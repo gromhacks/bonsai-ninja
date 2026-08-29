@@ -4,6 +4,14 @@ use bonsai_common::{FileId, FuncId, Precision};
 use bonsai_workspace::Workspace;
 use std::path::PathBuf;
 
+/// Semantic ABI of the persisted source-rooted taint evidence graph.
+///
+/// Bump this whenever compiler/IDG evidence is attributed differently even
+/// though the rulepack, transfer configuration, and source bytes are
+/// unchanged. The cache wire format may remain decodable while its derived
+/// answer is no longer reusable.
+const TAINT_GRAPH_QUERY_ABI: u32 = 4;
+
 pub(super) fn config_fingerprint(
     pack: &Rulepack,
     mode: &'static str,
@@ -40,11 +48,7 @@ pub(super) fn config_fingerprint(
         bonsai_hash::fnv1a_names64(&rule_tokens)
     });
     let tokens = vec![
-        // Query ABI: bump whenever the exact source-graph result changes
-        // without a rulepack/configuration change. v3 makes an incomplete
-        // backward field-relevance relation non-pruning, so cached negative
-        // graphs produced by v2 are not reusable.
-        "taint-graph-config-v3".to_string(),
+        format!("taint-graph-query-abi={TAINT_GRAPH_QUERY_ABI}"),
         format!("mode={mode}"),
         format!(
             "max_precision={}",
@@ -181,6 +185,28 @@ pub(super) fn prepare_workspace_cache(
     let resident_entries_before = index.resident_len();
     let total_entries_before = index.len();
     let resident_capacity = index.resident_capacity();
+    if cache_disabled() {
+        // `--no-cache` is a cold-run contract, not merely a renderer hint.
+        // Drop inherited resident/disk readers and retain only memoization
+        // produced inside this exact invocation. No sidecar is loaded or
+        // published below.
+        index.clear();
+        let config_changed = index.clear_for_config(config_fingerprint);
+        return WorkspaceCachePrepareReport {
+            sidecar_path: None,
+            disk_skipped_reason: Some("disabled by BONSAI_NO_CACHE"),
+            config_changed,
+            resident_entries_before,
+            total_entries_before,
+            resident_capacity,
+            temp_files_removed: 0,
+            disk_entries_loaded: 0,
+            persistence_enabled: false,
+            persist_started: false,
+            load_error: None,
+            persist_error: None,
+        };
+    }
     let config_changed = index.clear_for_config(config_fingerprint);
     let Some(root) = ws.db().workspace_root() else {
         return WorkspaceCachePrepareReport {
@@ -281,9 +307,16 @@ pub(super) fn finish_workspace_cache(ws: &Workspace) -> Option<usize> {
 }
 
 fn persistence_enabled() -> bool {
-    std::env::var("BONSAI_TAINT_GRAPH_PERSIST")
+    !cache_disabled()
+        && std::env::var("BONSAI_TAINT_GRAPH_PERSIST")
+            .ok()
+            .is_none_or(|value| !matches!(value.as_str(), "0" | "false" | "no" | "off"))
+}
+
+fn cache_disabled() -> bool {
+    std::env::var("BONSAI_NO_CACHE")
         .ok()
-        .is_none_or(|value| !matches!(value.as_str(), "0" | "false" | "no" | "off"))
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
 }
 
 fn precision_label(precision: Precision) -> &'static str {

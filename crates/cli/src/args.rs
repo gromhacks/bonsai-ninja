@@ -235,10 +235,10 @@ pub(crate) struct Cli {
     )]
     pub(crate) theme: Option<Theme>,
 
-    /// Disable the in-process caches used by `inspect` and `export`; results
-    /// remain identical. Every lookup recomputes from scratch. Use for
-    /// benchmarking the cold path or as a safety hatch if you suspect stale
-    /// state. Also respects `BONSAI_NO_CACHE`.
+    /// Disable reusable in-process and persistent sidecar caches. Exact
+    /// memoization inside the current command remains enabled. Use for a cold
+    /// benchmark or as a safety hatch when diagnosing stale external state.
+    /// Also respects `BONSAI_NO_CACHE`.
     #[arg(long, global = true, help_heading = "GLOBAL OPTIONS")]
     pub(crate) no_cache: bool,
 
@@ -1192,11 +1192,12 @@ pub(crate) enum Cmd {
                       passthrough, receiver-state, sanitizer, and output-argument \
                       transfer semantics.\n\
                       \n\
-                      Every taint edge threads through semantic, alias-aware \
+                      Every taint edge threads through compiler-resolved, alias-aware \
                       call resolution — cross-module imports, `from x import y \
                       as z` rewrites, and typed virtual dispatch. The dump \
-                      follows exact/narrowed dataflow by default; weaker \
-                      diagnostic edges stay out of propagated taint facts."),
+                      follows the one compiler-proven dataflow graph. `Exact` \
+                      and `Narrowed` labels describe edge provenance only; \
+                      guessed diagnostic edges stay out of propagated facts."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Start from update_user with `action` seeded as tainted\n  \
                       $ bonsai-ninja dump-taint ./src --source update_user --seed action\n  \
@@ -2194,7 +2195,7 @@ pub(crate) enum Cmd {
                       or `--taint-flow` for rulepack-free raw taint \
                       paths. These flags change output scope, not analysis \
                       accuracy: emitted graph facts still use the same \
-                      exact/narrowed static evidence contract.\n\
+                      compiler-proven static evidence contract.\n\
                       \n\
                       `--graph-flow` never recursively enumerates caller/callee paths. \
                       Use `symbol-summary` for a standalone declaration packet and \
@@ -2300,7 +2301,8 @@ pub(crate) enum Cmd {
         /// result sets, piping to LLMs, and any case where you need
         /// the structural evidence but not the full transcript.
         /// `--format json` is unaffected (JSON already carries the
-        /// same steps + location data).
+        /// same steps + location data). Compact changes rendering only:
+        /// results remain identical and analysis stays exact.
         #[arg(long, default_value_t = false)]
         compact: bool,
         /// Re-render only the evidence unit whose stable content-hash id
@@ -2443,7 +2445,8 @@ pub(crate) enum Cmd {
                       \n  - In-process memo caches (chains, downstream, reachable, \
                       callees, enclosing) — built fresh each run, dropped on \
                       exit. Use `--no-cache` / `BONSAI_NO_CACHE=1` on any \
-                      command to bypass them for a single invocation.\n\
+                      command to bypass both these memo caches and reusable \
+                      semantic sidecars for one exact cold invocation.\n\
                       \n  - On-disk artifacts in the workspace's OS cache directory — \
                       used for persisted sidecars, currently including the \
                       dataflow taint graph at `dataflow.v3.factstore` \
@@ -2465,7 +2468,7 @@ pub(crate) enum Cmd {
         action: CacheAction,
     },
 
-    /// Security analysis mode — rulepack-driven source / sink / dep /
+    /// Security command family — rulepack-driven source / sink / dep /
     /// taint scanning. Each subcommand mirrors the surface of
     /// `bonsai-ninja search` (paginated tables, file filters, JSON
     /// format) but the rulepack is the query — you don't pass a string,
@@ -3521,8 +3524,8 @@ pub(crate) enum CacheAction {
     /// Remove on-disk artifacts from the workspace's external OS cache.
     /// Specifically deletes the persisted analysis sidecars written
     /// by the engine. In-process caches don't need clearing — they
-    /// drop at process exit; use `--no-cache` to bypass them within
-    /// a single command.
+    /// drop at process exit. Use `--no-cache` for one exact invocation that
+    /// neither loads nor publishes reusable semantic sidecars.
     #[command(
         long_about = themed_subcommand_long_about("Remove on-disk artifacts from the workspace's external OS cache. \
                       Specifically deletes persisted analysis sidecars, \
@@ -3531,8 +3534,9 @@ pub(crate) enum CacheAction {
                       by the engine.\n\
                       \n\
                       In-process caches don't need clearing — they drop at \
-                      process exit; use `--no-cache` / `BONSAI_NO_CACHE=1` to \
-                      bypass them within a single command."),
+                      process exit. Use `--no-cache` / `BONSAI_NO_CACHE=1` for \
+                      one exact invocation that bypasses both memo caches and \
+                      reusable semantic sidecars."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Wipe every persisted sidecar for this workspace\n  \
                       $ bonsai-ninja cache clear ./src\n  \

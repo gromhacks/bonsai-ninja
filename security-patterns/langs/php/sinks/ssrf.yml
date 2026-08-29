@@ -1,20 +1,3 @@
-- id: php.ssrf.curl_exec
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: ssrf
-  severity: high
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: curl_exec
-  match_examples:
-  - name: php.ssrf.curl_exec example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  curl_exec($input);\n}\n"
-  description: "Disabled - curl_exec() dispatches URL stored on the curl handle; php.ssrf.curl_setopt_url carries the tainted URL argument."
 - id: php.ssrf.curl_setopt_url
   enabled: true
   language: php
@@ -23,6 +6,24 @@
   cwe:
   - CWE-918
   - CWE-295
+  analysis_semantics:
+    compiler_guard:
+      capability: terminal-predicate.compound-static-allowlist
+      required_evidence:
+      - guarded-argument:2=predicate-argument:0
+      - predicate-complete:true
+      - finite-static-string-membership:true
+      - parser-call:parse_url
+      - scheme-component:scheme
+      - scheme-value:string:https
+      - membership-call:in_array
+      - membership-component:host
+      - membership-argument:2=boolean:true
+      - related-call:curl_setopt:argument:0=guarded-argument:0
+      - related-call:curl_setopt:argument:1=place:CURLOPT_FOLLOWLOCATION
+      - related-call:curl_setopt:argument:2=boolean:false
+      sanitizer_tag: ssrf
+      category: finite-host-allowlist-and-no-redirect
   match:
     kind: call
     callee:
@@ -39,10 +40,7 @@
   - name: curl setopt literal url negative
     code: "<?php\nfunction example($ch, $url) {\n  curl_setopt($ch, CURLOPT_URL, \"https://example.com/\");\n}\n"
     expect_no_match: true
-  description: 'curl_setopt CURLOPT_URL = tainted. Merged aliases: php.tls.curl_ssl_verifypeer_off, php.tls.curl_ssl_verifyhost_off.'
-  aliases:
-  - php.tls.curl_ssl_verifypeer_off
-  - php.tls.curl_ssl_verifyhost_off
+  description: 'curl_setopt CURLOPT_URL = tainted. TLS verification options are independent configuration targets.'
 - id: php.ssrf.fopen_url
   enabled: true
   language: php
@@ -64,27 +62,6 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fopen(\"https://example.com/report\", \"r\");\n}\n"
     expect_no_match: true
   description: fopen with URL - also path-traversal.
-- id: php.ssrf.file_get_contents_url
-  enabled: true
-  language: php
-  tag: ssrf
-  severity: high
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: file_get_contents
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: php.ssrf.file_get_contents_url example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  file_get_contents($input);\n}\n"
-  - name: arg tainted literal negative
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  file_get_contents(\"https://example.com/report\");\n}\n"
-    expect_no_match: true
-  description: file_get_contents URL - duplicate of path rule but flagged for SSRF too.
 - id: php.ssrf.fsockopen
   enabled: true
   language: php
@@ -150,7 +127,6 @@
     code: |
       <?php
       use guzzlehttp\guzzle;
-      use guzzlehttp\guzzle;
       function example($input, $url, $id, $payload, $request) {
         Client::request("GET", $url);
       }
@@ -188,7 +164,6 @@
   - name: php.ssrf.guzzle_get example
     code: |
       <?php
-      use guzzlehttp\guzzle;
       use guzzlehttp\guzzle;
       function example($input, $url, $id, $payload, $request) {
         Client::get($input);
@@ -228,7 +203,6 @@
     code: |
       <?php
       use guzzlehttp\guzzle;
-      use guzzlehttp\guzzle;
       function example($input, $url, $id, $payload, $request) {
         Client::post($input);
       }
@@ -266,7 +240,6 @@
   - name: php.ssrf.guzzle_put example
     code: |
       <?php
-      use guzzlehttp\guzzle;
       use guzzlehttp\guzzle;
       function example($input, $url, $id, $payload, $request) {
         Client::put($input);
@@ -306,7 +279,6 @@
     code: |
       <?php
       use guzzlehttp\guzzle;
-      use guzzlehttp\guzzle;
       function example($input, $url, $id, $payload, $request) {
         Client::delete($input);
       }
@@ -344,7 +316,6 @@
   - name: php.ssrf.guzzle_patch example
     code: |
       <?php
-      use guzzlehttp\guzzle;
       use guzzlehttp\guzzle;
       function example($input, $url, $id, $payload, $request) {
         Client::patch($input);
@@ -384,7 +355,6 @@
     code: |
       <?php
       use guzzlehttp\guzzle;
-      use guzzlehttp\guzzle;
       function example($input, $url, $id, $payload, $request) {
         Client::head($input);
       }
@@ -422,7 +392,6 @@
   - name: php.ssrf.symfony_httpclient_request example
     code: |
       <?php
-      use symfony\httpclient;
       use symfony\httpclient;
       use symfony\http-client;
       function example($input, $url, $id, $payload, $request) {
@@ -464,7 +433,6 @@
     code: |
       <?php
       use illuminate\http;
-      use illuminate\http;
       function example($input, $url, $id, $payload, $request) {
         Http::get($input);
       }
@@ -502,7 +470,6 @@
   - name: php.ssrf.laravel_http_post example
     code: |
       <?php
-      use illuminate\http;
       use illuminate\http;
       function example($input, $url, $id, $payload, $request) {
         Http::post($input);
@@ -542,7 +509,6 @@
     code: |
       <?php
       use illuminate\http;
-      use illuminate\http;
       function example($input, $url, $id, $payload, $request) {
         Http::put($input);
       }
@@ -580,7 +546,6 @@
   - name: php.ssrf.laravel_http_delete example
     code: |
       <?php
-      use illuminate\http;
       use illuminate\http;
       function example($input, $url, $id, $payload, $request) {
         Http::delete($input);
@@ -620,7 +585,6 @@
     code: |
       <?php
       use illuminate\http;
-      use illuminate\http;
       function example($input, $url, $id, $payload, $request) {
         Http::patch($input);
       }
@@ -657,7 +621,6 @@
     code: |
       <?php
       use wordpress;
-      use wordpress;
       function example($input, $url, $id, $payload, $request) {
         wp_remote_get($input);
       }
@@ -691,7 +654,6 @@
     code: |
       <?php
       use wordpress;
-      use wordpress;
       function example($input, $url, $id, $payload, $request) {
         wp_remote_post($input);
       }
@@ -704,36 +666,6 @@
       }
     expect_no_match: true
   description: WordPress wp_remote_post.
-- id: php.ssrf.simplexml_load_file_url
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: ssrf
-  severity: high
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: simplexml_load_file
-  description: Disabled - canonical rule is php.xxe.simplexml_load_file in xxe.yml (XXE is the classic bug class for these loaders).
-- id: php.ssrf.dom_load_file_url
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: ssrf
-  severity: high
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - DOMDocument
-      - load
-  description: Disabled - canonical rule is php.xxe.domdocument_load in xxe.yml.
 - id: php.ssrf.get_headers
   enabled: true
   language: php
@@ -776,21 +708,3 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  gethostbyname(\"example.com\");\n}\n"
     expect_no_match: true
   description: gethostbyname(tainted) - DNS lookup on tainted host; SSRF reconnaissance.
-- id: php.ssrf.symfony_httpclient_create
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: ssrf
-  severity: medium
-  packages:
-  - symfony/http-client
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - HttpClient
-      - create
-  description: Disabled - factory; actual fetch is HttpClient::request.

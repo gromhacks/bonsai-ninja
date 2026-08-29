@@ -27,8 +27,10 @@ pub use summary::{
 pub struct InterTaintConfig {
     /// Declarative transfer-time shapes honored by the compiler IDG.
     pub clean_output_overwrites: Vec<CleanOutputOverwrite>,
+    pub clean_receiver_overwrites: Vec<CleanReceiverOverwrite>,
     pub source_output_args: Vec<SourceOutputArgs>,
     pub source_callback_args: Vec<SourceCallbackArgs>,
+    pub callback_invocations: Vec<CallbackInvocation>,
     /// Declarative query-time transfer overlays.
     pub call_result_passthroughs: Vec<CallResultPassthrough>,
     pub output_arg_flows: Vec<OutputArgFlow>,
@@ -40,8 +42,10 @@ impl Default for InterTaintConfig {
     fn default() -> Self {
         Self {
             clean_output_overwrites: Vec::new(),
+            clean_receiver_overwrites: Vec::new(),
             source_output_args: Vec::new(),
             source_callback_args: Vec::new(),
+            callback_invocations: Vec::new(),
             call_result_passthroughs: Vec::new(),
             output_arg_flows: Vec::new(),
             receiver_state_propagations: Vec::new(),
@@ -55,6 +59,15 @@ pub struct CleanOutputOverwrite {
     pub callee: String,
     pub output_arg_index: usize,
     pub value_start_arg_index: usize,
+}
+
+/// A matcher-approved call that replaces its receiver with a clean value.
+/// Exact call spans keep the transfer bound to the complete rule match rather
+/// than every call sharing the same operator/method spelling.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CleanReceiverOverwrite {
+    pub callee: String,
+    pub resolved_call_sites: Vec<Span>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,8 +87,38 @@ pub struct SourceCallbackArgs {
     pub callee: String,
     pub callback_arg_index: usize,
     pub source_param_indices: Vec<usize>,
+    /// Every compiler-declared callback parameter at or after this index is
+    /// an external source carrier.
+    pub source_param_indices_from: Option<usize>,
     /// Exact matcher-approved registration call spans.
     pub resolved_call_sites: Vec<Span>,
+}
+
+/// Matcher-approved call that invokes a compiler-resolved callable argument.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallbackInvocation {
+    pub callee: String,
+    pub callback_arg_index: usize,
+    /// Exact aggregate field beneath `callback_arg_index` that contains a
+    /// compiler-proven static callback map. Empty retains direct-callback
+    /// invocation semantics.
+    pub callback_map_field_path: Vec<String>,
+    /// Exact aggregate field forwarded into the selected callback parameter
+    /// for callback-map invocation.
+    pub forwarded_argument_field_path: Vec<String>,
+    /// Zero-based callback parameter receiving the forwarded field.
+    pub forwarded_callback_param_index: Option<usize>,
+    pub forwarded_args_from: Option<usize>,
+    pub receiver_to_callback_param: Option<usize>,
+    pub callback_return_result_offset: usize,
+    pub resolved_call_sites: Vec<Span>,
+    /// Exact matcher-approved outer call and compiler-resolved callback
+    /// declaration pairs. Shared IDG code consumes identities only; it never
+    /// interprets framework or field names.
+    pub resolved_callback_targets: Vec<(Span, FuncId)>,
+    /// Exact `(callback, host)` compiler relationships used only to plan a
+    /// source-in-callback corridor back through the invoking host.
+    pub callback_hosts: Vec<(FuncId, FuncId)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,15 +129,24 @@ pub struct CallResultPassthrough {
     /// applying to unrelated user-defined methods with the same spelling.
     pub receiver_type: Option<String>,
     pub input_arg_indices: Vec<usize>,
+    /// Every actual call argument at or after this index flows to the result.
+    pub input_arg_start_index: Option<usize>,
     pub input_receiver: bool,
+    /// Exact rule-matcher-approved call sites. Empty is reserved for direct
+    /// compiler/library callers that deliberately provide a name/type summary.
+    pub resolved_call_sites: Vec<Span>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputArgFlow {
     pub callee: String,
     pub output_arg_index: usize,
+    pub input_receiver: bool,
     pub value_start_arg_index: Option<usize>,
     pub value_arg_indices: Vec<usize>,
+    /// Exact matcher-approved call spans. An empty set is retained only for
+    /// direct compiler/library callers that provide a name-only summary.
+    pub resolved_call_sites: Vec<Span>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

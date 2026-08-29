@@ -19,7 +19,6 @@
     code: |
       <?php
       use webonyx\graphqlphp;
-      use webonyx\graphqlphp;
       use webonyx\graphql-php;
       function example($schema, $query) {
         return GraphQL::executeQuery($schema, $query);
@@ -62,7 +61,6 @@
     code: |
       <?php
       use webonyx\graphqlphp;
-      use webonyx\graphqlphp;
       use webonyx\graphql-php;
       function example($schema, $query) {
         return $schema->execute($query);
@@ -104,7 +102,6 @@
   - name: server execute psr request
     code: |
       <?php
-      use webonyx\graphqlphp;
       use webonyx\graphqlphp;
       use webonyx\graphql-php;
       function example($server, $request) {

@@ -82,6 +82,50 @@
     code: "const _u = require(\"koa\");\nfunction demo(input, req, obj) {\n  return ctx.redirect(\"/account\");\n}\n"
     expect_no_match: true
   description: Koa ctx.redirect(tainted).
+- id: typescript.open_redirect.koa_location_header
+  enabled: true
+  language: typescript
+  tag: open-redirect
+  severity: high
+  packages:
+  - koa
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ctx
+      - set
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"]Location['\"]$"
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: koa location header with tainted target
+    code: |
+      const _u = require("koa");
+      function demo(input: string) {
+        return ctx.set("Location", input);
+      }
+    expect_match_text: [ctx.set]
+  - name: koa location header with literal target negative
+    code: |
+      const _u = require("koa");
+      function demo() {
+        return ctx.set("Location", "/account");
+      }
+    expect_no_match: true
+  - name: koa non-location header negative
+    code: |
+      const _u = require("koa");
+      function demo(input: string) {
+        return ctx.set("X-Trace", input);
+      }
+    expect_no_match: true
+  description: "Koa ctx.set(\"Location\", tainted target) writes an attacker-controlled redirect target. The exact literal header-name constraint keeps ordinary response headers in the generic header-injection rule."
 - id: typescript.open_redirect.fastify_redirect
   enabled: true
   language: typescript
@@ -219,21 +263,6 @@
     code: "function demo(input, req, obj) {\n  return location.replace(\"/account\");\n}\n"
     expect_no_match: true
   description: window.location.replace(tainted).
-- id: typescript.open_redirect.window_location_href_assign
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: open-redirect
-  severity: high
-  cwe:
-  - CWE-601
-  match:
-    kind: write
-    target:
-      name: location
-  description: "Disabled - `target.name: location` matches any `x.location = y` assignment (too broad); flag `location.href = tainted` downstream via href target once receiver narrowing is supported."
-
 - id: typescript.open_redirect.simple_oauth2_redirect_tainted
   enabled: true
   language: typescript

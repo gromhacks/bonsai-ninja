@@ -28,10 +28,11 @@
   match:
     kind: call
     callee:
-      name: dataTaskWithURL
+      regex: "(?:^|\\.)dataTaskWithURL:completionHandler:$"
   constraints:
   - receiver_type_in: [NSURLSession]
   - arg_count: 2
+  - arg_is_inline_callback: 1
   taint_semantics:
     source_callback_only: true
     source_callback_args:
@@ -44,7 +45,7 @@
       void test(NSURLSession *session, NSURL *url) {
         [session dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) { NSLog(@"%@", data); }];
       }
-    expect_match_text: [session.dataTaskWithURL]
+    expect_match_text: ["session.dataTaskWithURL:completionHandler:"]
   - name: assigned task without callback is not response data
     code: |
       #import <Foundation/Foundation.h>
@@ -61,10 +62,11 @@
   match:
     kind: call
     callee:
-      name: dataTaskWithRequest
+      regex: "(?:^|\\.)dataTaskWithRequest:completionHandler:$"
   constraints:
   - receiver_type_in: [NSURLSession]
   - arg_count: 2
+  - arg_is_inline_callback: 1
   taint_semantics:
     source_callback_only: true
     source_callback_args:
@@ -77,7 +79,7 @@
       void test(NSURLSession *session, NSURLRequest *request) {
         [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) { NSLog(@"%@", data); }];
       }
-    expect_match_text: [session.dataTaskWithRequest]
+    expect_match_text: ["session.dataTaskWithRequest:completionHandler:"]
   - name: assigned request task without callback is not response data
     code: |
       #import <Foundation/Foundation.h>
@@ -94,10 +96,11 @@
   match:
     kind: call
     callee:
-      regex: "(?:^|\\.)(downloadTaskWithURL|downloadTaskWithRequest)$"
+      regex: "(?:^|\\.)(?:downloadTaskWithURL:completionHandler:|downloadTaskWithRequest:completionHandler:)$"
   constraints:
   - receiver_type_in: [NSURLSession]
   - arg_count: 2
+  - arg_is_inline_callback: 1
   taint_semantics:
     source_callback_only: true
     source_callback_args:
@@ -110,7 +113,7 @@
       void test(NSURLSession *session, NSURL *url) {
         [session downloadTaskWithURL:url completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) { NSLog(@"%@", location); }];
       }
-    expect_match_text: [session.downloadTaskWithURL]
+    expect_match_text: ["session.downloadTaskWithURL:completionHandler:"]
   - name: assigned download task without callback is not payload
     code: |
       #import <Foundation/Foundation.h>
@@ -128,7 +131,7 @@
   match:
     kind: call
     callee:
-      name: sendSynchronousRequest
+      regex: "(?:^|\\.)sendSynchronousRequest:returningResponse:error:$"
   match_examples:
   - name: synchronous response data
     code: |
@@ -136,6 +139,7 @@
       void test(NSURLRequest *input) {
         NSData *data = [NSURLConnection sendSynchronousRequest:input returningResponse:nil error:nil];
       }
+    expect_match_text: ["NSURLConnection.sendSynchronousRequest:returningResponse:error:"]
   - name: asynchronous completion negative
     code: |
       #import <Foundation/Foundation.h>
@@ -171,59 +175,47 @@
   match:
     kind: call
     callee:
-      name: stringWithContentsOfURL
+      regex: "(?:^|\\.)stringWithContentsOfURL:encoding:error:$"
   match_examples:
   - name: foundation string response
     code: |
       #import <Foundation/Foundation.h>
       void test(NSURL *input) { NSString *text = [NSString stringWithContentsOfURL:input encoding:NSUTF8StringEncoding error:nil]; }
+    expect_match_text: ["NSString.stringWithContentsOfURL:encoding:error:"]
   description: "NSString +stringWithContentsOfURL: - blocking HTTP GET returning tainted text."
 
-- id: objc.source.afnetworking_response
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: objc
-  trust: remote
-  tag: http-input
-  payload_types: [json, binary]
-  packages: [AFNetworking]
-  match:
-    kind: call
-    callee:
-      regex: "^(?:.*\\.)?(GET|POST|PUT|DELETE|PATCH|HEAD)$"
-  constraints:
-  - receiver_type_in: [AFHTTPSessionManager, AFHTTPRequestOperationManager]
-  match_examples:
-  - name: declared shape
-    code: |
-      #import <AFNetworking/AFNetworking.h>
-      void test(AFHTTPSessionManager *manager, id input) { id target = input; int amount = 1; [manager GET:input]; }
-  - name: non-http-verb method negative
-    code: |
-      #import <AFNetworking/AFNetworking.h>
-      void test(AFHTTPSessionManager *manager, id input) { id target = input; int amount = 1; [manager invalidateSessionCancelingTasks:input]; }
-    expect_no_match: true
-  description: "Disabled - AFHTTPSessionManager request methods return a task/progress object. The remote responseObject is a success-block parameter and needs exact callback ownership rather than sourcing the request call result."
-
 - id: objc.source.nsurlrequest_param
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: objc
   trust: remote
-  tag: http-input
+  tag: network-response
   payload_types: [url]
+  packages: [Foundation]
   match:
     kind: param
     target:
-      name: request
-  description: "Disabled - bare param name 'request' fires on every handler arg. Re-enable once adapter binds selector-pieces to param identifiers."
+      annotation: newRequest
+      param_type_in: [NSURLRequest]
+      in_method: [URLSession]
+  match_examples:
+  - name: redirected URL session request
+    code: |
+      #import <Foundation/Foundation.h>
+      @implementation Client
+      - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task willPerformHTTPRedirection:(NSHTTPURLResponse *)response newRequest:(NSURLRequest *)redirected completionHandler:(void (^)(NSURLRequest *))completion {
+        [self consume:redirected];
+      }
+      @end
+    expect_match_text: [redirected]
+  - name: ordinary request parameter negative
+    code: |
+      #import <Foundation/Foundation.h>
+      void consume(NSURLRequest *request) { }
+    expect_no_match: true
+  description: "The NSURLRequest bound to the exact URLSession redirection selector piece `newRequest:` is derived from the remote Location response; ordinary outbound NSURLRequest parameters remain clean."
 
 - id: objc.source.nsurlsession_delegate_data
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: objc
   trust: remote
   tag: network-response
@@ -249,12 +241,10 @@
       #import <Foundation/Foundation.h>
       void consume(NSData *chunk) { }
     expect_no_match: true
-  description: "Disabled pending adapter emission of Objective-C selector-piece annotations on declared parameters; this must identify URLSession:dataTask:didReceiveData: rather than every NSData parameter."
+  description: "URLSession:dataTask:didReceiveData: binds remote response bytes at the exact `didReceiveData:` selector piece; ordinary NSData parameters remain clean."
 
 - id: objc.source.nsurlsession_download_delegate_location
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: objc
   trust: remote
   tag: network-response
@@ -280,7 +270,7 @@
       #import <Foundation/Foundation.h>
       void consume(NSURL *location) { }
     expect_no_match: true
-  description: "Disabled pending adapter emission of Objective-C selector-piece annotations on declared parameters; this must identify the download delegate callback rather than every NSURL parameter."
+  description: "URLSession:downloadTask:didFinishDownloadingToURL: binds the downloaded response's temporary location at the exact selector piece; ordinary NSURL parameters remain clean."
 
 - id: objc.source.openurl_options_url
   enabled: true
@@ -292,6 +282,15 @@
     kind: param
     target:
       annotation: openURL
+      in_method: [application]
+      param_index_in: [1]
+      param_type_in: [NSURL]
+      param_count_in: [3]
+      signature_param_types:
+      - index: 0
+        type_in: [UIApplication]
+      - index: 2
+        type_in: [NSDictionary]
   match_examples:
   - name: openurl handler url param
     code: |
@@ -301,6 +300,16 @@
         return [self handle:url];
       }
       @end
+    expect_match_text: [url]
+  - name: same selector piece outside UIApplication signature negative
+    code: |
+      #import <UIKit/UIKit.h>
+      @implementation Router
+      - (BOOL)route:(NSObject *)app openURL:(NSURL *)url options:(NSDictionary *)options {
+        return [self handle:url];
+      }
+      @end
+    expect_no_match: true
   description: "application:openURL:options: - the openURL: deep-link URL param is attacker-controlled (scoped by the openURL: selector piece)."
 
 - id: objc.source.openurl_options_dict
@@ -313,6 +322,18 @@
     kind: param
     target:
       annotation: options
+      in_method: [application]
+      param_index_in: [2]
+      param_type_in: [NSDictionary]
+      param_count_in: [3]
+      signature_param_types:
+      - index: 0
+        type_in: [UIApplication]
+      - index: 1
+        type_in: [NSURL]
+      signature_param_annotations:
+      - index: 1
+        annotation_in: [openURL]
   match_examples:
   - name: openurl handler options param
     code: |
@@ -322,6 +343,16 @@
         return [self handle:options];
       }
       @end
+    expect_match_text: [options]
+  - name: same selector piece outside open URL signature negative
+    code: |
+      #import <UIKit/UIKit.h>
+      @implementation AppDelegate
+      - (BOOL)application:(UIApplication *)app configure:(NSURL *)url options:(NSDictionary *)options {
+        return [self handle:options];
+      }
+      @end
+    expect_no_match: true
   description: "application:openURL:options: - the options: dict (UIApplicationOpenURLOptionsKey) carries the attacker-controlled source-app payload (scoped by the options: selector piece)."
 
 - id: objc.source.universal_link_continueuseractivity
@@ -334,6 +365,13 @@
     kind: param
     target:
       annotation: continueUserActivity
+      in_method: [application]
+      param_index_in: [1]
+      param_type_in: [NSUserActivity]
+      param_count_in: [3]
+      signature_param_types:
+      - index: 0
+        type_in: [UIApplication]
   match_examples:
   - name: universal link continue user activity param
     code: |
@@ -343,6 +381,16 @@
         return [self handle:userActivity];
       }
       @end
+    expect_match_text: [userActivity]
+  - name: same selector piece outside UIApplication signature negative
+    code: |
+      #import <UIKit/UIKit.h>
+      @implementation ActivityRouter
+      - (BOOL)route:(NSObject *)app continueUserActivity:(NSUserActivity *)userActivity restorationHandler:(void (^)(NSArray *))handler {
+        return [self handle:userActivity];
+      }
+      @end
+    expect_no_match: true
   description: "application:continueUserActivity:restorationHandler: - Universal Link handler; NSUserActivity.webpageURL is attacker-controlled (scoped by the continueUserActivity: selector piece)."
 
 - id: objc.source.push_notification_userinfo
@@ -371,20 +419,6 @@
     expect_no_match: true
   description: "APNS didReceiveRemoteNotification selector parameter - remote notification payload matched from the compiler-emitted Objective-C selector piece."
 
-- id: objc.source.push_notification_userinfo_property
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: objc
-  trust: remote
-  tag: push-input
-  payload_types: [json]
-  match:
-    kind: read
-    target:
-      attribute: [notification, userInfo]
-  description: "Disabled - a generic `notification.userInfo` read does not prove an APNS boundary. The selector-scoped objc.source.push_notification_userinfo parameter rule is the canonical APNS source."
-
 - id: objc.source.wkwebview_usercontentcontroller_message
   enabled: true
   language: objc
@@ -395,6 +429,13 @@
     kind: param
     target:
       annotation: didReceiveScriptMessage
+      in_method: [userContentController]
+      param_index_in: [1]
+      param_type_in: [WKScriptMessage]
+      param_count_in: [2]
+      signature_param_types:
+      - index: 0
+        type_in: [WKUserContentController]
   match_examples:
   - name: wkwebview script message param
     code: |
@@ -404,21 +445,17 @@
         [self handle:message];
       }
       @end
+    expect_match_text: [message]
+  - name: same selector piece outside WebKit signature negative
+    code: |
+      #import <WebKit/WebKit.h>
+      @implementation Bridge
+      - (void)handle:(NSObject *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
+        [self consume:message];
+      }
+      @end
+    expect_no_match: true
   description: "userContentController:didReceiveScriptMessage: - JS->native bridge payload (WKScriptMessage.body) is attacker-controlled (scoped by the didReceiveScriptMessage: selector piece)."
-
-- id: objc.source.message_compose_body
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: objc
-  trust: remote
-  tag: deep-link
-  payload_types: [text]
-  match:
-    kind: write
-    target:
-      name: body
-  description: "Disabled - MFMessageComposeViewController.body assignment with attacker-controlled deep-link content; can hijack outbound SMS draft. Reflects sink-direction; enable only when modeling outbound-SMS surfaces."
 
 - id: objc.source.app_extension_input_items
   enabled: true
@@ -442,15 +479,120 @@
       @end
   description: "NSExtensionContext.inputItems - Share/Action extension input items from the host app, read via `self.extensionContext.inputItems`."
 
-- id: objc.source.nsurlprotocol_canonical_request
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: objc.source.gcdwebserver_request_param
+  enabled: true
   language: objc
   trust: remote
   tag: http-input
+  category: http-input
+  payload_types: [url, path, query, header, form, multipart, binary, json, text]
+  packages: [GCDWebServer]
   match:
     kind: param
     target:
-      name: canonicalRequestForRequest
-  description: "Disabled - NSURLProtocol subclass hook sees every outbound request; too noisy without receiver narrowing."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in:
+      - GCDWebServerRequest
+      - GCDWebServerURLEncodedFormRequest
+      - GCDWebServerMultiPartFormRequest
+      - GCDWebServerDataRequest
+  match_examples:
+  - name: GCDWebServer inbound request parameter
+    code: |
+      #import <GCDWebServer/GCDWebServer.h>
+      void handle(GCDWebServerDataRequest *request) { NSLog(@"%@", request.text); }
+    expect_match_text: [request]
+  - name: same name with non-request type negative
+    code: |
+      #import <GCDWebServer/GCDWebServer.h>
+      void handle(NSString *request) { NSLog(@"%@", request); }
+    expect_no_match: true
+  - name: workspace type collision is not the external request carrier
+    code: |
+      @interface GCDWebServerRequest : NSObject
+      @end
+      void handle(GCDWebServerRequest *request) { NSLog(@"%@", request); }
+    expect_no_match: true
+  description: "Typed GCDWebServer request parameters carry the inbound URL/query/header/form/upload/body surfaces; sourcing the carrier preserves field-sensitive compiler flow through its accessors."
+
+- id: objc.source.cocoahttpserver_request_uri
+  enabled: true
+  language: objc
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [url, path, query]
+  packages: [CocoaHTTPServer]
+  match:
+    kind: call
+    callee: {name: requestURI}
+  constraints:
+  - receiver_type_in: [HTTPConnection]
+  - arg_count: 0
+  match_examples:
+  - name: CocoaHTTPServer connection request URI
+    code: |
+      #import <CocoaHTTPServer/HTTPConnection.h>
+      NSString *uri(HTTPConnection *connection) { return [connection requestURI]; }
+    expect_match_text: [connection.requestURI]
+  - name: same selector on unrelated receiver negative
+    code: |
+      #import <CocoaHTTPServer/HTTPConnection.h>
+      @interface Cache : NSObject
+      - (NSString *)requestURI;
+      @end
+      NSString *uri(Cache *cache) { return [cache requestURI]; }
+    expect_no_match: true
+  description: "CocoaHTTPServer HTTPConnection requestURI returns the URI supplied by the connected HTTP client; receiver type excludes ordinary requestURI helpers."
+
+- id: objc.source.criollo_request_param
+  enabled: true
+  language: objc
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [url, path, query, header, binary, json, text]
+  packages: [Criollo]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [CRRequest]
+  match_examples:
+  - name: Criollo inbound request parameter
+    code: |
+      #import <Criollo/Criollo.h>
+      void handle(CRRequest *request) { NSLog(@"%@", request.URL); }
+    expect_match_text: [request]
+  - name: same name wrong type negative
+    code: |
+      #import <Criollo/Criollo.h>
+      void handle(NSURLRequest *request) { NSLog(@"%@", request.URL); }
+    expect_no_match: true
+  description: "Typed Criollo CRRequest parameters carry inbound query, body, URL, and header values without relying on a conventional variable name."
+
+- id: objc.source.routinghttpserver_request_param
+  enabled: true
+  language: objc
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path, query, header, binary, json, text]
+  packages: [RoutingHTTPServer]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [RouteRequest]
+  match_examples:
+  - name: RoutingHTTPServer inbound request parameter
+    code: |
+      #import <RoutingHTTPServer/RoutingHTTPServer.h>
+      void handle(RouteRequest *request) { NSLog(@"%@", [request param:@"id"]); }
+    expect_match_text: [request]
+  - name: same name wrong type negative
+    code: |
+      #import <RoutingHTTPServer/RoutingHTTPServer.h>
+      void handle(NSURLRequest *request) { NSLog(@"%@", request.URL); }
+    expect_no_match: true
+  description: "Typed RoutingHTTPServer RouteRequest parameters carry inbound route parameters, request maps, and body bytes."

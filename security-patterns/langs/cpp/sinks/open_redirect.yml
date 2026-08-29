@@ -20,7 +20,6 @@
   - name: generated direct match
     code: |
       #include <httplib.h>
-      #include <httplib.h>
       void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;

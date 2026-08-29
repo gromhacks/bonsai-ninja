@@ -1,0 +1,22 @@
+- id: dart.typing.firebase_run_functions_callback
+  enabled: true
+  language: dart
+  packages: [firebase_functions]
+  match:
+    kind: call
+    callee:
+      name: runFunctions
+  callback_arg_index: 0
+  callback_param_types:
+  - [Firebase]
+  match_examples:
+  - name: Firebase runtime registration callback type
+    code: |
+      import 'package:firebase_functions/firebase_functions.dart';
+      void main(List<String> args) {
+        runFunctions((firebase) {
+          firebase.https.onCall(name: 'lookup', handler: (request) async => sink(request.data));
+        });
+      }
+    expect_match_text: [runFunctions]
+  description: "runFunctions callback parameter 0 is the Firebase runtime registry. Typing-only compiler model; it never emits a finding."

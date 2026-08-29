@@ -29,39 +29,6 @@
   description: "tar.Reader.Next() - returns archive-controlled header metadata. Taint the returned header so Zip Slip is reported only when header.Name reaches a path open/write sink."
 
 # --- net/http stdlib --------------------------------------------------
-- id: go.nethttp.request_param
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [query, json, form, path, header, cookie]
-  frameworks: [nethttp, chi, gorilla]
-  packages: ["net/http"]
-  manifests: [go.mod]
-  lockfiles: [go.sum]
-  match:
-    kind: param
-    target:
-      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Request, http.Request]
-  description: "Disabled - Go parameter type facts currently retain the short type name but not imported type ownership, so a workspace-defined Request can collide with net/http.Request. Precise request accessor rules remain enabled until qualified type provenance can fail closed."
-- id: go.nethttp.request_named
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  trust: remote
-  tag: http-input
-  category: http-input
-  packages: ["net/http"]
-  match:
-    kind: param
-    target:
-      name: req
-  description: "Disabled - bare `req` parameter matches non-request helpers; it shares the qualified type-provenance requirement documented on go.nethttp.request_param."
 - id: go.nethttp.form_value
   enabled: true
   language: go
@@ -115,36 +82,6 @@
       }
     expect_match_text: [req.PostFormValue]
   description: "r.PostFormValue(key) - attacker-controlled POST form value."
-- id: go.nethttp.url_query
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: go.nethttp.query_value_get
-  language: go
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [query]
-  packages: ["net/http"]
-  match:
-    kind: call
-    callee:
-      attribute: [URL, Query]
-  match_examples:
-  - name: generated direct match
-    code: |
-      import "net/http"
-      package main
-
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        URL.Query(target)
-      }
-  description: "Disabled - Query() exposes the url.Values container; go.nethttp.query_value_get models concrete string reads and avoids double-counting chained Query().Get expressions."
-  imports:
-  - net
 - id: go.nethttp.query_value_get
   enabled: true
   language: go
@@ -180,7 +117,7 @@
     callee:
       regex: "\\.Header\\.Get$"
   constraints:
-  - receiver_type_in: [Request]
+  - receiver_type_in: [http.Request]
   match_examples:
   - name: net/http request header get
     code: |
@@ -190,6 +127,15 @@
         _ = r.Header.Get("X-Forwarded-Host")
       }
     expect_match_text: [r.Header.Get]
+  - name: same header get shape on a local request negative
+    code: |
+      package main
+      import "net/http"
+      type localHeader struct{}
+      func (localHeader) Get(string) string { return "safe" }
+      type localRequest struct{ Header localHeader }
+      func handler(r *localRequest) { _ = r.Header.Get("X-Test") }
+    expect_no_match: true
   description: "r.Header.Get(name) - attacker-controlled request header."
 - id: go.nethttp.cookie
   enabled: true
@@ -204,7 +150,7 @@
     callee:
       regex: "\\.Cookie$"
   constraints:
-  - receiver_type_in: [Request]
+  - receiver_type_in: [http.Request]
   match_examples:
   - name: net/http request cookie
     code: |
@@ -214,6 +160,14 @@
         _, _ = req.Cookie("session")
       }
     expect_match_text: [req.Cookie]
+  - name: same cookie method on a local receiver negative
+    code: |
+      package main
+      import "net/http"
+      type localRequest struct{}
+      func (*localRequest) Cookie(string) (string, error) { return "safe", nil }
+      func handler(req *localRequest) { _, _ = req.Cookie("session") }
+    expect_no_match: true
   description: "http.Request.Cookie(name) - attacker-controlled cookie value; narrowed by receiver type so framework cookie helpers own their own rules."
 - id: go.nethttp.request_pathvalue
   enabled: true
@@ -228,7 +182,7 @@
     callee:
       regex: "\\.PathValue$"
   constraints:
-  - receiver_type_in: [Request]
+  - receiver_type_in: [http.Request]
   - min_args: 1
   match_examples:
   - name: net/http serve mux path value
@@ -261,7 +215,7 @@
     callee:
       regex: "\\.(UserAgent|Referer)$"
   constraints:
-  - receiver_type_in: [Request]
+  - receiver_type_in: [http.Request]
   - max_args: 0
   match_examples:
   - name: net/http user agent
@@ -280,6 +234,15 @@
         _ = r.Referer()
       }
     expect_match_text: [r.Referer]
+  - name: same header accessors on a local receiver negative
+    code: |
+      package main
+      import "net/http"
+      type localRequest struct{}
+      func (*localRequest) UserAgent() string { return "safe" }
+      func (*localRequest) Referer() string { return "safe" }
+      func handler(req *localRequest) { _, _ = req.UserAgent(), req.Referer() }
+    expect_no_match: true
   description: "r.UserAgent() / r.Referer() - convenience accessors for attacker-controlled request header values."
 - id: go.nethttp.request_basicauth
   enabled: true
@@ -294,7 +257,7 @@
     callee:
       regex: "\\.BasicAuth$"
   constraints:
-  - receiver_type_in: [Request]
+  - receiver_type_in: [http.Request]
   - max_args: 0
   match_examples:
   - name: net/http basic auth
@@ -306,6 +269,14 @@
         _, _ = user, pass
       }
     expect_match_text: [r.BasicAuth]
+  - name: same basic auth method on a local receiver negative
+    code: |
+      package main
+      import "net/http"
+      type localRequest struct{}
+      func (*localRequest) BasicAuth() (string, string, bool) { return "safe", "safe", true }
+      func handler(r *localRequest) { _, _, _ = r.BasicAuth() }
+    expect_no_match: true
   description: "r.BasicAuth() - username and password parsed from the attacker-controlled Authorization request header."
 - id: go.nethttp.multipart_form_file
   enabled: true
@@ -320,7 +291,7 @@
     callee:
       regex: "\\.(FormFile|MultipartReader)$"
   constraints:
-  - receiver_type_in: [Request]
+  - receiver_type_in: [http.Request]
   match_examples:
   - name: net/http uploaded file
     code: |
@@ -379,38 +350,6 @@
       func helper(fh *LocalHeader) string { return fh.Filename }
     expect_no_match: true
   description: "multipart.FileHeader.Filename - client-supplied upload filename; treat as tainted path/name input."
-- id: go.nethttp.body_read
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [text]
-  packages: ["net/http"]
-  match:
-    kind: read
-    target:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.Body$"
-  match_examples:
-  - name: net/http request body read
-    code: |
-      package main
-      import "net/http"
-      func handler(r *http.Request) {
-        _ = r.Body
-      }
-    expect_match_text: [r.Body]
-  - name: net/http alternate request body read
-    code: |
-      package main
-      import "net/http"
-      func handler(req *http.Request) {
-        _ = req.Body
-      }
-    expect_match_text: [req.Body]
-  description: "Disabled - Body reads expose the stream object; go.nethttp.io_readall_request_body models the materialized request bytes and avoids double-counting Body reads passed to ReadAll."
 - id: go.nethttp.io_readall_request_body
   enabled: true
   language: go
@@ -535,6 +474,13 @@
         _ = mux.Vars(r)
       }
     expect_match_text: [mux.Vars]
+  - name: local mux spelling without gorilla import negative
+    code: |
+      package main
+      type localMux struct{}
+      func (localMux) Vars(any) map[string]string { return nil }
+      func handler(mux localMux, request any) { _ = mux.Vars(request) }
+    expect_no_match: true
   description: "mux.Vars(r) - map of attacker-controlled path parameters."
 - id: go.chi.urlparam
   enabled: true
@@ -588,6 +534,13 @@
         _ = chi.URLParamFromCtx(ctx, "id")
       }
     expect_match_text: [chi.URLParamFromCtx]
+  - name: local chi spelling without chi import negative
+    code: |
+      package main
+      type localChi struct{}
+      func (localChi) URLParamFromCtx(any, string) string { return "safe" }
+      func handler(chi localChi, ctx any) { _ = chi.URLParamFromCtx(ctx, "id") }
+    expect_no_match: true
   description: "chi.URLParamFromCtx(ctx, key) - attacker-controlled route parameter read from request context."
 
 # --- gin --------------------------------------------------------------
@@ -605,7 +558,7 @@
     callee:
       regex: "\\.Query$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [gin.Context, fiber.Ctx]
   match_examples:
   - name: gin query
     code: |
@@ -615,6 +568,14 @@
         _ = c.Query("next")
       }
     expect_match_text: [c.Query]
+  - name: same query method on a local receiver negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      type localContext struct{}
+      func (*localContext) Query(string) string { return "safe" }
+      func handler(c *localContext) { _ = c.Query("next") }
+    expect_no_match: true
   description: "c.Query(key) - attacker-controlled query string. Covers gin and fiber (same call shape)."
 - id: go.gin.context_postform
   enabled: true
@@ -630,7 +591,7 @@
     callee:
       regex: "\\.PostForm$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [gin.Context, echo.Context, buffalo.Context]
   match_examples:
   - name: gin post form
     code: |
@@ -640,6 +601,14 @@
         _ = c.PostForm("name")
       }
     expect_match_text: [c.PostForm]
+  - name: same post form method on a local receiver negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      type localContext struct{}
+      func (*localContext) PostForm(string) string { return "safe" }
+      func handler(c *localContext) { _ = c.PostForm("name") }
+    expect_no_match: true
   description: "gin c.PostForm(key) - attacker-controlled form value."
 - id: go.gin.context_param
   enabled: true
@@ -655,7 +624,7 @@
     callee:
       regex: "\\.Param$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [gin.Context, echo.Context, iris.Context, buffalo.Context]
   match_examples:
   - name: gin path param
     code: |
@@ -689,6 +658,14 @@
         _ = c.Param("id")
       }
     expect_match_text: [c.Param]
+  - name: same param method on a local receiver negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      type localContext struct{}
+      func (*localContext) Param(string) string { return "safe" }
+      func handler(c *localContext) { _ = c.Param("id") }
+    expect_no_match: true
   description: "c.Param/ctx.Param(key) - attacker-controlled path parameter. Covers gin, echo, iris, and buffalo context shapes."
 - id: go.gin.context_getheader
   enabled: true
@@ -704,7 +681,7 @@
     callee:
       regex: "\\.GetHeader$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [gin.Context, iris.Context]
   match_examples:
   - name: gin request header
     code: |
@@ -722,6 +699,14 @@
         _ = ctx.GetHeader("X-Forwarded-Host")
       }
     expect_match_text: [ctx.GetHeader]
+  - name: same get header method on a local receiver negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      type localContext struct{}
+      func (*localContext) GetHeader(string) string { return "safe" }
+      func handler(c *localContext) { _ = c.GetHeader("X-Test") }
+    expect_no_match: true
   description: "gin/iris context GetHeader(name) - attacker-controlled request header."
 - id: go.gin.context_cookie
   enabled: true
@@ -737,7 +722,7 @@
     callee:
       regex: "\\.(Cookie|Cookies)$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [gin.Context, echo.Context, fiber.Ctx]
   match_examples:
   - name: gin cookie
     code: |
@@ -772,6 +757,14 @@
         _ = ctx.Cookies("session")
       }
     expect_match_text: [ctx.Cookies]
+  - name: same cookie method on a local framework-shaped receiver negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      type localContext struct{}
+      func (*localContext) Cookie(string) (string, error) { return "safe", nil }
+      func handler(c *localContext) { _, _ = c.Cookie("session") }
+    expect_no_match: true
   description: "framework cookie helpers - attacker-controlled Cookie header values for gin, echo, and fiber contexts."
 - id: go.gin.context_bind
   enabled: true
@@ -787,7 +780,7 @@
     callee:
       regex: "\\.(Bind|BindHeader|BindQuery|BindUri|ShouldBind|ShouldBindBodyWith|ShouldBindHeader|ShouldBindQuery|ShouldBindUri|ShouldBindXML|ShouldBindYAML|ShouldBindWith)$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [gin.Context, echo.Context, buffalo.Context]
   taint_semantics:
     source_output_args: [0]
   match_examples:
@@ -844,6 +837,14 @@
         _ = c.Bind(dst)
       }
     expect_match_text: [c.Bind]
+  - name: same bind method on a local receiver negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      type localContext struct{}
+      func (*localContext) ShouldBind(any) error { return nil }
+      func handler(c *localContext, dst any) { _ = c.ShouldBind(dst) }
+    expect_no_match: true
   description: "framework context bind helpers - populate structs from attacker-controlled request body, query, form, XML, or YAML payloads."
 - id: go.gin.context_query_collection
   enabled: true
@@ -859,7 +860,7 @@
     callee:
       regex: "\\.(DefaultPostForm|DefaultQuery|QueryArray|QueryMap|GetQuery|GetQueryArray|GetQueryMap|PostFormArray|PostFormMap|GetPostForm|GetPostFormArray|GetPostFormMap)$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [gin.Context]
   match_examples:
   - name: gin query map
     code: |
@@ -885,6 +886,14 @@
         _ = c.DefaultQuery("next", "/")
       }
     expect_match_text: [c.DefaultQuery]
+  - name: same query collection method on a local receiver negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      type localContext struct{}
+      func (*localContext) QueryMap(string) map[string]string { return nil }
+      func handler(c *localContext) { _ = c.QueryMap("filters") }
+    expect_no_match: true
   description: "gin query/form collection helpers - attacker controls returned values."
 - id: go.gin.context_bindjson
   enabled: true
@@ -900,7 +909,7 @@
     callee:
       regex: "\\.BindJSON$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [gin.Context]
   taint_semantics:
     source_output_args: [0]
   match_examples:
@@ -912,6 +921,14 @@
         _ = c.BindJSON(dst)
       }
     expect_match_text: [c.BindJSON]
+  - name: same bind json method on a local receiver negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      type localContext struct{}
+      func (*localContext) BindJSON(any) error { return nil }
+      func handler(c *localContext, dst any) { _ = c.BindJSON(dst) }
+    expect_no_match: true
   description: "gin c.BindJSON(&v) - binds attacker-controlled JSON into v."
 - id: go.gin.context_shouldbindjson
   enabled: true
@@ -927,7 +944,7 @@
     callee:
       regex: "\\.ShouldBindJSON$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [gin.Context]
   taint_semantics:
     source_output_args: [0]
   match_examples:
@@ -939,6 +956,14 @@
         _ = ctx.ShouldBindJSON(dst)
       }
     expect_match_text: [ctx.ShouldBindJSON]
+  - name: same should bind json method on a local receiver negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      type localContext struct{}
+      func (*localContext) ShouldBindJSON(any) error { return nil }
+      func handler(c *localContext, dst any) { _ = c.ShouldBindJSON(dst) }
+    expect_no_match: true
   description: "gin c.ShouldBindJSON(&v) - binds attacker-controlled JSON request body into application data."
 - id: go.gin.context_getrawdata
   enabled: true
@@ -954,7 +979,7 @@
     callee:
       regex: "\\.GetRawData$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [gin.Context]
   match_examples:
   - name: gin raw request body
     code: |
@@ -964,6 +989,14 @@
         _, _ = c.GetRawData()
       }
     expect_match_text: [c.GetRawData]
+  - name: same raw data method on a local receiver negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      type localContext struct{}
+      func (*localContext) GetRawData() ([]byte, error) { return nil, nil }
+      func handler(c *localContext) { _, _ = c.GetRawData() }
+    expect_no_match: true
   description: "gin c.GetRawData() - raw request body."
 - id: go.gin_echo.context_formfile
   enabled: true
@@ -979,7 +1012,7 @@
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.FormFile$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [gin.Context, echo.Context]
   match_examples:
   - name: gin form file
     code: |
@@ -997,6 +1030,14 @@
         _, _ = c.FormFile("file")
       }
     expect_match_text: [c.FormFile]
+  - name: same form file method on a local receiver negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      type localContext struct{}
+      func (*localContext) FormFile(string) (any, error) { return nil, nil }
+      func handler(c *localContext) { _, _ = c.FormFile("file") }
+    expect_no_match: true
   description: "gin/echo Context.FormFile(name) - returned multipart FileHeader and filename metadata are controlled by the HTTP client."
 
 # --- echo -------------------------------------------------------------
@@ -1023,135 +1064,6 @@
       }
     expect_match_text: [c.QueryParam]
   description: "echo c.QueryParam(key) - attacker-controlled query parameter value."
-- id: go.echo.context_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [path]
-  frameworks: [echo]
-  packages: ["github.com/labstack/echo"]
-  match:
-    kind: call
-    callee:
-      regex: "\\.Param$"
-  description: "Disabled - merged into go.gin.context_param (same `.Param$` regex; frameworks list now covers echo)."
-- id: go.echo.context_formvalue
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [form]
-  frameworks: [echo]
-  packages: ["github.com/labstack/echo"]
-  match:
-    kind: call
-    callee:
-      regex: "\\.FormValue$"
-  description: "Disabled - merged into go.nethttp.form_value (same `.FormValue$` regex; frameworks list now covers echo)."
-- id: go.echo.context_bind
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [json]
-  frameworks: [echo, buffalo]
-  packages: ["github.com/labstack/echo", "github.com/gobuffalo/buffalo"]
-  match:
-    kind: call
-    callee:
-      regex: "\\.Bind$"
-  constraints:
-  - receiver_type_in: [Context, Ctx]
-  match_examples:
-  - name: echo bind
-    code: |
-      package main
-      import "github.com/labstack/echo"
-      func handler(c echo.Context, dst any) {
-        _ = c.Bind(dst)
-      }
-    expect_match_text: [c.Bind]
-  - name: buffalo bind
-    code: |
-      package main
-      import "github.com/gobuffalo/buffalo"
-      func handler(c buffalo.Context, dst any) {
-        _ = c.Bind(dst)
-      }
-    expect_match_text: [c.Bind]
-  description: "Disabled - duplicate `.Bind` call shape merged into go.gin.context_bind, whose framework list and examples now cover echo and buffalo."
-- id: go.echo.context_cookie
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [cookie]
-  frameworks: [echo]
-  packages: ["github.com/labstack/echo"]
-  match:
-    kind: call
-    callee:
-      regex: "\\.Cookie$|\\.Cookies$"
-  constraints:
-  - receiver_type_in: [Context, Ctx]
-  match_examples:
-  - name: echo cookie
-    code: |
-      package main
-      import "github.com/labstack/echo"
-      func handler(c echo.Context) {
-        _, _ = c.Cookie("session")
-      }
-    expect_match_text: [c.Cookie]
-  - name: echo cookies
-    code: |
-      package main
-      import "github.com/labstack/echo"
-      func handler(ctx echo.Context) {
-        _ = ctx.Cookies()
-      }
-    expect_match_text: [ctx.Cookies]
-  description: "Disabled - duplicate `.Cookie` / `.Cookies` call shape merged into go.gin.context_cookie, whose framework list and examples now cover echo."
-- id: go.echo.context_cookie_value
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: go.gin.context_cookie
-  language: go
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [cookie]
-  frameworks: [echo]
-  packages: ["github.com/labstack/echo"]
-  match:
-    kind: read
-    target:
-      regex: "^(c|ctx|context|echoContext)\\.Cookie\\([^)]*\\)\\.Value$"
-  match_examples:
-  - name: echo cookie value read
-    code: |
-      package main
-      import "github.com/labstack/echo"
-      func handler(c echo.Context) string {
-        cookie, _ := c.Cookie("session")
-        return c.Cookie("session").Value + cookie.Value
-      }
-    expect_match_text: ["c.Cookie(\"session\").Value"]
-  description: "Disabled - duplicate of the framework cookie source. The owning call source taints the returned *http.Cookie; modeling the chained `.Value` read separately double-counts every `c.Cookie(...).Value` expression."
 - id: go.echo.context_request_surface
   enabled: true
   language: go
@@ -1166,7 +1078,7 @@
     callee:
       regex: "\\.(QueryParams|FormParams)$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [echo.Context]
   match_examples:
   - name: echo query params
     code: |
@@ -1176,6 +1088,14 @@
         _ = c.QueryParams()
       }
     expect_match_text: [c.QueryParams]
+  - name: same query params method on a local receiver negative
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      type localContext struct{}
+      func (localContext) QueryParams() map[string][]string { return nil }
+      func handler(c localContext) { _ = c.QueryParams() }
+    expect_no_match: true
   description: "echo query/form surface getters - expose attacker-controlled query and form values. Raw request/body access is owned by the dedicated request-body rules."
 
 - id: go.framework.request_header_get
@@ -1192,7 +1112,7 @@
     callee:
       regex: "\\.Request\\(\\)\\.Header\\.Get$|\\.Request\\.Header\\.Get$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [gin.Context, echo.Context, iris.Context]
   - min_args: 1
   match_examples:
   - name: echo wrapped request header get
@@ -1211,6 +1131,16 @@
         _ = ctx.Request.Header.Get("X-Forwarded-Host")
       }
     expect_match_text: ["ctx.Request.Header.Get"]
+  - name: same nested request header shape on a local receiver negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      type localHeader struct{}
+      func (localHeader) Get(string) string { return "safe" }
+      type localRequest struct{ Header localHeader }
+      type localContext struct{ Request localRequest }
+      func handler(ctx *localContext) { _ = ctx.Request.Header.Get("X-Test") }
+    expect_no_match: true
   description: "Framework context request header accessors - client-controlled request headers reached through wrapped net/http requests."
 - id: go.echo.context_request_body
   enabled: true
@@ -1224,7 +1154,8 @@
   match:
     kind: read
     target:
-      regex: "^(c|ctx|context|echoContext)\\.Request\\(\\)\\.Body$"
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Request\(\)\.Body$'
+      receiver_type_in: [echo.Context, iris.Context]
   match_examples:
   - name: echo request body read
     code: |
@@ -1242,7 +1173,18 @@
         _ = ctx.Request().Body
       }
     expect_match_text: ["ctx.Request().Body"]
-  description: "Echo/Iris Request().Body stream - attacker-controlled request body reader. Complements io.ReadAll rules for sinks that consume the stream directly."
+  - name: local request body chain collision negative
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      type localRequest struct{ Body string }
+      type localContext struct{}
+      func (localContext) Request() localRequest { return localRequest{} }
+      func handler(_ echo.Context, ctx localContext) {
+        _ = ctx.Request().Body
+      }
+    expect_no_match: true
+  description: "Echo/Iris Request().Body stream - attacker-controlled request body reader. Exact receiver typing keeps same-shaped local request wrappers out."
 
 # --- iris -------------------------------------------------------------
 - id: go.iris.context_urlparam
@@ -1259,7 +1201,7 @@
     callee:
       regex: "\\.URLParam[A-Za-z]*$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [iris.Context]
   match_examples:
   - name: iris url param
     code: |
@@ -1277,6 +1219,14 @@
         _ = ctx.URLParamDefault("next", "/")
       }
     expect_match_text: [ctx.URLParamDefault]
+  - name: same url param method on a local receiver negative
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      type localContext struct{}
+      func (localContext) URLParam(string) string { return "safe" }
+      func handler(ctx localContext) { _ = ctx.URLParam("next") }
+    expect_no_match: true
   description: "iris ctx.URLParam* helpers - attacker-controlled query parameter values and typed query wrappers."
 
 - id: go.iris.context_body_readers
@@ -1293,7 +1243,7 @@
     callee:
       regex: "\\.(GetBody|GetBodyString)$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [iris.Context]
   match_examples:
   - name: iris get body string
     code: |
@@ -1327,7 +1277,7 @@
     callee:
       regex: "\\.(ReadBody|ReadJSON|ReadXML|ReadForm)$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [iris.Context]
   - min_args: 1
   - max_args: 1
   taint_semantics:
@@ -1361,7 +1311,7 @@
     callee:
       regex: "\\.(PostValue|PostValueDefault|FormValues)$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [iris.Context]
   match_examples:
   - name: iris post value
     code: |
@@ -1371,6 +1321,14 @@
         _ = ctx.PostValue("name")
       }
     expect_match_text: [ctx.PostValue]
+  - name: same post value method on a local receiver negative
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      type localContext struct{}
+      func (localContext) PostValue(string) string { return "safe" }
+      func handler(ctx localContext) { _ = ctx.PostValue("name") }
+    expect_no_match: true
   description: "iris form value helpers - attacker-controlled form fields."
 
 # --- beego ------------------------------------------------------------
@@ -1388,18 +1346,24 @@
     callee:
       regex: "\\.GetString$"
   constraints:
-  - receiver_type_in: [Controller]
+  - receiver_type_in: [web.Controller, beego.Controller]
   match_examples:
   - name: beego get string
     code: |
-      import "github.com/beego/beego/v2/server/web"
       package main
-      type Controller struct{}
-      func (c *Controller) GetString(name string) string { return "" }
-      func handler(c *Controller) {
+      import "github.com/beego/beego/v2/server/web"
+      func handler(c *web.Controller) {
         _ = c.GetString("name")
       }
     expect_match_text: [c.GetString]
+  - name: same get string method on a local controller negative
+    code: |
+      package main
+      import "github.com/beego/beego/v2/server/web"
+      type Controller struct{}
+      func (*Controller) GetString(string) string { return "safe" }
+      func handler(c *Controller) { _ = c.GetString("name") }
+    expect_no_match: true
   description: "beego Controller.GetString(key) - attacker-controlled query or form value."
 
 - id: go.beego.controller_getfile
@@ -1416,18 +1380,24 @@
     callee:
       regex: "\\.GetFile$"
   constraints:
-  - receiver_type_in: [Controller]
+  - receiver_type_in: [web.Controller, beego.Controller]
   match_examples:
   - name: beego get file
     code: |
-      import "github.com/beego/beego/v2/server/web"
       package main
-      type Controller struct{}
-      func (c *Controller) GetFile(name string) (any, any, error) { return nil, nil, nil }
-      func handler(c *Controller) {
+      import "github.com/beego/beego/v2/server/web"
+      func handler(c *web.Controller) {
         _, _, _ = c.GetFile("upload")
       }
     expect_match_text: [c.GetFile]
+  - name: same get file method on a local controller negative
+    code: |
+      package main
+      import "github.com/beego/beego/v2/server/web"
+      type Controller struct{}
+      func (*Controller) GetFile(string) (any, any, error) { return nil, nil, nil }
+      func handler(c *Controller) { _, _, _ = c.GetFile("upload") }
+    expect_no_match: true
   description: "beego Controller.GetFile(field) - attacker-controlled uploaded file and client-supplied file metadata."
 
 - id: go.beego.ctx_input_body
@@ -1458,22 +1428,6 @@
   description: "beego c.Ctx.Input.Body - raw attacker-controlled request body bytes."
 
 # --- fiber ------------------------------------------------------------
-- id: go.fiber.context_query
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [query]
-  frameworks: [fiber]
-  packages: ["github.com/gofiber/fiber"]
-  match:
-    kind: call
-    callee:
-      regex: "\\.Query$"
-  description: "Disabled - merged into go.gin.context_query (same `.Query$` regex; frameworks list now covers fiber)."
 - id: go.fiber.context_params
   enabled: true
   language: go
@@ -1571,37 +1525,6 @@
       }
     expect_no_match: true
   description: "Fiber Context.BodyParser(dest) populates destination argument 0 from the remote request body; its error return is not tainted."
-- id: go.fiber.context_cookies
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [cookie]
-  frameworks: [fiber]
-  packages: ["github.com/gofiber/fiber"]
-  match:
-    kind: call
-    callee:
-      regex: "\\.Cookies$"
-  match_examples:
-  - name: generated direct match
-    code: |
-      import "github.com/gofiber/fiber"
-      package main
-
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.Cookies(target)
-      }
-  description: "Disabled - duplicate `.Cookies` call shape merged into go.gin.context_cookie, whose framework list and examples now cover fiber."
-  imports:
-  - github
-  - github.com
 - id: go.fiber.context_header_get
   enabled: true
   language: go
@@ -1616,7 +1539,7 @@
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(Get|GetReqHeaders)$"
   constraints:
-  - receiver_type_in: [Context, Ctx]
+  - receiver_type_in: [fiber.Ctx]
   match_examples:
   - name: fiber header get
     code: |
@@ -1636,6 +1559,14 @@
         _ = ctx.GetReqHeaders()
       }
     expect_match_text: [ctx.GetReqHeaders]
+  - name: same header getter on a local receiver negative
+    code: |
+      package main
+      import "github.com/gofiber/fiber/v2"
+      type localContext struct{}
+      func (*localContext) Get(string) string { return "safe" }
+      func handler(ctx *localContext) { _ = ctx.Get("X-Test") }
+    expect_no_match: true
   description: "fiber request-header helpers - attacker controls header values."
 - id: go.fiber.context_form
   enabled: true
@@ -1663,7 +1594,6 @@
     expect_match_text: [c.FormFile]
   - name: fiber multipart form
     code: |
-      import "github.com/gofiber/fiber"
       package main
       import "github.com/gofiber/fiber/v2"
       func handler(ctx *fiber.Ctx) {
@@ -1842,7 +1772,7 @@
     callee:
       regex: "\\.NextReader$"
   constraints:
-  - receiver_type_in: [Conn]
+  - receiver_type_in: [websocket.Conn]
   match_examples:
   - name: gorilla websocket next reader
     code: |
@@ -1852,6 +1782,14 @@
         _, _, _ = conn.NextReader()
       }
     expect_match_text: [conn.NextReader]
+  - name: same next reader method on a local receiver negative
+    code: |
+      package main
+      import "github.com/gorilla/websocket"
+      type localConnection struct{}
+      func (*localConnection) NextReader() (int, any, error) { return 0, nil, nil }
+      func read(conn *localConnection) { _, _, _ = conn.NextReader() }
+    expect_no_match: true
   description: "gorilla/websocket Conn.NextReader() - returns a reader for an attacker-controlled frame."
 - id: go.websocket.nhooyr_read
   enabled: true
@@ -1866,7 +1804,7 @@
     callee:
       regex: "\\.Read$"
   constraints:
-  - receiver_type_in: [Conn]
+  - receiver_type_in: [websocket.Conn]
   - min_args: 1
   match_examples:
   - name: nhooyr conn read
@@ -1877,6 +1815,14 @@
         _, _, _ = c.Read(ctx)
       }
     expect_match_text: [c.Read]
+  - name: same read method on a local receiver negative
+    code: |
+      package main
+      import "nhooyr.io/websocket"
+      type localConnection struct{}
+      func (*localConnection) Read(any) (int, []byte, error) { return 0, nil, nil }
+      func read(c *localConnection, ctx any) { _, _, _ = c.Read(ctx) }
+    expect_no_match: true
   description: "nhooyr websocket Conn.Read(ctx) - attacker-controlled frame bytes."
 - id: go.websocket.nhooyr_wsjson_read
   enabled: true

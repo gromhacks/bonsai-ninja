@@ -119,7 +119,7 @@ Retrieval follows the candidate-only evidence and validation contract in
 [Architecture](contributing/architecture.mdx#query-browse-trace).
 The taint-graph sidecar is default-on for `security taint-analysis`,
 `security source-analysis`, and `security sink-analysis`. Each exact analysis
-configuration gets a distinct filename, so analysis modes do not overwrite
+analysis product gets a distinct filename, so source, sink, and taint queries do not overwrite
 one another's warm facts. Set `BONSAI_TAINT_GRAPH_PERSIST=0` only when you intentionally
 want to trade repeated-run speed for less cache I/O.
 
@@ -161,7 +161,7 @@ settings below.
 | `BONSAI_THEME` | string | `moss` | Terminal theme: `moss`, `earthy-dark`, `dracula`, or `retro-amber`. |
 | `BONSAI_WORKSPACE_DIR` | path | OS cache directory keyed by canonical workspace root | Exact per-workspace cache-directory override. Relative values are resolved below the workspace for backward compatibility; prefer an absolute path. |
 | `BONSAI_CONTEXT` | token budget | `32k` for text and JSON | Default paging/context budget. |
-| `BONSAI_NO_CACHE` | boolean-like | unset | Disable in-process caches. |
+| `BONSAI_NO_CACHE` | boolean-like | unset | Run one exact invocation without loading or publishing reusable semantic sidecars. Command-local compiler memoization may still avoid duplicate parsing within that process and is discarded at exit. |
 | `BONSAI_TAINT_GRAPH_PERSIST` | boolean-like | enabled | Persist exact taint/source graph entries to mode/config-specific `$CACHE_DIR/taint_graph.v*.<mode>.<config>.factstore` files. Set to `0`, `false`, `no`, or `off` to opt out. |
 | `BONSAI_INCLUDE_MINIFIED_JS` | boolean-like | unset | Equivalent to global `--minified-js`. Include adapter-classified minified JavaScript/TypeScript in compiler-backed commands and inherited semantic worker processes. |
 | `BONSAI_RAYON_STACK_BYTES` | integer bytes | internal default | Rayon worker stack size override for very deep syntax trees. |

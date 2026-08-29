@@ -32,3 +32,41 @@
     expect_no_match: true
   description: "app.log.info/logger/slog with concatenated attacker text - control characters or forged prefixes can\
     \ corrupt audit logs."
+
+- id: javascript.log_injection.console_newline
+  enabled: true
+  language: javascript
+  tag: log-injection
+  severity: medium
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [console, log]
+  constraints:
+  - arg_tainted: {index: 0}
+  analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
+      accepted_providers:
+      - operation: {regex: '^replace$'}
+      - factory: {name: String}
+        operation: {regex: '^String\.replace$'}
+      - factory: {name: map}
+        operation: {regex: '^map\.join$'}
+      - factory: {regex: '^charCodeAt\.toString\.padStart$'}
+        operation: {regex: '^(?:replace|String\.replace)$'}
+  match_examples:
+  - name: console log receives attacker-controlled text
+    code: |
+      function audit(input) {
+        console.log(input);
+      }
+    expect_match_text: [console.log]
+  - name: console log literal is not a tainted log entry
+    code: |
+      function audit() {
+        console.log("service started");
+      }
+    expect_no_match: true
+  description: "console.log(tainted text) can permit forged log records when CR or LF remains in the value."

@@ -248,21 +248,6 @@
       }
     expect_no_match: true
   description: window.location.replace(tainted).
-- id: javascript.open_redirect.window_location_href_assign
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: open-redirect
-  severity: medium
-  cwe:
-  - CWE-601
-  match:
-    kind: write
-    target:
-      name: location
-  description: "Disabled - bare `.location = ...` fires on any field named `location` (very common in config objects); enable with receiver narrowing to `window`/`document`."
-
 - id: javascript.open_redirect.simple_oauth2_redirect_tainted
   enabled: true
   language: javascript

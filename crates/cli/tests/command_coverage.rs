@@ -1,5 +1,5 @@
 //! Content-level coverage for every CLI command on
-//! `examples/python/micro`. Each test asserts on SPECIFIC output
+//! `test-fixtures/languages/python/micro`. Each test asserts on SPECIFIC output
 //! strings so a regression that makes a command exit cleanly but
 //! return wrong data is caught.
 //!
@@ -43,11 +43,11 @@ fn bin_path() -> Option<PathBuf> {
 }
 
 fn ws() -> PathBuf {
-    repo_root().join("examples/python/micro")
+    repo_root().join("test-fixtures/languages/python/micro")
 }
 
 fn complex_ws() -> PathBuf {
-    repo_root().join("examples/python/complex")
+    repo_root().join("test-fixtures/languages/python/complex")
 }
 
 fn run(args: &[&str]) -> Option<String> {

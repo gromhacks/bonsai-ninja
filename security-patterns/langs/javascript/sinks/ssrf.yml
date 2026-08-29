@@ -256,27 +256,6 @@
       }
     expect_no_match: true
   description: "node http.get(url) - tainted URL enables SSRF."
-- id: javascript.ssrf.http_get_var
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.ssrf.http_get
-  language: javascript
-  tag: ssrf
-  severity: high
-  packages:
-  - http
-  imports:
-  - http
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - http
-      - get
-  description: "Disabled duplicate - same http.get min-args shape is covered by javascript.ssrf.http_get."
 - id: javascript.ssrf.http_request
   enabled: true
   language: javascript
@@ -358,7 +337,6 @@
   - https
   cwe:
   - CWE-918
-  - CWE-295
   match:
     kind: call
     callee:
@@ -382,9 +360,7 @@
         return https.request("https://example.com");
       }
     expect_no_match: true
-  description: "node https.request(options) - tainted host enables SSRF. Merged collision aliases: javascript.tls.https_request_reject_unauth."
-  aliases:
-  - javascript.tls.https_request_reject_unauth
+  description: "node https.request(options) - tainted host enables SSRF."
 - id: javascript.ssrf.undici_fetch
   enabled: true
   language: javascript

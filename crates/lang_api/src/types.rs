@@ -584,9 +584,10 @@ pub enum FlowEvent {
         thrown_type: Option<String>,
     },
     /// Exception-handling region. `body` is the try / begin block;
-    /// `catch_events` merges every catch / except / rescue arm into a
-    /// single flat list; `finally_events` holds the ensure / finally
-    /// block. `catch_param` is the first-parameter binding of the
+    /// `catch_events` holds the catch / except / rescue region, with
+    /// multiple mutually exclusive arms encoded as nested conditionless
+    /// [`FlowEvent::Branch`] alternatives; `finally_events` holds the ensure
+    /// / finally block. `catch_param` is the first-parameter binding of the
     /// catch clause — `e` in `catch (e)` / `except Exception as e:` /
     /// `rescue => e`. When present, G8 seeds the catch region with
     /// this name pre-tainted whenever any Throw in the body throws a
@@ -613,6 +614,14 @@ pub enum FlowEvent {
         /// readability) — duplicates are fine.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         catch_types: Vec<String>,
+        /// Ordered compiler facts for each mutually exclusive catch arm.
+        /// The arm span keys the corresponding alternative already encoded
+        /// in `catch_events`; parameters and types therefore stay attached
+        /// to the arm that owns them instead of being flattened into one
+        /// lossy union. The aggregate `catch_param` / `catch_types` fields
+        /// remain for backwards wire compatibility only.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        catch_arms: Vec<CatchArmFact>,
     },
     /// `break`, `next`, `redo`, `retry` or a labeled variant — a
     /// terminating edge inside the enclosing loop/block.
@@ -674,6 +683,23 @@ pub enum FlowEvent {
         name: String,
         transition: String,
     },
+}
+
+/// One source-ordered exception handler attached to a [`FlowEvent::Try`].
+///
+/// Syntax ownership stays in the adapter: the shared IDG consumes only the
+/// exact arm span, binding, and declared type identities emitted here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatchArmFact {
+    /// Exact span of the catch/except/rescue arm node.
+    pub span: Span,
+    /// Explicit exception binding owned by this arm, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameter: Option<String>,
+    /// Declared catch types for this arm. Empty means a catch-all or a
+    /// language whose adapter cannot surface a static type for this syntax.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<String>,
 }
 
 /// Independently decodable syntax targets projected from one compiler object.
@@ -788,11 +814,19 @@ pub struct CompilerReturnHeader {
     pub value_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_name: Option<String>,
+    /// Exact RHS-node spans of compiler assignments to the returned binding
+    /// within the same callable. This header is a scheduling
+    /// over-approximation: full matching still computes the unique reaching
+    /// definition across control flow before granting a return match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignment_value_spans: Vec<Span>,
 }
 
 /// One adapter-proven assignment alias retained in a syntax header.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompilerAssignmentAlias {
+    pub owner_span: Span,
+    pub assignment_span: Span,
     pub target: String,
     pub source: String,
 }
@@ -800,6 +834,14 @@ pub struct CompilerAssignmentAlias {
 /// One direct call-result assignment retained for factory-return typing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompilerFactoryCallAssignment {
+    /// Exact declaration scope that owns the assignment. Header consumers use
+    /// this to distinguish module exports from function-local temporaries
+    /// without reopening the compiler body.
+    pub owner_span: Span,
+    /// Exact adapter-emitted assignment span. Workspace resolution uses it for
+    /// lexical shadow checks; consumers must not reconstruct ordering from
+    /// source text.
+    pub assignment_span: Span,
     pub target: String,
     pub call_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -815,6 +857,14 @@ pub struct CompilerCallbackArgumentHeader {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub call_receiver_types: Vec<String>,
     pub argument_index: usize,
+    /// Exact declaration span of the inline callback. Consumers use this to
+    /// attribute provider-declared callback parameter types to the callback's
+    /// own compiler scope without relying on a binding name.
+    pub callback_span: Span,
+    /// Static aggregate-field path between the call argument and callback.
+    /// Empty means the callback is the complete argument value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub field_path: Vec<String>,
     pub params: Vec<String>,
 }
 
@@ -875,6 +925,12 @@ pub struct CompilerCallAttribution {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompilerCallArgumentAttribution {
     pub span: Span,
+    /// Adapter-decoded named/labelled argument, when the source grammar
+    /// carries one. Keeping this compiler fact lets sparse lineage rendering
+    /// recover the same actual-to-formal mapping used during IDG stitching
+    /// without reparsing source or assuming positional order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub value_text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub place: Option<String>,
@@ -952,6 +1008,7 @@ impl CompilerAttribution {
                                     .iter()
                                     .map(|arg| CompilerCallArgumentAttribution {
                                         span: arg.span,
+                                        name: arg.name.clone(),
                                         value_text: arg.value_text.clone(),
                                         place: arg.place.clone(),
                                         source_names: arg.source_names.clone(),
@@ -990,6 +1047,7 @@ impl CompilerAttribution {
                                         let argument = argument.trim();
                                         CompilerCallArgumentAttribution {
                                             span: *span,
+                                            name: None,
                                             value_text: argument.to_string(),
                                             // Assignment-only compatibility calls retain
                                             // rendering and arity, but have no adapter-owned
@@ -1110,9 +1168,55 @@ impl CompilerSyntaxHeader {
         }
 
         struct Projection<'a> {
+            owner_span: Span,
             assignment_values: &'a ahash::AHashMap<Span, &'a AssignmentValueFact>,
+            assignment_value_spans_by_target: &'a ahash::AHashMap<String, Vec<Span>>,
             call_argument_values: &'a ahash::AHashMap<Span, Vec<&'a CallArgumentValueFact>>,
             out: &'a mut CompilerSyntaxHeader,
+        }
+
+        fn collect_assignment_value_spans(
+            events: &[FlowEvent],
+            assignment_values: &ahash::AHashMap<Span, &AssignmentValueFact>,
+            out: &mut ahash::AHashMap<String, Vec<Span>>,
+        ) {
+            for event in events {
+                match event {
+                    FlowEvent::Assign { span, target, .. }
+                    | FlowEvent::AggregateAssign { span, target, .. } => {
+                        if let Some(value_span) = assignment_values.get(span).map(|fact| fact.value_span) {
+                            let spans = out.entry(target.clone()).or_default();
+                            if !spans.contains(&value_span) {
+                                spans.push(value_span);
+                            }
+                        }
+                    }
+                    FlowEvent::Branch {
+                        then_events,
+                        else_events,
+                        ..
+                    } => {
+                        collect_assignment_value_spans(then_events, assignment_values, out);
+                        collect_assignment_value_spans(else_events, assignment_values, out);
+                    }
+                    FlowEvent::Loop { body, .. }
+                    | FlowEvent::Defer { body, .. }
+                    | FlowEvent::Using { body, .. } => {
+                        collect_assignment_value_spans(body, assignment_values, out);
+                    }
+                    FlowEvent::Try {
+                        body,
+                        catch_events,
+                        finally_events,
+                        ..
+                    } => {
+                        collect_assignment_value_spans(body, assignment_values, out);
+                        collect_assignment_value_spans(catch_events, assignment_values, out);
+                        collect_assignment_value_spans(finally_events, assignment_values, out);
+                    }
+                    _ => {}
+                }
+            }
         }
 
         fn walk(events: &[FlowEvent], projection: &mut Projection<'_>) {
@@ -1133,10 +1237,10 @@ impl CompilerSyntaxHeader {
                             call_kind: *call_kind,
                         });
                         if let Some(arguments) = projection.call_argument_values.get(span) {
-                            for argument in arguments
-                                .iter()
-                                .filter(|argument| !argument.inline_callback_params.is_empty())
-                            {
+                            for argument in arguments.iter().filter(|argument| {
+                                !argument.inline_callback_params.is_empty()
+                                    && argument.inline_callback_span.is_some()
+                            }) {
                                 projection
                                     .out
                                     .callback_arguments
@@ -1145,8 +1249,28 @@ impl CompilerSyntaxHeader {
                                         call_receiver: receiver.clone(),
                                         call_receiver_types: receiver_types.clone(),
                                         argument_index: argument.argument_index,
+                                        callback_span: argument
+                                            .inline_callback_span
+                                            .expect("filtered direct callback span"),
+                                        field_path: Vec::new(),
                                         params: argument.inline_callback_params.clone(),
                                     });
+                            }
+                            for argument in arguments {
+                                for callback in &argument.inline_callback_fields {
+                                    projection
+                                        .out
+                                        .callback_arguments
+                                        .push(CompilerCallbackArgumentHeader {
+                                            call_name: name.clone(),
+                                            call_receiver: receiver.clone(),
+                                            call_receiver_types: receiver_types.clone(),
+                                            argument_index: argument.argument_index,
+                                            callback_span: callback.callback_span,
+                                            field_path: callback.path.clone(),
+                                            params: callback.params.clone(),
+                                        });
+                                }
                             }
                         }
                     }
@@ -1163,6 +1287,8 @@ impl CompilerSyntaxHeader {
                             let source = source.trim();
                             if !target.is_empty() && !source.is_empty() {
                                 projection.out.assignment_aliases.push(CompilerAssignmentAlias {
+                                    owner_span: projection.owner_span,
+                                    assignment_span: *span,
                                     target: target.to_string(),
                                     source: source.to_string(),
                                 });
@@ -1194,6 +1320,8 @@ impl CompilerSyntaxHeader {
                                     .out
                                     .factory_assignments
                                     .push(CompilerFactoryCallAssignment {
+                                        owner_span: projection.owner_span,
+                                        assignment_span: *span,
                                         target: target.to_string(),
                                         call_name: call_name.to_string(),
                                         call_receiver: indexed
@@ -1212,6 +1340,11 @@ impl CompilerSyntaxHeader {
                         span: *span,
                         value_text: value_text.clone(),
                         value_name: value_name.clone(),
+                        assignment_value_spans: value_name
+                            .as_ref()
+                            .and_then(|name| projection.assignment_value_spans_by_target.get(name))
+                            .cloned()
+                            .unwrap_or_default(),
                     }),
                     FlowEvent::Branch {
                         then_events,
@@ -1281,10 +1414,18 @@ impl CompilerSyntaxHeader {
             call_argument_values.entry(fact.call_span).or_default().push(fact);
         }
         for decl in &index.defs {
+            let mut assignment_value_spans_by_target = ahash::AHashMap::new();
+            collect_assignment_value_spans(
+                &decl.flow_events,
+                &assignment_values,
+                &mut assignment_value_spans_by_target,
+            );
             walk(
                 &decl.flow_events,
                 &mut Projection {
+                    owner_span: decl.span,
                     assignment_values: &assignment_values,
+                    assignment_value_spans_by_target: &assignment_value_spans_by_target,
                     call_argument_values: &call_argument_values,
                     out: &mut out,
                 },
@@ -1350,16 +1491,26 @@ impl CompilerSyntaxHeader {
         });
         out.returns.dedup();
         out.assignment_aliases.sort_by(|left, right| {
-            left.target
-                .cmp(&right.target)
-                .then_with(|| left.source.cmp(&right.source))
+            left.owner_span
+                .cmp(&right.owner_span)
+                .then_with(|| left.assignment_span.cmp(&right.assignment_span))
+                .then_with(|| {
+                    left.target
+                        .cmp(&right.target)
+                        .then_with(|| left.source.cmp(&right.source))
+                })
         });
         out.assignment_aliases.dedup_by(|left, right| left == right);
         out.factory_assignments.sort_by(|left, right| {
-            left.target
-                .cmp(&right.target)
-                .then_with(|| left.call_name.cmp(&right.call_name))
-                .then_with(|| left.call_receiver.cmp(&right.call_receiver))
+            left.owner_span
+                .cmp(&right.owner_span)
+                .then_with(|| left.assignment_span.cmp(&right.assignment_span))
+                .then_with(|| {
+                    left.target
+                        .cmp(&right.target)
+                        .then_with(|| left.call_name.cmp(&right.call_name))
+                        .then_with(|| left.call_receiver.cmp(&right.call_receiver))
+                })
         });
         out.factory_assignments.dedup();
         out.callback_arguments.sort_by(|left, right| {
@@ -1368,6 +1519,8 @@ impl CompilerSyntaxHeader {
                 .then_with(|| left.argument_index.cmp(&right.argument_index))
                 .then_with(|| left.call_receiver.cmp(&right.call_receiver))
                 .then_with(|| left.call_receiver_types.cmp(&right.call_receiver_types))
+                .then_with(|| left.callback_span.cmp(&right.callback_span))
+                .then_with(|| left.field_path.cmp(&right.field_path))
                 .then_with(|| left.params.cmp(&right.params))
         });
         out.callback_arguments.dedup();
@@ -1474,6 +1627,11 @@ pub enum AssignValueKind {
     /// depends on the callee's return-value summary; the engine
     /// routes through CallRet → Write.
     CallResult,
+    /// RHS is a compiler-proven property projection that may also dispatch
+    /// through a language accessor. The exact projected storage value and a
+    /// resolved accessor return are both valid inputs; unlike an ordinary
+    /// call, the projection spelling is not callee-token noise.
+    PropertyRead,
     /// RHS is delivered to a call-site block / closure by the
     /// callee's `yield`, not by the callee's ordinary return value.
     /// Resolved callees use their exact yield summaries. If a language
@@ -1491,10 +1649,21 @@ pub enum AssignValueKind {
     /// bind the assignment target as an indirect callable without inventing a
     /// return-value edge.
     CallableReference,
-    /// RHS is a compound expression (member access, binary op,
-    /// template literal, ternary, conditional, …). Adapters provide its
+    /// Address-of expression whose operand is a compiler-resolved aggregate
+    /// object (record/struct/union), rather than one of its fields. This is a
+    /// syntax/type role only; rule data decides whether a selected call uses
+    /// that address as an unsafe object-reconstruction boundary.
+    AddressOfAggregate,
+    /// RHS is a combining compound expression (arithmetic/concatenation,
+    /// template literal, aggregate composition, …). Adapters provide its
     /// AST-derived carriers through structured expression-flow facts.
     Compound,
+    /// RHS selects one complete operand without combining operand values
+    /// (for example a language's conditional or short-circuit selection
+    /// expression). The adapter proves this from the exact CST operator and
+    /// branch shape. A root binding therefore owns the selected operand's
+    /// complete runtime value, including later field projections.
+    WholeValueSelection,
     /// RHS shape couldn't be classified (or the adapter doesn't
     /// surface enough info). Engine treats as `Compound` for
     /// safety.
@@ -2287,12 +2456,29 @@ pub struct AssignmentValueFact {
     /// that rendering.
     #[serde(default, skip_serializing_if = "ExpressionFlow::is_empty")]
     pub value_flow: ExpressionFlow,
+    /// Exact scalar value of the complete RHS when the owning language
+    /// frontend can decode it.  Consumers use this compiler fact for
+    /// rule-declared state constraints; shared analysis never interprets
+    /// source-language literal syntax or rendered assignment text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_value: Option<StaticScalarValue>,
     /// Exact return value of a callable assigned by this syntax node when the
     /// language frontend proves that the callable body consists of one
     /// unconditional return. Absent for multi-path, fallthrough, or otherwise
     /// non-exact callable bodies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exact_callable_return: Option<ExpressionFlow>,
+    /// Exact scalar returned by the complete inline callback assigned on the
+    /// RHS. Adapters emit this only for the same fail-closed callback shapes
+    /// as [`CallArgumentValueFact::inline_callback_static_return`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_callback_static_return: Option<StaticScalarValue>,
+    /// Inline callbacks stored beneath statically named fields of the
+    /// complete RHS aggregate. Dynamic keys, spreads, duplicate paths, and
+    /// non-aggregate RHS values leave this empty. The frontend records only
+    /// syntax; rule data decides whether an external runtime invokes the map.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline_callback_fields: Vec<InlineAggregateCallbackFact>,
     /// Exact scalar arguments of the direct RHS call when every argument was
     /// decoded by the owning language frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2302,10 +2488,28 @@ pub struct AssignmentValueFact {
     /// adapter, never from scanning the rendered RHS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_call_name: Option<String>,
+    /// Exact compiler callee span for the direct value-producing call.
+    /// Nested calls remain in [`Self::call_sites`]; this field identifies the
+    /// outer producer without relying on traversal order or span overlap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_call_span: Option<Span>,
     /// Canonical receiver for [`Self::direct_call_name`], when the parsed call
     /// is receiver-qualified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_call_receiver: Option<String>,
+    /// Exact parsed receiver expression for [`Self::direct_call_name`].
+    ///
+    /// Language frontends may also use this for a syntax-proven value
+    /// accessor that lowers without call punctuation (for example a property
+    /// getter). Consumers can join a nested call result to the accessor
+    /// receiver through this span without tokenizing its rendered spelling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_call_receiver_span: Option<Span>,
+    /// Compiler-owned value dependencies of the exact direct receiver.
+    /// Present only when the frontend can isolate that receiver expression;
+    /// consumers must not approximate it from the complete assignment RHS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_call_receiver_flow: Option<ExpressionFlow>,
 }
 
 /// One exact key/value entry in a statically initialized string map.
@@ -2320,6 +2524,12 @@ pub struct StaticStringMapEntry {
 pub struct StaticStringMapFact {
     pub assignment_span: Span,
     pub target: String,
+    /// The language frontend proved that this binding cannot be reassigned
+    /// after its complete literal initialization. This permits exact
+    /// module/class constants to be consumed from nested callables without
+    /// treating an ordinary outer-scope mutable map as stable.
+    #[serde(default)]
+    pub target_is_immutable: bool,
     pub entries: Vec<StaticStringMapEntry>,
 }
 
@@ -2368,6 +2578,12 @@ pub struct StringCompositionFact {
     /// compositions leave this unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// Exact parsed operand span when the complete composition contains one
+    /// dynamic place. This locates the value that makes the composition
+    /// dynamic without changing flow or safety semantics. Multiple dynamic
+    /// operands deliberately leave it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_anchor_span: Option<Span>,
     pub parts: Vec<StringCompositionPart>,
 }
 
@@ -2472,6 +2688,22 @@ pub enum CharacterConstraintOutput {
     },
 }
 
+/// Strength of the compiler proof behind a character constraint.
+///
+/// Most adapters can prove the runtime character operation directly from a
+/// statically known receiver type. Dynamic-language comprehensions may prove
+/// the transform and its output type while leaving the predicate receiver's
+/// runtime type to an independently matched source rule. Shared security
+/// analysis may credit that weaker fact only when rule data explicitly
+/// accepts the source payload type.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CharacterConstraintProof {
+    #[default]
+    ExactRuntimeSemantics,
+    RequiresSourcePayloadEvidence,
+}
+
 /// A complete Tree-sitter/runtime proof that one value has a constrained
 /// output alphabet. Provider-bound facts retain exact call identity without
 /// assigning security meaning; rule semantics select accepted providers.
@@ -2485,6 +2717,8 @@ pub struct CharacterConstraintFact {
     pub input_place: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_param_index: Option<usize>,
+    #[serde(default)]
+    pub proof: CharacterConstraintProof,
     pub output: CharacterConstraintOutput,
     pub domain: CharacterConstraintDomain,
 }
@@ -2515,6 +2749,7 @@ pub fn character_constraints_from_substitutions(
                 transform_span: fact.transform_span,
                 input_place,
                 input_param_index: Some(fact.input_param_index),
+                proof: CharacterConstraintProof::ExactRuntimeSemantics,
                 output: CharacterConstraintOutput::Return,
                 domain: CharacterConstraintDomain::ExcludesExact { characters },
             })
@@ -2538,6 +2773,19 @@ pub struct GuardedValueFilterFact {
     pub write_span: Span,
     pub input_place: String,
     pub output_place: String,
+}
+
+/// Exact boolean expression returned by one callable.
+///
+/// The owning adapter emits this only when the callable has one complete
+/// return expression and no alternate normal return.  The expression keeps
+/// provider calls as spans; rule data, not compiler IR, decides whether any
+/// provider is a security predicate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PredicateReturnFact {
+    pub function_span: Span,
+    pub return_span: Span,
+    pub expression: ConditionExpressionFact,
 }
 
 /// Compiler/runtime proof that a helper returns only a same-origin absolute
@@ -2662,6 +2910,11 @@ pub enum ConditionEquality {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConditionOperandFact {
     pub span: Span,
+    /// Exact syntax span when the complete operand is one direct call result.
+    /// Adapters leave this absent for wrapped/arithmetic expressions so rule
+    /// consumers never infer call-result equality from source text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_call_span: Option<Span>,
     #[serde(default, skip_serializing_if = "ExpressionFlow::is_empty")]
     pub value_flow: ExpressionFlow,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2830,8 +3083,10 @@ pub struct CallArgumentValueFact {
     pub direct_call_span: Option<Span>,
     /// Exact value-shape classification supplied by the owning language
     /// adapter for this argument expression. `Literal` is sufficient for
-    /// value-independent clean-overwrite proofs without parsing
-    /// [`CallArg::value_text`]; absent or non-literal facts fail closed.
+    /// value-independent clean-overwrite proofs, while `CallableReference`
+    /// proves that the parsed expression denotes a callable value rather than
+    /// an ordinary qualified value. Consumers never infer either role from
+    /// [`CallArg::value_text`]; absent facts fail closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_kind: Option<AssignValueKind>,
     /// Adapter-lowered parameter bindings when the complete argument is an
@@ -2841,6 +3096,22 @@ pub struct CallArgumentValueFact {
     /// whether a particular callback position receives source data.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inline_callback_params: Vec<String>,
+    /// Exact declaration span when the complete argument is an inline
+    /// callback. Parameter names alone are not a unique scope identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_callback_span: Option<Span>,
+    /// Exact scalar returned by a complete inline callback. Frontends emit
+    /// this only when the callback is expression-bodied or has one
+    /// unconditional explicit return and the parsed return expression is an
+    /// adapter-decoded scalar. Named callbacks, conditional/mixed returns,
+    /// and incomplete bodies remain `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_callback_static_return: Option<StaticScalarValue>,
+    /// Inline callbacks stored under statically named fields of the complete
+    /// argument aggregate. The adapter supplies only parsed structure and
+    /// parameter bindings; rule data assigns provider/API meaning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline_callback_fields: Vec<InlineAggregateCallbackFact>,
     pub value_flow: ExpressionFlow,
     /// Exact scalar value decoded by the owning language frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2859,6 +3130,15 @@ pub struct CallArgumentValueFact {
     pub exact_static_sequence_values: Option<Vec<Option<StaticScalarValue>>>,
 }
 
+/// One inline callback proven to occupy a static field path in a call
+/// argument aggregate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlineAggregateCallbackFact {
+    pub callback_span: Span,
+    pub path: Vec<String>,
+    pub params: Vec<String>,
+}
+
 /// One exact field in a compiler-lowered aggregate call argument.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StaticAggregateFieldValue {
@@ -2874,6 +3154,7 @@ pub struct StaticAggregateFieldValue {
 pub enum StaticScalarValue {
     String(String),
     Boolean(bool),
+    Integer(i64),
     Null,
 }
 
@@ -3065,6 +3346,9 @@ pub struct DeclIndex {
     /// dataflow proof only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guarded_value_filters: Vec<GuardedValueFilterFact>,
+    /// Complete boolean-return summaries lowered by the owning frontend.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub predicate_returns: Vec<PredicateReturnFact>,
     /// Exact same-origin path summaries lowered by the owning frontend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub same_origin_path_constraints: Vec<SameOriginPathConstraintFact>,
@@ -3299,7 +3583,7 @@ pub enum ImportScope {
 /// Aliases and imported symbols belong in `alias` and
 /// `original_name`; do not fold them into `module`.
 ///
-/// Supported adapters are pinned by the mega-flow contract test in
+/// Supported adapters are pinned by the language-gauntlet contract test in
 /// `crates/conformance/tests/architecture_invariants.rs`:
 ///
 /// | Language | Fixture import form | Adapter `module` |
@@ -3641,7 +3925,7 @@ mod compiler_attribution_tests {
                             args: vec![CallArg {
                                 span: span(15, 17),
                                 passing_mode: ArgumentPassingMode::Value,
-                                name: None,
+                                name: Some("payload_arg".to_string()),
                                 value_text: "payload".to_string(),
                                 place: Some("payload".to_string()),
                                 source_names: vec!["payload".to_string()],
@@ -3713,6 +3997,7 @@ mod compiler_attribution_tests {
             .expect("function projection");
         assert_eq!(function.calls.len(), 2);
         assert_eq!(function.calls[0].name, "send");
+        assert_eq!(function.calls[0].args[0].name.as_deref(), Some("payload_arg"));
         assert_eq!(
             function.calls[0].receiver_source_names,
             ["nested.value", "repo", "repo.client"]
@@ -3727,6 +4012,111 @@ mod compiler_attribution_tests {
             "rendered compound text must not be split into invented carriers"
         );
         assert!(projected.function_at_span(span(90, 120)).is_none());
+    }
+
+    #[test]
+    fn compiler_syntax_header_retains_assignment_rhs_for_variable_returns() {
+        let assignment_span = span(10, 30);
+        let value_span = span(20, 30);
+        let return_span = span(40, 52);
+        let index = DeclIndex {
+            file: FileId::new(4),
+            defs: vec![decl(
+                DeclKind::Function,
+                span(1, 60),
+                vec![
+                    FlowEvent::Assign {
+                        span: assignment_span,
+                        target: "page".to_string(),
+                        source_name: Some("input".to_string()),
+                        source_call: None,
+                        source_call_args: Vec::new(),
+                        source_names: vec!["input".to_string()],
+                        declares_new_binding: true,
+                        value_kind: Some(AssignValueKind::Compound),
+                    },
+                    FlowEvent::Return {
+                        span: return_span,
+                        value_kind: Some(AssignValueKind::Compound),
+                        value_text: Some("page".to_string()),
+                        value_name: Some("page".to_string()),
+                        value_flow: ExpressionFlow::from_place("page"),
+                    },
+                ],
+            )],
+            assignment_values: vec![AssignmentValueFact {
+                assignment_span,
+                target: Some("page".to_string()),
+                target_is_immutable: true,
+                target_owner: None,
+                target_span: Some(span(14, 18)),
+                value_span,
+                call_sites: Vec::new(),
+                value_flow: ExpressionFlow::from_place("input"),
+                static_value: None,
+                exact_callable_return: None,
+                inline_callback_static_return: None,
+                inline_callback_fields: Vec::new(),
+                exact_static_call_args: None,
+                direct_call_name: None,
+                direct_call_span: None,
+                direct_call_receiver: None,
+                direct_call_receiver_span: None,
+                direct_call_receiver_flow: None,
+            }],
+            ..DeclIndex::default()
+        };
+
+        let header = CompilerSyntaxHeader::from_decl_index(&index);
+        assert_eq!(header.returns.len(), 1);
+        assert_eq!(header.returns[0].assignment_value_spans, [value_span]);
+    }
+
+    #[test]
+    fn compiler_syntax_header_retains_direct_callback_scope_identity() {
+        let call_span = span(10, 30);
+        let callback_span = span(40, 60);
+        let index = DeclIndex {
+            file: FileId::new(4),
+            defs: vec![decl(
+                DeclKind::Function,
+                span(1, 80),
+                vec![FlowEvent::Call {
+                    span: call_span,
+                    name: "configure".to_string(),
+                    receiver: Some("provider".to_string()),
+                    receiver_types: Vec::new(),
+                    call_kind: CallKind::Method,
+                    args: Vec::new(),
+                }],
+            )],
+            call_argument_values: vec![CallArgumentValueFact {
+                call_span,
+                argument_index: 0,
+                argument_span: callback_span,
+                direct_call_span: None,
+                value_kind: None,
+                inline_callback_params: vec!["request".to_string()],
+                inline_callback_span: Some(callback_span),
+                inline_callback_static_return: None,
+                inline_callback_fields: Vec::new(),
+                value_flow: ExpressionFlow::default(),
+                static_value: None,
+                exact_static_aggregate_fields: Vec::new(),
+                exact_static_sequence_values: None,
+            }],
+            ..DeclIndex::default()
+        };
+
+        let projected = CompilerSyntaxHeader::from_decl_index(&index);
+        assert_eq!(projected.callback_arguments.len(), 1);
+        let callback = &projected.callback_arguments[0];
+        assert_eq!(callback.call_name, "configure");
+        assert_eq!(callback.call_receiver.as_deref(), Some("provider"));
+        assert_eq!(callback.argument_index, 0);
+        assert_eq!(callback.callback_span, callback_span);
+        assert_eq!(callback.params, ["request"]);
+        assert!(callback.field_path.is_empty());
     }
 }
 
@@ -3859,6 +4249,7 @@ mod operation_tests {
                 }],
                 catch_param: Some("err".to_string()),
                 catch_types: Vec::new(),
+                catch_arms: Vec::new(),
             }],
             else_events: Vec::new(),
         }]);

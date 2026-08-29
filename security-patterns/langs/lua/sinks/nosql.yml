@@ -59,22 +59,6 @@
     expect_no_match: true
   description: "lua-resty-mongol collection:find_one(filter) - tainted filter with $-operators."
 
-- id: lua.nosql.mongorover_find
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: lua.nosql.resty_mongol_find
-  language: lua
-  tag: nosql-injection
-  severity: high
-  packages: [mongorover]
-  cwe: [CWE-943]
-  match:
-    kind: call
-    callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]find$
-  description: "Subsumed by lua.nosql.resty_mongol_find - same shape; canonical rule covers all Lua MongoDB drivers."
-
 - id: lua.nosql.resty_redis_eval
   enabled: true
   language: lua
@@ -134,49 +118,3 @@
       end
     expect_no_match: true
   description: "lua-resty-redis red:evalsha(sha, ...) - runs cached script; tainted args still reach KEYS/ARGV."
-
-- id: lua.nosql.redis_lua_eval
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: lua.nosql.resty_redis_eval
-  language: lua
-  tag: nosql-injection
-  severity: high
-  packages: [redis-lua]
-  cwe: [CWE-943]
-  match:
-    kind: call
-    callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]eval$
-  description: "Subsumed by lua.nosql.resty_redis_eval - same regex; canonical rule should add redis-lua to its packages list."
-
-- id: lua.nosql.cjson_encode_injection
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: lua
-  tag: nosql-injection
-  severity: low
-  packages: [cjson]
-  cwe: [CWE-943]
-  match:
-    kind: call
-    callee:
-      attribute: [cjson, encode]
-  description: "Disabled - cjson.encode is serialisation; only flag when output is embedded in a NoSQL query string."
-
-- id: lua.nosql.openresty_cosocket_redis_script
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: lua
-  tag: nosql-injection
-  severity: medium
-  packages: [openresty]
-  cwe: [CWE-943]
-  match:
-    kind: call
-    callee:
-      attribute: [red, script_load]
-  description: "Disabled - script_load caches a script but does not execute it; the sink is eval/evalsha."

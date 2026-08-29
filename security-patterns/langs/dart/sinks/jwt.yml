@@ -1,33 +1,4 @@
 # Dart JWT sinks.
-- id: dart.jwt.dart_jsonwebtoken_verify
-  aliases:
-  - dart.jwt.alg_confusion
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: dart
-  tag: jwt
-  severity: high
-  packages: [dart_jsonwebtoken]
-  cwe: [CWE-347, CWE-345]
-  match:
-    kind: call
-    callee:
-      attribute: [JWT, verify]
-  match_examples:
-  - name: declared shape
-    code: |
-      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
-      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
-      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
-      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
-      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart'; // dart_jsonwebtoken
-      // uses dart_jsonwebtoken
-      void test() { var input = "x"; var amount = 1; JWT.verify(input); }
-  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT configuration, not just the broad API shape. dart_jsonwebtoken JWT.verify - check algorithm whitelist + key pinning. Also covers merged aliases: dart.jwt.alg_confusion."
-
-  imports:
-  - dart_jsonwebtoken/dart_jsonwebtoken.dart
 - id: dart.jwt.dart_jsonwebtoken_decode
   enabled: true
   language: dart
@@ -45,15 +16,13 @@
   match_examples:
   - name: declared shape
     code: |
-      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
-      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
-      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
-      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
       import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart'; // dart_jsonwebtoken
       // uses dart_jsonwebtoken
       void test(String input) { var amount = 1; JWT.decode(input); }
   - name: literal jwt negative
-    code: "import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';\nimport 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';\nimport 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';\nimport 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';\nimport 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart'; // dart_jsonwebtoken\n// uses dart_jsonwebtoken\nvoid test() { var \"safe\" = \"x\"; var amount = 1; JWT.decode(\"safe\"); }\n"
+    code: |
+      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+      void test() { JWT.decode("safe"); }
     expect_no_match: true
   description: "dart_jsonwebtoken JWT.decode - does not verify signature."
 
@@ -76,46 +45,18 @@
   match_examples:
   - name: declared shape
     code: |
-      import 'package:jose/jose.dart';
-      import 'package:jose/jose.dart';
-      import 'package:jose/jose.dart';
-      import 'package:jose/jose.dart';
       import 'package:jose/jose.dart'; // jose
       // uses jose
       void test(String input) { var amount = 1; JsonWebToken.unverified(input); }
   - name: literal jwt negative
-    code: "import 'package:jose/jose.dart';\nimport 'package:jose/jose.dart';\nimport 'package:jose/jose.dart';\nimport 'package:jose/jose.dart';\nimport 'package:jose/jose.dart'; // jose\n// uses jose\nvoid test() { var \"safe\" = \"x\"; var amount = 1; JsonWebToken.unverified(\"safe\"); }\n"
+    code: |
+      import 'package:jose/jose.dart';
+      void test() { JsonWebToken.unverified("safe"); }
     expect_no_match: true
   description: "jose JsonWebToken.unverified - explicit no-verify."
 
   imports:
   - jose/jose.dart
-- id: dart.jwt.jaguar_verify
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: dart
-  tag: jwt
-  severity: high
-  packages: [jaguar_jwt]
-  cwe: [CWE-347]
-  match:
-    kind: call
-    callee:
-      name: verifyJwtHS256Signature
-  match_examples:
-  - name: declared shape
-    code: |
-      import 'package:jaguar_jwt/jaguar_jwt.dart';
-      import 'package:jaguar_jwt/jaguar_jwt.dart';
-      import 'package:jaguar_jwt/jaguar_jwt.dart';
-      import 'package:jaguar_jwt/jaguar_jwt.dart';
-      import 'package:jaguar_jwt/jaguar_jwt.dart';
-      void test() { var input = "x"; var amount = 1; verifyJwtHS256Signature(input); }
-  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT configuration, not just the broad API shape. jaguar_jwt verifyJwtHS256Signature - check secret not attacker-controlled."
-
-  imports:
-  - jaguar_jwt/jaguar_jwt.dart
 - id: dart.jwt.corsac_parse
   enabled: true
   language: dart
@@ -133,15 +74,13 @@
   match_examples:
   - name: declared shape
     code: |
-      import 'package:corsac_jwt/corsac_jwt.dart';
-      import 'package:corsac_jwt/corsac_jwt.dart';
-      import 'package:corsac_jwt/corsac_jwt.dart';
-      import 'package:corsac_jwt/corsac_jwt.dart';
       import 'package:corsac_jwt/corsac_jwt.dart'; // corsac_jwt
       // uses corsac_jwt
       void test(String input) { var amount = 1; JWT.parse(input); }
   - name: literal jwt negative
-    code: "import 'package:corsac_jwt/corsac_jwt.dart';\nimport 'package:corsac_jwt/corsac_jwt.dart';\nimport 'package:corsac_jwt/corsac_jwt.dart';\nimport 'package:corsac_jwt/corsac_jwt.dart';\nimport 'package:corsac_jwt/corsac_jwt.dart'; // corsac_jwt\n// uses corsac_jwt\nvoid test() { var \"safe\" = \"x\"; var amount = 1; JWT.parse(\"safe\"); }\n"
+    code: |
+      import 'package:corsac_jwt/corsac_jwt.dart';
+      void test() { JWT.parse("safe"); }
     expect_no_match: true
   description: "corsac_jwt JWT.parse - does not verify signature."
 

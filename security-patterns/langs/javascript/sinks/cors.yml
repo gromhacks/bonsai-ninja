@@ -12,13 +12,30 @@
     kind: call
     callee:
       name: cors
+  constraints:
+  - any_arg_matches_regex: "(?i)origin\\s*[:=]\\s*['\"]\\*['\"]"
+  - any_arg_matches_regex: "(?i)credentials\\s*[:=]\\s*true"
   match_examples:
   - name: cors wildcard with credentials
     code: |
       const _u = require("cors");
       function demo(input, req, obj) {
-        return cors(input, { origin: "*", credentials: true });
+        return cors({ origin: "*", credentials: true });
       }
+  - name: cors allowlisted origin negative
+    code: |
+      const cors = require("cors");
+      function demo() {
+        return cors({ origin: "https://app.example", credentials: true });
+      }
+    expect_no_match: true
+  - name: cors wildcard without credentials negative
+    code: |
+      const cors = require("cors");
+      function demo() {
+        return cors({ origin: "*", credentials: false });
+      }
+    expect_no_match: true
   description: "cors() called with wildcard origin and credentials true - Express CORS allow-all-with-credentials. Reflect-origin attack via misconfigured ACAO. Merged aliases: javascript.cors.cors_origin_true, javascript.cors.express_cors_origin_star."
   aliases:
   - javascript.cors.cors_origin_true
@@ -37,6 +54,8 @@
     kind: call
     callee:
       name: enableCors
+  constraints:
+  - arg_count: 0
   match_examples:
   - name: nest enablecors default
     code: |
@@ -46,6 +65,13 @@
       }
     expect_match_text:
     - app.enableCors
+  - name: nest enablecors explicit allowlist negative
+    code: |
+      const _u = require("@nestjs/core");
+      function bootstrap(app) {
+        return app.enableCors({ origin: "https://app.example" });
+      }
+    expect_no_match: true
   description: 'NestJS app.enableCors() with no origin allowlist enables permissive CORS defaults. Merged aliases: javascript.cors.nest_enablecors_wildcard.'
   aliases:
   - javascript.cors.nest_enablecors_wildcard
@@ -65,6 +91,8 @@
       attribute:
       - NestFactory
       - create
+  constraints:
+  - any_arg_matches_regex: "(?i)cors\\s*[:=]\\s*(?:true|\\{[^}]*origin\\s*[:=]\\s*['\"]\\*['\"])"
   match_examples:
   - name: nestfactory create cors true
     code: |
@@ -74,6 +102,13 @@
       }
     expect_match_text:
     - NestFactory.create
+  - name: nestfactory create no cors negative
+    code: |
+      const _u = require("@nestjs/core");
+      function bootstrap(AppModule) {
+        return NestFactory.create(AppModule);
+      }
+    expect_no_match: true
   - name: nestfactory create cors wildcard
     code: |
       const _u = require("@nestjs/core");

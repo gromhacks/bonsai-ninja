@@ -17,7 +17,6 @@
     code: |
       <?php
       use wordpress;
-      use wordpress;
       function example($input, $url, $id, $payload, $request) {
         check_ajax_referer('export-report', '_ajax_nonce', false);
       }

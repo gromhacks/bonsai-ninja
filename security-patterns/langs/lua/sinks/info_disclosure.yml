@@ -1,7 +1,5 @@
 # Lua information-disclosure sinks (logs, debug output, error responses).
 - id: lua.info_disclosure.ngx_log_secret
-  aliases:
-  - lua.log_injection.ngx_log_newline
   enabled: true
   language: lua
   tag: information-disclosure
@@ -31,4 +29,4 @@
         ngx.log(ngx.ERR, "user=", input)
       end
     expect_no_match: true
-  description: "ngx.log with secret-shaped data - credentials or tokens can leak to nginx / OpenResty logs. Also covers merged aliases: lua.log_injection.ngx_log_newline."
+  description: "ngx.log with secret-shaped data - credentials or tokens can leak to nginx / OpenResty logs. Newline-forging is an independent log-injection shape, not an alias of secret disclosure."

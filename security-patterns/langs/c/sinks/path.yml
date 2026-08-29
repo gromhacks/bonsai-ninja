@@ -150,24 +150,6 @@
     code: "void example(void) {\n  rename(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
     expect_no_match: true
   description: "rename(2) with tainted destination path - attacker-controlled paths can overwrite arbitrary targets."
-- id: c.path.access
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: c.toctou.access_check
-  language: c
-  tag: path-traversal
-  severity: medium
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      name: access
-  match_examples:
-  - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  access(arg);\n}\n"
-  description: "Disabled - duplicate of c.toctou.access_check; access(2) is modeled as the TOCTOU check site."
 - id: c.path.chmod
   enabled: true
   language: c
@@ -450,20 +432,6 @@
       }
     expect_no_match: true
   description: "remove(3) - delete tainted path."
-- id: c.path.stat
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  tag: path-traversal
-  severity: low
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      name: stat
-  description: "Disabled - stat on tainted path is info-leak only; too noisy."
 - id: c.path.unlinkat
   enabled: true
   language: c
@@ -595,8 +563,6 @@
   - name: generated direct match
     code: |
       #include <windows.h>
-      #include <windows.h>
-      #include <windows.h> /* win32 */
       #include <windows.h> /* win32 */
       void example(char *arg) {
         char *fmt = arg;
@@ -632,8 +598,6 @@
   - name: generated direct match
     code: |
       #include <windows.h>
-      #include <windows.h>
-      #include <windows.h> /* win32 */
       #include <windows.h> /* win32 */
       void example(char *arg) {
         char *fmt = arg;
@@ -669,8 +633,6 @@
   - name: generated direct match
     code: |
       #include <windows.h>
-      #include <windows.h>
-      #include <windows.h> /* win32 */
       #include <windows.h> /* win32 */
       void example(char *arg) {
         char *fmt = arg;
@@ -706,8 +668,6 @@
   - name: generated direct match
     code: |
       #include <windows.h>
-      #include <windows.h>
-      #include <windows.h> /* win32 */
       #include <windows.h> /* win32 */
       void example(char *arg) {
         char *fmt = arg;
@@ -723,38 +683,3 @@
   imports:
   - windows
   - windows.h
-- id: c.path.archive_read_extract
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  tag: zip-slip
-  severity: high
-  packages:
-  - libarchive
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      name: archive_read_extract
-  match_examples:
-  - name: generated direct match
-    code: "#include <libarchive/archive.h>\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  archive_read_extract(arg);\n}\n"
-  description: "Disabled - archive_read_extract uses the pathname stored in the archive entry; accurate Zip Slip matching needs entry/receiver-state tracking, so the call-only rule is over-broad."
-- id: c.path.archive_entry_pathname
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  tag: zip-slip
-  severity: medium
-  packages:
-  - libarchive
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      name: archive_entry_pathname
-  description: "Disabled - informational marker for libarchive entry pathname read; pair with archive_read_extract sink for the actual Zip Slip site."

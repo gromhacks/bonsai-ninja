@@ -116,8 +116,10 @@ pub fn reset_for_tests() {
 /// thanks to the `if`-guard pattern.
 ///
 /// Usage:
-/// ```ignore
+/// ```no_run
 /// use bonsai_diagnostics::debug_log;
+/// # let name = "entry";
+/// # let size = 1usize;
 /// debug_log!("idg-closure", "src={} closure_size={}", name, size);
 /// ```
 #[macro_export]

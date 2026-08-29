@@ -17,10 +17,6 @@
   - name: tainted shelf headers
     code: |
       import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
       void test(Map<String, String> input) { Response.change(headers: input); }
   - name: literal shelf headers negative
     code: |
@@ -76,18 +72,3 @@
       void test(String input) { headers.add(input, "safe"); }
     expect_no_match: true
   description: "HttpHeaders.add."
-
-- id: dart.header.httpclient_request_set_header
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: dart.header.httpheaders_set
-  language: dart
-  tag: header-injection
-  severity: medium
-  cwe: [CWE-113]
-  match:
-    kind: call
-    callee:
-      attribute: [request, headers]
-  description: "Disabled - `.headers` is a getter not a call; actual CRLF sink is covered by dart.header.httpheaders_set / httpheaders_add."

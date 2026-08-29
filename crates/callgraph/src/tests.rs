@@ -1,7 +1,9 @@
 use super::*;
 use crate::chains::{enumerate_paths_resolved, PathTruncation};
 use bonsai_common::{FileId, Span, SymbolId};
-use bonsai_lang_api::{CallKind, DeclIndex, ModulePath, Visibility, NO_CONSTRUCTOR_METHOD_NAMES};
+use bonsai_lang_api::{
+    ArgumentPassingMode, CallKind, DeclIndex, ModulePath, Visibility, NO_CONSTRUCTOR_METHOD_NAMES,
+};
 
 #[test]
 fn compact_callgraph_wire_rebuilds_adjacency_and_provenance() {
@@ -1506,8 +1508,12 @@ fn rust_crate_root_member_import_resolves_by_path_not_leaf_fanout() {
                 }
             },
             |file| match file {
-                f if f == caller_file => Some("/repo/examples/rust/micro/gateway.rs".to_string()),
-                f if f == micro_file => Some("/repo/examples/rust/micro/user_service.rs".to_string()),
+                f if f == caller_file => {
+                    Some("/repo/test-fixtures/languages/rust/micro/gateway.rs".to_string())
+                }
+                f if f == micro_file => {
+                    Some("/repo/test-fixtures/languages/rust/micro/user_service.rs".to_string())
+                }
                 f if f == admin_file => Some("/repo/examples/rust/admin/user_service.rs".to_string()),
                 _ => None,
             },
@@ -2117,6 +2123,135 @@ fn bare_implicit_receiver_call_resolves_inherited_base_accessor() {
 }
 
 #[test]
+fn class_ancestor_index_materializes_exact_transitive_declared_bases() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let base = with_module_path(
+        decl_with(file, 0, "Base", DeclKind::Class, None, Vec::new()),
+        &["app"],
+    );
+    let mut middle = with_module_path(
+        decl_with(file, 1, "Middle", DeclKind::Class, None, Vec::new()),
+        &["app"],
+    );
+    middle.bases = vec!["Base".to_string()];
+    let mut leaf = with_module_path(
+        decl_with(file, 2, "Leaf", DeclKind::Class, None, Vec::new()),
+        &["app"],
+    );
+    leaf.bases = vec!["Middle".to_string()];
+    let unrelated = with_module_path(
+        decl_with(file, 3, "Unrelated", DeclKind::Class, None, Vec::new()),
+        &["app"],
+    );
+    insert_file(&mut global, file, vec![base, middle, leaf, unrelated]);
+
+    let index = build_class_ancestor_index(&global);
+    let leaf = global.find_by_name("Leaf")[0];
+    let ancestors = index.ancestors(leaf).iter().copied().collect::<AHashSet<_>>();
+
+    assert_eq!(ancestors.len(), 3);
+    assert!(ancestors.contains(&leaf));
+    assert!(ancestors.contains(&global.find_by_name("Middle")[0]));
+    assert!(ancestors.contains(&global.find_by_name("Base")[0]));
+    assert!(!ancestors.contains(&global.find_by_name("Unrelated")[0]));
+}
+
+#[test]
+fn typed_interface_dispatch_includes_only_declared_implementations() {
+    let file = FileId::new(1);
+    let caller_file = FileId::new(2);
+    let mut interface = with_module_path(
+        decl_with(file, 0, "Port", DeclKind::Interface, None, Vec::new()),
+        &["app"],
+    );
+    interface.body_span = None;
+    let mut abstract_run = with_module_path(
+        decl_with(file, 1, "run", DeclKind::Method, Some(0), Vec::new()),
+        &["app"],
+    );
+    abstract_run.body_span = None;
+
+    let mut implementation = with_module_path(
+        decl_with(file, 2, "LivePort", DeclKind::Class, None, Vec::new()),
+        &["app"],
+    );
+    implementation.bases = vec!["Port".to_string()];
+    let implementation_run = with_module_path(
+        decl_with(file, 3, "run", DeclKind::Method, Some(2), Vec::new()),
+        &["app"],
+    );
+
+    let collision = with_module_path(
+        decl_with(file, 4, "Unrelated", DeclKind::Class, None, Vec::new()),
+        &["app"],
+    );
+    let collision_run = with_module_path(
+        decl_with(file, 5, "run", DeclKind::Method, Some(4), Vec::new()),
+        &["app"],
+    );
+    let entry = with_module_path(
+        decl(
+            caller_file,
+            6,
+            "entry",
+            vec![method_call(caller_file, "port.run", "port", &["Port"])],
+        ),
+        &["app"],
+    );
+
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            interface,
+            abstract_run,
+            implementation,
+            implementation_run,
+            collision,
+            collision_run,
+        ],
+    );
+    insert_file(&mut global, caller_file, vec![entry]);
+    global.finalize_semantic_facts();
+
+    let graph = build_graph(&global, |_| Some("kotlin"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let implementation_run = global
+        .find_by_name("run")
+        .iter()
+        .copied()
+        .find(|symbol| {
+            global
+                .decl_of(*symbol)
+                .is_some_and(|decl| decl.parent == Some(SymbolId::new(2)))
+        })
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .expect("implementation run");
+    let collision_run = global
+        .find_by_name("run")
+        .iter()
+        .copied()
+        .find(|symbol| {
+            global
+                .decl_of(*symbol)
+                .is_some_and(|decl| decl.parent == Some(SymbolId::new(4)))
+        })
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .expect("collision run");
+    let targets = graph.callees_of(entry).map(|edge| edge.to).collect::<Vec<_>>();
+    assert!(
+        targets.contains(&implementation_run),
+        "declared interface implementation must participate in virtual dispatch: {targets:?}"
+    );
+    assert!(
+        !targets.contains(&collision_run),
+        "a same-named method without an exact inheritance edge is not an implementation: {targets:?}"
+    );
+}
+
+#[test]
 fn typed_child_receiver_resolves_inherited_base_method() {
     let base_file = FileId::new(1);
     let entry_file = FileId::new(2);
@@ -2517,6 +2652,20 @@ fn parameter_invocation_identity_uses_adapter_call_and_receiver_facts() {
 }
 
 #[test]
+fn receiver_member_identity_preserves_exact_adapter_syntax_after_the_receiver() {
+    assert_eq!(
+        receiver_member_callee("auth.runAdminCommand:action:", "auth"),
+        "runAdminCommand:action:"
+    );
+    assert_eq!(receiver_member_callee("service.run", "service"), "run");
+    assert_eq!(
+        receiver_member_callee("service_runner.run", "service"),
+        "run",
+        "a receiver prefix may not match inside a longer identifier"
+    );
+}
+
+#[test]
 fn lexical_parameter_prevents_same_named_workspace_call_edge() {
     let file = FileId::new(1);
     let mut global = GlobalIndex::new();
@@ -2635,6 +2784,125 @@ fn static_class_receiver_method_resolves_without_bare_name_fanout() {
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].to, repo_search);
     assert_eq!(cg.callers_of(repo_search).count(), 1);
+}
+
+#[test]
+fn class_side_factory_resolution_uses_exact_type_identity_and_honors_lexical_shadows() {
+    let model_file = FileId::new(40);
+    let caller_file = FileId::new(41);
+    let mut global = GlobalIndex::new();
+
+    let mut packet = with_module_path(
+        decl_with(model_file, 1, "Packet", DeclKind::Class, None, Vec::new()),
+        &["models"],
+    );
+    packet.qualified_name = Some("models.Packet".to_string());
+    let mut decode = with_module_path(
+        decl_with(
+            model_file,
+            2,
+            "decode",
+            DeclKind::Constructor,
+            Some(1),
+            vec![FlowEvent::Return {
+                value_kind: None,
+                span: Span::new(model_file, 20, 25),
+                value_name: Some("value".to_string()),
+                value_text: Some("value".to_string()),
+                value_flow: bonsai_lang_api::ExpressionFlow::from_place("value"),
+            }],
+        ),
+        &["models", "Packet"],
+    );
+    decode.qualified_name = Some("models.Packet.decode".to_string());
+    insert_file(&mut global, model_file, vec![packet, decode]);
+
+    let entry = with_module_path(
+        decl(
+            caller_file,
+            3,
+            "entry",
+            vec![method_call(caller_file, "Packet.decode", "Packet", &[])],
+        ),
+        &["routes"],
+    );
+    let shadowed_param = with_params(
+        with_module_path(
+            decl(
+                caller_file,
+                4,
+                "shadowed_param",
+                vec![method_call(caller_file, "Packet.decode", "Packet", &[])],
+            ),
+            &["routes"],
+        ),
+        &["Packet"],
+    );
+    let shadowed_local = with_module_path(
+        decl(
+            caller_file,
+            5,
+            "shadowed_local",
+            vec![
+                FlowEvent::Assign {
+                    span: Span::new(caller_file, 10, 20),
+                    target: "Packet".to_string(),
+                    source_name: Some("provider".to_string()),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: vec!["provider".to_string()],
+                    declares_new_binding: true,
+                    value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+                },
+                FlowEvent::Call {
+                    span: Span::new(caller_file, 30, 45),
+                    name: "Packet.decode".to_string(),
+                    receiver: Some("Packet".to_string()),
+                    receiver_types: Vec::new(),
+                    call_kind: CallKind::Method,
+                    args: Vec::new(),
+                },
+            ],
+        ),
+        &["routes"],
+    );
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![entry, shadowed_param, shadowed_local],
+    );
+
+    let entry_decl = global
+        .find_by_name("entry")
+        .first()
+        .and_then(|symbol| global.decl_of(*symbol))
+        .expect("entry declaration");
+    let resolve_context = ResolveContext::new(caller_file, &entry_decl.module_path);
+    assert_eq!(
+        resolve_declared_receiver_class(&global, "Packet", &resolve_context),
+        vec![global.find_by_name("Packet")[0]],
+        "the unique compiler-declared type must be available as exact receiver evidence"
+    );
+
+    let graph = build_graph(&global, |_| Some("neutral"));
+    let decode = FuncId::new(global.find_by_name("decode")[0].raw());
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let shadowed_param = FuncId::new(global.find_by_name("shadowed_param")[0].raw());
+    let shadowed_local = FuncId::new(global.find_by_name("shadowed_local")[0].raw());
+
+    assert_eq!(
+        graph.callees_of(entry).map(|edge| edge.to).collect::<Vec<_>>(),
+        vec![decode],
+        "a unique compiler-declared type owns its exact class-side factory"
+    );
+    assert!(
+        graph.callees_of(shadowed_param).all(|edge| edge.to != decode),
+        "a parameter must shadow the same-spelled type object"
+    );
+    assert!(
+        graph.callees_of(shadowed_local).all(|edge| edge.to != decode),
+        "an earlier local value must shadow the same-spelled type object"
+    );
 }
 
 #[test]
@@ -3354,6 +3622,7 @@ fn qualified_receiver_type_does_not_dispatch_to_same_named_local_type() {
     )]);
     let mut method_cache =
         MethodCandidateCache::with_peer_class_index(build_shared_peer_class_index(&headers));
+    let flow_lookup = DeclFlowLookup::build(&remapped_entry.flow_events);
     let direct_targets = collect_receiver_method_targets(
         &headers,
         remapped_entry,
@@ -3369,6 +3638,7 @@ fn qualified_receiver_type_does_not_dispatch_to_same_named_local_type() {
             rooted_prefixes: &["crate::", "self::"],
             repeatable_rooted_prefixes: &["super::"],
         },
+        &flow_lookup,
         &mut method_cache,
     );
     let graph = ResolvedCallGraph::build_with_file_semantics_streaming(
@@ -3756,6 +4026,73 @@ fn receiver_method_does_not_resolve_through_same_named_local_callable_binding() 
 }
 
 #[test]
+fn exact_argument_place_retains_capitalized_local_callable_binding() {
+    let file = FileId::new(1);
+    let mut caller = decl(
+        file,
+        0,
+        "entry",
+        vec![
+            FlowEvent::Assign {
+                span: Span::new(file, 10, 40),
+                target: "Render".to_string(),
+                source_name: None,
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: Vec::new(),
+                declares_new_binding: true,
+                value_kind: Some(bonsai_lang_api::AssignValueKind::CallableReference),
+            },
+            FlowEvent::Call {
+                span: Span::new(file, 50, 70),
+                name: "apply".to_string(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Function,
+                args: vec![CallArg {
+                    passing_mode: Default::default(),
+                    span: Span::new(file, 56, 62),
+                    name: None,
+                    value_text: "Render".to_string(),
+                    place: Some("Render".to_string()),
+                    source_names: vec!["Render".to_string()],
+                }],
+            },
+        ],
+    );
+    caller.span = Span::new(file, 0, 100);
+    caller.body_span = Some(caller.span);
+    let mut closure = decl(file, 1, "Render", Vec::new());
+    closure.span = Span::new(file, 20, 40);
+    closure.name_span = closure.span;
+
+    let mut global = GlobalIndex::new();
+    insert_file(&mut global, file, vec![caller, closure]);
+    let caller = global
+        .find_by_name("entry")
+        .first()
+        .and_then(|symbol| global.decl_of(*symbol))
+        .expect("caller declaration");
+    let target = FuncId::new(global.find_by_name("Render")[0].raw());
+    let bindings =
+        collect_workspace_local_callable_bindings(&global, |_| bonsai_lang_api::LanguageCapabilities {
+            callable_reference_syntax: bonsai_lang_api::CallableReferenceSyntax {
+                prefixes: &["fun "],
+                ..Default::default()
+            },
+            ..bonsai_lang_api::LanguageCapabilities::partial_baseline()
+        });
+
+    assert_eq!(
+        bindings
+            .get(&FuncId::new(caller.symbol.raw()))
+            .and_then(|bindings| bindings.get("Render")),
+        Some(&target),
+        "an exact argument place must keep the lexical binding eligible even when callable-literal syntax has a different shape"
+    );
+}
+
+#[test]
 fn receiver_projected_callable_binding_resolves_receiver_form_invocation() {
     let caller_file = FileId::new(1);
     let mut global = GlobalIndex::new();
@@ -3993,6 +4330,84 @@ fn prior_local_value_assignment_still_shadows_workspace_callable() {
 }
 
 #[test]
+fn declaration_flow_lookup_preserves_shadow_and_duplicate_call_semantics() {
+    let file = FileId::new(1);
+    let events = vec![
+        FlowEvent::Assign {
+            span: Span::new(file, 10, 20),
+            target: "runner.execute".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::Literal),
+        },
+        FlowEvent::Call {
+            span: Span::new(file, 40, 50),
+            name: "service.execute".to_string(),
+            receiver: Some("service".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        },
+        FlowEvent::Call {
+            span: Span::new(file, 60, 100),
+            name: "factory().execute".to_string(),
+            receiver: Some("factory()".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: vec![CallArg {
+                span: Span::new(file, 80, 90),
+                passing_mode: ArgumentPassingMode::Value,
+                name: None,
+                value_text: "argument()".to_string(),
+                place: None,
+                source_names: Vec::new(),
+            }],
+        },
+        FlowEvent::Call {
+            span: Span::new(file, 60, 69),
+            name: "factory".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        },
+        FlowEvent::Call {
+            span: Span::new(file, 82, 88),
+            name: "argument".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        },
+    ];
+    let lookup = DeclFlowLookup::build(&events);
+
+    for call_span in [Span::new(file, 1, 5), Span::new(file, 30, 35)] {
+        assert_eq!(
+            lookup.value_binding_shadows_callable("execute", call_span),
+            local_value_binding_shadows_callable(&events, "execute", call_span),
+            "the indexed lookup must preserve exact source-order shadowing"
+        );
+    }
+    assert!(lookup.assignment_has_explicit_call("repository.execute", Span::new(file, 35, 55)));
+    assert!(!lookup.assignment_has_explicit_call("repository.execute", Span::new(file, 110, 120)));
+    assert_eq!(lookup.assignments_for_receiver("runner.execute").len(), 1);
+    let nested_names = lookup
+        .calls_strictly_inside(Span::new(file, 60, 100))
+        .into_iter()
+        .filter_map(|event| match event {
+            FlowEvent::Call { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(nested_names, ["factory", "argument"]);
+    assert_eq!(lookup.argument_spans_at_call(Span::new(file, 60, 100)).len(), 1);
+}
+
+#[test]
 fn callback_argument_resolves_when_outer_callee_is_unresolved() {
     let file = FileId::new(1);
     let mut global = GlobalIndex::new();
@@ -4015,10 +4430,205 @@ fn callback_argument_resolves_when_outer_callee_is_unresolved() {
     let callback = FuncId::new(global.find_by_name("onRead")[0].raw());
 
     assert!(
-        cg.callees_of(entry)
-            .any(|edge| edge.to == callback && edge.kind == EdgeKind::Indirect),
-        "a compiler-resolved callback argument must survive an unresolved outer API call"
+        cg.callees_of(entry).all(|edge| edge.to != callback),
+        "passing a callback value must not manufacture an execution edge"
     );
+    assert!(
+        cg.callable_arguments()
+            .any(|argument| argument.caller == entry && argument.target == callback),
+        "the compiler-resolved callable value must survive an unresolved outer API call"
+    );
+}
+
+#[test]
+fn qualified_ordinary_argument_never_resolves_by_terminal_name() {
+    let caller_file = FileId::new(1);
+    let first_target_file = FileId::new(2);
+    let second_target_file = FileId::new(3);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![decl(
+            caller_file,
+            0,
+            "entry",
+            vec![call_with_args(caller_file, "Envelope", &["Kind.run"])],
+        )],
+    );
+    insert_file(
+        &mut global,
+        first_target_file,
+        vec![decl(first_target_file, 0, "run", Vec::new())],
+    );
+    insert_file(
+        &mut global,
+        second_target_file,
+        vec![decl(second_target_file, 0, "run", Vec::new())],
+    );
+
+    let graph = build_graph(&global, |_| Some("dart"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+
+    assert_eq!(
+        graph
+            .callable_arguments()
+            .filter(|argument| argument.caller == entry)
+            .count(),
+        0,
+        "an adapter-unclassified qualified value is data, not a callback"
+    );
+    assert_eq!(
+        graph.unresolved_workspace_call_sites().count(),
+        0,
+        "same-named terminal declarations must not turn qualified data into an ambiguous workspace call"
+    );
+}
+
+#[test]
+fn callable_argument_executes_only_where_the_bound_formal_is_invoked() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let mut host = decl(file, 1, "run", vec![call_with_args(file, "callback", &["value"])]);
+    host.params = vec!["callback".to_string(), "value".to_string()];
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl(
+                file,
+                0,
+                "entry",
+                vec![call_with_args(file, "run", &["executor", "input"])],
+            ),
+            host,
+            decl(file, 2, "executor", Vec::new()),
+        ],
+    );
+
+    let graph = build_graph(&global, |_| Some("fixture"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let run = FuncId::new(global.find_by_name("run")[0].raw());
+    let executor = FuncId::new(global.find_by_name("executor")[0].raw());
+
+    assert!(
+        graph
+            .callable_arguments()
+            .any(|argument| argument.caller == entry && argument.target == executor),
+        "the caller must retain the callable-value relation"
+    );
+    assert!(
+        graph
+            .callees_of(run)
+            .any(|edge| edge.to == executor && edge.kind == EdgeKind::Indirect),
+        "the formal invocation must materialize the execution edge: {:#?}",
+        graph.inner().edges
+    );
+    assert!(
+        graph.callees_of(entry).all(|edge| edge.to != executor),
+        "the passing caller must not directly execute the callback"
+    );
+}
+
+#[test]
+fn streamed_callback_fixed_point_is_independent_of_file_batch_order() {
+    let file = FileId::new(1);
+    let mut host = decl(file, 1, "run", vec![call_with_args(file, "callback", &["value"])]);
+    host.params = vec!["callback".to_string(), "value".to_string()];
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl(
+                file,
+                0,
+                "entry",
+                vec![call_with_args(file, "run", &["executor", "input"])],
+            ),
+            host,
+            decl(file, 2, "executor", Vec::new()),
+        ],
+    );
+
+    let context = ResolvedCallGraph::build_context(
+        &global,
+        |_| None,
+        |_| Some("fixture"),
+        |_| LanguageCapabilities::unsupported(),
+    );
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let run = FuncId::new(global.find_by_name("run")[0].raw());
+    let executor = FuncId::new(global.find_by_name("executor")[0].raw());
+    let build_batch = |func| {
+        ResolvedCallGraph::build_with_file_semantics_for_funcs_streaming_with_context(
+            &global,
+            |_| AHashMap::new(),
+            |_| AHashMap::new(),
+            &[func],
+            &context,
+            |requested| global.file_index(requested).cloned(),
+        )
+    };
+    let entry_batch = build_batch(entry);
+    let host_batch = build_batch(run);
+    let full = build_graph(&global, |_| Some("fixture"));
+    assert!(
+        full.callees_of(entry).any(|edge| edge.to == run),
+        "control fixture must resolve before testing partitions: {:#?}",
+        full.inner().edges
+    );
+
+    assert!(
+        entry_batch.callees_of(entry).any(|edge| edge.to == run),
+        "entry partition must resolve the workspace host: {:#?}",
+        entry_batch.inner().edges
+    );
+    assert!(
+        entry_batch
+            .callable_arguments()
+            .any(|argument| argument.caller == entry && argument.target == executor),
+        "entry partition must retain the exact callable argument: {:#?}",
+        entry_batch.callable_argument_records()
+    );
+    assert!(
+        entry_batch
+            .callback_execution_facts
+            .bindings
+            .iter()
+            .any(|binding| { binding.host == run && binding.param_index == 0 && binding.target == executor }),
+        "entry partition must retain the formal binding: {:#?}",
+        entry_batch.callback_execution_facts
+    );
+    assert!(
+        host_batch
+            .callback_execution_facts
+            .invocations
+            .iter()
+            .any(|invocation| invocation.host == run && invocation.param_index == 0),
+        "host partition must retain the formal invocation: {:#?}",
+        host_batch.callback_execution_facts
+    );
+
+    assert!(
+        host_batch.callees_of(run).all(|edge| edge.to != executor),
+        "the host-only partition must not guess which callable is bound"
+    );
+
+    for batches in [[&entry_batch, &host_batch], [&host_batch, &entry_batch]] {
+        let mut accumulator = CallbackExecutionAccumulator::default();
+        let first = accumulator.extend(batches[0]);
+        let second = accumulator.extend(batches[1]);
+        let edges = first.into_iter().chain(second).collect::<Vec<_>>();
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|edge| edge.from == run && edge.to == executor)
+                .count(),
+            1,
+            "typed callback facts must join exactly once in either batch order: {edges:#?}"
+        );
+    }
 }
 
 #[test]
@@ -5034,6 +5644,111 @@ fn class_shaped_function_call_does_not_infer_a_constructor() {
 }
 
 #[test]
+fn constructor_resolution_prefers_an_executable_definition_over_its_prototype() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let interface = decl_with(file, 1, "Repository", DeclKind::Class, None, Vec::new());
+    let implementation = decl_with(file, 2, "Repository", DeclKind::Class, None, Vec::new());
+    let mut prototype = with_params(
+        decl_with(
+            file,
+            3,
+            "initWithData",
+            DeclKind::Constructor,
+            Some(1),
+            Vec::new(),
+        ),
+        &["data"],
+    );
+    prototype.body_span = None;
+    let definition = with_params(
+        decl_with(
+            file,
+            4,
+            "initWithData",
+            DeclKind::Constructor,
+            Some(2),
+            vec![call(file, "consume")],
+        ),
+        &["data"],
+    );
+    insert_file(
+        &mut global,
+        file,
+        vec![interface, implementation, prototype, definition],
+    );
+    let class_symbols = global
+        .find_by_name("Repository")
+        .iter()
+        .copied()
+        .filter(|symbol| {
+            global
+                .decl_of(*symbol)
+                .is_some_and(|decl| decl.kind == DeclKind::Class)
+        })
+        .collect::<Vec<_>>();
+    let definition_id = global
+        .find_by_name("initWithData")
+        .iter()
+        .copied()
+        .find_map(|symbol| {
+            global
+                .decl_of(symbol)
+                .is_some_and(callable_decl_has_executable_body)
+                .then_some(FuncId::new(symbol.raw()))
+        })
+        .expect("executable constructor definition");
+
+    assert_eq!(
+        declared_constructor_targets(&global, &class_symbols, None),
+        vec![definition_id],
+        "a bodyless prototype must not make its executable peer ambiguous"
+    );
+}
+
+#[test]
+fn constructor_resolution_retains_a_prototype_when_no_definition_exists() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let class = decl_with(file, 1, "ExternalRepository", DeclKind::Class, None, Vec::new());
+    let mut prototype = with_params(
+        decl_with(
+            file,
+            2,
+            "initWithData",
+            DeclKind::Constructor,
+            Some(1),
+            Vec::new(),
+        ),
+        &["data"],
+    );
+    prototype.body_span = None;
+    insert_file(&mut global, file, vec![class, prototype]);
+    let class_symbol = global
+        .find_by_name("ExternalRepository")
+        .iter()
+        .copied()
+        .find(|symbol| {
+            global
+                .decl_of(*symbol)
+                .is_some_and(|decl| decl.kind == DeclKind::Class)
+        })
+        .expect("external class declaration");
+    let prototype_id = global
+        .find_by_name("initWithData")
+        .first()
+        .copied()
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .expect("constructor prototype");
+
+    assert_eq!(
+        declared_constructor_targets(&global, &[class_symbol], None),
+        vec![prototype_id],
+        "declaration-only external constructors remain exact graph targets"
+    );
+}
+
+#[test]
 fn ambiguous_bare_call_constructs_only_with_adapter_capability_and_resolved_class() {
     let file = FileId::new(1);
     let mut global = GlobalIndex::new();
@@ -5538,6 +6253,7 @@ fn assign_source_call_does_not_duplicate_nested_try_call_edge() {
                         finally_events: Vec::new(),
                         catch_param: None,
                         catch_types: Vec::new(),
+                        catch_arms: Vec::new(),
                     },
                 ],
             ),

@@ -27,5 +27,5 @@
   match_examples:
   - name: mem take changes the source state
     code: 'fn f(mut value: String) { let _ = std::mem::take(&mut value); }'
-    expect_match_text: [std::mem::take]
+    expect_match_text: ["std::mem::take"]
   description: "Rust ownership-transfer calls move argument zero to moved. Typing-only; never a finding."

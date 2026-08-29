@@ -1,7 +1,5 @@
 # Dart information-disclosure sinks (logs, debug output, error responses).
 - id: dart.info_disclosure.print_secret
-  aliases:
-  - dart.log_injection.print_newline
   enabled: true
   language: dart
   tag: information-disclosure
@@ -24,7 +22,7 @@
     code: |
       void test(String username) { print(username); }
     expect_no_match: true
-  description: "print(...) with secret-shaped data - credentials or tokens can leak to stdout / platform logs. Also covers merged aliases: dart.log_injection.print_newline."
+  description: "print(...) with secret-shaped data - credentials or tokens can leak to stdout / platform logs."
 
 - id: dart.info_disclosure.shelf_internal_server_error
   enabled: true
@@ -43,10 +41,6 @@
   match_examples:
   - name: dart shelf error response body
     code: |
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
       import 'package:shelf/shelf.dart';
       void test(Object error) { Response.internalServerError(body: error); }
     expect_match_text: [Response.internalServerError]
@@ -73,9 +67,6 @@
   match_examples:
   - name: dart flutter debug error page
     code: |
-      import 'package:flutter/flutter.dart';
-      import 'package:flutter/flutter.dart';
-      import 'package:flutter/flutter.dart';
       import 'package:flutter/flutter.dart';
       import 'package:flutter/material.dart'; // flutter
       void test(dynamic details) { FlutterError.dumpErrorToConsole(details); }

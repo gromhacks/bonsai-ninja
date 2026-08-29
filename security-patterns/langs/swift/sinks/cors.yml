@@ -5,18 +5,43 @@
   tag: cors
   category: source-independent
   severity: medium
-  packages: [vapor]
+  packages: [Vapor]
+  imports: [Vapor]
   cwe: [CWE-942]
   match:
     kind: call
     callee:
       attribute: [CORSMiddleware, Configuration]
+      binding_origin: imported
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:allowedOrigin\s*:\s*)?\.all$'
   match_examples:
-  - name: declared shape
+  - name: Vapor wildcard origin configuration
     code: |
-      import vapor
-      import Vapor // vapor
-      import Vapor // vapor
-      func test() { let input = "x"; let amount = 1; CORSMiddleware.Configuration("all") }
+      import Vapor
+      func configure() {
+        _ = CORSMiddleware.Configuration(allowedOrigin: .all)
+      }
+    expect_match_text: [CORSMiddleware.Configuration]
+  - name: Vapor explicit origin configuration is safe
+    code: |
+      import Vapor
+      func configure() {
+        _ = CORSMiddleware.Configuration(allowedOrigin: .custom("https://app.example.com"))
+      }
+    expect_no_match: true
+  - name: local CORS configuration is not Vapor
+    code: |
+      import Vapor
+      enum CORSMiddleware {
+        struct Configuration { init(allowedOrigin: LocalOrigin) {} }
+      }
+      enum LocalOrigin { case all }
+      func configure() {
+        _ = CORSMiddleware.Configuration(allowedOrigin: .all)
+      }
+    expect_no_match: true
   description: |-
     Vapor CORSMiddleware.Configuration(allowedOrigin: .all) - allow any origin.

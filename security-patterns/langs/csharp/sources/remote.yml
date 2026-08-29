@@ -79,45 +79,6 @@
     expect_no_match: true
   description: "Google Cloud Functions IHttpFunction.HandleAsync(HttpContext) request context supplied by the remote caller."
 
-- id: csharp.source.httputility_parsequerystring
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  trust: remote
-  tag: http-input
-  payload_types: [query]
-  packages: [System.Web]
-  match:
-    kind: call
-    callee:
-      attribute: [HttpUtility, ParseQueryString]
-  match_examples:
-  - name: declared shape
-    code: |
-      using System.Web;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpUtility.ParseQueryString(input); } }
-  - name: unrelated httputility encode negative
-    code: |
-      using System.Web;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpUtility.HtmlEncode(input); } }
-    expect_no_match: true
-  description: "Disabled - HttpUtility.ParseQueryString parses any supplied string, including literals and trusted configuration. It is a taint-preserving transform, not an input origin."
-
-- id: csharp.source.streamreader_readtoend
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  trust: remote
-  tag: http-input
-  packages: [System.IO]
-  match:
-    kind: call
-    callee:
-      attribute: [StreamReader, ReadToEnd]
-  description: "Disabled - StreamReader.ReadToEnd is generic file/stream IO; enable in audits where Request.Body wrapping is the primary surface."
-
 - id: csharp.source.signalr_hub_method_arg
   enabled: true
   language: csharp
@@ -155,20 +116,6 @@
       }
     expect_no_match: true
   description: "Parameter of a public method on an ASP.NET Core SignalR Hub - client-supplied RPC invocation argument, proven from declaration visibility and Hub inheritance."
-
-- id: csharp.source.grpc_request_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  trust: remote
-  tag: rpc-input
-  packages: [Grpc.Core, Grpc.AspNetCore]
-  match:
-    kind: param
-    target:
-      name: request
-  description: "Disabled - gRPC service-method `request` parameter is attacker-controlled; bare-name overmatch keeps it off by default."
 
 - id: csharp.source.aspnet_request_query
   enabled: true
@@ -366,20 +313,6 @@
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.ServerVariables; } }
   description: "ASP.NET legacy Request.ServerVariables property read - includes client-controlled values such as HTTP_X_FORWARDED_FOR and request headers."
 
-- id: csharp.source.controller_bind_parameter
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  trust: remote
-  tag: http-input
-  packages: [Microsoft.AspNetCore.Mvc]
-  match:
-    kind: param
-    target:
-      name: action
-  description: "Disabled - `target.name: action` does not map to a concrete attribute; [FromBody]/[FromQuery]/[FromForm]/[FromRoute]/[FromHeader] attribute rules cover bound action parameters precisely."
-
 - id: csharp.source.frombody_attr
   enabled: true
   language: csharp
@@ -555,21 +488,6 @@
     expect_no_match: true
   description: "ASP.NET Core IFormFile parameter - uploaded file content and client filename supplied by the request."
 
-- id: csharp.source.signalr_hub_method
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: csharp.source.signalr_hub_method_arg
-  language: csharp
-  trust: remote
-  tag: rpc-input
-  packages: [Microsoft.AspNetCore.SignalR]
-  match:
-    kind: param
-    target:
-      name: Hub
-  description: "Subsumed by csharp.source.signalr_hub_method_arg, which matches public Hub method parameters using compiler declaration and inheritance facts."
-
 - id: csharp.source.aspnet_iformfile_filename
   enabled: true
   language: csharp
@@ -588,22 +506,6 @@
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var name = IFormFile.FileName; } }
     expect_match_text: [IFormFile.FileName]
   description: "ASP.NET Core IFormFile.FileName - client-supplied multipart filename."
-
-- id: csharp.source.aspnet_formfile_filename
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: csharp.source.aspnet_iformfile_filename
-  language: csharp
-  trust: remote
-  tag: http-input
-  payload_types: [file]
-  packages: [Microsoft.AspNetCore.Http]
-  match:
-    kind: read
-    target:
-      attribute: [file, FileName]
-  description: "Disabled - hardcoded local receiver `file.FileName` is not semantic. The enabled IFormFile rule covers exact and typed IFormFile.FileName reads."
 
 - id: csharp.source.websocket_receiveasync
   enabled: true
@@ -741,3 +643,85 @@
       class Helper { public string GetArgument(string name) => name; }
     expect_no_match: true
   description: "GraphQL.NET IResolveFieldContext.GetArgument(name) - resolver argument supplied by the GraphQL caller. Receiver type is required so generic helper GetArgument methods stay clean."
+
+- id: csharp.source.servicestack_request_getheader
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  frameworks: [servicestack]
+  packages: [ServiceStack]
+  match:
+    kind: call
+    callee:
+      name: GetHeader
+  constraints:
+  - receiver_type_in: [IRequest, ServiceStack.Web.IRequest]
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: servicestack request header
+    code: |
+      using ServiceStack.Web;
+      class Service {
+        string Read(IRequest request) => request.GetHeader("X-Trace");
+      }
+    expect_match_text: [request.GetHeader]
+  - name: local header helper is not request input
+    code: |
+      using ServiceStack.Web;
+      class Headers { public string GetHeader(string name) => name; }
+      class Helper { string Read(Headers headers) => headers.GetHeader("X-Trace"); }
+    expect_no_match: true
+  description: "ServiceStack IRequest.GetHeader(name) returns a client-supplied request header."
+
+- id: csharp.source.servicestack_request_formdata
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  payload_types: [form]
+  frameworks: [servicestack]
+  packages: [ServiceStack]
+  match:
+    kind: read
+    target:
+      attribute: [Request, FormData]
+  match_examples:
+  - name: servicestack form data
+    code: |
+      using ServiceStack;
+      class Service { object Read() { return Request.FormData; } }
+    expect_match_text: [Request.FormData]
+  - name: servicestack response status is not request input
+    code: |
+      using ServiceStack;
+      class Service { object Read() { return Response.StatusCode; } }
+    expect_no_match: true
+  description: "ServiceStack service Request.FormData property exposes form values from the current inbound request."
+
+- id: csharp.source.nancy_request_value
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  payload_types: [query, form, binary, header]
+  frameworks: [nancy]
+  packages: [Nancy]
+  match:
+    kind: read
+    target:
+      regex: '^Request\.(Query|Form|Body|Headers)$'
+  match_examples:
+  - name: nancy request query
+    code: |
+      using Nancy;
+      class Routes : NancyModule { object Read() { return Request.Query; } }
+    expect_match_text: [Request.Query]
+  - name: nancy response headers are not request input
+    code: |
+      using Nancy;
+      class Routes : NancyModule { object Read() { return Response.Headers; } }
+    expect_no_match: true
+  description: "Nancy Request query/form/body/header properties expose values supplied by the inbound HTTP client."

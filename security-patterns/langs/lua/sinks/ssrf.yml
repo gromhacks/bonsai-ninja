@@ -1,36 +1,58 @@
 # Lua SSRF sinks (OpenResty / lua-resty-http / LuaSocket / lua-requests).
 - id: lua.ssrf.luaresty_http_request_uri
-  aliases:
-  - lua.tls.resty_http_ssl_verify_false
   enabled: true
   language: lua
   tag: ssrf
   severity: high
   frameworks: [openresty]
-  packages: [lua-resty-http]
+  packages: [lua-resty-http, resty.http]
+  imports: [resty.http]
   cwe: [CWE-918, CWE-295]
+  analysis_semantics:
+    compiler_guard:
+      capability: terminal-predicate.compound-static-allowlist
+      required_evidence:
+      - predicate-complete:true
+      - finite-static-string-membership:true
+      - extractor-call:match
+      - extractor-value:string:^https://([^/]+)
+      - guarded-argument:0=predicate-argument:0
+      - guarded-static-field:1.redirect=boolean:false
+      sanitizer_tag: ssrf
+      category: finite-host-allowlist-and-no-redirect
   match:
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]request_uri$
+      receiver_type_in: [RestyHttpClient]
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: lua.ssrf.luaresty_http_request_uri example
     code: |
-      local _lua_resty_http = require("lua-resty-http")
-      function example(input, url, id, payload, request, params, user)
-        httpc.request_uri(input)
+      local http = require("resty.http")
+      function example(input)
+        local arbitrary_client = http.new()
+        arbitrary_client:request_uri(input)
       end
   - name: literal url negative
     code: |
-      local _lua_resty_http = require("lua-resty-http")
-      function example(input, url, id, payload, request, params, user)
-        httpc.request_uri("https://api.example.test/health")
+      local http = require("resty.http")
+      function example()
+        local arbitrary_client = http.new()
+        arbitrary_client:request_uri("https://api.example.test/health")
       end
     expect_no_match: true
-  description: "lua-resty-http httpc:request_uri(url) - tainted URL reaches arbitrary internal/cloud endpoint. Also covers merged aliases: lua.tls.resty_http_ssl_verify_false."
+  - name: unrelated request_uri method is not lua-resty-http
+    code: |
+      local http = require("resty.http")
+      function example(input)
+        local arbitrary_client = LocalClient.new()
+        arbitrary_client:request_uri(input)
+      end
+    expect_no_match: true
+  description: "lua-resty-http httpc:request_uri(url) - tainted URL reaches arbitrary internal/cloud endpoint. TLS verification options require an independent configuration rule."
 
 - id: lua.ssrf.luaresty_http_request
   enabled: true
@@ -38,27 +60,38 @@
   tag: ssrf
   severity: high
   frameworks: [openresty]
-  packages: [lua-resty-http]
+  packages: [lua-resty-http, resty.http]
   cwe: [CWE-918]
   match:
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]request$
+      receiver_type_in: [RestyHttpClient]
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: lua.ssrf.luaresty_http_request example
     code: |
-      local _lua_resty_http = require("lua-resty-http")
-      function example(input, url, id, payload, request, params, user)
-        httpc.request(input)
+      local http = require("resty.http")
+      function example(input)
+        local arbitrary_client = http.new()
+        arbitrary_client:request(input)
       end
   - name: literal request negative
     code: |
-      local _lua_resty_http = require("lua-resty-http")
-      function example(input, url, id, payload, request, params, user)
-        httpc.request({ path = "/health" })
+      local http = require("resty.http")
+      function example(input)
+        local arbitrary_client = http.new()
+        arbitrary_client:request({ path = "/health" })
+      end
+    expect_no_match: true
+  - name: unrelated request method is not lua-resty-http
+    code: |
+      local http = require("resty.http")
+      function example(input)
+        local arbitrary_client = LocalClient.new()
+        arbitrary_client:request(input)
       end
     expect_no_match: true
   description: "lua-resty-http httpc:request{} - tainted URI/path hits arbitrary origin."

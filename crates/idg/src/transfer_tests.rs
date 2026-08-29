@@ -1,6 +1,6 @@
 use super::*;
 use bonsai_common::{FileId, Span as CommonSpan, SymbolId};
-use bonsai_lang_api::{CallArg, ModulePath, Visibility};
+use bonsai_lang_api::{CallArg, CatchArmFact, ModulePath, Visibility};
 
 fn span(lo: u64, hi: u64) -> CommonSpan {
     CommonSpan::new(FileId::new(0), lo, hi)
@@ -33,6 +33,23 @@ fn empty_decl(sym: u32, name: &str) -> Decl {
         return_type: None,
         is_variadic: false,
     }
+}
+
+#[test]
+fn variadic_source_callback_indices_expand_only_to_exact_compiler_arity() {
+    let shape = SourceCallbackArgSpec {
+        callee: "source.callback".to_string(),
+        callback_arg_index: 0,
+        source_param_indices: vec![0, 4],
+        source_param_indices_from: Some(1),
+        resolved_call_sites: vec![span(10, 20)],
+    };
+    assert_eq!(shape.resolved_source_param_indices(4), [0, 1, 2, 3]);
+    assert_eq!(shape.resolved_source_param_indices(1), [0]);
+    assert!(
+        shape.resolved_source_param_indices(0).is_empty(),
+        "declarative variadic semantics must never invent callback parameters"
+    );
 }
 
 fn count_edges_of(out: &TransferOutput, kind: IdgEdgeKind) -> usize {
@@ -71,6 +88,15 @@ fn rendered_write_span(out: &TransferOutput, node_id: NodeId) -> Option<CommonSp
     }
 }
 
+fn rendered_catch_type(out: &TransferOutput, node_id: NodeId) -> Option<&str> {
+    let node = out.nodes.get(node_id).expect("node exists");
+    let place = out.places.get(node.place).expect("place exists");
+    let Place::Catch { ty } = place else {
+        return None;
+    };
+    out.names.get(ty.0)
+}
+
 #[test]
 fn empty_decl_emits_no_edges() {
     let decl = empty_decl(1, "f");
@@ -103,7 +129,102 @@ fn empty_param_name_skipped() {
 }
 
 #[test]
-fn configured_source_call_binds_inline_callback_parameter_from_compiler_fact() {
+fn property_read_argument_keeps_storage_and_accessor_return_inputs() {
+    let mut decl = empty_decl(1, "handle");
+    decl.params = vec!["token".to_string()];
+    let assignment_span = span(10, 20);
+    let property_call_span = span(30, 38);
+    let sink_call_span = span(40, 44);
+    let argument_span = span(45, 53);
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: assignment_span,
+            target: "this.cmd".to_string(),
+            source_name: Some("token".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["token".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: property_call_span,
+            name: "this.cmd".to_string(),
+            receiver: Some("this".to_string()),
+            receiver_types: vec!["Record".to_string()],
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        },
+        FlowEvent::Call {
+            span: sink_call_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: argument_span,
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "this.cmd".to_string(),
+                place: Some("this.cmd".to_string()),
+                source_names: vec!["this.cmd".to_string()],
+            }],
+        },
+    ];
+    let argument_values = [CallArgumentValueFact {
+        call_span: sink_call_span,
+        argument_index: 0,
+        argument_span,
+        direct_call_span: Some(property_call_span),
+        value_kind: Some(AssignValueKind::PropertyRead),
+        inline_callback_params: Vec::new(),
+        inline_callback_span: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
+        value_flow: ExpressionFlow::from_place("this.cmd"),
+        static_value: None,
+        exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
+    }];
+    let out = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &TransferOptions::default(),
+        &[],
+        &[],
+        &argument_values,
+        &[],
+    );
+    let sink_arg = out
+        .places
+        .places
+        .iter()
+        .position(|place| matches!(place, Place::CallArg { site, idx: 0 } if site.0 == sink_call_span))
+        .and_then(|place| {
+            out.nodes
+                .nodes
+                .iter()
+                .position(|node| node.place.0 as usize == place)
+                .map(|node| NodeId(u32::try_from(node).expect("node id")))
+        })
+        .expect("sink argument node");
+    let incoming = out
+        .edges
+        .iter()
+        .filter(|edge| edge.to == sink_arg)
+        .map(|edge| rendered_place_name(&out, edge.from))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        incoming.contains("this.cmd"),
+        "property projection must retain exact storage input: {incoming:?}"
+    );
+    assert!(
+        incoming.contains(&format!("CallRet({property_call_span:?})")),
+        "computed accessor return must remain an independent input: {incoming:?}"
+    );
+}
+
+#[test]
+fn compiled_source_callback_span_is_authoritative_over_rendered_callee() {
     let mut decl = empty_decl(1, "module");
     let source_span = span(20, 48);
     let callback_span = span(49, 90);
@@ -157,6 +278,9 @@ fn configured_source_call_binds_inline_callback_parameter_from_compiler_fact() {
         direct_call_span: None,
         value_kind: None,
         inline_callback_params: vec!["input".to_string()],
+        inline_callback_span: Some(callback_span),
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
         value_flow: ExpressionFlow::default(),
         static_value: None,
         exact_static_aggregate_fields: Vec::new(),
@@ -164,9 +288,14 @@ fn configured_source_call_binds_inline_callback_parameter_from_compiler_fact() {
     }];
     let options = TransferOptions {
         source_callback_args: vec![SourceCallbackArgSpec {
-            callee: r"regex:(^|\.)procedure\.input\(.+\)\.query$".to_string(),
+            // Rule compilation may retain a provider/type-qualified identity
+            // while the adapter renders the source expression at the call
+            // site. The exact matched span, not this diagnostic spelling, is
+            // the transfer contract.
+            callee: "ExternalProcedure.query".to_string(),
             callback_arg_index: 0,
             source_param_indices: vec![0],
+            source_param_indices_from: None,
             resolved_call_sites: vec![source_span],
         }],
         ..TransferOptions::default()
@@ -241,6 +370,397 @@ fn configured_source_call_binds_inline_callback_parameter_from_compiler_fact() {
         !(rendered_place_name(&without_rule, edge.from).starts_with("CallRet(")
             && rendered_place_name(&without_rule, edge.to) == "input")
     }));
+}
+
+#[test]
+fn configured_source_call_replaces_generic_yield_result_binding_at_registration_site() {
+    let mut decl = empty_decl(1, "module");
+    let source_span = span(20, 28);
+    let callback_span = span(29, 70);
+    let sink_span = span(50, 54);
+    decl.flow_events = vec![
+        FlowEvent::Call {
+            span: source_span,
+            name: "register".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: callback_span,
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "do |payload| sink(payload) end".to_string(),
+                place: None,
+                source_names: vec!["payload".to_string()],
+            }],
+        },
+        FlowEvent::Assign {
+            // The generic closure walker keys yielded parameters to the
+            // registration call so callgraph resolution can identify the
+            // producer. Exact source-callback semantics must replace this
+            // synthetic alias without overwriting the delivered binding.
+            span: source_span,
+            target: "payload".to_string(),
+            source_name: None,
+            source_call: Some("register".to_string()),
+            source_call_args: vec!["do |payload| sink(payload) end".to_string()],
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::YieldResult),
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: span(55, 62),
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "payload".to_string(),
+                place: Some("payload".to_string()),
+                source_names: vec!["payload".to_string()],
+            }],
+        },
+    ];
+    let callback_facts = [CallArgumentValueFact {
+        call_span: source_span,
+        argument_index: 0,
+        argument_span: callback_span,
+        direct_call_span: None,
+        value_kind: None,
+        inline_callback_params: vec!["payload".to_string()],
+        inline_callback_span: Some(callback_span),
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
+        value_flow: ExpressionFlow::default(),
+        static_value: None,
+        exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
+    }];
+    let options = TransferOptions {
+        source_callback_args: vec![SourceCallbackArgSpec {
+            callee: "register".to_string(),
+            callback_arg_index: 0,
+            source_param_indices: vec![0],
+            source_param_indices_from: None,
+            resolved_call_sites: vec![source_span],
+        }],
+        ..TransferOptions::default()
+    };
+
+    let out = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &options,
+        &[],
+        &[],
+        &callback_facts,
+        &[],
+    );
+    let delivered = out
+        .edges
+        .iter()
+        .find(|edge| edge.meta.kind == IdgEdgeKind::InterSourceCallback)
+        .expect("exact callback delivery edge");
+    let sink_arg = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx: 0 }) if site.0 == sink_span
+            )
+            .then_some(NodeId(u32::try_from(index).expect("node id")))
+        })
+        .expect("sink argument");
+    assert!(out
+        .edges
+        .iter()
+        .any(|edge| edge.from == delivered.to && edge.to == sink_arg));
+}
+
+#[test]
+fn source_callback_suppresses_only_the_selected_delivered_parameter() {
+    let mut decl = empty_decl(1, "module");
+    let source_span = span(20, 28);
+    let callback_span = span(29, 74);
+    let callback_text = "do |context, payload| sink(payload) end";
+    decl.flow_events = vec![
+        FlowEvent::Call {
+            span: source_span,
+            name: "register".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: callback_span,
+                passing_mode: Default::default(),
+                name: None,
+                value_text: callback_text.to_string(),
+                place: None,
+                source_names: vec!["context".to_string(), "payload".to_string()],
+            }],
+        },
+        FlowEvent::Assign {
+            span: source_span,
+            target: "context".to_string(),
+            source_name: None,
+            source_call: Some("register".to_string()),
+            source_call_args: vec![callback_text.to_string()],
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::YieldResult),
+        },
+        FlowEvent::Assign {
+            span: source_span,
+            target: "payload".to_string(),
+            source_name: None,
+            source_call: Some("register".to_string()),
+            source_call_args: vec![callback_text.to_string()],
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::YieldResult),
+        },
+    ];
+    let callback_facts = [CallArgumentValueFact {
+        call_span: source_span,
+        argument_index: 0,
+        argument_span: callback_span,
+        direct_call_span: None,
+        value_kind: None,
+        inline_callback_params: vec!["context".to_string(), "payload".to_string()],
+        inline_callback_span: Some(callback_span),
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
+        value_flow: ExpressionFlow::default(),
+        static_value: None,
+        exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
+    }];
+    let options = TransferOptions {
+        source_callback_args: vec![SourceCallbackArgSpec {
+            callee: "register".to_string(),
+            callback_arg_index: 0,
+            source_param_indices: vec![1],
+            source_param_indices_from: None,
+            resolved_call_sites: vec![source_span],
+        }],
+        ..TransferOptions::default()
+    };
+
+    let out = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &options,
+        &[],
+        &[],
+        &callback_facts,
+        &[],
+    );
+    let write_at = |expected: &str, expected_span: Span| {
+        out.nodes.nodes.iter().any(|node| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::Write { name, span, .. })
+                    if *span == expected_span && out.names.get(*name) == Some(expected)
+            )
+        })
+    };
+    assert!(
+        write_at("context", source_span),
+        "the unselected callback parameter must retain ordinary HOF lowering"
+    );
+    assert!(
+        !write_at("payload", source_span),
+        "the selected externally-delivered parameter must not be overwritten by generic HOF lowering"
+    );
+    assert!(
+        write_at("payload", callback_span),
+        "the selected callback parameter must receive the exact external-delivery binding"
+    );
+}
+
+#[test]
+fn distinct_source_callbacks_in_one_callable_do_not_alias_their_parameters() {
+    let mut decl = empty_decl(1, "sockets");
+    let text_call = span(10, 20);
+    let text_closure = span(21, 40);
+    let text_sink = span(31, 35);
+    let binary_call = span(50, 62);
+    let binary_closure = span(63, 84);
+    let binary_sink = span(74, 80);
+    let callback_arg = |closure_span: Span, rendered: &str, source_names: Vec<String>| CallArg {
+        span: closure_span,
+        passing_mode: Default::default(),
+        name: None,
+        value_text: rendered.to_string(),
+        place: None,
+        source_names,
+    };
+    let sink_arg = |value: &str, arg_span| CallArg {
+        span: arg_span,
+        passing_mode: Default::default(),
+        name: None,
+        value_text: value.to_string(),
+        place: Some(value.to_string()),
+        source_names: vec![value.to_string()],
+    };
+    let synthetic_binding = |closure_span, target: &str, sources: Vec<&str>| FlowEvent::Assign {
+        span: closure_span,
+        target: target.to_string(),
+        source_name: None,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: sources.into_iter().map(str::to_string).collect(),
+        declares_new_binding: false,
+        value_kind: None,
+    };
+    decl.flow_events = vec![
+        FlowEvent::Call {
+            span: text_call,
+            name: "socket.onText".to_string(),
+            receiver: Some("socket".to_string()),
+            receiver_types: vec!["WebSocket".to_string()],
+            call_kind: CallKind::Method,
+            args: vec![callback_arg(
+                text_closure,
+                "{ ws, text in sink(text) }",
+                vec!["ws".to_string(), "text".to_string()],
+            )],
+        },
+        synthetic_binding(text_closure, "ws", vec!["socket", "text", "ws"]),
+        synthetic_binding(text_closure, "text", vec!["socket", "text", "ws"]),
+        FlowEvent::Call {
+            span: text_sink,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![sink_arg("text", span(36, 39))],
+        },
+        FlowEvent::Call {
+            span: binary_call,
+            name: "socket.onBinary".to_string(),
+            receiver: Some("socket".to_string()),
+            receiver_types: vec!["WebSocket".to_string()],
+            call_kind: CallKind::Method,
+            args: vec![callback_arg(
+                binary_closure,
+                "{ ws, data in sink(data) }",
+                vec!["ws".to_string(), "data".to_string()],
+            )],
+        },
+        synthetic_binding(binary_closure, "ws", vec!["socket", "data", "ws"]),
+        synthetic_binding(binary_closure, "data", vec!["socket", "data", "ws"]),
+        FlowEvent::Call {
+            span: binary_sink,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![sink_arg("data", span(81, 83))],
+        },
+    ];
+    let callback_facts = [
+        CallArgumentValueFact {
+            call_span: text_call,
+            argument_index: 0,
+            argument_span: text_closure,
+            direct_call_span: None,
+            value_kind: None,
+            inline_callback_params: vec!["ws".to_string(), "text".to_string()],
+            inline_callback_span: Some(text_closure),
+            inline_callback_static_return: None,
+            inline_callback_fields: Vec::new(),
+            value_flow: ExpressionFlow::default(),
+            static_value: None,
+            exact_static_aggregate_fields: Vec::new(),
+            exact_static_sequence_values: None,
+        },
+        CallArgumentValueFact {
+            call_span: binary_call,
+            argument_index: 0,
+            argument_span: binary_closure,
+            direct_call_span: None,
+            value_kind: None,
+            inline_callback_params: vec!["ws".to_string(), "data".to_string()],
+            inline_callback_span: Some(binary_closure),
+            inline_callback_static_return: None,
+            inline_callback_fields: Vec::new(),
+            value_flow: ExpressionFlow::default(),
+            static_value: None,
+            exact_static_aggregate_fields: Vec::new(),
+            exact_static_sequence_values: None,
+        },
+    ];
+    let options = TransferOptions {
+        source_callback_args: vec![
+            SourceCallbackArgSpec {
+                callee: r"regex:\.onText$".to_string(),
+                callback_arg_index: 0,
+                source_param_indices: vec![1],
+                source_param_indices_from: None,
+                resolved_call_sites: vec![text_call],
+            },
+            SourceCallbackArgSpec {
+                callee: r"regex:\.onBinary$".to_string(),
+                callback_arg_index: 0,
+                source_param_indices: vec![1],
+                source_param_indices_from: None,
+                resolved_call_sites: vec![binary_call],
+            },
+        ],
+        ..TransferOptions::default()
+    };
+    let out = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &options,
+        &[],
+        &[],
+        &callback_facts,
+        &[],
+    );
+    let node_at = |name: &str, write_span: CommonSpan| {
+        out.nodes
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                let node = NodeId(u32::try_from(index).expect("node id"));
+                (rendered_place_name(&out, node) == name
+                    && rendered_write_span(&out, node) == Some(write_span))
+                .then_some(node)
+            })
+            .expect("callback binding")
+    };
+    let text = node_at("text", text_closure);
+    let data = node_at("data", binary_closure);
+    let binary_arg = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx: 0 }) if site.0 == binary_sink
+            )
+            .then_some(NodeId(u32::try_from(index).expect("node id")))
+        })
+        .expect("binary sink argument");
+
+    assert!(out
+        .edges
+        .iter()
+        .any(|edge| edge.from == data && edge.to == binary_arg));
+    assert!(
+        out.edges
+            .iter()
+            .all(|edge| !(edge.from == text && (edge.to == data || edge.to == binary_arg))),
+        "the first external callback must not taint a later callback's parameter or sink"
+    );
 }
 
 #[test]
@@ -499,10 +1019,16 @@ fn field_precise_container_assignment_does_not_bridge_sources_to_base_write() {
             ],
             ..Default::default()
         },
+        static_value: None,
         exact_callable_return: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
         exact_static_call_args: None,
         direct_call_name: None,
+        direct_call_span: None,
         direct_call_receiver: None,
+        direct_call_receiver_span: None,
+        direct_call_receiver_flow: None,
     }];
     decl.flow_events = vec![
         FlowEvent::Assign {
@@ -711,6 +1237,50 @@ fn php_this_scalar_return_projection_normalizes_receiver_sigil() {
             && rendered_place_name(&out, edge.to) == "Return"
             && edge.meta.kind == IdgEdgeKind::IntraReturn
     }));
+}
+
+#[test]
+fn sigiled_implicit_receiver_writes_share_the_canonical_read_place() {
+    let mut decl = empty_decl(1, "capture");
+    decl.params = vec!["$request".to_string()];
+    decl.implicit_receiver_names = vec!["$this".to_string(), "this".to_string()];
+    decl.receiver_field_writes = vec![bonsai_lang_api::FieldWrite {
+        span: span(20, 40),
+        target: "$this.query".to_string(),
+        source_param_indices: vec![0],
+    }];
+    decl.flow_events = vec![FlowEvent::Assign {
+        span: span(20, 40),
+        target: "$this.query".to_string(),
+        source_name: Some("$request".to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: None,
+    }];
+
+    let out = transfer_function_for(&decl);
+    let write_names = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| {
+            matches!(out.places.get(node.place), Some(Place::Write { .. }))
+                .then(|| rendered_place_name(&out, NodeId(index as u32)))
+        })
+        .collect::<Vec<_>>();
+    assert!(write_names.iter().any(|name| name == "this.query"));
+    assert!(
+        !write_names.iter().any(|name| name == "$this.query"),
+        "implicit receiver writes must use the same canonical storage identity as reads"
+    );
+    assert_eq!(
+        normalize_implicit_receiver_place("$request.query", &decl.implicit_receiver_names),
+        "$request.query",
+        "ordinary sigiled variables are not implicit receivers"
+    );
 }
 
 #[test]
@@ -937,6 +1507,43 @@ fn arbitrary_property_projection_does_not_bridge_receiver_carrier() {
 }
 
 #[test]
+fn property_read_binding_is_a_complete_value_for_later_projection() {
+    let mut decl = empty_decl(1, "f");
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(20, 40),
+            target: "file".to_string(),
+            source_name: Some("request.files.avatar".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["request.files.avatar".to_string()],
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::PropertyRead),
+        },
+        FlowEvent::Assign {
+            span: span(50, 70),
+            target: "destination".to_string(),
+            source_name: Some("file.name".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["file.name".to_string()],
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::Compound),
+        },
+    ];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "file"
+                && rendered_place_name(&out, edge.to) == "destination"
+        }),
+        "the complete property value assigned to `file` must feed its later exact projection: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
 fn returned_container_spread_copies_known_fields_without_root_promotion() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["user".to_string()];
@@ -983,6 +1590,77 @@ fn returned_container_spread_copies_known_fields_without_root_promotion() {
                 && rendered_place_name(&out, edge.to) == "__bonsai_return"
         }),
         "spread copies must not promote the whole spread object into the whole return: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn returned_nested_object_field_preserves_exact_descendants_without_sibling_promotion() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["cmd".to_string(), "safe".to_string()];
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(20, 30),
+            target: "payload.command".to_string(),
+            source_name: Some("cmd".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["cmd".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: span(31, 40),
+            target: "payload.sibling".to_string(),
+            source_name: Some("safe".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["safe".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Return {
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+            span: span(45, 75),
+            value_name: None,
+            value_text: None,
+            value_flow: bonsai_lang_api::ExpressionFlow {
+                aggregate_fields: vec![bonsai_lang_api::ExpressionField {
+                    name: "payload".to_string(),
+                    value_span: Some(span(60, 67)),
+                    value: bonsai_lang_api::ExpressionFlow::from_place("payload"),
+                }],
+                ..Default::default()
+            },
+        },
+    ];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "payload.command"
+                && rendered_place_name(&out, edge.to) == "__bonsai_return.payload.command"
+        }),
+        "a nested object-valued return field must retain its exact compiler-known descendant: {:#?}",
+        out.edges
+    );
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "payload.sibling"
+                && rendered_place_name(&out, edge.to) == "__bonsai_return.payload.sibling"
+        }),
+        "each real sibling descendant must be copied independently: {:#?}",
+        out.edges
+    );
+    assert!(
+        !out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "payload.command"
+                && matches!(
+                    rendered_place_name(&out, edge.to).as_str(),
+                    "__bonsai_return" | "__bonsai_return.payload" | "__bonsai_return.payload.sibling"
+                )
+        }),
+        "descendant preservation must not promote or cross-contaminate the tainted field: {:#?}",
         out.edges
     );
 }
@@ -1061,6 +1739,7 @@ fn call_result_whole_value_writer_feeds_a_later_projection() {
     let assignment_span = span(20, 35);
     let source_call_span = span(26, 33);
     let sink_call_span = span(50, 60);
+    let projected_argument_span = span(55, 59);
     decl.flow_events = vec![
         FlowEvent::Assign {
             span: assignment_span,
@@ -1107,7 +1786,7 @@ fn call_result_whole_value_writer_feeds_a_later_projection() {
                 },
                 CallArg {
                     passing_mode: Default::default(),
-                    span: span(55, 59),
+                    span: projected_argument_span,
                     name: None,
                     value_text: "header.Name".to_string(),
                     place: Some("header.Name".to_string()),
@@ -1122,9 +1801,122 @@ fn call_result_whole_value_writer_feeds_a_later_projection() {
         out.edges.iter().any(|edge| {
             rendered_place_name(&out, edge.from) == "header.__bonsai_tuple_result_0"
                 && rendered_place_name(&out, edge.to).starts_with("CallArg")
-                && edge.meta.via_span == sink_call_span
+                && edge.meta.via_span == projected_argument_span
         }),
         "a field read from a whole call result must depend on the returned object: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn whole_value_selection_alias_feeds_a_later_projection() {
+    let mut decl = empty_decl(1, "handler");
+    let assignment_span = span(20, 40);
+    let sink_call_span = span(50, 70);
+    let projected_argument_span = span(55, 67);
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: assignment_span,
+            target: "body".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["request".to_string(), "request.payload".to_string()],
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::WholeValueSelection),
+        },
+        FlowEvent::Call {
+            span: sink_call_span,
+            name: "consume".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: projected_argument_span,
+                name: None,
+                value_text: "body.command".to_string(),
+                place: Some("body.command".to_string()),
+                source_names: vec!["body".to_string(), "body.command".to_string()],
+            }],
+        },
+    ];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "body"
+                && rendered_write_span(&out, edge.from) == Some(assignment_span)
+                && rendered_place_name(&out, edge.to).starts_with("CallArg")
+                && edge.meta.via_span == projected_argument_span
+        }),
+        "a projection of a complete selected value must depend on its exact root writer: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn exact_projected_clean_overwrite_wins_over_whole_value_selection_alias() {
+    let mut decl = empty_decl(1, "handler");
+    let assignment_span = span(20, 40);
+    let overwrite_span = span(41, 49);
+    let sink_call_span = span(50, 70);
+    let projected_argument_span = span(55, 67);
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: assignment_span,
+            target: "body".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["request".to_string(), "request.payload".to_string()],
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::WholeValueSelection),
+        },
+        FlowEvent::Assign {
+            span: overwrite_span,
+            target: "body.command".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::Literal),
+        },
+        FlowEvent::Call {
+            span: sink_call_span,
+            name: "consume".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: projected_argument_span,
+                name: None,
+                value_text: "body.command".to_string(),
+                place: Some("body.command".to_string()),
+                source_names: vec!["body".to_string(), "body.command".to_string()],
+            }],
+        },
+    ];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        out.edges.iter().all(|edge| {
+            rendered_place_name(&out, edge.from) != "body"
+                || rendered_write_span(&out, edge.from) != Some(assignment_span)
+                || !rendered_place_name(&out, edge.to).starts_with("CallArg")
+        }),
+        "a later exact field overwrite must cut the earlier whole-value alias: {:#?}",
+        out.edges
+    );
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "body.command"
+                && rendered_write_span(&out, edge.from) == Some(overwrite_span)
+                && rendered_place_name(&out, edge.to).starts_with("CallArg")
+        }),
+        "the projected sink read must bind only to the latest exact clean field writer: {:#?}",
         out.edges
     );
 }
@@ -1136,6 +1928,7 @@ fn exact_projection_overwrite_wins_over_whole_call_result() {
     let source_call_span = span(26, 33);
     let overwrite_span = span(36, 45);
     let sink_call_span = span(50, 60);
+    let projected_argument_span = span(55, 59);
     decl.flow_events = vec![
         FlowEvent::Assign {
             span: assignment_span,
@@ -1173,7 +1966,7 @@ fn exact_projection_overwrite_wins_over_whole_call_result() {
             call_kind: CallKind::Function,
             args: vec![CallArg {
                 passing_mode: Default::default(),
-                span: span(55, 59),
+                span: projected_argument_span,
                 name: None,
                 value_text: "header.Name".to_string(),
                 place: Some("header.Name".to_string()),
@@ -1188,7 +1981,7 @@ fn exact_projection_overwrite_wins_over_whole_call_result() {
             rendered_place_name(&out, edge.from) == "header.Name"
                 && rendered_write_span(&out, edge.from) == Some(overwrite_span)
                 && rendered_place_name(&out, edge.to).starts_with("CallArg")
-                && edge.meta.via_span == sink_call_span
+                && edge.meta.via_span == projected_argument_span
         }),
         "the exact field overwrite must feed the projected read: {:#?}",
         out.edges
@@ -1197,7 +1990,7 @@ fn exact_projection_overwrite_wins_over_whole_call_result() {
         !out.edges.iter().any(|edge| {
             rendered_place_name(&out, edge.from) == "header.__bonsai_tuple_result_0"
                 && rendered_place_name(&out, edge.to).starts_with("CallArg")
-                && edge.meta.via_span == sink_call_span
+                && edge.meta.via_span == projected_argument_span
         }),
         "a clean exact field overwrite must block the earlier whole-result writer: {:#?}",
         out.edges
@@ -1469,7 +2262,9 @@ fn configured_call_result_passthrough_is_materialized_for_assign_rhs() {
             callee: "project.decode".to_string(),
             receiver_type: None,
             input_arg_indices: vec![0],
+            input_arg_start_index: None,
             input_receiver: false,
+            resolved_call_sites: Vec::new(),
         }],
         ..TransferOptions::default()
     };
@@ -1510,7 +2305,9 @@ fn configured_call_result_passthrough_is_materialized_for_call_event() {
             callee: "decode".to_string(),
             receiver_type: Some("ProjectCodec".to_string()),
             input_arg_indices: vec![0],
+            input_arg_start_index: None,
             input_receiver: true,
+            resolved_call_sites: Vec::new(),
         }],
         ..TransferOptions::default()
     };
@@ -1525,6 +2322,102 @@ fn configured_call_result_passthrough_is_materialized_for_call_event() {
 
     assert!(incoming.contains(&call_site.call_arg_nodes[0]));
     assert!(incoming.contains(&call_site.receiver_arg_node.expect("receiver node")));
+}
+
+#[test]
+fn variadic_call_result_passthrough_uses_actual_arity_without_a_cap() {
+    let mut decl = empty_decl(1, "f");
+    let call_span = span(50, 100);
+    let args = (0..12)
+        .map(|index| CallArg {
+            passing_mode: Default::default(),
+            span: span(60 + index, 61 + index),
+            name: None,
+            value_text: format!("value{index}"),
+            place: Some(format!("value{index}")),
+            source_names: vec![format!("value{index}")],
+        })
+        .collect::<Vec<_>>();
+    decl.flow_events = vec![FlowEvent::Call {
+        span: call_span,
+        name: "collect".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args,
+    }];
+    let options = TransferOptions {
+        call_result_passthroughs: vec![CallResultPassthroughSpec {
+            callee: "collect".to_string(),
+            receiver_type: None,
+            input_arg_indices: Vec::new(),
+            input_arg_start_index: Some(1),
+            input_receiver: false,
+            resolved_call_sites: Vec::new(),
+        }],
+        ..TransferOptions::default()
+    };
+    let out = transfer_function_for_with_options(&decl, &options);
+    let call_site = out.call_sites.first().expect("call site");
+    let incoming = out
+        .edges
+        .iter()
+        .filter(|edge| edge.to == call_site.call_ret_node)
+        .map(|edge| edge.from)
+        .collect::<ahash::AHashSet<_>>();
+
+    assert!(!incoming.contains(&call_site.call_arg_nodes[0]));
+    for node in &call_site.call_arg_nodes[1..] {
+        assert!(incoming.contains(node), "every actual tail argument must flow");
+    }
+}
+
+#[test]
+fn matcher_compiled_call_result_passthrough_applies_only_at_approved_span() {
+    let mut decl = empty_decl(1, "f");
+    let approved = span(20, 30);
+    let unrelated = span(40, 50);
+    let call = |span, value: &str| FlowEvent::Call {
+        span,
+        name: "decode".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span,
+            name: None,
+            value_text: value.to_string(),
+            place: Some(value.to_string()),
+            source_names: vec![value.to_string()],
+        }],
+    };
+    decl.flow_events = vec![call(approved, "external"), call(unrelated, "local")];
+    let options = TransferOptions {
+        call_result_passthroughs: vec![CallResultPassthroughSpec {
+            callee: "decode".to_string(),
+            receiver_type: None,
+            input_arg_indices: vec![0],
+            input_arg_start_index: None,
+            input_receiver: false,
+            resolved_call_sites: vec![approved],
+        }],
+        ..TransferOptions::default()
+    };
+    let out = transfer_function_for_with_options(&decl, &options);
+    let has_passthrough = |target_span| {
+        let site = out
+            .call_sites
+            .iter()
+            .find(|site| site.site.0 == target_span)
+            .expect("call site");
+        out.edges
+            .iter()
+            .any(|edge| edge.from == site.call_arg_nodes[0] && edge.to == site.call_ret_node)
+    };
+
+    assert!(has_passthrough(approved));
+    assert!(!has_passthrough(unrelated));
 }
 
 #[test]
@@ -1572,7 +2465,9 @@ fn self_receiver_call_result_reads_the_pre_assignment_value() {
             callee: "value.transform".to_string(),
             receiver_type: None,
             input_arg_indices: Vec::new(),
+            input_arg_start_index: None,
             input_receiver: true,
+            resolved_call_sites: Vec::new(),
         }],
         ..TransferOptions::default()
     };
@@ -1855,10 +2750,16 @@ fn compound_assignment_binds_ast_indexed_rhs_call_result() {
         value_span: span(55, 88),
         call_sites: vec![call_expression_span],
         value_flow: ExpressionFlow::default(),
+        static_value: None,
         exact_callable_return: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
         exact_static_call_args: None,
         direct_call_name: None,
+        direct_call_span: None,
         direct_call_receiver: None,
+        direct_call_receiver_span: None,
+        direct_call_receiver_flow: None,
     }];
     let out =
         transfer_function_for_with_options_and_assignment_values(&decl, &TransferOptions::default(), &facts);
@@ -1902,10 +2803,16 @@ fn finite_literal_selection_keeps_lookup_call_but_cleans_result_write() {
         value_span: span(39, 68),
         call_sites: vec![selection_span],
         value_flow: ExpressionFlow::from_place("key"),
+        static_value: None,
         exact_callable_return: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
         exact_static_call_args: None,
         direct_call_name: Some("get".to_string()),
+        direct_call_span: None,
         direct_call_receiver: Some("SORTABLE".to_string()),
+        direct_call_receiver_span: None,
+        direct_call_receiver_flow: None,
     }];
     let selections = [FiniteLiteralSelectionFact {
         selection_span,
@@ -2017,6 +2924,445 @@ fn finite_literal_selection_used_inline_does_not_taint_the_sink_argument() {
 }
 
 #[test]
+fn direct_call_argument_is_mediated_by_the_nested_call_return() {
+    let mut decl = empty_decl(1, "review");
+    decl.params = vec!["input".to_string()];
+    let outer_span = span(20, 27);
+    let inner_span = span(32, 41);
+    let argument_span = span(32, 49);
+    decl.flow_events = vec![
+        FlowEvent::Call {
+            span: outer_span,
+            name: "consume".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: argument_span,
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "transform(input)".to_string(),
+                place: None,
+                source_names: vec!["input".to_string()],
+            }],
+        },
+        FlowEvent::Call {
+            span: inner_span,
+            name: "transform".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: span(42, 47),
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "input".to_string(),
+                place: Some("input".to_string()),
+                source_names: vec!["input".to_string()],
+            }],
+        },
+    ];
+    let argument_values = [CallArgumentValueFact {
+        call_span: outer_span,
+        argument_index: 0,
+        argument_span,
+        direct_call_span: Some(inner_span),
+        value_kind: Some(AssignValueKind::CallResult),
+        inline_callback_params: Vec::new(),
+        inline_callback_span: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
+        value_flow: ExpressionFlow {
+            source_names: vec!["input".to_string()],
+            call_sites: vec![inner_span],
+            ..Default::default()
+        },
+        static_value: None,
+        exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
+    }];
+
+    let out = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &TransferOptions::default(),
+        &[],
+        &[],
+        &argument_values,
+        &[],
+    );
+    let outer_argument = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx: 0 }) if site.0 == outer_span
+            )
+            .then_some(NodeId(u32::try_from(index).expect("node id")))
+        })
+        .expect("outer argument");
+
+    assert!(out.edges.iter().any(|edge| {
+        edge.to == outer_argument
+            && matches!(
+                out.places
+                    .get(out.nodes.get(edge.from).expect("node").place),
+                Some(Place::CallRet { site }) if site.0 == inner_span
+            )
+            && edge.meta.kind == IdgEdgeKind::IntraAssign
+            && edge.meta.precision == Precision::Exact
+    }));
+    assert!(
+        out.edges
+            .iter()
+            .filter(|edge| edge.to == outer_argument)
+            .all(|edge| rendered_place_name(&out, edge.from) != "input"),
+        "the nested callee's operand must not bypass its return contract: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn adapter_proven_static_projection_bypasses_only_the_builtin_call_spelling() {
+    let mut decl = empty_decl(1, "review");
+    decl.params = vec!["record".to_string()];
+    let outer_span = span(20, 27);
+    let inner_span = span(32, 41);
+    let argument_span = span(32, 49);
+    decl.flow_events = vec![
+        FlowEvent::Call {
+            span: outer_span,
+            name: "consume".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: argument_span,
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "record.item".to_string(),
+                place: Some("record.item".to_string()),
+                source_names: vec!["record".to_string(), "record.item".to_string()],
+            }],
+        },
+        FlowEvent::Call {
+            span: inner_span,
+            name: "builtin_select".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: span(42, 47),
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "record".to_string(),
+                place: Some("record".to_string()),
+                source_names: vec!["record".to_string()],
+            }],
+        },
+    ];
+    let argument_values = [CallArgumentValueFact {
+        call_span: outer_span,
+        argument_index: 0,
+        argument_span,
+        direct_call_span: Some(inner_span),
+        value_kind: Some(AssignValueKind::CallResult),
+        inline_callback_params: Vec::new(),
+        inline_callback_span: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
+        value_flow: ExpressionFlow::from_place("record.item"),
+        static_value: None,
+        exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
+    }];
+
+    let out = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &TransferOptions::default(),
+        &[],
+        &[],
+        &argument_values,
+        &[],
+    );
+    let outer_argument = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx: 0 }) if site.0 == outer_span
+            )
+            .then_some(NodeId(u32::try_from(index).expect("node id")))
+        })
+        .expect("outer argument");
+    let incoming = out
+        .edges
+        .iter()
+        .filter(|edge| edge.to == outer_argument)
+        .collect::<Vec<_>>();
+
+    assert!(
+        incoming
+            .iter()
+            .any(|edge| rendered_place_name(&out, edge.from) == "record.item"),
+        "the adapter-proven exact projection must feed the argument: {incoming:#?}"
+    );
+    assert!(
+        incoming.iter().all(|edge| {
+            !matches!(
+                out.places.get(out.nodes.get(edge.from).expect("node").place),
+                Some(Place::CallRet { site }) if site.0 == inner_span
+            )
+        }),
+        "a compiler-proven static projection must not depend on an unresolved builtin return: {incoming:#?}"
+    );
+}
+
+#[test]
+fn method_shaped_projection_still_requires_the_nested_call_return() {
+    let mut decl = empty_decl(1, "review");
+    decl.params = vec!["record".to_string()];
+    let outer_span = span(20, 27);
+    let inner_span = span(32, 41);
+    let argument_span = span(32, 49);
+    decl.flow_events = vec![
+        FlowEvent::Call {
+            span: outer_span,
+            name: "consume".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: argument_span,
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "record.transform".to_string(),
+                place: Some("record.transform".to_string()),
+                source_names: vec!["record.transform".to_string()],
+            }],
+        },
+        FlowEvent::Call {
+            span: inner_span,
+            name: "record.transform".to_string(),
+            receiver: Some("record".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        },
+    ];
+    let argument_values = [CallArgumentValueFact {
+        call_span: outer_span,
+        argument_index: 0,
+        argument_span,
+        direct_call_span: Some(inner_span),
+        value_kind: Some(AssignValueKind::CallResult),
+        inline_callback_params: Vec::new(),
+        inline_callback_span: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
+        value_flow: ExpressionFlow::from_place("record.transform"),
+        static_value: None,
+        exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
+    }];
+
+    let out = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &TransferOptions::default(),
+        &[],
+        &[],
+        &argument_values,
+        &[],
+    );
+    let outer_argument = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx: 0 }) if site.0 == outer_span
+            )
+            .then_some(NodeId(u32::try_from(index).expect("node id")))
+        })
+        .expect("outer argument");
+
+    assert!(out.edges.iter().any(|edge| {
+        edge.to == outer_argument
+            && matches!(
+                out.places.get(out.nodes.get(edge.from).expect("node").place),
+                Some(Place::CallRet { site }) if site.0 == inner_span
+            )
+    }));
+    assert!(
+        out.edges
+            .iter()
+            .filter(|edge| edge.to == outer_argument)
+            .all(|edge| rendered_place_name(&out, edge.from) != "record.transform"),
+        "method-shaped values must not bypass their return contract: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn compound_nested_call_argument_retains_all_compiler_operands() {
+    let mut decl = empty_decl(1, "review");
+    decl.params = vec!["prefix".to_string(), "input".to_string()];
+    let outer_span = span(20, 27);
+    let inner_span = span(38, 47);
+    let argument_span = span(32, 55);
+    decl.flow_events = vec![FlowEvent::Call {
+        span: outer_span,
+        name: "consume".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            span: argument_span,
+            passing_mode: Default::default(),
+            name: None,
+            value_text: "prefix + transform(input)".to_string(),
+            place: None,
+            source_names: vec!["prefix".to_string(), "input".to_string()],
+        }],
+    }];
+    let argument_values = [CallArgumentValueFact {
+        call_span: outer_span,
+        argument_index: 0,
+        argument_span,
+        direct_call_span: None,
+        value_kind: Some(AssignValueKind::Compound),
+        inline_callback_params: Vec::new(),
+        inline_callback_span: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
+        value_flow: ExpressionFlow {
+            source_names: vec!["prefix".to_string(), "input".to_string()],
+            call_sites: vec![inner_span],
+            ..Default::default()
+        },
+        static_value: None,
+        exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
+    }];
+
+    let out = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &TransferOptions::default(),
+        &[],
+        &[],
+        &argument_values,
+        &[],
+    );
+    let outer_argument = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx: 0 }) if site.0 == outer_span
+            )
+            .then_some(NodeId(u32::try_from(index).expect("node id")))
+        })
+        .expect("outer argument");
+    let incoming: std::collections::BTreeSet<_> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.to == outer_argument)
+        .map(|edge| rendered_place_name(&out, edge.from))
+        .collect();
+
+    assert!(incoming.contains("prefix"), "compound operand lost: {incoming:?}");
+    assert!(incoming.contains("input"), "compound operand lost: {incoming:?}");
+    assert!(
+        !incoming.iter().any(|place| place.starts_with("CallRet(")),
+        "a nested call inside a compound value is not the complete argument: {incoming:?}"
+    );
+}
+
+#[test]
+fn multiple_nested_calls_without_an_exact_direct_call_fail_closed() {
+    let mut decl = empty_decl(1, "review");
+    decl.params = vec!["left".to_string(), "right".to_string()];
+    let outer_span = span(20, 27);
+    let left_call = span(32, 37);
+    let right_call = span(48, 54);
+    let argument_span = span(32, 62);
+    decl.flow_events = vec![FlowEvent::Call {
+        span: outer_span,
+        name: "consume".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            span: argument_span,
+            passing_mode: Default::default(),
+            name: None,
+            value_text: "first(left) + second(right)".to_string(),
+            place: None,
+            source_names: vec!["left".to_string(), "right".to_string()],
+        }],
+    }];
+    let argument_values = [CallArgumentValueFact {
+        call_span: outer_span,
+        argument_index: 0,
+        argument_span,
+        direct_call_span: None,
+        value_kind: Some(AssignValueKind::Compound),
+        inline_callback_params: Vec::new(),
+        inline_callback_span: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
+        value_flow: ExpressionFlow {
+            source_names: vec!["left".to_string(), "right".to_string()],
+            call_sites: vec![left_call, right_call],
+            ..Default::default()
+        },
+        static_value: None,
+        exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
+    }];
+
+    let out = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &TransferOptions::default(),
+        &[],
+        &[],
+        &argument_values,
+        &[],
+    );
+    let outer_argument = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx: 0 }) if site.0 == outer_span
+            )
+            .then_some(NodeId(u32::try_from(index).expect("node id")))
+        })
+        .expect("outer argument");
+    let incoming: std::collections::BTreeSet<_> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.to == outer_argument)
+        .map(|edge| rendered_place_name(&out, edge.from))
+        .collect();
+
+    assert_eq!(incoming, ["left".to_string(), "right".to_string()].into());
+}
+
+#[test]
 fn indexed_object_initializer_is_field_precise_without_duplicate_flow_event() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["userInput".to_string()];
@@ -2058,10 +3404,16 @@ fn indexed_object_initializer_is_field_precise_without_duplicate_flow_event() {
             ],
             ..ExpressionFlow::default()
         },
+        static_value: None,
         exact_callable_return: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
         exact_static_call_args: None,
         direct_call_name: None,
+        direct_call_span: None,
         direct_call_receiver: None,
+        direct_call_receiver_span: None,
+        direct_call_receiver_flow: None,
     }];
 
     let out =
@@ -2404,8 +3756,10 @@ fn configured_clean_output_overwrite_commits_fresh_output_writer() {
             output_arg_index: 0,
             value_start_arg_index: 1,
         }],
+        clean_receiver_overwrites: Vec::new(),
         source_output_args: Vec::new(),
         source_callback_args: Vec::new(),
+        callback_invocations: Vec::new(),
         call_result_passthroughs: Vec::new(),
         output_arg_flows: Vec::new(),
         receiver_state_propagations: Vec::new(),
@@ -2450,6 +3804,182 @@ fn configured_clean_output_overwrite_commits_fresh_output_writer() {
             .all(|edge| { !matches!(rendered_place_name(&out, edge.from).as_str(), "Read(buf)") }),
         "post-overwrite read must not fall back to stale buf read: {incoming:#?}"
     );
+}
+
+#[test]
+fn clean_receiver_overwrite_requires_the_exact_matcher_approved_call_span() {
+    let mut decl = empty_decl(1, "f");
+    let mutation_span = span(20, 35);
+    let sink_span = span(40, 50);
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(10, 15),
+            target: "$value".to_string(),
+            source_name: Some("source".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["source".to_string()],
+            declares_new_binding: true,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: mutation_span,
+            name: "substitute".to_string(),
+            receiver: Some("$value".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Operator,
+            args: Vec::new(),
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(42, 48),
+                name: None,
+                value_text: "$value".to_string(),
+                place: Some("$value".to_string()),
+                source_names: vec!["$value".to_string()],
+            }],
+        },
+    ];
+    let lower = |resolved_call_sites| {
+        transfer_function_for_with_options(
+            &decl,
+            &TransferOptions {
+                clean_receiver_overwrites: vec![CleanReceiverOverwriteSpec {
+                    callee: "substitute".to_string(),
+                    resolved_call_sites,
+                }],
+                ..TransferOptions::default()
+            },
+        )
+    };
+    let sink_incoming_spans = |out: &TransferOutput| {
+        let sink = out
+            .nodes
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(idx, node)| {
+                matches!(
+                    out.places.get(node.place),
+                    Some(Place::CallArg { site, idx: 0 }) if site.0 == sink_span
+                )
+                .then_some(NodeId(idx as u32))
+            })
+            .expect("sink argument");
+        out.edges
+            .iter()
+            .filter(|edge| edge.to == sink)
+            .filter_map(|edge| rendered_write_span(out, edge.from))
+            .collect::<Vec<_>>()
+    };
+
+    let matched = lower(vec![mutation_span]);
+    assert_eq!(sink_incoming_spans(&matched), [mutation_span]);
+
+    let collision = lower(vec![span(100, 110)]);
+    assert!(
+        !sink_incoming_spans(&collision).contains(&mutation_span),
+        "same-named call outside approved spans must not clean its receiver"
+    );
+}
+
+#[test]
+fn sibling_call_result_assignment_does_not_replay_output_argument_reads() {
+    let mut decl = empty_decl(1, "handle");
+    let assign_span = span(15, 40);
+    let call_span = span(20, 35);
+    let call = FlowEvent::Call {
+        span: call_span,
+        name: "recv".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![
+            CallArg {
+                passing_mode: Default::default(),
+                span: span(21, 23),
+                name: None,
+                value_text: "fd".to_string(),
+                place: Some("fd".to_string()),
+                source_names: vec!["fd".to_string()],
+            },
+            CallArg {
+                passing_mode: Default::default(),
+                span: span(25, 28),
+                name: None,
+                value_text: "buf".to_string(),
+                place: Some("buf".to_string()),
+                source_names: vec!["buf".to_string()],
+            },
+        ],
+    };
+    let assign = FlowEvent::Assign {
+        span: assign_span,
+        target: "count".to_string(),
+        source_name: Some("recv".to_string()),
+        source_call: Some("recv".to_string()),
+        source_call_args: vec!["fd".to_string(), "buf".to_string()],
+        source_names: vec!["recv".to_string(), "fd".to_string(), "buf".to_string()],
+        declares_new_binding: true,
+        value_kind: Some(AssignValueKind::CallResult),
+    };
+    let options = TransferOptions {
+        source_output_args: vec![SourceOutputArgSpec {
+            callee: "recv".to_string(),
+            output_arg_indices: vec![1],
+            output_arg_start_index: None,
+            resolved_call_sites: vec![call_span],
+        }],
+        ..TransferOptions::default()
+    };
+
+    for events in [
+        vec![call.clone(), assign.clone()],
+        vec![assign.clone(), call.clone()],
+    ] {
+        decl.flow_events = events;
+        let out = transfer_function_for_with_options(&decl, &options);
+        let output_write = out
+            .nodes
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, node)| {
+                matches!(
+                    out.places.get(node.place),
+                    Some(Place::Write { span, .. })
+                        if *span == call_span && rendered_place_name(&out, NodeId(index as u32)) == "buf"
+                )
+                .then_some(NodeId(index as u32))
+            })
+            .expect("source output writer");
+        let output_call_arg = out
+            .nodes
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, node)| {
+                matches!(
+                    out.places.get(node.place),
+                    Some(Place::CallArg { site, idx: 1 }) if site.0 == call_span
+                )
+                .then_some(NodeId(index as u32))
+            })
+            .expect("output call argument");
+        assert!(
+            out.edges
+                .iter()
+                .all(|edge| !(edge.from == output_write && edge.to == output_call_arg)),
+            "a sibling assignment must not feed a newly written output carrier back into its own call: {:#?}",
+            out.edges
+        );
+    }
 }
 
 #[test]
@@ -2503,8 +4033,10 @@ fn configured_output_arg_flow_materializes_value_to_post_call_writer() {
         output_arg_flows: vec![OutputArgFlowSpec {
             callee: "copy_out".to_string(),
             output_arg_index: 0,
+            input_receiver: false,
             value_arg_indices: vec![1],
             value_start_arg_index: None,
+            resolved_call_sites: Vec::new(),
         }],
         ..TransferOptions::default()
     };
@@ -2522,10 +4054,27 @@ fn configured_output_arg_flow_materializes_value_to_post_call_writer() {
             .then_some(NodeId(idx as u32))
         })
         .expect("output writer");
+    let source_argument = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(idx, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx }) if site.0 == copy_span && *idx == 1
+            )
+            .then_some(NodeId(idx as u32))
+        })
+        .expect("source argument");
     assert!(out
         .edges
         .iter()
-        .any(|edge| { edge.to == output_write && rendered_place_name(&out, edge.from) == "src" }));
+        .any(|edge| edge.from == source_argument && edge.to == output_write));
+    assert!(out
+        .edges
+        .iter()
+        .any(|edge| edge.to == source_argument && rendered_place_name(&out, edge.from) == "src"));
     let sink_arg = out
         .nodes
         .nodes
@@ -2543,6 +4092,371 @@ fn configured_output_arg_flow_materializes_value_to_post_call_writer() {
         .edges
         .iter()
         .any(|edge| edge.from == output_write && edge.to == sink_arg));
+}
+
+#[test]
+fn exact_output_arg_flow_can_copy_receiver_state_without_name_widening() {
+    let mut decl = empty_decl(1, "extract");
+    let assign_span = span(10, 18);
+    let extract_span = span(20, 35);
+    let sink_span = span(40, 50);
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: assign_span,
+            target: "stream".to_string(),
+            source_name: Some("raw".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["raw".to_string()],
+            declares_new_binding: true,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: extract_span,
+            name: ">>".to_string(),
+            receiver: Some("stream".to_string()),
+            receiver_types: vec!["istringstream".to_string()],
+            call_kind: CallKind::Operator,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(30, 35),
+                name: None,
+                value_text: "token".to_string(),
+                place: Some("token".to_string()),
+                source_names: vec!["token".to_string()],
+            }],
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(42, 47),
+                name: None,
+                value_text: "token".to_string(),
+                place: Some("token".to_string()),
+                source_names: vec!["token".to_string()],
+            }],
+        },
+    ];
+    let lower = |resolved_call_sites| {
+        transfer_function_for_with_options(
+            &decl,
+            &TransferOptions {
+                output_arg_flows: vec![OutputArgFlowSpec {
+                    callee: ">>".to_string(),
+                    output_arg_index: 0,
+                    input_receiver: true,
+                    value_arg_indices: Vec::new(),
+                    value_start_arg_index: None,
+                    resolved_call_sites,
+                }],
+                ..TransferOptions::default()
+            },
+        )
+    };
+    let has_receiver_to_output = |out: &TransferOutput| {
+        let output = out.nodes.nodes.iter().enumerate().find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::Write { span, .. }) if *span == extract_span
+            )
+            .then_some(NodeId(index as u32))
+        });
+        output.is_some_and(|output| {
+            out.edges
+                .iter()
+                .any(|edge| edge.to == output && rendered_place_name(out, edge.from) == "stream")
+        })
+    };
+
+    assert!(has_receiver_to_output(&lower(vec![extract_span])));
+    assert!(
+        !has_receiver_to_output(&lower(vec![span(60, 70)])),
+        "a same-named operator outside matcher-approved spans must not receive the transfer"
+    );
+}
+
+#[test]
+fn configured_whole_output_arg_flow_reaches_later_field_read() {
+    let mut decl = empty_decl(1, "f");
+    let copy_span = span(20, 35);
+    let sink_span = span(40, 55);
+    decl.flow_events = vec![
+        FlowEvent::Call {
+            span: copy_span,
+            name: "copy_out".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![
+                CallArg {
+                    passing_mode: bonsai_lang_api::ArgumentPassingMode::WriteBack,
+                    span: span(21, 25),
+                    name: None,
+                    value_text: "&record".to_string(),
+                    place: Some("record".to_string()),
+                    source_names: vec!["record".to_string()],
+                },
+                CallArg {
+                    passing_mode: Default::default(),
+                    span: span(27, 30),
+                    name: None,
+                    value_text: "raw".to_string(),
+                    place: Some("raw".to_string()),
+                    source_names: vec!["raw".to_string()],
+                },
+            ],
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(45, 53),
+                name: None,
+                value_text: "record.field".to_string(),
+                place: Some("record.field".to_string()),
+                source_names: vec!["record".to_string(), "record.field".to_string()],
+            }],
+        },
+    ];
+    let options = TransferOptions {
+        output_arg_flows: vec![OutputArgFlowSpec {
+            callee: "copy_out".to_string(),
+            output_arg_index: 0,
+            input_receiver: false,
+            value_arg_indices: vec![1],
+            value_start_arg_index: None,
+            resolved_call_sites: Vec::new(),
+        }],
+        ..TransferOptions::default()
+    };
+    let out = transfer_function_for_with_options(&decl, &options);
+    let output_write = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(idx, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::Write { span, .. }) if *span == copy_span
+            )
+            .then_some(NodeId(idx as u32))
+        })
+        .expect("whole output writer");
+    let field_argument = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(idx, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx: 0 }) if site.0 == sink_span
+            )
+            .then_some(NodeId(idx as u32))
+        })
+        .expect("projected sink argument");
+    assert!(
+        out.edges
+            .iter()
+            .any(|edge| edge.from == output_write && edge.to == field_argument),
+        "a complete output write must feed later exact projections: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn formal_parameter_entry_does_not_collapse_an_exact_field_read() {
+    let mut decl = empty_decl(1, "inspect");
+    decl.params = vec!["record".to_string()];
+    let sink_span = span(40, 55);
+    decl.flow_events = vec![FlowEvent::Call {
+        span: sink_span,
+        name: "consume".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(48, 54),
+            name: None,
+            value_text: "record.field".to_string(),
+            place: Some("record.field".to_string()),
+            source_names: vec!["record".to_string(), "record.field".to_string()],
+        }],
+    }];
+    let out = transfer_function_for(&decl);
+    let entry_write = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(idx, node)| {
+            let node_id = NodeId(idx as u32);
+            (matches!(
+                out.places.get(node.place),
+                Some(Place::Write { span, .. }) if *span == decl.name_span
+            ) && rendered_place_name(&out, node_id) == "record")
+                .then_some(node_id)
+        })
+        .expect("parameter entry writer");
+    let field_argument = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(idx, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx: 0 }) if site.0 == sink_span
+            )
+            .then_some(NodeId(idx as u32))
+        })
+        .expect("projected call argument");
+    assert!(
+        !out.edges
+            .iter()
+            .any(|edge| edge.from == entry_write && edge.to == field_argument),
+        "the scalar formal slot must not collapse an exact field into the whole object: {:#?}",
+        out.edges
+    );
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "record.field" && edge.to == field_argument
+        }),
+        "the compiler-emitted exact field must still feed the argument: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn configured_output_writer_consumes_the_exact_argument_value_not_nested_operands() {
+    let mut decl = empty_decl(1, "render");
+    decl.params = vec!["input".to_string()];
+    let writer_span = span(20, 50);
+    let nested_span = span(35, 46);
+    let value_span = span(35, 46);
+    decl.flow_events = vec![
+        FlowEvent::Call {
+            span: writer_span,
+            name: "write_value".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![
+                CallArg {
+                    passing_mode: Default::default(),
+                    span: span(21, 24),
+                    name: None,
+                    value_text: "dst".to_string(),
+                    place: Some("dst".to_string()),
+                    source_names: vec!["dst".to_string()],
+                },
+                CallArg {
+                    passing_mode: Default::default(),
+                    span: value_span,
+                    name: None,
+                    value_text: "select_value(input)".to_string(),
+                    place: None,
+                    source_names: vec!["input".to_string()],
+                },
+            ],
+        },
+        FlowEvent::Call {
+            span: nested_span,
+            name: "select_value".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(42, 47),
+                name: None,
+                value_text: "input".to_string(),
+                place: Some("input".to_string()),
+                source_names: vec!["input".to_string()],
+            }],
+        },
+    ];
+    let argument_values = [CallArgumentValueFact {
+        call_span: writer_span,
+        argument_index: 1,
+        argument_span: value_span,
+        direct_call_span: Some(nested_span),
+        value_kind: Some(AssignValueKind::CallResult),
+        inline_callback_params: Vec::new(),
+        inline_callback_span: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
+        value_flow: ExpressionFlow {
+            source_names: vec!["input".to_string()],
+            call_sites: vec![nested_span],
+            ..Default::default()
+        },
+        static_value: None,
+        exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
+    }];
+    let options = TransferOptions {
+        clean_output_overwrites: vec![CleanOutputOverwriteSpec {
+            callee: "write_value".to_string(),
+            output_arg_index: 0,
+            value_start_arg_index: 1,
+        }],
+        ..TransferOptions::default()
+    };
+    let out = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &options,
+        &[],
+        &[],
+        &argument_values,
+        &[],
+    );
+    let output_write = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::Write { span, .. }) if *span == writer_span
+            )
+            .then_some(NodeId(index as u32))
+        })
+        .expect("output writer");
+    let writer_argument = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx }) if site.0 == writer_span && *idx == 1
+            )
+            .then_some(NodeId(index as u32))
+        })
+        .expect("writer argument");
+
+    assert!(out
+        .edges
+        .iter()
+        .any(|edge| edge.from == writer_argument && edge.to == output_write));
+    assert!(out
+        .edges
+        .iter()
+        .all(|edge| { edge.to != output_write || rendered_place_name(&out, edge.from) != "input" }));
 }
 
 #[test]
@@ -2677,6 +4591,77 @@ fn resolved_rule_call_site_supplies_receiver_type_proof() {
         .edges
         .iter()
         .any(|edge| edge.to == receiver_write && rendered_place_name(&out, edge.from) == "src"));
+}
+
+#[test]
+fn resolved_rule_write_site_materializes_member_value_into_receiver_state() {
+    let mut decl = empty_decl(1, "f");
+    let mutation_span = span(20, 35);
+    let sink_span = span(40, 50);
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: mutation_span,
+            target: "builder.parts".to_string(),
+            source_name: Some("src".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["src".to_string()],
+            declares_new_binding: false,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "finish".to_string(),
+            receiver: Some("builder".to_string()),
+            receiver_types: vec!["Builder".to_string()],
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        },
+    ];
+    let options = TransferOptions {
+        receiver_state_propagations: vec![ReceiverStatePropagationSpec {
+            method: "parts".to_string(),
+            receiver_type: Some("Builder".to_string()),
+            resolved_call_sites: vec![mutation_span],
+        }],
+        ..TransferOptions::default()
+    };
+
+    let out = transfer_function_for_with_options(&decl, &options);
+    let receiver_write = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(idx, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::Write { name, path, span })
+                    if out.names.get(*name) == Some("builder") && path.is_empty() && *span == mutation_span
+            )
+            .then_some(NodeId(idx as u32))
+        })
+        .expect("resolved property write should materialize receiver state");
+    assert!(out.edges.iter().any(|edge| {
+        edge.to == receiver_write && rendered_place_name(&out, edge.from) == "builder.parts"
+    }));
+    let sink_receiver = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(idx, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx }) if site.0 == sink_span && *idx == u32::MAX
+            )
+            .then_some(NodeId(idx as u32))
+        })
+        .expect("sink receiver");
+    assert!(out
+        .edges
+        .iter()
+        .any(|edge| edge.from == receiver_write && edge.to == sink_receiver));
 }
 
 #[test]
@@ -2953,6 +4938,7 @@ fn try_catch_typed_match_emits_throw_to_catch_edge() {
         finally_events: Vec::new(),
         catch_param: Some("ex".to_string()),
         catch_types: vec!["IOException".to_string()],
+        catch_arms: Vec::new(),
     }];
     let out = transfer_function_for(&decl);
     // 1 IntraThrow from the body's Read(e) → Throw(IOException)
@@ -2960,6 +4946,83 @@ fn try_catch_typed_match_emits_throw_to_catch_edge() {
     assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraThrow), 2);
     // 1 IntraAssign from Catch(IOException) → Write(ex)
     assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraAssign), 1);
+}
+
+#[test]
+fn typed_throw_connects_only_to_its_own_catch_arm() {
+    let mut decl = empty_decl(1, "f");
+    let first_arm = span(30, 55);
+    let second_arm = span(56, 80);
+    decl.flow_events = vec![FlowEvent::Try {
+        span: span(0, 90),
+        body: vec![FlowEvent::Throw {
+            span: span(10, 25),
+            value_name: Some("payload".to_string()),
+            thrown_type: Some("FirstException".to_string()),
+        }],
+        catch_events: vec![FlowEvent::Branch {
+            span: first_arm,
+            condition: None,
+            then_events: vec![FlowEvent::Assign {
+                span: span(40, 45),
+                target: "first_copy".to_string(),
+                source_name: Some("first".to_string()),
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: vec!["first".to_string()],
+                declares_new_binding: true,
+                value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+            }],
+            else_events: vec![FlowEvent::Assign {
+                span: span(65, 70),
+                target: "second_copy".to_string(),
+                source_name: Some("second".to_string()),
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: vec!["second".to_string()],
+                declares_new_binding: true,
+                value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+            }],
+        }],
+        finally_events: Vec::new(),
+        catch_param: Some("first".to_string()),
+        catch_types: vec!["FirstException".to_string(), "SecondException".to_string()],
+        catch_arms: vec![
+            CatchArmFact {
+                span: first_arm,
+                parameter: Some("first".to_string()),
+                types: vec!["FirstException".to_string()],
+            },
+            CatchArmFact {
+                span: second_arm,
+                parameter: Some("second".to_string()),
+                types: vec!["SecondException".to_string()],
+            },
+        ],
+    }];
+
+    let out = transfer_function_for(&decl);
+    let reached_catches = out
+        .edges
+        .iter()
+        .filter(|edge| edge.meta.kind == IdgEdgeKind::IntraThrow)
+        .filter_map(|edge| rendered_catch_type(&out, edge.to))
+        .collect::<Vec<_>>();
+    assert_eq!(reached_catches, ["FirstException"]);
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "first"
+                && rendered_place_name(&out, edge.to) == "first_copy"
+        }),
+        "the matching arm binding must feed its own body"
+    );
+    assert!(
+        !out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "first"
+                && rendered_place_name(&out, edge.to) == "second_copy"
+        }),
+        "a sibling handler must never inherit another arm's binding"
+    );
 }
 
 #[test]
@@ -2985,6 +5048,7 @@ fn sigiled_catch_param_read_uses_bare_binding_writer() {
         finally_events: Vec::new(),
         catch_param: Some("e".to_string()),
         catch_types: vec!["Exception".to_string()],
+        catch_arms: Vec::new(),
     }];
     let out = transfer_function_for(&decl);
     assert!(
@@ -3012,6 +5076,7 @@ fn try_catch_distinct_types_wait_for_workspace_hierarchy_resolution() {
         finally_events: Vec::new(),
         catch_param: Some("ex".to_string()),
         catch_types: vec!["Exception".to_string()],
+        catch_arms: Vec::new(),
     }];
     let out = transfer_function_for(&decl);
     // Only Read(e) -> Throw(RuntimeException) is local. The transfer pass has
@@ -3053,6 +5118,7 @@ fn compound_throw_constructor_arg_bridges_to_throw_node() {
         finally_events: Vec::new(),
         catch_param: Some("ex".to_string()),
         catch_types: vec!["RuntimeException".to_string()],
+        catch_arms: Vec::new(),
     }];
     let out = transfer_function_for(&decl);
     // 1 Read(payload) -> CallArg, 1 Read(payload) -> Throw,
@@ -3130,6 +5196,7 @@ fn call_arg_property_projection_bridges_receiver_carrier() {
         finally_events: Vec::new(),
         catch_param: Some("e".to_string()),
         catch_types: vec!["Exception".to_string()],
+        catch_arms: Vec::new(),
     }];
     let out = transfer_function_for(&decl);
     assert!(
@@ -3156,6 +5223,7 @@ fn try_catch_all_matches_typed_throw_via_star_sentinel() {
         finally_events: Vec::new(),
         catch_param: Some("ex".to_string()),
         catch_types: Vec::new(),
+        catch_arms: Vec::new(),
     }];
     let out = transfer_function_for(&decl);
     // Body throw: Read(e) → Throw(*) (1 IntraThrow)
@@ -3198,6 +5266,131 @@ fn branch_walks_both_arms() {
     // span) so the SSA-style branch join unions them — both
     // are live for any read after the merge.
     assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraAssign), 2);
+}
+
+#[test]
+fn branch_return_in_one_arm_does_not_hide_yield_from_the_other_arm() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["input".to_string()];
+    let send_span = span(40, 50);
+    decl.flow_events = vec![
+        FlowEvent::Defer {
+            span: span(1, 5),
+            body: vec![FlowEvent::Call {
+                span: span(2, 4),
+                name: "close".to_string(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Function,
+                args: Vec::new(),
+            }],
+        },
+        FlowEvent::Assign {
+            span: span(10, 20),
+            target: "part".to_string(),
+            source_name: Some("input".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: None,
+        },
+        FlowEvent::Loop {
+            span: span(25, 60),
+            loop_kind: bonsai_lang_api::LoopKind::ForEach,
+            body: vec![FlowEvent::Branch {
+                span: span(25, 60),
+                condition: None,
+                then_events: vec![FlowEvent::Return {
+                    span: span(30, 35),
+                    value_name: None,
+                    value_text: None,
+                    value_flow: bonsai_lang_api::ExpressionFlow::default(),
+                    value_kind: None,
+                }],
+                else_events: vec![
+                    FlowEvent::Call {
+                        span: send_span,
+                        name: "send".to_string(),
+                        receiver: Some("out".to_string()),
+                        receiver_types: Vec::new(),
+                        call_kind: CallKind::ChannelSend,
+                        args: vec![
+                            CallArg {
+                                span: span(40, 43),
+                                passing_mode: Default::default(),
+                                name: None,
+                                value_text: "out".to_string(),
+                                place: Some("out".to_string()),
+                                source_names: vec!["out".to_string()],
+                            },
+                            CallArg {
+                                span: span(47, 51),
+                                passing_mode: Default::default(),
+                                name: None,
+                                value_text: "part".to_string(),
+                                place: Some("part".to_string()),
+                                source_names: vec!["part".to_string()],
+                            },
+                        ],
+                    },
+                    FlowEvent::Yield {
+                        span: send_span,
+                        value_text: Some("part".to_string()),
+                        value_flow: bonsai_lang_api::ExpressionFlow::from_place("part"),
+                    },
+                ],
+            }],
+        },
+        FlowEvent::Return {
+            span: span(70, 75),
+            value_name: Some("out".to_string()),
+            value_text: Some("out".to_string()),
+            value_flow: bonsai_lang_api::ExpressionFlow::from_place("out"),
+            value_kind: None,
+        },
+    ];
+
+    let out = transfer_function_for(&decl);
+    let input_write = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            let Place::Write { name, span, .. } = out.places.get(node.place)? else {
+                return None;
+            };
+            (out.names.get(*name) == Some("part") && *span == CommonSpan::new(FileId::new(0), 10, 20))
+                .then_some(NodeId(index as u32))
+        })
+        .expect("part writer");
+    let yield_node = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(out.places.get(node.place), Some(Place::Yield)).then_some(NodeId(index as u32))
+        })
+        .expect("yield endpoint");
+
+    let mut reached = std::collections::HashSet::from([input_write]);
+    loop {
+        let before = reached.len();
+        for edge in &out.edges {
+            if reached.contains(&edge.from) {
+                reached.insert(edge.to);
+            }
+        }
+        if reached.len() == before {
+            break;
+        }
+    }
+    assert!(
+        reached.contains(&yield_node),
+        "the executable-flow normalizer and transfer walker must retain the non-returning branch"
+    );
 }
 
 #[test]
@@ -3679,6 +5872,7 @@ fn nested_branch_in_try_walks_all_arms() {
         finally_events: Vec::new(),
         catch_param: Some("ex".to_string()),
         catch_types: vec!["E".to_string()],
+        catch_arms: Vec::new(),
     }];
     let out = transfer_function_for(&decl);
     // 2 body throws (Read(a)→Throw, Read(b)→Throw) + 2 throw→catch
@@ -3868,4 +6062,87 @@ fn transfer_fingerprint_canonicalizes_symbolic_adapter_languages() {
 
     assert_eq!(left.semantic_fingerprint(), right.semantic_fingerprint());
     assert_ne!(left.semantic_fingerprint(), narrower.semantic_fingerprint());
+}
+
+#[test]
+fn transfer_excludes_calls_after_unconditional_return() {
+    let mut decl = empty_decl(1, "f");
+    decl.flow_events = vec![
+        FlowEvent::Call {
+            span: span(10, 11),
+            name: "before".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        },
+        FlowEvent::Return {
+            span: span(20, 21),
+            value_kind: None,
+            value_text: None,
+            value_name: None,
+            value_flow: Default::default(),
+        },
+        FlowEvent::Call {
+            span: span(30, 31),
+            name: "dead".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        },
+    ];
+
+    let out = transfer_function_for(&decl);
+    assert_eq!(
+        out.call_sites
+            .iter()
+            .map(|site| site.callee_name.as_str())
+            .collect::<Vec<_>>(),
+        ["before"]
+    );
+}
+
+#[test]
+fn transfer_executes_defer_at_scope_exit_in_lifo_order() {
+    fn call(at: u64, name: &str) -> FlowEvent {
+        FlowEvent::Call {
+            span: span(at, at + 1),
+            name: name.to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        }
+    }
+
+    let mut decl = empty_decl(1, "f");
+    decl.flow_events = vec![
+        FlowEvent::Defer {
+            span: span(10, 11),
+            body: vec![call(70, "first_cleanup")],
+        },
+        FlowEvent::Defer {
+            span: span(20, 21),
+            body: vec![call(60, "second_cleanup")],
+        },
+        call(30, "body"),
+        FlowEvent::Return {
+            span: span(40, 41),
+            value_kind: None,
+            value_text: None,
+            value_name: None,
+            value_flow: Default::default(),
+        },
+        call(50, "dead"),
+    ];
+
+    let out = transfer_function_for(&decl);
+    assert_eq!(
+        out.call_sites
+            .iter()
+            .map(|site| site.callee_name.as_str())
+            .collect::<Vec<_>>(),
+        ["body", "second_cleanup", "first_cleanup"]
+    );
 }

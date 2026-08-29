@@ -1,6 +1,6 @@
 //! R_10 — Higher-order: callback returns tainted.
 #![allow(unreachable_pub)]
-use crate::helpers::{run_positive_cell, LangFixture};
+use crate::helpers::{run_negative_cell, run_positive_cell, LangFixture};
 use std::sync::Arc;
 
 #[test]
@@ -47,6 +47,11 @@ fn r_10_csharp() {
 #[test]
 fn r_10_dart() {
     run_positive_cell("R_10", LangFixture { lang:"dart", adapter:Arc::new(bonsai_lang_dart::DartAdapter::new()), files:&[("a.dart","String cb(String p) { return p; }\nString apply_(String Function(String) f, String x) { return f(x); }\nvoid entry(String args) { var out = apply_(cb, args); sink(out); }\n")], entry:"entry", seed:&["args"], sink:"sink" });
+}
+
+#[test]
+fn r_10_dart_non_invoked_callback_does_not_produce_a_return() {
+    run_negative_cell("R_10", LangFixture { lang:"dart", adapter:Arc::new(bonsai_lang_dart::DartAdapter::new()), files:&[("negative.dart","String callback(String value) { return value; }\nString retain(String Function(String) operation, String value) { return 'clean'; }\nvoid entry(String args) { var out = retain(callback, args); sink(out); }\n")], entry:"entry", seed:&["args"], sink:"sink" });
 }
 
 #[test]

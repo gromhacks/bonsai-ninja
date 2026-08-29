@@ -144,6 +144,7 @@
     kind: call
     callee:
       attribute: [flag, Arg]
+      binding_origin: imported
   constraints:
   - min_args: 1
   - max_args: 1
@@ -156,6 +157,15 @@
         _ = flag.Arg(0)
       }
     expect_match_text: [flag.Arg]
+  - name: local flag-shaped value is not the standard flag package
+    code: |
+      package main
+      import stdflag "flag"
+      var _ = stdflag.CommandLine
+      type localFlags struct{}
+      func (localFlags) Arg(int) string { return "safe" }
+      func example(flag localFlags) { _ = flag.Arg(0) }
+    expect_no_match: true
   description: "flag.Arg(i) - positional CLI argument supplied by the local command invoker."
 
 - id: go.flag.args
@@ -170,6 +180,7 @@
     kind: call
     callee:
       attribute: [flag, Args]
+      binding_origin: imported
   constraints:
   - max_args: 0
   match_examples:
@@ -181,6 +192,15 @@
         _ = flag.Args()
       }
     expect_match_text: [flag.Args]
+  - name: local flag-shaped value is not the standard flag package
+    code: |
+      package main
+      import stdflag "flag"
+      var _ = stdflag.CommandLine
+      type localFlags struct{}
+      func (localFlags) Args() []string { return nil }
+      func example(flag localFlags) { _ = flag.Args() }
+    expect_no_match: true
   description: "flag.Args() - remaining positional CLI arguments supplied by the local command invoker."
 
 - id: go.viper.get_string
@@ -205,19 +225,3 @@
       }
     expect_match_text: [viper.GetString]
   description: "viper.GetString(key) - config / env-driven value; tainted if config source is untrusted."
-
-- id: go.cobra.flag_getstring
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  trust: local
-  tag: local-input
-  category: local-input
-  payload_types: [text]
-  packages: ["github.com/spf13/cobra", "github.com/spf13/pflag"]
-  match:
-    kind: call
-    callee:
-      regex: "\\.GetString$"
-  description: "Disabled - bare `.GetString$` double-fires with go.viper.get_string on `viper.GetString(...)`. Enable per-project if cobra is the only source of GetString usage."

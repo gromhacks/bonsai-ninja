@@ -8,7 +8,9 @@
 use crate::ClassOut;
 use bonsai_common::{FileId, FuncId, Precision, Span, SpanMap, SymbolId};
 use bonsai_idg::CrossCallEdge;
-use bonsai_lang_api::{AssignValueKind, CallArg, CallKind, DeclKind, ExpressionFlow, FlowEvent, LoopKind};
+use bonsai_lang_api::{
+    AssignValueKind, CallArg, CallKind, CatchArmFact, DeclKind, ExpressionFlow, FlowEvent, LoopKind,
+};
 use bonsai_workspace::{decl_decorator_names, Workspace};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
@@ -257,7 +259,7 @@ struct ExportTaintedArg {
     param_name: String,
 }
 
-/// Retained wire shape for the v7 schema's optional concrete flow rows.
+/// Retained wire shape for the v9 schema's optional concrete flow rows.
 /// Production export leaves this empty and publishes the exact relationship
 /// through `compressed_callgraph` instead.
 #[derive(Serialize)]
@@ -426,6 +428,8 @@ enum ExportFlowEventPayload<'a> {
         catch_param: Option<&'a str>,
         #[serde(skip_serializing_if = "<[String]>::is_empty")]
         catch_types: &'a [String],
+        #[serde(skip_serializing_if = "<[CatchArmFact]>::is_empty")]
+        catch_arms: &'a [CatchArmFact],
     },
     Break {
         span: Span,
@@ -613,6 +617,7 @@ fn flatten_flow_events<'a>(
                 finally_events,
                 catch_param,
                 catch_types,
+                catch_arms,
             } => {
                 push_flow_region(&mut stack, finally_events, event_id, ExportFlowRegion::Finally);
                 push_flow_region(&mut stack, catch_events, event_id, ExportFlowRegion::Catch);
@@ -621,6 +626,7 @@ fn flatten_flow_events<'a>(
                     span: *span,
                     catch_param: catch_param.as_deref(),
                     catch_types,
+                    catch_arms,
                 }
             }
             FlowEvent::Break { span, label } => ExportFlowEventPayload::Break {
@@ -716,7 +722,13 @@ struct ExportAssignmentValue {
     #[serde(skip_serializing_if = "Option::is_none")]
     direct_call_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    direct_call_span: Option<Span>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     direct_call_receiver: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direct_call_receiver_span: Option<Span>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direct_call_receiver_flow: Option<bonsai_lang_api::ExpressionFlow>,
 }
 
 #[derive(Serialize)]
@@ -913,7 +925,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     let mut map = serializer.serialize_map(None)?;
 
     map.serialize_entry("schema", "bonsai-native-export")?;
-    map.serialize_entry("schema_version", &7_u32)?;
+    map.serialize_entry("schema_version", &9_u32)?;
     map.serialize_entry("engine_version", env!("CARGO_PKG_VERSION"))?;
     map.serialize_entry("workspace_root", &root.display().to_string())?;
     map.serialize_entry("generated_at_unix_ms", &generated_at_unix_ms())?;
@@ -1314,7 +1326,10 @@ fn build_export_file<'a>(
             call_sites: fact.call_sites.clone(),
             value_flow: fact.value_flow.clone(),
             direct_call_name: fact.direct_call_name.clone(),
+            direct_call_span: fact.direct_call_span,
             direct_call_receiver: fact.direct_call_receiver.clone(),
+            direct_call_receiver_span: fact.direct_call_receiver_span,
+            direct_call_receiver_flow: fact.direct_call_receiver_flow.clone(),
         })
         .collect();
     let strings = index
@@ -2278,7 +2293,7 @@ fn export_intra_taint_for_decl(decl: &bonsai_lang_api::Decl) -> Option<ExportInt
     if decl.params.is_empty() {
         return None;
     }
-    let cfg = bonsai_cfg::build_cfg_from_flow(&decl.name, &decl.flow_events);
+    let cfg = bonsai_cfg::build_cfg_from_flow_in_span(&decl.name, Some(decl.span), &decl.flow_events);
     let mut per_param: Vec<ExportIntraTaintParam> = Vec::new();
     for (idx, param) in decl.params.iter().enumerate() {
         if param.is_empty() {

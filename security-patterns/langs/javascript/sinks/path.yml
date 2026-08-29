@@ -759,33 +759,3 @@
       }
     expect_no_match: true
   description: tar.extract - tainted archive can write outside cwd (tar-slip).
-
-- id: javascript.path.fs_readdir
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: path-traversal
-  severity: medium
-  packages: [fs]
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      attribute: [fs, readdir]
-  description: "Disabled - readdir listing is rarely the injection vector; enable only when the listing is returned to the user."
-
-- id: javascript.path.path_join
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: path-traversal
-  severity: low
-  packages: [path]
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      attribute: [path, join]
-  description: "Disabled - path.join is ubiquitous in legitimate code; without a root-check constraint this is all false positives."

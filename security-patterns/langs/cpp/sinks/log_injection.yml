@@ -4,7 +4,7 @@
 - id: cpp.log_injection.spdlog_info_newline
   enabled: true
   language: cpp
-  tag: header-injection
+  tag: log-injection
   severity: medium
   packages: [spdlog]
   cwe: [CWE-117]
@@ -33,3 +33,41 @@
       }
     expect_no_match: true
   description: 'spdlog::info("... {} ...\n", user) - newline log forging.'
+
+- id: cpp.log_injection.spdlog_info_tainted_value
+  enabled: true
+  language: cpp
+  tag: log-injection
+  severity: medium
+  packages: [spdlog]
+  cwe: [CWE-117]
+  analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
+  match:
+    kind: call
+    callee:
+      attribute: [spdlog, info]
+  constraints:
+  - min_args: 2
+  - arg_matches_regex:
+      index: 0
+      regex: '\{[^}]*\}'
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: spdlog constant format with tainted value
+    code: |
+      #include <spdlog/spdlog.h>
+      void audit(const std::string &input) {
+        spdlog::info("user={}", input);
+      }
+    expect_match_text: ["spdlog::info"]
+  - name: spdlog literal value is not tainted
+    code: |
+      #include <spdlog/spdlog.h>
+      void audit() {
+        spdlog::info("user={}", "system");
+      }
+    expect_no_match: true
+  description: "spdlog::info with a constant replacement field and an attacker-controlled value can accept CR/LF bytes that forge additional log entries."

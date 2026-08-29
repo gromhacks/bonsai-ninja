@@ -15,9 +15,6 @@
   - name: declared shape
     code: |
       import 'package:crypto/crypto.dart';
-      import 'package:crypto/crypto.dart';
-      import 'package:crypto/crypto.dart';
-      import 'package:crypto/crypto.dart';
       import 'package:crypto/crypto.dart'; // crypto
       void test() { var input = "x"; var amount = 1; md5.convert(input); }
   description: "package:crypto md5.convert - collision-broken hash."
@@ -39,9 +36,6 @@
   match_examples:
   - name: declared shape
     code: |
-      import 'package:crypto/crypto.dart';
-      import 'package:crypto/crypto.dart';
-      import 'package:crypto/crypto.dart';
       import 'package:crypto/crypto.dart';
       import 'package:crypto/crypto.dart'; // crypto
       void test() { var input = "x"; var amount = 1; sha1.convert(input); }

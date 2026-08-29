@@ -41,19 +41,37 @@
   description: "readline.Interface.question(query, callback) - callback parameter 0 is interactive stdin input. Factory-derived receiver typing prevents same-named application methods from matching, and the void registration result remains clean."
 
 - id: javascript.source.readline_sync_question
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: javascript
   trust: local
   tag: cli-input
   payload_types: [text]
   packages: [readline-sync]
+  analysis_semantics:
+    allow_file_package_evidence: false
   match:
     kind: call
     callee:
       name: question
-  description: "Disabled pending exact CommonJS module-binding receiver provenance. File-level readline-sync package presence plus a same-named question method is not sufficient evidence."
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: readline sync CommonJS binding question
+    code: |
+      const rlsync = require("readline-sync");
+      function demo() {
+        return rlsync.question("name?");
+      }
+    expect_match_text: [rlsync.question]
+  - name: same named application method beside readline sync import
+    code: |
+      const rlsync = require("readline-sync");
+      class Survey { question(prompt) { return "fixed"; } }
+      function demo(survey) {
+        return survey.question("name?");
+      }
+    expect_no_match: true
+  description: "readline-sync CommonJS-binding question(query) - synchronous interactive stdin input. Exact compiler import-alias evidence binds the receiver to readline-sync; file-level dependency presence alone cannot qualify a same-named application method."
 
 - id: javascript.source.process_argv
   enabled: true
@@ -325,6 +343,12 @@
         return await fsp.readFile(path, "utf8");
       }
     expect_match_text: [fsp.readFile]
+  - name: same chain on a local object is not filesystem input
+    code: |
+      const realFs = require("fs");
+      const local = { promises: { readFile(path) { return "fixed"; } } };
+      function demo(path) { return local.promises.readFile(path); }
+    expect_no_match: true
   description: "fs.promises.readFile(path[, options]) - promise resolving to local file bytes/text."
 
 - id: javascript.source.fs_readfile_callback

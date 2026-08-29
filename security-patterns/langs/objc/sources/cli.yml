@@ -18,42 +18,108 @@
   description: "fgets(buf, size, stdin) - interactive stdin read; buf is tainted via output argument 0."
 
 - id: objc.source.nsprocessinfo_arguments
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: objc
   trust: local
   tag: cli-input
   payload_types: [text]
+  packages: [Foundation]
   match:
     kind: read
     target:
-      name: arguments
+      attribute: [NSProcessInfo, processInfo, arguments]
   match_examples:
-    - name: declared shape
-      code: |
-        void test(id input) { id target = input; int amount = 1; id result = [NSProcessInfo processInfo].arguments; }
-  description: "Disabled pending Objective-C receiver-type facts for chained `[NSProcessInfo processInfo].arguments`; a bare arguments property would overmatch application models. Raw main argv remains covered."
+  - name: exact process arguments property
+    code: |
+      #import <Foundation/Foundation.h>
+      NSArray *arguments(void) { return [NSProcessInfo processInfo].arguments; }
+    expect_match_text: [NSProcessInfo.processInfo.arguments]
+  - name: unrelated arguments property negative
+    code: |
+      #import <Foundation/Foundation.h>
+      id arguments(ProcessState *state) { return state.processInfo.arguments; }
+    expect_no_match: true
+  description: "The exact `[NSProcessInfo processInfo].arguments` compiler place carries process argv; matching the complete chain avoids every application `arguments` property."
+
+- id: objc.source.nsprocessinfo_arguments_message
+  enabled: true
+  language: objc
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  packages: [Foundation]
+  match:
+    kind: call
+    callee:
+      attribute: [NSProcessInfo, processInfo, arguments]
+  constraints:
+  - arg_count: 0
+  match_examples:
+  - name: exact process arguments message
+    code: |
+      #import <Foundation/Foundation.h>
+      NSArray *arguments(void) { return [[NSProcessInfo processInfo] arguments]; }
+    expect_match_text: [NSProcessInfo.processInfo.arguments]
+  - name: unrelated arguments message negative
+    code: |
+      #import <Foundation/Foundation.h>
+      NSArray *arguments(ProcessState *state) { return [state arguments]; }
+    expect_no_match: true
+  description: "The message-send spelling `[[NSProcessInfo processInfo] arguments]` returns process argv; the complete nested receiver chain is compiler-derived."
 
 - id: objc.source.nsprocessinfo_environment
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: objc
   trust: local
   tag: env-input
   payload_types: [text]
+  packages: [Foundation]
   analysis_semantics:
     flow_classes: [environment-input]
   match:
     kind: read
     target:
-      name: environment
+      attribute: [NSProcessInfo, processInfo, environment]
   match_examples:
-    - name: declared shape
-      code: |
-        void test(id input) { id target = input; int amount = 1; id result = [NSProcessInfo processInfo].environment; }
-  description: "Disabled pending Objective-C receiver-type facts for chained `[NSProcessInfo processInfo].environment`; a bare environment property would overmatch application models. libc getenv remains covered."
+  - name: exact process environment property
+    code: |
+      #import <Foundation/Foundation.h>
+      NSDictionary *environment(void) { return [NSProcessInfo processInfo].environment; }
+    expect_match_text: [NSProcessInfo.processInfo.environment]
+  - name: unrelated environment property negative
+    code: |
+      #import <Foundation/Foundation.h>
+      id environment(ProcessState *state) { return state.processInfo.environment; }
+    expect_no_match: true
+  description: "The exact `[NSProcessInfo processInfo].environment` compiler place carries process environment values; a bare environment property is never sufficient."
+
+- id: objc.source.nsprocessinfo_environment_message
+  enabled: true
+  language: objc
+  trust: local
+  tag: env-input
+  payload_types: [text]
+  packages: [Foundation]
+  analysis_semantics:
+    flow_classes: [environment-input]
+  match:
+    kind: call
+    callee:
+      attribute: [NSProcessInfo, processInfo, environment]
+  constraints:
+  - arg_count: 0
+  match_examples:
+  - name: exact process environment message
+    code: |
+      #import <Foundation/Foundation.h>
+      NSDictionary *environment(void) { return [[NSProcessInfo processInfo] environment]; }
+    expect_match_text: [NSProcessInfo.processInfo.environment]
+  - name: unrelated environment message negative
+    code: |
+      #import <Foundation/Foundation.h>
+      NSDictionary *environment(ProcessState *state) { return [state environment]; }
+    expect_no_match: true
+  description: "The message-send spelling `[[NSProcessInfo processInfo] environment]` returns process environment input through an exact compiler-derived chain."
 
 - id: objc.source.cli_argv
   enabled: true
@@ -104,19 +170,6 @@
       void configure(void) { setenv("APP_MODE", "prod", 1); }
     expect_no_match: true
   description: "libc getenv(name) returns process-environment input with local trust."
-
-- id: objc.source.nsfilehandle_standardinput
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: objc
-  trust: local
-  tag: cli-input
-  match:
-    kind: call
-    callee:
-      name: fileHandleWithStandardInput
-  description: "Disabled - NSFileHandle standardInput is stdin; rarely used in iOS apps, enable for CLI/macOS tools."
 
 - id: objc.source.readline
   enabled: true

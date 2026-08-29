@@ -1,5 +1,5 @@
 # Swift LLM sinks (OpenAI / Anthropic / Bedrock client wrappers).
-- id: swift.llm.openai_chats_create
+- id: swift.llm.openai_chats
   enabled: true
   language: swift
   tag: web-llm
@@ -10,13 +10,8 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.chats\.create$
-      base_name_in:
-      - chats
-      - messages
-      - client
-      - completions
-      - c
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.chats$
+      receiver_type_in: [OpenAIProtocol]
   constraints:
   - arg_tainted:
       index: 0
@@ -24,71 +19,56 @@
   - name: swift openai chats create
     code: |
       import OpenAI
-      func test(input: String) { client.chats.create(input) }
-    expect_match_text: [client.chats.create]
+      func test(client: OpenAIProtocol, input: ChatQuery) async throws { _ = try await client.chats(query: input) }
+    expect_match_text: [client.chats]
   - name: literal openai chat negative
     code: |
       import OpenAI
-      func test() { client.chats.create("Summarize the release notes") }
+      func test(client: OpenAIProtocol) async throws {
+        _ = try await client.chats(query: "fixed prompt")
+      }
     expect_no_match: true
-  description: "OpenAI Swift client.chats.create - tainted prompt content reaches an LLM instruction / tool surface."
-
-- id: swift.llm.anthropic_messages_create
-  enabled: true
-  language: swift
-  tag: web-llm
-  severity: medium
-  packages: [Anthropic]
-  cwe: [CWE-20, CWE-94, CWE-200]
-  match:
-    kind: call
-    callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.messages\.create$
-      base_name_in:
-      - anthropic
-      - client
-      - messages
-      - chats
-      - c
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: swift anthropic messages create
+  - name: local OpenAIProtocol is not the imported SDK
     code: |
-      import Anthropic // Anthropic
-      func test(input: String) { anthropic.messages.create(input) }
-    expect_match_text: [anthropic.messages.create]
-  - name: literal anthropic messages negative
-    code: |
-      import Anthropic // Anthropic
-      func test() { anthropic.messages.create("Summarize the release notes") }
+      import OpenAI
+      protocol OpenAIProtocol {}
+      func test(client: OpenAIProtocol, input: ChatQuery) async throws { _ = try await client.chats(query: input) }
     expect_no_match: true
-  description: "Anthropic Swift wrapper messages.create - tainted prompt content reaches Claude."
+  description: "MacPaw OpenAI OpenAIProtocol.chats(query:) - a tainted ChatQuery reaches the chat-completions instruction surface."
 
 - id: swift.llm.bedrock_invoke_model
   enabled: true
   language: swift
   tag: web-llm
   severity: medium
-  packages: [AWSSDKSwift]
+  packages: [AWSBedrockRuntime]
+  imports: [AWSBedrockRuntime]
   cwe: [CWE-20, CWE-94, CWE-200]
   match:
     kind: call
     callee:
-      name: invokeModel
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.invokeModel$
+      receiver_type_in: [BedrockRuntimeClient]
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: swift bedrock invoke model
     code: |
-      import AWSSDKSwift // AWSSDKSwift
-      func test(input: String) { invokeModel(input) }
-    expect_match_text: [invokeModel]
+      import AWSBedrockRuntime
+      func test(client: BedrockRuntimeClient, input: InvokeModelInput) async throws { _ = try await client.invokeModel(input: input) }
+    expect_match_text: [client.invokeModel]
   - name: literal bedrock invoke model negative
     code: |
-      import AWSSDKSwift // AWSSDKSwift
-      func test() { invokeModel("Summarize the release notes") }
+      import AWSBedrockRuntime
+      func test(client: BedrockRuntimeClient) async throws {
+        _ = try await client.invokeModel(input: "fixed request")
+      }
+    expect_no_match: true
+  - name: local BedrockRuntimeClient is not AWS Bedrock
+    code: |
+      import AWSBedrockRuntime
+      struct BedrockRuntimeClient {}
+      func test(client: BedrockRuntimeClient, input: InvokeModelInput) async throws { _ = try await client.invokeModel(input: input) }
     expect_no_match: true
   description: "AWS Bedrock invokeModel - tainted request body steers the underlying foundation model."

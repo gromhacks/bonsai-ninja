@@ -5,15 +5,38 @@
 # engine owning any method-name list. These NEVER produce findings; they
 # feed `build_rulepack_typing`. The match_example MUST construct the
 # receiver so a paired receiver-typed sink replays.
+- id: python.typing.django_queryset_from_manager_filter
+  enabled: true
+  language: python
+  packages: [django]
+  returns_type: QuerySet
+  match:
+    kind: call
+    callee:
+      attribute: [objects, filter]
+  match_examples:
+  - name: django model manager filter returns QuerySet
+    code: |
+      from django.db import models
+      class Product(models.Model):
+          name = models.TextField()
+      def example(user_input):
+          qs = Product.objects.filter(active=True)
+          return qs.extra(order_by=[user_input])
+    expect_match_text: [Product.objects.filter]
+  description: "A Django model manager's objects.filter(...) call returns a QuerySet. The model-manager syntax is rulepack-owned framework semantics; it types the assigned receiver so raw QuerySet escape-hatch sinks do not depend on local variable spelling."
+
 - id: python.typing.httpx_async_client
   enabled: true
   language: python
   packages: [httpx]
+  imports: [httpx]
   returns_type: AsyncClient
   match:
     kind: call
     callee:
       attribute: [httpx, AsyncClient]
+      binding_origin: imported
   match_examples:
   - name: httpx async context manager returns AsyncClient
     code: |
@@ -22,17 +45,27 @@
           async with httpx.AsyncClient() as client:
               return await client.get(user_input)
     expect_match_text: [httpx.AsyncClient]
+  - name: local AsyncClient is not httpx
+    code: |
+      import httpx as standard
+      _ = standard.AsyncClient
+      class AsyncClient:
+          pass
+      def example(): return AsyncClient()
+    expect_no_match: true
   description: "httpx.AsyncClient(...) returns an AsyncClient; type normal assignments and syntax-bound async context-manager aliases so receiver-typed HTTP sinks remain package-derived."
 
 - id: python.typing.jinja2_sandboxed_environment
   enabled: true
   language: python
   packages: [jinja2]
+  imports: [jinja2.sandbox]
   returns_type: SandboxedEnvironment
   match:
     kind: call
     callee:
       name: SandboxedEnvironment
+      binding_origin: imported
   match_examples:
   - name: sandbox constructor returns SandboxedEnvironment
     code: |
@@ -41,34 +74,312 @@
           env = SandboxedEnvironment(autoescape=True)
           return env.from_string(user_input)
     expect_match_text: [SandboxedEnvironment]
+  - name: local SandboxedEnvironment class is not Jinja
+    code: |
+      from jinja2.sandbox import SandboxedEnvironment as JinjaSandbox
+      _ = JinjaSandbox
+      class SandboxedEnvironment:
+          pass
+      def example():
+          return SandboxedEnvironment()
+    expect_no_match: true
   description: "jinja2.sandbox.SandboxedEnvironment(...) returns a SandboxedEnvironment; type assigned instances so the sandbox sanitizer matches instance calls without engine-owned constructor names."
 
 - id: python.typing.dbapi_cursor
   enabled: true
   language: python
-  returns_type: cursor
+  packages: [sqlite3, psycopg2, psycopg, mysql.connector, pymysql, pyodbc, oracledb, aiosqlite, asyncpg]
+  returns_type: DBAPI.Cursor
   match:
     kind: call
     callee:
       name: cursor
+  constraints:
+  - receiver_type_in:
+    - DBAPI.Connection
+    - sqlite3.Connection
+    - psycopg2.extensions.connection
+    - psycopg.Connection
+    - mysql.connector.connection.MySQLConnection
+    - pymysql.connections.Connection
+    - pyodbc.Connection
+    - oracledb.Connection
+    - aiosqlite.Connection
+    - asyncpg.Connection
   match_examples:
-  - name: cursor() factory returns a DB-API cursor
+  - name: cursor from an imported DB-API connection is typed
     code: |
       import sqlite3
-      def example(user_input, conn):
+      def example(user_input):
+          conn = sqlite3.connect("app.db")
           c = conn.cursor()
           c.execute(user_input)
     expect_match_text: [conn.cursor]
-  description: "DB-API `.cursor()` returns a cursor object; type the local so a factory-returned cursor (`c = conn.cursor()`) matches the receiver-typed cursor.execute sink that an explicitly-named `cursor` var already matched. Typing-only — never a finding."
+  - name: unrelated cursor method is not a DB-API factory
+    code: |
+      import sqlite3
+      class Report:
+          def cursor(self): return object()
+      def example(report: Report):
+          return report.cursor()
+    expect_no_match: true
+  description: "A cursor created from an exactly typed DB-API connection receives the rulepack-owned DBAPI.Cursor identity. The method spelling alone is insufficient. Typing-only — never a finding."
+
+- id: python.typing.sqlite3_connect
+  enabled: true
+  language: python
+  packages: [sqlite3]
+  imports: [sqlite3]
+  returns_type: DBAPI.Connection
+  match:
+    kind: call
+    callee:
+      attribute: [sqlite3, connect]
+      binding_origin: imported
+  match_examples:
+  - name: imported sqlite factory returns a DB-API connection
+    code: |
+      import sqlite3
+      def example(): return sqlite3.connect("app.db")
+    expect_match_text: [sqlite3.connect]
+  - name: local sqlite-shaped factory is not imported sqlite3
+    code: |
+      import sqlite3 as standard
+      _ = standard.connect
+      class Factory:
+          def connect(self): return object()
+      def example(sqlite3: Factory): return sqlite3.connect()
+    expect_no_match: true
+  description: "sqlite3.connect returns a rulepack-owned DBAPI.Connection identity; imported binding identity prevents same-spelled local factories from matching."
+
+- id: python.typing.psycopg2_connect
+  enabled: true
+  language: python
+  packages: [psycopg2]
+  imports: [psycopg2]
+  returns_type: DBAPI.Connection
+  match:
+    kind: call
+    callee:
+      attribute: [psycopg2, connect]
+      binding_origin: imported
+  match_examples:
+  - name: imported psycopg2 factory returns a DB-API connection
+    code: |
+      import psycopg2
+      def example(): return psycopg2.connect("dbname=app")
+    expect_match_text: [psycopg2.connect]
+  - name: local psycopg2-shaped factory is not the provider
+    code: |
+      import psycopg2 as standard
+      _ = standard.connect
+      class Factory:
+          def connect(self): return object()
+      def example(psycopg2: Factory): return psycopg2.connect()
+    expect_no_match: true
+  description: "psycopg2.connect returns DBAPI.Connection with imported-provider identity."
+
+- id: python.typing.psycopg_connect
+  enabled: true
+  language: python
+  packages: [psycopg]
+  imports: [psycopg]
+  returns_type: DBAPI.Connection
+  match:
+    kind: call
+    callee:
+      attribute: [psycopg, connect]
+      binding_origin: imported
+  match_examples:
+  - name: imported psycopg factory returns a DB-API connection
+    code: |
+      import psycopg
+      def example(): return psycopg.connect("dbname=app")
+    expect_match_text: [psycopg.connect]
+  - name: local psycopg-shaped factory is not the provider
+    code: |
+      import psycopg as standard
+      _ = standard.connect
+      class Factory:
+          def connect(self): return object()
+      def example(psycopg: Factory): return psycopg.connect()
+    expect_no_match: true
+  description: "psycopg.connect returns DBAPI.Connection with imported-provider identity."
+
+- id: python.typing.mysql_connector_connect
+  enabled: true
+  language: python
+  packages: [mysql.connector]
+  imports: [mysql.connector]
+  returns_type: DBAPI.Connection
+  match:
+    kind: call
+    callee:
+      attribute: [mysql, connector, connect]
+      binding_origin: imported
+  match_examples:
+  - name: imported mysql connector factory returns a DB-API connection
+    code: |
+      import mysql.connector
+      def example(): return mysql.connector.connect(database="app")
+    expect_match_text: [mysql.connector.connect]
+  - name: local connector-shaped factory is not the provider
+    code: |
+      import mysql.connector as standard
+      _ = standard.connect
+      class Factory:
+          def connect(self): return object()
+      class Namespace: connector = Factory()
+      def example(mysql: Namespace): return mysql.connector.connect()
+    expect_no_match: true
+  description: "mysql.connector.connect returns DBAPI.Connection with imported-provider identity."
+
+- id: python.typing.pymysql_connect
+  enabled: true
+  language: python
+  packages: [pymysql]
+  imports: [pymysql]
+  returns_type: DBAPI.Connection
+  match:
+    kind: call
+    callee:
+      attribute: [pymysql, connect]
+      binding_origin: imported
+  match_examples:
+  - name: imported pymysql factory returns a DB-API connection
+    code: |
+      import pymysql
+      def example(): return pymysql.connect(database="app")
+    expect_match_text: [pymysql.connect]
+  - name: local pymysql-shaped factory is not the provider
+    code: |
+      import pymysql as standard
+      _ = standard.connect
+      class Factory:
+          def connect(self): return object()
+      def example(pymysql: Factory): return pymysql.connect()
+    expect_no_match: true
+  description: "pymysql.connect returns DBAPI.Connection with imported-provider identity."
+
+- id: python.typing.pyodbc_connect
+  enabled: true
+  language: python
+  packages: [pyodbc]
+  imports: [pyodbc]
+  returns_type: DBAPI.Connection
+  match:
+    kind: call
+    callee:
+      attribute: [pyodbc, connect]
+      binding_origin: imported
+  match_examples:
+  - name: imported pyodbc factory returns a DB-API connection
+    code: |
+      import pyodbc
+      def example(): return pyodbc.connect("DSN=app")
+    expect_match_text: [pyodbc.connect]
+  - name: local pyodbc-shaped factory is not the provider
+    code: |
+      import pyodbc as standard
+      _ = standard.connect
+      class Factory:
+          def connect(self): return object()
+      def example(pyodbc: Factory): return pyodbc.connect()
+    expect_no_match: true
+  description: "pyodbc.connect returns DBAPI.Connection with imported-provider identity."
+
+- id: python.typing.oracledb_connect
+  enabled: true
+  language: python
+  packages: [oracledb]
+  imports: [oracledb]
+  returns_type: DBAPI.Connection
+  match:
+    kind: call
+    callee:
+      attribute: [oracledb, connect]
+      binding_origin: imported
+  match_examples:
+  - name: imported oracledb factory returns a DB-API connection
+    code: |
+      import oracledb
+      def example(): return oracledb.connect(user="app")
+    expect_match_text: [oracledb.connect]
+  - name: local oracledb-shaped factory is not the provider
+    code: |
+      import oracledb as standard
+      _ = standard.connect
+      class Factory:
+          def connect(self): return object()
+      def example(oracledb: Factory): return oracledb.connect()
+    expect_no_match: true
+  description: "oracledb.connect returns DBAPI.Connection with imported-provider identity."
+
+- id: python.typing.aiosqlite_connect
+  enabled: true
+  language: python
+  packages: [aiosqlite]
+  imports: [aiosqlite]
+  returns_type: DBAPI.Connection
+  match:
+    kind: call
+    callee:
+      attribute: [aiosqlite, connect]
+      binding_origin: imported
+  match_examples:
+  - name: imported aiosqlite factory returns a DB-API connection
+    code: |
+      import aiosqlite
+      async def example(): return await aiosqlite.connect("app.db")
+    expect_match_text: [aiosqlite.connect]
+  - name: local aiosqlite-shaped factory is not the provider
+    code: |
+      import aiosqlite as standard
+      _ = standard.connect
+      class Factory:
+          async def connect(self): return object()
+      async def example(aiosqlite: Factory): return await aiosqlite.connect()
+    expect_no_match: true
+  description: "aiosqlite.connect returns DBAPI.Connection with imported-provider identity."
+
+- id: python.typing.asyncpg_connect
+  enabled: true
+  language: python
+  packages: [asyncpg]
+  imports: [asyncpg]
+  returns_type: DBAPI.Connection
+  match:
+    kind: call
+    callee:
+      attribute: [asyncpg, connect]
+      binding_origin: imported
+  match_examples:
+  - name: imported asyncpg factory returns a DB-API connection
+    code: |
+      import asyncpg
+      async def example(): return await asyncpg.connect("postgres:///app")
+    expect_match_text: [asyncpg.connect]
+  - name: local asyncpg-shaped factory is not the provider
+    code: |
+      import asyncpg as standard
+      _ = standard.connect
+      class Factory:
+          async def connect(self): return object()
+      async def example(asyncpg: Factory): return await asyncpg.connect()
+    expect_no_match: true
+  description: "asyncpg.connect returns DBAPI.Connection with imported-provider identity."
 
 - id: python.typing.ldap3_connection
   enabled: true
   language: python
+  packages: [ldap3]
+  imports: [ldap3]
   returns_type: Connection
   match:
     kind: call
     callee:
       attribute: [ldap3, Connection]
+      binding_origin: imported
   match_examples:
   - name: ldap3 constructor returns a Connection
     code: |
@@ -77,16 +388,27 @@
           connection = ldap3.Connection("ldap://example")
           return connection.search("dc=example,dc=com", user_input)
     expect_match_text: [ldap3.Connection]
+  - name: local ldap3-shaped Connection is not the provider
+    code: |
+      import ldap3 as standard
+      _ = standard.Connection
+      class Namespace:
+          class Connection: pass
+      def example(ldap3: Namespace): return ldap3.Connection()
+    expect_no_match: true
   description: "The external `ldap3.Connection(...)` constructor returns a `Connection`; type assigned locals so receiver-typed LDAP sink rules use library metadata instead of variable-name conventions. Typing-only — never a finding."
 
 - id: python.typing.werkzeug_headers
   enabled: true
   language: python
+  packages: [werkzeug]
+  imports: [werkzeug]
   returns_type: Headers
   match:
     kind: call
     callee:
       attribute: [werkzeug, Headers]
+      binding_origin: imported
   match_examples:
   - name: werkzeug constructor returns Headers
     code: |
@@ -96,16 +418,27 @@
           headers.set("X-Trace", user_input)
           return headers
     expect_match_text: [werkzeug.Headers]
+  - name: local werkzeug-shaped Headers is not the provider
+    code: |
+      import werkzeug as standard
+      _ = standard
+      class Namespace:
+          class Headers: pass
+      def example(werkzeug: Namespace): return werkzeug.Headers()
+    expect_no_match: true
   description: "The external `werkzeug.Headers()` constructor returns `Headers`; type assigned locals so receiver-typed header rules are driven by library metadata. Typing-only — never a finding."
 
 - id: python.typing.django_http_response
   enabled: true
   language: python
+  packages: [django]
+  imports: [django.http]
   returns_type: HttpResponse
   match:
     kind: call
     callee:
       attribute: [django, http, HttpResponse]
+      binding_origin: imported
   match_examples:
   - name: django constructor returns HttpResponse
     code: |
@@ -115,16 +448,26 @@
           response[user_input] = "value"
           return response
     expect_match_text: [HttpResponse]
+  - name: local HttpResponse is not Django
+    code: |
+      from django.http import HttpResponse as DjangoResponse
+      _ = DjangoResponse
+      class HttpResponse: pass
+      def example(): return HttpResponse()
+    expect_no_match: true
   description: "`django.http.HttpResponse(...)` returns `HttpResponse`; the compiler import index expands the imported constructor before typing assigned response objects. Typing-only — never a finding."
 
 - id: python.typing.zipfile_zip_file
   enabled: true
   language: python
+  packages: [zipfile]
+  imports: [zipfile]
   returns_type: ZipFile
   match:
     kind: call
     callee:
       attribute: [zipfile, ZipFile]
+      binding_origin: imported
   match_examples:
   - name: zipfile constructor returns ZipFile
     code: |
@@ -133,16 +476,27 @@
           archive = zipfile.ZipFile(path)
           archive.extractall(dest)
     expect_match_text: [zipfile.ZipFile]
+  - name: local zipfile-shaped ZipFile is not stdlib zipfile
+    code: |
+      import zipfile as standard
+      _ = standard.ZipFile
+      class Namespace:
+          class ZipFile: pass
+      def example(zipfile: Namespace): return zipfile.ZipFile()
+    expect_no_match: true
   description: "`zipfile.ZipFile(...)` returns `ZipFile`; type assigned archive handles for receiver-typed extraction rules. Typing-only — never a finding."
 
 - id: python.typing.tarfile_tar_file
   enabled: true
   language: python
+  packages: [tarfile]
+  imports: [tarfile]
   returns_type: TarFile
   match:
     kind: call
     callee:
       attribute: [tarfile, TarFile]
+      binding_origin: imported
   match_examples:
   - name: tarfile constructor returns TarFile
     code: |
@@ -151,16 +505,27 @@
           archive = tarfile.TarFile(path)
           archive.extractall(dest)
     expect_match_text: [tarfile.TarFile]
+  - name: local tarfile-shaped TarFile is not stdlib tarfile
+    code: |
+      import tarfile as standard
+      _ = standard.TarFile
+      class Namespace:
+          class TarFile: pass
+      def example(tarfile: Namespace): return tarfile.TarFile()
+    expect_no_match: true
   description: "`tarfile.TarFile(...)` returns `TarFile`; type assigned archive handles for receiver-typed extraction rules. Typing-only — never a finding."
 
 - id: python.typing.pathlib_pure_path
   enabled: true
   language: python
+  packages: [pathlib]
+  imports: [pathlib]
   returns_type: PurePath
   match:
     kind: call
     callee:
       attribute: [pathlib, PurePath]
+      binding_origin: imported
   match_examples:
   - name: pathlib constructor returns PurePath
     code: |
@@ -169,16 +534,26 @@
           candidate = PurePath(raw)
           return candidate.relative_to(root)
     expect_match_text: [PurePath]
+  - name: local PurePath is not pathlib
+    code: |
+      from pathlib import PurePath as StdPurePath
+      _ = StdPurePath
+      class PurePath: pass
+      def example(): return PurePath()
+    expect_no_match: true
   description: "`pathlib.PurePath(...)` returns `PurePath`; imported member aliases are resolved through the compiler import index. Typing-only — never a finding."
 
 - id: python.typing.sqlite3_connection
   enabled: true
   language: python
-  returns_type: Connection
+  packages: [sqlite3]
+  imports: [sqlite3]
+  returns_type: DBAPI.Connection
   match:
     kind: call
     callee:
       attribute: [sqlite3, Connection]
+      binding_origin: imported
   match_examples:
   - name: sqlite3 constructor returns Connection
     code: |
@@ -187,16 +562,26 @@
           connection = Connection("db.sqlite")
           return connection.execute("SELECT * FROM users WHERE id = ?", (user_id,))
     expect_match_text: [Connection]
+  - name: local Connection is not sqlite3
+    code: |
+      from sqlite3 import Connection as SqliteConnection
+      _ = SqliteConnection
+      class Connection: pass
+      def example(): return Connection()
+    expect_no_match: true
   description: "`sqlite3.Connection(...)` returns `Connection`; imported member aliases are resolved through the compiler import index. Typing-only — never a finding."
 
 - id: python.typing.asyncpg_connection
   enabled: true
   language: python
-  returns_type: Connection
+  packages: [asyncpg]
+  imports: [asyncpg]
+  returns_type: DBAPI.Connection
   match:
     kind: call
     callee:
       attribute: [asyncpg, Connection]
+      binding_origin: imported
   match_examples:
   - name: asyncpg constructor returns Connection
     code: |
@@ -205,16 +590,26 @@
           connection = Connection()
           return await connection.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
     expect_match_text: [Connection]
+  - name: local Connection is not asyncpg
+    code: |
+      from asyncpg import Connection as AsyncpgConnection
+      _ = AsyncpgConnection
+      class Connection: pass
+      def example(): return Connection()
+    expect_no_match: true
   description: "`asyncpg.Connection(...)` returns `Connection`; the package-qualified rule keeps the shared class name scoped. Typing-only — never a finding."
 
 - id: python.typing.itsdangerous_signer
   enabled: true
   language: python
+  packages: [itsdangerous]
+  imports: [itsdangerous]
   returns_type: Signer
   match:
     kind: call
     callee:
       attribute: [itsdangerous, Signer]
+      binding_origin: imported
   match_examples:
   - name: itsdangerous constructor returns Signer
     code: |
@@ -223,16 +618,26 @@
           signer = Signer("secret")
           return signer.unsign(value)
     expect_match_text: [Signer]
+  - name: local Signer is not itsdangerous
+    code: |
+      from itsdangerous import Signer as DangerousSigner
+      _ = DangerousSigner
+      class Signer: pass
+      def example(): return Signer()
+    expect_no_match: true
   description: "`itsdangerous.Signer(...)` returns `Signer`; imported member aliases are resolved from syntax facts. Typing-only — never a finding."
 
 - id: python.typing.itsdangerous_url_safe_serializer
   enabled: true
   language: python
+  packages: [itsdangerous]
+  imports: [itsdangerous]
   returns_type: URLSafeSerializer
   match:
     kind: call
     callee:
       attribute: [itsdangerous, URLSafeSerializer]
+      binding_origin: imported
   match_examples:
   - name: itsdangerous constructor returns URLSafeSerializer
     code: |
@@ -241,4 +646,39 @@
           serializer = URLSafeSerializer("secret")
           return serializer.loads(value)
     expect_match_text: [URLSafeSerializer]
+  - name: local URLSafeSerializer is not itsdangerous
+    code: |
+      from itsdangerous import URLSafeSerializer as DangerousSerializer
+      _ = DangerousSerializer
+      class URLSafeSerializer: pass
+      def example(): return URLSafeSerializer()
+    expect_no_match: true
   description: "`itsdangerous.URLSafeSerializer(...)` returns its declared serializer type; imported member aliases are resolved from syntax facts. Typing-only — never a finding."
+
+- id: python.typing.logging_get_logger
+  enabled: true
+  language: python
+  packages: [logging]
+  imports: [logging]
+  returns_type: Logger
+  match:
+    kind: call
+    callee:
+      attribute: [logging, getLogger]
+      binding_origin: imported
+  match_examples:
+  - name: logging getLogger returns Logger
+    code: |
+      import logging
+      logger = logging.getLogger("audit")
+      logger.error("failed")
+    expect_match_text: [logging.getLogger]
+  - name: application getLogger is not stdlib typing evidence
+    code: |
+      import logging
+      class Registry:
+          def getLogger(self, name): return name
+      registry = Registry()
+      registry.getLogger("audit")
+    expect_no_match: true
+  description: "logging.getLogger(...) returns a Logger; typing-only receiver evidence for logging rules."

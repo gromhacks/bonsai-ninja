@@ -20,8 +20,9 @@ cannot silently accumulate here.
 - `audit-build-artifacts.sh` — enforces the local and CI Cargo artifact-size budget.
 - `audit-cli-docs.py` — verifies documented commands and flags against the
   release binary's help surface.
-- `audit-corpus-independence.py` — rejects benchmark identities and developer
-  paths in production logic.
+- `audit-corpus-independence.py` — rejects fixture identities from production
+  logic and developer-home paths from production logic, rule data, and public
+  documentation.
 - `audit-dependency-licenses.py` — validates licenses across the locked Cargo dependency graph.
 - `audit-docs.py` — checks every tracked Markdown surface, links, navigation,
   public wording, copied prose, command shapes, repository-derived counts,
@@ -77,8 +78,8 @@ cannot silently accumulate here.
   per supported language, validates exact taint output, and removes each
   checkout by default; `--check` validates its inventory without network
   access.
-- `validate-mega-cli.py` — exercises the CLI/security matrix over the
-  per-language `mega_flow` fixtures.
+- `validate-language-gauntlets.py` — exercises the CLI/security matrix over the
+  per-language `language_gauntlet` fixtures.
 
 ## Maintenance
 

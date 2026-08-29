@@ -28,6 +28,12 @@ use tree_sitter::Node;
 
 use super::{extract_direct_call_info, node_text, short_name_of, GrammarHandler, SYNTHETIC_VARARGS_PARAM};
 
+fn same_syntax_node(left: Node<'_>, right: Node<'_>) -> bool {
+    left.kind_id() == right.kind_id()
+        && left.start_byte() == right.start_byte()
+        && left.end_byte() == right.end_byte()
+}
+
 /// Locate the active grammar's parsed parameter container without carrying a
 /// union of other languages' node kinds in shared lowering. Tree-sitter field
 /// names are tried first; the bounded structural walk then selects only a kind
@@ -38,6 +44,18 @@ pub(super) fn parameter_container<'tree>(
 ) -> Option<Node<'tree>> {
     for field in ["parameters", "args", "parameter"] {
         if let Some(node) = fn_node.child_by_field_name(field) {
+            // Some grammars reuse the singular `parameter` field id for a
+            // declaration's own bare name when the optional parameter list
+            // is absent (Ruby `def show` / `def self.status` are concrete
+            // examples). A declaration name is never a runtime formal. Keep
+            // the lookup grammar-driven, but reject the candidate when the
+            // CST proves that both fields designate the same node.
+            if fn_node
+                .child_by_field_name("name")
+                .is_some_and(|name| same_syntax_node(name, node))
+            {
+                continue;
+            }
             return Some(node);
         }
     }
@@ -177,9 +195,13 @@ pub fn extract_param_annotations(
     // identifier so ObjC method_parameter siblings inherit their
     // selector piece as a pseudo-annotation.
     if parameters_container.is_none() {
+        let declaration_name = fn_node.child_by_field_name("name");
         let mut cursor = fn_node.walk();
         let mut previous_identifier_text: Option<String> = None;
         for child in fn_node.named_children(&mut cursor) {
+            if declaration_name.is_some_and(|name| same_syntax_node(name, child)) {
+                continue;
+            }
             if handler.parameter_kinds.contains(&child.kind()) {
                 if handler.last_identifier_parameter_kinds.contains(&child.kind()) {
                     // ObjC method param — its selector piece is the
@@ -317,7 +339,7 @@ fn collect_param_annotation_names(
 ///   1. Receiver-as-field (Go: `func (r *T) m()`).
 ///   2. Parameter container (Python `parameters`, Java `formal_parameters`, ...).
 ///   3. Flat siblings of the function node (Objective-C selectors).
-pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Vec<String> {
+pub fn extract_param_names(fn_node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Vec<String> {
     let mut param_names = Vec::new();
     // Receivers come first so their slot is index 0.
     if let Some(receiver) = fn_node.child_by_field_name("receiver") {
@@ -389,8 +411,12 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8], handler: &Gram
     // declaration name as though it were a bare parameter corrupts positional
     // identity in grammars where both nodes share an identifier kind.
     if parameters_container.is_none() {
+        let declaration_name = fn_node.child_by_field_name("name");
         let mut cursor = fn_node.walk();
         for child in fn_node.named_children(&mut cursor) {
+            if declaration_name.is_some_and(|name| same_syntax_node(name, child)) {
+                continue;
+            }
             if handler.parameter_kinds.contains(&child.kind()) {
                 push_param_name(child, src, handler, &mut param_names);
             }
@@ -482,10 +508,12 @@ fn push_param_name(param: Node<'_>, src: &[u8], handler: &GrammarHandler, param_
         .contains(&pattern_node.kind())
     {
         let pattern_bindings = binding_names_from_pattern(pattern_node, src, handler);
-        if !pattern_bindings.is_empty() {
-            param_names.extend(pattern_bindings);
-            return;
-        }
+        // An adapter-declared pattern is the complete binding boundary even
+        // when it contains only wildcards. Falling through to the ordinary
+        // name fallback would turn constructor/type text such as `Wrap(_)`
+        // into a parameter identity.
+        param_names.extend(pattern_bindings);
+        return;
     }
 
     // Bare identifier params: the param node itself carries the name.
@@ -546,12 +574,23 @@ fn push_param_name(param: Node<'_>, src: &[u8], handler: &GrammarHandler, param_
     if let Some(name_node) = name_node {
         if handler.destructured_parameter_kinds.contains(&name_node.kind()) {
             let pattern_bindings = binding_names_from_pattern(name_node, src, handler);
-            if !pattern_bindings.is_empty() {
-                param_names.extend(pattern_bindings);
-                return;
-            }
+            param_names.extend(pattern_bindings);
+            return;
         }
     }
+    // TypeScript wraps a top-level rest binding as
+    // `required_parameter > rest_pattern > identifier`, with the pattern in
+    // the wrapper's `pattern` field.  The pattern text (`...rest`) is syntax,
+    // not the binding identity used by call/argument stitching.  Normalize
+    // any adapter-declared variadic pattern to its parsed identifier rather
+    // than trimming punctuation from source text.
+    let name_node = name_node.map(|node| {
+        if handler.variadic_parameter_kinds.contains(&node.kind()) {
+            first_identifier_descendant_for_handler(node, handler).unwrap_or(node)
+        } else {
+            node
+        }
+    });
     let raw_name_text = match (bare_identifier_text, name_node) {
         (Some(text), _) => text,
         (None, Some(node)) => node_text(&node, src).trim().to_string(),

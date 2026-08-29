@@ -35,7 +35,7 @@
   match:
     kind: call
     callee:
-      name: responseWithStatusCode
+      regex: '^GCDWebServerDataResponse\.responseWithStatusCode:text:$'
   constraints:
   - any_arg_tainted: true
   match_examples:
@@ -43,7 +43,7 @@
     code: |
       #import <GCDWebServer/GCDWebServer.h>
       void test(id input) { [GCDWebServerDataResponse responseWithStatusCode:500 text:input]; }
-    expect_match_text: [GCDWebServerDataResponse.responseWithStatusCode]
+    expect_match_text: ['GCDWebServerDataResponse.responseWithStatusCode:text:']
   - name: literal gcdwebserver error response negative
     code: |
       #import <GCDWebServer/GCDWebServer.h>

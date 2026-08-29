@@ -35,6 +35,57 @@
       }
     expect_no_match: true
   description: "graphql.Do(params) - dynamic GraphQL query text or context reaches resolver execution."
+- id: go.graphql.schema_exec
+  enabled: true
+  language: go
+  tag: graphql-injection
+  severity: high
+  packages:
+  - github.com/graph-gophers/graphql-go
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Exec$'
+  constraints:
+  - receiver_type_in: [graphql.Schema, Schema]
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: graph gophers schema executes tainted query
+    code: |
+      package main
+      import (
+        "context"
+        "github.com/graph-gophers/graphql-go"
+      )
+      func execute(schema *graphql.Schema, query string) {
+        _ = schema.Exec(context.Background(), query, "", nil)
+      }
+    expect_match_text: [schema.Exec]
+  - name: graph gophers schema literal query negative
+    code: |
+      package main
+      import (
+        "context"
+        "github.com/graph-gophers/graphql-go"
+      )
+      func execute(schema *graphql.Schema) {
+        _ = schema.Exec(context.Background(), "{ health }", "", nil)
+      }
+    expect_no_match: true
+  - name: local exec method collision negative
+    code: |
+      package main
+      import "github.com/graph-gophers/graphql-go"
+      type localExecutor struct{}
+      func (localExecutor) Exec(any, string, string, any) {}
+      func execute(_ *graphql.Schema, executor localExecutor, query string) {
+        executor.Exec(nil, query, "", nil)
+      }
+    expect_no_match: true
+  description: "graph-gophers/graphql-go Schema.Exec executes GraphQL query text at argument one. Exact receiver typing separates it from same-spelled SQL, process, and interpreter APIs."
 - id: go.graphql.playground_handler
   enabled: true
   language: go

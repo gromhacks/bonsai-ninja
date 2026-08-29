@@ -8,16 +8,18 @@
 
 use crate::rule::{
     ArgTaintedSpec, ConstraintKind, LifecycleBindingTarget, MatchKind, MatchOrigin,
-    ReceiverOriginCallbackParamReachesCallSpec, Rule, RuleTarget,
+    ReceiverFactoryArgumentsSpec, ReceiverOriginCallbackParamReachesCallSpec, Rule, RuleBindingOrigin,
+    RuleTarget,
 };
 use ahash::{AHashMap, AHashSet};
+use aho_corasick::AhoCorasick;
 use bonsai_common::{qualified_names_match, FileId, Span, SymbolId};
 use bonsai_hash::Hasher as StableHasher;
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
-    AliasTarget, AssignmentValueIndex, CallArg, CallKind, CallTextPrefilter, CompilerAssignmentAlias,
-    CompilerSyntaxHeader, Decl, DeclIndex, DeclKind, FlowEvent, ImportSpec, ModulePath, RefKind,
-    TypeAliasBinding,
+    AliasTarget, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, CallTextPrefilter,
+    CompilerAssignmentAlias, CompilerSyntaxHeader, Decl, DeclIndex, DeclKind, FlowEvent, ImportSpec,
+    ModulePath, RefKind, TypeAliasBinding,
 };
 use bonsai_taint::{TaintedCall, TaintedCallKind};
 use bonsai_workspace::{decl_decorator_names, Workspace};
@@ -34,8 +36,11 @@ use std::{
 };
 
 const LOCAL_IMPORT_PACKAGE_PREFIX: &str = "__bonsai_local_import_pkg__";
+const LOCAL_IMPORT_PACKAGE_SIGNAL_PREFIX: &str = "__bonsai_local_import_pkg_signal__";
 const WORKSPACE_IMPORT_PACKAGE_PREFIX: &str = "__bonsai_workspace_import_pkg__";
 const COMPONENT_IMPORT_PACKAGE_PREFIX: &str = "__bonsai_component_import_pkg__";
+const MANIFEST_PACKAGE_PREFIX: &str = "__bonsai_manifest_pkg__";
+const TEMPLATE_MANIFEST_PACKAGE_PREFIX: &str = "__bonsai_template_manifest_pkg__";
 static ENDPOINT_FALLBACK_DEBUG_SAMPLES: AtomicUsize = AtomicUsize::new(0);
 
 /// Process-wide derived matcher facts share a fixed fraction of the effective
@@ -316,8 +321,6 @@ pub struct InterTaintView<'a> {
     verdict_cache: parking_lot::Mutex<AHashMap<(String, FileId, u64, u64), bool>>,
 }
 
-type CalleeCallsView<'a> = std::borrow::Cow<'a, [CallFact]>;
-
 impl<'a> InterTaintView<'a> {
     /// Build a view over the engine's tainted-call records. Pre-bins
     /// calls by span so the hot lookup path in `arg_is_tainted` is
@@ -560,6 +563,38 @@ pub(crate) fn match_rule_against_facts_with_factory(
     factory: &Arc<RulepackTyping>,
 ) -> Vec<RuleMatch> {
     match_rules_against_facts_with_factory(ws, &[rule], factory)
+}
+
+/// Match one rule's exact compiler-owned endpoint while postponing only
+/// constraints that require a source-specific taint view.
+///
+/// Rulepack validation uses this for non-finding typing rules. A typing rule
+/// can condition a receiver-state transfer on tainted input, but it can never
+/// produce a security finding for the taint replay path to observe. This mode
+/// still proves the call/write target, receiver type, imports, argument shape,
+/// and every other structural constraint.
+pub(crate) fn match_rule_endpoint_for_validation(
+    ws: &Workspace,
+    rule: &Rule,
+    factory: &Arc<RulepackTyping>,
+) -> Vec<RuleMatch> {
+    let mut on_file_done = || {};
+    let mut on_phase_progress = |_| {};
+    match_rules_against_facts_with_progress_and_mode(
+        ws,
+        &[rule],
+        &mut on_file_done,
+        &mut on_phase_progress,
+        MatchRunConfig {
+            mode: ConstraintMode::TaintEndpoint,
+            taint_view: None,
+            scan_files: None,
+            factory,
+            dedup_file_matches: false,
+            retention: FactRetention::Transient,
+            global_headers: None,
+        },
+    )
 }
 
 /// Batch matcher with a per-file progress callback.
@@ -907,7 +942,7 @@ fn call_rule_match_passes_constraints_at_expected_hit(
         return false;
     };
     let compiler_imports = ws.db().compiler_import_index_uncached(file);
-    let requirements = DeclFactRequirements::for_rules(std::iter::once(prepared), factory);
+    let requirements = DeclFactRequirements::for_rules(std::iter::once(prepared));
     let bundle = decl_match_facts_for_retention(
         ws,
         file,
@@ -918,6 +953,7 @@ fn call_rule_match_passes_constraints_at_expected_hit(
             retention: FactRetention::Transient,
             compiler_imports: compiler_imports.as_ref(),
             global_headers: Some(global_headers.as_ref()),
+            call_result_type_decls: None,
         },
     );
     let empty_receiver_base_map = AHashMap::new();
@@ -951,6 +987,15 @@ fn call_rule_match_passes_constraints_at_expected_hit(
             else {
                 continue;
             };
+            if external_receiver_type_is_workspace_shadow_at(
+                prepared,
+                &receiver_types,
+                &file_index.defs,
+                compiler_imports.as_ref(),
+                Some(&matched_callee),
+            ) {
+                continue;
+            }
             if !prepared.call_context_allows(
                 &call.callee,
                 &receiver_types,
@@ -964,6 +1009,20 @@ fn call_rule_match_passes_constraints_at_expected_hit(
                 global: global_headers.as_ref(),
                 caller: decl,
             };
+            if prepared_call_binding_origin_is_invalid(
+                prepared,
+                ws.db()
+                    .adapter_for(decl.name_span.file)
+                    .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax),
+                decl,
+                Some(&file_index.defs),
+                Some(&workspace_context),
+                call,
+                &facts.alias_map,
+                compiler_imports.as_ref(),
+            ) {
+                continue;
+            }
             if prepared.rule.match_spec.kind == MatchKind::New
                 && !call_has_new_identity(
                     Some(&workspace_context),
@@ -981,6 +1040,7 @@ fn call_rule_match_passes_constraints_at_expected_hit(
             if constraints_pass(ConstraintEval {
                 rule_id: &prepared.rule.id,
                 callee: &matched_callee,
+                receiver: call.receiver.as_deref(),
                 args: &call.args,
                 receiver_types: &receiver_types,
                 span: call.span,
@@ -1002,9 +1062,12 @@ fn call_rule_match_passes_constraints_at_expected_hit(
                     file_decls: &file_index.defs,
                     assignment_values: &file_index.assignment_values,
                     call_argument_values: &file_index.call_argument_values,
+                    string_compositions: &file_index.string_compositions,
                     factory_import_identity: Some(FactoryImportIdentityContext {
                         required_imports: &prepared.rule.imports,
                         alias_map: &facts.alias_map,
+                        compiler_imports: compiler_imports.as_ref(),
+                        workspace: Some((ws, global_headers.as_ref())),
                     }),
                 }),
             }) {
@@ -1038,7 +1101,9 @@ fn write_rule_match_passes_constraints_at_expected_hit(
         prepared.needs_workspace_package_context(),
         FactRetention::Transient,
     );
-    let alias_map = file_alias_map_with_retention(ws, file, FactRetention::Transient);
+    let compiler_imports = transient_import_index(ws, file);
+    let alias_map =
+        file_alias_map_with_compiler_imports(ws, file, FactRetention::Transient, compiler_imports.as_ref());
 
     for decl in &file_index.defs {
         if expected
@@ -1062,7 +1127,41 @@ fn write_rule_match_passes_constraints_at_expected_hit(
             ) {
                 continue;
             }
-            if !prepared.call_context_allows(&write.target, &[], &alias_map, file_packages.as_ref()) {
+            if !prepared.base_name_allows(&write.target) {
+                continue;
+            }
+            let receiver_types =
+                exact_declared_receiver_types_for_match_base(decl, &write.target, compiler_imports.as_ref());
+            if !base_receiver_type_allows(prepared, Some(decl), &write.target, &receiver_types, &[])
+                || external_receiver_type_is_workspace_shadow_at(
+                    prepared,
+                    &receiver_types,
+                    &file_index.defs,
+                    compiler_imports.as_ref(),
+                    Some(&write.target),
+                )
+            {
+                continue;
+            }
+            if !prepared.call_context_allows(
+                &write.target,
+                &receiver_types,
+                &alias_map,
+                file_packages.as_ref(),
+            ) {
+                continue;
+            }
+            if prepared_write_binding_origin_is_invalid(
+                ws,
+                file,
+                prepared,
+                decl,
+                &file_index.defs,
+                &write.target,
+                write.span,
+                &alias_map,
+                compiler_imports.as_ref(),
+            ) {
                 continue;
             }
             let args = [write.argument.clone()];
@@ -1070,8 +1169,9 @@ fn write_rule_match_passes_constraints_at_expected_hit(
             if constraints_pass(ConstraintEval {
                 rule_id: &prepared.rule.id,
                 callee: &write.target,
+                receiver: None,
                 args: &args,
-                receiver_types: &[],
+                receiver_types: &receiver_types,
                 span: write.span,
                 call_origin: Some(CallFactOrigin::SyntheticWrite),
                 constraints: &prepared.rule.constraints.0,
@@ -1091,6 +1191,7 @@ fn write_rule_match_passes_constraints_at_expected_hit(
                     file_decls: &file_index.defs,
                     assignment_values: &file_index.assignment_values,
                     call_argument_values: &file_index.call_argument_values,
+                    string_compositions: &file_index.string_compositions,
                     factory_import_identity: None,
                 }),
             }) {
@@ -1111,11 +1212,47 @@ fn write_rule_match_passes_constraints_at_expected_hit(
         ) {
             continue;
         }
+        if !prepared.base_name_allows(&r.name) {
+            continue;
+        }
+        let Some(decl) = innermost_decl_for_span(&file_index.defs, r.span) else {
+            continue;
+        };
+        let receiver_types =
+            exact_declared_receiver_types_for_match_base(decl, &r.name, compiler_imports.as_ref());
+        if !base_receiver_type_allows(prepared, Some(decl), &r.name, &receiver_types, &[])
+            || external_receiver_type_is_workspace_shadow_at(
+                prepared,
+                &receiver_types,
+                &file_index.defs,
+                compiler_imports.as_ref(),
+                Some(&r.name),
+            )
+        {
+            continue;
+        }
+        if !prepared.call_context_allows(&r.name, &receiver_types, &alias_map, file_packages.as_ref()) {
+            continue;
+        }
+        if prepared_write_binding_origin_is_invalid(
+            ws,
+            file,
+            prepared,
+            decl,
+            &file_index.defs,
+            &r.name,
+            r.span,
+            &alias_map,
+            compiler_imports.as_ref(),
+        ) {
+            continue;
+        }
         if constraints_pass(ConstraintEval {
             rule_id: &prepared.rule.id,
             callee: &r.name,
+            receiver: None,
             args: &[],
-            receiver_types: &[],
+            receiver_types: &receiver_types,
             span: r.span,
             call_origin: Some(CallFactOrigin::SyntheticWrite),
             constraints: &prepared.rule.constraints.0,
@@ -1429,7 +1566,7 @@ where
             total,
         });
     }
-    let raw_scan_files = parallel_map_with_progress(
+    let raw_scan_candidates = parallel_map_with_progress(
         &files,
         |file| {
             let adapter = ws.db().adapter_for(*file)?;
@@ -1437,19 +1574,27 @@ where
             let Ok(snapshot) = ws.db().vfs().snapshot(*file) else {
                 return None;
             };
+            let call_text_prefilter = adapter.capabilities().call_text_prefilter;
+            let anchor_matches =
+                file_rules.text_anchor_matches(snapshot.text.as_ref(), call_text_prefilter, mode);
             file_rules
-                .syntax_target_possible_in_text(
+                .syntax_target_possible_in_text_with_matches(
                     snapshot.text.as_ref(),
                     mode,
-                    adapter.capabilities().call_text_prefilter,
+                    call_text_prefilter,
+                    &anchor_matches,
                 )
-                .then_some(*file)
+                .then_some((*file, anchor_matches))
         },
         &mut || on_phase_progress(MatcherProgress::UnitCompleted),
     )
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
+    let raw_scan_files = raw_scan_candidates
+        .iter()
+        .map(|(file, _)| *file)
+        .collect::<Vec<_>>();
     if total > 0 {
         on_phase_progress(MatcherProgress::PhaseFinished);
     }
@@ -1525,14 +1670,16 @@ where
     let text_filter_ns = AtomicU64::new(0);
     let syntax_load_ns = AtomicU64::new(0);
     let syntax_filter_ns = AtomicU64::new(0);
-    let build_scan_plan = |candidate_files: &[FileId],
+    let build_scan_plan = |candidate_files: &[(FileId, BatchTextAnchorMatches)],
                            receiver_base_map: &AHashMap<String, Vec<String>>,
                            receiver_ancestry: Option<&Arc<bonsai_index::ReceiverAncestry>>,
                            receiver_ancestry_complete: bool,
                            on_completed: &mut dyn FnMut()| {
         parallel_map_with_progress(
             candidate_files,
-            |&file| {
+            |candidate| {
+                let file = candidate.0;
+                let matched_text_anchors = &candidate.1;
                 let adapter = ws.db().adapter_for(file)?;
                 let language = adapter.language_id();
                 let file_rules = prepared_by_language.get(language.as_str())?;
@@ -1555,6 +1702,7 @@ where
                     retention,
                     prewarmed_import_contexts: import_contexts,
                     compiler_imports,
+                    matched_text_anchors: Some(matched_text_anchors),
                 });
                 if let Some(started) = text_filter_started {
                     record_elapsed_ns(&text_filter_ns, started);
@@ -1623,7 +1771,7 @@ where
         });
     }
     let initial_plan = build_scan_plan(
-        &raw_scan_files,
+        &raw_scan_candidates,
         &receiver_base_map,
         receiver_ancestry.as_ref(),
         ancestry_already_complete,
@@ -1634,15 +1782,20 @@ where
     }
     let mut deferred_plans = Vec::new();
     let mut scan_plan = Vec::new();
-    let mut needs_workspace_constructor_resolution = false;
-    for (file, rules, deferred, needs_constructor_resolution) in initial_plan {
+    let mut needs_workspace_call_resolution = false;
+    for (file, rules, deferred, needs_call_resolution) in initial_plan {
         if let Some(deferred) = deferred {
             deferred_plans.push((file, deferred));
         } else if !rules.is_empty() {
-            needs_workspace_constructor_resolution |= needs_constructor_resolution;
+            needs_workspace_call_resolution |= needs_call_resolution;
             scan_plan.push((file, rules));
         }
     }
+    let needs_workspace_parameter_identity = scan_plan.iter().any(|(_, rules)| {
+        rules
+            .iter()
+            .any(|prepared| prepared_rule_needs_external_parameter_identity(prepared))
+    });
     if !deferred_plans.is_empty() {
         let deferred_file_count = deferred_plans.len();
         on_phase_progress(MatcherProgress::PhaseStarted {
@@ -1669,16 +1822,15 @@ where
                     enrich_compiler_syntax_header_receiver_types(&mut syntax, &receiver_base_map);
                 }
                 let file_rules = prepared_by_language.get(&language)?;
-                let (rules, _, needs_constructor_resolution) = file_rules
-                    .filtered_rule_refs_for_syntax_header(
-                        rules,
-                        &syntax,
-                        source_text.as_ref(),
-                        compiler_imports.as_ref(),
-                        &language,
-                        true,
-                    );
-                (!rules.is_empty()).then_some((file, rules, needs_constructor_resolution))
+                let (rules, _, needs_call_resolution) = file_rules.filtered_rule_refs_for_syntax_header(
+                    rules,
+                    &syntax,
+                    source_text.as_ref(),
+                    compiler_imports.as_ref(),
+                    &language,
+                    true,
+                );
+                (!rules.is_empty()).then_some((file, rules, needs_call_resolution))
             },
             &mut || on_phase_progress(MatcherProgress::UnitCompleted),
         )
@@ -1686,8 +1838,8 @@ where
         .flatten()
         .collect::<Vec<_>>();
         on_phase_progress(MatcherProgress::PhaseFinished);
-        for (file, rules, needs_constructor_resolution) in completed_deferred {
-            needs_workspace_constructor_resolution |= needs_constructor_resolution;
+        for (file, rules, needs_call_resolution) in completed_deferred {
+            needs_workspace_call_resolution |= needs_call_resolution;
             scan_plan.push((file, rules));
         }
         scan_plan.sort_unstable_by_key(|(file, _)| file.raw());
@@ -1702,12 +1854,17 @@ where
             );
         }
     }
-    if needs_workspace_constructor_resolution && global_file_indexes.is_none() {
-        // Compact headers proved that at least one function-shaped call
-        // can match a constructor/type model. Load only declaration/type
-        // headers before the parallel body phase so exact workspace callable
-        // identity and lexical shadowing decide the result. No bodies or IDG
-        // are materialized by this step.
+    if (needs_workspace_call_resolution || needs_workspace_parameter_identity)
+        && global_file_indexes.is_none()
+    {
+        // Compact headers proved that at least one surviving typed call can
+        // change its verdict through exact first-party call identity, or that
+        // an exact typed parameter needs a workspace-shadow check before it
+        // can stand in for a missing external import. Load only
+        // declaration/type headers before the parallel body phase so imported
+        // module values, declared returns, constructors, and lexical shadowing
+        // are resolved by compiler facts. No bodies or IDG are materialized by
+        // this step.
         global_file_indexes = Some(matcher_global_headers(ws, retention));
     }
     if let Some(started) = package_filter_started {
@@ -1787,7 +1944,7 @@ where
         })
         .collect::<Vec<_>>();
     let parallel_width = workers.min(scan_plan.len()).max(1);
-    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
+    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_streaming_compiler_bodies();
     let phase_timings = debug_security_phase.then(MatcherPhaseTimings::default);
     if debug_security_phase {
         bonsai_diagnostics::debug_log!(
@@ -1828,12 +1985,25 @@ where
         if let (Some(started), Some(timings)) = (remap_started, phase_timings.as_ref()) {
             record_elapsed_ns(&timings.remap, started);
         }
+        // Reuse the same exact compiler/package evidence representation for
+        // every endpoint family in this body. Component and manifest sets are
+        // shared by reference; only file-local imports are projected here.
+        // This avoids rebuilding marker-expanded package hash sets in calls,
+        // reads, writes, and params without changing any matcher verdict.
+        let package_evidence = file_package_planning_evidence(
+            ws,
+            file,
+            file_rules.include_workspace_package_context,
+            retention,
+            prewarmed_import_contexts.get(language.as_str()),
+            file_imports.as_ref(),
+        );
         let ctx = FileScanContext {
             ws,
             file,
             file_index: &file_index,
             file_imports: file_imports.as_ref(),
-            import_package_contexts: prewarmed_import_contexts.get(language.as_str()),
+            package_evidence: &package_evidence,
             mode,
             taint_view,
             retention,
@@ -1937,13 +2107,23 @@ where
                             };
                             bonsai_diagnostics::debug_log!(
                                 "security-phase",
-                                "matcher aggregate worker CPU: compiler_object={:.3}s remap={:.3}s body_scan={:.3}s call_setup={:.3}s decl_facts={:.3}s call_match={:.3}s",
+                                "matcher aggregate worker CPU: compiler_object={:.3}s remap={:.3}s body_scan={:.3}s call_setup={:.3}s decl_facts={:.3}s call_match={:.3}s refs={:.3}s flow_reads={:.3}s writes={:.3}s params={:.3}s types={:.3}s returns={:.3}s missing={:.3}s direct_receiver_files={} derived_receiver_files={} derived_receiver_decls={}",
                                 seconds(&timings.compiler_object),
                                 seconds(&timings.remap),
                                 seconds(&timings.body_scan),
                                 seconds(&timings.call_setup),
                                 seconds(&timings.decl_facts),
                                 seconds(&timings.call_match),
+                                seconds(&timings.refs_scan),
+                                seconds(&timings.flow_reads_scan),
+                                seconds(&timings.writes_scan),
+                                seconds(&timings.params_scan),
+                                seconds(&timings.types_scan),
+                                seconds(&timings.returns_scan),
+                                seconds(&timings.missing_scan),
+                                timings.direct_receiver_files.load(Ordering::Relaxed),
+                                timings.derived_receiver_files.load(Ordering::Relaxed),
+                                timings.derived_receiver_decls.load(Ordering::Relaxed),
                             );
                         }
                     }
@@ -1989,9 +2169,16 @@ fn matcher_worker_count() -> usize {
 }
 
 /// Keep one inventory row per exact compiler binding and rule, preferring
-/// callable attribution over a duplicate module-body projection.
+/// callable attribution and the narrowest syntax span over duplicate wrapper
+/// projections.
 pub(crate) fn dedup_inventory_matches(matches: &mut Vec<RuleMatch>) {
-    type InventoryDedupKey = (String, String, u64, u64, String, String);
+    // Two compiler views can anchor one place at the same token start while
+    // retaining different ends: the reference inventory owns the exact place,
+    // while expression-flow lowering may own a surrounding value wrapper.
+    // Start + bound text is the concrete binding identity; distinct same-line
+    // parameters remain separate because their match text and token starts
+    // differ. Keeping `span.end` in this key would emit the same source twice.
+    type InventoryDedupKey = (String, String, u64, String, String);
 
     let mut seen: AHashMap<InventoryDedupKey, usize> = AHashMap::new();
     let mut deduped: Vec<RuleMatch> = Vec::with_capacity(matches.len());
@@ -2000,7 +2187,6 @@ pub(crate) fn dedup_inventory_matches(matches: &mut Vec<RuleMatch>) {
             m.language.clone(),
             m.file.clone(),
             m.span.start,
-            m.span.end,
             m.rule_id.clone(),
             m.match_text.clone(),
         );
@@ -2015,7 +2201,10 @@ pub(crate) fn dedup_inventory_matches(matches: &mut Vec<RuleMatch>) {
                 .as_deref()
                 .is_some_and(|name| name != "__module__");
             let candidate_is_callable = m.enclosing_fn.as_deref().is_some_and(|name| name != "__module__");
-            if candidate_is_callable && !existing_is_callable {
+            let candidate_is_narrower = m.span.len() < deduped[idx].span.len();
+            if (candidate_is_callable && !existing_is_callable)
+                || (candidate_is_callable == existing_is_callable && candidate_is_narrower)
+            {
                 deduped[idx] = m;
             }
             continue;
@@ -2097,7 +2286,7 @@ struct FileScanContext<'a, 'taint> {
     file: FileId,
     file_index: &'a DeclIndex,
     file_imports: Option<&'a bonsai_lang_api::ImportIndex>,
-    import_package_contexts: Option<&'a Arc<LanguageImportPackageContexts>>,
+    package_evidence: &'a FilePackagePlanningEvidence,
     mode: ConstraintMode,
     taint_view: Option<&'a InterTaintView<'taint>>,
     retention: FactRetention,
@@ -2117,6 +2306,16 @@ struct MatcherPhaseTimings {
     call_setup: AtomicU64,
     decl_facts: AtomicU64,
     call_match: AtomicU64,
+    refs_scan: AtomicU64,
+    flow_reads_scan: AtomicU64,
+    writes_scan: AtomicU64,
+    params_scan: AtomicU64,
+    types_scan: AtomicU64,
+    returns_scan: AtomicU64,
+    missing_scan: AtomicU64,
+    direct_receiver_files: AtomicUsize,
+    derived_receiver_files: AtomicUsize,
+    derived_receiver_decls: AtomicUsize,
 }
 
 fn record_elapsed_ns(counter: &AtomicU64, started: Instant) {
@@ -2197,10 +2396,13 @@ fn workspace_receiver_base_map(global: &bonsai_index::GlobalIndex) -> AHashMap<S
 }
 
 fn prepared_rule_needs_receiver_base_map(rule: &PreparedRule<'_>) -> bool {
-    if matches!(rule.rule.kind, crate::rule::RuleKind::Source) {
-        return false;
-    }
     rule.attribute.as_ref().is_some_and(|attr| attr.len() >= 2)
+        || rule
+            .rule
+            .match_spec
+            .target
+            .as_ref()
+            .is_some_and(|target| !target.in_class.is_empty() || !target.in_class_suffix.is_empty())
         || rule.rule.constraints.iter().any(|constraint| {
             matches!(
                 constraint,
@@ -2311,6 +2513,8 @@ impl<'a> PreparedRule<'a> {
                 package_signals.push(signal.as_str());
             }
         }
+        package_signals.sort_unstable();
+        package_signals.dedup();
         let requires_call_package_signal = rule_requires_call_package_signal(rule);
         let regex = match target.regex.as_deref() {
             Some(pattern) => match Regex::new(pattern) {
@@ -2402,6 +2606,7 @@ impl<'a> PreparedRule<'a> {
         )
     }
 
+    #[cfg(test)]
     fn text_possible_in_mode(
         &self,
         text: &str,
@@ -2409,14 +2614,40 @@ impl<'a> PreparedRule<'a> {
         mode: ConstraintMode,
         call_text_prefilter: CallTextPrefilter,
     ) -> bool {
-        if !self.syntax_target_possible_in_mode(text, mode, call_text_prefilter) {
+        self.text_possible_in_mode_with_anchor_lookup(
+            text,
+            file_packages,
+            mode,
+            call_text_prefilter,
+            &|anchor| text.contains(anchor),
+            &|anchor| call_text_anchor_possible_in(text, anchor, call_text_prefilter),
+        )
+    }
+
+    #[cfg(test)]
+    fn text_possible_in_mode_with_anchor_lookup(
+        &self,
+        text: &str,
+        file_packages: Option<&AHashSet<String>>,
+        mode: ConstraintMode,
+        call_text_prefilter: CallTextPrefilter,
+        anchor_present: &impl Fn(&str) -> bool,
+        call_anchor_present: &impl Fn(&str) -> bool,
+    ) -> bool {
+        if !self.syntax_target_possible_in_mode_with_anchor_lookup(
+            text,
+            mode,
+            call_text_prefilter,
+            anchor_present,
+            call_anchor_present,
+        ) {
             return false;
         }
         self.package_text_anchors.is_empty()
             || self
                 .package_text_anchors
                 .iter()
-                .any(|anchor| text.contains(anchor))
+                .any(|anchor| anchor_present(anchor))
             || file_packages.is_some_and(|packages| self.package_evidence_allows_text_anchor_skip(packages))
     }
 
@@ -2428,22 +2659,40 @@ impl<'a> PreparedRule<'a> {
     /// available. Target/call anchors cannot be created by imports; checking
     /// them against the VFS snapshot before decoding a compiler object is
     /// therefore lossless.
+    #[cfg(test)]
     fn syntax_target_possible_in_mode(
         &self,
         text: &str,
         mode: ConstraintMode,
         call_text_prefilter: CallTextPrefilter,
     ) -> bool {
+        self.syntax_target_possible_in_mode_with_anchor_lookup(
+            text,
+            mode,
+            call_text_prefilter,
+            &|anchor| text.contains(anchor),
+            &|anchor| call_text_anchor_possible_in(text, anchor, call_text_prefilter),
+        )
+    }
+
+    fn syntax_target_possible_in_mode_with_anchor_lookup(
+        &self,
+        _text: &str,
+        mode: ConstraintMode,
+        call_text_prefilter: CallTextPrefilter,
+        anchor_present: &impl Fn(&str) -> bool,
+        call_anchor_present: &impl Fn(&str) -> bool,
+    ) -> bool {
         let target_possible = self
             .text_anchor_groups
             .iter()
-            .all(|group| group.is_empty() || group.iter().any(|anchor| text.contains(anchor)));
+            .all(|group| group.is_empty() || group.iter().any(|anchor| anchor_present(anchor)));
         if !target_possible {
             return false;
         }
         if matches!(mode, ConstraintMode::Inventory) && call_text_prefilter != CallTextPrefilter::Disabled {
             if let Some(anchor) = self.call_text_anchor.as_deref() {
-                if !call_text_anchor_possible_in(text, anchor, call_text_prefilter) {
+                if !call_anchor_present(anchor) {
                     return false;
                 }
             }
@@ -2451,41 +2700,125 @@ impl<'a> PreparedRule<'a> {
         true
     }
 
+    #[cfg(test)]
     fn package_evidence_allows_text_anchor_skip(&self, file_packages: &AHashSet<String>) -> bool {
         self.package_signals.iter().any(|signal| {
             file_packages.contains(*signal)
-                || file_packages.contains(&workspace_import_package_marker(signal))
+                || (self.manifest_package_evidence_allowed()
+                    && file_packages.contains(&manifest_package_marker(signal)))
+                || (self.template_manifest_package_evidence_allowed()
+                    && file_packages.contains(&template_manifest_package_marker(signal)))
                 || (self.component_level_package_evidence_allowed()
                     && file_packages.contains(&component_import_package_marker(signal)))
                 || file_packages_have_local_import_package(file_packages, signal)
         })
     }
 
-    fn call_context_allows(
+    /// Evaluate the raw/import planning gate without materializing common
+    /// workspace, component, and manifest packages into a fresh string set
+    /// for every source file. The four evidence classes below are exactly the
+    /// marker classes consumed by `package_evidence_allows_text_anchor_skip`;
+    /// only their representation changes. Full endpoint matching continues
+    /// to use the canonical materialized package set.
+    fn package_evidence_allows_text_anchor_skip_in_planning(
+        &self,
+        evidence: &FilePackagePlanningEvidence,
+    ) -> bool {
+        self.package_signals.iter().any(|signal| {
+            evidence.direct_file_packages.contains(*signal)
+                || (evidence.manifest_packages.as_ref().is_some_and(|packages| {
+                    packages.packages.contains(*signal)
+                        && if evidence.is_template {
+                            self.template_manifest_package_evidence_allowed()
+                        } else {
+                            self.manifest_package_evidence_allowed()
+                        }
+                }))
+                || (self.component_level_package_evidence_allowed()
+                    && evidence.component_packages.packages.contains(*signal))
+                || file_packages_have_local_import_package(&evidence.direct_file_packages, signal)
+        })
+    }
+
+    fn has_same_package_evidence_query(&self, other: &Self) -> bool {
+        self.package_signals == other.package_signals
+            && self.file_level_package_evidence_allowed() == other.file_level_package_evidence_allowed()
+            && self.manifest_package_evidence_allowed() == other.manifest_package_evidence_allowed()
+            && self.template_manifest_package_evidence_allowed()
+                == other.template_manifest_package_evidence_allowed()
+            && self.component_level_package_evidence_allowed()
+                == other.component_level_package_evidence_allowed()
+            && self.rule.package_matching == other.rule.package_matching
+    }
+
+    fn call_context_allows<P: PackageEvidence + ?Sized>(
         &self,
         callee: &str,
         receiver_types: &[String],
         alias_map: &std::collections::HashMap<String, AliasTarget>,
-        file_packages: &AHashSet<String>,
+        file_packages: &P,
     ) -> bool {
         self.call_context_allows_impl(callee, receiver_types, alias_map, file_packages, false)
     }
 
-    fn imported_default_call_context_allows(
+    /// A source rule's exact compiler-owned enclosing class/base is itself
+    /// provider provenance. This is deliberately narrower than a naming
+    /// convention: the ordinary declaration-context matcher must already
+    /// have proven the rule-authored `in_class` or `in_owner_base` constraint
+    /// against the adapter declaration and its expanded ancestry. Package
+    /// evidence remains mandatory for unconstrained names, suffix-only class
+    /// conventions, and every wrong/no-owner context.
+    fn source_declaration_provider_context_allows(
         &self,
-        callee: &str,
-        alias_map: &std::collections::HashMap<String, AliasTarget>,
-        file_packages: &AHashSet<String>,
+        file_index: &DeclIndex,
+        decl: Option<&Decl>,
     ) -> bool {
-        self.call_context_allows_impl(callee, &[], alias_map, file_packages, true)
+        if self.rule.kind != crate::rule::RuleKind::Source || !self.requires_call_package_signal {
+            return false;
+        }
+        let target = match self.rule.match_spec.kind {
+            MatchKind::Call | MatchKind::New | MatchKind::Missing => self.rule.match_spec.callee.as_ref(),
+            MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param | MatchKind::Type => {
+                self.rule.match_spec.target.as_ref()
+            }
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        if target.in_class.is_empty() && target.in_owner_base.is_empty() {
+            return false;
+        }
+        decl_target_context_allows(file_index, decl, Some(target), None)
     }
 
-    fn call_context_allows_impl(
+    fn call_or_source_context_allows<P: PackageEvidence + ?Sized>(
         &self,
         callee: &str,
         receiver_types: &[String],
         alias_map: &std::collections::HashMap<String, AliasTarget>,
-        file_packages: &AHashSet<String>,
+        file_packages: &P,
+        file_index: &DeclIndex,
+        decl: Option<&Decl>,
+    ) -> bool {
+        self.call_context_allows(callee, receiver_types, alias_map, file_packages)
+            || self.source_declaration_provider_context_allows(file_index, decl)
+    }
+
+    fn imported_default_call_context_allows<P: PackageEvidence + ?Sized>(
+        &self,
+        callee: &str,
+        alias_map: &std::collections::HashMap<String, AliasTarget>,
+        file_packages: &P,
+    ) -> bool {
+        self.call_context_allows_impl(callee, &[], alias_map, file_packages, true)
+    }
+
+    fn call_context_allows_impl<P: PackageEvidence + ?Sized>(
+        &self,
+        callee: &str,
+        receiver_types: &[String],
+        alias_map: &std::collections::HashMap<String, AliasTarget>,
+        file_packages: &P,
         exact_binding_only: bool,
     ) -> bool {
         if !self.requires_call_package_signal {
@@ -2549,8 +2882,10 @@ impl<'a> PreparedRule<'a> {
             !exact_binding_only && self.file_level_package_evidence_allowed();
         let component_level_package_evidence_allowed =
             !exact_binding_only && self.component_level_package_evidence_allowed();
-        let workspace_level_package_evidence_allowed =
-            !exact_binding_only && self.workspace_level_package_evidence_allowed();
+        let manifest_package_evidence_allowed =
+            !exact_binding_only && self.manifest_package_evidence_allowed();
+        let template_manifest_package_evidence_allowed =
+            !exact_binding_only && self.template_manifest_package_evidence_allowed();
         let allowed = self.package_signals.iter().any(|signal| {
             (file_level_package_evidence_allowed
                 && package_set_contains_import(
@@ -2566,11 +2901,18 @@ impl<'a> PreparedRule<'a> {
                         Some(COMPONENT_IMPORT_PACKAGE_PREFIX),
                         &self.rule.package_matching,
                     ))
-                || (workspace_level_package_evidence_allowed
+                || (manifest_package_evidence_allowed
                     && package_set_contains_import(
                         file_packages,
                         signal,
-                        Some(WORKSPACE_IMPORT_PACKAGE_PREFIX),
+                        Some(MANIFEST_PACKAGE_PREFIX),
+                        &self.rule.package_matching,
+                    ))
+                || (template_manifest_package_evidence_allowed
+                    && package_set_contains_import(
+                        file_packages,
+                        signal,
+                        Some(TEMPLATE_MANIFEST_PACKAGE_PREFIX),
                         &self.rule.package_matching,
                     ))
                 || candidates
@@ -2665,44 +3007,128 @@ impl<'a> PreparedRule<'a> {
         }
     }
 
-    fn workspace_level_package_evidence_allowed(&self) -> bool {
-        // Generic source shapes such as `request.headers` must stay tied to
-        // the current file's imports/aliases. A sibling file importing the
-        // package proves only that the dependency exists somewhere in the
-        // workspace; it does not prove that this value is framework input.
-        // Sink rules may use workspace evidence when their target shape and
-        // constraints make file-level package evidence safe.
-        matches!(self.rule.kind, crate::rule::RuleKind::Sink) && self.file_level_package_evidence_allowed()
+    fn manifest_package_evidence_allowed(&self) -> bool {
+        let target = match self.rule.match_spec.kind {
+            MatchKind::Call | MatchKind::New | MatchKind::Missing => self.rule.match_spec.callee.as_ref(),
+            MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param | MatchKind::Type => {
+                self.rule.match_spec.target.as_ref()
+            }
+        };
+        let target_has_exact_owner = target.is_some_and(|target| {
+            !target.in_class.is_empty()
+                || !target.in_class_suffix.is_empty()
+                || !target.in_owner_base.is_empty()
+                || !target.param_type_exact_in.is_empty()
+                || !target.signature_param_types.is_empty()
+                || !target.signature_param_annotations.is_empty()
+                || !target.receiver_type_in.is_empty()
+                || target
+                    .regex
+                    .as_deref()
+                    .is_some_and(regex_has_literal_qualified_prefix)
+                || (target.regex.is_none()
+                    && target
+                        .attribute
+                        .as_ref()
+                        .is_some_and(|attribute| attribute.len() >= 2))
+        });
+        let has_receiver_type_constraint = self
+            .rule
+            .constraints
+            .iter()
+            .any(|constraint| matches!(constraint, ConstraintKind::ReceiverTypeIn { .. }));
+        match self.rule.kind {
+            // A dependency manifest proves installation, not that a generic
+            // local `read`, `params`, or callback parameter belongs to the
+            // framework. Require compiler ownership/type evidence or an exact
+            // rulepack-qualified API path before manifest evidence can
+            // satisfy a source gate.
+            crate::rule::RuleKind::Source => target_has_exact_owner || has_receiver_type_constraint,
+            // Explicit source-independent/file-evidence sink semantics are a
+            // reviewed rulepack opt-in. Ordinary taint sinks still need an
+            // exact owner/type shape before a workspace manifest can replace
+            // an in-file import.
+            crate::rule::RuleKind::Sink => {
+                allows_file_package_evidence(self.rule)
+                    || target_has_exact_owner
+                    || has_receiver_type_constraint
+            }
+            crate::rule::RuleKind::Sanitizer | crate::rule::RuleKind::Typing => false,
+        }
     }
 
     fn component_level_package_evidence_allowed(&self) -> bool {
-        if self.rule.kind != crate::rule::RuleKind::Source || self.rule.frameworks.is_empty() {
-            return false;
-        }
         let target = match self.rule.match_spec.kind {
             MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param | MatchKind::Type => {
                 self.rule.match_spec.target.as_ref()
             }
-            MatchKind::Call | MatchKind::New | MatchKind::Missing => None,
+            MatchKind::Call | MatchKind::New | MatchKind::Missing => self.rule.match_spec.callee.as_ref(),
         };
-        // A connected importer proves which framework owns a split-out route
-        // module, but only admit that evidence for an exact structured
-        // attribute read. Regex/name-only source shapes remain file-local:
-        // component package presence is not precise enough for them.
-        target.is_some_and(|target| {
+        let exact_structured_owner = target.is_some_and(|target| {
             target.regex.is_none()
                 && target.name.is_none()
                 && target
                     .attribute
                     .as_ref()
                     .is_some_and(|attribute| attribute.len() >= 2)
-        })
+        });
+        let constrained_receiver = target.is_some_and(|target| {
+            !target.base_name_in.is_empty()
+                || !target.receiver_type_in.is_empty()
+                || !target.in_class.is_empty()
+                || !target.in_class_suffix.is_empty()
+                || !target.in_owner_base.is_empty()
+                || !target.param_type_exact_in.is_empty()
+                || !target.signature_param_types.is_empty()
+                || !target.signature_param_annotations.is_empty()
+        }) || self
+            .rule
+            .constraints
+            .iter()
+            .any(|constraint| matches!(constraint, ConstraintKind::ReceiverTypeIn { .. }));
+
+        match self.rule.kind {
+            // A connected importer proves which framework owns a split-out
+            // route module, but source evidence still needs both an explicit
+            // framework declaration and an exact compiler-owned target.
+            // Regex/name-only source shapes remain file-local.
+            crate::rule::RuleKind::Source => {
+                !self.rule.frameworks.is_empty() && (exact_structured_owner || constrained_receiver)
+            }
+            // A package imported by the same compiler-resolved component is
+            // valid supporting evidence for an exact receiver/member sink.
+            // This is what lets a service module consume a DB handle created
+            // by its imported connection module. Bare calls such as
+            // `serialize(...)` remain ineligible, so an unrelated package
+            // import elsewhere in the component cannot authorize them.
+            crate::rule::RuleKind::Sink => exact_structured_owner || constrained_receiver,
+            crate::rule::RuleKind::Sanitizer | crate::rule::RuleKind::Typing => false,
+        }
+    }
+
+    fn template_manifest_package_evidence_allowed(&self) -> bool {
+        // Template adapters lower helper calls in a runtime-owned rendering
+        // context where the template itself cannot carry a normal language
+        // import. The file extension and package manifest provide that
+        // context; ordinary source files never receive this marker.
+        self.rule.kind == crate::rule::RuleKind::Sink && self.file_level_package_evidence_allowed()
     }
 
     fn needs_workspace_package_context(&self) -> bool {
         self.requires_call_package_signal
-            && (self.component_level_package_evidence_allowed()
-                || self.workspace_level_package_evidence_allowed())
+            // Language-scoped dependency manifests are represented as plain
+            // package evidence and intentionally use the same admission rule
+            // as an exact import in this file. Workspace/component *import*
+            // evidence carries a distinct marker and remains subject to the
+            // narrower source/sink policies below. Without the file-level
+            // arm, compiler-proven runtime globals and inherited framework
+            // APIs can be proven installed by dependency inventory but can
+            // never satisfy their source rule's package gate.
+            && (self.file_level_package_evidence_allowed()
+                || self.manifest_package_evidence_allowed()
+                || self.template_manifest_package_evidence_allowed()
+                || self.component_level_package_evidence_allowed()
+            )
     }
 }
 
@@ -2714,13 +3140,11 @@ fn empty_rule_target() -> &'static RuleTarget {
 fn text_anchor_groups_for_rule(rule: &Rule, target: &RuleTarget) -> Vec<Vec<String>> {
     let mut groups = Vec::new();
     groups.extend(text_anchor_groups_for_target(target, rule.match_spec.kind));
-    let mut class_group = Vec::new();
-    for class_name in &target.in_class {
-        push_text_anchor(&mut class_group, class_name);
-    }
-    if !class_group.is_empty() {
-        groups.push(class_group);
-    }
+    // `in_class` means "equals or extends" and may be satisfied through an
+    // arbitrarily deep base chain declared in other files. Requiring the
+    // named base spelling in this file would be a lossy raw-text prefilter.
+    // The staged compiler matcher enforces it against exact declaration
+    // ownership after receiver ancestry has been loaded.
     let mut method_group = Vec::new();
     for method_name in &target.in_method {
         push_text_anchor(&mut method_group, method_name);
@@ -2738,7 +3162,19 @@ fn text_anchor_groups_for_rule(rule: &Rule, target: &RuleTarget) -> Vec<Vec<Stri
         } = constraint
         {
             for decorator in enclosing_decorator_in {
-                push_text_anchor(&mut decorator_group, annotation_tail(decorator));
+                // Decorator config facts are compiler-semantic identities,
+                // not source spellings. For example, an adapter may lower
+                // `@job(bind=True)` to `job.bind=true`. Requiring the latter
+                // verbatim here would make this conservative raw-text planner
+                // language- and spelling-sensitive. Only the callable segment
+                // before config remains a source anchor; exact config is
+                // checked later against adapter facts.
+                let callable = decorator
+                    .split('.')
+                    .take_while(|segment| !segment.contains('='))
+                    .last()
+                    .unwrap_or_default();
+                push_text_anchor(&mut decorator_group, annotation_tail(callable));
             }
         }
     }
@@ -2762,8 +3198,17 @@ fn text_anchor_groups_for_rule(rule: &Rule, target: &RuleTarget) -> Vec<Vec<Stri
     groups
 }
 
-fn package_text_anchors_for_rule(rule: &Rule, _target: &RuleTarget, package_signals: &[&str]) -> Vec<String> {
+fn package_text_anchors_for_rule(rule: &Rule, target: &RuleTarget, package_signals: &[&str]) -> Vec<String> {
     if package_signals.is_empty() || !rule_requires_call_package_signal(rule) {
+        return Vec::new();
+    }
+    // Exact enclosing-owner source rules prove provider identity only after
+    // the compiler body and ancestry are available. A package spelling is
+    // not required to occur in the same file, so retaining it as a raw-text
+    // prerequisite would discard the candidate before that structural proof.
+    if rule.kind == crate::rule::RuleKind::Source
+        && (!target.in_class.is_empty() || !target.in_owner_base.is_empty())
+    {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -2804,19 +3249,8 @@ fn call_text_anchor_possible_in(text: &str, anchor: &str, syntax: CallTextPrefil
     while let Some(relative) = text[search_from..].find(anchor) {
         let start = search_from + relative;
         let end = start + anchor.len();
-        let before_ok = text[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|ch| !is_call_identifier_char(ch));
-        if before_ok {
-            if call_anchor_followed_by_call_paren(text, end) {
-                return true;
-            }
-            if syntax == CallTextPrefilter::ParenthesizedOrCommand
-                && call_anchor_followed_by_command_style_call(text, end)
-            {
-                return true;
-            }
+        if call_text_match_is_call(text, start, end, syntax) {
+            return true;
         }
         search_from = end;
         if search_from >= text.len() {
@@ -2824,6 +3258,17 @@ fn call_text_anchor_possible_in(text: &str, anchor: &str, syntax: CallTextPrefil
         }
     }
     false
+}
+
+fn call_text_match_is_call(text: &str, start: usize, end: usize, syntax: CallTextPrefilter) -> bool {
+    let before_ok = text[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|ch| !is_call_identifier_char(ch));
+    before_ok
+        && (call_anchor_followed_by_call_paren(text, end)
+            || (syntax == CallTextPrefilter::ParenthesizedOrCommand
+                && call_anchor_followed_by_command_style_call(text, end)))
 }
 
 fn call_anchor_followed_by_call_paren(text: &str, mut pos: usize) -> bool {
@@ -2911,15 +3356,32 @@ fn text_anchor_groups_for_target(target: &RuleTarget, match_kind: MatchKind) -> 
             if attribute.len() == 2 && idx == 0 {
                 continue;
             }
-            let mut out = Vec::new();
-            push_text_anchor(&mut out, part);
-            if idx > 0 && part.len() < 3 {
-                push_exact_text_anchor(&mut out, &format!(".{part}"));
-                push_exact_text_anchor(&mut out, &format!("::{part}"));
-                push_exact_text_anchor(&mut out, &format!("->{part}"));
-            }
-            if !out.is_empty() {
-                groups.push(out);
+            let components = bonsai_common::qualified_name_segments(part);
+            if components.len() > 1 {
+                // A single rule component may preserve an exact multipart
+                // callable suffix. Its identifier components are each
+                // mandatory in source, but the complete compiler spelling is
+                // not necessarily contiguous around argument expressions.
+                // Keep one required raw-anchor group per structural component
+                // and leave the exact suffix comparison to the body matcher.
+                for component in components {
+                    let mut out = Vec::new();
+                    push_text_anchor(&mut out, component);
+                    if !out.is_empty() {
+                        groups.push(out);
+                    }
+                }
+            } else {
+                let mut out = Vec::new();
+                push_text_anchor(&mut out, part);
+                if idx > 0 && part.len() < 3 {
+                    push_exact_text_anchor(&mut out, &format!(".{part}"));
+                    push_exact_text_anchor(&mut out, &format!("::{part}"));
+                    push_exact_text_anchor(&mut out, &format!("->{part}"));
+                }
+                if !out.is_empty() {
+                    groups.push(out);
+                }
             }
         }
     }
@@ -3246,6 +3708,10 @@ fn local_import_package_marker(module: &str, package: &str) -> String {
     format!("{LOCAL_IMPORT_PACKAGE_PREFIX}:{module}:{package}")
 }
 
+fn local_import_package_signal_marker(package: &str) -> String {
+    format!("{LOCAL_IMPORT_PACKAGE_SIGNAL_PREFIX}:{package}")
+}
+
 fn workspace_import_package_marker(package: &str) -> String {
     format!("{WORKSPACE_IMPORT_PACKAGE_PREFIX}:{package}")
 }
@@ -3254,45 +3720,122 @@ fn component_import_package_marker(package: &str) -> String {
     format!("{COMPONENT_IMPORT_PACKAGE_PREFIX}:{package}")
 }
 
-fn package_set_contains_import(
-    file_packages: &AHashSet<String>,
+fn manifest_package_marker(package: &str) -> String {
+    format!("{MANIFEST_PACKAGE_PREFIX}:{package}")
+}
+
+fn template_manifest_package_marker(package: &str) -> String {
+    format!("{TEMPLATE_MANIFEST_PACKAGE_PREFIX}:{package}")
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PackageEvidenceScope {
+    Direct,
+    Component,
+    Manifest,
+    TemplateManifest,
+}
+
+/// Exact package evidence queried by the endpoint matcher.
+///
+/// The materialized implementation preserves the legacy marker-set oracle
+/// used by focused tests and isolated checks. Broad scans use the compact
+/// implementation below, which borrows shared component/manifest sets and
+/// therefore changes allocation only, never package ownership semantics.
+trait PackageEvidence {
+    fn contains_import(
+        &self,
+        signal: &str,
+        scope: PackageEvidenceScope,
+        semantics: &crate::loader::PackageMatchSemantics,
+    ) -> bool;
+
+    fn local_import_allows(&self, candidate: &str, signal: &str) -> bool;
+
+    fn has_local_import_package(&self, signal: &str) -> bool;
+}
+
+fn is_package_evidence_marker(candidate: &str) -> bool {
+    candidate.starts_with(LOCAL_IMPORT_PACKAGE_PREFIX)
+        || candidate.starts_with(LOCAL_IMPORT_PACKAGE_SIGNAL_PREFIX)
+        || candidate.starts_with(WORKSPACE_IMPORT_PACKAGE_PREFIX)
+        || candidate.starts_with(COMPONENT_IMPORT_PACKAGE_PREFIX)
+        || candidate.starts_with(MANIFEST_PACKAGE_PREFIX)
+        || candidate.starts_with(TEMPLATE_MANIFEST_PACKAGE_PREFIX)
+}
+
+impl PackageEvidence for AHashSet<String> {
+    fn contains_import(
+        &self,
+        signal: &str,
+        scope: PackageEvidenceScope,
+        semantics: &crate::loader::PackageMatchSemantics,
+    ) -> bool {
+        let scope_prefix = match scope {
+            PackageEvidenceScope::Direct => None,
+            PackageEvidenceScope::Component => Some(COMPONENT_IMPORT_PACKAGE_PREFIX),
+            PackageEvidenceScope::Manifest => Some(MANIFEST_PACKAGE_PREFIX),
+            PackageEvidenceScope::TemplateManifest => Some(TEMPLATE_MANIFEST_PACKAGE_PREFIX),
+        };
+        self.iter().any(|candidate| {
+            let candidate = if let Some(prefix) = scope_prefix {
+                let Some(candidate) = candidate
+                    .strip_prefix(prefix)
+                    .and_then(|candidate| candidate.strip_prefix(':'))
+                else {
+                    return false;
+                };
+                candidate
+            } else {
+                if is_package_evidence_marker(candidate) {
+                    return false;
+                }
+                candidate.as_str()
+            };
+            crate::pkg::import_matches_package(candidate, signal, semantics)
+        })
+    }
+
+    fn local_import_allows(&self, candidate: &str, signal: &str) -> bool {
+        self.contains(&local_import_package_marker(candidate, signal))
+            || call_head(candidate)
+                .is_some_and(|head| self.contains(&local_import_package_marker(head, signal)))
+    }
+
+    fn has_local_import_package(&self, signal: &str) -> bool {
+        self.contains(&local_import_package_signal_marker(signal))
+    }
+}
+
+fn package_set_contains_import<P: PackageEvidence + ?Sized>(
+    file_packages: &P,
     signal: &str,
     scope_prefix: Option<&str>,
     semantics: &crate::loader::PackageMatchSemantics,
 ) -> bool {
-    file_packages.iter().any(|candidate| {
-        let candidate = if let Some(prefix) = scope_prefix {
-            let Some(candidate) = candidate
-                .strip_prefix(prefix)
-                .and_then(|candidate| candidate.strip_prefix(':'))
-            else {
-                return false;
-            };
-            candidate
-        } else {
-            if candidate.starts_with(LOCAL_IMPORT_PACKAGE_PREFIX)
-                || candidate.starts_with(WORKSPACE_IMPORT_PACKAGE_PREFIX)
-                || candidate.starts_with(COMPONENT_IMPORT_PACKAGE_PREFIX)
-            {
-                return false;
-            }
-            candidate.as_str()
-        };
-        crate::pkg::import_matches_package(candidate, signal, semantics)
-    })
+    let scope = match scope_prefix {
+        None => PackageEvidenceScope::Direct,
+        Some(COMPONENT_IMPORT_PACKAGE_PREFIX) => PackageEvidenceScope::Component,
+        Some(MANIFEST_PACKAGE_PREFIX) => PackageEvidenceScope::Manifest,
+        Some(TEMPLATE_MANIFEST_PACKAGE_PREFIX) => PackageEvidenceScope::TemplateManifest,
+        Some(_) => return false,
+    };
+    file_packages.contains_import(signal, scope, semantics)
 }
 
-fn local_import_package_allows(file_packages: &AHashSet<String>, candidate: &str, signal: &str) -> bool {
-    file_packages.contains(&local_import_package_marker(candidate, signal))
-        || call_head(candidate)
-            .is_some_and(|head| file_packages.contains(&local_import_package_marker(head, signal)))
+fn local_import_package_allows<P: PackageEvidence + ?Sized>(
+    file_packages: &P,
+    candidate: &str,
+    signal: &str,
+) -> bool {
+    file_packages.local_import_allows(candidate, signal)
 }
 
-fn file_packages_have_local_import_package(file_packages: &AHashSet<String>, signal: &str) -> bool {
-    let suffix = format!(":{signal}");
-    file_packages
-        .iter()
-        .any(|package| package.starts_with(LOCAL_IMPORT_PACKAGE_PREFIX) && package.ends_with(&suffix))
+fn file_packages_have_local_import_package<P: PackageEvidence + ?Sized>(
+    file_packages: &P,
+    signal: &str,
+) -> bool {
+    file_packages.has_local_import_package(signal)
 }
 
 fn match_base_name(text: &str) -> Option<&str> {
@@ -3307,10 +3850,21 @@ fn match_base_name(text: &str) -> Option<&str> {
 
 #[allow(clippy::struct_field_names)] // Rule buckets intentionally carry the matched rule kind in each field name.
 struct PreparedRuleBatch<'p, 'rule> {
+    /// Stable order used by the raw-anchor planner. Each file carries only
+    /// the indexes that survived its exact raw syntax anchors into the
+    /// import/package stage, avoiding a second rule-by-file scan.
+    text_order_rules: Vec<&'p PreparedRule<'rule>>,
+    /// Exact equivalence classes for the package-evidence predicate. Broad
+    /// packs commonly have many sink variants for one provider, so this lets
+    /// each file answer that shared import/package question once.
+    text_order_package_classes: Vec<usize>,
+    package_evidence_representatives: Vec<&'p PreparedRule<'rule>>,
     call_rules: Vec<&'p PreparedRule<'rule>>,
     call_wildcard_rules: Vec<&'p PreparedRule<'rule>>,
     call_keyed_rules: AHashMap<String, Vec<&'p PreparedRule<'rule>>>,
     read_rules: Vec<&'p PreparedRule<'rule>>,
+    read_wildcard_rules: Vec<&'p PreparedRule<'rule>>,
+    read_keyed_rules: AHashMap<String, Vec<&'p PreparedRule<'rule>>>,
     write_rules: Vec<&'p PreparedRule<'rule>>,
     param_rules: Vec<&'p PreparedRule<'rule>>,
     type_rules: Vec<&'p PreparedRule<'rule>>,
@@ -3319,8 +3873,19 @@ struct PreparedRuleBatch<'p, 'rule> {
     /// Rulepack call-result, constructor, and callback typing for this run.
     factory: Arc<RulepackTyping>,
     include_workspace_package_context: bool,
-    has_package_text_anchors: bool,
     workspace_package_signals: Vec<String>,
+    /// One multi-pattern scan replaces the rule x source-bytes Cartesian
+    /// product for literal target/package anchors. Exact syntax, package, and
+    /// semantic matching still happens in the compiler-header/body stages.
+    text_anchor_ids: AHashMap<String, usize>,
+    text_anchor_matcher: Option<AhoCorasick>,
+    call_text_anchor_ids: Vec<bool>,
+}
+
+struct BatchTextAnchorMatches {
+    present: Vec<bool>,
+    call_like: Vec<bool>,
+    syntax_rule_indexes: Vec<usize>,
 }
 
 struct FileRuleFilterContext<'a> {
@@ -3331,15 +3896,68 @@ struct FileRuleFilterContext<'a> {
     retention: FactRetention,
     prewarmed_import_contexts: Option<&'a Arc<LanguageImportPackageContexts>>,
     compiler_imports: Option<&'a bonsai_lang_api::ImportIndex>,
+    matched_text_anchors: Option<&'a BatchTextAnchorMatches>,
 }
 
 impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
     fn new(rules: &[&'p PreparedRule<'rule>], factory: Arc<RulepackTyping>) -> Self {
+        let text_order_rules = rules
+            .iter()
+            .copied()
+            .filter(|rule| rule.rule.match_spec.kind != MatchKind::Missing)
+            .collect::<Vec<_>>();
+        let mut package_evidence_representatives = Vec::new();
+        let text_order_package_classes = text_order_rules
+            .iter()
+            .map(|rule| {
+                package_evidence_representatives
+                    .iter()
+                    .position(|representative: &&PreparedRule<'_>| {
+                        rule.has_same_package_evidence_query(representative)
+                    })
+                    .unwrap_or_else(|| {
+                        package_evidence_representatives.push(*rule);
+                        package_evidence_representatives.len() - 1
+                    })
+            })
+            .collect::<Vec<_>>();
+        let mut text_anchors = rules
+            .iter()
+            .flat_map(|rule| {
+                rule.text_anchor_groups
+                    .iter()
+                    .flatten()
+                    .chain(rule.package_text_anchors.iter())
+                    .chain(rule.call_text_anchor.iter())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        text_anchors.sort();
+        text_anchors.dedup();
+        let text_anchor_ids: AHashMap<String, usize> = text_anchors
+            .iter()
+            .enumerate()
+            .map(|(index, anchor)| (anchor.clone(), index))
+            .collect();
+        let text_anchor_matcher = (!text_anchors.is_empty())
+            .then(|| AhoCorasick::new(&text_anchors).ok())
+            .flatten();
+        let mut call_text_anchor_ids = vec![false; text_anchors.len()];
+        for anchor in rules.iter().filter_map(|rule| rule.call_text_anchor.as_ref()) {
+            if let Some(index) = text_anchor_ids.get(anchor) {
+                call_text_anchor_ids[*index] = true;
+            }
+        }
         let mut out = Self {
+            text_order_rules,
+            text_order_package_classes,
+            package_evidence_representatives,
             call_rules: Vec::new(),
             call_wildcard_rules: Vec::new(),
             call_keyed_rules: AHashMap::new(),
             read_rules: Vec::new(),
+            read_wildcard_rules: Vec::new(),
+            read_keyed_rules: AHashMap::new(),
             write_rules: Vec::new(),
             param_rules: Vec::new(),
             type_rules: Vec::new(),
@@ -3349,7 +3967,6 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             include_workspace_package_context: rules
                 .iter()
                 .any(|rule| rule.needs_workspace_package_context()),
-            has_package_text_anchors: rules.iter().any(|rule| !rule.package_text_anchors.is_empty()),
             workspace_package_signals: {
                 let mut signals = rules
                     .iter()
@@ -3361,6 +3978,9 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
                 signals.dedup();
                 signals
             },
+            text_anchor_ids,
+            text_anchor_matcher,
+            call_text_anchor_ids,
         };
         for &rule in rules {
             match rule.rule.match_spec.kind {
@@ -3368,7 +3988,10 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
                     out.call_rules.push(rule);
                     insert_call_rule_index(&mut out.call_keyed_rules, &mut out.call_wildcard_rules, rule);
                 }
-                MatchKind::Read => out.read_rules.push(rule),
+                MatchKind::Read => {
+                    out.read_rules.push(rule);
+                    insert_call_rule_index(&mut out.read_keyed_rules, &mut out.read_wildcard_rules, rule);
+                }
                 MatchKind::Write => out.write_rules.push(rule),
                 MatchKind::Param => out.param_rules.push(rule),
                 MatchKind::Type => out.type_rules.push(rule),
@@ -3377,6 +4000,67 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             }
         }
         out
+    }
+
+    fn text_anchor_matches(
+        &self,
+        text: &str,
+        syntax: CallTextPrefilter,
+        mode: ConstraintMode,
+    ) -> BatchTextAnchorMatches {
+        let mut matched = BatchTextAnchorMatches {
+            present: vec![false; self.text_anchor_ids.len()],
+            call_like: vec![false; self.text_anchor_ids.len()],
+            syntax_rule_indexes: Vec::new(),
+        };
+        if let Some(matcher) = self.text_anchor_matcher.as_ref() {
+            for found in matcher.find_overlapping_iter(text) {
+                let index = found.pattern().as_usize();
+                matched.present[index] = true;
+                if self.call_text_anchor_ids[index]
+                    && !matched.call_like[index]
+                    && call_text_match_is_call(text, found.start(), found.end(), syntax)
+                {
+                    matched.call_like[index] = true;
+                }
+            }
+        }
+        for (index, rule) in self.text_order_rules.iter().enumerate() {
+            if rule.syntax_target_possible_in_mode_with_anchor_lookup(
+                text,
+                mode,
+                syntax,
+                &|anchor| self.text_anchor_present(text, &matched, anchor),
+                &|anchor| self.call_text_anchor_present(text, &matched, anchor, syntax),
+            ) {
+                matched.syntax_rule_indexes.push(index);
+            }
+        }
+        matched
+    }
+
+    fn text_anchor_present(&self, text: &str, matched: &BatchTextAnchorMatches, anchor: &str) -> bool {
+        self.text_anchor_ids
+            .get(anchor)
+            .and_then(|index| matched.present.get(*index))
+            .copied()
+            // A missing index or failed matcher construction must only cost
+            // work; it must never suppress a valid rule match.
+            .unwrap_or_else(|| text.contains(anchor))
+    }
+
+    fn call_text_anchor_present(
+        &self,
+        text: &str,
+        matched: &BatchTextAnchorMatches,
+        anchor: &str,
+        syntax: CallTextPrefilter,
+    ) -> bool {
+        self.text_anchor_ids
+            .get(anchor)
+            .and_then(|index| matched.call_like.get(*index))
+            .copied()
+            .unwrap_or_else(|| call_text_anchor_possible_in(text, anchor, syntax))
     }
 
     fn filtered_rule_refs_for_text(
@@ -3391,36 +4075,75 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             retention,
             prewarmed_import_contexts,
             compiler_imports,
+            matched_text_anchors,
         } = context;
         let include_workspace_package_context = self.include_workspace_package_context
             && (!matches!(mode, ConstraintMode::Inventory)
                 || workspace_manifest_package_context_allowed(ws, file));
-        let file_packages = self.has_package_text_anchors.then(|| {
-            file_package_set_with_prewarmed_workspace_context_and_retention(
-                ws,
-                file,
-                include_workspace_package_context,
-                retention,
-                prewarmed_import_contexts,
-                compiler_imports,
-            )
-        });
         let call_text_prefilter = ws
             .db()
             .adapter_for(file)
             .map(|adapter| adapter.capabilities().call_text_prefilter)
             .unwrap_or_default();
+        let computed_text_anchors = matched_text_anchors
+            .is_none()
+            .then(|| self.text_anchor_matches(text, call_text_prefilter, mode));
+        let matched_text_anchors = matched_text_anchors
+            .or(computed_text_anchors.as_ref())
+            .expect("text anchor evidence is supplied or computed");
+        let anchor_present = |anchor: &str| self.text_anchor_present(text, matched_text_anchors, anchor);
+        let mut package_planning_evidence = None;
+        let mut package_evidence_by_class = vec![None; self.package_evidence_representatives.len()];
         let mut rules = Vec::new();
-        for &rule in self
-            .call_rules
-            .iter()
-            .chain(self.read_rules.iter())
-            .chain(self.write_rules.iter())
-            .chain(self.param_rules.iter())
-            .chain(self.type_rules.iter())
-            .chain(self.return_rules.iter())
-        {
-            if rule.text_possible_in_mode(text, file_packages.as_deref(), mode, call_text_prefilter) {
+        for &rule_index in &matched_text_anchors.syntax_rule_indexes {
+            let Some(&rule) = self.text_order_rules.get(rule_index) else {
+                continue;
+            };
+            let package_possible = rule.package_text_anchors.is_empty()
+                || rule
+                    .package_text_anchors
+                    .iter()
+                    .any(|anchor| anchor_present(anchor))
+                // An exact typed parameter can prove external identity in the
+                // body phase even when a runtime-injected source file carries
+                // no import. Keep only files containing one of the rule's
+                // declared type spellings; the compiler matcher still checks
+                // the parameter binding and rejects workspace/import
+                // collisions before emitting a match.
+                || (rule.requires_call_package_signal
+                    && rule.rule.match_spec.kind == MatchKind::Param
+                    && rule
+                        .rule
+                        .match_spec
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| {
+                            (!target.param_type_in.is_empty()
+                                || !target.param_type_exact_in.is_empty())
+                                && target
+                                    .param_type_in
+                                    .iter()
+                                    .chain(target.param_type_exact_in.iter())
+                                    .any(|type_name| anchor_present(type_name))
+                        }))
+                || {
+                    let evidence = package_planning_evidence.get_or_insert_with(|| {
+                        file_package_planning_evidence(
+                            ws,
+                            file,
+                            include_workspace_package_context,
+                            retention,
+                            prewarmed_import_contexts,
+                            compiler_imports,
+                        )
+                    });
+                    let class = self.text_order_package_classes[rule_index];
+                    *package_evidence_by_class[class].get_or_insert_with(|| {
+                        self.package_evidence_representatives[class]
+                            .package_evidence_allows_text_anchor_skip_in_planning(evidence)
+                    })
+                };
+            if package_possible {
                 rules.push(rule);
             }
         }
@@ -3454,38 +4177,50 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             .unwrap_or_default();
         extend_alias_map_with_declared_types(&mut alias_map, &syntax.type_aliases);
         extend_alias_map_with_compiler_assignment_aliases(&mut alias_map, &syntax.assignment_aliases);
-        let mut workspace_constructor_resolution_required = false;
+        let mut workspace_call_resolution_required = false;
         if let Some(specs) = self.factory.specs_for(language) {
             let mut factory_aliases = Vec::new();
-            for assignment in &syntax.factory_assignments {
-                let expanded = expand_callee_alias(&assignment.call_name, &alias_map);
-                for spec in specs {
-                    if !typing_imports_allow(&spec.required_imports, compiler_imports) {
-                        continue;
-                    }
-                    if !factory_spec_matches_call(
-                        &assignment.call_name,
-                        assignment.call_receiver.as_deref(),
-                        spec,
-                    ) && !expanded
-                        .as_deref()
-                        .is_some_and(|expanded| factory_spec_matches_call(expanded, None, spec))
-                    {
-                        continue;
-                    }
-                    if spec.kind == MatchKind::New {
-                        workspace_constructor_resolution_required = true;
-                    }
-                    let binding = TypeAliasBinding {
-                        name: assignment.target.clone(),
-                        type_name: spec.type_name.clone(),
-                    };
-                    if !factory_aliases.contains(&binding) {
-                        factory_aliases.push(binding);
+            // Factory results form a finite monotone relation over the
+            // compiler header's assignment targets. Derive it to the same
+            // uncapped fixed point as the full-body matcher: a chain such as
+            // `connect() -> DB`, then `db.prepare() -> Statement` must not be
+            // discarded by header planning before the exact body can prove
+            // its terminal receiver.
+            loop {
+                let prior_len = factory_aliases.len();
+                for assignment in &syntax.factory_assignments {
+                    let expanded = expand_callee_alias(&assignment.call_name, &alias_map);
+                    for spec in specs {
+                        if !typing_imports_allow(&spec.required_imports, compiler_imports) {
+                            continue;
+                        }
+                        if !factory_spec_matches_call(
+                            &assignment.call_name,
+                            assignment.call_receiver.as_deref(),
+                            spec,
+                            &alias_map,
+                        ) && !expanded.as_deref().is_some_and(|expanded| {
+                            factory_spec_matches_call(expanded, None, spec, &alias_map)
+                        }) {
+                            continue;
+                        }
+                        if spec.kind == MatchKind::New {
+                            workspace_call_resolution_required = true;
+                        }
+                        let binding = TypeAliasBinding {
+                            name: assignment.target.clone(),
+                            type_name: spec.type_name.clone(),
+                        };
+                        if !factory_aliases.contains(&binding) {
+                            factory_aliases.push(binding);
+                        }
                     }
                 }
+                if factory_aliases.len() == prior_len {
+                    break;
+                }
+                extend_alias_map_with_declared_types(&mut alias_map, &factory_aliases[prior_len..]);
             }
-            extend_alias_map_with_declared_types(&mut alias_map, &factory_aliases);
         }
         let callback_aliases = synth_callback_param_type_aliases_from_header(
             syntax,
@@ -3495,6 +4230,30 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             compiler_imports,
         );
         extend_alias_map_with_declared_types(&mut alias_map, &callback_aliases);
+        // Workspace return-type resolution can affect a receiver match only
+        // when the receiver is the exact result of a compiler-recorded call
+        // assignment (possibly copied through exact assignment aliases).
+        // Merely seeing an untyped receiver such as `client.clean()` is not
+        // evidence that `client` came from a call; opening global declaration
+        // headers for every such call defeats syntax-header planning.
+        let mut call_result_targets = syntax
+            .factory_assignments
+            .iter()
+            .map(|assignment| normalize_leading_call_punctuation(&assignment.target).to_string())
+            .collect::<AHashSet<_>>();
+        loop {
+            let prior_len = call_result_targets.len();
+            for assignment in &syntax.assignment_aliases {
+                let source = normalize_leading_call_punctuation(&assignment.source);
+                if call_result_targets.contains(source) {
+                    call_result_targets
+                        .insert(normalize_leading_call_punctuation(&assignment.target).to_string());
+                }
+            }
+            if call_result_targets.len() == prior_len {
+                break;
+            }
+        }
         // Call/new planning used to compare every surviving rule with every
         // adapter-emitted call. Large files and broad language packs turned
         // that into a rule x call Cartesian product even though the body
@@ -3559,7 +4318,26 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
                     && prepared.rule.match_spec.kind == MatchKind::New
                     && call.call_kind != CallKind::Constructor
                 {
-                    workspace_constructor_resolution_required = true;
+                    workspace_call_resolution_required = true;
+                }
+                // A typed receiver with no adapter-proven type may be the
+                // exact result of a first-party call, including a value
+                // exported by an imported module. The compact syntax header
+                // proves that this endpoint survived name/kind filtering;
+                // request the independently decodable workspace declaration
+                // headers so the body matcher can resolve that call chain.
+                // This is deliberately syntax-generic: provider/API names
+                // remain rule data and ambiguous callable identities fail
+                // closed in `workspace_call_return_type`.
+                if direct_match
+                    && call.receiver.as_deref().is_some_and(|receiver| {
+                        call_result_targets.contains(normalize_leading_call_punctuation(receiver))
+                    })
+                    && call.receiver_types.is_empty()
+                    && DeclFactRequirements::for_rules(std::iter::once(prepared))
+                        .contains(DeclFactRequirements::CALL_RESULT_TYPES)
+                {
+                    workspace_call_resolution_required = true;
                 }
                 if direct_match {
                     matched_call_rule_ids.insert(prepared.rule.id.as_str());
@@ -3588,41 +4366,50 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
                 }
             }
         }
+        if !receiver_ancestry_complete
+            && retained.iter().any(|prepared| {
+                prepared
+                    .rule
+                    .match_spec
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| !target.in_class.is_empty() || !target.in_class_suffix.is_empty())
+            })
+        {
+            // Declaration-scoped rules (parameters, reads, and calls with an
+            // `in_class` guard) need the same exact cross-file ancestry as
+            // receiver-constrained calls. A compact syntax header cannot
+            // prove ownership for a non-call target, so keep the candidate
+            // until ancestry enriches its streamed compiler body.
+            receiver_ancestry_deferred = true;
+        }
         (
             retained,
             receiver_ancestry_deferred,
-            workspace_constructor_resolution_required,
+            workspace_call_resolution_required,
         )
     }
 
     /// Return whether any rule in this language batch can match the raw file
     /// text before imports or full adapter IR are decoded.
-    fn syntax_target_possible_in_text(
+    fn syntax_target_possible_in_text_with_matches(
         &self,
-        text: &str,
-        mode: ConstraintMode,
-        call_text_prefilter: CallTextPrefilter,
+        _text: &str,
+        _mode: ConstraintMode,
+        _call_text_prefilter: CallTextPrefilter,
+        matched_text_anchors: &BatchTextAnchorMatches,
     ) -> bool {
-        !self.missing_rules.is_empty()
-            || self
-                .call_rules
-                .iter()
-                .chain(self.read_rules.iter())
-                .chain(self.write_rules.iter())
-                .chain(self.param_rules.iter())
-                .chain(self.type_rules.iter())
-                .chain(self.return_rules.iter())
-                .any(|rule| rule.syntax_target_possible_in_mode(text, mode, call_text_prefilter))
+        !self.missing_rules.is_empty() || !matched_text_anchors.syntax_rule_indexes.is_empty()
     }
 }
 
 /// Lossless body-planning gate for `kind: return` rules.
 ///
-/// The full matcher accepts either an adapter-lowered return spelling or the
-/// exact source span. The independent syntax header supplies the former; a
-/// whole-file regex check conservatively covers the latter (and may retain a
-/// comment/string elsewhere, which only costs work). No language or API
-/// vocabulary is interpreted here.
+/// The full matcher accepts either an adapter-lowered return spelling, the
+/// exact return source span, or the exact RHS of a uniquely reaching local
+/// assignment. The independent syntax header retains all compiler-proven RHS
+/// candidates only for scheduling; full matching still proves control-flow
+/// uniqueness. No whole-file text search or language/API vocabulary is used.
 fn return_rule_possible_in_syntax_header(
     prepared: &PreparedRule<'_>,
     syntax: &CompilerSyntaxHeader,
@@ -3650,6 +4437,22 @@ fn return_rule_possible_in_syntax_header(
             };
             if regex.is_match(span_text) {
                 return true;
+            }
+            for assignment_value_span in &returned.assignment_value_spans {
+                let Ok(start) = usize::try_from(assignment_value_span.start) else {
+                    return true;
+                };
+                let Ok(end) = usize::try_from(assignment_value_span.end) else {
+                    return true;
+                };
+                let Some(assignment_value) = source_text.get(start..end) else {
+                    // Header/source disagreement can only increase work; it
+                    // must never suppress a full-body return match.
+                    return true;
+                };
+                if regex.is_match(assignment_value) {
+                    return true;
+                }
             }
         }
     }
@@ -3873,7 +4676,7 @@ fn prepared_regex_call_keys(rule: &PreparedRule<'_>) -> Vec<String> {
     let Some(pattern) = rule_target_regex_text(rule.rule) else {
         return Vec::new();
     };
-    regex_terminal_call_key(pattern).into_iter().collect()
+    regex_terminal_call_keys(pattern)
 }
 
 fn rule_target_regex_text(rule: &Rule) -> Option<&str> {
@@ -3887,30 +4690,133 @@ fn rule_target_regex_text(rule: &Rule) -> Option<&str> {
 }
 
 fn regex_terminal_call_key(pattern: &str) -> Option<String> {
-    let trimmed = pattern.trim();
-    let trimmed = trimmed
-        .strip_prefix("(?i)")
-        .or_else(|| trimmed.strip_prefix("(?-i)"))
-        .unwrap_or(trimmed);
-    if trimmed.contains("_?") {
+    let keys = regex_terminal_call_keys(pattern);
+    let [key] = keys.as_slice() else {
         return None;
+    };
+    Some(key.clone())
+}
+
+/// Return every exact terminal callable/read identity admitted by a regex.
+///
+/// The candidate index is a scheduling optimization, so it may narrow only
+/// when every regex branch has an exact terminal key. Parsing the regex HIR
+/// avoids treating the textual suffix of the final alternative as though it
+/// applied to every branch (for example `.(foo|bar)$|.baz$`).
+fn regex_terminal_call_keys(pattern: &str) -> Vec<String> {
+    let trimmed = pattern.trim();
+    // The candidate map is byte-case-sensitive. A case-insensitive target
+    // therefore stays in the wildcard bucket unless/until the index itself
+    // carries case-folded keys; keying its displayed suffix could suppress a
+    // valid differently-cased compiler identity.
+    if trimmed.starts_with("(?i)") {
+        return Vec::new();
     }
-    let trimmed = trimmed.strip_suffix('$').unwrap_or(trimmed);
-    let mut end = trimmed.len();
-    while end > 0 && !trimmed.is_char_boundary(end) {
-        end -= 1;
+    let trimmed = trimmed.strip_prefix("(?-i)").unwrap_or(trimmed);
+    let Ok(hir) = regex_syntax::Parser::new().parse(trimmed) else {
+        return Vec::new();
+    };
+    terminal_hir_call_keys(&hir, true).unwrap_or_default()
+}
+
+fn terminal_hir_call_keys(hir: &regex_syntax::hir::Hir, boundary_before: bool) -> Option<Vec<String>> {
+    use regex_syntax::hir::HirKind;
+
+    match hir.kind() {
+        HirKind::Literal(literal) => {
+            let text = std::str::from_utf8(&literal.0).ok()?;
+            let starts_at_boundary = text.chars().next().is_some_and(|ch| !is_call_identifier_char(ch));
+            if !boundary_before && !starts_at_boundary {
+                return None;
+            }
+            terminal_literal_call_key(text).map(|key| vec![key])
+        }
+        HirKind::Capture(capture) => terminal_hir_call_keys(&capture.sub, boundary_before),
+        HirKind::Alternation(branches) => {
+            let mut keys = Vec::new();
+            for branch in branches {
+                for key in terminal_hir_call_keys(branch, boundary_before)? {
+                    if !keys.contains(&key) {
+                        keys.push(key);
+                    }
+                }
+            }
+            keys.sort();
+            (!keys.is_empty()).then_some(keys)
+        }
+        HirKind::Concat(parts) => {
+            let (terminal_index, terminal) = parts
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, part)| !matches!(part.kind(), HirKind::Empty | HirKind::Look(_)))?;
+            let prefix = &parts[..terminal_index];
+            let has_prefix = prefix
+                .iter()
+                .any(|part| !matches!(part.kind(), HirKind::Empty | HirKind::Look(_)));
+            let terminal_boundary = if !has_prefix {
+                boundary_before
+            } else {
+                hir_sequence_ends_with_name_boundary(prefix)
+            };
+            terminal_hir_call_keys(terminal, terminal_boundary)
+        }
+        HirKind::Repetition(repetition) if repetition.min == 1 && repetition.max == Some(1) => {
+            terminal_hir_call_keys(&repetition.sub, boundary_before)
+        }
+        HirKind::Empty | HirKind::Look(_) | HirKind::Class(_) | HirKind::Repetition(_) => None,
     }
-    let bytes = trimmed.as_bytes();
-    while end > 0 {
-        let b = bytes[end - 1];
-        if b == b'_' || b == b'$' || b.is_ascii_alphanumeric() {
-            end -= 1;
+}
+
+fn hir_sequence_ends_with_name_boundary(parts: &[regex_syntax::hir::Hir]) -> bool {
+    use regex_syntax::hir::HirKind;
+
+    parts
+        .iter()
+        .rev()
+        .find_map(|part| match part.kind() {
+            HirKind::Empty => None,
+            // A zero-width boundary/start assertion separates the following
+            // terminal from any preceding identifier just as an explicit
+            // member punctuation literal does.
+            HirKind::Look(_) => Some(true),
+            _ => Some(hir_ends_with_name_boundary(part)),
+        })
+        .unwrap_or(false)
+}
+
+fn hir_ends_with_name_boundary(hir: &regex_syntax::hir::Hir) -> bool {
+    use regex_syntax::hir::HirKind;
+
+    match hir.kind() {
+        HirKind::Literal(literal) => std::str::from_utf8(&literal.0)
+            .ok()
+            .and_then(|text| text.chars().next_back())
+            .is_some_and(|ch| !is_call_identifier_char(ch)),
+        HirKind::Capture(capture) => hir_ends_with_name_boundary(&capture.sub),
+        HirKind::Alternation(branches) => {
+            !branches.is_empty() && branches.iter().all(hir_ends_with_name_boundary)
+        }
+        HirKind::Concat(parts) => hir_sequence_ends_with_name_boundary(parts),
+        HirKind::Repetition(repetition) if repetition.min > 0 => hir_ends_with_name_boundary(&repetition.sub),
+        HirKind::Look(_) => true,
+        HirKind::Empty | HirKind::Class(_) | HirKind::Repetition(_) => false,
+    }
+}
+
+fn terminal_literal_call_key(literal: &str) -> Option<String> {
+    let mut start = literal.len();
+    let bytes = literal.as_bytes();
+    while start > 0 {
+        let byte = bytes[start - 1];
+        if byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric() {
+            start -= 1;
             continue;
         }
         break;
     }
-    let key = trimmed
-        .get(end..)?
+    let key = literal
+        .get(start..)?
         .trim()
         .trim_start_matches(bonsai_common::is_name_punctuation);
     if key.len() < 3 {
@@ -3943,55 +4849,75 @@ fn scan_file_rules(
         scan_calls_batch(ctx, rules, out);
     }
     if !rules.read_rules.is_empty() {
+        let started = ctx.debug_timings.map(|_| Instant::now());
         scan_refs_batch(
             ctx,
-            &rules.read_rules,
+            rules,
             RefKind::Read,
             rules.include_workspace_package_context,
+            &rules.factory,
             out,
         );
+        if let (Some(started), Some(timings)) = (started, ctx.debug_timings) {
+            record_elapsed_ns(&timings.refs_scan, started);
+        }
+        let started = ctx.debug_timings.map(|_| Instant::now());
         scan_flow_reads_batch(
             ctx,
-            &rules.read_rules,
+            rules,
             rules.include_workspace_package_context,
+            &rules.factory,
             out,
         );
+        if let (Some(started), Some(timings)) = (started, ctx.debug_timings) {
+            record_elapsed_ns(&timings.flow_reads_scan, started);
+        }
     }
     if !rules.write_rules.is_empty() {
-        scan_writes_batch(
-            ctx,
-            &rules.write_rules,
-            rules.include_workspace_package_context,
-            out,
-        );
-        scan_ref_writes_batch(
-            ctx,
-            &rules.write_rules,
-            rules.include_workspace_package_context,
-            out,
-        );
+        let started = ctx.debug_timings.map(|_| Instant::now());
+        scan_writes_batch(ctx, rules, out);
+        scan_ref_writes_batch(ctx, rules, out);
+        if let (Some(started), Some(timings)) = (started, ctx.debug_timings) {
+            record_elapsed_ns(&timings.writes_scan, started);
+        }
     }
     if !rules.param_rules.is_empty() {
+        let started = ctx.debug_timings.map(|_| Instant::now());
         scan_params_batch(
             ctx,
             &rules.param_rules,
             rules.include_workspace_package_context,
             out,
         );
+        if let (Some(started), Some(timings)) = (started, ctx.debug_timings) {
+            record_elapsed_ns(&timings.params_scan, started);
+        }
     }
     if !rules.type_rules.is_empty() {
+        let started = ctx.debug_timings.map(|_| Instant::now());
         scan_callable_types_batch(ctx, &rules.type_rules, out);
+        if let (Some(started), Some(timings)) = (started, ctx.debug_timings) {
+            record_elapsed_ns(&timings.types_scan, started);
+        }
     }
     if !rules.return_rules.is_empty() {
+        let started = ctx.debug_timings.map(|_| Instant::now());
         scan_returns_batch(ctx.ws, ctx.file, ctx.file_index, &rules.return_rules, out);
+        if let (Some(started), Some(timings)) = (started, ctx.debug_timings) {
+            record_elapsed_ns(&timings.returns_scan, started);
+        }
     }
     if !rules.missing_rules.is_empty() {
+        let started = ctx.debug_timings.map(|_| Instant::now());
         scan_missing_batch(
             ctx,
             &rules.missing_rules,
             rules.include_workspace_package_context,
             out,
         );
+        if let (Some(started), Some(timings)) = (started, ctx.debug_timings) {
+            record_elapsed_ns(&timings.missing_scan, started);
+        }
     }
 }
 
@@ -4046,16 +4972,37 @@ fn scan_returns_batch(
     let assignment_values = AssignmentValueIndex::new(&file_index.assignment_values);
     for decl in &file_index.defs {
         let mut returns = Vec::new();
-        collect_return_sites(&decl.flow_events, &mut returns);
-        for (span, value_text, value_name) in returns {
+        collect_return_rule_sites(&decl.flow_events, &mut returns);
+        for return_site in returns {
+            let ReturnRuleSite {
+                span,
+                value_kind,
+                value_text,
+                value_name,
+                reaching_assignment,
+            } = return_site;
+            // A compiler-proven literal has no value carrier and therefore
+            // cannot be a taint-relevant return boundary. Keep this in the
+            // generic return matcher so rule YAML describes only the
+            // security-sensitive output shape, not language-specific literal
+            // spellings.
+            if value_kind == Some(AssignValueKind::Literal) {
+                continue;
+            }
             let span_text = source_text
                 .as_deref()
                 .and_then(|text| text.get(span.start as usize..span.end as usize))
                 .unwrap_or("");
             for prepared in rules {
-                let Some(match_text) =
-                    return_rule_match(prepared, value_text.as_deref(), value_name.as_deref(), span_text)
-                else {
+                let direct_match =
+                    return_rule_match(prepared, value_text.as_deref(), value_name.as_deref(), span_text);
+                let assigned_match = direct_match.is_none().then(|| {
+                    let assignment_span = reaching_assignment?;
+                    let source = source_text.as_deref()?;
+                    let rhs = assignment_values.rendering(assignment_span, source)?;
+                    return_rule_match(prepared, Some(rhs), None, "")
+                });
+                let Some(match_text) = direct_match.or_else(|| assigned_match.flatten()) else {
                     continue;
                 };
                 let span = canonical_flow_read_match_span(ws, file, span, &match_text, &assignment_values);
@@ -4108,21 +5055,14 @@ fn return_rule_match(
 fn scan_params_batch(
     ctx: &FileScanContext<'_, '_>,
     rules: &[&PreparedRule<'_>],
-    include_workspace_package_context: bool,
+    _include_workspace_package_context: bool,
     out: &mut Vec<RuleMatch>,
 ) {
     let ws = ctx.ws;
     let file = ctx.file;
     let file_index = ctx.file_index;
     let retention = ctx.retention;
-    let file_packages = file_package_set_with_prewarmed_workspace_context_and_retention(
-        ctx.ws,
-        ctx.file,
-        include_workspace_package_context,
-        ctx.retention,
-        ctx.import_package_contexts,
-        ctx.file_imports,
-    );
+    let file_packages = ctx.package_evidence;
     let alias_map = file_alias_map_with_compiler_imports(ws, file, retention, ctx.file_imports);
     for decl in &file_index.defs {
         let decl_decorators = decl_decorator_names(ws, file, file_index, decl.span, decl.name_span);
@@ -4138,6 +5078,12 @@ fn scan_params_batch(
             Vec::new()
         };
         for (idx, param) in decl.params.iter().enumerate() {
+            let param_types = decl
+                .type_aliases
+                .iter()
+                .filter(|binding| binding.name == *param)
+                .map(|binding| binding.type_name.clone())
+                .collect::<Vec<_>>();
             // T204: per-param annotations are parallel-indexed with
             // `params`. Empty if the adapter doesn't surface them.
             let param_anns: &[String] = decl.param_annotations.get(idx).map(Vec::as_slice).unwrap_or(&[]);
@@ -4191,10 +5137,22 @@ fn scan_params_batch(
                         && prepared.imported_default_call_context_allows(
                             default_call,
                             &alias_map,
-                            file_packages.as_ref(),
+                            file_packages,
                         )
                 } else {
-                    prepared.call_context_allows(param, &[], &alias_map, file_packages.as_ref())
+                    prepared.call_or_source_context_allows(
+                        param,
+                        &param_types,
+                        &alias_map,
+                        file_packages,
+                        file_index,
+                        Some(decl),
+                    ) || unresolved_external_parameter_type_allows(
+                        prepared,
+                        &param_types,
+                        &alias_map,
+                        ctx.global_headers,
+                    )
                 };
                 if !package_context_allows {
                     continue;
@@ -4209,6 +5167,7 @@ fn scan_params_batch(
                 if !constraints_pass(ConstraintEval {
                     rule_id: &prepared.rule.id,
                     callee: param,
+                    receiver: None,
                     args: &[],
                     receiver_types: &[],
                     span,
@@ -4243,6 +5202,86 @@ fn scan_params_batch(
             }
         }
     }
+}
+
+/// Whether a package-gated parameter rule can use an exact unresolved type as
+/// its external identity after compiler-owned collision checks.
+///
+/// Some runtimes inject framework request objects without a source-file import
+/// (and partial source distributions may omit their build manifest). A typed
+/// parameter is still exact evidence when its adapter-emitted type matches the
+/// rule and no workspace declaration or conflicting compiler import owns that
+/// spelling. This is deliberately limited to simple unresolved types:
+/// provider-qualified types must satisfy the ordinary package/import gate.
+fn unresolved_external_parameter_type_allows(
+    prepared: &PreparedRule<'_>,
+    actual_types: &[String],
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+    global_headers: Option<&GlobalIndex>,
+) -> bool {
+    if !prepared.requires_call_package_signal || prepared.rule.match_spec.kind != MatchKind::Param {
+        return false;
+    }
+    let Some(target) = prepared.rule.match_spec.target.as_ref() else {
+        return false;
+    };
+    if target.param_type_in.is_empty() && target.param_type_exact_in.is_empty() {
+        return false;
+    }
+    let Some(global_headers) = global_headers else {
+        return false;
+    };
+
+    let matching = actual_types
+        .iter()
+        .filter(|actual| {
+            target
+                .param_type_in
+                .iter()
+                .any(|want| semantic_type_names_match(actual, want))
+                || target
+                    .param_type_exact_in
+                    .iter()
+                    .any(|want| exact_semantic_type_names_match(actual, want))
+        })
+        .collect::<Vec<_>>();
+    !matching.is_empty()
+        && matching.into_iter().all(|actual| {
+            let segments = bonsai_common::qualified_name_segments(actual);
+            let Some(simple) = segments.last().copied() else {
+                return false;
+            };
+            // A qualified compiler identity or an exact import binding has a
+            // known provider. If that provider were rule-owned, the ordinary
+            // package gate above would already have accepted it; otherwise it
+            // is a collision and must fail closed.
+            if segments.len() != 1 || alias_map.contains_key(simple) {
+                return false;
+            }
+            !global_headers.find_by_name(simple).iter().any(|symbol| {
+                global_headers.decl_of(*symbol).is_some_and(|decl| {
+                    matches!(
+                        decl.kind,
+                        DeclKind::Class
+                            | DeclKind::Struct
+                            | DeclKind::Trait
+                            | DeclKind::Interface
+                            | DeclKind::Enum
+                    )
+                })
+            })
+        })
+}
+
+fn prepared_rule_needs_external_parameter_identity(prepared: &PreparedRule<'_>) -> bool {
+    prepared.requires_call_package_signal
+        && prepared.rule.match_spec.kind == MatchKind::Param
+        && prepared
+            .rule
+            .match_spec
+            .target
+            .as_ref()
+            .is_some_and(|target| !target.param_type_in.is_empty() || !target.param_type_exact_in.is_empty())
 }
 
 /// A module-level declaration with the same unqualified name wins over an
@@ -4288,10 +5327,16 @@ fn decl_target_context_allows(
     if target.decl_kind_in.is_empty()
         && target.visibility_in.is_empty()
         && target.in_class.is_empty()
+        && target.in_class_suffix.is_empty()
+        && target.in_owner_base.is_empty()
         && target.in_method.is_empty()
         && target.in_method_prefix.is_empty()
         && (param_index.is_none() || target.param_index_in.is_empty())
+        && (param_index.is_none() || target.param_index_not_in.is_empty())
         && (param_index.is_none() || target.param_type_in.is_empty())
+        && (param_index.is_none() || target.param_type_exact_in.is_empty())
+        && target.signature_param_types.is_empty()
+        && target.signature_param_annotations.is_empty()
         && target.param_count_in.is_empty()
     {
         return true;
@@ -4318,6 +5363,9 @@ fn decl_target_context_allows(
         if !target.param_index_in.is_empty() && !target.param_index_in.contains(&(idx as u32)) {
             return false;
         }
+        if target.param_index_not_in.contains(&(idx as u32)) {
+            return false;
+        }
         if !target.param_type_in.is_empty() {
             let Some(param_name) = decl.params.get(idx) else {
                 return false;
@@ -4336,6 +5384,60 @@ fn decl_target_context_allows(
                 return false;
             }
         }
+        if !target.param_type_exact_in.is_empty() {
+            let Some(param_name) = decl.params.get(idx) else {
+                return false;
+            };
+            let type_allowed = decl
+                .type_aliases
+                .iter()
+                .filter(|binding| &binding.name == param_name)
+                .any(|binding| {
+                    target
+                        .param_type_exact_in
+                        .iter()
+                        .any(|want| exact_semantic_type_names_match(&binding.type_name, want))
+                });
+            if !type_allowed {
+                return false;
+            }
+        }
+    }
+    for requirement in &target.signature_param_types {
+        if requirement.type_in.is_empty() {
+            return false;
+        }
+        let Some(param_name) = decl.params.get(requirement.index as usize) else {
+            return false;
+        };
+        let type_allowed = decl
+            .type_aliases
+            .iter()
+            .filter(|binding| &binding.name == param_name)
+            .any(|binding| {
+                requirement
+                    .type_in
+                    .iter()
+                    .any(|want| semantic_type_names_match(&binding.type_name, want))
+            });
+        if !type_allowed {
+            return false;
+        }
+    }
+    for requirement in &target.signature_param_annotations {
+        if requirement.annotation_in.is_empty() {
+            return false;
+        }
+        let Some(annotations) = decl.param_annotations.get(requirement.index as usize) else {
+            return false;
+        };
+        if !requirement.annotation_in.iter().any(|want| {
+            annotations
+                .iter()
+                .any(|actual| annotation_name_matches(actual, want))
+        }) {
+            return false;
+        }
     }
     if !target.param_count_in.is_empty()
         && !target
@@ -4344,7 +5446,23 @@ fn decl_target_context_allows(
     {
         return false;
     }
-    if target.in_class.is_empty() {
+    if !target.in_owner_base.is_empty() {
+        let Some(owner) = decl
+            .parent
+            .and_then(|symbol| local_decl_by_symbol(file_index, symbol))
+        else {
+            return false;
+        };
+        if !owner.bases.iter().any(|base| {
+            target
+                .in_owner_base
+                .iter()
+                .any(|want| semantic_owner_names_match(base, want))
+        }) {
+            return false;
+        }
+    }
+    if target.in_class.is_empty() && target.in_class_suffix.is_empty() {
         return true;
     }
 
@@ -4360,11 +5478,24 @@ fn decl_target_context_allows(
     let Some(enclosing_class) = enclosing_class else {
         return false;
     };
-    target.in_class.iter().any(|want| want == &enclosing_class.name)
+    target
+        .in_class
+        .iter()
+        .any(|want| semantic_owner_names_match(&enclosing_class.name, want))
+        || enclosing_class.bases.iter().any(|base| {
+            target
+                .in_class
+                .iter()
+                .any(|want| semantic_owner_names_match(base, want))
+        })
+        || target
+            .in_class_suffix
+            .iter()
+            .any(|suffix| enclosing_class.name.ends_with(suffix))
         || enclosing_class
             .bases
             .iter()
-            .any(|base| target.in_class.iter().any(|want| want == base))
+            .any(|base| target.in_class_suffix.iter().any(|suffix| base.ends_with(suffix)))
 }
 
 fn param_target_is_context_only(target: &RuleTarget) -> bool {
@@ -4378,6 +5509,25 @@ fn param_target_is_context_only(target: &RuleTarget) -> bool {
 fn semantic_type_names_match(actual: &str, expected: &str) -> bool {
     actual == expected
         || bonsai_common::short_qualified_tail(actual) == bonsai_common::short_qualified_tail(expected)
+}
+
+/// Match a rule-authored declaration owner/base identity.
+///
+/// A concise expected type may match an adapter-emitted qualified owner tail,
+/// but a qualified expected identity must match every compiler segment. This
+/// prevents unrelated providers with a common base tail (for example two
+/// distinct `Worker` modules) from satisfying each other's boundary rules.
+fn semantic_owner_names_match(actual: &str, expected: &str) -> bool {
+    let expected_segments = bonsai_common::qualified_name_segments(expected);
+    if expected_segments.len() > 1 {
+        bonsai_common::qualified_name_segments(actual) == expected_segments
+    } else {
+        semantic_type_names_match(actual, expected)
+    }
+}
+
+fn exact_semantic_type_names_match(actual: &str, expected: &str) -> bool {
+    actual.trim().trim_start_matches("::") == expected.trim().trim_start_matches("::")
 }
 
 fn decl_modifier_names(ws: &Workspace, file: FileId, decl: &Decl) -> Vec<String> {
@@ -4419,40 +5569,270 @@ fn local_decl_by_symbol(file_index: &DeclIndex, symbol: SymbolId) -> Option<&Dec
     file_index.defs.iter().find(|decl| decl.symbol == symbol)
 }
 
-#[derive(Clone)]
-struct LocalEnclosingEntry {
-    start: u64,
-    end: u64,
-    name: String,
+/// Compiler-proven places whose receiver type can change when rulepack or
+/// first-party call-result typing is enabled for this file.
+///
+/// This is a demand index only. It never assigns a type: the selected
+/// declarations still run the complete uncapped fixed point below. Calls on
+/// ordinary locals/fields that have no call assignment, callback origin, or
+/// imported binding cannot gain a derived receiver type and therefore do not
+/// force unrelated declaration work.
+struct DerivedReceiverCandidates {
+    by_decl: AHashMap<Span, AHashSet<String>>,
+    module_places: AHashSet<String>,
+    callback_arguments: Vec<bonsai_lang_api::types::CompilerCallbackArgumentHeader>,
+    typed_callback_names: AHashSet<String>,
+    imported_bindings: AHashSet<String>,
 }
 
-fn local_enclosing_entries(file_index: &DeclIndex) -> Vec<LocalEnclosingEntry> {
-    let mut entries: Vec<LocalEnclosingEntry> = file_index
-        .defs
-        .iter()
-        .map(|decl| {
-            let body = decl.body_span.unwrap_or(decl.span);
-            LocalEnclosingEntry {
-                start: body.start,
-                end: body.end,
-                name: decl.name.clone(),
+impl DerivedReceiverCandidates {
+    fn from_context(ctx: &FileScanContext<'_, '_>, factory: &RulepackTyping) -> Self {
+        let syntax = CompilerSyntaxHeader::from_decl_index(ctx.file_index);
+        let module_span = ctx
+            .file_index
+            .defs
+            .iter()
+            .find(|decl| decl.name == bonsai_lang_api::MODULE_DECL_NAME || decl.kind == DeclKind::Module)
+            .map(|decl| decl.span);
+        let mut by_decl: AHashMap<Span, AHashSet<String>> = AHashMap::new();
+        for assignment in &syntax.factory_assignments {
+            by_decl
+                .entry(assignment.owner_span)
+                .or_default()
+                .insert(normalize_leading_call_punctuation(&assignment.target).to_string());
+        }
+        loop {
+            let mut changed = false;
+            for alias in &syntax.assignment_aliases {
+                let source = normalize_leading_call_punctuation(&alias.source);
+                let target = normalize_leading_call_punctuation(&alias.target);
+                let places = by_decl.entry(alias.owner_span).or_default();
+                if places.contains(source) && places.insert(target.to_string()) {
+                    changed = true;
+                }
             }
+            if !changed {
+                break;
+            }
+        }
+        let module_places = module_span
+            .and_then(|span| by_decl.get(&span).cloned())
+            .unwrap_or_default();
+        let mut callback_arguments = syntax.callback_arguments;
+        let mut typed_callback_names: AHashSet<String> = syntax
+            .typed_callables
+            .iter()
+            .map(|callback| callback.name.clone())
+            .collect();
+        let mut imported_bindings = AHashSet::new();
+        if let Some(imports) = ctx.file_imports {
+            for binding in bonsai_lang_api::alias_map_from_imports(imports).keys() {
+                imported_bindings.insert(normalize_leading_call_punctuation(binding).to_string());
+            }
+        }
+        let has_callback_typing = ctx
+            .ws
+            .db()
+            .adapter_for(ctx.file)
+            .and_then(|adapter| factory.callback_specs_for(adapter.language_id().as_str()))
+            .is_some_and(|specs| !specs.is_empty());
+        if !has_callback_typing {
+            callback_arguments.clear();
+            typed_callback_names.clear();
+        }
+        Self {
+            by_decl,
+            module_places,
+            callback_arguments,
+            typed_callback_names,
+            imported_bindings,
+        }
+    }
+
+    fn call_can_gain_type(&self, decl: &Decl, call: &CallFact) -> bool {
+        let Some(receiver) = call
+            .receiver
+            .as_deref()
+            .or_else(|| call_receiver_text(&call.callee))
+        else {
+            return false;
+        };
+        self.place_can_gain_type(decl, receiver, call.span)
+    }
+
+    fn place_can_gain_type(&self, decl: &Decl, receiver: &str, span: Span) -> bool {
+        if receiver.contains(['(', ')']) {
+            return true;
+        }
+        let receiver = normalize_leading_call_punctuation(receiver);
+        let base = match_base_name(receiver)
+            .map(normalize_leading_call_punctuation)
+            .unwrap_or(receiver);
+        let matches_place = |places: &AHashSet<String>| places.contains(receiver) || places.contains(base);
+        if self.by_decl.get(&decl.span).is_some_and(matches_place)
+            || matches_place(&self.module_places)
+            || self.imported_bindings.contains(receiver)
+            || self.imported_bindings.contains(base)
+        {
+            return true;
+        }
+        let receiver_is_decl_param = decl.params.iter().any(|param| {
+            let param = normalize_leading_call_punctuation(param);
+            param == receiver || param == base
+        });
+        if self.typed_callback_names.contains(&decl.name) && receiver_is_decl_param {
+            return true;
+        }
+        // Some adapters deliberately flatten inline callback bodies into the
+        // enclosing declaration while retaining the exact callback span and
+        // parameter list in the compiler syntax header. Other adapters emit
+        // the callback as its own declaration whose span is exactly the
+        // compiler callback span. Select either exact ownership form when
+        // this call is inside the callback and reads one of its parameters.
+        // Requiring both span containment and parameter identity prevents a
+        // sibling lambda from lending its external type.
+        self.callback_arguments.iter().any(|callback| {
+            (decl.span == callback.callback_span
+                || matcher_span_contains(decl.body_span.unwrap_or(decl.span), callback.callback_span))
+                && matcher_span_contains(callback.callback_span, span)
+                && callback.params.iter().any(|param| {
+                    let param = normalize_leading_call_punctuation(param);
+                    param == receiver || param == base
+                })
         })
-        .collect();
-    entries.sort_unstable_by_key(|entry| entry.start);
-    entries
+    }
 }
 
-fn local_enclosing_name(entries: &[LocalEnclosingEntry], pos: u64) -> Option<String> {
-    if entries.is_empty() {
-        return None;
+/// Decide whether adapter-declared receiver facts already make call-result
+/// typing irrelevant for this file's surviving endpoint rules.
+///
+/// This is a semantic staging decision, not a heuristic: the expensive
+/// factory/first-party fixed point is skipped only when every receiver-
+/// sensitive rule/call pair already has the same final verdict from direct
+/// compiler types. Any untyped, negatively constrained, factory-shaped, or
+/// otherwise ambiguous pair requests the complete derived projection.
+fn call_batch_derived_receiver_decls<P: PackageEvidence + ?Sized>(
+    ctx: &FileScanContext<'_, '_>,
+    rules: &PreparedRuleBatch<'_, '_>,
+    bundle: &FileDeclFactsBundle,
+    file_packages: &P,
+) -> Arc<[Span]> {
+    let mut derived_decls = Vec::new();
+    let candidates = DerivedReceiverCandidates::from_context(ctx, &rules.factory);
+    for decl in &ctx.file_index.defs {
+        let Some(facts) = bundle.by_decl_span.get(&decl.span) else {
+            continue;
+        };
+        let mut needs_derived_facts = false;
+        for call in &facts.calls {
+            let call_can_gain_type = candidates.call_can_gain_type(decl, call);
+            let mut candidate_rules = Vec::new();
+            push_call_candidate_rules(&mut candidate_rules, rules, &call.callee, &facts.alias_map);
+            let receiver_types = expanded_receiver_types(&call.receiver_types, ctx.receiver_base_map);
+            for prepared in candidate_rules {
+                if !prepared_rule_needs_call_result_types(prepared)
+                    || !prepared.call_kind_allows(call.call_kind)
+                    || !decl_target_context_allows(
+                        ctx.file_index,
+                        Some(decl),
+                        prepared.rule.match_spec.callee.as_ref(),
+                        None,
+                    )
+                {
+                    continue;
+                }
+                if rule_primary_target(prepared.rule).is_some_and(|target| target.binding_origin.is_some()) {
+                    needs_derived_facts = true;
+                    break;
+                }
+                let Some(matched_callee) =
+                    prepared.call_target_matches(call, &receiver_types, &facts.alias_map)
+                else {
+                    // A rule-indexed call whose target does not match direct
+                    // receiver facts may become exact after factory/callback
+                    // return typing. Fail toward the full fixed point.
+                    if call_can_gain_type {
+                        needs_derived_facts = true;
+                        break;
+                    }
+                    continue;
+                };
+                if !prepared.base_name_allows(&matched_callee) {
+                    continue;
+                }
+                if external_receiver_type_is_workspace_shadow_at(
+                    prepared,
+                    &receiver_types,
+                    &ctx.file_index.defs,
+                    ctx.file_imports,
+                    Some(&matched_callee),
+                ) {
+                    // An already-proven lexical shadow remains a shadow when
+                    // more receiver aliases are added.
+                    continue;
+                }
+                if !base_receiver_type_allows(prepared, Some(decl), &matched_callee, &receiver_types, &[])
+                    || !prepared.call_context_allows(
+                        &call.callee,
+                        &receiver_types,
+                        &facts.alias_map,
+                        file_packages,
+                    )
+                {
+                    if call_can_gain_type {
+                        needs_derived_facts = true;
+                        break;
+                    }
+                    continue;
+                }
+
+                let mut permanently_rejected = false;
+                for constraint in prepared.rule.constraints.iter() {
+                    match constraint {
+                        ConstraintKind::ReceiverTypeIn { receiver_type_in }
+                            if !receiver_type_matches_any(&receiver_types, receiver_type_in) =>
+                        {
+                            if call_can_gain_type {
+                                needs_derived_facts = true;
+                                break;
+                            }
+                        }
+                        ConstraintKind::ReceiverTypeNotIn { receiver_type_not_in }
+                            if receiver_type_matches_any(&receiver_types, receiver_type_not_in) =>
+                        {
+                            permanently_rejected = true;
+                            break;
+                        }
+                        ConstraintKind::ReceiverTypeNotIn { .. } => {
+                            // A derived safe/blocked type can turn a direct
+                            // positive into a rejection, so retain the full
+                            // projection for negative receiver constraints.
+                            if call_can_gain_type {
+                                needs_derived_facts = true;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if permanently_rejected {
+                    continue;
+                }
+                // The rule already has an exact direct receiver verdict at
+                // this site. Adding more aliases cannot create a second row
+                // for the same rule/span.
+            }
+            if needs_derived_facts {
+                break;
+            }
+        }
+        if needs_derived_facts {
+            derived_decls.push(decl.span);
+        }
     }
-    let partition = entries.partition_point(|entry| entry.start <= pos);
-    if partition == 0 {
-        return None;
-    }
-    let entry = &entries[partition - 1];
-    (pos < entry.end).then(|| entry.name.clone())
+    derived_decls.sort_unstable();
+    derived_decls.dedup();
+    Arc::from(derived_decls)
 }
 
 fn scan_calls_batch(
@@ -4468,32 +5848,60 @@ fn scan_calls_batch(
     let taint_view = ctx.taint_view;
     let retention = ctx.retention;
     let receiver_base_map = ctx.receiver_base_map;
-    let file_packages = file_package_set_with_prewarmed_workspace_context_and_retention(
-        ws,
-        file,
-        rules.include_workspace_package_context,
-        retention,
-        ctx.import_package_contexts,
-        ctx.file_imports,
-    );
+    let file_packages = ctx.package_evidence;
     let import_aliases = file_alias_map_with_compiler_imports(ws, file, retention, ctx.file_imports);
     if let (Some(started), Some(timings)) = (call_setup_started, ctx.debug_timings) {
         record_elapsed_ns(&timings.call_setup, started);
     }
     let decl_facts_started = ctx.debug_timings.map(|_| Instant::now());
-    let requirements = DeclFactRequirements::for_rules(rules.call_rules.iter().copied(), &rules.factory);
-    let bundle = decl_match_facts_for_retention(
+    let requirements = DeclFactRequirements::for_rules(rules.call_rules.iter().copied());
+    let base_requirements = requirements.without(DeclFactRequirements::CALL_RESULT_TYPES);
+    let base_bundle = decl_match_facts_for_retention(
         ws,
         file,
         Some(file_index),
         DeclMatchFactsRequest {
             factory: &rules.factory,
-            requirements,
+            requirements: base_requirements,
             retention,
             compiler_imports: ctx.file_imports,
             global_headers: ctx.global_headers,
+            call_result_type_decls: None,
         },
     );
+    let derived_receiver_decls = if requirements.contains(DeclFactRequirements::CALL_RESULT_TYPES) {
+        call_batch_derived_receiver_decls(ctx, rules, base_bundle.as_ref(), file_packages)
+    } else {
+        Arc::<[Span]>::from([])
+    };
+    let bundle = if !derived_receiver_decls.is_empty() {
+        if let Some(timings) = ctx.debug_timings {
+            timings.derived_receiver_files.fetch_add(1, Ordering::Relaxed);
+            timings
+                .derived_receiver_decls
+                .fetch_add(derived_receiver_decls.len(), Ordering::Relaxed);
+        }
+        decl_match_facts_for_retention(
+            ws,
+            file,
+            Some(file_index),
+            DeclMatchFactsRequest {
+                factory: &rules.factory,
+                requirements,
+                retention,
+                compiler_imports: ctx.file_imports,
+                global_headers: ctx.global_headers,
+                call_result_type_decls: Some(derived_receiver_decls),
+            },
+        )
+    } else {
+        if requirements.contains(DeclFactRequirements::CALL_RESULT_TYPES) {
+            if let Some(timings) = ctx.debug_timings {
+                timings.direct_receiver_files.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        base_bundle
+    };
     if let (Some(started), Some(timings)) = (decl_facts_started, ctx.debug_timings) {
         record_elapsed_ns(&timings.decl_facts, started);
     }
@@ -4524,6 +5932,15 @@ fn scan_calls_batch(
                 else {
                     continue;
                 };
+                if external_receiver_type_is_workspace_shadow_at(
+                    prepared,
+                    &receiver_types,
+                    &file_index.defs,
+                    ctx.file_imports,
+                    Some(&matched_callee),
+                ) {
+                    continue;
+                }
                 if !prepared.base_name_allows(&matched_callee) {
                     continue;
                 }
@@ -4532,15 +5949,17 @@ fn scan_calls_batch(
                     Some(decl),
                     &matched_callee,
                     &receiver_types,
-                    &facts.factory_type_aliases,
+                    &facts.derived_type_aliases,
                 ) {
                     continue;
                 }
-                if !prepared.call_context_allows(
+                if !prepared.call_or_source_context_allows(
                     &call.callee,
                     &receiver_types,
                     &facts.alias_map,
-                    file_packages.as_ref(),
+                    file_packages,
+                    file_index,
+                    Some(decl),
                 ) {
                     continue;
                 }
@@ -4549,6 +5968,7 @@ fn scan_calls_batch(
                 if !constraints_pass(ConstraintEval {
                     rule_id: &prepared.rule.id,
                     callee: &matched_callee,
+                    receiver: call.receiver.as_deref(),
                     args: &call.args,
                     receiver_types: &receiver_types,
                     span: call.span,
@@ -4570,9 +5990,12 @@ fn scan_calls_batch(
                         file_decls: &file_index.defs,
                         assignment_values: &file_index.assignment_values,
                         call_argument_values: &file_index.call_argument_values,
+                        string_compositions: &file_index.string_compositions,
                         factory_import_identity: Some(FactoryImportIdentityContext {
                             required_imports: &prepared.rule.imports,
                             alias_map: &facts.alias_map,
+                            compiler_imports: ctx.file_imports,
+                            workspace: ctx.global_headers.map(|global| (ws, global)),
                         }),
                     }),
                 }) {
@@ -4583,6 +6006,21 @@ fn scan_calls_batch(
                     global,
                     caller: decl,
                 });
+                if prepared_call_binding_origin_is_invalid(
+                    prepared,
+                    ctx.ws
+                        .db()
+                        .adapter_for(decl.name_span.file)
+                        .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax),
+                    decl,
+                    Some(&file_index.defs),
+                    workspace_context.as_ref(),
+                    call,
+                    &facts.alias_map,
+                    ctx.file_imports,
+                ) {
+                    continue;
+                }
                 if prepared.rule.match_spec.kind == MatchKind::New
                     && !call_has_new_identity(
                         workspace_context.as_ref(),
@@ -4611,12 +6049,15 @@ fn scan_calls_batch(
         }
     }
 
-    let enclosing_entries = local_enclosing_entries(file_index);
+    let enclosing_callables =
+        bonsai_workspace::enclosing_index::EnclosingSpanIndex::from_callable_decls(&file_index.defs);
     for r in &file_index.refs {
         if r.kind != RefKind::Call || decl_call_keys.contains(&(r.name.clone(), r.span.start)) {
             continue;
         }
-        let enclosing_fn = local_enclosing_name(&enclosing_entries, r.span.start);
+        let enclosing_fn = enclosing_callables
+            .enclosing(r.span.start)
+            .map(|entry| entry.name);
         let mut candidate_rules = Vec::new();
         push_call_candidate_rules(&mut candidate_rules, rules, &r.name, &import_aliases);
         for prepared in candidate_rules {
@@ -4626,6 +6067,12 @@ fn scan_calls_batch(
                 // actual invocations as `FlowEvent::Call`; fail closed here
                 // instead of turning a same-spelled reference into a guessed
                 // constructor.
+                continue;
+            }
+            if rule_primary_target(prepared.rule).is_some_and(|target| target.binding_origin.is_some()) {
+                // A reference fallback has no adapter-lowered receiver or
+                // caller binding identity. Exact external/global targets
+                // must be decided from a real Call fact.
                 continue;
             }
             if !prepared.call_kind_in.is_empty() {
@@ -4652,12 +6099,13 @@ fn scan_calls_batch(
             if !base_receiver_type_allows(prepared, None, &matched_callee, &[], &[]) {
                 continue;
             }
-            if !prepared.call_context_allows(&r.name, &[], &import_aliases, file_packages.as_ref()) {
+            if !prepared.call_context_allows(&r.name, &[], &import_aliases, file_packages) {
                 continue;
             }
             if !constraints_pass(ConstraintEval {
                 rule_id: &prepared.rule.id,
                 callee: &matched_callee,
+                receiver: None,
                 args: &[],
                 receiver_types: &[],
                 span: r.span,
@@ -4737,6 +6185,30 @@ fn push_call_candidate_rules<'batch, 'p, 'rule>(
     }
 }
 
+/// Select read-shaped rule candidates by the exact terminal identities that
+/// the compiler emitted for one structured reference/value read. This is the
+/// same lossless index used for call-shaped rules: regexes without a provable
+/// literal terminal remain in the wildcard bucket, and every candidate still
+/// passes through the canonical target, receiver, package, binding, and
+/// workspace-shadow checks in the scanners below.
+fn push_read_candidate_rules<'batch, 'p, 'rule>(
+    out: &mut Vec<&'p PreparedRule<'rule>>,
+    rules: &'batch PreparedRuleBatch<'p, 'rule>,
+    read: &str,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+) {
+    for &rule in &rules.read_wildcard_rules {
+        push_unique_prepared_rule(out, rule);
+    }
+    for key in call_candidate_keys(read, alias_map) {
+        if let Some(bucket) = rules.read_keyed_rules.get(&key) {
+            for &rule in bucket {
+                push_unique_prepared_rule(out, rule);
+            }
+        }
+    }
+}
+
 fn call_candidate_keys(
     callee: &str,
     alias_map: &std::collections::HashMap<String, AliasTarget>,
@@ -4749,17 +6221,36 @@ fn call_candidate_keys(
     out
 }
 
-/// Expand the first compiler alias in a callee while preserving its remaining
-/// member path. This is the canonical import/type rewrite shared by matcher
-/// candidate lookup and rulepack factory-return typing.
+/// Expand the longest compiler alias prefix in a callee while preserving its
+/// remaining member path. Exact module-member values may themselves carry a
+/// compiler type (`module.shared_client -> Client`), so considering only the
+/// first segment loses receiver identity after a namespace import. Longest
+/// prefix also prevents a broader namespace alias from overriding a more
+/// specific compiler binding.
 fn expand_callee_alias(
     callee: &str,
     alias_map: &std::collections::HashMap<String, AliasTarget>,
 ) -> Option<String> {
     let segments = bonsai_common::qualified_name_segments(callee);
-    let bare = normalize_leading_call_punctuation(segments.first().copied()?);
-    let target = alias_map.get(bare)?;
-    let tail = segments.iter().skip(1).copied().collect::<Vec<_>>().join(".");
+    if segments.is_empty() {
+        return None;
+    }
+    let normalized = segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            if index == 0 {
+                normalize_leading_call_punctuation(segment).to_string()
+            } else {
+                (*segment).to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    let (prefix_len, target) = (1..=normalized.len()).rev().find_map(|prefix_len| {
+        let prefix = normalized[..prefix_len].join(".");
+        alias_map.get(&prefix).map(|target| (prefix_len, target))
+    })?;
+    let tail = normalized[prefix_len..].join(".");
     let tail = if tail.is_empty() {
         String::new()
     } else {
@@ -4770,6 +6261,43 @@ fn expand_callee_alias(
         AliasTarget::Namespace { module } => format!("{module}{tail}"),
         AliasTarget::Type { type_name } => format!("{type_name}{tail}"),
     })
+}
+
+fn read_receiver_derivation_needed(prepared: &PreparedRule<'_>, direct_types: &[String]) -> bool {
+    let target_needs_type = rule_primary_target(prepared.rule).is_some_and(|target| {
+        !target.receiver_type_in.is_empty()
+            && !receiver_type_matches_any(direct_types, &target.receiver_type_in)
+    });
+    target_needs_type
+        || prepared
+            .rule
+            .constraints
+            .iter()
+            .any(|constraint| match constraint {
+                ConstraintKind::ReceiverTypeIn { receiver_type_in } => {
+                    !receiver_type_matches_any(direct_types, receiver_type_in)
+                }
+                // A newly derived blocked/safe type can reverse a direct positive
+                // verdict, so negative type constraints must retain derivation.
+                ConstraintKind::ReceiverTypeNotIn { .. } => true,
+                _ => false,
+            })
+}
+
+fn read_receiver_constraints_allow(prepared: &PreparedRule<'_>, receiver_types: &[String]) -> bool {
+    prepared
+        .rule
+        .constraints
+        .iter()
+        .all(|constraint| match constraint {
+            ConstraintKind::ReceiverTypeIn { receiver_type_in } => {
+                receiver_type_matches_any(receiver_types, receiver_type_in)
+            }
+            ConstraintKind::ReceiverTypeNotIn { receiver_type_not_in } => {
+                !receiver_type_matches_any(receiver_types, receiver_type_not_in)
+            }
+            _ => true,
+        })
 }
 
 /// Match a structured compiler call against rule-owned syntax after applying
@@ -4822,13 +6350,14 @@ fn normalize_leading_call_punctuation(value: &str) -> &str {
     }
 }
 
-/// Fire each Missing rule on every function-shaped decl in `file`
-/// where the expected callee is absent. Cross-procedural reach is
-/// opt-in via `match.search_depth`.
+/// Fire each Missing rule on every function-shaped decl in `file` where the
+/// expected callee is absent from that declaration's exact compiler facts.
+/// Interprocedural absence cannot be proven by a bounded graph prefix, so
+/// Missing rules deliberately remain intraprocedural.
 fn scan_missing_batch(
     ctx: &FileScanContext<'_, '_>,
     rules: &[&PreparedRule<'_>],
-    include_workspace_package_context: bool,
+    _include_workspace_package_context: bool,
     out: &mut Vec<RuleMatch>,
 ) {
     let ws = ctx.ws;
@@ -4837,18 +6366,10 @@ fn scan_missing_batch(
     let mode = ctx.mode;
     let taint_view = ctx.taint_view;
     let retention = ctx.retention;
-    let file_packages = file_package_set_with_prewarmed_workspace_context_and_retention(
-        ws,
-        file,
-        include_workspace_package_context,
-        retention,
-        ctx.import_package_contexts,
-        ctx.file_imports,
-    );
-    let import_aliases = file_alias_map_with_compiler_imports(ws, file, retention, ctx.file_imports);
+    let file_packages = ctx.package_evidence;
     // Missing-call rules don't use factory-return typing.
     let empty_factory = empty_rulepack_typing();
-    let requirements = DeclFactRequirements::for_rules(rules.iter().copied(), empty_factory.as_ref());
+    let requirements = DeclFactRequirements::for_rules(rules.iter().copied());
     let bundle = decl_match_facts_for_retention(
         ws,
         file,
@@ -4859,6 +6380,7 @@ fn scan_missing_batch(
             retention,
             compiler_imports: ctx.file_imports,
             global_headers: None,
+            call_result_type_decls: None,
         },
     );
 
@@ -4884,6 +6406,7 @@ fn scan_missing_batch(
             if !constraints_pass(ConstraintEval {
                 rule_id: &prepared.rule.id,
                 callee: "",
+                receiver: None,
                 args: &[],
                 receiver_types: &[],
                 span: target_span,
@@ -4905,16 +6428,16 @@ fn scan_missing_batch(
                     file_decls: &file_index.defs,
                     assignment_values: &file_index.assignment_values,
                     call_argument_values: &file_index.call_argument_values,
+                    string_compositions: &file_index.string_compositions,
                     factory_import_identity: None,
                 }),
             }) {
                 continue;
             }
 
-            // Does any call inside this declaration (or, when
-            // `search_depth > 0`, any resolved callee reachable within the
-            // rule-declared depth) match the expected target? Cross-procedure
-            // traversal only runs when the rule opts in.
+            // Does any exact call inside this declaration match the expected
+            // target? A finite resolved-call walk cannot prove whole-program
+            // absence and is therefore not part of the rule language.
             let target_present = facts.calls.iter().any(|call| {
                 prepared
                     .call_target_matches(call, &call.receiver_types, &facts.alias_map)
@@ -4923,17 +6446,9 @@ fn scan_missing_batch(
                         &call.callee,
                         &call.receiver_types,
                         &facts.alias_map,
-                        file_packages.as_ref(),
+                        file_packages,
                     )
-            }) || missing_target_in_reachable_callees(
-                ws,
-                file,
-                decl,
-                prepared,
-                &import_aliases,
-                retention,
-                ctx.import_package_contexts,
-            );
+            });
             if target_present {
                 continue;
             }
@@ -4952,164 +6467,6 @@ fn scan_missing_batch(
             });
         }
     }
-}
-
-/// Walk the entry declaration's resolved callees up to the rule's exact
-/// `search_depth`, looking for the expected target. Used by the Missing
-/// walker only when the rule opts into cross-procedural reach.
-fn missing_target_in_reachable_callees(
-    ws: &Workspace,
-    file: FileId,
-    entry: &bonsai_lang_api::Decl,
-    prepared: &PreparedRule<'_>,
-    import_aliases: &std::collections::HashMap<String, AliasTarget>,
-    retention: FactRetention,
-    import_package_contexts: Option<&Arc<LanguageImportPackageContexts>>,
-) -> bool {
-    if prepared.rule.match_spec.kind != MatchKind::Missing {
-        return false;
-    }
-    let max_depth = prepared.rule.match_spec.search_depth;
-    if max_depth == 0 {
-        return false;
-    }
-    let global = streaming_global_headers(ws);
-    let mut visited: AHashSet<bonsai_common::SymbolId> = AHashSet::new();
-    let mut frontier: AHashSet<bonsai_common::SymbolId> = AHashSet::new();
-
-    // Seed: direct callees of the entry decl. Export aliases come
-    // from the entry's adapter so JS/TS `module.exports.X` assignments
-    // count as published callees, while languages without an
-    // export-by-assignment convention pass an empty slice.
-    let entry_export_aliases = ws
-        .db()
-        .adapter_for(file)
-        .map(|adapter| adapter.capabilities().module_export_aliases)
-        .unwrap_or(&[]);
-    collect_callee_symbols(
-        ws,
-        &entry.flow_events,
-        &global,
-        entry,
-        import_aliases,
-        entry_export_aliases,
-        &mut frontier,
-    );
-
-    for _depth in 0..max_depth {
-        if frontier.is_empty() {
-            break;
-        }
-        let mut next: AHashSet<bonsai_common::SymbolId> = AHashSet::new();
-        for symbol in &frontier {
-            if !visited.insert(*symbol) {
-                continue;
-            }
-            let Some(callee_header) = global.decl_of(*symbol) else {
-                continue;
-            };
-            // Per-callee aliases / packages so child resolutions
-            // use the callee's own imports, not the entry's. The
-            // workspace-cached `decl_match_facts_for(ws, callee_file)`
-            // returns Arc-shared `DeclMatchFacts` keyed on
-            // `(FileId, version, content_hash)`; using it instead
-            // of inlining `collect_calls` /
-            // `extend_alias_map_with_declared_types` /
-            // `enrich_call_fact_receiver_types` per callee
-            // collapses Missing-rule BFS cost to one cache hit
-            // per (file, decl) pair across the whole search.
-            let callee_file = global.declaring_file(callee_header.symbol).unwrap_or(file);
-            let Some(callee_file_index) = ws
-                .db()
-                .decl_index_remapped_to_headers(global.as_ref(), callee_file)
-            else {
-                continue;
-            };
-            let Some(callee_decl) = callee_file_index.defs.iter().find(|decl| decl.symbol == *symbol) else {
-                continue;
-            };
-            let callee_file_packages = file_package_set_with_prewarmed_workspace_context_and_retention(
-                ws,
-                callee_file,
-                prepared.needs_workspace_package_context(),
-                retention,
-                import_package_contexts,
-                None,
-            );
-            let empty_factory = empty_rulepack_typing();
-            let requirements =
-                DeclFactRequirements::for_rules(std::iter::once(prepared), empty_factory.as_ref());
-            let callee_bundle = decl_match_facts_for_retention(
-                ws,
-                callee_file,
-                Some(&callee_file_index),
-                DeclMatchFactsRequest {
-                    factory: empty_factory.as_ref(),
-                    requirements,
-                    retention,
-                    compiler_imports: None,
-                    global_headers: None,
-                },
-            );
-            // Bundle covers every decl in the file; index by
-            // span. Fallback: if the cache layer didn't
-            // materialise this decl (rare — adapters that emit
-            // a decl with no flow_events skip it), fall through
-            // to the prior inline shape.
-            let callee_facts = callee_bundle.by_decl_span.get(&callee_decl.span).cloned();
-            let callee_alias_owned;
-            let (calls_view, callee_alias_ref): (
-                CalleeCallsView<'_>,
-                &std::collections::HashMap<String, AliasTarget>,
-            ) = if let Some(facts) = &callee_facts {
-                (
-                    std::borrow::Cow::Borrowed(facts.calls.as_slice()),
-                    &facts.alias_map,
-                )
-            } else {
-                let mut callee_alias = file_alias_map_with_retention(ws, callee_file, retention);
-                extend_alias_map_with_declared_types(&mut callee_alias, &callee_decl.type_aliases);
-                bonsai_lang_api::extend_alias_map_with_flow_events(
-                    &mut callee_alias,
-                    &callee_decl.flow_events,
-                );
-                let mut calls = collect_calls(&callee_decl.flow_events);
-                enrich_call_fact_receiver_types(&mut calls, &callee_decl.type_aliases);
-                callee_alias_owned = callee_alias;
-                (std::borrow::Cow::Owned(calls), &callee_alias_owned)
-            };
-            for call in calls_view.iter() {
-                if prepared
-                    .call_target_matches(call, &call.receiver_types, callee_alias_ref)
-                    .is_some()
-                    && prepared.call_context_allows(
-                        &call.callee,
-                        &call.receiver_types,
-                        callee_alias_ref,
-                        callee_file_packages.as_ref(),
-                    )
-                {
-                    return true;
-                }
-            }
-            let callee_export_aliases = ws
-                .db()
-                .adapter_for(callee_file)
-                .map(|adapter| adapter.capabilities().module_export_aliases)
-                .unwrap_or(&[]);
-            collect_callee_symbols(
-                ws,
-                &callee_decl.flow_events,
-                &global,
-                callee_decl,
-                callee_alias_ref,
-                callee_export_aliases,
-                &mut next,
-            );
-        }
-        frontier = next;
-    }
-    false
 }
 
 fn matching_call_has_arg_index(
@@ -5145,6 +6502,15 @@ fn matching_call_has_arg_index(
             {
                 continue;
             }
+            if external_receiver_type_is_workspace_shadow_at(
+                prepared,
+                &call.receiver_types,
+                &file_index.defs,
+                compiler_imports.as_ref(),
+                Some(&call.callee),
+            ) {
+                continue;
+            }
             if !prepared.call_context_allows(
                 &call.callee,
                 &call.receiver_types,
@@ -5153,22 +6519,36 @@ fn matching_call_has_arg_index(
             ) {
                 continue;
             }
-            if prepared.rule.match_spec.kind == MatchKind::New {
-                let workspace_context = WorkspaceCallIdentityContext {
-                    ws,
-                    global,
-                    caller: decl,
-                };
-                if !call_has_new_identity(
+            let workspace_context = WorkspaceCallIdentityContext {
+                ws,
+                global,
+                caller: decl,
+            };
+            if prepared_call_binding_origin_is_invalid(
+                prepared,
+                ws.db()
+                    .adapter_for(decl.name_span.file)
+                    .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax),
+                decl,
+                Some(&file_index.defs),
+                Some(&workspace_context),
+                &call,
+                &alias_map,
+                compiler_imports.as_ref(),
+            ) {
+                continue;
+            }
+            if prepared.rule.match_spec.kind == MatchKind::New
+                && !call_has_new_identity(
                     Some(&workspace_context),
                     factory,
                     &prepared.rule.language,
                     &call,
                     &alias_map,
                     compiler_imports.as_ref(),
-                ) {
-                    continue;
-                }
+                )
+            {
+                continue;
             }
             return true;
         }
@@ -5230,7 +6610,7 @@ fn transient_import_index(ws: &Workspace, file: FileId) -> Option<bonsai_lang_ap
 // Cross-workspace correctness requires the VFS instance because local-import
 // resolution and manifest context can differ even when a source file has the
 // same numeric FileId and byte content in two workspaces.
-type FilePackageSetKey = (u64, FileId, u64, u64, u64, bool);
+type FilePackageSetKey = (u64, FileId, u64, u64, bool);
 static FILE_PACKAGE_SET_CACHE: std::sync::LazyLock<MatcherFactCache<FilePackageSetKey, AHashSet<String>>> =
     std::sync::LazyLock::new(|| MatcherFactCache::new(matcher_fact_cache_budget_share(3, 32)));
 
@@ -5260,6 +6640,63 @@ struct LanguageImportPackageContexts {
     /// constraints reject files before full declaration/flow objects are
     /// decoded and also avoids reparsing relative-import targets.
     imports_by_file: AHashMap<FileId, Arc<bonsai_lang_api::ImportIndex>>,
+}
+
+/// Borrow-friendly package evidence used only by the staged header planner.
+/// Common component/manifest sets stay shared; only the usually-small exact
+/// import projection for this file is owned. This is semantically equivalent
+/// to the marker-prefixed union used by full matching while avoiding a
+/// workspace-sized allocation for every raw-anchor candidate.
+struct FilePackagePlanningEvidence {
+    direct_file_packages: AHashSet<String>,
+    component_packages: Arc<WorkspaceImportPackageContext>,
+    manifest_packages: Option<crate::deps::WorkspaceDependencyPackages>,
+    is_template: bool,
+}
+
+impl PackageEvidence for FilePackagePlanningEvidence {
+    fn contains_import(
+        &self,
+        signal: &str,
+        scope: PackageEvidenceScope,
+        semantics: &crate::loader::PackageMatchSemantics,
+    ) -> bool {
+        let packages = match scope {
+            PackageEvidenceScope::Direct => Some(&self.direct_file_packages),
+            PackageEvidenceScope::Component => Some(&self.component_packages.packages),
+            PackageEvidenceScope::Manifest if !self.is_template => self
+                .manifest_packages
+                .as_ref()
+                .map(|packages| packages.packages.as_ref()),
+            PackageEvidenceScope::TemplateManifest if self.is_template => self
+                .manifest_packages
+                .as_ref()
+                .map(|packages| packages.packages.as_ref()),
+            PackageEvidenceScope::Manifest | PackageEvidenceScope::TemplateManifest => None,
+        };
+        packages.is_some_and(|packages| {
+            packages
+                .iter()
+                .filter(|candidate| {
+                    scope != PackageEvidenceScope::Direct || !is_package_evidence_marker(candidate)
+                })
+                .any(|candidate| crate::pkg::import_matches_package(candidate, signal, semantics))
+        })
+    }
+
+    fn local_import_allows(&self, candidate: &str, signal: &str) -> bool {
+        self.direct_file_packages
+            .contains(&local_import_package_marker(candidate, signal))
+            || call_head(candidate).is_some_and(|head| {
+                self.direct_file_packages
+                    .contains(&local_import_package_marker(head, signal))
+            })
+    }
+
+    fn has_local_import_package(&self, signal: &str) -> bool {
+        self.direct_file_packages
+            .contains(&local_import_package_signal_marker(signal))
+    }
 }
 
 struct ImportComponents {
@@ -5378,6 +6815,78 @@ fn file_package_set_with_workspace_context_and_retention(
     )
 }
 
+fn file_package_planning_evidence(
+    ws: &Workspace,
+    file: FileId,
+    include_workspace_context: bool,
+    retention: FactRetention,
+    prewarmed_import_contexts: Option<&Arc<LanguageImportPackageContexts>>,
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+) -> FilePackagePlanningEvidence {
+    let language_imports = if include_workspace_context {
+        prewarmed_import_contexts.cloned().unwrap_or_else(|| {
+            project_language_import_package_contexts(
+                language_import_package_contexts(ws, file, retention).as_ref(),
+                None,
+            )
+        })
+    } else {
+        Arc::new(LanguageImportPackageContexts::default())
+    };
+    let prewarmed_file_imports = prewarmed_import_contexts
+        .and_then(|contexts| contexts.imports_by_file.get(&file))
+        .map(Arc::as_ref);
+    let mut direct_file_packages = AHashSet::new();
+    let loaded_imports;
+    let imports = if let Some(imports) = compiler_imports.or(prewarmed_file_imports) {
+        Some(imports)
+    } else {
+        loaded_imports = match retention {
+            FactRetention::Cached => ws.db().import_index(file).map(|imports| (*imports).clone()),
+            FactRetention::Transient => transient_import_index(ws, file),
+        };
+        loaded_imports.as_ref()
+    };
+    if let Some(imports) = imports {
+        insert_file_import_packages(
+            ws,
+            file,
+            imports,
+            retention,
+            prewarmed_import_contexts.map(|contexts| &contexts.imports_by_file),
+            &mut direct_file_packages,
+        );
+    }
+    let component_packages = language_imports
+        .by_file
+        .get(&file)
+        .map_or_else(|| Arc::new(WorkspaceImportPackageContext::default()), Arc::clone);
+    let manifest_packages = (include_workspace_context
+        && workspace_manifest_package_context_allowed(ws, file))
+    .then(|| {
+        let root = ws.db().workspace_root()?;
+        let language = ws
+            .db()
+            .adapter_for(file)
+            .map(|adapter| adapter.language_id().as_str())
+            .unwrap_or("");
+        Some(
+            crate::deps::workspace_dependency_packages_for_language_in_workspace(
+                &root,
+                language,
+                ws.db().vfs().instance_id(),
+            ),
+        )
+    })
+    .flatten();
+    FilePackagePlanningEvidence {
+        direct_file_packages,
+        component_packages,
+        manifest_packages,
+        is_template: workspace_manifest_template_context_allowed(ws, file),
+    }
+}
+
 fn file_package_set_with_prewarmed_workspace_context_and_retention(
     ws: &Workspace,
     file: FileId,
@@ -5430,17 +6939,19 @@ fn file_package_set_with_prewarmed_workspace_context_and_retention(
         combined_workspace_package_fingerprint(workspace_imports.fingerprint, component_imports.fingerprint);
     let workspace_package_fingerprint =
         combined_workspace_package_fingerprint(manifest_fingerprint, import_fingerprint);
-    let (version, text_hash) = ws.db().vfs().snapshot(file).map_or((0, 0), |snapshot| {
-        (
-            snapshot.version,
-            package_cache_content_hash(snapshot.text.as_bytes()),
-        )
-    });
+    // `Vfs::instance_id` separates workspace lifetimes and each write/edit
+    // monotonically increments this file's version. Hashing the complete
+    // source again here duplicated the raw-anchor pass on every broad scan;
+    // the identity tuple is already exact for this process-local cache.
+    let version = ws
+        .db()
+        .vfs()
+        .snapshot(file)
+        .map_or(0, |snapshot| snapshot.version);
     let key = (
         ws.db().vfs().instance_id(),
         file,
         version,
-        text_hash,
         workspace_package_fingerprint,
         include_workspace_context,
     );
@@ -5519,7 +7030,12 @@ fn build_file_package_set(
             .map(|package| component_import_package_marker(package)),
     );
     if let Some(workspace_packages) = inputs.workspace_packages {
-        out.extend(workspace_packages.packages.iter().cloned());
+        let marker = if workspace_manifest_template_context_allowed(ws, file) {
+            template_manifest_package_marker
+        } else {
+            manifest_package_marker
+        };
+        out.extend(workspace_packages.packages.iter().map(|package| marker(package)));
     }
     Arc::new(out)
 }
@@ -5712,14 +7228,12 @@ fn build_language_import_package_contexts(
                 .fingerprint
                 .wrapping_mul(16_777_619)
                 .wrapping_add(u64::from(candidate_file.raw()))
-                .wrapping_add(snapshot.version)
-                .wrapping_add(package_cache_content_hash(snapshot.text.as_bytes()));
+                .wrapping_add(snapshot.version);
             let fingerprint = component_fingerprints.entry(root).or_default();
             *fingerprint = fingerprint
                 .wrapping_mul(16_777_619)
                 .wrapping_add(u64::from(candidate_file.raw()))
-                .wrapping_add(snapshot.version)
-                .wrapping_add(package_cache_content_hash(snapshot.text.as_bytes()));
+                .wrapping_add(snapshot.version);
         }
         let Some(imports) = imports_by_file.get(&candidate_file) else {
             continue;
@@ -5815,6 +7329,7 @@ fn direct_package_imports_for_file(
 }
 
 fn insert_local_import_package_markers(out: &mut AHashSet<String>, spec: &ImportSpec, package: &str) {
+    out.insert(local_import_package_signal_marker(package));
     out.insert(local_import_package_marker(&spec.module, package));
     if let Some(alias) = &spec.alias {
         out.insert(local_import_package_marker(alias, package));
@@ -5834,17 +7349,20 @@ fn insert_local_import_package_markers(out: &mut AHashSet<String>, spec: &Import
 }
 
 fn resolve_relative_import_file(ws: &Workspace, importer: FileId, module: &str) -> Option<FileId> {
-    if !module.starts_with('.') {
-        return None;
-    }
     let importer_path = ws.vfs().path(importer).ok()?;
     let base_dir = importer_path.parent()?;
-    let raw = normalize_path(&base_dir.join(module));
-    let extensions = ws
-        .db()
-        .adapter_for(importer)
-        .map(|adapter| adapter.capabilities().module_resolution_extensions)
-        .unwrap_or(&[]);
+    let adapter = ws.db().adapter_for(importer)?;
+    let capabilities = adapter.capabilities();
+    if !module.starts_with('.') && !capabilities.unqualified_imports_search_current_directory {
+        return None;
+    }
+    let module_path = if module.starts_with('.') {
+        module.to_string()
+    } else {
+        module.replace('.', std::path::MAIN_SEPARATOR_STR)
+    };
+    let raw = normalize_path(&base_dir.join(module_path));
+    let extensions = capabilities.module_resolution_extensions;
     relative_import_candidates(&raw, extensions)
         .into_iter()
         .find_map(|candidate| ws.vfs().lookup(&candidate))
@@ -5901,10 +7419,35 @@ fn workspace_manifest_package_context_allowed(ws: &Workspace, file: FileId) -> b
         return false;
     };
     let path = path.to_string_lossy();
-    std::path::Path::new(path.as_ref())
+    let extension = std::path::Path::new(path.as_ref())
         .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| extensions.contains(&ext))
+        .and_then(|ext| ext.to_str());
+    extension.is_some_and(|ext| {
+        adapter
+            .file_extensions()
+            .iter()
+            .any(|source_ext| source_ext.eq_ignore_ascii_case(ext))
+            || extensions
+                .iter()
+                .any(|template_ext| template_ext.eq_ignore_ascii_case(ext))
+    })
+}
+
+fn workspace_manifest_template_context_allowed(ws: &Workspace, file: FileId) -> bool {
+    let Some(adapter) = ws.db().adapter_for(file) else {
+        return false;
+    };
+    let Ok(path) = ws.vfs().path(file) else {
+        return false;
+    };
+    let extension = path.extension().and_then(|ext| ext.to_str());
+    extension.is_some_and(|ext| {
+        adapter
+            .capabilities()
+            .workspace_manifest_context_extensions
+            .iter()
+            .any(|template_ext| template_ext.eq_ignore_ascii_case(ext))
+    })
 }
 
 fn package_cache_content_hash(bytes: &[u8]) -> u64 {
@@ -5938,11 +7481,12 @@ struct DeclMatchFacts {
     alias_chains: AHashMap<String, String>,
     runtime_types: Vec<RuntimeTypeNarrowing>,
     lifecycle_transitions: Vec<(Span, String, String)>,
-    /// `local → ReturnType` aliases synthesized from rulepack-declared call
-    /// results (`returns_type`) and structured constructors (`kind: new`).
-    /// Consulted by `base_receiver_type_allows` so receiver-typed rules
-    /// resolve on externally typed locals.
-    factory_type_aliases: Vec<TypeAliasBinding>,
+    /// `local → ReturnType` aliases synthesized from exact first-party
+    /// call resolution plus rulepack-declared external call results
+    /// (`returns_type`) and structured constructors (`kind: new`). Consulted
+    /// by `base_receiver_type_allows` so receiver-typed rules resolve without
+    /// local-variable spelling guesses.
+    derived_type_aliases: Vec<TypeAliasBinding>,
 }
 
 /// Exact derived-fact projection required by one prepared rule batch.
@@ -5962,7 +7506,7 @@ impl DeclFactRequirements {
     const ALIAS_CHAINS: u8 = 1 << 3;
     const RUNTIME_TYPES: u8 = 1 << 4;
     const LIFECYCLE: u8 = 1 << 5;
-    const RULEPACK_TYPES: u8 = 1 << 6;
+    const CALL_RESULT_TYPES: u8 = 1 << 6;
 
     fn insert(&mut self, flag: u8) {
         self.0 |= flag;
@@ -5972,29 +7516,16 @@ impl DeclFactRequirements {
         self.0 & flag != 0
     }
 
-    fn for_rules<'p, 'rule: 'p>(
-        rules: impl IntoIterator<Item = &'p PreparedRule<'rule>>,
-        factory: &RulepackTyping,
-    ) -> Self {
+    fn without(mut self, flag: u8) -> Self {
+        self.0 &= !flag;
+        self
+    }
+
+    fn for_rules<'p, 'rule: 'p>(rules: impl IntoIterator<Item = &'p PreparedRule<'rule>>) -> Self {
         let mut requirements = Self::default();
         for prepared in rules {
-            let target = rule_primary_target(prepared.rule);
-            let rulepack_types_can_change_match = !factory.is_empty()
-                && matches!(prepared.rule.match_spec.kind, MatchKind::Call | MatchKind::New)
-                && (prepared.rule.match_spec.kind == MatchKind::New
-                    || prepared.requires_call_package_signal
-                    || target.is_some_and(|target| {
-                        !target.receiver_type_in.is_empty()
-                            || target.attribute.as_ref().is_some_and(|parts| parts.len() >= 2)
-                    })
-                    || prepared.rule.constraints.iter().any(|constraint| {
-                        matches!(
-                            constraint,
-                            ConstraintKind::ReceiverTypeIn { .. } | ConstraintKind::ReceiverTypeNotIn { .. }
-                        )
-                    }));
-            if rulepack_types_can_change_match {
-                requirements.insert(Self::RULEPACK_TYPES);
+            if prepared_rule_needs_call_result_types(prepared) {
+                requirements.insert(Self::CALL_RESULT_TYPES);
             }
             for constraint in prepared.rule.constraints.iter() {
                 match constraint {
@@ -6006,7 +7537,8 @@ impl DeclFactRequirements {
                     ConstraintKind::SameReceiverCallCountAtLeast { .. } => {
                         requirements.insert(Self::RECEIVER_COUNTS);
                     }
-                    ConstraintKind::EnclosingDecoratorIn { .. } => {
+                    ConstraintKind::EnclosingDecoratorIn { .. }
+                    | ConstraintKind::EnclosingDecoratorNotIn { .. } => {
                         requirements.insert(Self::DECORATORS);
                     }
                     ConstraintKind::MustAlias { .. } => {
@@ -6024,6 +7556,24 @@ impl DeclFactRequirements {
         }
         requirements
     }
+}
+
+fn prepared_rule_needs_call_result_types(prepared: &PreparedRule<'_>) -> bool {
+    let target = rule_primary_target(prepared.rule);
+    matches!(
+        prepared.rule.match_spec.kind,
+        MatchKind::Call | MatchKind::New | MatchKind::Read | MatchKind::Write
+    ) && (prepared.requires_call_package_signal
+        || target.is_some_and(|target| {
+            !target.receiver_type_in.is_empty()
+                || target.attribute.as_ref().is_some_and(|parts| parts.len() >= 2)
+        })
+        || prepared.rule.constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                ConstraintKind::ReceiverTypeIn { .. } | ConstraintKind::ReceiverTypeNotIn { .. }
+            )
+        }))
 }
 
 /// Bundle of per-decl facts for one file, keyed by `decl.span` (the
@@ -6057,8 +7607,10 @@ struct FactoryReturnSpec {
     kind: MatchKind,
     method: String,
     receiver_path: Vec<String>,
+    receiver_types: Vec<String>,
     type_name: String,
     required_imports: Vec<String>,
+    binding_origin: Option<RuleBindingOrigin>,
 }
 
 /// Exact constructor identity declared by a structured `kind: new` rule.
@@ -6081,8 +7633,10 @@ struct CallbackParamTypeSpec {
     kind: MatchKind,
     target: RuleTarget,
     callback_arg_index: Option<usize>,
+    callback_field_path: Vec<String>,
     param_types: Vec<Vec<String>>,
     required_imports: Vec<String>,
+    binding_origin: Option<RuleBindingOrigin>,
 }
 
 /// Rulepack-owned call-to-state transfer. The target carries the exact
@@ -6102,7 +7656,10 @@ pub(crate) struct RulepackTyping {
     /// JS/Ruby/etc. file. Specs with an empty receiver path preserve the
     /// original method-name-only behavior; specs from
     /// `attribute: [Receiver, method]` require the assignment RHS callee
-    /// to end in that receiver path before typing the local.
+    /// to end in that receiver path before typing the local. A
+    /// `receiver_type_in` constraint instead requires an adapter/compiler
+    /// type alias for the receiver, enabling exact fluent return typing
+    /// without putting a library method inventory in shared code.
     by_language: AHashMap<String, Vec<FactoryReturnSpec>>,
     constructors_by_language: AHashMap<String, Vec<ConstructorSpec>>,
     callback_params_by_language: AHashMap<String, Vec<CallbackParamTypeSpec>>,
@@ -6174,8 +7731,10 @@ pub(crate) fn build_rulepack_typing(rules: &[&Rule]) -> Arc<RulepackTyping> {
                         kind: rule.match_spec.kind,
                         target: target.clone(),
                         callback_arg_index: rule.callback_arg_index.map(|index| index as usize),
+                        callback_field_path: rule.callback_field_path.clone(),
                         param_types: rule.callback_param_types.clone(),
                         required_imports: rule.imports.clone(),
+                        binding_origin: target.binding_origin,
                     });
             }
         }
@@ -6223,6 +7782,26 @@ pub(crate) fn build_rulepack_typing(rules: &[&Rule]) -> Arc<RulepackTyping> {
                 });
         }
         if let Some(ty) = rule.returns_type.as_deref().filter(|ty| !ty.is_empty()) {
+            // Receiver identity can be expressed either on the structured
+            // callee target or as a standalone constraint. Both forms are
+            // part of the exact rule contract; dropping the target-owned
+            // types turns a rulepack return model into an untyped method-name
+            // guess and also prevents direct factory chains from matching.
+            let mut receiver_types = target.receiver_type_in.clone();
+            receiver_types.extend(
+                rule.constraints
+                    .iter()
+                    .filter_map(|constraint| match constraint {
+                        ConstraintKind::ReceiverTypeIn { receiver_type_in } => {
+                            Some(receiver_type_in.as_slice())
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                    .cloned(),
+            );
+            receiver_types.sort();
+            receiver_types.dedup();
             by_language
                 .entry(rule.language.clone())
                 .or_default()
@@ -6230,8 +7809,10 @@ pub(crate) fn build_rulepack_typing(rules: &[&Rule]) -> Arc<RulepackTyping> {
                     kind: rule.match_spec.kind,
                     method: method.to_string(),
                     receiver_path,
+                    receiver_types,
                     type_name: ty.to_string(),
                     required_imports: rule.imports.clone(),
+                    binding_origin: target.binding_origin,
                 });
         }
     }
@@ -6248,7 +7829,7 @@ pub(crate) fn build_rulepack_typing(rules: &[&Rule]) -> Arc<RulepackTyping> {
     let mut langs: Vec<&String> = by_language.keys().collect();
     langs.sort();
     let mut hasher = StableHasher::new();
-    hasher.absorb(b"bonsai-matcher-rulepack-call-types-v2");
+    hasher.absorb(b"bonsai-matcher-rulepack-call-types-v4");
     hasher.absorb_separator();
     for lang in langs {
         hasher.absorb(&(lang.len() as u64).to_le_bytes());
@@ -6258,16 +7839,20 @@ pub(crate) fn build_rulepack_typing(rules: &[&Rule]) -> Arc<RulepackTyping> {
             (
                 a.kind,
                 &a.receiver_path,
+                &a.receiver_types,
                 &a.method,
                 &a.type_name,
                 &a.required_imports,
+                a.binding_origin,
             )
                 .cmp(&(
                     b.kind,
                     &b.receiver_path,
+                    &b.receiver_types,
                     &b.method,
                     &b.type_name,
                     &b.required_imports,
+                    b.binding_origin,
                 ))
         });
         hasher.absorb(&(specs.len() as u64).to_le_bytes());
@@ -6276,6 +7861,11 @@ pub(crate) fn build_rulepack_typing(rules: &[&Rule]) -> Arc<RulepackTyping> {
             for segment in &spec.receiver_path {
                 hasher.absorb(&(segment.len() as u64).to_le_bytes());
                 hasher.absorb(segment.as_bytes());
+            }
+            hasher.absorb(&(spec.receiver_types.len() as u64).to_le_bytes());
+            for type_name in &spec.receiver_types {
+                hasher.absorb(&(type_name.len() as u64).to_le_bytes());
+                hasher.absorb(type_name.as_bytes());
             }
             hasher.absorb(&(spec.method.len() as u64).to_le_bytes());
             hasher.absorb(spec.method.as_bytes());
@@ -6289,6 +7879,10 @@ pub(crate) fn build_rulepack_typing(rules: &[&Rule]) -> Arc<RulepackTyping> {
                 hasher.absorb(&(import.len() as u64).to_le_bytes());
                 hasher.absorb(import.as_bytes());
             }
+            let binding_origin =
+                serde_json::to_vec(&spec.binding_origin).expect("binding origins are serializable");
+            hasher.absorb(&(binding_origin.len() as u64).to_le_bytes());
+            hasher.absorb(&binding_origin);
         }
         hasher.absorb_separator();
     }
@@ -6326,7 +7920,7 @@ pub(crate) fn build_rulepack_typing(rules: &[&Rule]) -> Arc<RulepackTyping> {
     }
     let mut callback_langs: Vec<&String> = callback_params_by_language.keys().collect();
     callback_langs.sort();
-    hasher.absorb(b"callback-param-types-v1");
+    hasher.absorb(b"callback-param-types-v2");
     hasher.absorb_separator();
     for lang in callback_langs {
         hasher.absorb(&(lang.len() as u64).to_le_bytes());
@@ -6338,8 +7932,10 @@ pub(crate) fn build_rulepack_typing(rules: &[&Rule]) -> Arc<RulepackTyping> {
                     spec.kind,
                     &spec.target,
                     spec.callback_arg_index,
+                    &spec.callback_field_path,
                     &spec.param_types,
                     &spec.required_imports,
+                    spec.binding_origin,
                 ))
             })
             .collect::<Result<Vec<_>, _>>()
@@ -6392,26 +7988,48 @@ fn factory_path_segments(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn factory_spec_matches_call(call_name: &str, call_receiver: Option<&str>, spec: &FactoryReturnSpec) -> bool {
+fn factory_spec_matches_call(
+    call_name: &str,
+    call_receiver: Option<&str>,
+    spec: &FactoryReturnSpec,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+) -> bool {
     if !callee_tail_matches(call_name, &spec.method) {
         return false;
     }
-    if spec.receiver_path.is_empty() {
-        return true;
+    if !spec.receiver_types.is_empty() {
+        let Some(receiver) = call_receiver.or_else(|| bonsai_common::qualified_name_owner(call_name)) else {
+            return false;
+        };
+        let receiver = normalize_leading_call_punctuation(receiver.trim());
+        let typed = receiver_type_matches_wanted(receiver, &spec.receiver_types)
+            || matches!(
+                alias_map.get(receiver),
+                Some(AliasTarget::Type { type_name })
+                    if receiver_type_matches_wanted(type_name, &spec.receiver_types)
+            );
+        if !typed {
+            return false;
+        }
     }
-    let segments = call_receiver.map_or_else(
-        || {
-            let mut segments = factory_path_segments(call_name);
-            segments.pop();
-            segments
-        },
-        factory_path_segments,
-    );
-    if segments.len() < spec.receiver_path.len() {
-        return false;
+    if !spec.receiver_path.is_empty() {
+        let segments = call_receiver.map_or_else(
+            || {
+                let mut segments = factory_path_segments(call_name);
+                segments.pop();
+                segments
+            },
+            factory_path_segments,
+        );
+        if segments.len() < spec.receiver_path.len() {
+            return false;
+        }
+        let start = segments.len() - spec.receiver_path.len();
+        if segments[start..] != spec.receiver_path {
+            return false;
+        }
     }
-    let start = segments.len() - spec.receiver_path.len();
-    segments[start..] == spec.receiver_path
+    true
 }
 
 fn constructor_spec_matches_call(
@@ -6470,16 +8088,535 @@ struct WorkspaceCallIdentityContext<'a> {
     caller: &'a Decl,
 }
 
+/// Return the compiler binding that owns a call's callable identity.
+///
+/// Adapters already normalize both the complete callee and the receiver. The
+/// first receiver/callee path segment is therefore the lexical binding a
+/// language resolver would consult; no provider spelling is interpreted
+/// here. Call-expression receivers deliberately fail closed because an
+/// intermediate return value is not a lexical binding.
+fn identity_binding_root(identity: &str) -> Option<String> {
+    let identity = identity.trim();
+    let root = bonsai_common::qualified_name_segments(identity)
+        .first()
+        .copied()
+        .map(normalize_leading_call_punctuation)
+        .unwrap_or(identity)
+        .trim();
+    (!root.is_empty()
+        && root
+            .chars()
+            .all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()))
+    .then(|| root.to_string())
+}
+
+fn call_identity_binding_root(call: &CallFact) -> Option<String> {
+    identity_binding_root(call.receiver.as_deref().unwrap_or(&call.callee))
+}
+
+fn assignment_is_exact_import_binding(
+    root: &str,
+    span: Span,
+    required_imports: &[String],
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+) -> bool {
+    compiler_imports.is_some_and(|imports| {
+        imports.imports.iter().any(|import| {
+            import.alias.as_deref() == Some(root)
+                && (required_imports.is_empty()
+                    || required_imports
+                        .iter()
+                        .any(|wanted| import_module_matches(&import.module, wanted)))
+                && spans_overlap(span, import.span)
+        })
+    })
+}
+
+fn local_non_import_binding_shadows_import_alias(
+    events: &[FlowEvent],
+    root: &str,
+    call_span: Span,
+    required_imports: &[String],
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+) -> bool {
+    fn walk(
+        events: &[FlowEvent],
+        root: &str,
+        call_span: Span,
+        required_imports: &[String],
+        compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+    ) -> bool {
+        events.iter().any(|event| match event {
+            FlowEvent::Assign { target, span, .. } => {
+                if span.end > call_span.start || normalize_leading_call_punctuation(target) != root {
+                    return false;
+                }
+                !assignment_is_exact_import_binding(root, *span, required_imports, compiler_imports)
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                walk(then_events, root, call_span, required_imports, compiler_imports)
+                    || walk(else_events, root, call_span, required_imports, compiler_imports)
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                walk(body, root, call_span, required_imports, compiler_imports)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                walk(body, root, call_span, required_imports, compiler_imports)
+                    || walk(catch_events, root, call_span, required_imports, compiler_imports)
+                    || walk(
+                        finally_events,
+                        root,
+                        call_span,
+                        required_imports,
+                        compiler_imports,
+                    )
+            }
+            _ => false,
+        })
+    }
+
+    walk(events, root, call_span, required_imports, compiler_imports)
+}
+
+fn flow_contains_exact_non_import_binding(
+    events: &[FlowEvent],
+    root: &str,
+    required_imports: &[String],
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Assign { target, span, .. } => {
+            normalize_leading_call_punctuation(target) == root
+                && !assignment_is_exact_import_binding(root, *span, required_imports, compiler_imports)
+        }
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            flow_contains_exact_non_import_binding(then_events, root, required_imports, compiler_imports)
+                || flow_contains_exact_non_import_binding(
+                    else_events,
+                    root,
+                    required_imports,
+                    compiler_imports,
+                )
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            flow_contains_exact_non_import_binding(body, root, required_imports, compiler_imports)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            flow_contains_exact_non_import_binding(body, root, required_imports, compiler_imports)
+                || flow_contains_exact_non_import_binding(
+                    catch_events,
+                    root,
+                    required_imports,
+                    compiler_imports,
+                )
+                || flow_contains_exact_non_import_binding(
+                    finally_events,
+                    root,
+                    required_imports,
+                    compiler_imports,
+                )
+        }
+        _ => false,
+    })
+}
+
+#[allow(clippy::too_many_arguments)] // Binding identity proof keeps compiler declarations, aliases, imports, and exact span visible.
+fn write_binding_origin_is_valid(
+    ws: &Workspace,
+    file: FileId,
+    origin: RuleBindingOrigin,
+    caller: &Decl,
+    file_decls: &[Decl],
+    target: &str,
+    span: Span,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+    required_imports: &[String],
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+) -> bool {
+    let Some(root) = identity_binding_root(target) else {
+        return false;
+    };
+    let synthetic = CallFact {
+        callee: target.to_string(),
+        receiver: None,
+        span,
+        args: Vec::new(),
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        origin: CallFactOrigin::SyntheticWrite,
+    };
+    if !call_binding_origin_is_valid(
+        origin,
+        false,
+        caller,
+        Some(file_decls),
+        None,
+        &synthetic,
+        alias_map,
+        required_imports,
+        compiler_imports,
+    ) {
+        return false;
+    }
+
+    // A module/file binding shadows a runtime global or imported owner for
+    // every nested declaration. Compiler declarations and the synthetic
+    // module body provide the scope fact; the matcher does not interpret the
+    // provider spelling.
+    if file_decls.iter().any(|decl| {
+        if decl.symbol == caller.symbol || decl.parent.is_some() {
+            return false;
+        }
+        if decl.name == bonsai_lang_api::kit::MODULE_DECL_NAME {
+            return flow_contains_exact_non_import_binding(
+                &decl.flow_events,
+                &root,
+                required_imports,
+                compiler_imports,
+            );
+        }
+        declaration_binds_root(decl, &root)
+            && !(origin == RuleBindingOrigin::Imported && decl.kind == DeclKind::Import)
+    }) {
+        return false;
+    }
+
+    if origin == RuleBindingOrigin::Imported {
+        let module_matches_rule = |module: &str| {
+            required_imports.is_empty()
+                || required_imports
+                    .iter()
+                    .any(|wanted| import_module_matches(module, wanted))
+        };
+        let mut saw_exact_import = false;
+        let mut saw_workspace_local_import = false;
+        if let Some(AliasTarget::Member { module, .. } | AliasTarget::Namespace { module }) =
+            alias_map.get(&root)
+        {
+            if module_matches_rule(module) {
+                saw_exact_import = true;
+                saw_workspace_local_import |= resolve_relative_import_file(ws, file, module).is_some();
+            }
+        }
+        if let Some(imports) = compiler_imports {
+            for import in &imports.imports {
+                let binds_root = import.alias.as_deref() == Some(root.as_str())
+                    || (import.alias.is_none() && import.is_wildcard && module_matches_rule(&import.module));
+                if !binds_root || !module_matches_rule(&import.module) {
+                    continue;
+                }
+                saw_exact_import = true;
+                saw_workspace_local_import |=
+                    resolve_relative_import_file(ws, file, &import.module).is_some();
+            }
+        }
+        if !saw_exact_import || saw_workspace_local_import {
+            return false;
+        }
+    }
+
+    true
+}
+
+#[allow(clippy::too_many_arguments)] // Prepared matcher wrapper mirrors the exact binding-origin proof inputs.
+fn prepared_write_binding_origin_is_invalid(
+    ws: &Workspace,
+    file: FileId,
+    prepared: &PreparedRule<'_>,
+    caller: &Decl,
+    file_decls: &[Decl],
+    target: &str,
+    span: Span,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+) -> bool {
+    rule_primary_target(prepared.rule).is_some_and(|target_rule| {
+        target_rule.binding_origin.is_some_and(|origin| {
+            !write_binding_origin_is_valid(
+                ws,
+                file,
+                origin,
+                caller,
+                file_decls,
+                target,
+                span,
+                alias_map,
+                &prepared.rule.imports,
+                compiler_imports,
+            )
+        })
+    })
+}
+
+/// Reject a read-shaped reference whose rule-declared binding origin cannot
+/// be proven from compiler lexical/import facts. A missing enclosing
+/// declaration is insufficient evidence and therefore fails closed.
+#[allow(clippy::too_many_arguments)] // Prepared matcher wrapper mirrors the exact binding-origin proof inputs.
+fn prepared_reference_binding_origin_is_invalid(
+    ws: &Workspace,
+    file: FileId,
+    prepared: &PreparedRule<'_>,
+    caller: Option<&Decl>,
+    file_decls: &[Decl],
+    target: &str,
+    span: Span,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+) -> bool {
+    rule_primary_target(prepared.rule).is_some_and(|target_rule| {
+        target_rule.binding_origin.is_some_and(|origin| {
+            caller.is_none_or(|caller| {
+                !write_binding_origin_is_valid(
+                    ws,
+                    file,
+                    origin,
+                    caller,
+                    file_decls,
+                    target,
+                    span,
+                    alias_map,
+                    &prepared.rule.imports,
+                    compiler_imports,
+                )
+            })
+        })
+    })
+}
+
+/// Prove the rule-declared binding origin for one call using compiler facts.
+/// Lexical values/functions always win. Imported targets additionally require
+/// either an exact adapter-emitted import alias or an exact wildcard import of
+/// a namespace declared by the rule. Runtime globals need only remain
+/// lexically unshadowed.
+#[allow(clippy::too_many_arguments)] // Callable identity needs declaration, type, alias, import, and call facts together.
+fn call_binding_origin_is_valid(
+    origin: RuleBindingOrigin,
+    bare_type_is_callable: bool,
+    caller: &Decl,
+    file_decls: Option<&[Decl]>,
+    context: Option<&WorkspaceCallIdentityContext<'_>>,
+    call: &CallFact,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+    required_imports: &[String],
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+) -> bool {
+    let Some(root) = call_identity_binding_root(call) else {
+        return false;
+    };
+    if caller
+        .params
+        .iter()
+        .any(|param| normalize_leading_call_punctuation(param) == root)
+    {
+        return false;
+    }
+    let local_value_shadow =
+        bonsai_callgraph::local_value_binding_shadows_callable(&caller.flow_events, &root, call.span);
+    if local_value_shadow
+        && match origin {
+            RuleBindingOrigin::RuntimeGlobal => true,
+            RuleBindingOrigin::Imported => local_non_import_binding_shadows_import_alias(
+                &caller.flow_events,
+                &root,
+                call.span,
+                required_imports,
+                compiler_imports,
+            ),
+        }
+    {
+        return false;
+    }
+    if file_decls.is_some_and(|decls| {
+        decls.iter().any(|decl| {
+            decl.name == bonsai_lang_api::kit::MODULE_DECL_NAME
+                && flow_contains_exact_non_import_binding(
+                    &decl.flow_events,
+                    &root,
+                    required_imports,
+                    compiler_imports,
+                )
+        })
+    }) {
+        return false;
+    }
+    if file_decls.is_some_and(|decls| {
+        decls.iter().any(|decl| {
+            decl.symbol != caller.symbol
+                && matches!(
+                    decl.kind,
+                    DeclKind::Module
+                        | DeclKind::Namespace
+                        | DeclKind::Class
+                        | DeclKind::Struct
+                        | DeclKind::Trait
+                        | DeclKind::Interface
+                        | DeclKind::Enum
+                )
+                && declaration_binds_root(decl, &root)
+        })
+    }) {
+        return false;
+    }
+    let bare_call = bonsai_common::qualified_name_owner(&call.callee).is_none();
+    if bare_call
+        && file_decls.is_some_and(|decls| {
+            decls.iter().any(|decl| {
+                decl.symbol != caller.symbol
+                    && decl.name == root
+                    && (matches!(
+                        decl.kind,
+                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                    ) || (bare_type_is_callable
+                        && matches!(decl.kind, DeclKind::Class | DeclKind::Struct | DeclKind::Enum)))
+                    && (decl.parent.is_none() || decl.parent == caller.parent)
+            })
+        })
+    {
+        return false;
+    }
+    // An exact external import alias is a file-local lexical binding. A
+    // same-named declaration in another source file cannot shadow it. Keep
+    // workspace resolution for runtime globals, wildcard/unproven imports,
+    // and relative imports whose target is part of this workspace; those
+    // identities can genuinely resolve to first-party code.
+    let exact_external_import_alias = origin == RuleBindingOrigin::Imported
+        && alias_map.get(&root).is_some_and(|target| {
+            let module = match target {
+                AliasTarget::Member { module, .. } | AliasTarget::Namespace { module } => module,
+                AliasTarget::Type { .. } => return false,
+            };
+            context.is_none_or(|context| {
+                resolve_relative_import_file(context.ws, caller.span.file, module).is_none()
+            })
+        });
+    if bare_call
+        && !exact_external_import_alias
+        && context.is_some_and(|context| {
+            workspace_call_resolves_as_constructor(context, &call.callee, call.span, alias_map).is_some()
+        })
+    {
+        return false;
+    }
+    match origin {
+        RuleBindingOrigin::RuntimeGlobal => true,
+        RuleBindingOrigin::Imported => {
+            matches!(
+                alias_map.get(&root),
+                Some(AliasTarget::Member { .. } | AliasTarget::Namespace { .. })
+            ) || compiler_imports.is_some_and(|imports| {
+                imports.imports.iter().any(|import| {
+                    (import.is_wildcard
+                        && import.alias.is_none()
+                        && required_imports
+                            .iter()
+                            .any(|required| import_module_matches(&import.module, required)))
+                        || qualified_call_owner_matches_import(call, import, required_imports)
+                })
+            })
+        }
+    }
+}
+
+fn declaration_binds_root(decl: &Decl, expected_root: &str) -> bool {
+    // Adapters preserve both the concise source binding and, when available,
+    // its complete lexical identity.  Either can be the root used at a call
+    // site: `Client()` inside its namespace consults the concise binding,
+    // while `Vendor::Queue::Client->new()` consults the qualified root.
+    // Compare both compiler facts rather than reconstructing ownership from
+    // source punctuation in shared analysis.
+    std::iter::once(decl.name.as_str())
+        .chain(decl.qualified_name.as_deref())
+        .filter_map(|identity| bonsai_common::qualified_name_segments(identity).first().copied())
+        .map(normalize_leading_call_punctuation)
+        .map(str::trim)
+        .any(|root| !root.is_empty() && root == expected_root)
+}
+
+fn qualified_call_owner_matches_import(
+    call: &CallFact,
+    import: &bonsai_lang_api::ImportSpec,
+    required_imports: &[String],
+) -> bool {
+    if import.alias.is_some()
+        || (!required_imports.is_empty()
+            && !required_imports
+                .iter()
+                .any(|required| import_module_matches(&import.module, required)))
+    {
+        return false;
+    }
+    let owner = call
+        .receiver
+        .as_deref()
+        .or_else(|| bonsai_common::qualified_name_owner(&call.callee))
+        .map(bonsai_common::normalize_qualified_name);
+    let imported = bonsai_common::normalize_qualified_name(&import.module);
+    owner.is_some_and(|owner| {
+        owner == imported
+            || owner.starts_with(&format!("{imported}."))
+            || required_imports.iter().any(|declared_alias| {
+                let declared_alias = bonsai_common::normalize_qualified_name(declared_alias);
+                owner == declared_alias || owner.starts_with(&format!("{declared_alias}."))
+            })
+    })
+}
+
+#[allow(clippy::too_many_arguments)] // Prepared matcher wrapper mirrors the exact callable-identity proof inputs.
+fn prepared_call_binding_origin_is_invalid(
+    prepared: &PreparedRule<'_>,
+    bare_type_is_callable: bool,
+    caller: &Decl,
+    file_decls: Option<&[Decl]>,
+    context: Option<&WorkspaceCallIdentityContext<'_>>,
+    call: &CallFact,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+) -> bool {
+    rule_primary_target(prepared.rule).is_some_and(|target| {
+        target.binding_origin.is_some_and(|origin| {
+            !call_binding_origin_is_valid(
+                origin,
+                bare_type_is_callable,
+                caller,
+                file_decls,
+                context,
+                call,
+                alias_map,
+                &prepared.rule.imports,
+                compiler_imports,
+            )
+        })
+    })
+}
+
 /// Resolve a function-shaped call against exact workspace declarations. `None` means no
 /// workspace callable owns the spelling, so a rulepack-declared external
 /// constructor may supply the identity. `Some(false)` includes lexical value
 /// shadowing, ordinary functions, and mixed/ambiguous candidates.
-fn workspace_call_resolves_as_constructor(
+fn resolve_workspace_call_candidates(
     context: &WorkspaceCallIdentityContext<'_>,
     call_name: &str,
     call_span: Span,
     alias_map: &std::collections::HashMap<String, AliasTarget>,
-) -> Option<bool> {
+) -> Vec<bonsai_common::FuncId> {
     if bonsai_common::qualified_name_owner(call_name).is_none()
         && bonsai_callgraph::local_value_binding_shadows_callable(
             &context.caller.flow_events,
@@ -6487,7 +8624,7 @@ fn workspace_call_resolves_as_constructor(
             call_span,
         )
     {
-        return Some(false);
+        return Vec::new();
     }
     let aliases: AHashMap<String, AliasTarget> = alias_map
         .iter()
@@ -6513,8 +8650,16 @@ fn workspace_call_resolves_as_constructor(
             .with_file_path_lookup(&path_lookup)
             .with_same_directory_unqualified_calls(capabilities.same_directory_unqualified_calls)
             .with_module_path_syntax(capabilities.module_path_syntax);
-    let candidates =
-        bonsai_resolve::resolve_callable_with_context(context.global, call_name, &resolve_context);
+    bonsai_resolve::resolve_callable_with_context(context.global, call_name, &resolve_context)
+}
+
+fn workspace_call_resolves_as_constructor(
+    context: &WorkspaceCallIdentityContext<'_>,
+    call_name: &str,
+    call_span: Span,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+) -> Option<bool> {
+    let candidates = resolve_workspace_call_candidates(context, call_name, call_span, alias_map);
     if candidates.is_empty() {
         return None;
     }
@@ -6524,6 +8669,738 @@ fn workspace_call_resolves_as_constructor(
             .decl_of(SymbolId::new(candidate.raw()))
             .is_some_and(|decl| decl.kind == DeclKind::Constructor)
     }))
+}
+
+/// Resolve the declared return type of one exact workspace call.
+///
+/// Every surviving callable candidate must declare the same non-empty return
+/// type. Mixed, missing, or ambiguous return contracts fail closed. Imported
+/// type aliases are expanded through compiler import facts before the type is
+/// attached to the assignment target.
+fn workspace_call_return_type(
+    context: &WorkspaceCallIdentityContext<'_>,
+    call_name: &str,
+    call_span: Span,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+) -> Option<String> {
+    let candidates = resolve_workspace_call_candidates(context, call_name, call_span, alias_map);
+    let mut resolved: Option<String> = None;
+    for candidate in candidates {
+        let decl = context.global.decl_of(SymbolId::new(candidate.raw()))?;
+        let declared = if decl.kind == DeclKind::Constructor {
+            let owner = decl.parent.and_then(|parent| context.global.decl_of(parent))?;
+            if !matches!(
+                owner.kind,
+                DeclKind::Class | DeclKind::Struct | DeclKind::Enum | DeclKind::Trait | DeclKind::Interface
+            ) {
+                return None;
+            }
+            owner
+                .qualified_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(owner.name.as_str())
+                .to_string()
+        } else {
+            let declared = decl
+                .return_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|return_type| !return_type.is_empty())?;
+            // Return annotations are written in the callee's lexical import
+            // scope, not the caller's. Canonicalizing through caller aliases
+            // silently loses types whenever a helper imports/renames its
+            // result type and a different module calls that helper.
+            let callee_aliases = context
+                .ws
+                .db()
+                .compiler_import_index_uncached(decl.span.file)
+                .as_ref()
+                .map(bonsai_lang_api::alias_map_from_imports)
+                .unwrap_or_default();
+            expand_callee_alias(declared, &callee_aliases).unwrap_or_else(|| declared.to_string())
+        };
+        let canonical = declared;
+        if resolved.as_deref().is_some_and(|existing| existing != canonical) {
+            return None;
+        }
+        resolved = Some(canonical);
+    }
+    resolved
+}
+
+/// Resolve an exact first-party call result from either its declared return
+/// type or a compiler-proven, rulepack-typed return value.
+///
+/// The fallback is deliberately narrow: every resolved callable must have a
+/// complete body whose normal exits return the same typed place. The place
+/// type itself comes from generic compiler aliases or a rulepack-declared
+/// external factory. Shared analysis never assigns meaning to a provider or
+/// method spelling, and an untyped/mixed/fallthrough return fails closed.
+fn workspace_call_return_type_with_rulepack(
+    context: &WorkspaceCallIdentityContext<'_>,
+    call_name: &str,
+    call_span: Span,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+    factory: &RulepackTyping,
+    language: Option<&str>,
+) -> Option<String> {
+    if let Some(declared) = workspace_call_return_type(context, call_name, call_span, alias_map) {
+        return Some(declared);
+    }
+    let language = language?;
+    let candidates = resolve_workspace_call_candidates(context, call_name, call_span, alias_map);
+    if candidates.is_empty() {
+        return None;
+    }
+    let mut resolved: Option<String> = None;
+    for candidate in candidates {
+        let inferred =
+            infer_rulepack_typed_decl_return(context, SymbolId::new(candidate.raw()), factory, language)?;
+        if resolved.as_deref().is_some_and(|existing| existing != inferred) {
+            return None;
+        }
+        resolved = Some(inferred);
+    }
+    resolved
+}
+
+fn infer_rulepack_typed_decl_return(
+    context: &WorkspaceCallIdentityContext<'_>,
+    symbol: SymbolId,
+    factory: &RulepackTyping,
+    language: &str,
+) -> Option<String> {
+    let decl = context.ws.exact_decl(symbol)?;
+    if decl.kind == DeclKind::Constructor || decl.flow_events.is_empty() {
+        return None;
+    }
+    let file_index = context.ws.exact_decl_index_shared(decl.span.file)?;
+    let compiler_imports = context.ws.db().compiler_import_index_uncached(decl.span.file);
+    let mut aliases = compiler_imports
+        .as_ref()
+        .map(bonsai_lang_api::alias_map_from_imports)
+        .unwrap_or_default();
+    extend_alias_map_with_declared_types(&mut aliases, &decl.type_aliases);
+    bonsai_lang_api::extend_alias_map_with_flow_events(&mut aliases, &decl.flow_events);
+    let callee_context = WorkspaceCallIdentityContext {
+        ws: context.ws,
+        global: context.global,
+        caller: &decl,
+    };
+    let derived = synth_factory_type_aliases(
+        &decl.flow_events,
+        &file_index.assignment_values,
+        factory,
+        language,
+        &aliases,
+        compiler_imports.as_ref(),
+        Some(&decl),
+        Some(&callee_context),
+    );
+    extend_alias_map_with_declared_types(&mut aliases, &derived);
+
+    if !flow_events_guarantee_exit(&decl.flow_events) {
+        return None;
+    }
+    let mut returns = Vec::new();
+    if !collect_typed_return_places(&decl.flow_events, &aliases, &mut returns) || returns.is_empty() {
+        return None;
+    }
+    returns.sort();
+    returns.dedup();
+    (returns.len() == 1).then(|| returns.pop().expect("single inferred return type"))
+}
+
+fn collect_typed_return_places(
+    events: &[FlowEvent],
+    aliases: &std::collections::HashMap<String, AliasTarget>,
+    out: &mut Vec<String>,
+) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                value_name,
+                value_flow,
+                ..
+            } => {
+                let Some(place) = value_flow.place.as_deref().or(value_name.as_deref()) else {
+                    return false;
+                };
+                let place = normalize_leading_call_punctuation(place.trim());
+                let Some(AliasTarget::Type { type_name }) = aliases.get(place) else {
+                    return false;
+                };
+                if type_name.trim().is_empty() {
+                    return false;
+                }
+                out.push(type_name.clone());
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if !collect_typed_return_places(then_events, aliases, out)
+                    || !collect_typed_return_places(else_events, aliases, out)
+                {
+                    return false;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if !collect_typed_return_places(body, aliases, out) {
+                    return false;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if !collect_typed_return_places(body, aliases, out)
+                    || !collect_typed_return_places(catch_events, aliases, out)
+                    || !collect_typed_return_places(finally_events, aliases, out)
+                {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Conservative normal-exit proof for inferred return summaries. A final
+/// return/throw terminates the sequence; a branch must terminate on both
+/// sides. Loops and partial try/catch constructs never become total merely
+/// because one nested arm returns.
+fn flow_events_guarantee_exit(events: &[FlowEvent]) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Return { .. } | FlowEvent::Throw { .. } => return true,
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } if !else_events.is_empty()
+                && flow_events_guarantee_exit(then_events)
+                && flow_events_guarantee_exit(else_events) =>
+            {
+                return true;
+            }
+            FlowEvent::Try { finally_events, .. } if flow_events_guarantee_exit(finally_events) => {
+                return true
+            }
+            FlowEvent::Using { body, .. } if flow_events_guarantee_exit(body) => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+type ExactModuleFileIndexKey = (u64, u64, bonsai_index::GlobalIndexIdentity);
+
+/// Candidate directory for exact workspace-module lookup.
+///
+/// The final verdict still runs the resolver's exact module/path predicates.
+/// This index only replaces the accidental `imports x workspace-files` scan:
+/// any exact module or path match must share its terminal normalized segment
+/// with the target, so the leaf directory is a complete candidate set.
+#[derive(Default)]
+struct ExactModuleFileIndex {
+    files_by_leaf: AHashMap<String, Vec<FileId>>,
+}
+
+impl ExactModuleFileIndex {
+    fn build(ws: &Workspace, global: &bonsai_index::GlobalIndex) -> Arc<Self> {
+        let mut files_by_leaf: AHashMap<String, Vec<FileId>> = AHashMap::new();
+        for file in global.all_files() {
+            let mut file_leaves = AHashSet::new();
+            for decl in global
+                .decls_in(file)
+                .iter()
+                .filter(|decl| decl.kind == DeclKind::Module)
+            {
+                if let Some(leaf) = decl.module_path.segments.last() {
+                    if !leaf.is_empty() {
+                        file_leaves.insert(leaf.clone());
+                    }
+                }
+            }
+            if let Ok(path) = ws.vfs().path(file) {
+                for part in bonsai_resolve::module_path_parts(&path.to_string_lossy()) {
+                    if !part.is_empty() {
+                        file_leaves.insert(part);
+                    }
+                }
+            }
+            for leaf in file_leaves {
+                files_by_leaf.entry(leaf).or_default().push(file);
+            }
+        }
+        for files in files_by_leaf.values_mut() {
+            files.sort_unstable();
+            files.dedup();
+        }
+        Arc::new(Self { files_by_leaf })
+    }
+
+    fn candidate_files(&self, target: &str) -> Vec<FileId> {
+        let mut leaves = AHashSet::new();
+        if let Some(leaf) = bonsai_common::qualified_name_segments(target).last() {
+            if !leaf.is_empty() {
+                leaves.insert((*leaf).to_string());
+            }
+        }
+        if let Some(leaf) = bonsai_resolve::module_target_parts(target).last() {
+            if !leaf.is_empty() {
+                leaves.insert(leaf.clone());
+            }
+        }
+        let mut candidates = leaves
+            .into_iter()
+            .filter_map(|leaf| self.files_by_leaf.get(&leaf))
+            .flat_map(|files| files.iter().copied())
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
+    }
+}
+
+fn estimated_exact_module_file_index_bytes(index: &ExactModuleFileIndex) -> u64 {
+    index.files_by_leaf.iter().fold(1024_u64, |total, (leaf, files)| {
+        total
+            .saturating_add(96)
+            .saturating_add(u64::try_from(leaf.len()).unwrap_or(u64::MAX))
+            .saturating_add(
+                u64::try_from(files.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(std::mem::size_of::<FileId>() as u64),
+            )
+    })
+}
+
+static EXACT_MODULE_FILE_INDEX_CACHE: std::sync::LazyLock<
+    MatcherFactCache<ExactModuleFileIndexKey, ExactModuleFileIndex>,
+> = std::sync::LazyLock::new(|| {
+    MatcherFactCache::new_with_oversized_singleton(matcher_fact_cache_budget_share(1, 8), true)
+});
+
+type ModuleExportTypeKey = (u64, u64, bonsai_index::GlobalIndexIdentity, FileId, u64, String);
+
+static MODULE_EXPORT_TYPE_CACHE: std::sync::LazyLock<
+    MatcherFactCache<ModuleExportTypeKey, Vec<TypeAliasBinding>>,
+> = std::sync::LazyLock::new(|| MatcherFactCache::new(matcher_fact_cache_budget_share(1, 8)));
+
+fn estimated_type_alias_bytes(aliases: &[TypeAliasBinding]) -> u64 {
+    aliases.iter().fold(64_u64, |total, alias| {
+        total
+            .saturating_add(64)
+            .saturating_add(u64::try_from(alias.name.len()).unwrap_or(u64::MAX))
+            .saturating_add(u64::try_from(alias.type_name.len()).unwrap_or(u64::MAX))
+    })
+}
+
+fn exact_module_file_index(ws: &Workspace, global: &bonsai_index::GlobalIndex) -> Arc<ExactModuleFileIndex> {
+    let key = (
+        ws.db().vfs().instance_id(),
+        ws.db().vfs().revision(),
+        global.identity(),
+    );
+    EXACT_MODULE_FILE_INDEX_CACHE.get_or_insert_with(
+        key,
+        || ExactModuleFileIndex::build(ws, global),
+        estimated_exact_module_file_index_bytes,
+    )
+}
+
+fn exact_module_file_for_import_target(
+    ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
+    target: &str,
+) -> Option<FileId> {
+    let module_files = exact_module_file_index(ws, global);
+    let mut candidates = Vec::new();
+    for file in module_files.candidate_files(target) {
+        let syntax = ws
+            .db()
+            .adapter_for(file)
+            .map(|adapter| adapter.capabilities().module_path_syntax)
+            .unwrap_or_else(bonsai_lang_api::ModulePathSyntax::none);
+        let module_matches = global.decls_in(file).iter().any(|decl| {
+            decl.kind == DeclKind::Module
+                && bonsai_resolve::module_target_exactly_matches_decl_module_path_with_syntax(
+                    target,
+                    &decl.module_path,
+                    syntax,
+                )
+        });
+        let path_matches =
+            ws.vfs().path(file).ok().is_some_and(|path| {
+                bonsai_resolve::module_target_matches_path(target, &path.to_string_lossy())
+            });
+        if module_matches || path_matches {
+            candidates.push(file);
+        }
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [file] => Some(*file),
+        _ => None,
+    }
+}
+
+fn flow_events_rebind_prefix(events: &[FlowEvent], prefix: &str) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Assign { target, .. } | FlowEvent::AggregateAssign { target, .. }
+                if target == prefix || target.starts_with(&format!("{prefix}.")) =>
+            {
+                return true;
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if flow_events_rebind_prefix(then_events, prefix)
+                    || flow_events_rebind_prefix(else_events, prefix)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if flow_events_rebind_prefix(body, prefix) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if flow_events_rebind_prefix(body, prefix)
+                    || flow_events_rebind_prefix(catch_events, prefix)
+                    || flow_events_rebind_prefix(finally_events, prefix)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn module_header_export_type_aliases(
+    ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
+    file: FileId,
+    factory: &RulepackTyping,
+    language: Option<&str>,
+) -> Arc<Vec<TypeAliasBinding>> {
+    let key = (
+        ws.db().vfs().instance_id(),
+        ws.db().vfs().revision(),
+        global.identity(),
+        file,
+        factory.fingerprint,
+        language.unwrap_or_default().to_string(),
+    );
+    MODULE_EXPORT_TYPE_CACHE.get_or_insert_with(
+        key,
+        || {
+            Arc::new(build_module_header_export_type_aliases(
+                ws, global, file, factory, language,
+            ))
+        },
+        |aliases| estimated_type_alias_bytes(aliases),
+    )
+}
+
+fn build_module_header_export_type_aliases(
+    ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
+    file: FileId,
+    factory: &RulepackTyping,
+    language: Option<&str>,
+) -> Vec<TypeAliasBinding> {
+    let Some(module_decl) = global
+        .decls_in(file)
+        .iter()
+        .find(|decl| decl.kind == DeclKind::Module || decl.name == bonsai_lang_api::MODULE_DECL_NAME)
+    else {
+        return Vec::new();
+    };
+    let Some(syntax) = ws.db().compiler_syntax_header_uncached(file) else {
+        return Vec::new();
+    };
+    let compiler_imports = ws.db().compiler_import_index_uncached(file);
+    let mut alias_map = compiler_imports
+        .as_ref()
+        .map(bonsai_lang_api::alias_map_from_imports)
+        .unwrap_or_default();
+    extend_alias_map_with_declared_types(&mut alias_map, &module_decl.type_aliases);
+    let assignments = syntax
+        .factory_assignments
+        .iter()
+        .filter(|assignment| assignment.owner_span == module_decl.span)
+        .collect::<Vec<_>>();
+    let ordinary_aliases = syntax
+        .assignment_aliases
+        .iter()
+        .filter(|assignment| assignment.owner_span == module_decl.span)
+        .cloned()
+        .collect::<Vec<_>>();
+    extend_alias_map_with_compiler_assignment_aliases(&mut alias_map, &ordinary_aliases);
+    let context = WorkspaceCallIdentityContext {
+        ws,
+        global,
+        caller: module_decl,
+    };
+    let specs = language
+        .and_then(|language| factory.specs_for(language))
+        .unwrap_or_default();
+    let mut out = module_decl.type_aliases.clone();
+    loop {
+        let prior_len = out.len();
+        for assignment in &assignments {
+            let call_root = bonsai_common::qualified_name_segments(&assignment.call_name)
+                .first()
+                .copied()
+                .map(normalize_leading_call_punctuation)
+                .unwrap_or_default();
+            let rebound_before_call = ordinary_aliases.iter().any(|alias| {
+                alias.assignment_span.start < assignment.assignment_span.start
+                    && (alias.target == call_root || alias.target.starts_with(&format!("{call_root}.")))
+            }) || assignments.iter().any(|prior| {
+                prior.assignment_span.start < assignment.assignment_span.start
+                    && (prior.target == call_root || prior.target.starts_with(&format!("{call_root}.")))
+            });
+            if !call_root.is_empty() && rebound_before_call {
+                continue;
+            }
+
+            let call = CallFact {
+                callee: assignment.call_name.clone(),
+                receiver: assignment.call_receiver.clone(),
+                span: assignment.assignment_span,
+                args: Vec::new(),
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Function,
+                origin: CallFactOrigin::AssignmentSourceCall,
+            };
+            let mut candidate_types = Vec::new();
+            if let Some(type_name) = workspace_call_return_type(
+                &context,
+                &assignment.call_name,
+                assignment.assignment_span,
+                &alias_map,
+            ) {
+                push_unique_string(&mut candidate_types, type_name);
+            }
+            for spec in specs {
+                if !typing_imports_allow(&spec.required_imports, compiler_imports.as_ref()) {
+                    continue;
+                }
+                if let Some(origin) = spec.binding_origin {
+                    if !call_binding_origin_is_valid(
+                        origin,
+                        ws.db()
+                            .adapter_for(file)
+                            .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax),
+                        module_decl,
+                        Some(global.decls_in(file)),
+                        Some(&context),
+                        &call,
+                        &alias_map,
+                        &spec.required_imports,
+                        compiler_imports.as_ref(),
+                    ) {
+                        continue;
+                    }
+                }
+                if !factory_spec_matches_call(
+                    &assignment.call_name,
+                    assignment.call_receiver.as_deref(),
+                    spec,
+                    &alias_map,
+                ) {
+                    continue;
+                }
+                if spec.kind == MatchKind::New
+                    && workspace_call_resolves_as_constructor(
+                        &context,
+                        &assignment.call_name,
+                        assignment.assignment_span,
+                        &alias_map,
+                    ) == Some(false)
+                {
+                    continue;
+                }
+                push_unique_string(&mut candidate_types, spec.type_name.clone());
+            }
+            if candidate_types.len() == 1 {
+                let binding = TypeAliasBinding {
+                    name: assignment.target.clone(),
+                    type_name: candidate_types.pop().expect("single module export type"),
+                };
+                if !out.contains(&binding) {
+                    out.push(binding);
+                }
+            }
+        }
+        if out.len() == prior_len {
+            break;
+        }
+        extend_alias_map_with_declared_types(&mut alias_map, &out[prior_len..]);
+    }
+    out.sort_by(|left, right| (&left.name, &left.type_name).cmp(&(&right.name, &right.type_name)));
+    out.dedup();
+    out
+}
+
+fn imported_module_value_type_aliases(
+    ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
+    file_index: &DeclIndex,
+    factory: &RulepackTyping,
+    language: Option<&str>,
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+) -> Vec<TypeAliasBinding> {
+    let Some(compiler_imports) = compiler_imports else {
+        return Vec::new();
+    };
+    let compiler_aliases = bonsai_lang_api::alias_map_from_imports(compiler_imports);
+    let mut out = Vec::new();
+    for (local, target) in compiler_aliases {
+        if local.starts_with(bonsai_lang_api::WILDCARD_IMPORT_ALIAS_PREFIX)
+            || file_index
+                .defs
+                .iter()
+                .any(|decl| flow_events_rebind_prefix(&decl.flow_events, &local))
+        {
+            continue;
+        }
+        let (module_target, imported_member) = match target {
+            AliasTarget::Namespace { module } => (module, None),
+            AliasTarget::Member { module, member } => {
+                let nested_module = format!("{module}.{member}");
+                if exact_module_file_for_import_target(ws, global, &nested_module).is_some() {
+                    (nested_module, None)
+                } else {
+                    (module, Some(member))
+                }
+            }
+            AliasTarget::Type { .. } => continue,
+        };
+        let Some(target_file) = exact_module_file_for_import_target(ws, global, &module_target) else {
+            continue;
+        };
+        let exported = module_header_export_type_aliases(ws, global, target_file, factory, language);
+        if let Some(member) = imported_member {
+            let mut types = exported
+                .iter()
+                .filter(|binding| binding.name == member)
+                .map(|binding| binding.type_name.clone())
+                .collect::<Vec<_>>();
+            types.sort();
+            types.dedup();
+            if types.len() == 1 {
+                out.push(TypeAliasBinding {
+                    name: local,
+                    type_name: types.pop().expect("single imported member type"),
+                });
+            }
+        } else {
+            for binding in exported.iter() {
+                out.push(TypeAliasBinding {
+                    name: format!("{local}.{}", binding.name),
+                    type_name: binding.type_name.clone(),
+                });
+            }
+        }
+    }
+    out.sort_by(|left, right| (&left.name, &left.type_name).cmp(&(&right.name, &right.type_name)));
+    out.dedup();
+    out
+}
+
+/// Synthesize assignment receiver types from compiler-resolved first-party
+/// calls. This is independent of rulepack factory models: source declarations
+/// own their return contracts, while the resolver owns callable identity.
+fn synth_workspace_call_result_type_aliases(
+    events: &[FlowEvent],
+    context: &WorkspaceCallIdentityContext<'_>,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+    factory: &RulepackTyping,
+    language: Option<&str>,
+) -> Vec<TypeAliasBinding> {
+    fn walk(
+        events: &[FlowEvent],
+        context: &WorkspaceCallIdentityContext<'_>,
+        alias_map: &std::collections::HashMap<String, AliasTarget>,
+        factory: &RulepackTyping,
+        language: Option<&str>,
+        out: &mut Vec<TypeAliasBinding>,
+    ) {
+        for event in events {
+            match event {
+                FlowEvent::Assign {
+                    span,
+                    target,
+                    source_call: Some(call_name),
+                    ..
+                } if !target.is_empty() => {
+                    if let Some(type_name) = workspace_call_return_type_with_rulepack(
+                        context, call_name, *span, alias_map, factory, language,
+                    ) {
+                        let binding = TypeAliasBinding {
+                            name: target.clone(),
+                            type_name,
+                        };
+                        if !out.contains(&binding) {
+                            out.push(binding);
+                        }
+                    }
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    walk(then_events, context, alias_map, factory, language, out);
+                    walk(else_events, context, alias_map, factory, language, out);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => {
+                    walk(body, context, alias_map, factory, language, out);
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    walk(body, context, alias_map, factory, language, out);
+                    walk(catch_events, context, alias_map, factory, language, out);
+                    walk(finally_events, context, alias_map, factory, language, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(events, context, alias_map, factory, language, &mut out);
+    out
 }
 
 fn call_has_new_identity(
@@ -6559,9 +9436,130 @@ fn call_has_new_identity(
     )
 }
 
+/// Derive return types for exact call expressions used as the parsed receiver
+/// of an assignment's direct value producer.
+///
+/// This is the assignment/accessor counterpart to
+/// [`synth_exact_call_expression_type_aliases`]. Some grammars lower a getter
+/// such as `Factory(x).value` without an outer call node. The frontend still
+/// records the getter's exact receiver span and the nested call span. Joining
+/// those compiler facts here lets rulepack typing describe the provider while
+/// shared matching remains independent of language punctuation and API names.
+#[allow(clippy::too_many_arguments)]
+fn synth_exact_assignment_receiver_type_aliases(
+    calls: &[CallFact],
+    assignment_values: &[bonsai_lang_api::AssignmentValueFact],
+    specs: &[FactoryReturnSpec],
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+    caller: Option<&Decl>,
+    workspace_context: Option<&WorkspaceCallIdentityContext<'_>>,
+) -> Vec<TypeAliasBinding> {
+    let mut candidates_by_expression: AHashMap<String, Vec<String>> = AHashMap::new();
+    for fact in assignment_values {
+        let (Some(expression), Some(receiver_span)) = (
+            fact.direct_call_receiver.as_deref().map(str::trim),
+            fact.direct_call_receiver_span,
+        ) else {
+            continue;
+        };
+        if expression.is_empty() || !fact.call_sites.contains(&receiver_span) {
+            continue;
+        }
+        let Some(call) = calls
+            .iter()
+            .filter(|call| {
+                call.span.file == receiver_span.file
+                    && call.span.start == receiver_span.start
+                    && call.span.end <= receiver_span.end
+            })
+            .max_by_key(|call| call.span.end)
+        else {
+            continue;
+        };
+
+        let mut candidate_types = Vec::new();
+        let expanded = expand_callee_alias(&call.callee, alias_map);
+        if let Some(context) = workspace_context {
+            if let Some(type_name) = workspace_call_return_type(context, &call.callee, call.span, alias_map) {
+                push_unique_string(&mut candidate_types, type_name);
+            }
+        }
+        for spec in specs {
+            if !typing_imports_allow(&spec.required_imports, compiler_imports) {
+                continue;
+            }
+            if let Some(origin) = spec.binding_origin {
+                let Some(caller) = caller else {
+                    continue;
+                };
+                if !call_binding_origin_is_valid(
+                    origin,
+                    workspace_context
+                        .and_then(|context| context.ws.db().adapter_for(caller.name_span.file))
+                        .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax),
+                    caller,
+                    None,
+                    workspace_context,
+                    call,
+                    alias_map,
+                    &spec.required_imports,
+                    compiler_imports,
+                ) {
+                    continue;
+                }
+            }
+            if !factory_spec_matches_call(&call.callee, call.receiver.as_deref(), spec, alias_map)
+                && !expanded
+                    .as_deref()
+                    .is_some_and(|expanded| factory_spec_matches_call(expanded, None, spec, alias_map))
+            {
+                continue;
+            }
+            if spec.kind == MatchKind::New {
+                let Some(workspace_context) = workspace_context else {
+                    continue;
+                };
+                if workspace_call_resolves_as_constructor(
+                    workspace_context,
+                    &call.callee,
+                    call.span,
+                    alias_map,
+                ) == Some(false)
+                {
+                    continue;
+                }
+            }
+            push_unique_string(&mut candidate_types, spec.type_name.clone());
+        }
+        if candidate_types.len() == 1 {
+            let type_name = candidate_types.pop().expect("single candidate type");
+            push_unique_string(
+                candidates_by_expression
+                    .entry(expression.to_string())
+                    .or_default(),
+                type_name,
+            );
+        }
+    }
+
+    let mut out = candidates_by_expression
+        .into_iter()
+        .filter_map(|(name, mut types)| {
+            (types.len() == 1).then(|| TypeAliasBinding {
+                name,
+                type_name: types.pop().expect("single expression type"),
+            })
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| (&left.name, &left.type_name).cmp(&(&right.name, &right.type_name)));
+    out
+}
+
 /// Synthesize `local → ReturnType` aliases for assignments whose RHS is a
 /// factory call or constructor named in rulepack metadata. Empty (no
 /// allocation) when the pack declares no matching call-result type.
+#[allow(clippy::too_many_arguments)] // Factory typing joins rule semantics to exact calls, assignments, imports, and workspace identity.
 fn synth_factory_type_aliases(
     events: &[FlowEvent],
     assignment_values: &[bonsai_lang_api::AssignmentValueFact],
@@ -6569,18 +9567,22 @@ fn synth_factory_type_aliases(
     language: &str,
     alias_map: &std::collections::HashMap<String, AliasTarget>,
     compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+    caller: Option<&Decl>,
     workspace_context: Option<&WorkspaceCallIdentityContext<'_>>,
 ) -> Vec<TypeAliasBinding> {
     let Some(specs) = factory.specs_for(language) else {
         return Vec::new();
     };
     let mut out = Vec::new();
+    let calls = collect_calls(events);
+    #[allow(clippy::too_many_arguments)] // Recursive traversal threads immutable factory evidence and one output accumulator.
     fn walk(
         events: &[FlowEvent],
         assignment_values: &[bonsai_lang_api::AssignmentValueFact],
         specs: &[FactoryReturnSpec],
         alias_map: &std::collections::HashMap<String, AliasTarget>,
         compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+        caller: Option<&Decl>,
         workspace_context: Option<&WorkspaceCallIdentityContext<'_>>,
         out: &mut Vec<TypeAliasBinding>,
     ) {
@@ -6608,14 +9610,45 @@ fn synth_factory_type_aliases(
                     };
                     let call_receiver = indexed.and_then(|fact| fact.direct_call_receiver.as_deref());
                     let expanded = expand_callee_alias(call_name, alias_map);
+                    let call_identity = CallFact {
+                        callee: call_name.to_string(),
+                        receiver: call_receiver.map(str::to_string),
+                        span: *span,
+                        args: Vec::new(),
+                        receiver_types: Vec::new(),
+                        call_kind: CallKind::Function,
+                        origin: CallFactOrigin::AssignmentSourceCall,
+                    };
                     for spec in specs {
                         if !typing_imports_allow(&spec.required_imports, compiler_imports) {
                             continue;
                         }
-                        if !factory_spec_matches_call(call_name, call_receiver, spec)
-                            && !expanded
-                                .as_deref()
-                                .is_some_and(|expanded| factory_spec_matches_call(expanded, None, spec))
+                        if let Some(origin) = spec.binding_origin {
+                            let Some(caller) = caller else {
+                                continue;
+                            };
+                            if !call_binding_origin_is_valid(
+                                origin,
+                                workspace_context
+                                    .and_then(|context| context.ws.db().adapter_for(caller.name_span.file))
+                                    .is_some_and(|adapter| {
+                                        adapter.capabilities().bare_call_constructor_syntax
+                                    }),
+                                caller,
+                                None,
+                                workspace_context,
+                                &call_identity,
+                                alias_map,
+                                &spec.required_imports,
+                                compiler_imports,
+                            ) {
+                                continue;
+                            }
+                        }
+                        if !factory_spec_matches_call(call_name, call_receiver, spec, alias_map)
+                            && !expanded.as_deref().is_some_and(|expanded| {
+                                factory_spec_matches_call(expanded, None, spec, alias_map)
+                            })
                         {
                             continue;
                         }
@@ -6653,6 +9686,7 @@ fn synth_factory_type_aliases(
                         specs,
                         alias_map,
                         compiler_imports,
+                        caller,
                         workspace_context,
                         out,
                     );
@@ -6662,6 +9696,7 @@ fn synth_factory_type_aliases(
                         specs,
                         alias_map,
                         compiler_imports,
+                        caller,
                         workspace_context,
                         out,
                     );
@@ -6675,6 +9710,7 @@ fn synth_factory_type_aliases(
                         specs,
                         alias_map,
                         compiler_imports,
+                        caller,
                         workspace_context,
                         out,
                     );
@@ -6691,6 +9727,7 @@ fn synth_factory_type_aliases(
                         specs,
                         alias_map,
                         compiler_imports,
+                        caller,
                         workspace_context,
                         out,
                     );
@@ -6700,6 +9737,7 @@ fn synth_factory_type_aliases(
                         specs,
                         alias_map,
                         compiler_imports,
+                        caller,
                         workspace_context,
                         out,
                     );
@@ -6709,6 +9747,7 @@ fn synth_factory_type_aliases(
                         specs,
                         alias_map,
                         compiler_imports,
+                        caller,
                         workspace_context,
                         out,
                     );
@@ -6717,15 +9756,352 @@ fn synth_factory_type_aliases(
             }
         }
     }
-    walk(
-        events,
-        assignment_values,
-        specs,
-        alias_map,
-        compiler_imports,
-        workspace_context,
-        &mut out,
-    );
+    // Factory return types form a finite monotone relation over the
+    // declaration's assignment targets. Derive it to a fixed point so an
+    // exact rule chain such as `client_factory() -> Client`, followed by
+    // `client.session() -> Session`, types the second receiver without any
+    // provider names or depth limit in shared analysis.
+    //
+    // `walk` de-duplicates `(binding, type)` pairs, and both the assignment
+    // targets and typing specs are finite. Therefore each non-terminal pass
+    // adds at least one fact and the uncapped loop terminates naturally.
+    let mut resolved_aliases = alias_map.clone();
+    loop {
+        let prior_len = out.len();
+        for alias in synth_exact_assignment_receiver_type_aliases(
+            &calls,
+            assignment_values,
+            specs,
+            &resolved_aliases,
+            compiler_imports,
+            caller,
+            workspace_context,
+        ) {
+            if !out.contains(&alias) {
+                out.push(alias);
+            }
+        }
+        extend_alias_map_with_declared_types(&mut resolved_aliases, &out[prior_len..]);
+        walk(
+            events,
+            assignment_values,
+            specs,
+            &resolved_aliases,
+            compiler_imports,
+            caller,
+            workspace_context,
+            &mut out,
+        );
+        if out.len() == prior_len {
+            break;
+        }
+        extend_alias_map_with_declared_types(&mut resolved_aliases, &out[prior_len..]);
+    }
+    out
+}
+
+/// Derive rulepack-declared types for immutable receiver fields initialized
+/// by exact compiler call facts, then expose those types to methods of the
+/// owning class.
+///
+/// A field initializer belongs to class state rather than to an arbitrary
+/// sibling callable. Language adapters prove that relationship through
+/// `AssignmentValueFact::target_owner` and `target_is_immutable`; this helper
+/// consumes those facts without interpreting field names, provider names, or
+/// source-language syntax. The concise field identity is obtained from the
+/// adapter-normalized place using the shared qualified-name helper, and local
+/// flow bindings are layered afterward so ordinary lexical shadowing still
+/// wins.
+#[allow(clippy::too_many_arguments)]
+fn synth_class_field_type_aliases(
+    ws: &Workspace,
+    file_index: &DeclIndex,
+    decl: &Decl,
+    factory: &RulepackTyping,
+    language: &str,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+    global_headers: Option<&GlobalIndex>,
+) -> Vec<TypeAliasBinding> {
+    let Some(specs) = factory.specs_for(language) else {
+        return Vec::new();
+    };
+
+    let mut visible_owners = Vec::new();
+    let mut current = Some(decl.symbol);
+    while let Some(symbol) = current {
+        visible_owners.push(symbol);
+        current = file_index
+            .defs
+            .iter()
+            .find(|candidate| candidate.symbol == symbol)
+            .and_then(|candidate| candidate.parent);
+    }
+    let field_initializers = file_index
+        .assignment_values
+        .iter()
+        .filter(|fact| {
+            fact.target_is_immutable
+                && fact
+                    .target_owner
+                    .is_some_and(|owner| visible_owners.contains(&owner))
+                && fact.target.is_some()
+                && fact.direct_call_name.is_some()
+        })
+        .collect::<Vec<_>>();
+    if field_initializers.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let mut resolved_aliases = alias_map.clone();
+    loop {
+        let prior_len = out.len();
+        for fact in &field_initializers {
+            let (Some(target), Some(call_name)) = (fact.target.as_deref(), fact.direct_call_name.as_deref())
+            else {
+                continue;
+            };
+            let Some(owner) = fact
+                .target_owner
+                .and_then(|owner| file_index.defs.iter().find(|candidate| candidate.symbol == owner))
+            else {
+                continue;
+            };
+            let call_span = fact.direct_call_span.unwrap_or(fact.assignment_span);
+            let call = CallFact {
+                callee: call_name.to_string(),
+                receiver: fact.direct_call_receiver.clone(),
+                span: call_span,
+                args: Vec::new(),
+                receiver_types: Vec::new(),
+                call_kind: if fact.direct_call_receiver.is_some() {
+                    CallKind::Method
+                } else {
+                    CallKind::Function
+                },
+                origin: CallFactOrigin::AssignmentSourceCall,
+            };
+            let workspace_context = global_headers.map(|global| WorkspaceCallIdentityContext {
+                ws,
+                global,
+                caller: owner,
+            });
+            let mut candidate_types = Vec::new();
+            if let Some(context) = workspace_context.as_ref() {
+                if let Some(type_name) =
+                    workspace_call_return_type(context, call_name, call_span, &resolved_aliases)
+                {
+                    push_unique_string(&mut candidate_types, type_name);
+                }
+            }
+            let expanded = expand_callee_alias(call_name, &resolved_aliases);
+            for spec in specs {
+                if !typing_imports_allow(&spec.required_imports, compiler_imports) {
+                    continue;
+                }
+                if let Some(origin) = spec.binding_origin {
+                    if !call_binding_origin_is_valid(
+                        origin,
+                        ws.db()
+                            .adapter_for(owner.span.file)
+                            .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax),
+                        owner,
+                        Some(&file_index.defs),
+                        workspace_context.as_ref(),
+                        &call,
+                        &resolved_aliases,
+                        &spec.required_imports,
+                        compiler_imports,
+                    ) {
+                        continue;
+                    }
+                }
+                if !factory_spec_matches_call(
+                    call_name,
+                    fact.direct_call_receiver.as_deref(),
+                    spec,
+                    &resolved_aliases,
+                ) && !expanded.as_deref().is_some_and(|expanded| {
+                    factory_spec_matches_call(expanded, None, spec, &resolved_aliases)
+                }) {
+                    continue;
+                }
+                if spec.kind == MatchKind::New
+                    && workspace_context.as_ref().is_some_and(|context| {
+                        workspace_call_resolves_as_constructor(
+                            context,
+                            call_name,
+                            call_span,
+                            &resolved_aliases,
+                        ) == Some(false)
+                    })
+                {
+                    continue;
+                }
+                push_unique_string(&mut candidate_types, spec.type_name.clone());
+            }
+            let [type_name] = candidate_types.as_slice() else {
+                continue;
+            };
+            let mut names = vec![target.to_string()];
+            let tail = bonsai_common::short_qualified_tail(target).trim();
+            if is_simple_identifier(tail) && !names.iter().any(|name| name == tail) {
+                names.push(tail.to_string());
+            }
+            for name in names {
+                let alias = TypeAliasBinding {
+                    name,
+                    type_name: type_name.clone(),
+                };
+                if !out.contains(&alias) {
+                    out.push(alias);
+                }
+            }
+        }
+        if out.len() == prior_len {
+            break;
+        }
+        extend_alias_map_with_declared_types(&mut resolved_aliases, &out[prior_len..]);
+    }
+    out.sort_by(|left, right| (&left.name, &left.type_name).cmp(&(&right.name, &right.type_name)));
+    out.dedup();
+    let mut ambiguous = AHashSet::new();
+    for pair in out.windows(2) {
+        if pair[0].name == pair[1].name && pair[0].type_name != pair[1].type_name {
+            ambiguous.insert(pair[0].name.clone());
+        }
+    }
+    out.retain(|alias| !ambiguous.contains(&alias.name));
+    out
+}
+
+/// Type an exact compiler call expression when that expression is used
+/// directly as the receiver of another call.
+///
+/// Assignment typing alone covers `val statement = connection.createStatement()`
+/// followed by `statement.execute(...)`, but it does not cover the semantically
+/// identical direct chain `connection.createStatement().execute(...)`. The
+/// compiler already emits both calls and the outer call's exact receiver text,
+/// so preserve that relationship as another finite type alias. Provider and
+/// method identities still come exclusively from declared return types or
+/// rulepack typing; this helper owns no library/API vocabulary.
+///
+/// The receiver's exact Tree-sitter span identifies the nested call that
+/// produced it, so argument-bearing factories require no source-text
+/// reconstruction and work under the same fail-closed identity contract.
+#[allow(clippy::too_many_arguments)] // Exact call typing joins receiver, assignment, import, and workspace identity evidence.
+fn synth_exact_call_expression_type_aliases(
+    calls: &[CallFact],
+    call_receivers: &[bonsai_lang_api::CallReceiverFact],
+    factory: &RulepackTyping,
+    language: &str,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+    caller: Option<&Decl>,
+    workspace_context: Option<&WorkspaceCallIdentityContext<'_>>,
+) -> Vec<TypeAliasBinding> {
+    let specs = factory.specs_for(language).unwrap_or_default();
+    if calls.is_empty() || call_receivers.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for outer_call in calls {
+        let Some(expression) = outer_call.receiver.as_deref().map(str::trim) else {
+            continue;
+        };
+        let Some(receiver_fact) =
+            bonsai_lang_api::call_receiver_fact_for_span(call_receivers, outer_call.span)
+        else {
+            continue;
+        };
+        // The frontend proves that the whole receiver expression is a call.
+        // Select the call whose compiler callee span begins at that exact
+        // receiver node and is contained by it. Nested argument calls begin
+        // later; the maximal end chooses the complete callee for chained
+        // qualifier spellings without interpreting punctuation or names.
+        if !receiver_fact
+            .value_flow
+            .call_sites
+            .contains(&receiver_fact.receiver_span)
+        {
+            continue;
+        }
+        let Some(call) = calls
+            .iter()
+            .filter(|call| {
+                call.span.file == receiver_fact.receiver_span.file
+                    && call.span.start == receiver_fact.receiver_span.start
+                    && call.span.end <= receiver_fact.receiver_span.end
+            })
+            .max_by_key(|call| call.span.end)
+        else {
+            continue;
+        };
+
+        let mut candidate_types = Vec::new();
+        if let Some(context) = workspace_context {
+            if let Some(type_name) = workspace_call_return_type(context, &call.callee, call.span, alias_map) {
+                push_unique_string(&mut candidate_types, type_name);
+            }
+        }
+        for spec in specs {
+            if !typing_imports_allow(&spec.required_imports, compiler_imports) {
+                continue;
+            }
+            if let Some(origin) = spec.binding_origin {
+                let Some(caller) = caller else {
+                    continue;
+                };
+                if !call_binding_origin_is_valid(
+                    origin,
+                    workspace_context
+                        .and_then(|context| context.ws.db().adapter_for(caller.name_span.file))
+                        .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax),
+                    caller,
+                    None,
+                    workspace_context,
+                    call,
+                    alias_map,
+                    &spec.required_imports,
+                    compiler_imports,
+                ) {
+                    continue;
+                }
+            }
+            if !factory_spec_matches_call(&call.callee, call.receiver.as_deref(), spec, alias_map) {
+                continue;
+            }
+            if spec.kind == MatchKind::New {
+                let Some(workspace_context) = workspace_context else {
+                    continue;
+                };
+                if workspace_call_resolves_as_constructor(
+                    workspace_context,
+                    &call.callee,
+                    call.span,
+                    alias_map,
+                ) == Some(false)
+                {
+                    continue;
+                }
+            }
+            push_unique_string(&mut candidate_types, spec.type_name.clone());
+        }
+
+        // Multiple independently valid return contracts make the expression
+        // ambiguous. Failing closed prevents an external model from choosing
+        // one arbitrarily and mirrors workspace-call return typing.
+        if candidate_types.len() == 1 {
+            out.push(TypeAliasBinding {
+                name: expression.to_string(),
+                type_name: candidate_types.pop().expect("single candidate type"),
+            });
+        }
+    }
+    out.sort_by(|a, b| (&a.name, &a.type_name).cmp(&(&b.name, &b.type_name)));
+    out.dedup();
     out
 }
 
@@ -6818,6 +10194,7 @@ fn synth_callback_param_type_aliases_from_header(
                 };
                 for callback in syntax.callback_arguments.iter().filter(|callback| {
                     callback.argument_index == argument_index
+                        && callback.field_path == spec.callback_field_path
                         && rule_target_matches_call_with_aliases(
                             &callback.call_name,
                             &callback.call_receiver_types,
@@ -6847,14 +10224,19 @@ fn synth_callback_param_type_aliases_from_header(
 /// Synthesize external callback parameter types from rulepack declarations
 /// and compiler-owned callback relationships. No provider callable or type
 /// spelling is interpreted by the engine.
+#[allow(clippy::too_many_arguments)] // Callback typing requires enclosing declarations, call facts, aliases, imports, and rule constraints.
 fn synth_callback_param_type_aliases(
     decl: &Decl,
-    calls: &[CallFact],
+    file_decls: &[Decl],
+    decl_calls: &[CallFact],
+    file_calls: &[CallFact],
     call_argument_values: &[bonsai_lang_api::CallArgumentValueFact],
     typing: &RulepackTyping,
     language: &str,
     alias_map: &std::collections::HashMap<String, AliasTarget>,
     compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+    workspace_context: Option<&WorkspaceCallIdentityContext<'_>>,
+    bare_type_is_callable: bool,
 ) -> Vec<TypeAliasBinding> {
     let Some(specs) = typing.callback_specs_for(language) else {
         return Vec::new();
@@ -6869,20 +10251,92 @@ fn synth_callback_param_type_aliases(
                 let Some(argument_index) = spec.callback_arg_index else {
                     continue;
                 };
-                for call in calls.iter().filter(|call| {
-                    rule_target_matches_call_with_aliases(
-                        &call.callee,
-                        &call.receiver_types,
-                        &spec.target,
-                        alias_map,
-                    )
-                }) {
-                    let Some(callback) = call_argument_values
-                        .iter()
-                        .find(|fact| fact.call_span == call.span && fact.argument_index == argument_index)
-                    else {
+                let binding_origin_allows = |call: &CallFact| {
+                    spec.binding_origin.is_none_or(|origin| {
+                        call_binding_origin_is_valid(
+                            origin,
+                            bare_type_is_callable,
+                            decl,
+                            Some(file_decls),
+                            workspace_context,
+                            call,
+                            alias_map,
+                            &spec.required_imports,
+                            compiler_imports,
+                        )
+                    })
+                };
+                if !spec.callback_field_path.is_empty() {
+                    for callback in call_argument_values.iter().filter_map(|fact| {
+                        let field = fact
+                            .inline_callback_fields
+                            .iter()
+                            .find(|field| field.path == spec.callback_field_path)?;
+                        let call = decl_calls
+                            .iter()
+                            .find(|call| {
+                                call.span == fact.call_span
+                                    && rule_target_matches_call_with_aliases(
+                                        &call.callee,
+                                        &call.receiver_types,
+                                        &spec.target,
+                                        alias_map,
+                                    )
+                            })
+                            .or_else(|| {
+                                (field.callback_span == decl.span).then(|| {
+                                    file_calls.iter().find(|call| {
+                                        call.span == fact.call_span
+                                            && rule_target_matches_call_with_aliases(
+                                                &call.callee,
+                                                &call.receiver_types,
+                                                &spec.target,
+                                                alias_map,
+                                            )
+                                    })
+                                })?
+                            })?;
+                        if !binding_origin_allows(call) {
+                            return None;
+                        }
+                        (fact.argument_index == argument_index).then_some((call, field))
+                    }) {
+                        let (_, field) = callback;
+                        push_callback_param_aliases(&mut out, &field.params, &spec.param_types);
+                    }
+                    continue;
+                }
+                for callback in call_argument_values
+                    .iter()
+                    .filter(|fact| fact.argument_index == argument_index)
+                {
+                    let provider_in_decl = decl_calls.iter().find(|call| {
+                        call.span == callback.call_span
+                            && binding_origin_allows(call)
+                            && rule_target_matches_call_with_aliases(
+                                &call.callee,
+                                &call.receiver_types,
+                                &spec.target,
+                                alias_map,
+                            )
+                    });
+                    let provider_for_callback_decl = (callback.inline_callback_span == Some(decl.span))
+                        .then(|| {
+                            file_calls.iter().find(|call| {
+                                call.span == callback.call_span
+                                    && binding_origin_allows(call)
+                                    && rule_target_matches_call_with_aliases(
+                                        &call.callee,
+                                        &call.receiver_types,
+                                        &spec.target,
+                                        alias_map,
+                                    )
+                            })
+                        })
+                        .flatten();
+                    if provider_in_decl.is_none() && provider_for_callback_decl.is_none() {
                         continue;
-                    };
+                    }
                     push_callback_param_aliases(
                         &mut out,
                         &callback.inline_callback_params,
@@ -6977,6 +10431,7 @@ type FileDeclFactsKey = (
     u64,
     DeclFactRequirements,
     Option<bonsai_index::GlobalIndexIdentity>,
+    Option<Arc<[Span]>>,
 );
 static DECL_FACTS_CACHE: std::sync::LazyLock<MatcherFactCache<FileDeclFactsKey, FileDeclFactsBundle>> =
     std::sync::LazyLock::new(|| MatcherFactCache::new(matcher_fact_cache_budget_share(7, 8)));
@@ -6984,6 +10439,8 @@ static DECL_FACTS_CACHE: std::sync::LazyLock<MatcherFactCache<FileDeclFactsKey, 
 fn prepare_matcher_fact_caches_for_broad_scan() {
     FILE_PACKAGE_SET_CACHE.set_retained_budget(matcher_fact_cache_budget_share(3, 32));
     LANGUAGE_IMPORT_PACKAGE_CONTEXT_CACHE.set_retained_budget(matcher_fact_cache_budget_share(1, 16));
+    EXACT_MODULE_FILE_INDEX_CACHE.set_retained_budget(matcher_fact_cache_budget_share(1, 8));
+    MODULE_EXPORT_TYPE_CACHE.set_retained_budget(matcher_fact_cache_budget_share(1, 8));
     DECL_FACTS_CACHE.set_retained_budget(matcher_fact_cache_budget_share(7, 8));
 }
 
@@ -6993,9 +10450,13 @@ fn prepare_matcher_fact_caches_for_broad_scan() {
 pub(crate) fn release_matcher_fact_caches() {
     FILE_PACKAGE_SET_CACHE.clear_retained();
     LANGUAGE_IMPORT_PACKAGE_CONTEXT_CACHE.clear_retained();
+    EXACT_MODULE_FILE_INDEX_CACHE.clear_retained();
+    MODULE_EXPORT_TYPE_CACHE.clear_retained();
     DECL_FACTS_CACHE.clear_retained();
     FILE_PACKAGE_SET_CACHE.set_retained_budget(point_matcher_fact_cache_budget_share(3, 32));
     LANGUAGE_IMPORT_PACKAGE_CONTEXT_CACHE.set_retained_budget(point_matcher_fact_cache_budget_share(1, 16));
+    EXACT_MODULE_FILE_INDEX_CACHE.set_retained_budget(point_matcher_fact_cache_budget_share(1, 8));
+    MODULE_EXPORT_TYPE_CACHE.set_retained_budget(point_matcher_fact_cache_budget_share(1, 8));
     DECL_FACTS_CACHE.set_retained_budget(point_matcher_fact_cache_budget_share(7, 8));
 }
 
@@ -7009,13 +10470,18 @@ fn estimated_decl_match_facts_bytes(source_bytes: usize) -> u64 {
     )
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct DeclMatchFactsRequest<'a> {
     factory: &'a RulepackTyping,
     requirements: DeclFactRequirements,
     retention: FactRetention,
     compiler_imports: Option<&'a bonsai_lang_api::ImportIndex>,
     global_headers: Option<&'a GlobalIndex>,
+    /// If present, derive return/factory/callback receiver types only for
+    /// these declarations. Module export typing remains complete because any
+    /// selected declaration may consume it. `None` requests the historical
+    /// complete-file projection used by point queries.
+    call_result_type_decls: Option<Arc<[Span]>>,
 }
 
 /// Return the per-decl matcher fact bundle for `file`. Builds the
@@ -7034,6 +10500,7 @@ fn decl_match_facts_for_retention(
     let requirements = request.requirements;
     let retention = request.retention;
     let global_headers = request.global_headers;
+    let call_result_type_decls = request.call_result_type_decls.clone();
     let (version, text_hash, source_bytes) = ws.db().vfs().snapshot(file).map_or((0, 0, 0), |snap| {
         (
             snap.version,
@@ -7049,6 +10516,7 @@ fn decl_match_facts_for_retention(
         factory.fingerprint,
         requirements,
         global_headers.map(GlobalIndex::identity),
+        call_result_type_decls,
     );
     DECL_FACTS_CACHE.get_or_insert_with(
         key,
@@ -7085,8 +10553,10 @@ fn build_decl_match_facts_bundle(
         retention,
         compiler_imports,
         global_headers,
+        call_result_type_decls,
     } = request;
     let import_aliases = file_alias_map_with_compiler_imports(ws, file, retention, compiler_imports);
+    let compiler_import_aliases = compiler_imports.map(bonsai_lang_api::alias_map_from_imports);
     let source_text = requirements
         .contains(DeclFactRequirements::ASSIGNMENT_TEXTS)
         .then(|| ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text))
@@ -7095,7 +10565,7 @@ fn build_decl_match_facts_bundle(
     // not type `.cursor()` in a JS file). Skipped entirely when the pack
     // declares no call-result, constructor, or callback typing.
     let file_language = (!factory.is_empty()
-        && (requirements.contains(DeclFactRequirements::RULEPACK_TYPES)
+        && (requirements.contains(DeclFactRequirements::CALL_RESULT_TYPES)
             || requirements.contains(DeclFactRequirements::LIFECYCLE)))
     .then(|| {
         ws.db()
@@ -7103,19 +10573,164 @@ fn build_decl_match_facts_bundle(
             .map(|a| a.language_id().as_str().to_string())
     })
     .flatten();
-    let module_type_aliases: Vec<TypeAliasBinding> = file_index
+    let module_decl = file_index
         .defs
         .iter()
-        .filter(|decl| decl.name == bonsai_lang_api::MODULE_DECL_NAME)
+        .find(|decl| decl.name == bonsai_lang_api::MODULE_DECL_NAME);
+    let mut module_type_aliases: Vec<TypeAliasBinding> = module_decl
+        .into_iter()
         .flat_map(|decl| decl.type_aliases.iter().cloned())
         .collect();
+    if requirements.contains(DeclFactRequirements::CALL_RESULT_TYPES) {
+        if let Some(global) = global_headers {
+            for alias in imported_module_value_type_aliases(
+                ws,
+                global,
+                file_index,
+                factory,
+                file_language.as_deref(),
+                compiler_imports,
+            ) {
+                if !module_type_aliases.contains(&alias) {
+                    module_type_aliases.push(alias);
+                }
+            }
+        }
+    }
+    if requirements.contains(DeclFactRequirements::CALL_RESULT_TYPES) {
+        if let Some(module_decl) = module_decl {
+            let mut module_alias_map = import_aliases.clone();
+            extend_alias_map_with_declared_types(&mut module_alias_map, &module_type_aliases);
+            bonsai_lang_api::extend_alias_map_with_flow_events(
+                &mut module_alias_map,
+                &module_decl.flow_events,
+            );
+            let module_context = global_headers.map(|global| WorkspaceCallIdentityContext {
+                ws,
+                global,
+                caller: module_decl,
+            });
+            let mut module_calls = collect_calls(&module_decl.flow_events);
+            enrich_assignment_call_fact_receivers(&mut module_calls, &file_index.assignment_values);
+            enrich_call_fact_receiver_types(&mut module_calls, &module_type_aliases);
+            if let Some(import_aliases) = compiler_import_aliases.as_ref() {
+                enrich_call_fact_receiver_import_types(&mut module_calls, import_aliases);
+            }
+            loop {
+                let prior_len = module_type_aliases.len();
+                if let Some(context) = module_context.as_ref() {
+                    for alias in synth_workspace_call_result_type_aliases(
+                        &module_decl.flow_events,
+                        context,
+                        &module_alias_map,
+                        factory,
+                        file_language.as_deref(),
+                    ) {
+                        if !module_type_aliases.contains(&alias) {
+                            module_type_aliases.push(alias);
+                        }
+                    }
+                }
+                if let Some(lang) = file_language.as_deref() {
+                    for alias in synth_factory_type_aliases(
+                        &module_decl.flow_events,
+                        &file_index.assignment_values,
+                        factory,
+                        lang,
+                        &module_alias_map,
+                        compiler_imports,
+                        Some(module_decl),
+                        module_context.as_ref(),
+                    ) {
+                        if !module_type_aliases.contains(&alias) {
+                            module_type_aliases.push(alias);
+                        }
+                    }
+                }
+                for alias in synth_exact_call_expression_type_aliases(
+                    &module_calls,
+                    &file_index.call_receivers,
+                    factory,
+                    file_language.as_deref().unwrap_or_default(),
+                    &module_alias_map,
+                    compiler_imports,
+                    Some(module_decl),
+                    module_context.as_ref(),
+                ) {
+                    if !module_type_aliases.contains(&alias) {
+                        module_type_aliases.push(alias);
+                    }
+                }
+                if module_type_aliases.len() == prior_len {
+                    break;
+                }
+                extend_alias_map_with_declared_types(
+                    &mut module_alias_map,
+                    &module_type_aliases[prior_len..],
+                );
+                enrich_call_fact_receiver_types(&mut module_calls, &module_type_aliases[prior_len..]);
+                if let Some(import_aliases) = compiler_import_aliases.as_ref() {
+                    enrich_call_fact_receiver_import_types(&mut module_calls, import_aliases);
+                }
+            }
+        }
+    }
     let assignment_values = requirements
         .contains(DeclFactRequirements::ASSIGNMENT_TEXTS)
         .then(|| AssignmentValueIndex::new(&file_index.assignment_values));
+    let file_calls = file_language
+        .as_deref()
+        .filter(|_| requirements.contains(DeclFactRequirements::CALL_RESULT_TYPES))
+        .and_then(|language| factory.callback_specs_for(language))
+        .filter(|specs| !specs.is_empty())
+        .map(|_| {
+            let mut calls = Vec::new();
+            for owner in &file_index.defs {
+                let mut owner_calls = collect_calls(&owner.flow_events);
+                // Callback declarations are indexed independently from the
+                // enclosing provider call. Preserve the provider call's own
+                // compiler type environment before making it visible to the
+                // callback: testing a nested call against the callback's
+                // aliases loses exact parameter/receiver typing from the
+                // enclosing declaration (`router: Router`).
+                enrich_call_fact_receiver_types(&mut owner_calls, &module_type_aliases);
+                enrich_call_fact_receiver_types(&mut owner_calls, &owner.type_aliases);
+                if let Some(import_aliases) = compiler_import_aliases.as_ref() {
+                    enrich_call_fact_receiver_import_types(&mut owner_calls, import_aliases);
+                }
+                calls.extend(owner_calls);
+            }
+            calls
+        })
+        .unwrap_or_default();
     let mut by_decl_span: AHashMap<Span, Arc<DeclMatchFacts>> = AHashMap::new();
     for decl in &file_index.defs {
+        let derive_call_result_types = requirements.contains(DeclFactRequirements::CALL_RESULT_TYPES)
+            && call_result_type_decls
+                .as_ref()
+                .is_none_or(|selected| selected.binary_search(&decl.span).is_ok());
         let mut alias_map = import_aliases.clone();
         extend_alias_map_with_declared_types(&mut alias_map, &module_type_aliases);
+        let class_field_type_aliases = if derive_call_result_types {
+            file_language.as_deref().map_or_else(Vec::new, |language| {
+                synth_class_field_type_aliases(
+                    ws,
+                    file_index,
+                    decl,
+                    factory,
+                    language,
+                    &alias_map,
+                    compiler_imports,
+                    global_headers,
+                )
+            })
+        } else {
+            Vec::new()
+        };
+        extend_alias_map_with_declared_types(&mut alias_map, &class_field_type_aliases);
+        // Parameter and local bindings are applied after class-state aliases
+        // so lexical values with the same concise name shadow the implicit
+        // receiver field.
         extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
         bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
         let assignment_map = assignment_values
@@ -7128,52 +10743,102 @@ fn build_decl_match_facts_bundle(
             global,
             caller: decl,
         });
-        let mut rulepack_type_aliases = requirements
-            .contains(DeclFactRequirements::RULEPACK_TYPES)
-            .then_some(file_language.as_deref())
-            .flatten()
-            .map(|lang| {
-                synth_factory_type_aliases(
-                    &decl.flow_events,
-                    &file_index.assignment_values,
-                    factory,
-                    lang,
-                    &alias_map,
-                    compiler_imports,
-                    workspace_context.as_ref(),
-                )
-            })
-            .unwrap_or_default();
         let mut calls = collect_calls(&decl.flow_events);
+        enrich_assignment_call_fact_receivers(&mut calls, &file_index.assignment_values);
         enrich_call_fact_receiver_types(&mut calls, &module_type_aliases);
         enrich_call_fact_receiver_types(&mut calls, &decl.type_aliases);
-        if !rulepack_type_aliases.is_empty() {
-            // Factory-typed locals participate in receiver-type matching
-            // and the package gate's receiver-type candidate chase.
-            enrich_call_fact_receiver_types(&mut calls, &rulepack_type_aliases);
-            extend_alias_map_with_declared_types(&mut alias_map, &rulepack_type_aliases);
+        let mut derived_type_aliases = class_field_type_aliases;
+        if derive_call_result_types {
+            // First-party declared return types and rule-declared external
+            // return types form one finite monotone relation over compiler
+            // assignment targets. Derive the exact fixed point without an
+            // iteration cap so mixed chains remain exact across locals.
+            loop {
+                let prior_len = derived_type_aliases.len();
+                if let Some(context) = workspace_context.as_ref() {
+                    for alias in synth_workspace_call_result_type_aliases(
+                        &decl.flow_events,
+                        context,
+                        &alias_map,
+                        factory,
+                        file_language.as_deref(),
+                    ) {
+                        if !derived_type_aliases.contains(&alias) {
+                            derived_type_aliases.push(alias);
+                        }
+                    }
+                }
+                if let Some(lang) = file_language.as_deref() {
+                    for alias in synth_factory_type_aliases(
+                        &decl.flow_events,
+                        &file_index.assignment_values,
+                        factory,
+                        lang,
+                        &alias_map,
+                        compiler_imports,
+                        Some(decl),
+                        workspace_context.as_ref(),
+                    ) {
+                        if !derived_type_aliases.contains(&alias) {
+                            derived_type_aliases.push(alias);
+                        }
+                    }
+                }
+                for alias in synth_exact_call_expression_type_aliases(
+                    &calls,
+                    &file_index.call_receivers,
+                    factory,
+                    file_language.as_deref().unwrap_or_default(),
+                    &alias_map,
+                    compiler_imports,
+                    Some(decl),
+                    workspace_context.as_ref(),
+                ) {
+                    if !derived_type_aliases.contains(&alias) {
+                        derived_type_aliases.push(alias);
+                    }
+                }
+                if derived_type_aliases.len() == prior_len {
+                    break;
+                }
+                extend_alias_map_with_declared_types(&mut alias_map, &derived_type_aliases[prior_len..]);
+            }
         }
-        if requirements.contains(DeclFactRequirements::RULEPACK_TYPES) {
+        if !derived_type_aliases.is_empty() {
+            // Resolved-return and factory-typed locals participate in
+            // receiver matching and package candidate chasing.
+            enrich_call_fact_receiver_types(&mut calls, &derived_type_aliases);
+        }
+        if derive_call_result_types {
             if let Some(lang) = file_language.as_deref() {
                 let callback_aliases = synth_callback_param_type_aliases(
                     decl,
+                    &file_index.defs,
                     &calls,
+                    &file_calls,
                     &file_index.call_argument_values,
                     factory,
                     lang,
                     &alias_map,
                     compiler_imports,
+                    workspace_context.as_ref(),
+                    ws.db()
+                        .adapter_for(decl.name_span.file)
+                        .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax),
                 );
                 if !callback_aliases.is_empty() {
                     enrich_call_fact_receiver_types(&mut calls, &callback_aliases);
                     extend_alias_map_with_declared_types(&mut alias_map, &callback_aliases);
                     for alias in callback_aliases {
-                        if !rulepack_type_aliases.contains(&alias) {
-                            rulepack_type_aliases.push(alias);
+                        if !derived_type_aliases.contains(&alias) {
+                            derived_type_aliases.push(alias);
                         }
                     }
                 }
             }
+        }
+        if let Some(import_aliases) = compiler_import_aliases.as_ref() {
+            enrich_call_fact_receiver_import_types(&mut calls, import_aliases);
         }
         let receiver_counts = if requirements.contains(DeclFactRequirements::RECEIVER_COUNTS) {
             receiver_method_call_counts(&calls)
@@ -7234,7 +10899,7 @@ fn build_decl_match_facts_bundle(
                 alias_chains,
                 runtime_types,
                 lifecycle_transitions,
-                factory_type_aliases: rulepack_type_aliases,
+                derived_type_aliases,
             }),
         );
     }
@@ -7315,6 +10980,24 @@ fn regex_prefix_is_receiver_agnostic(regex: &str) -> bool {
         && (rest.contains("A-Za-z0-9_") || rest.contains("a-zA-Z0-9_"))
 }
 
+/// A manifest can support an anchored regex only when its leading compiler
+/// callee identity is an explicit qualified path (`cowboy_req:match_qs`,
+/// `Package.Type.method`, ...). Stop at the first regex metacharacter; a bare
+/// function name or wildcard receiver is not package ownership evidence.
+fn regex_has_literal_qualified_prefix(regex: &str) -> bool {
+    let rest = regex.trim().strip_prefix('^').unwrap_or(regex);
+    let literal = rest
+        .split(|ch: char| {
+            matches!(
+                ch,
+                '(' | ')' | '[' | ']' | '{' | '}' | '*' | '+' | '?' | '|' | '$' | '\\'
+            )
+        })
+        .next()
+        .unwrap_or_default();
+    bonsai_common::qualified_name_segments(literal).len() >= 2
+}
+
 fn callee_or_alias_matches(
     callee: &str,
     receiver_types: &[String],
@@ -7341,9 +11024,10 @@ fn callee_or_alias_matches(
 
 fn scan_refs_batch(
     ctx: &FileScanContext<'_, '_>,
-    rules: &[&PreparedRule<'_>],
+    rules: &PreparedRuleBatch<'_, '_>,
     want_kind: RefKind,
-    include_workspace_package_context: bool,
+    _include_workspace_package_context: bool,
+    factory: &RulepackTyping,
     out: &mut Vec<RuleMatch>,
 ) {
     let ws = ctx.ws;
@@ -7351,21 +11035,38 @@ fn scan_refs_batch(
     let file_index = ctx.file_index;
     let retention = ctx.retention;
     let decls = file_index.defs.as_slice();
-    let file_packages = file_package_set_with_prewarmed_workspace_context_and_retention(
-        ws,
-        file,
-        include_workspace_package_context,
-        retention,
-        ctx.import_package_contexts,
-        ctx.file_imports,
-    );
+    let file_packages = ctx.package_evidence;
     let alias_map = file_alias_map_with_compiler_imports(ws, file, retention, ctx.file_imports);
+    let requirements = DeclFactRequirements::for_rules(rules.read_rules.iter().copied());
+    let derived_receiver_decls = if requirements.contains(DeclFactRequirements::CALL_RESULT_TYPES) {
+        read_batch_derived_receiver_decls(ctx, rules, want_kind, &alias_map)
+    } else {
+        Arc::<[Span]>::from([])
+    };
+    let derived_types = (!derived_receiver_decls.is_empty()).then(|| {
+        decl_match_facts_for_retention(
+            ws,
+            file,
+            Some(file_index),
+            DeclMatchFactsRequest {
+                factory,
+                requirements,
+                retention,
+                compiler_imports: ctx.file_imports,
+                global_headers: ctx.global_headers,
+                call_result_type_decls: Some(derived_receiver_decls),
+            },
+        )
+    });
+    let mut candidate_rules = Vec::new();
     for r in &file_index.refs {
         if r.kind != want_kind {
             continue;
         }
         let enclosing_decl = innermost_decl_for_span(decls, r.span);
-        for prepared in rules {
+        candidate_rules.clear();
+        push_read_candidate_rules(&mut candidate_rules, rules, &r.name, &alias_map);
+        for prepared in candidate_rules.iter().copied() {
             if !decl_target_context_allows(
                 file_index,
                 enclosing_decl,
@@ -7388,7 +11089,28 @@ fn scan_refs_batch(
             if !base_param_index_allows(prepared, enclosing_decl, &r.name) {
                 continue;
             }
-            if !base_receiver_type_allows(prepared, enclosing_decl, &r.name, &[], &[]) {
+            let mut receiver_types = enclosing_decl.map_or_else(Vec::new, |decl| {
+                exact_declared_receiver_types_for_match_base(decl, &r.name, ctx.file_imports)
+            });
+            let derived_type_aliases = enclosing_decl
+                .and_then(|decl| derived_types.as_ref()?.by_decl_span.get(&decl.span))
+                .map_or(&[][..], |facts| facts.derived_type_aliases.as_slice());
+            append_derived_receiver_types_for_match_base(&mut receiver_types, derived_type_aliases, &r.name);
+            receiver_types = expanded_receiver_types(&receiver_types, ctx.receiver_base_map);
+            if !base_receiver_type_allows(
+                prepared,
+                enclosing_decl,
+                &r.name,
+                &receiver_types,
+                derived_type_aliases,
+            ) || external_receiver_type_is_workspace_shadow_at(
+                prepared,
+                &receiver_types,
+                &file_index.defs,
+                ctx.file_imports,
+                Some(&r.name),
+            ) || !read_receiver_constraints_allow(prepared, &receiver_types)
+            {
                 continue;
             }
             // Receiver-agnostic read regexes (`^[A-Za-z_]\w*\.body$`)
@@ -7397,7 +11119,27 @@ fn scan_refs_batch(
             // every aws-lambda example is the canonical regression.
             // The package-signal gate is the same one that
             // call-shaped rules use; reads need it just as much.
-            if !prepared.call_context_allows(&r.name, &[], &alias_map, file_packages.as_ref()) {
+            if !prepared.call_or_source_context_allows(
+                &r.name,
+                &[],
+                &alias_map,
+                file_packages,
+                file_index,
+                enclosing_decl,
+            ) {
+                continue;
+            }
+            if prepared_reference_binding_origin_is_invalid(
+                ws,
+                file,
+                prepared,
+                enclosing_decl,
+                &file_index.defs,
+                &r.name,
+                r.span,
+                &alias_map,
+                ctx.file_imports,
+            ) {
                 continue;
             }
             let (file_path, line, col) = resolve_span(ws, file, r.span);
@@ -7417,26 +11159,103 @@ fn scan_refs_batch(
     }
 }
 
+/// Identify only declarations where a read rule can gain its required
+/// receiver type from exact call-result/factory propagation. Direct compiler
+/// receiver/import types settle the common case without deriving every
+/// callable's secondary type fixed point. This is scheduling only: selected
+/// declarations still use the canonical fact builder and unselected reads
+/// have already received a final direct-type verdict.
+fn read_batch_derived_receiver_decls(
+    ctx: &FileScanContext<'_, '_>,
+    rules: &PreparedRuleBatch<'_, '_>,
+    want_kind: RefKind,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+) -> Arc<[Span]> {
+    let file_index = ctx.file_index;
+    let derivable = DerivedReceiverCandidates::from_context(ctx, &rules.factory);
+    let mut selected = Vec::new();
+    let mut candidate_rules = Vec::new();
+    for reference in file_index
+        .refs
+        .iter()
+        .filter(|reference| reference.kind == want_kind)
+    {
+        let Some(decl) = innermost_decl_for_span(&file_index.defs, reference.span) else {
+            continue;
+        };
+        candidate_rules.clear();
+        push_read_candidate_rules(&mut candidate_rules, rules, &reference.name, alias_map);
+        for prepared in candidate_rules.iter().copied() {
+            let target = prepared.rule.match_spec.target.as_ref();
+            if !decl_target_context_allows(file_index, Some(decl), target, None)
+                || !callee_matches(
+                    &reference.name,
+                    prepared.name,
+                    prepared.attribute,
+                    prepared.regex.as_ref(),
+                )
+                || !prepared.base_name_allows(&reference.name)
+                || !base_param_index_allows(prepared, Some(decl), &reference.name)
+            {
+                continue;
+            }
+            let direct_types = expanded_receiver_types(
+                &exact_declared_receiver_types_for_match_base(decl, &reference.name, ctx.file_imports),
+                ctx.receiver_base_map,
+            );
+            let receiver = match_base_name(&reference.name).unwrap_or(reference.name.as_str());
+            if read_receiver_derivation_needed(prepared, &direct_types)
+                && derivable.place_can_gain_type(decl, receiver, reference.span)
+            {
+                selected.push(decl.span);
+                break;
+            }
+        }
+    }
+    selected.sort_unstable();
+    selected.dedup();
+    Arc::from(selected)
+}
+
 fn scan_flow_reads_batch(
     ctx: &FileScanContext<'_, '_>,
-    rules: &[&PreparedRule<'_>],
-    include_workspace_package_context: bool,
+    rules: &PreparedRuleBatch<'_, '_>,
+    _include_workspace_package_context: bool,
+    factory: &RulepackTyping,
     out: &mut Vec<RuleMatch>,
 ) {
     let ws = ctx.ws;
     let file = ctx.file;
     let file_index = ctx.file_index;
-    let file_packages = file_package_set_with_prewarmed_workspace_context_and_retention(
-        ws,
-        file,
-        include_workspace_package_context,
-        ctx.retention,
-        ctx.import_package_contexts,
-        ctx.file_imports,
-    );
+    let file_packages = ctx.package_evidence;
     let alias_map = file_alias_map_with_compiler_imports(ws, file, ctx.retention, ctx.file_imports);
     let assignment_values = AssignmentValueIndex::new(&file_index.assignment_values);
+    let requirements = DeclFactRequirements::for_rules(rules.read_rules.iter().copied());
+    let derived_receiver_decls = if requirements.contains(DeclFactRequirements::CALL_RESULT_TYPES) {
+        flow_read_batch_derived_receiver_decls(ctx, rules, &alias_map)
+    } else {
+        Arc::<[Span]>::from([])
+    };
+    let derived_types = (!derived_receiver_decls.is_empty()).then(|| {
+        decl_match_facts_for_retention(
+            ws,
+            file,
+            Some(file_index),
+            DeclMatchFactsRequest {
+                factory,
+                requirements,
+                retention: ctx.retention,
+                compiler_imports: ctx.file_imports,
+                global_headers: ctx.global_headers,
+                call_result_type_decls: Some(derived_receiver_decls),
+            },
+        )
+    });
     for decl in &file_index.defs {
+        let derived_type_aliases = derived_types
+            .as_ref()
+            .and_then(|bundle| bundle.by_decl_span.get(&decl.span))
+            .map_or(&[][..], |facts| facts.derived_type_aliases.as_slice());
         let mut reads = Vec::new();
         collect_flow_read_sites(
             &decl.flow_events,
@@ -7444,8 +11263,13 @@ fn scan_flow_reads_batch(
             &file_index.call_receivers,
             &mut reads,
         );
+        let mut candidate_rules = Vec::new();
         for (span, tokens) in reads {
-            for prepared in rules {
+            candidate_rules.clear();
+            for token in &tokens {
+                push_read_candidate_rules(&mut candidate_rules, rules, token, &alias_map);
+            }
+            for prepared in candidate_rules.iter().copied() {
                 if !decl_target_context_allows(
                     file_index,
                     Some(decl),
@@ -7460,17 +11284,58 @@ fn scan_flow_reads_batch(
                 if !base_param_index_allows(prepared, Some(decl), &match_text) {
                     continue;
                 }
-                if !base_receiver_type_allows(prepared, Some(decl), &match_text, &[], &[]) {
+                let mut receiver_types =
+                    exact_declared_receiver_types_for_match_base(decl, &match_text, ctx.file_imports);
+                append_derived_receiver_types_for_match_base(
+                    &mut receiver_types,
+                    derived_type_aliases,
+                    &match_text,
+                );
+                receiver_types = expanded_receiver_types(&receiver_types, ctx.receiver_base_map);
+                if !base_receiver_type_allows(
+                    prepared,
+                    Some(decl),
+                    &match_text,
+                    &receiver_types,
+                    derived_type_aliases,
+                ) || external_receiver_type_is_workspace_shadow_at(
+                    prepared,
+                    &receiver_types,
+                    &file_index.defs,
+                    ctx.file_imports,
+                    Some(&match_text),
+                ) || !read_receiver_constraints_allow(prepared, &receiver_types)
+                {
                     continue;
                 }
                 // Same package-signal gate that `scan_refs_batch`
                 // applies; without it a receiver-agnostic read
                 // regex would fire on any file regardless of the
                 // imports it actually pulls in.
-                if !prepared.call_context_allows(&match_text, &[], &alias_map, file_packages.as_ref()) {
+                if !prepared.call_or_source_context_allows(
+                    &match_text,
+                    &[],
+                    &alias_map,
+                    file_packages,
+                    file_index,
+                    Some(decl),
+                ) {
                     continue;
                 }
                 let span = canonical_flow_read_match_span(ws, file, span, &match_text, &assignment_values);
+                if prepared_reference_binding_origin_is_invalid(
+                    ws,
+                    file,
+                    prepared,
+                    Some(decl),
+                    &file_index.defs,
+                    &match_text,
+                    span,
+                    &alias_map,
+                    ctx.file_imports,
+                ) {
+                    continue;
+                }
                 if out
                     .iter()
                     .any(|existing| existing.rule_id == prepared.rule.id && existing.span == span)
@@ -7494,13 +11359,79 @@ fn scan_flow_reads_batch(
     }
 }
 
+fn flow_read_batch_derived_receiver_decls(
+    ctx: &FileScanContext<'_, '_>,
+    rules: &PreparedRuleBatch<'_, '_>,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+) -> Arc<[Span]> {
+    let file_index = ctx.file_index;
+    let derivable = DerivedReceiverCandidates::from_context(ctx, &rules.factory);
+    let mut selected = Vec::new();
+    let mut candidate_rules = Vec::new();
+    for decl in &file_index.defs {
+        let mut reads = Vec::new();
+        collect_flow_read_sites(
+            &decl.flow_events,
+            &file_index.assignment_values,
+            &file_index.call_receivers,
+            &mut reads,
+        );
+        'reads: for (span, tokens) in reads {
+            candidate_rules.clear();
+            for token in &tokens {
+                push_read_candidate_rules(&mut candidate_rules, rules, token, alias_map);
+            }
+            for prepared in candidate_rules.iter().copied() {
+                let target = prepared.rule.match_spec.target.as_ref();
+                if !decl_target_context_allows(file_index, Some(decl), target, None) {
+                    continue;
+                }
+                let Some(match_text) = flow_read_rule_match(prepared, &tokens) else {
+                    continue;
+                };
+                if !base_param_index_allows(prepared, Some(decl), &match_text) {
+                    continue;
+                }
+                let direct_types = expanded_receiver_types(
+                    &exact_declared_receiver_types_for_match_base(decl, &match_text, ctx.file_imports),
+                    ctx.receiver_base_map,
+                );
+                let receiver = match_base_name(&match_text).unwrap_or(match_text.as_str());
+                if read_receiver_derivation_needed(prepared, &direct_types)
+                    && derivable.place_can_gain_type(decl, receiver, span)
+                {
+                    selected.push(decl.span);
+                    break 'reads;
+                }
+            }
+        }
+    }
+    selected.sort_unstable();
+    selected.dedup();
+    Arc::from(selected)
+}
+
 fn flow_read_rule_match(prepared: &PreparedRule<'_>, tokens: &[String]) -> Option<String> {
     if let Some(name) = prepared.name {
-        if tokens
-            .iter()
-            .any(|token| token == name && prepared.base_name_allows(token))
-        {
-            return Some(name.to_string());
+        if let Some(token) = tokens.iter().find(|token| {
+            if token.as_str() == name {
+                return prepared.base_name_allows(token);
+            }
+            // A typed member-read rule expresses the security/API spelling
+            // as the terminal member (`text`, `body`, `messages`) while the
+            // adapter emits the exact structured place (`field.text`).  Only
+            // admit that terminal form when the rule also requires receiver
+            // type evidence; `base_receiver_type_allows` proves the parsed
+            // base immediately after this shape match.  Untyped bare-name
+            // rules retain their exact-token semantics.
+            rule_primary_target(prepared.rule).is_some_and(|target| {
+                !target.receiver_type_in.is_empty()
+                    && token.rsplit('.').next() == Some(name)
+                    && token.contains('.')
+                    && prepared.base_name_allows(token)
+            })
+        }) {
+            return Some(token.clone());
         }
     }
     if let Some(attr) = prepared.attribute {
@@ -7582,7 +11513,9 @@ fn base_receiver_type_allows(
     // (`c = engine.connect().cursor()` → `c: Cursor`).
     if factory_aliases
         .iter()
-        .filter(|alias| alias.name == base)
+        .filter(|alias| {
+            normalize_leading_call_punctuation(&alias.name) == normalize_leading_call_punctuation(base)
+        })
         .any(|alias| receiver_type_matches_wanted(&alias.type_name, &target.receiver_type_in))
     {
         return true;
@@ -7592,14 +11525,346 @@ fn base_receiver_type_allows(
     };
     decl.type_aliases
         .iter()
-        .filter(|alias| alias.name == base)
+        .filter(|alias| {
+            normalize_leading_call_punctuation(&alias.name) == normalize_leading_call_punctuation(base)
+        })
         .any(|alias| receiver_type_matches_wanted(&alias.type_name, &target.receiver_type_in))
+}
+
+fn exact_declared_receiver_types_for_match_base(
+    decl: &Decl,
+    match_text: &str,
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+) -> Vec<String> {
+    let Some(base) = match_base_name(match_text) else {
+        return Vec::new();
+    };
+    let normalized_base = normalize_leading_call_punctuation(base);
+    let mut types = decl
+        .type_aliases
+        .iter()
+        .filter(|alias| normalize_leading_call_punctuation(&alias.name) == normalized_base)
+        .map(|alias| alias.type_name.clone())
+        .collect::<Vec<_>>();
+    if let Some(imports) = compiler_imports {
+        let import_aliases = bonsai_lang_api::alias_map_from_imports(imports);
+        append_import_expanded_type_identities(&mut types, &import_aliases);
+        for import in &imports.imports {
+            if import.alias.as_deref() == Some(base) {
+                types.push(import.module.clone());
+            } else if import.alias.is_none() && !import.is_wildcard {
+                if bonsai_common::short_qualified_tail(&import.module) == base {
+                    types.push(import.module.clone());
+                }
+            } else if import.alias.is_none() && import.is_wildcard {
+                types.push(format!("{}.{}", import.module, base));
+            }
+        }
+    }
+    types.sort();
+    types.dedup();
+    types
+}
+
+fn append_derived_receiver_types_for_match_base(
+    receiver_types: &mut Vec<String>,
+    aliases: &[TypeAliasBinding],
+    match_text: &str,
+) {
+    let Some(base) = match_base_name(match_text) else {
+        return;
+    };
+    let normalized_base = normalize_leading_call_punctuation(base);
+    for alias in aliases
+        .iter()
+        .filter(|alias| normalize_leading_call_punctuation(&alias.name) == normalized_base)
+    {
+        if !receiver_types.contains(&alias.type_name) {
+            receiver_types.push(alias.type_name.clone());
+        }
+    }
+    receiver_types.sort();
+    receiver_types.dedup();
+}
+
+/// Preserve adapter-emitted type spellings and add only identities proven by
+/// the file's exact compiler import map. Nested source types such as
+/// `Provider.Builder` therefore retain their raw spelling while also gaining
+/// `external.package.Provider.Builder`; local or ambiguous declarations remain
+/// visible to the separate workspace-shadow check and fail closed there.
+fn append_import_expanded_type_identities(
+    types: &mut Vec<String>,
+    import_aliases: &std::collections::HashMap<String, AliasTarget>,
+) {
+    let expanded = types
+        .iter()
+        .filter_map(|type_name| expand_callee_alias(type_name, import_aliases))
+        .collect::<Vec<_>>();
+    for type_name in expanded {
+        push_unique_string(types, type_name);
+    }
 }
 
 fn receiver_type_matches_wanted(actual: &str, wanted: &[String]) -> bool {
     wanted
         .iter()
         .any(|want| actual == want || actual.rsplit('.').next() == Some(want.as_str()))
+}
+
+/// Reject an external receiver-type claim when compiler identity cannot prove
+/// that every matching receiver belongs to the rule-declared provider.
+///
+/// A module import proves that an external package is available; it does not
+/// make a same-named local `struct Client` into that package's `Client`.
+/// Qualified adapter types already carry provider identity. They must match a
+/// complete provider-qualified rule identity or an exact compiler import whose
+/// module is owned by the rule. Simple types pass only when no exact workspace
+/// declaration shadows them. Multiple matching but conflicting compiler
+/// identities fail closed.
+#[cfg(test)]
+fn external_receiver_type_is_workspace_shadow(
+    prepared: &PreparedRule<'_>,
+    receiver_types: &[String],
+    file_decls: &[Decl],
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+) -> bool {
+    external_receiver_type_is_workspace_shadow_at(
+        prepared,
+        receiver_types,
+        file_decls,
+        compiler_imports,
+        None,
+    )
+}
+
+fn external_receiver_type_is_workspace_shadow_at(
+    prepared: &PreparedRule<'_>,
+    receiver_types: &[String],
+    file_decls: &[Decl],
+    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+    match_text: Option<&str>,
+) -> bool {
+    if prepared.rule.imports.is_empty()
+        && prepared.rule.packages.is_empty()
+        && prepared.rule.modules.is_empty()
+    {
+        return false;
+    }
+    // An exact rule-owned static path can carry provider identity without an
+    // instance receiver type (`Provider.shared.value`). A same-named
+    // workspace type still wins lexical resolution, so reject that path
+    // before considering package availability. The rule supplies the owner;
+    // shared matching only compares its structured/literal root with compiler
+    // declarations.
+    if match_text
+        .and_then(match_base_name)
+        .is_some_and(|base| exact_rule_target_owns_base(prepared.rule, base))
+        && match_text
+            .and_then(match_base_name)
+            .is_some_and(|base| workspace_declares_type_named(file_decls, base))
+    {
+        return true;
+    }
+    let expected = rule_receiver_type_expectations(prepared.rule);
+    if expected.is_empty() {
+        return false;
+    }
+    let matching = receiver_types
+        .iter()
+        .filter(|actual| receiver_type_matches_any(std::slice::from_ref(actual), &expected))
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return false;
+    }
+
+    matching.into_iter().any(|actual| {
+        let segments = bonsai_common::qualified_name_segments(actual);
+        if segments.len() > 1 {
+            // Import expansion may qualify an unqualified static receiver in
+            // the header (`ExternalMode.WEAK` ->
+            // `external.config.ExternalMode`) even when a same-named local
+            // type wins lexical resolution. Preserve the original compiler
+            // match spelling so local declarations shadow only unqualified
+            // references; an explicitly qualified source reference remains
+            // exact external evidence.
+            let terminal = segments.last().copied();
+            let unqualified_local_shadow = match_text
+                .and_then(match_base_name)
+                .map(bonsai_common::qualified_name_segments)
+                .is_some_and(|base_segments| {
+                    base_segments.len() == 1
+                        && base_segments.last().copied() == terminal
+                        && file_decls.iter().any(|decl| {
+                            matches!(
+                                decl.kind,
+                                DeclKind::Class
+                                    | DeclKind::Struct
+                                    | DeclKind::Trait
+                                    | DeclKind::Interface
+                                    | DeclKind::Enum
+                            ) && Some(decl.name.as_str()) == terminal
+                        })
+                });
+            if unqualified_local_shadow {
+                return true;
+            }
+            // A compiler-qualified receiver carries its provider identity.
+            // It may satisfy this external rule only through one equally
+            // qualified rule-owned identity; a terminal-name match such as
+            // `local.Client` against `provider.Client` is not evidence.
+            let exact_rule_identity = expected.iter().any(|wanted| {
+                let wanted_segments = bonsai_common::qualified_name_segments(wanted);
+                wanted_segments.len() > 1
+                    && segments.len() >= wanted_segments.len()
+                    && segments[segments.len() - wanted_segments.len()..] == wanted_segments
+            });
+            let exact_rule_provider = prepared
+                .rule
+                .packages
+                .iter()
+                .chain(prepared.rule.imports.iter())
+                .chain(prepared.rule.modules.iter())
+                .any(|signal| {
+                    crate::pkg::import_matches_package(actual, signal, &prepared.rule.package_matching)
+                });
+            if exact_rule_identity || exact_rule_provider {
+                return false;
+            }
+            let qualifier = segments[0];
+            let exact_import_owner = compiler_imports.is_some_and(|imports| {
+                let candidates = imports
+                    .imports
+                    .iter()
+                    .filter(|import| {
+                        let imported_segments = bonsai_common::qualified_name_segments(&import.module);
+                        let local_binding = import
+                            .alias
+                            .as_deref()
+                            .or(import.original_name.as_deref())
+                            .map(str::to_string)
+                            .or_else(|| bonsai_lang_api::module_local_binding(&import.module));
+                        local_binding.as_deref() == Some(qualifier)
+                            || (!imported_segments.is_empty()
+                                && segments.len() >= imported_segments.len()
+                                && segments[..imported_segments.len()] == imported_segments)
+                    })
+                    .collect::<Vec<_>>();
+                // Adapters may retain both the namespace import and its
+                // exact named-member binding for one source import. Those
+                // records are complementary evidence for the same provider,
+                // not ambiguous owners (`module` plus `module.Member`). Only
+                // distinct imported modules represent conflicting provider
+                // identities and must fail closed.
+                let providers = candidates
+                    .iter()
+                    .map(|import| bonsai_common::normalize_qualified_name(&import.module))
+                    .collect::<AHashSet<_>>();
+                if providers.len() != 1 {
+                    return false;
+                }
+                candidates.into_iter().any(|import| {
+                    let identity = import.original_name.as_deref().map_or_else(
+                        || import.module.clone(),
+                        |original| format!("{}.{original}", import.module),
+                    );
+                    prepared
+                        .rule
+                        .packages
+                        .iter()
+                        .chain(prepared.rule.imports.iter())
+                        .chain(prepared.rule.modules.iter())
+                        .any(|signal| {
+                            crate::pkg::import_matches_package(
+                                &import.module,
+                                signal,
+                                &prepared.rule.package_matching,
+                            ) || crate::pkg::import_matches_package(
+                                &identity,
+                                signal,
+                                &prepared.rule.package_matching,
+                            )
+                        })
+                })
+            });
+            return !exact_import_owner;
+        }
+        let Some(simple) = segments.last().copied() else {
+            return true;
+        };
+        file_decls.iter().any(|decl| {
+            matches!(
+                decl.kind,
+                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
+            ) && decl.name == simple
+        })
+    })
+}
+
+fn workspace_declares_type_named(file_decls: &[Decl], name: &str) -> bool {
+    file_decls.iter().any(|decl| {
+        matches!(
+            decl.kind,
+            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
+        ) && decl.name == name
+    })
+}
+
+fn exact_rule_target_owns_base(rule: &Rule, base: &str) -> bool {
+    let Some(target) = rule_primary_target(rule) else {
+        return false;
+    };
+    if target.attribute.as_ref().is_some_and(|attribute| {
+        attribute
+            .iter()
+            .take(attribute.len().saturating_sub(1))
+            .flat_map(|part| bonsai_common::qualified_name_segments(part))
+            .any(|part| part == base)
+    }) {
+        return true;
+    }
+    target.regex.as_deref().and_then(exact_qualified_regex_root) == Some(base)
+}
+
+/// Extract the first literal owner from an anchored qualified-path regex.
+/// Character classes, groups, and wildcard dots deliberately fail closed;
+/// only an identifier followed by an escaped dot or literal namespace
+/// separator is provider ownership evidence.
+fn exact_qualified_regex_root(regex: &str) -> Option<&str> {
+    let regex = regex.trim();
+    let regex = regex
+        .strip_prefix("(?i)")
+        .or_else(|| regex.strip_prefix("(?-i)"))
+        .unwrap_or(regex);
+    let rest = regex.strip_prefix('^')?;
+    let end = rest
+        .find(|ch: char| !(ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()))
+        .unwrap_or(rest.len());
+    let root = rest.get(..end)?;
+    if root.is_empty()
+        || !root
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let suffix = rest.get(end..)?;
+    (suffix.starts_with("\\.") || suffix.starts_with("::") || suffix.starts_with(':')).then_some(root)
+}
+
+fn rule_receiver_type_expectations(rule: &Rule) -> Vec<String> {
+    let mut expected = rule_primary_target(rule)
+        .into_iter()
+        .flat_map(|target| target.receiver_type_in.iter().cloned())
+        .collect::<Vec<_>>();
+    for constraint in rule.constraints.iter() {
+        if let ConstraintKind::ReceiverTypeIn { receiver_type_in } = constraint {
+            expected.extend(receiver_type_in.iter().cloned());
+        }
+    }
+    expected.sort();
+    expected.dedup();
+    expected
 }
 
 fn rule_primary_target(rule: &Rule) -> Option<&RuleTarget> {
@@ -7669,39 +11934,189 @@ fn canonical_flow_read_match_span_in_source(
     )
 }
 
-fn collect_return_sites(events: &[FlowEvent], out: &mut Vec<(Span, Option<String>, Option<String>)>) {
+#[derive(Clone, Debug)]
+struct ReturnRuleSite {
+    span: Span,
+    value_kind: Option<AssignValueKind>,
+    value_text: Option<String>,
+    value_name: Option<String>,
+    /// Exact compiler assignment whose value reaches this return on every
+    /// fall-through control-flow predecessor. `None` means either no local
+    /// definition or multiple possible definitions; matcher rules fail closed
+    /// rather than selecting one textual assignment.
+    reaching_assignment: Option<Span>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ReturnDefinition {
+    One(Span),
+    Ambiguous,
+}
+
+type ReturnDefinitionState = AHashMap<String, ReturnDefinition>;
+
+fn collect_return_rule_sites(events: &[FlowEvent], out: &mut Vec<ReturnRuleSite>) {
+    let mut state = ReturnDefinitionState::new();
+    let _ = walk_return_rule_sites(events, &mut state, out, false);
+}
+
+/// Walk the structured compiler flow in execution order and retain only a
+/// unique reaching assignment for identifier-shaped returns.
+///
+/// The result is deliberately stricter than lexical "latest assignment":
+/// branch joins, zero-iteration loops, and exception alternatives merge to
+/// `Ambiguous` unless every fall-through path carries the same definition.
+/// Nested compiler-declared bindings are restored at scope exit so an inner
+/// shadow never supplies the outer return. API and language spellings are not
+/// interpreted here.
+fn walk_return_rule_sites(
+    events: &[FlowEvent],
+    state: &mut ReturnDefinitionState,
+    out: &mut Vec<ReturnRuleSite>,
+    nested_scope: bool,
+) -> bool {
+    let entry_state = nested_scope.then(|| state.clone());
+    let mut declared_here = AHashSet::new();
     for event in events {
         match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                declares_new_binding,
+                ..
+            } => {
+                if nested_scope && *declares_new_binding {
+                    declared_here.insert(target.clone());
+                }
+                state.insert(target.clone(), ReturnDefinition::One(*span));
+            }
+            FlowEvent::AggregateAssign { span, target, .. } => {
+                state.insert(target.clone(), ReturnDefinition::One(*span));
+            }
             FlowEvent::Return {
                 span,
+                value_kind,
                 value_text,
                 value_name,
                 ..
-            } => out.push((*span, value_text.clone(), value_name.clone())),
+            } => {
+                let reaching_assignment = value_name.as_deref().and_then(|name| match state.get(name) {
+                    Some(ReturnDefinition::One(span)) => Some(*span),
+                    Some(ReturnDefinition::Ambiguous) | None => None,
+                });
+                out.push(ReturnRuleSite {
+                    span: *span,
+                    value_kind: *value_kind,
+                    value_text: value_text.clone(),
+                    value_name: value_name.clone(),
+                    reaching_assignment,
+                });
+                return false;
+            }
+            FlowEvent::Throw { .. } | FlowEvent::Break { .. } | FlowEvent::Continue { .. } => {
+                return false;
+            }
             FlowEvent::Branch {
                 then_events,
                 else_events,
                 ..
             } => {
-                collect_return_sites(then_events, out);
-                collect_return_sites(else_events, out);
+                let before = state.clone();
+                let mut then_state = before.clone();
+                let then_falls = walk_return_rule_sites(then_events, &mut then_state, out, true);
+                let mut else_state = before;
+                let else_falls = walk_return_rule_sites(else_events, &mut else_state, out, true);
+                let fallthrough = [then_falls.then_some(then_state), else_falls.then_some(else_state)]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                if fallthrough.is_empty() {
+                    return false;
+                }
+                *state = merge_return_definition_states(&fallthrough);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_return_sites(body, out);
+            FlowEvent::Loop { body, .. } => {
+                let before = state.clone();
+                let mut body_state = before.clone();
+                let body_falls = walk_return_rule_sites(body, &mut body_state, out, true);
+                let paths = if body_falls {
+                    vec![before, body_state]
+                } else {
+                    vec![before]
+                };
+                *state = merge_return_definition_states(&paths);
             }
+            FlowEvent::Using { body, .. } => {
+                if !walk_return_rule_sites(body, state, out, true) {
+                    return false;
+                }
+            }
+            // Deferred statements run during scope exit, after the returned
+            // expression has been selected, so they cannot define the value
+            // whose return shape is being matched.
+            FlowEvent::Defer { .. } => {}
             FlowEvent::Try {
                 body,
                 catch_events,
                 finally_events,
                 ..
             } => {
-                collect_return_sites(body, out);
-                collect_return_sites(catch_events, out);
-                collect_return_sites(finally_events, out);
+                let before = state.clone();
+                let mut body_state = before.clone();
+                let body_falls = walk_return_rule_sites(body, &mut body_state, out, true);
+                let mut catch_state = before.clone();
+                let catch_falls = walk_return_rule_sites(catch_events, &mut catch_state, out, true);
+                // A catch may begin after any prefix of the try body. Include
+                // the entry state as an additional conservative predecessor;
+                // any differing assignment therefore fails closed.
+                let mut paths = vec![before];
+                if body_falls {
+                    paths.push(body_state);
+                }
+                if catch_falls {
+                    paths.push(catch_state);
+                }
+                *state = merge_return_definition_states(&paths);
+                if !walk_return_rule_sites(finally_events, state, out, true) {
+                    return false;
+                }
             }
             _ => {}
         }
     }
+
+    if let Some(entry_state) = entry_state {
+        for name in declared_here {
+            match entry_state.get(&name).copied() {
+                Some(definition) => {
+                    state.insert(name, definition);
+                }
+                None => {
+                    state.remove(&name);
+                }
+            }
+        }
+    }
+    true
+}
+
+fn merge_return_definition_states(paths: &[ReturnDefinitionState]) -> ReturnDefinitionState {
+    let mut names = AHashSet::new();
+    for path in paths {
+        names.extend(path.keys().cloned());
+    }
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let first = paths.first().and_then(|path| path.get(&name)).copied();
+            let definition = if paths.iter().all(|path| path.get(&name).copied() == first) {
+                first
+            } else {
+                Some(ReturnDefinition::Ambiguous)
+            }?;
+            Some((name, definition))
+        })
+        .collect()
 }
 
 fn collect_flow_read_sites(
@@ -7992,26 +12407,43 @@ fn is_simple_identifier(text: &str) -> bool {
 }
 
 /// Layer adapter-emitted type-alias bindings (`Decl.type_aliases`)
-/// onto an existing alias map. Existing entries are preserved so
-/// import-derived aliases beat type-derived ones when both fire on
-/// the same local name.
+/// onto an existing alias map.
+///
+/// A compiler-proven value type is the binding identity used for member
+/// dispatch. It therefore replaces an import alias for the same local. This
+/// matters for imported values: `from pool import connection` first creates
+/// an import-member alias, while the exporting module can additionally prove
+/// that `connection` is a concrete instance. Keeping only the import spelling
+/// would discard that stronger fact and prevent exact receiver-return typing
+/// on `connection.cursor()`.
+///
+/// Import/package evidence remains independently available through the
+/// compiler import index; replacing this lookup entry does not manufacture or
+/// discard dependency evidence.
 fn extend_alias_map_with_declared_types(
     alias_map: &mut std::collections::HashMap<String, AliasTarget>,
     aliases: &[TypeAliasBinding],
 ) {
     for alias in aliases {
-        alias_map
-            .entry(alias.name.clone())
-            .or_insert_with(|| AliasTarget::Type {
-                type_name: alias.type_name.clone(),
-            });
+        let target = AliasTarget::Type {
+            type_name: alias.type_name.clone(),
+        };
+        alias_map.insert(alias.name.clone(), target.clone());
+        // Some adapters preserve a binding sigil in storage places while
+        // their call receiver is the same parser-classified identifier
+        // without leading punctuation (`$dbh` versus `dbh`). Retain the exact
+        // place and also its vocabulary-free identifier identity so declared
+        // and rulepack return types can reach the receiver.
+        let normalized = normalize_leading_call_punctuation(&alias.name);
+        if normalized != alias.name {
+            alias_map.insert(normalized.to_string(), target);
+        }
     }
 }
 
 fn scan_writes_batch(
     ctx: &FileScanContext<'_, '_>,
-    rules: &[&PreparedRule<'_>],
-    include_workspace_package_context: bool,
+    rules: &PreparedRuleBatch<'_, '_>,
     out: &mut Vec<RuleMatch>,
 ) {
     let ws = ctx.ws;
@@ -8020,26 +12452,35 @@ fn scan_writes_batch(
     let mode = ctx.mode;
     let taint_view = ctx.taint_view;
     let retention = ctx.retention;
-    let file_packages = file_package_set_with_prewarmed_workspace_context_and_retention(
-        ws,
-        file,
-        include_workspace_package_context,
-        retention,
-        ctx.import_package_contexts,
-        ctx.file_imports,
-    );
-    let alias_map = file_alias_map_with_compiler_imports(ws, file, retention, ctx.file_imports);
+    let file_packages = ctx.package_evidence;
     let nested_ast_values = NestedAstValueIndex::new(&file_index.defs);
     let assignment_values = AssignmentValueIndex::new(&file_index.assignment_values);
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
+    let requirements = DeclFactRequirements::for_rules(rules.write_rules.iter().copied());
+    let bundle = decl_match_facts_for_retention(
+        ws,
+        file,
+        Some(file_index),
+        DeclMatchFactsRequest {
+            factory: &rules.factory,
+            requirements,
+            retention,
+            compiler_imports: ctx.file_imports,
+            global_headers: ctx.global_headers,
+            call_result_type_decls: None,
+        },
+    );
     for decl in &file_index.defs {
+        let Some(facts) = bundle.by_decl_span.get(&decl.span) else {
+            continue;
+        };
         let writes = collect_writes(&decl.flow_events);
         for mut write in writes {
             write.extend_with_assignment_value(&assignment_values, source_text.as_deref());
             write.extend_with_nested_ast_values(&nested_ast_values);
             let args = [write.argument.clone()];
             let ast_arg_values = [write.ast_values];
-            for prepared in rules {
+            for prepared in &rules.write_rules {
                 if !callee_matches(
                     &write.target,
                     prepared.name,
@@ -8051,18 +12492,59 @@ fn scan_writes_batch(
                 if !prepared.base_name_allows(&write.target) {
                     continue;
                 }
+                let mut receiver_types =
+                    exact_declared_receiver_types_for_match_base(decl, &write.target, ctx.file_imports);
+                append_derived_receiver_types_for_match_base(
+                    &mut receiver_types,
+                    &facts.derived_type_aliases,
+                    &write.target,
+                );
+                if !base_receiver_type_allows(
+                    prepared,
+                    Some(decl),
+                    &write.target,
+                    &receiver_types,
+                    &facts.derived_type_aliases,
+                ) || external_receiver_type_is_workspace_shadow_at(
+                    prepared,
+                    &receiver_types,
+                    &file_index.defs,
+                    ctx.file_imports,
+                    Some(&write.target),
+                ) {
+                    continue;
+                }
                 // Same package-signal gate the call/read scanners use —
                 // a receiver-agnostic write target like
                 // `^[A-Za-z_$]\w*\.headers$` would otherwise fire on
                 // any file regardless of the rule's `packages` list.
-                if !prepared.call_context_allows(&write.target, &[], &alias_map, file_packages.as_ref()) {
+                if !prepared.call_context_allows(
+                    &write.target,
+                    &receiver_types,
+                    &facts.alias_map,
+                    file_packages,
+                ) {
+                    continue;
+                }
+                if prepared_write_binding_origin_is_invalid(
+                    ws,
+                    file,
+                    prepared,
+                    decl,
+                    &file_index.defs,
+                    &write.target,
+                    write.span,
+                    &facts.alias_map,
+                    ctx.file_imports,
+                ) {
                     continue;
                 }
                 if !constraints_pass(ConstraintEval {
                     rule_id: &prepared.rule.id,
                     callee: &write.target,
+                    receiver: None,
                     args: &args,
-                    receiver_types: &[],
+                    receiver_types: &receiver_types,
                     span: write.span,
                     call_origin: Some(CallFactOrigin::SyntheticWrite),
                     constraints: &prepared.rule.constraints.0,
@@ -8082,6 +12564,7 @@ fn scan_writes_batch(
                         file_decls: &file_index.defs,
                         assignment_values: &file_index.assignment_values,
                         call_argument_values: &file_index.call_argument_values,
+                        string_compositions: &file_index.string_compositions,
                         factory_import_identity: None,
                     }),
                 }) {
@@ -8106,8 +12589,7 @@ fn scan_writes_batch(
 
 fn scan_ref_writes_batch(
     ctx: &FileScanContext<'_, '_>,
-    rules: &[&PreparedRule<'_>],
-    include_workspace_package_context: bool,
+    rules: &PreparedRuleBatch<'_, '_>,
     out: &mut Vec<RuleMatch>,
 ) {
     let ws = ctx.ws;
@@ -8117,20 +12599,53 @@ fn scan_ref_writes_batch(
     let taint_view = ctx.taint_view;
     let retention = ctx.retention;
     let decls = file_index.defs.as_slice();
-    let file_packages = file_package_set_with_prewarmed_workspace_context_and_retention(
+    let file_packages = ctx.package_evidence;
+    let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
+    let requirements = DeclFactRequirements::for_rules(rules.write_rules.iter().copied());
+    let bundle = decl_match_facts_for_retention(
         ws,
         file,
-        include_workspace_package_context,
-        retention,
-        ctx.import_package_contexts,
-        ctx.file_imports,
+        Some(file_index),
+        DeclMatchFactsRequest {
+            factory: &rules.factory,
+            requirements,
+            retention,
+            compiler_imports: ctx.file_imports,
+            global_headers: ctx.global_headers,
+            call_result_type_decls: None,
+        },
     );
-    let alias_map = file_alias_map_with_compiler_imports(ws, file, retention, ctx.file_imports);
     for r in &file_index.refs {
         if r.kind != RefKind::Write {
             continue;
         }
-        for prepared in rules {
+        let enclosing_decl = innermost_decl_for_span(decls, r.span);
+        let assignment = file_index
+            .assignment_values
+            .iter()
+            .find(|fact| fact.target_span == Some(r.span));
+        let constraint_span = assignment.map_or(r.span, |fact| fact.assignment_span);
+        let rendered_value = assignment.and_then(|fact| {
+            let source = source_text.as_deref()?;
+            source.get(fact.value_span.start as usize..fact.value_span.end as usize)
+        });
+        let argument = CallArg {
+            passing_mode: Default::default(),
+            span: assignment.map_or(r.span, |fact| fact.value_span),
+            name: None,
+            place: None,
+            source_names: Vec::new(),
+            value_text: rendered_value.unwrap_or_default().to_string(),
+        };
+        let args = [argument];
+        let ast_values = [rendered_value.into_iter().map(str::to_string).collect::<Vec<_>>()];
+        let Some(decl) = enclosing_decl else {
+            continue;
+        };
+        let Some(facts) = bundle.by_decl_span.get(&decl.span) else {
+            continue;
+        };
+        for prepared in &rules.write_rules {
             if !callee_matches(
                 &r.name,
                 prepared.name,
@@ -8142,21 +12657,63 @@ fn scan_ref_writes_batch(
             if !prepared.base_name_allows(&r.name) {
                 continue;
             }
-            if !prepared.call_context_allows(&r.name, &[], &alias_map, file_packages.as_ref()) {
+            let mut receiver_types =
+                exact_declared_receiver_types_for_match_base(decl, &r.name, ctx.file_imports);
+            append_derived_receiver_types_for_match_base(
+                &mut receiver_types,
+                &facts.derived_type_aliases,
+                &r.name,
+            );
+            if !base_receiver_type_allows(
+                prepared,
+                Some(decl),
+                &r.name,
+                &receiver_types,
+                &facts.derived_type_aliases,
+            ) || external_receiver_type_is_workspace_shadow_at(
+                prepared,
+                &receiver_types,
+                &file_index.defs,
+                ctx.file_imports,
+                Some(&r.name),
+            ) {
+                continue;
+            }
+            if !prepared.call_context_allows(&r.name, &receiver_types, &facts.alias_map, file_packages) {
+                continue;
+            }
+            if prepared_write_binding_origin_is_invalid(
+                ws,
+                file,
+                prepared,
+                decl,
+                &file_index.defs,
+                &r.name,
+                r.span,
+                &facts.alias_map,
+                ctx.file_imports,
+            ) {
+                continue;
+            }
+            if out
+                .iter()
+                .any(|existing| existing.rule_id == prepared.rule.id && existing.span == constraint_span)
+            {
                 continue;
             }
             if !constraints_pass(ConstraintEval {
                 rule_id: &prepared.rule.id,
                 callee: &r.name,
-                args: &[],
-                receiver_types: &[],
-                span: r.span,
+                receiver: None,
+                args: &args,
+                receiver_types: &receiver_types,
+                span: constraint_span,
                 call_origin: Some(CallFactOrigin::SyntheticWrite),
                 constraints: &prepared.rule.constraints.0,
                 constraint_regexes: &prepared.constraint_regexes,
                 receiver_call_count: None,
                 assignment_texts: None,
-                ast_arg_values: None,
+                ast_arg_values: Some(&ast_values),
                 mode,
                 taint_view,
                 enclosing_decorators: None,
@@ -8164,7 +12721,14 @@ fn scan_ref_writes_batch(
                 alias_chains: None,
                 runtime_types: None,
                 lifecycle_transitions: None,
-                structural_context: None,
+                structural_context: Some(StructuralConstraintContext {
+                    current_decl: decl,
+                    file_decls: &file_index.defs,
+                    assignment_values: &file_index.assignment_values,
+                    call_argument_values: &file_index.call_argument_values,
+                    string_compositions: &file_index.string_compositions,
+                    factory_import_identity: None,
+                }),
             }) {
                 continue;
             }
@@ -8175,7 +12739,7 @@ fn scan_ref_writes_batch(
                 continue;
             }
             let (file_path, line, col) = resolve_span(ws, file, r.span);
-            let enclosing_fn = innermost_decl_for_span(decls, r.span).map(|d| d.name.clone());
+            let enclosing_fn = Some(decl.name.clone());
             out.push(RuleMatch {
                 origin: MatchOrigin::Rulepack,
                 rule_id: prepared.rule.id.clone(),
@@ -8441,20 +13005,79 @@ fn collect_calls(events: &[FlowEvent]) -> Vec<CallFact> {
     calls
 }
 
+/// Restore the exact parsed receiver on assignment-source call projections.
+///
+/// `FlowEvent::Assign` intentionally keeps a compact value-producer name, but
+/// `AssignmentValueFact` owns the syntax relationship between that producer
+/// and its receiver. Joining by the assignment span preserves typed property
+/// getters and other accessor-shaped values without reconstructing a receiver
+/// from the rendered callee string.
+fn enrich_assignment_call_fact_receivers(
+    calls: &mut [CallFact],
+    assignment_values: &[bonsai_lang_api::AssignmentValueFact],
+) {
+    for call in calls {
+        if call.origin != CallFactOrigin::AssignmentSourceCall {
+            continue;
+        }
+        let Some(fact) = bonsai_lang_api::assignment_value_fact_for_span(assignment_values, call.span) else {
+            continue;
+        };
+        if fact.direct_call_name.as_deref() != Some(call.callee.as_str())
+            || fact.direct_call_receiver_span.is_none()
+        {
+            continue;
+        }
+        let Some(receiver) = fact
+            .direct_call_receiver
+            .as_ref()
+            .filter(|receiver| !receiver.is_empty())
+        else {
+            continue;
+        };
+        call.receiver = Some(receiver.clone());
+        call.call_kind = CallKind::Method;
+    }
+}
+
 fn enrich_call_fact_receiver_types(calls: &mut [CallFact], aliases: &[TypeAliasBinding]) {
     if aliases.is_empty() {
         return;
     }
     for call in calls {
-        let Some(receiver) = call_receiver_text(&call.callee) else {
+        // The adapter's receiver field is the canonical structural fact.
+        // Some grammars intentionally lower a method call as a bare callee
+        // plus an exact receiver (for example Rust fluent filter calls), so
+        // deriving the receiver only from the display-form callee silently
+        // drops otherwise-proven rulepack return typing.
+        let Some(receiver) = call
+            .receiver
+            .as_deref()
+            .or_else(|| call_receiver_text(&call.callee))
+        else {
             continue;
         };
+        let receiver = normalize_leading_call_punctuation(receiver.trim());
         for alias in aliases {
-            if alias.name == receiver || receiver_root_name(receiver).as_deref() == Some(alias.name.as_str())
-            {
+            let alias_name = normalize_leading_call_punctuation(&alias.name);
+            if alias_name == receiver || receiver_root_name(receiver).as_deref() == Some(alias_name) {
                 push_unique_string(&mut call.receiver_types, alias.type_name.clone());
             }
         }
+    }
+}
+
+/// Expand only adapter-emitted receiver types through the file's exact
+/// compiler import bindings. The original source spelling is retained so
+/// lexical shadow/ambiguity checks can still fail closed, while an imported
+/// nested type such as `Provider.Builder` also carries its complete external
+/// identity for rule-owned receiver constraints.
+fn enrich_call_fact_receiver_import_types(
+    calls: &mut [CallFact],
+    import_aliases: &std::collections::HashMap<String, AliasTarget>,
+) {
+    for call in calls {
+        append_import_expanded_type_identities(&mut call.receiver_types, import_aliases);
     }
 }
 
@@ -8694,9 +13317,17 @@ pub(crate) fn rule_target_matches_call(callee: &str, receiver_types: &[String], 
     if target.annotation.is_some()
         || target.default_call.is_some()
         || !target.in_class.is_empty()
+        || !target.in_class_suffix.is_empty()
+        || !target.in_owner_base.is_empty()
         || !target.in_method.is_empty()
         || !target.in_method_prefix.is_empty()
         || !target.param_index_in.is_empty()
+        || !target.param_index_not_in.is_empty()
+        || !target.param_type_in.is_empty()
+        || !target.param_type_exact_in.is_empty()
+        || !target.signature_param_types.is_empty()
+        || !target.signature_param_annotations.is_empty()
+        || !target.param_count_in.is_empty()
         || !target.base_param_index_in.is_empty()
         || !target.decl_kind_in.is_empty()
         || !target.visibility_in.is_empty()
@@ -8758,17 +13389,29 @@ fn type_name_matches_attribute_prefix(actual: &str, expected: &[String]) -> bool
             .iter()
             .zip(expected)
             .all(|(actual, expected)| actual == expected))
-        || actual
-            .last()
-            .zip(expected.last())
-            .is_some_and(|(actual, expected)| actual == expected)
+        || (expected.len() == 1
+            && actual
+                .last()
+                .zip(expected.last())
+                .is_some_and(|(actual, expected)| actual == expected))
 }
 
 fn receiver_type_matches_any(actual: &[String], expected: &[String]) -> bool {
     actual.iter().any(|actual| {
-        expected
-            .iter()
-            .any(|expected| type_name_matches_attribute_prefix(actual, std::slice::from_ref(expected)))
+        expected.iter().any(|expected| {
+            // A rule-owned receiver type is one semantic identity even when
+            // its source ecosystem spells it with qualification
+            // (`Net::AMQP::RabbitMQ`, `java.sql.Connection`).  Compare the
+            // compiler and rule identities as structural segments; wrapping
+            // the complete rule string in a one-element slice makes every
+            // qualified type unreachable because the compiler side is
+            // already segmented.
+            let expected_segments = bonsai_common::qualified_name_segments(expected)
+                .into_iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            type_name_matches_attribute_prefix(actual, &expected_segments)
+        })
     })
 }
 
@@ -8809,7 +13452,17 @@ fn normalize_callee_for_matching(callee: &str) -> String {
 }
 
 fn callee_tail_matches(normalized: &str, method: &str) -> bool {
-    normalized == method || bonsai_common::short_qualified_tail(normalized) == method
+    if normalized == method || bonsai_common::short_qualified_tail(normalized) == method {
+        return true;
+    }
+    // Some adapters preserve a multipart callable suffix as one exact
+    // source-level selector in the rule target while the language-neutral
+    // qualified-name view exposes each identifier-shaped component. Compare
+    // those already-compiled components as an exact suffix; no punctuation
+    // spelling or API vocabulary is interpreted here.
+    let actual = bonsai_common::qualified_name_segments(normalized);
+    let expected = bonsai_common::qualified_name_segments(method);
+    !expected.is_empty() && actual.ends_with(&expected)
 }
 
 #[derive(Clone, Debug)]
@@ -9066,21 +13719,13 @@ fn callee_matches(
         if actual.ends_with(&expected) {
             return true;
         }
-        // Method-chain fallback. Some adapters (Rust, Swift, Kotlin)
-        // emit a whole builder chain as ONE Call event — e.g.
-        // `Command::new("sh").arg("-c").arg(cmd).output`. The rule
-        // targets the chain head `Command::new`, which won't match
-        // any suffix of the chain. Accept it only when the emitted
-        // callee starts with that head call or with an import-path
-        // prefix whose final segment is that head call; a callback
-        // argument like `callbacks.add(Command::new("sh"))` must not
-        // match a `[Command, new]` rule.
-        if actual
-            .windows(expected.len())
-            .any(|candidate| candidate == expected.as_slice())
-        {
-            return true;
-        }
+        // A rule target is one exact call, never an arbitrary component of a
+        // fluent-chain rendering. Adapters lower nested calls independently,
+        // so matching an interior window here would bind the rule's argument
+        // constraints to the outer call's arguments (`Command::new(literal)
+        // .args(tainted)` would falsely treat the tainted argv as `new` arg
+        // zero). Keep only exact/suffix identities and let the compiler fact
+        // for the nested call match on its own.
         return false;
     }
     if let Some(n) = name {
@@ -9133,6 +13778,13 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
                 "constraints.unless_prior_receiver_call.static_string_args_regex",
                 &unless_prior_receiver_call.static_string_args_regex,
             )?),
+            ConstraintKind::RequiresPriorReceiverCall {
+                requires_prior_receiver_call,
+            } => Some(compile_constraint_regex(
+                rule_id,
+                "constraints.requires_prior_receiver_call.static_string_args_regex",
+                &requires_prior_receiver_call.static_string_args_regex,
+            )?),
             ConstraintKind::ArgMatchesRegex { arg_matches_regex } => Some(compile_constraint_regex(
                 rule_id,
                 "constraints.arg_matches_regex",
@@ -9154,6 +13806,7 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
             )?),
             ConstraintKind::ReceiverTypeIn { .. }
             | ConstraintKind::ReceiverTypeNotIn { .. }
+            | ConstraintKind::RequiresPriorReceiverWrite { .. }
             | ConstraintKind::SecondArgEquals { .. }
             | ConstraintKind::ArgEquals { .. }
             | ConstraintKind::KeywordArgEquals { .. }
@@ -9162,6 +13815,7 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
             | ConstraintKind::AnyArgTainted { .. }
             | ConstraintKind::ReceiverOriginCallbackParamReachesCall { .. }
             | ConstraintKind::ReceiverFactoryArgumentFieldsEqual { .. }
+            | ConstraintKind::ReceiverFactoryArgumentsEqual { .. }
             | ConstraintKind::FormatArgIndex { .. }
             | ConstraintKind::Namespace { .. }
             | ConstraintKind::TopLevel { .. }
@@ -9169,7 +13823,13 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
             | ConstraintKind::MinArgs { .. }
             | ConstraintKind::MaxArgs { .. }
             | ConstraintKind::ArgValueNotAggregate { .. }
+            | ConstraintKind::ArgValueKind { .. }
+            | ConstraintKind::ArgStringCompositionStartsWith { .. }
+            | ConstraintKind::ArgStringCompositionNotStartsWith { .. }
+            | ConstraintKind::ArgIsInlineCallback { .. }
+            | ConstraintKind::ArgInlineCallbackReturnsStatic { .. }
             | ConstraintKind::ArgSequenceItemsEqual { .. }
+            | ConstraintKind::ArgAggregateFieldsEqual { .. }
             | ConstraintKind::SameReceiverCallCountAtLeast { .. }
             | ConstraintKind::ArgLt { .. }
             | ConstraintKind::ArgLe { .. }
@@ -9177,6 +13837,7 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
             | ConstraintKind::ArgGe { .. }
             | ConstraintKind::RequiresRuntimeType { .. }
             | ConstraintKind::EnclosingDecoratorIn { .. }
+            | ConstraintKind::EnclosingDecoratorNotIn { .. }
             | ConstraintKind::EnclosingModifierIn { .. }
             | ConstraintKind::SinkTagIn { .. }
             | ConstraintKind::MustAlias { .. }
@@ -9213,6 +13874,7 @@ struct StructuralConstraintContext<'a> {
     file_decls: &'a [Decl],
     assignment_values: &'a [bonsai_lang_api::AssignmentValueFact],
     call_argument_values: &'a [bonsai_lang_api::CallArgumentValueFact],
+    string_compositions: &'a [bonsai_lang_api::StringCompositionFact],
     factory_import_identity: Option<FactoryImportIdentityContext<'a>>,
 }
 
@@ -9220,6 +13882,34 @@ struct StructuralConstraintContext<'a> {
 struct FactoryImportIdentityContext<'a> {
     required_imports: &'a [String],
     alias_map: &'a std::collections::HashMap<String, AliasTarget>,
+    compiler_imports: Option<&'a bonsai_lang_api::ImportIndex>,
+    workspace: Option<(&'a Workspace, &'a GlobalIndex)>,
+}
+
+fn argument_string_composition_starts_with(
+    structural: StructuralConstraintContext<'_>,
+    call_span: Span,
+    argument_index: usize,
+    required: &str,
+) -> bool {
+    let Some(argument) =
+        bonsai_lang_api::call_argument_value_fact(structural.call_argument_values, call_span, argument_index)
+    else {
+        return false;
+    };
+    structural.string_compositions.iter().any(|composition| {
+        composition.value_span == argument.argument_span
+            && composition.parts.len() > 1
+            && matches!(
+                composition.parts.first(),
+                Some(bonsai_lang_api::StringCompositionPart::Literal { value }) if value == required
+            )
+            && composition
+                .parts
+                .iter()
+                .skip(1)
+                .any(|part| !matches!(part, bonsai_lang_api::StringCompositionPart::Literal { .. }))
+    })
 }
 
 #[derive(Copy, Clone)]
@@ -9229,6 +13919,166 @@ struct GuaranteedPriorCall<'a> {
     receiver: Option<&'a str>,
     receiver_types: &'a [String],
     arg_count: usize,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ReachingPriorWrite {
+    None,
+    Known(Span),
+    Ambiguous,
+}
+
+fn merge_reaching_prior_writes(left: ReachingPriorWrite, right: ReachingPriorWrite) -> ReachingPriorWrite {
+    if left == right {
+        left
+    } else {
+        ReachingPriorWrite::Ambiguous
+    }
+}
+
+fn flow_event_contains_span(event: &FlowEvent, target: Span) -> bool {
+    let event_span = match event {
+        FlowEvent::Call { span, .. }
+        | FlowEvent::Branch { span, .. }
+        | FlowEvent::Loop { span, .. }
+        | FlowEvent::Assign { span, .. }
+        | FlowEvent::AggregateAssign { span, .. }
+        | FlowEvent::Return { span, .. }
+        | FlowEvent::Throw { span, .. }
+        | FlowEvent::Try { span, .. }
+        | FlowEvent::Break { span, .. }
+        | FlowEvent::Continue { span, .. }
+        | FlowEvent::Yield { span, .. }
+        | FlowEvent::Await { span, .. }
+        | FlowEvent::Defer { span, .. }
+        | FlowEvent::Using { span, .. }
+        | FlowEvent::Lifecycle { span, .. } => *span,
+    };
+    event_span == target
+        || spans_overlap(event_span, target)
+        || (event_span.start <= target.start && target.end <= event_span.end)
+}
+
+fn events_contain_span(events: &[FlowEvent], target: Span) -> bool {
+    events.iter().any(|event| flow_event_contains_span(event, target))
+}
+
+fn receiver_write_matches(target: &str, receiver: &str, member: &RuleTarget) -> bool {
+    call_receiver_text(target).is_some_and(|candidate| candidate == receiver)
+        && rule_target_matches_call(target, &[], member)
+}
+
+/// Compute the exact reaching definition for one rule-declared member on a
+/// compiler receiver.  Completed branches merge by equality; loops include
+/// the zero-iteration predecessor; exception regions include the entry path.
+/// Any disagreement becomes `Ambiguous`, so state constraints fail closed.
+fn reaching_prior_receiver_write(
+    events: &[FlowEvent],
+    target: Span,
+    receiver: &str,
+    member: &RuleTarget,
+) -> ReachingPriorWrite {
+    fn walk(
+        events: &[FlowEvent],
+        target: Span,
+        receiver: &str,
+        member: &RuleTarget,
+        state: &mut ReachingPriorWrite,
+    ) -> bool {
+        for event in events {
+            match event {
+                FlowEvent::Assign {
+                    span,
+                    target: write_target,
+                    ..
+                }
+                | FlowEvent::AggregateAssign {
+                    span,
+                    target: write_target,
+                    ..
+                } => {
+                    if flow_event_contains_span(event, target) {
+                        return true;
+                    }
+                    if span.end <= target.start && receiver_write_matches(write_target, receiver, member) {
+                        *state = ReachingPriorWrite::Known(*span);
+                    }
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    if events_contain_span(then_events, target) {
+                        return walk(then_events, target, receiver, member, state);
+                    }
+                    if events_contain_span(else_events, target) {
+                        return walk(else_events, target, receiver, member, state);
+                    }
+                    let before = *state;
+                    let mut then_state = before;
+                    let _ = walk(then_events, target, receiver, member, &mut then_state);
+                    let mut else_state = before;
+                    let _ = walk(else_events, target, receiver, member, &mut else_state);
+                    *state = merge_reaching_prior_writes(then_state, else_state);
+                }
+                FlowEvent::Loop { body, .. } => {
+                    if events_contain_span(body, target) {
+                        return walk(body, target, receiver, member, state);
+                    }
+                    let before = *state;
+                    let mut body_state = before;
+                    let _ = walk(body, target, receiver, member, &mut body_state);
+                    *state = merge_reaching_prior_writes(before, body_state);
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    for region in [
+                        body.as_slice(),
+                        catch_events.as_slice(),
+                        finally_events.as_slice(),
+                    ] {
+                        if events_contain_span(region, target) {
+                            return walk(region, target, receiver, member, state);
+                        }
+                    }
+                    let before = *state;
+                    let mut body_state = before;
+                    let _ = walk(body, target, receiver, member, &mut body_state);
+                    let mut catch_state = before;
+                    let _ = walk(catch_events, target, receiver, member, &mut catch_state);
+                    *state = merge_reaching_prior_writes(
+                        before,
+                        merge_reaching_prior_writes(body_state, catch_state),
+                    );
+                    let _ = walk(finally_events, target, receiver, member, state);
+                }
+                FlowEvent::Using { body, .. } => {
+                    if events_contain_span(body, target) {
+                        return walk(body, target, receiver, member, state);
+                    }
+                    let _ = walk(body, target, receiver, member, state);
+                }
+                // Deferred bodies execute after the current expression and
+                // cannot establish its reaching state.
+                FlowEvent::Defer { .. } => {}
+                _ => {
+                    if flow_event_contains_span(event, target) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    let mut state = ReachingPriorWrite::None;
+    let _ = walk(events, target, receiver, member, &mut state);
+    state
 }
 
 fn collect_guaranteed_prior_calls<'a>(
@@ -9359,6 +14209,10 @@ fn static_string_call_arguments(
 struct ConstraintEval<'a, 't> {
     rule_id: &'a str,
     callee: &'a str,
+    /// Exact receiver expression emitted by the language adapter. Synthetic
+    /// write/ref paths leave this absent and retain the legacy qualified
+    /// callee fallback below.
+    receiver: Option<&'a str>,
     args: &'a [CallArg],
     receiver_types: &'a [String],
     span: Span,
@@ -9431,6 +14285,8 @@ fn constraints_pass(ctx: ConstraintEval<'_, '_>) -> bool {
 /// | `ArgNotMatchesRegex`         | inverse of `ArgMatchesRegex`                       |
 /// | `AnyArgMatchesRegex`         | any arg matches regex                              |
 /// | `ArgValueNotAggregate`       | parsed argument is not an aggregate/object         |
+/// | `ArgIsInlineCallback`        | parsed argument is an inline callback              |
+/// | `ArgInlineCallbackReturnsStatic` | inline callback has one exact scalar return    |
 /// | `SameReceiverCallCountAtLeast` | same receiver has ≥N calls in this scope        |
 ///
 /// Each arm short-circuits to `false` on first failure; constraints
@@ -9449,7 +14305,7 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 }
             }
             ConstraintKind::ReceiverMatchesRegex { .. } => {
-                let Some(receiver) = call_receiver_text(ctx.callee) else {
+                let Some(receiver) = ctx.receiver.or_else(|| call_receiver_text(ctx.callee)) else {
                     return false;
                 };
                 let Some(Some(re)) = ctx.constraint_regexes.get(constraint_index) else {
@@ -9460,7 +14316,7 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 }
             }
             ConstraintKind::ReceiverNotMatchesRegex { .. } => {
-                let Some(receiver) = call_receiver_text(ctx.callee) else {
+                let Some(receiver) = ctx.receiver.or_else(|| call_receiver_text(ctx.callee)) else {
                     return false;
                 };
                 let Some(Some(re)) = ctx.constraint_regexes.get(constraint_index) else {
@@ -9473,7 +14329,7 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
             ConstraintKind::UnlessPriorReceiverCall {
                 unless_prior_receiver_call,
             } => {
-                let Some(receiver) = call_receiver_text(ctx.callee) else {
+                let Some(receiver) = ctx.receiver.or_else(|| call_receiver_text(ctx.callee)) else {
                     continue;
                 };
                 let Some(Some(re)) = ctx.constraint_regexes.get(constraint_index) else {
@@ -9504,6 +14360,146 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                         )
                         .is_some_and(|arguments| re.is_match(&arguments))
                 }) {
+                    return false;
+                }
+            }
+            ConstraintKind::RequiresPriorReceiverCall {
+                requires_prior_receiver_call,
+            } => {
+                let Some(receiver) = ctx.receiver.or_else(|| call_receiver_text(ctx.callee)) else {
+                    return false;
+                };
+                let Some(Some(re)) = ctx.constraint_regexes.get(constraint_index) else {
+                    return false;
+                };
+                let Some(structural) = ctx.structural_context else {
+                    return false;
+                };
+                let owner = structural
+                    .file_decls
+                    .iter()
+                    .filter(|decl| decl.span.start <= ctx.span.start && ctx.span.end <= decl.span.end)
+                    .min_by_key(|decl| decl.span.end.saturating_sub(decl.span.start))
+                    .unwrap_or(structural.current_decl);
+                let mut prior_calls = Vec::new();
+                collect_guaranteed_prior_calls(&owner.flow_events, ctx.span, &mut prior_calls);
+                if !prior_calls.iter().any(|call| {
+                    call.receiver == Some(receiver)
+                        && rule_target_matches_call(
+                            call.name,
+                            call.receiver_types,
+                            &requires_prior_receiver_call.call,
+                        )
+                        && static_string_call_arguments(
+                            structural.call_argument_values,
+                            call.span,
+                            call.arg_count,
+                        )
+                        .is_some_and(|arguments| re.is_match(&arguments))
+                }) {
+                    return false;
+                }
+            }
+            ConstraintKind::RequiresPriorReceiverWrite {
+                requires_prior_receiver_write,
+            } => {
+                let Some(receiver) = ctx.receiver.or_else(|| call_receiver_text(ctx.callee)) else {
+                    return false;
+                };
+                let Some(structural) = ctx.structural_context else {
+                    return false;
+                };
+                if requires_prior_receiver_write.accepted_values.is_empty()
+                    && requires_prior_receiver_write.accepted_calls.is_empty()
+                {
+                    return false;
+                }
+                let owner = structural
+                    .file_decls
+                    .iter()
+                    .filter(|decl| decl.span.start <= ctx.span.start && ctx.span.end <= decl.span.end)
+                    .min_by_key(|decl| decl.span.end.saturating_sub(decl.span.start))
+                    .unwrap_or(structural.current_decl);
+                let reaching = reaching_prior_receiver_write(
+                    &owner.flow_events,
+                    ctx.span,
+                    receiver,
+                    &requires_prior_receiver_write.target,
+                );
+                let ReachingPriorWrite::Known(write_span) = reaching else {
+                    return false;
+                };
+                let Some(value_fact) =
+                    bonsai_lang_api::assignment_value_fact_for_span(structural.assignment_values, write_span)
+                else {
+                    return false;
+                };
+                let scalar_matches = value_fact
+                    .static_value
+                    .as_ref()
+                    .is_some_and(|value| requires_prior_receiver_write.accepted_values.contains(value));
+                let call_matches = requires_prior_receiver_write
+                    .accepted_calls
+                    .iter()
+                    .any(|accepted| {
+                        value_fact.direct_call_name.as_deref().is_some_and(|callee| {
+                            structural.factory_import_identity.map_or_else(
+                                || rule_target_matches_call(callee, &[], &accepted.call),
+                                |identity| {
+                                    let target_matches = rule_target_matches_call_with_aliases(
+                                        callee,
+                                        &[],
+                                        &accepted.call,
+                                        identity.alias_map,
+                                    );
+                                    if !target_matches {
+                                        return false;
+                                    }
+                                    let Some(origin) = accepted.call.binding_origin else {
+                                        return factory_import_identity_allows(callee, identity);
+                                    };
+                                    let synthetic = CallFact {
+                                        callee: callee.to_string(),
+                                        receiver: None,
+                                        span: value_fact.value_span,
+                                        args: Vec::new(),
+                                        receiver_types: Vec::new(),
+                                        call_kind: CallKind::Function,
+                                        origin: CallFactOrigin::SyntheticWrite,
+                                    };
+                                    let workspace_context =
+                                        identity
+                                            .workspace
+                                            .map(|(ws, global)| WorkspaceCallIdentityContext {
+                                                ws,
+                                                global,
+                                                caller: structural.current_decl,
+                                            });
+                                    call_binding_origin_is_valid(
+                                        origin,
+                                        true,
+                                        structural.current_decl,
+                                        Some(structural.file_decls),
+                                        workspace_context.as_ref(),
+                                        &synthetic,
+                                        identity.alias_map,
+                                        identity.required_imports,
+                                        identity.compiler_imports,
+                                    )
+                                },
+                            )
+                        }) && value_fact
+                            .exact_static_call_args
+                            .as_ref()
+                            .is_some_and(|arguments| {
+                                accepted.items.iter().all(|required| {
+                                    arguments
+                                        .get(required.index)
+                                        .is_some_and(|actual| required.accepted_values.contains(actual))
+                                })
+                            })
+                    });
+                if !scalar_matches && !call_matches {
                     return false;
                 }
             }
@@ -9647,6 +14643,17 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                     return false;
                 }
             }
+            ConstraintKind::ReceiverFactoryArgumentsEqual {
+                receiver_factory_arguments_equal,
+            } => {
+                let Some(structural) = ctx.structural_context else {
+                    return false;
+                };
+                if !receiver_factory_arguments_equal_passes(ctx, structural, receiver_factory_arguments_equal)
+                {
+                    return false;
+                }
+            }
             ConstraintKind::ArgMatchesRegex { arg_matches_regex } => {
                 let idx = arg_matches_regex.index as usize;
                 let Some(arg) = ctx.args.get(idx) else {
@@ -9707,6 +14714,95 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                     return false;
                 }
             }
+            ConstraintKind::ArgValueKind { arg_value_kind } => {
+                let Some(structural) = ctx.structural_context else {
+                    return false;
+                };
+                if bonsai_lang_api::call_argument_value_fact(
+                    structural.call_argument_values,
+                    ctx.span,
+                    arg_value_kind.index as usize,
+                )
+                .is_none_or(|fact| fact.value_kind != Some(arg_value_kind.kind))
+                {
+                    return false;
+                }
+            }
+            ConstraintKind::ArgStringCompositionStartsWith {
+                arg_string_composition_starts_with,
+            } => {
+                let Some(structural) = ctx.structural_context else {
+                    return false;
+                };
+                if !argument_string_composition_starts_with(
+                    structural,
+                    ctx.span,
+                    arg_string_composition_starts_with.index as usize,
+                    &arg_string_composition_starts_with.value,
+                ) {
+                    return false;
+                }
+            }
+            ConstraintKind::ArgStringCompositionNotStartsWith {
+                arg_string_composition_not_starts_with,
+            } => {
+                let Some(structural) = ctx.structural_context else {
+                    continue;
+                };
+                if argument_string_composition_starts_with(
+                    structural,
+                    ctx.span,
+                    arg_string_composition_not_starts_with.index as usize,
+                    &arg_string_composition_not_starts_with.value,
+                ) {
+                    return false;
+                }
+            }
+            ConstraintKind::ArgIsInlineCallback {
+                arg_is_inline_callback,
+            } => {
+                let Some(structural) = ctx.structural_context else {
+                    return false;
+                };
+                if bonsai_lang_api::call_argument_value_fact(
+                    structural.call_argument_values,
+                    ctx.span,
+                    *arg_is_inline_callback as usize,
+                )
+                .is_none_or(|fact| fact.inline_callback_span.is_none())
+                {
+                    return false;
+                }
+            }
+            ConstraintKind::ArgInlineCallbackReturnsStatic {
+                arg_inline_callback_returns_static,
+            } => {
+                let Some(structural) = ctx.structural_context else {
+                    return false;
+                };
+                let call_argument_matches = bonsai_lang_api::call_argument_value_fact(
+                    structural.call_argument_values,
+                    ctx.span,
+                    arg_inline_callback_returns_static.index as usize,
+                )
+                .is_some_and(|fact| {
+                    fact.inline_callback_static_return.as_ref()
+                        == Some(&arg_inline_callback_returns_static.value)
+                });
+                let write_rhs_matches = ctx.call_origin == Some(CallFactOrigin::SyntheticWrite)
+                    && arg_inline_callback_returns_static.index == 0
+                    && bonsai_lang_api::assignment_value_fact_for_span(
+                        structural.assignment_values,
+                        ctx.span,
+                    )
+                    .is_some_and(|fact| {
+                        fact.inline_callback_static_return.as_ref()
+                            == Some(&arg_inline_callback_returns_static.value)
+                    });
+                if !call_argument_matches && !write_rhs_matches {
+                    return false;
+                }
+            }
             ConstraintKind::ArgSequenceItemsEqual {
                 arg_sequence_items_equal,
             } => {
@@ -9727,6 +14823,33 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                             .get(required.index)
                             .and_then(Option::as_ref)
                             .is_some_and(|actual| required.accepted_values.contains(actual))
+                    })
+                {
+                    return false;
+                }
+            }
+            ConstraintKind::ArgAggregateFieldsEqual {
+                arg_aggregate_fields_equal,
+            } => {
+                let Some(structural) = ctx.structural_context else {
+                    return false;
+                };
+                let Some(argument) = bonsai_lang_api::call_argument_value_fact(
+                    structural.call_argument_values,
+                    ctx.span,
+                    arg_aggregate_fields_equal.argument_index,
+                ) else {
+                    return false;
+                };
+                if !argument.value_flow.spreads.is_empty()
+                    || argument.exact_static_aggregate_fields.is_empty()
+                    || arg_aggregate_fields_equal.required_fields.is_empty()
+                    || !arg_aggregate_fields_equal.required_fields.iter().all(|required| {
+                        !required.path.is_empty()
+                            && argument
+                                .exact_static_aggregate_fields
+                                .iter()
+                                .any(|actual| actual.path == required.path && actual.value == required.value)
                     })
                 {
                     return false;
@@ -9796,6 +14919,23 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                     .iter()
                     .any(|attached| enclosing_decorator_in.iter().any(|want| want == attached));
                 if !any_match {
+                    return false;
+                }
+            }
+            ConstraintKind::EnclosingDecoratorNotIn {
+                enclosing_decorator_not_in,
+            } => {
+                if enclosing_decorator_not_in.is_empty() {
+                    return false;
+                }
+                let Some(decorators) = ctx.enclosing_decorators else {
+                    return false;
+                };
+                if decorators.iter().any(|attached| {
+                    enclosing_decorator_not_in
+                        .iter()
+                        .any(|blocked| blocked == attached)
+                }) {
                     return false;
                 }
             }
@@ -9969,6 +15109,55 @@ fn factory_import_identity_allows(actual: &str, identity: FactoryImportIdentityC
     false
 }
 
+fn receiver_factory_arguments_equal_passes(
+    ctx: &ConstraintEval<'_, '_>,
+    structural: StructuralConstraintContext<'_>,
+    spec: &ReceiverFactoryArgumentsSpec,
+) -> bool {
+    let Some(receiver) = ctx.receiver.or_else(|| call_receiver_text(ctx.callee)) else {
+        return false;
+    };
+    if spec.items.is_empty() {
+        return false;
+    }
+    let Some(assignment) = structural
+        .assignment_values
+        .iter()
+        .filter(|assignment| {
+            assignment.assignment_span.end <= ctx.span.start
+                && assignment.target.as_deref() == Some(receiver)
+                && assignment_is_lexically_visible_from(
+                    assignment,
+                    structural.current_decl,
+                    structural.file_decls,
+                )
+        })
+        .max_by_key(|assignment| (assignment.assignment_span.end, assignment.assignment_span.start))
+    else {
+        return false;
+    };
+    let factory_matches = assignment.direct_call_name.as_deref().is_some_and(|callee| {
+        structural.factory_import_identity.map_or_else(
+            || rule_target_matches_call(callee, &[], &spec.factory),
+            |identity| {
+                rule_target_matches_call_with_aliases(callee, &[], &spec.factory, identity.alias_map)
+                    && factory_import_identity_allows(callee, identity)
+            },
+        )
+    });
+    if !factory_matches {
+        return false;
+    }
+    let Some(arguments) = assignment.exact_static_call_args.as_ref() else {
+        return false;
+    };
+    spec.items.iter().all(|required| {
+        arguments
+            .get(required.index)
+            .is_some_and(|actual| required.accepted_values.contains(actual))
+    })
+}
+
 fn receiver_factory_argument_fields_proof(
     callee: &str,
     call_span: Span,
@@ -10111,6 +15300,7 @@ pub(crate) fn configured_receiver_factory_attribution_match(
         .filter(|decl| decl.span.start <= sink.span.start && sink.span.end <= decl.span.end)
         .min_by_key(|decl| decl.span.end.saturating_sub(decl.span.start))?;
     let alias_map = file_alias_map_with_retention(ws, sink.span.file, FactRetention::Transient);
+    let compiler_imports = transient_import_index(ws, sink.span.file);
     let proof = receiver_factory_argument_fields_proof(
         &sink.match_text,
         sink.span,
@@ -10119,9 +15309,12 @@ pub(crate) fn configured_receiver_factory_attribution_match(
             file_decls: &file_index.defs,
             assignment_values: &file_index.assignment_values,
             call_argument_values: &file_index.call_argument_values,
+            string_compositions: &file_index.string_compositions,
             factory_import_identity: Some(FactoryImportIdentityContext {
                 required_imports: &rule.imports,
                 alias_map: &alias_map,
+                compiler_imports: compiler_imports.as_ref(),
+                workspace: Some((ws, global)),
             }),
         },
         spec,
@@ -10311,6 +15504,7 @@ pub(crate) fn callback_extension_attribution_match(
             file_decls: &file_index.defs,
             assignment_values: &file_index.assignment_values,
             call_argument_values: &file_index.call_argument_values,
+            string_compositions: &file_index.string_compositions,
             factory_import_identity: None,
         },
         spec,
@@ -10657,10 +15851,13 @@ fn format_arg_is_dynamic(ctx: &ConstraintEval<'_, '_>, index: usize, arg: &CallA
         Some(bonsai_lang_api::AssignValueKind::Literal) => false,
         Some(
             bonsai_lang_api::AssignValueKind::CallResult
+            | bonsai_lang_api::AssignValueKind::PropertyRead
             | bonsai_lang_api::AssignValueKind::Compound
+            | bonsai_lang_api::AssignValueKind::WholeValueSelection
             | bonsai_lang_api::AssignValueKind::Destructure
             | bonsai_lang_api::AssignValueKind::YieldResult
             | bonsai_lang_api::AssignValueKind::CallableReference
+            | bonsai_lang_api::AssignValueKind::AddressOfAggregate
             | bonsai_lang_api::AssignValueKind::Unknown,
         )
         | None => true,
@@ -11597,115 +16794,6 @@ fn caller_allows_same_directory_unqualified_lookup(ws: &Workspace, file: FileId)
 fn push_unique_assignment_symbol(out: &mut Vec<SymbolId>, symbol: SymbolId) {
     if !out.contains(&symbol) {
         out.push(symbol);
-    }
-}
-
-fn collect_callee_symbols(
-    ws: &Workspace,
-    events: &[FlowEvent],
-    global: &bonsai_index::GlobalIndex,
-    caller: &bonsai_lang_api::Decl,
-    alias_map: &std::collections::HashMap<String, AliasTarget>,
-    export_aliases: &[&'static str],
-    out: &mut ahash::AHashSet<SymbolId>,
-) {
-    let resolve = |name: &str, receiver_types: &[String], out: &mut ahash::AHashSet<SymbolId>| {
-        if name.trim().is_empty() {
-            return;
-        }
-        let ahash_alias: ahash::AHashMap<String, AliasTarget> =
-            alias_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let path_lookup = |file| {
-            ws.vfs()
-                .path(file)
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned())
-        };
-        let ctx = bonsai_resolve::ResolveContext::new(caller.span.file, &caller.module_path)
-            .with_alias_map(&ahash_alias)
-            .with_file_path_lookup(&path_lookup)
-            .with_same_directory_unqualified_calls(caller_allows_same_directory_unqualified_lookup(
-                ws,
-                caller.span.file,
-            ));
-        for func in bonsai_resolve::resolve_callable_with_context(global, name, &ctx) {
-            out.insert(SymbolId::new(func.raw()));
-        }
-        let tail = bonsai_common::short_qualified_tail(name);
-        for receiver_type in receiver_types {
-            for receiver_class in bonsai_resolve::resolve_class(global, receiver_type, &ctx) {
-                let mut seen = ahash::AHashSet::default();
-                let mut candidates = Vec::new();
-                bonsai_resolve::collect_method_candidates_for_class(
-                    global,
-                    receiver_class,
-                    tail,
-                    &ctx,
-                    &mut seen,
-                    &mut candidates,
-                );
-                for func in candidates {
-                    out.insert(SymbolId::new(func.raw()));
-                }
-            }
-        }
-        let tail = bonsai_common::short_qualified_tail(name);
-        if !tail.is_empty() && tail != name {
-            for func in bonsai_resolve::resolve_callable_with_context(global, tail, &ctx) {
-                out.insert(SymbolId::new(func.raw()));
-            }
-        }
-    };
-    for event in events {
-        match event {
-            FlowEvent::Call {
-                name, receiver_types, ..
-            } => resolve(name.as_str(), receiver_types, out),
-            FlowEvent::Assign {
-                target,
-                source_name,
-                source_call,
-                source_names,
-                ..
-            } => {
-                if let Some(name) = source_name.as_deref() {
-                    resolve(name, &[], out);
-                }
-                if let Some(name) = source_call.as_deref() {
-                    resolve(name, &[], out);
-                }
-                if assignment_exports_callable_names(target, export_aliases) {
-                    for name in source_names {
-                        resolve(name, &[], out);
-                    }
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_callee_symbols(ws, then_events, global, caller, alias_map, export_aliases, out);
-                collect_callee_symbols(ws, else_events, global, caller, alias_map, export_aliases, out);
-            }
-            FlowEvent::Loop { body, .. } => {
-                collect_callee_symbols(ws, body, global, caller, alias_map, export_aliases, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_callee_symbols(ws, body, global, caller, alias_map, export_aliases, out);
-                collect_callee_symbols(ws, catch_events, global, caller, alias_map, export_aliases, out);
-                collect_callee_symbols(ws, finally_events, global, caller, alias_map, export_aliases, out);
-            }
-            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_callee_symbols(ws, body, global, caller, alias_map, export_aliases, out);
-            }
-            _ => {}
-        }
     }
 }
 

@@ -12,7 +12,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn python_micro() -> PathBuf {
-    repo_root().join("examples/python/micro")
+    repo_root().join("test-fixtures/languages/python/micro")
 }
 
 fn temp_python_micro(name: &str) -> PathBuf {
@@ -829,6 +829,35 @@ fn sdk_retrieval_candidate_filters_are_relative_and_fact_backed() {
         indexed.source_content_fingerprint(),
         "a scoped query must retain the complete workspace generation identity"
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn sdk_persistent_cache_opt_out_bypasses_warmed_retrieval_sidecars() {
+    let root = tempdir("retrieval-cache-opt-out");
+    std::fs::write(
+        root.join("app.py"),
+        "def sdk_unique_symbol(value):\n    return value\n",
+    )
+    .expect("write app");
+    bonsai_sdk::Bonsai::new()
+        .index_semantic(&root)
+        .expect("build warmed retrieval sidecar");
+
+    let uncached = bonsai_sdk::Bonsai::new().with_persistent_semantic_cache(false);
+    assert!(
+        uncached
+            .retrieval_candidate_file_filters(
+                &root,
+                "sdk_unique_symbol",
+                bonsai_sdk::SearchFilters::default(),
+            )
+            .expect("uncached candidate lookup")
+            .is_none(),
+        "persistent-cache opt-out must bypass retrieval even when a fresh sidecar exists"
+    );
+
+    let _ = std::fs::remove_dir_all(bonsai_common::workspace_bonsai_dir(&root));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -2211,12 +2240,17 @@ fn facade_records_auto_refresh_failures_and_clears_them_after_recovery() {
 }
 
 #[test]
-#[ignore = "set BONSAI_SCALE_ROOT to profile an external workspace"]
 fn external_workspace_fingerprint_profile() {
-    let root = std::env::var_os("BONSAI_SCALE_ROOT").expect("BONSAI_SCALE_ROOT");
+    let configured = std::env::var_os("BONSAI_SCALE_ROOT").map(PathBuf::from);
+    let root = configured.clone().unwrap_or_else(|| {
+        let root = tempdir("fingerprint-profile");
+        std::fs::write(root.join("app.py"), "def entry(value):\n    return value\n")
+            .expect("write fingerprint fixture");
+        root
+    });
     let started = std::time::Instant::now();
-    let fingerprint = bonsai_sdk::workspace_source_fingerprint_from_disk(std::path::Path::new(&root))
-        .expect("fingerprint external workspace");
+    let fingerprint =
+        bonsai_sdk::workspace_source_fingerprint_from_disk(&root).expect("fingerprint external workspace");
     eprintln!(
         "fingerprinted {} supported files in {:.3}s (digest {:016x})",
         fingerprint.files,
@@ -2224,12 +2258,20 @@ fn external_workspace_fingerprint_profile() {
         fingerprint.digest
     );
     assert!(fingerprint.files > 0);
+    if configured.is_none() {
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[test]
-#[ignore = "set BONSAI_SCALE_ROOT to profile an external workspace"]
 fn external_workspace_metadata_refresh_profile() {
-    let root = std::path::PathBuf::from(std::env::var_os("BONSAI_SCALE_ROOT").expect("BONSAI_SCALE_ROOT"));
+    let configured = std::env::var_os("BONSAI_SCALE_ROOT").map(PathBuf::from);
+    let root = configured.clone().unwrap_or_else(|| {
+        let root = tempdir("metadata-refresh-profile");
+        std::fs::write(root.join("app.py"), "def entry(value):\n    return value\n")
+            .expect("write refresh fixture");
+        root
+    });
     let open_started = std::time::Instant::now();
     let project = bonsai_sdk::Bonsai::new()
         .index(&root)
@@ -2249,9 +2291,12 @@ fn external_workspace_metadata_refresh_profile() {
         report.content_files_read,
         refresh_elapsed.as_secs_f64(),
     );
-    assert_eq!(report.metadata_files_checked, 0);
+    assert_eq!(report.metadata_files_checked, project.workspace().stats().files);
     assert_eq!(report.content_files_read, 0);
     assert!(!report.changed());
+    if configured.is_none() {
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[test]

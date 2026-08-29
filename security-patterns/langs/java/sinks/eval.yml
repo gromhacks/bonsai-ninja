@@ -21,38 +21,6 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    ScriptEngine.eval(\"safe\");\n  }\n}\n"
     expect_no_match: true
   description: "javax.script ScriptEngine.eval - Nashorn / Rhino / GraalJS RCE."
-- id: java.eval.compiledscript_eval
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: code-injection
-  severity: critical
-  cwe:
-  - CWE-94
-  match:
-    kind: call
-    callee:
-      attribute:
-      - CompiledScript
-      - eval
-  description: "Disabled - CompiledScript.eval() executes code compiled earlier; needs receiver state from a tainted compile step, not an eval argument."
-- id: java.eval.scriptengine_manager_getengine
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: code-injection
-  severity: medium
-  cwe:
-  - CWE-94
-  match:
-    kind: call
-    callee:
-      attribute:
-      - ScriptEngineManager
-      - getEngineByName
-  description: "Disabled - factory alone is informational; flag ScriptEngine.eval instead."
 - id: java.eval.beanshell_eval
   enabled: true
   language: java
@@ -164,22 +132,6 @@
       }
     expect_no_match: true
   description: JRuby ScriptingContainer.runScriptlet(tainted).
-- id: java.eval.method_invoke
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: code-injection
-  severity: medium
-  cwe:
-  - CWE-470
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Method
-      - invoke
-  description: "Disabled - reflection.Method.invoke; dangerous only when method-name tainted."
 - id: java.eval.class_forname
   enabled: true
   language: java
@@ -374,97 +326,6 @@
       }
     expect_no_match: true
   description: GroovyClassLoader.parseClass(tainted).
-- id: java.eval.spel_parseexpression
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: ssti
-  severity: critical
-  packages:
-  - org.springframework.expression
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - SpelExpressionParser
-      - parseExpression
-  match_examples:
-  - name: generated shape example
-    code: |
-      import org.springframework.expression.*;
-      class App {
-        void handle(String input) throws Exception {
-          SpelExpressionParser.parseExpression(input);
-        }
-      }
-  description: "Disabled duplicate - SpEL template parsing is classified by canonical java.template.spel_parseexpression as SSTI CWE-1336."
-  imports:
-  - org
-- id: java.eval.spel_parser_parse
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: ssti
-  severity: critical
-  packages:
-  - org.springframework.expression
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - ExpressionParser
-      - parseExpression
-  match_examples:
-  - name: generated shape example
-    code: |
-      import org.springframework.expression.*;
-      class App {
-        void handle(String input) throws Exception {
-          ExpressionParser.parseExpression(input);
-        }
-      }
-  description: "Disabled duplicate - SpEL template parsing is classified by canonical java.template.spel_parseexpression as SSTI CWE-1336."
-  imports:
-  - org
-- id: java.eval.spel_parseexpression_instance
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: ssti
-  severity: critical
-  packages:
-  - org.springframework.expression
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      name: parseExpression
-  match_examples:
-  - name: spel parser instance parse expression
-    code: |
-      import org.springframework.expression.*;
-      class App {
-        void handle(String input) throws Exception {
-          SpelExpressionParser parser = new SpelExpressionParser();
-          parser.parseExpression(input);
-        }
-      }
-      class SpelExpressionParser {
-        Object parseExpression(Object... args) { return null; }
-      }
-    expect_match_text:
-    - parser.parseExpression
-  description: "Disabled broad duplicate - canonical java.template.spel_parseexpression classifies parser.parseExpression(template) as SSTI CWE-1336."
-  imports:
-  - org
 - id: java.eval.spel_expressionparser_parseexpression_tainted
   enabled: true
   language: java
@@ -554,9 +415,7 @@
         }
       }
     expect_no_match: true
-  description: "OGNL Ognl.getValue - Struts2 RCE family. Merged collision aliases: java.template.spel_getvalue."
-  aliases:
-  - java.template.spel_getvalue
+  description: "OGNL Ognl.getValue - Struts2 RCE family."
 - id: java.eval.ognl_parseexpression
   enabled: true
   language: java
@@ -596,9 +455,7 @@
         }
       }
     expect_no_match: true
-  description: 'OGNL Ognl.parseExpression(tainted). Merged collision aliases: java.template.spel_parseexpression.'
-  aliases:
-  - java.template.spel_parseexpression
+  description: 'OGNL Ognl.parseExpression(tainted).'
 - id: java.eval.mvel_eval
   enabled: true
   language: java

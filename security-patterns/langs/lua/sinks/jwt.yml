@@ -88,18 +88,3 @@
       end
     expect_no_match: true
   description: "lua-resty-jwt jwt:load_jwt - parses header/payload WITHOUT signature verification; trusting claims is auth bypass."
-
-- id: lua.jwt.resty_jwt_sign_none
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: lua
-  tag: jwt
-  severity: high
-  packages: [lua-resty-jwt]
-  cwe: [CWE-347]
-  match:
-    kind: call
-    callee:
-      attribute: [jwt, sign]
-  description: "Disabled - jwt:sign is unsafe only when alg='none'; flag with alg-constant narrowing."

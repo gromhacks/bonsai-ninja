@@ -234,7 +234,7 @@ fn i_09_ruby() {
             adapter: Arc::new(bonsai_lang_ruby::RubyAdapter::new()),
             files: &[(
                 "a.rb",
-                "def entry(args)\n  3.times do\n    sink(args)\n  end\nend\n",
+                "def entry(args)\n  i = 0\n  while i < 3\n    sink(args)\n    i += 1\n  end\nend\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -338,7 +338,7 @@ fn i_09_elixir() {
     run_positive_cell("I_09", LangFixture {
         lang: "elixir",
         adapter: Arc::new(bonsai_lang_elixir::ElixirAdapter::new()),
-        files: &[("a.ex", "defmodule Demo do\n  def entry(args) do\n    Enum.each(1..3, fn _i -> sink(args) end)\n  end\nend\n")],
+        files: &[("a.ex", "defmodule Demo do\n  def entry(args) do\n    for _i <- 1..3 do\n      sink(args)\n    end\n  end\nend\n")],
         entry: "entry",
         seed: &["args"],
         sink: "sink",

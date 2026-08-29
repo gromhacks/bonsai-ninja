@@ -1,23 +1,6 @@
 # Objective-C cloud-trust sources (AWS SDK iOS).
-- id: objc.source.aws_lambda_invocation
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: objc
-  trust: service
-  tag: cloud-input
-  payload_types: [json]
-  packages: [AWSLambda]
-  match:
-    kind: param
-    target:
-      name: invocationRequest
-  description: "Disabled - AWSLambdaInvocationRequest param; enable for AWS SDK iOS Lambda handlers that deserialize payload JSON."
-
 - id: objc.source.aws_s3_getobject_body
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: objc
   trust: service
   tag: cloud-input
@@ -26,5 +9,32 @@
   match:
     kind: call
     callee:
-      name: getObject
-  description: "Disabled - AWSS3 getObject: returns bucket contents that may be attacker-controlled when bucket is user-writable."
+      regex: "(?:^|\\.)getObject:completionHandler:$"
+  constraints:
+  - receiver_type_in: [AWSS3]
+  - arg_count: 2
+  - arg_is_inline_callback: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: S3 get object completion output
+    code: |
+      #import <AWSS3/AWSS3.h>
+      void download(AWSS3 *client, AWSS3GetObjectRequest *request) {
+        [client getObject:request completionHandler:^(AWSS3GetObjectOutput *output, NSError *error) { NSLog(@"%@", output.body); }];
+      }
+    expect_match_text: ["client.getObject:completionHandler:"]
+  - name: same selector on a local store is not cloud input
+    code: |
+      #import <AWSS3/AWSS3.h>
+      @interface LocalStore : NSObject
+      - (void)getObject:(id)request completionHandler:(void (^)(id, NSError *))handler;
+      @end
+      void download(LocalStore *store, id request) {
+        [store getObject:request completionHandler:^(id output, NSError *error) { NSLog(@"%@", output); }];
+      }
+    expect_no_match: true
+  description: "AWSS3 getObject:completionHandler: delivers the downloaded object output through callback parameter zero on a compiler-typed AWSS3 receiver."

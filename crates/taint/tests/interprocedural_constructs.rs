@@ -170,9 +170,23 @@ fn config_with_receiver_mutators(mutators: &[&str]) -> InterTaintConfig {
 }
 
 fn func_id(db: &AnalyzerDb, name: &str) -> bonsai_common::FuncId {
-    let mut candidates = bonsai_resolve::resolve_callable(&db.global_index(), name);
-    assert!(!candidates.is_empty(), "fixture missing function `{name}`");
-    candidates.remove(0)
+    let global = db.global_index();
+    let candidates = bonsai_resolve::resolve_callable(&global, name);
+    let executable = candidates
+        .iter()
+        .copied()
+        .filter(|func| {
+            global
+                .decl_of(bonsai_common::SymbolId::new(func.raw()))
+                .is_some_and(|decl| decl.body_span.is_some() || !decl.flow_events.is_empty())
+        })
+        .collect::<Vec<_>>();
+    match executable.as_slice() {
+        [only] => *only,
+        [] if candidates.len() == 1 => candidates[0],
+        [] => panic!("fixture missing function `{name}`"),
+        many => panic!("fixture function `{name}` is ambiguous across executable definitions: {many:?}"),
+    }
 }
 
 fn has_propagation(
@@ -1508,8 +1522,15 @@ function cb(item) {
   sink(item);
 }
 
+class Runner {
+  forEach(callback, value) {
+    callback(value);
+  }
+}
+
 function entry(items) {
-  items.forEach(cb);
+  const runner = new Runner();
+  runner.forEach(cb, items[0]);
 }
 ",
     );
@@ -1522,6 +1543,33 @@ function entry(items) {
         "item",
         &InterTaintConfig::default(),
     ));
+}
+
+#[test]
+fn semantic_javascript_unproven_receiver_callback_does_not_execute() {
+    let db = javascript_ws(
+        r"
+function cb(item) {
+  sink(item);
+}
+
+function entry(items) {
+  items.forEach(cb);
+}
+",
+    );
+    assert!(
+        !cross_function_sink_receives_with_config(
+            &db,
+            "entry",
+            &["items"],
+            "cb",
+            "sink",
+            "item",
+            &InterTaintConfig::default(),
+        ),
+        "passing cb to an unresolved receiver method is not compiler proof that it executes"
+    );
 }
 
 #[test]
@@ -1557,16 +1605,19 @@ class App {
 // Per-language complex-fixture interprocedural smoke tests
 // ---------------------------------------------------------------------------
 
-/// Root of `examples/` relative to the crate's Cargo.toml.
-fn examples_root() -> std::path::PathBuf {
+fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().unwrap().parent().unwrap().join("examples")
+    manifest.parent().unwrap().parent().unwrap().to_path_buf()
 }
 
-/// Open a workspace under `examples/<subdir>/` with every adapter
-/// registered. Mirrors `language_matrix.rs`'s `open_fixture`.
+/// Open either a public language gauntlet or a focused test-only fixture.
 fn open_fixture(subdir: &str) -> AnalyzerDb {
-    let dir = examples_root().join(subdir);
+    let root = repo_root();
+    let dir = if subdir.ends_with("/language_gauntlet") {
+        root.join("examples").join(subdir)
+    } else {
+        root.join("test-fixtures/languages").join(subdir)
+    };
     let vfs = Arc::new(Vfs::new());
     ingest_dir(&vfs, &dir, &dir);
     let registry = Arc::new(LanguageRegistry::new());
@@ -1714,8 +1765,8 @@ fn interproc_complex_fixture_csharp() {
 }
 
 #[test]
-fn csharp_mega_flow_handle_reaches_execute_from_readline_value() {
-    let db = open_fixture("csharp/mega_flow");
+fn csharp_language_gauntlet_remote_parameter_reaches_execute() {
+    let db = open_fixture("csharp/language_gauntlet");
     let global = db.global_index();
     let handle = func_id(&db, "Handle");
     let execute = func_id(&db, "Execute");
@@ -1731,11 +1782,11 @@ fn csharp_mega_flow_handle_reaches_execute_from_readline_value() {
         "expected Execute's chained exec.Command receiver to read cmd"
     );
     let mut seed = TokenSet::default();
-    seed.insert("ReadLine".to_string());
+    seed.insert("raw".to_string());
     let result = interprocedural_taint(handle, &seed, &InterTaintConfig::default(), &db);
     assert!(
         result.call_records.iter().any(|record| record.callee == execute),
-        "expected C# mega flow to propagate into Execute; records={:?}",
+        "expected C# language gauntlet to propagate into Execute; records={:?}",
         result
             .call_records
             .iter()
@@ -1755,18 +1806,18 @@ fn csharp_mega_flow_handle_reaches_execute_from_readline_value() {
 }
 
 #[test]
-fn java_mega_flow_record_field_reaches_execute_without_tainting_siblings() {
-    let db = open_fixture("java/mega_flow");
+fn java_language_gauntlet_record_field_reaches_execute_without_tainting_siblings() {
+    let db = open_fixture("java/language_gauntlet");
     let global = db.global_index();
     let handle = func_id(&db, "handle");
     let execute = func_id(&db, "execute");
 
-    let source_span = call_span(&db, handle, "req.getParameter", None);
+    let source_span = call_span(&db, handle, "request.getParameter", None);
     let sink_span = call_span(&db, execute, "Runtime.getRuntime().exec", Some("cmd"));
     let idg = ensure_idg_service(&db);
     let mut anchored_names = TokenSet::default();
     anchored_names.insert("raw".to_string());
-    anchored_names.insert("req.getParameter".to_string());
+    anchored_names.insert("request.getParameter".to_string());
     let anchored_nodes = compose_idg_seed_nodes(
         IdgSeedRequest::rule_match(handle, &anchored_names, Some(source_span), &[]),
         global.as_ref(),
@@ -1820,7 +1871,7 @@ fn java_mega_flow_record_field_reaches_execute_without_tainting_siblings() {
             .collect::<Vec<_>>()
     );
     let mut raw_seed = TokenSet::default();
-    raw_seed.insert("req.getParameter".to_string());
+    raw_seed.insert("request.getParameter".to_string());
     let raw_result = interprocedural_taint(handle, &raw_seed, &InterTaintConfig::default(), &db);
     assert!(
         raw_result
@@ -1846,7 +1897,7 @@ fn java_mega_flow_record_field_reaches_execute_without_tainting_siblings() {
     );
 
     let mut user_seed = TokenSet::default();
-    user_seed.insert("req.getHeader".to_string());
+    user_seed.insert("request.getHeader".to_string());
     let user_result = interprocedural_taint(handle, &user_seed, &InterTaintConfig::default(), &db);
     assert!(
         !user_result
@@ -1859,18 +1910,64 @@ fn java_mega_flow_record_field_reaches_execute_without_tainting_siblings() {
 }
 
 #[test]
-fn python_mega_flow_handle_reaches_execute_from_request_args_get() {
-    let db = open_fixture("python/mega_flow");
+fn python_language_gauntlet_handle_reaches_execute_from_request_args_get() {
+    let db = open_fixture("python/language_gauntlet");
     let global = db.global_index();
     let handle = func_id(&db, "handle_request");
     let execute = func_id(&db, "execute");
     let mut seed = TokenSet::default();
     seed.insert("request.args.get".to_string());
-    let config = config_with_receiver_mutators(&["append"]);
+    // The compatibility API is intentionally rulepack-free. Mirror the
+    // production pack's standard-library transform summaries so this test
+    // isolates compiler/IDG structure rather than pretending that calls such
+    // as `map`, `reduce`, `split`, and `strip` have language semantics.
+    let mut config = config_with_receiver_mutators(&["append"]);
+    config.call_result_passthroughs = vec![
+        CallResultPassthrough {
+            callee: "list".to_string(),
+            receiver_type: None,
+            input_arg_indices: vec![0],
+            input_arg_start_index: None,
+            input_receiver: false,
+            resolved_call_sites: Vec::new(),
+        },
+        CallResultPassthrough {
+            callee: "map".to_string(),
+            receiver_type: None,
+            input_arg_indices: vec![1],
+            input_arg_start_index: None,
+            input_receiver: false,
+            resolved_call_sites: Vec::new(),
+        },
+        CallResultPassthrough {
+            callee: "reduce".to_string(),
+            receiver_type: None,
+            input_arg_indices: vec![1],
+            input_arg_start_index: None,
+            input_receiver: false,
+            resolved_call_sites: Vec::new(),
+        },
+        CallResultPassthrough {
+            callee: r"regex:^.*\.split$".to_string(),
+            receiver_type: None,
+            input_arg_indices: Vec::new(),
+            input_arg_start_index: None,
+            input_receiver: true,
+            resolved_call_sites: Vec::new(),
+        },
+        CallResultPassthrough {
+            callee: r"regex:^.*\.strip$".to_string(),
+            receiver_type: None,
+            input_arg_indices: Vec::new(),
+            input_arg_start_index: None,
+            input_receiver: true,
+            resolved_call_sites: Vec::new(),
+        },
+    ];
     let result = interprocedural_taint(handle, &seed, &config, &db);
     assert!(
         result.call_records.iter().any(|record| record.callee == execute),
-        "expected Python mega flow to propagate request.args.get into execute; records={:?}",
+        "expected Python language gauntlet to propagate request.args.get into execute; records={:?}",
         result
             .call_records
             .iter()
@@ -1897,18 +1994,21 @@ fn python_mega_flow_handle_reaches_execute_from_request_args_get() {
 }
 
 #[test]
-fn javascript_mega_flow_handle_reaches_execute_from_readline_question() {
-    let db = open_fixture("javascript/mega_flow");
+fn javascript_language_gauntlet_request_query_reaches_execute() {
+    let db = open_fixture("javascript/language_gauntlet");
     let global = db.global_index();
     let handle = func_id(&db, "handle_request");
     let execute = func_id(&db, "execute");
     let mut seed = TokenSet::default();
-    seed.insert("question".to_string());
+    // This rulepack-free compatibility API seeds names at callable entry.
+    // The security source matcher separately proves req.query.cmd -> raw at
+    // its exact read span; this test starts at that source-derived binding.
+    seed.insert("raw".to_string());
     let config = config_with_receiver_mutators(&["push"]);
     let result = interprocedural_taint(handle, &seed, &config, &db);
     assert!(
         result.call_records.iter().any(|record| record.callee == execute),
-        "expected JavaScript mega flow to propagate readline.question into execute; records={:?}",
+        "expected JavaScript language gauntlet to propagate the source-derived raw binding into execute; records={:?}",
         result
             .call_records
             .iter()
@@ -1939,13 +2039,15 @@ fn javascript_mega_flow_handle_reaches_execute_from_readline_question() {
 }
 
 #[test]
-fn php_mega_flow_handle_reaches_execute_from_readline_value() {
-    let db = open_fixture("php/mega_flow");
+fn php_language_gauntlet_get_superglobal_reaches_execute() {
+    let db = open_fixture("php/language_gauntlet");
     let global = db.global_index();
     let handle = func_id(&db, "handle_request");
     let execute = func_id(&db, "execute");
     let mut seed = TokenSet::default();
-    seed.insert("readline".to_string());
+    // The security source matcher seeds the exact $_GET read. This
+    // rulepack-free entry-token test begins at its assigned local.
+    seed.insert("$raw".to_string());
     let result = interprocedural_taint(
         handle,
         &seed,
@@ -1957,20 +2059,26 @@ fn php_mega_flow_handle_reaches_execute_from_readline_value() {
                 CallResultPassthrough {
                     callee: "array_map".to_string(),
                     receiver_type: None,
-                    input_arg_indices: vec![1, 2, 3, 4, 5, 6, 7],
+                    input_arg_indices: Vec::new(),
+                    input_arg_start_index: Some(1),
                     input_receiver: false,
+                    resolved_call_sites: Vec::new(),
                 },
                 CallResultPassthrough {
                     callee: "array_filter".to_string(),
                     receiver_type: None,
                     input_arg_indices: vec![0],
+                    input_arg_start_index: None,
                     input_receiver: false,
+                    resolved_call_sites: Vec::new(),
                 },
                 CallResultPassthrough {
                     callee: "array_reduce".to_string(),
                     receiver_type: None,
                     input_arg_indices: vec![0, 2],
+                    input_arg_start_index: None,
                     input_receiver: false,
+                    resolved_call_sites: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -1979,7 +2087,7 @@ fn php_mega_flow_handle_reaches_execute_from_readline_value() {
     );
     assert!(
         result.call_records.iter().any(|record| record.callee == execute),
-        "expected PHP mega flow to propagate readline into execute; records={:?}; calls={:?}",
+        "expected PHP language gauntlet to propagate the source-derived $raw binding into execute; records={:?}; calls={:?}",
         result
             .call_records
             .iter()
@@ -2071,8 +2179,8 @@ fn scala_cross_file_chain_method_projection_reaches_execute() {
 }
 
 #[test]
-fn dart_mega_flow_handle_reaches_execute_from_readline_value() {
-    let db = open_fixture("dart/mega_flow");
+fn dart_language_gauntlet_handle_reaches_execute_from_readline_value() {
+    let db = open_fixture("dart/language_gauntlet");
     let global = db.global_index();
     let handle = func_id(&db, "handle_request");
     let execute = func_id(&db, "execute");
@@ -2083,7 +2191,7 @@ fn dart_mega_flow_handle_reaches_execute_from_readline_value() {
     let result = interprocedural_taint(handle, &seed, &InterTaintConfig::default(), &db);
     assert!(
         result.call_records.iter().any(|record| record.callee == execute),
-        "expected Dart mega flow to propagate into execute; records={:?}",
+        "expected Dart language gauntlet to propagate into execute; records={:?}",
         result
             .call_records
             .iter()
@@ -2156,19 +2264,20 @@ fn dart_mega_flow_handle_reaches_execute_from_readline_value() {
 }
 
 #[test]
-fn objc_mega_flow_handle_reaches_execute_from_fgets_value() {
-    let db = open_fixture("objc/mega_flow");
+fn objc_language_gauntlet_typed_request_value_reaches_execute() {
+    let db = open_fixture("objc/language_gauntlet");
     let global = db.global_index();
     let handle = func_id(&db, "handle_request");
     let execute = func_id(&db, "executeCmd");
     let mut seed = TokenSet::default();
-    seed.insert("buf".to_string());
-    seed.insert("fgets".to_string());
+    // Production source analysis anchors request.text at the assignment
+    // span; the rulepack-free entry-token API starts at the resulting local.
+    seed.insert("raw".to_string());
     let config = config_with_receiver_mutators(&["addObject"]);
     let result = interprocedural_taint(handle, &seed, &config, &db);
     assert!(
         result.call_records.iter().any(|record| record.callee == execute),
-        "expected ObjC mega flow to propagate into executeCmd; records={:?}; calls={:?}",
+        "expected ObjC language gauntlet to propagate into executeCmd; records={:?}; calls={:?}",
         result
             .call_records
             .iter()

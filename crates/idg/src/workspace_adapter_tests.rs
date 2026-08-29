@@ -1,8 +1,36 @@
 use super::*;
+use crate::IdgQueryService;
 use ahash::AHashMap;
 use bonsai_callgraph::{CallEdge, CallGraph, EdgeKind, EdgeProvenance, ResolvedCallGraph};
 use bonsai_common::{Precision, Span, SymbolId};
 use bonsai_lang_api::{Decl, DeclKind, FlowEvent, ModulePath, Visibility};
+
+struct TestCallGraphRelation {
+    graph: CallGraph,
+    bindings: Vec<(FuncId, String, FuncId)>,
+}
+
+impl CallGraphRelation for TestCallGraphRelation {
+    fn visit_callees(&self, caller: FuncId, visit: &mut dyn FnMut(&CallEdge)) {
+        for edge in self.graph.callees(caller) {
+            visit(edge);
+        }
+    }
+
+    fn visit_callers(&self, callee: FuncId, visit: &mut dyn FnMut(&CallEdge)) {
+        for edge in self.graph.callers(callee) {
+            visit(edge);
+        }
+    }
+
+    fn visit_local_callable_bindings(&self, visit: &mut dyn FnMut(FuncId, &str, FuncId)) {
+        for (caller, binding, target) in &self.bindings {
+            visit(*caller, binding, *target);
+        }
+    }
+
+    fn visit_callable_arguments(&self, _caller: FuncId, _visit: &mut dyn FnMut(Span, FuncId)) {}
+}
 
 #[test]
 fn ordered_transfer_window_restores_canonical_segment_publication() {
@@ -95,6 +123,62 @@ fn path_module_resolution_accepts_dot_prefixed_adapter_extensions() {
     assert_eq!(
         import_module_candidates("src.app", "./render.tsx", &[".tsx"]),
         vec!["src.render"]
+    );
+}
+
+#[test]
+fn imported_binding_shadowing_uses_exact_assignment_identity_and_use_span() {
+    let events = vec![
+        // Some adapters retain a same-span bare-base mirror for ordinary
+        // scalar compatibility beside the exact projected write. The latter
+        // proves this is object-field mutation, not lexical rebinding.
+        FlowEvent::Assign {
+            span: span(0, 10, 20),
+            target: "provider".to_string(),
+            source_name: Some("payload".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
+        FlowEvent::Assign {
+            span: span(0, 10, 20),
+            target: "provider.field".to_string(),
+            source_name: Some("payload".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
+        FlowEvent::Assign {
+            span: span(0, 40, 50),
+            target: "provider".to_string(),
+            source_name: Some("local_value".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
+    ];
+
+    assert!(
+        !binding_is_reassigned_before(&events, "provider", span(0, 30, 35)),
+        "writing an imported object's field is not rebinding the imported object"
+    );
+    assert!(
+        binding_is_reassigned_before(&events, "provider", span(0, 60, 65)),
+        "an exact local assignment before the use must shadow the imported binding"
+    );
+    assert!(
+        !binding_is_reassigned_before(&events, "other_provider", span(0, 60, 65)),
+        "a different binding must remain independent"
+    );
+    assert!(
+        !binding_is_reassigned_before(&events, "provider", span(1, 60, 65)),
+        "source-order comparisons never cross compiler file identities"
     );
 }
 
@@ -1079,6 +1163,208 @@ fn higher_order_callback_stitches_invocation_arg_to_bound_function_param() {
         callback_arg_edges, 1,
         "callback invocation `cb(value)` must pass invocation arg `value` into bound function `executor(cmd)`"
     );
+}
+
+#[test]
+fn local_callable_argument_carries_exact_capture_environment_through_higher_order_formal() {
+    for language in ["erlang", "javascript"] {
+        let mut entry = empty_decl(1, 0, "entry");
+        entry.params = vec!["payload".to_string()];
+        entry.flow_events = vec![
+            FlowEvent::Assign {
+                span: span(0, 10, 19),
+                target: "render".to_string(),
+                source_name: None,
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: Vec::new(),
+                declares_new_binding: true,
+                value_kind: Some(bonsai_lang_api::AssignValueKind::CallableReference),
+            },
+            FlowEvent::Assign {
+                span: span(0, 10, 19),
+                target: "render.payload".to_string(),
+                source_name: Some("payload".to_string()),
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: Vec::new(),
+                declares_new_binding: false,
+                value_kind: None,
+            },
+            FlowEvent::Call {
+                span: span(0, 20, 35),
+                name: "apply".to_string(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: bonsai_lang_api::CallKind::Function,
+                args: vec![bonsai_lang_api::CallArg {
+                    passing_mode: Default::default(),
+                    span: span(0, 27, 33),
+                    name: None,
+                    value_text: "render".to_string(),
+                    place: Some("render".to_string()),
+                    source_names: vec!["render".to_string()],
+                }],
+            },
+        ];
+
+        let mut apply = empty_decl(2, 1, "apply");
+        apply.params = vec!["callback".to_string()];
+        apply.flow_events = vec![FlowEvent::Call {
+            span: span(1, 50, 60),
+            name: "callback".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: Vec::new(),
+        }];
+
+        let mut render = empty_decl(3, 2, "render_body");
+        render.span = span(2, 11, 18);
+        render.name_span = render.span;
+        render.params = vec!["payload".to_string()];
+
+        let mut alternate_render = empty_decl(4, 3, "alternate_render_body");
+        alternate_render.span = span(3, 11, 18);
+        alternate_render.name_span = alternate_render.span;
+        alternate_render.params = vec!["payload".to_string()];
+
+        let idx = build_index(vec![entry, apply, render, alternate_render]);
+        let entry_id = func_id(&idx, "entry");
+        let apply_id = func_id(&idx, "apply");
+        let render_id = func_id(&idx, "render_body");
+        let alternate_render_id = func_id(&idx, "alternate_render_body");
+        let mut graph = CallGraph::new();
+        graph.add_edge(CallEdge {
+            from: entry_id,
+            to: apply_id,
+            span: span(0, 20, 35),
+            kind: EdgeKind::Direct,
+            precision: Precision::Exact,
+            provenance: EdgeProvenance::direct_symbol(),
+        });
+        // Production callgraphs also retain the exact callable-valued
+        // argument edge. Its presence must not suppress the local binding
+        // origin needed to transfer the callable's lexical environment.
+        graph.add_edge(CallEdge {
+            from: entry_id,
+            to: render_id,
+            span: span(0, 27, 33),
+            kind: EdgeKind::Indirect,
+            precision: Precision::Narrowed,
+            provenance: EdgeProvenance::callable_value("argument resolved as callable reference"),
+        });
+        let relation = TestCallGraphRelation {
+            graph,
+            bindings: vec![(entry_id, "render".to_string(), render_id)],
+        };
+        let semantics = ClosureIdgFileSemantics::new(
+            |_| AHashMap::new(),
+            |_| Some(language),
+            |_| None,
+            |_| &[] as &'static [&'static str],
+        );
+        let ws = expect_queryable_idg(build_with_file_info_and_options_scoped(
+            &idx,
+            &relation,
+            semantics,
+            &TransferOptions::default(),
+            IdgBuildScope::queryable(None, None, None),
+        ));
+        let entry_segment = ws.segment_for_func(entry_id).expect("entry segment");
+        let render_segment = ws.segment_for_func(render_id).expect("render segment");
+        assert!(
+            ws.cross_file().edges.iter().any(|cross| {
+                cross.from_segment == entry_segment
+                    && cross.to_segment == render_segment
+                    && cross.edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg
+                    && cross.edge.meta.call_kind == EdgeKind::Indirect
+                    && cross.edge.meta.via_span == span(1, 50, 60)
+            }),
+            "{language}: the exact callable environment field must reach its hidden capture parameter"
+        );
+        let service = IdgQueryService::new(Arc::new(ws), Arc::new(idx.clone()));
+        let payload_seeds = service.read_or_write_nodes_for_names(entry_id, &["payload".to_string()]);
+        let closure = service.forward_closure(&payload_seeds);
+        let render_param = service
+            .param_nodes_for_names(render_id, &["payload".to_string()], &idx)
+            .into_iter()
+            .next()
+            .expect("render capture parameter");
+        assert!(
+            closure.contains(&render_param),
+            "{language}: the caller value assigned into the callable environment must reach the hidden capture parameter"
+        );
+
+        let mut no_binding_graph = CallGraph::new();
+        no_binding_graph.add_edge(CallEdge {
+            from: entry_id,
+            to: apply_id,
+            span: span(0, 20, 35),
+            kind: EdgeKind::Direct,
+            precision: Precision::Exact,
+            provenance: EdgeProvenance::direct_symbol(),
+        });
+        let no_binding = TestCallGraphRelation {
+            graph: no_binding_graph,
+            bindings: Vec::new(),
+        };
+        let semantics = ClosureIdgFileSemantics::new(
+            |_| AHashMap::new(),
+            |_| Some(language),
+            |_| None,
+            |_| &[] as &'static [&'static str],
+        );
+        let collision_ws = expect_queryable_idg(build_with_file_info_and_options_scoped(
+            &idx,
+            &no_binding,
+            semantics,
+            &TransferOptions::default(),
+            IdgBuildScope::queryable(None, None, None),
+        ));
+        assert!(collision_ws.cross_file().edges.iter().all(|cross| {
+            cross.to_segment != render_segment
+                || cross.edge.meta.kind != crate::edge::IdgEdgeKind::InterCallArg
+                || cross.edge.meta.via_span != span(1, 50, 60)
+        }), "{language}: a same-spelled ordinary argument without a callable binding must remain disconnected");
+
+        let mut ambiguous_graph = relation.graph.clone();
+        ambiguous_graph.add_edge(CallEdge {
+            from: entry_id,
+            to: alternate_render_id,
+            span: span(0, 27, 33),
+            kind: EdgeKind::Indirect,
+            precision: Precision::Narrowed,
+            provenance: EdgeProvenance::callable_value("ambiguous callable argument"),
+        });
+        let ambiguous_binding = TestCallGraphRelation {
+            graph: ambiguous_graph,
+            bindings: vec![
+                (entry_id, "render".to_string(), render_id),
+                (entry_id, "render".to_string(), alternate_render_id),
+            ],
+        };
+        let semantics = ClosureIdgFileSemantics::new(
+            |_| AHashMap::new(),
+            |_| Some(language),
+            |_| None,
+            |_| &[] as &'static [&'static str],
+        );
+        let ambiguous_ws = expect_queryable_idg(build_with_file_info_and_options_scoped(
+            &idx,
+            &ambiguous_binding,
+            semantics,
+            &TransferOptions::default(),
+            IdgBuildScope::queryable(None, None, None),
+        ));
+        assert!(
+            ambiguous_ws.cross_file().edges.iter().all(|cross| {
+                cross.edge.meta.kind != crate::edge::IdgEdgeKind::InterCallArg
+                    || cross.edge.meta.via_span != span(1, 50, 60)
+            }),
+            "{language}: one binding with multiple compiler targets is ambiguous and must fail closed"
+        );
+    }
 }
 
 #[test]

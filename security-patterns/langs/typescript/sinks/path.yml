@@ -655,33 +655,3 @@
       }
     expect_no_match: true
   description: tar.extract archive path - tainted archive can write outside cwd (tar-slip).
-
-- id: typescript.path.fs_readdir
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: path-traversal
-  severity: medium
-  packages: [fs]
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      attribute: [fs, readdir]
-  description: "Disabled - readdir often legitimate listing."
-
-- id: typescript.path.path_join
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: typescript
-  tag: path-traversal
-  severity: low
-  packages: [path]
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      attribute: [path, join]
-  description: "Disabled - path.join is too common; needs traversal-aware analysis."

@@ -1,14 +1,3 @@
-- id: c.sanitizer.strncpy_bounded
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  tag: validation
-  match:
-    kind: call
-    callee:
-      name: strncpy
-  description: "Disabled - strncpy does NOT NUL-terminate; it is a sink, not a sanitizer."
 - id: c.passthrough.strncpy_copy
   enabled: true
   language: c
@@ -302,20 +291,6 @@
       }
     expect_match_text: [CRYPTO_memcmp]
   description: "OpenSSL CRYPTO_memcmp - constant-time memory compare prevents timing oracles on HMAC/token equality."
-- id: c.sanitizer.realpath
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  tag: path-sanitize
-  match:
-    kind: call
-    callee:
-      name: realpath
-  description: "Disabled - path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
-    traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer
-    must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component).
-    Marking these as sanitizers produced false negatives on attacker-controlled paths."
 - id: c.sanitizer.strlcat
   enabled: true
   language: c
@@ -582,17 +557,6 @@
       }
     expect_match_text: [xmlEncodeEntitiesReentrant]
   description: "libxml2 xmlEncodeEntitiesReentrant - escapes XML entities; safe for attribute / text content."
-- id: c.sanitizer.curl_easy_unescape
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  tag: url-encode
-  match:
-    kind: call
-    callee:
-      name: curl_easy_unescape
-  description: "Disabled - curl_easy_unescape is DECODE (attacker-controlled), not an encoder; listed for completeness."
 - id: c.sanitizer.consttime_memequal
   enabled: true
   language: c
@@ -702,18 +666,6 @@
       }
     expect_match_text: [sodium_memcmp]
   description: "libsodium sodium_memcmp - constant-time compare for authenticators / keys."
-- id: c.sanitizer.getauxval_at_secure
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: c
-  tag: validation
-  match:
-    kind: call
-    callee:
-      name: getauxval
-  description: "Disabled - getauxval(AT_SECURE) is a privilege-state probe, not a value sanitizer; still useful evidence for
-    elevated-trust logic when paired with AT_SECURE constraint matching."
 - id: c.sanitizer.html_escape
   enabled: true
   language: c
@@ -836,36 +788,6 @@
   description: "strncmp/memcmp against a literal slash-prefixed path prefix - common C guard for same-origin redirects or
     chrooted path routing. Scoped to prefix literals and three-arg compare calls."
 
-- id: c.sanitizer.g_hash_table_contains_allowlist
-  enabled: false
-  language: c
-  tag: allowlist-validate
-  packages: [glib]
-  match:
-    kind: call
-    callee:
-      name: g_hash_table_contains
-  constraints:
-  - arg_matches_regex:
-      index: 0
-      regex: "^(allowed|allowlist|whitelist|safe_keys|safe_paths)$"
-  match_examples:
-  - name: glib hash allowlist
-    code: |
-      #include <glib.h>
-      void example(void *input) {
-        g_hash_table_contains(allowed, input);
-      }
-    expect_match_text: [g_hash_table_contains]
-  - name: glib hash allowlist negative constraint boundary
-    code: "#include <glib.h>\nvoid example(void *input) {\n  g_hash_table_contains();\n}\n"
-    expect_no_match: true
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    GLib g_hash_table_contains on an allowlist-named table - finite-set membership validation before routing, redirects, or
-    dispatch."
-
-  disabled_reason:
-    code: over-broad
 - id: c.sanitizer.g_regex_match_simple_full
   enabled: true
   language: c

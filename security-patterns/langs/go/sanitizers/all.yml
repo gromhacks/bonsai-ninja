@@ -200,21 +200,6 @@
       }
     expect_match_text: [url.PathEscape]
   description: "url.PathEscape - escapes for URL path segment."
-- id: go.sanitizer.filepath_clean
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: path-sanitize
-  packages: ["path/filepath"]
-  match:
-    kind: call
-    callee:
-      attribute: [filepath, Clean]
-  description: "Disabled - path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
-    traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer
-    must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component).
-    Marking these as sanitizers produced false negatives on attacker-controlled paths."
 - id: go.sanitizer.filepath_islocal
   enabled: true
   language: go
@@ -237,69 +222,6 @@
     expect_match_text: [filepath.IsLocal]
   description: "filepath.IsLocal(path) - lexical path validation that rejects absolute paths and paths escaping via `..`;
     useful before joining under a fixed root."
-- id: go.sanitizer.path_containment_hasprefix
-  enabled: false
-  language: go
-  tag: path-sanitize
-  packages: [strings]
-  match:
-    kind: call
-    callee:
-      attribute: [strings, HasPrefix]
-  constraints:
-  - arg_matches_regex:
-      index: 0
-      regex: "(clean|abs|full|joined|path|target|candidate)"
-  - arg_matches_regex:
-      index: 1
-      regex: "(root|base|baseDir|allowedDir|uploadRoot)"
-  match_examples:
-  - name: cleaned path containment guard
-    code: |
-      package main
-      import (
-        "path/filepath"
-        "strings"
-      )
-      func safe(root, name string) bool {
-        joined := filepath.Clean(filepath.Join(root, name))
-        return strings.HasPrefix(joined, root)
-      }
-    expect_match_text: [strings.HasPrefix]
-  - name: cleaned path containment guard negative constraint boundary
-    code: "package main\nimport (\n  \"path/filepath\"\n  \"strings\"\n)\nfunc safe(root, name string) bool {\n  joined :=
-      filepath.Clean(filepath.Join(root, name))\n  return strings.HasPrefix()\n}\n"
-    expect_no_match: true
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    strings.HasPrefix(clean/abs joined path, trusted root) - path containment check when paired with filepath.Clean/Abs/Join
-    and a path separator-aware root."
-  disabled_reason:
-    code: over-broad
-- id: go.sanitizer.filepath_rel_containment
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: path-sanitize
-  packages: ["path/filepath"]
-  match:
-    kind: call
-    callee:
-      attribute: [filepath, Rel]
-  constraints:
-  - min_args: 2
-  match_examples:
-  - name: filepath relative containment basis
-    code: |
-      package main
-      import "path/filepath"
-      func rel(root, candidate string) (string, error) {
-        return filepath.Rel(root, candidate)
-      }
-    expect_match_text: [filepath.Rel]
-  description: "Disabled as a standalone sanitizer: filepath.Rel only computes a relative path. Sink rules that support
-    containment opt into relative-path-containment semantics, which require the canonical candidate, relative result,
-    exact parent and parent-prefix rejection branch, abrupt failure arm, trusted base provenance, and guarded consumer."
 - id: go.sanitizer.strconv_atoi
   enabled: true
   language: go
@@ -670,34 +592,6 @@
     expect_match_text: [hmac.Equal]
   description: "hmac.Equal(mac1, mac2) - constant-time MAC comparison; safe for verifying HMAC tags against attacker input."
 
-- id: go.sanitizer.subtle_xor_bytes
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: constant-time
-  packages: ["crypto/subtle"]
-  match:
-    kind: call
-    callee:
-      attribute: [subtle, XORBytes]
-  description: "Disabled audit - subtle.XORBytes itself does not sanitise; included so an authenticated-decryption pipeline
-    using it can be audited as a unit."
-
-- id: go.sanitizer.argon2_compare
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: auth-sanitizer
-  packages: ["golang.org/x/crypto/argon2"]
-  match:
-    kind: call
-    callee:
-      regex: "\\.IDKey$|\\.Key$"
-  description: "Disabled audit - golang.org/x/crypto/argon2 IDKey/Key derives a hash; verification is the caller's constant-time
-    compare (subtle.ConstantTimeCompare). Enable when a project wraps Argon2 verification in a single helper."
-
 - id: go.sanitizer.validator_struct
   enabled: true
   language: go
@@ -753,32 +647,6 @@
   description: "go-playground/validator v.Var(value, tag) - single-value validation against a declared rule set. `min_args: 2` requires the value plus the validation tag, rejecting same-name decoys."
 
 # -- Open-redirect mitigations -------------------------------------------------
-- id: go.sanitizer.url_parse_then_host_check
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: open-redirect-sanitize
-  packages: [net/url]
-  match:
-    kind: call
-    callee:
-      regex: "^url\\.Parse$"
-  description: "Disabled - url.Parse only normalizes; pair with .Hostname() allowlist check."
-
-- id: go.sanitizer.gin_redirect_local
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  tag: open-redirect-sanitize
-  packages: ["github.com/gin-gonic/gin"]
-  match:
-    kind: call
-    callee:
-      regex: "\\.Redirect$"
-  description: "Disabled - gin Context.Redirect alone is not a sanitizer. Enable with relative-path constraint."
-
 - id: go.sanitizer.same_origin_path_hasprefix
   enabled: true
   language: go
@@ -816,119 +684,6 @@
     used with a sibling `!strings.HasPrefix(path, \"//\")` network-path guard."
 
 # -- Focused allowlist / regex / SQL binding validators -----------------------
-- id: go.sanitizer.slices_contains_allowlist
-  enabled: false
-  language: go
-  tag: allowlist-validate
-  packages: [slices]
-  match:
-    kind: call
-    callee:
-      attribute: [slices, Contains]
-  constraints:
-  - arg_matches_regex:
-      index: 0
-      regex: "^(allowed|allowlist|allowedValues|allowedNames|allowedRoles|allowedRoutes|allowedTargets|allowedHosts|allowedSchemes)$"
-  - min_args: 2
-  match_examples:
-  - name: slices contains allowlist
-    code: |
-      import "slices"
-      package main
-
-      func ok(role string) bool {
-        allowedRoles := []string{"user", "admin"}
-        return slices.Contains(allowedRoles, role)
-      }
-    expect_match_text: [slices.Contains]
-  - name: url host allowlist
-    code: |
-      package main
-      import (
-        "net/url"
-        "slices"
-      )
-      func ok(raw string) bool {
-        u, _ := url.Parse(raw)
-        allowedHosts := []string{"api.example.com"}
-        return slices.Contains(allowedHosts, u.Hostname())
-      }
-    expect_match_text: [slices.Contains]
-  - name: slices contains allowlist negative constraint boundary
-    code: "import \"slices\"\npackage main\n\nfunc ok(role string) bool {\n  allowedRoles := []string{\"user\", \"admin\"\
-      }\n  return slices.Contains()\n}\n"
-    expect_no_match: true
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    slices.Contains over allowlist-named slices - validates that input is one of a finite set, including URL host/scheme allowlists."
-
-  disabled_reason:
-    code: over-broad
-- id: go.sanitizer.set_contains_allowlist
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: allowlist-validate
-  packages: ["github.com/deckarep/golang-set", "github.com/deckarep/golang-set/v2"]
-  match:
-    kind: call
-    callee:
-      regex: "\\.Contains$"
-  constraints:
-  - min_args: 1
-  match_examples:
-  - name: set contains allowlist
-    code: |
-      import "github.com/deckarep/golang-set"
-      package main
-      func ok(role string) bool {
-        allowedSet := mapset.NewSet("user", "admin")
-        return allowedSet.Contains(role)
-      }
-    expect_match_text: [allowedSet.Contains]
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set or guard facts. Set.Contains over a trusted finite set is a useful sanitizer once the engine can prove the set provenance."
-
-- id: go.sanitizer.map_enum_allowlist_lookup
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  tag: allowlist-validate
-  packages: []
-  match:
-    kind: read
-    target:
-      regex: "^(allowed|allowlist|allowedSet|allowedHosts|allowedRoles|allowedValues)\\[[^\\]]+\\]$"
-  description: "Disabled - a map lookup only validates the key when its truthy result controls the path to the sensitive use.
-    Enabling a read-shaped sanitizer would clear the lookup result, not prove that the checked input is guard-dominated. Re-enable
-    when the rule vocabulary can join an AST index key to the successful branch of the membership guard."
-
-- id: go.sanitizer.named_regex_matchstring
-  enabled: false
-  language: go
-  tag: regex-validate
-  packages: [regexp]
-  match:
-    kind: call
-    callee:
-      regex: "^(uuidRE|slugRE|idRE|safeRE|allowedRE)\\.MatchString$"
-  constraints:
-  - min_args: 1
-  match_examples:
-  - name: named regex match string
-    code: |
-      import "regexp"
-      package main
-
-      func ok(id string) bool {
-        return uuidRE.MatchString(id)
-      }
-    expect_match_text: [uuidRE.MatchString]
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    Named regexp MatchString validators, constrained to UUID/slug/id/safe/allowed receiver names."
-
-  disabled_reason:
-    code: over-broad
 - id: go.sanitizer.regexp_matchstring_literal_gate
   enabled: true
   language: go
@@ -993,6 +748,11 @@
       attribute: [uuidRE, MatchString]
   constraints:
   - min_args: 1
+  analysis_semantics:
+    sanitizer_guard:
+      argument_indices: [0]
+      require_terminal_rejection: true
+      accepted_predicate_value: true
   match_examples:
   - name: uuid regexp match string
     code: |
@@ -1001,6 +761,16 @@
       var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
       func ok(id string) bool {
         return uuidRE.MatchString(id)
+      }
+    expect_match_text: [uuidRE.MatchString]
+  - name: UUID validation must reject the false branch before use
+    code: |
+      package main
+      import "regexp"
+      var uuidRE = regexp.MustCompile(`^[0-9a-f-]+$`)
+      func unsafe(id string) string {
+        _ = uuidRE.MatchString(id)
+        return id
       }
     expect_match_text: [uuidRE.MatchString]
   description: "uuidRE.MatchString(input) - strict UUID-shaped full-string allowlist used as an identifier/path segment guard."
@@ -1192,38 +962,6 @@
     expect_no_match: true
   description: "GORM Where with literal placeholders and separate bind args."
 
-- id: go.sanitizer.char_allowlist_replaceallstring
-  enabled: false
-  language: go
-  tag: char-allowlist
-  packages: [regexp]
-  match:
-    kind: call
-    callee:
-      regex: "^(safeRE|allowedRE|stripUnsafeRE|nonWordRE)\\.ReplaceAllString$"
-  constraints:
-  - arg_equals:
-      index: 1
-      value: "\"\""
-  match_examples:
-  - name: regex character allowlist strip
-    code: |
-      import "regexp"
-      package main
-
-      func clean(value string) string {
-        return safeRE.ReplaceAllString(value, "")
-      }
-    expect_match_text: [safeRE.ReplaceAllString]
-  - name: regex character allowlist strip negative constraint boundary
-    code: "import \"regexp\"\npackage main\n\nfunc clean(value string) string {\n  return safeRE.ReplaceAllString()\n}\n"
-    expect_no_match: true
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    Named regexp ReplaceAllString(value, \"\") strip helpers - used with compiled `[^allowlist]` patterns to remove disallowed
-    characters."
-
-  disabled_reason:
-    code: over-broad
 - id: go.sanitizer.xml_decoder_strict
   enabled: true
   language: go
@@ -2210,37 +1948,6 @@
 # httpOnly + secure flags are the SAFE shape; reviewer
 # enumerates with `security sanitizers --tag cookie-secure`
 # and audits routes that set cookies WITHOUT them.
-- id: go.cookie.http_cookie_httponly_secure
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: go.cookie.cookie_struct_secure_httponly
-  language: go
-  tag: cookie-secure
-  match:
-    kind: call
-    callee:
-      name: Cookie
-  constraints:
-  - any_arg_matches_regex: |-
-      HttpOnly.*true|Secure.*true
-  match_examples:
-  - name: generated direct match
-    code: |
-      package main
-
-      type Cookie struct { HttpOnly bool; Secure bool }
-      func example() {
-        _ = Cookie{HttpOnly: true, Secure: true}
-      }
-    expect_match_text: [Cookie]
-  - name: generated direct match negative constraint boundary
-    code: "package main\nfunc example() {\n  Cookie()\n}\n"
-    expect_no_match: true
-  description: "Disabled - duplicate of go.cookie.cookie_struct_secure_httponly; the struct-literal `new` rule is the precise
-    owner for secure http.Cookie literals."
-
-# Rate-limit middleware presence sanitizers (architectural).
 - id: go.ratelimit.tollbooth_limit_handler
   enabled: true
   language: go

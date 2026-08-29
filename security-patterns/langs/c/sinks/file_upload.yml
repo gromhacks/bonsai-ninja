@@ -1,57 +1,11 @@
-# C file-upload sinks (libmicrohttpd / civetweb / mongoose POST handlers).
-- id: c.upload.mhd_postprocessor
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
-  language: c
-  tag: file-upload
-  severity: medium
-  packages: [libmicrohttpd]
-  cwe: [CWE-434]
-  match:
-    kind: call
-    callee:
-      name: MHD_create_post_processor
-  match_examples:
-  - name: generated direct match
-    code: |
-      #include <libmicrohttpd/microhttpd.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        MHD_create_post_processor(arg);
-      }
-  description: "Disabled - MHD_create_post_processor installs multipart parsing callbacks; it is not itself a file-write sink. Model callback filename arguments as remote sources when callback adapter facts are available."
+# C file-upload sinks. Framework/API identity remains rulepack data; the C
+# adapter contributes only exact call/argument facts.
 
-- id: c.upload.civetweb_form_data_handler
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
-  language: c
-  tag: file-upload
-  severity: medium
-  packages: [civetweb]
-  cwe: [CWE-434]
-  match:
-    kind: call
-    callee:
-      name: mg_handle_form_request
-  match_examples:
-  - name: generated direct match
-    code: |
-      #include <civetweb.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mg_handle_form_request(arg);
-      }
-  description: "Disabled - mg_handle_form_request dispatches multipart/form callbacks; it is not itself a write sink. Flag downstream writes using callback-provided filenames instead."
-
-- id: c.upload.mongoose_mg_http_upload
+- id: c.upload.mongoose_http_upload
   enabled: true
   language: c
   tag: file-upload
-  severity: medium
+  severity: high
   packages: [mongoose]
   cwe: [CWE-434]
   match:
@@ -59,34 +13,58 @@
     callee:
       name: mg_http_upload
   constraints:
+  - min_args: 5
+  - max_args: 5
   - arg_tainted:
-      index: 2
+      index: 1
   match_examples:
-  - name: generated direct match
+  - name: Mongoose chunked HTTP upload request
     code: |
       #include <mongoose.h>
-      void example(char *input) {
-        mg_http_upload("safe", "safe", input);
+      void receive(struct mg_connection *c, struct mg_http_message *request) {
+        mg_http_upload(c, request, &mg_fs_posix, "/srv/uploads", 1048576);
       }
-  - name: literal arg 2 negative
+    expect_match_text: [mg_http_upload]
+  - name: obsolete three argument spelling is not the current upload API
     code: |
-      void example(void) {
-        mg_http_upload("safe", "safe", "safe");
+      #include <mongoose.h>
+      void helper(void *a, void *b, void *c) {
+        mg_http_upload(a, b, c);
       }
     expect_no_match: true
-  description: "mongoose mg_http_upload - flag tainted destination."
+  description: "Mongoose mg_http_upload(c, hm, fs, dir, max_size) appends the HTTP request body to a client-named file under dir. Mongoose rejects path traversal and enforces max_size, but accepting arbitrary uploaded content still crosses the unrestricted-file-upload sink boundary."
 
-- id: c.upload.fopen_uploaded_path
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: c.path.fopen
+- id: c.upload.mongoose_http_start_upload
+  enabled: true
   language: c
   tag: file-upload
-  severity: medium
+  severity: high
+  packages: [mongoose]
   cwe: [CWE-434]
   match:
     kind: call
     callee:
-      name: fopen
-  description: "Disabled - generic fopen, covered by path-traversal."
+      name: mg_http_start_upload
+  constraints:
+  - min_args: 6
+  - max_args: 6
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: Mongoose streaming HTTP upload request
+    code: |
+      #include <mongoose.h>
+      void receive(struct mg_connection *c, struct mg_http_message *request,
+                   struct mg_str name) {
+        mg_http_start_upload(c, request, name, mg_str("/srv/uploads"),
+                             &mg_fs_posix, upload_done);
+      }
+    expect_match_text: [mg_http_start_upload]
+  - name: unrelated short helper call is not the streaming upload API
+    code: |
+      #include <mongoose.h>
+      void helper(void *a, void *b) {
+        mg_http_start_upload(a, b);
+      }
+    expect_no_match: true
+  description: "Mongoose mg_http_start_upload(c, hm, name, dir, fs, callback) streams an HTTP request body into a file. Its path-sanity check prevents traversal, but it does not itself establish an application allowlist for uploaded content."

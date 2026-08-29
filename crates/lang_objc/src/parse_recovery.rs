@@ -8,7 +8,18 @@ pub(crate) fn objc_parse_recovery_edits(
     vfs: &Vfs,
     tree: &SyntaxTree,
 ) -> Vec<ParseRecoveryEdit> {
-    let mut edits = bonsai_lang_api::branch_free_conditional_recovery_edits(
+    objc_parse_recovery_edit_batches(snapshot, vfs, tree)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+pub(crate) fn objc_parse_recovery_edit_batches(
+    snapshot: &FileSnapshot,
+    vfs: &Vfs,
+    tree: &SyntaxTree,
+) -> Vec<Vec<ParseRecoveryEdit>> {
+    let conditionals = bonsai_lang_api::branch_free_conditional_recovery_edits(
         snapshot,
         tree,
         bonsai_lang_api::ConditionalDirectiveSyntax {
@@ -17,20 +28,24 @@ pub(crate) fn objc_parse_recovery_edits(
             alternatives_without_condition: &["#else"],
             closing: "#endif",
             trailing_comment_prefixes: &["//", "/*"],
+            non_directive_node_kinds: &["comment", "string_literal", "char_literal", "concatenated_string"],
         },
     );
-    edits.extend(bonsai_lang_api::c_family_declaration_macro_recovery_edits(
+    let declarations = bonsai_lang_api::c_family_declaration_macro_recovery_edits(
         snapshot,
         vfs,
         tree,
         &["va_arg", "__builtin_va_arg"],
-    ));
-    edits.extend(standalone_declaration_marker_edits(snapshot, tree));
-    edits.extend(enum_macro_recovery_edits(snapshot, tree));
-    edits.extend(nullability_qualifier_recovery_edits(snapshot, tree));
-    edits.sort_by_key(|edit| (edit.start_byte, edit.end_byte));
-    edits.dedup();
-    edits
+    );
+    let mut objc_syntax = standalone_declaration_marker_edits(snapshot, tree);
+    objc_syntax.extend(enum_macro_recovery_edits(snapshot, tree));
+    objc_syntax.extend(nullability_qualifier_recovery_edits(snapshot, tree));
+    objc_syntax.sort_by_key(|edit| (edit.start_byte, edit.end_byte));
+    objc_syntax.dedup();
+    [conditionals, declarations, objc_syntax]
+        .into_iter()
+        .filter(|batch| !batch.is_empty())
+        .collect()
 }
 
 /// Recover an otherwise-unparseable standalone preprocessor marker around an
@@ -317,11 +332,7 @@ pub(crate) fn objc_tree_proves_language(snapshot: &FileSnapshot, tree: &SyntaxTr
     while let Some(node) = stack.pop() {
         if matches!(
             node.kind(),
-            "class_interface"
-                | "class_implementation"
-                | "category_interface"
-                | "category_implementation"
-                | "protocol_declaration"
+            "class_interface" | "class_implementation" | "protocol_declaration"
         ) || node.is_error() && error_contains_objc_declaration(node, source)
         {
             return true;

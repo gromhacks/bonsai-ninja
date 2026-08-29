@@ -15,6 +15,23 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    receiver_factory_guard:
+      factories:
+      - regex: '^(?:XML::LibXML->)?new$'
+      required_arguments:
+      - index: 0
+        accepted_values: [{kind: string, value: expand_entities}]
+      - index: 1
+        accepted_values: [{kind: boolean, value: false}]
+      - index: 2
+        accepted_values: [{kind: string, value: load_ext_dtd}]
+      - index: 3
+        accepted_values: [{kind: boolean, value: false}]
+      - index: 4
+        accepted_values: [{kind: string, value: no_network}]
+      - index: 5
+        accepted_values: [{kind: boolean, value: true}]
   match_examples:
   - name: perl.xxe.xml_libxml_parse_file example
     code: |
@@ -47,6 +64,23 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    receiver_factory_guard:
+      factories:
+      - regex: '^(?:XML::LibXML->)?new$'
+      required_arguments:
+      - index: 0
+        accepted_values: [{kind: string, value: expand_entities}]
+      - index: 1
+        accepted_values: [{kind: boolean, value: false}]
+      - index: 2
+        accepted_values: [{kind: string, value: load_ext_dtd}]
+      - index: 3
+        accepted_values: [{kind: boolean, value: false}]
+      - index: 4
+        accepted_values: [{kind: string, value: no_network}]
+      - index: 5
+        accepted_values: [{kind: boolean, value: true}]
   match_examples:
   - name: perl.xxe.xml_libxml_parse_string example
     code: |

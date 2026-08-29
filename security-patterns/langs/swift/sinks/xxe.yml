@@ -1,51 +1,87 @@
 # Swift XXE sinks.
-- id: swift.xxe.xmlparser_init
-  enabled: true
-  language: swift
-  tag: xxe
-  severity: high
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      name: XMLParser
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-    - name: declared shape
-      code: |
-        func test(input: Data) { XMLParser(input) }
-    - name: literal xml parser negative
-      code: |
-        func test() { XMLParser("<root/>") }
-      expect_no_match: true
-  description: "XMLParser(data:) - review shouldResolveExternalEntities setting."
-
 - id: swift.xxe.should_resolve_external_entities
   enabled: true
   language: swift
   tag: xxe
   category: source-independent
   severity: high
+  packages: [Foundation]
   cwe: [CWE-611]
   match:
     kind: write
     target:
-      regex: ^[^\.\s]+\.shouldResolveExternalEntities$
+      name: shouldResolveExternalEntities
+      receiver_type_in: [XMLParser]
+  constraints:
+  - arg_equals: {index: 0, value: 'true'}
   match_examples:
-    - name: XMLParser external entities member write
+    - name: tainted XMLParser enables external entities
       code: |
-        func test(input: Bool) {
-          let parser = XMLParser(data: Data())
-          parser.shouldResolveExternalEntities = input
+        import Foundation
+        func test(input: Data) {
+          let parser = XMLParser(data: input)
+          parser.shouldResolveExternalEntities = true
         }
       expect_match_text: [parser.shouldResolveExternalEntities]
-    - name: local shouldResolveExternalEntities variable negative
+    - name: tainted XMLParser keeps external entities disabled negative
       code: |
-        func test(input: Bool) { let shouldResolveExternalEntities = input }
+        import Foundation
+        func test(input: Data) {
+          let parser = XMLParser(data: input)
+          parser.shouldResolveExternalEntities = false
+        }
       expect_no_match: true
-  description: "XMLParser.shouldResolveExternalEntities = true - enables XXE."
+    - name: unrelated parser property negative
+      code: |
+        import Foundation
+        struct LocalParser { var shouldResolveExternalEntities = false }
+        func test(input: Data) {
+          var parser = LocalParser()
+          parser.shouldResolveExternalEntities = true
+        }
+      expect_no_match: true
+  description: "Setting shouldResolveExternalEntities=true on a compiler-typed XMLParser enables external-entity resolution; false and unrelated receivers remain quiet."
+
+- id: swift.xxe.xmlparser_parse_external_entities
+  enabled: true
+  language: swift
+  tag: xxe
+  severity: high
+  packages: [Foundation]
+  imports: [Foundation]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: parse
+  constraints:
+  - receiver_type_in: [XMLParser]
+  - receiver_tainted: true
+  - arg_count: 0
+  - requires_prior_receiver_write:
+      target: {name: shouldResolveExternalEntities}
+      accepted_values:
+      - {kind: boolean, value: true}
+  match_examples:
+  - name: parse tainted XML with external entities enabled
+    code: |
+      import Foundation
+      func parse(_ data: Data) {
+          let parser = XMLParser(data: data)
+          parser.shouldResolveExternalEntities = true
+          parser.parse()
+      }
+    expect_match_text: [parser.parse]
+  - name: parse with external entities disabled
+    code: |
+      import Foundation
+      func parse(_ data: Data) {
+          let parser = XMLParser(data: data)
+          parser.shouldResolveExternalEntities = false
+          parser.parse()
+      }
+    expect_no_match: true
+  description: "Parsing tainted bytes with a typed XMLParser after a dominating shouldResolveExternalEntities=true write enables external entity resolution; disabled state remains quiet."
 
 - id: swift.xxe.xmldocument_init
   enabled: true

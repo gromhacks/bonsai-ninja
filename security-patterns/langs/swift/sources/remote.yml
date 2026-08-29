@@ -11,14 +11,9 @@
 # Swift HTTP frameworks (Vapor, Hummingbird, Perfect, Kitura) expose almost
 # every request surface as a property access on `Request` (req.query,
 # req.content, req.headers, req.parameters, req.cookies, req.body). The
-# shared adapter kit now emits member-access reads for the Vapor shapes
-# below, so those rules are enabled. Framework/callback shapes that still
-# need result binding or semantic receiver facts remain disabled. Per
-# docs/pattern-guide.mdx the fix for unsupported shapes is in the Swift
-# adapter, not YAML.
-#
-# Below this header: callable-shape rules plus enabled Vapor property-read
-# rules that work today.
+# shared adapter kit emits member-access reads for the precise Vapor shapes
+# below. The bundled file contains executable callable and property-read rules
+# only.
 
 - id: swift.vapor.request_content_decode
   enabled: true
@@ -151,12 +146,20 @@
   match:
     kind: read
     target:
-      attribute: [Request, query]
+      name: query
+      receiver_type_in: [Request]
   match_examples:
-  - name: declared shape
+  - name: typed vapor request query
     code: |
       import Vapor
-      func test() { let input = "x"; let amount = 1; let result = Request.query }
+      func test(req: Request) { let result = req.query }
+    expect_match_text: [req.query]
+  - name: unrelated query property negative
+    code: |
+      import Vapor
+      struct LocalRequest { let query: String }
+      func test(req: LocalRequest) { let result = req.query }
+    expect_no_match: true
   description: "Vapor req.query property read - query-string container from the remote request."
 
 - id: swift.vapor.request_content
@@ -170,12 +173,20 @@
   match:
     kind: read
     target:
-      attribute: [Request, content]
+      name: content
+      receiver_type_in: [Request]
   match_examples:
-  - name: declared shape
+  - name: typed vapor request content
     code: |
       import Vapor
-      func test() { let input = "x"; let amount = 1; let result = Request.content }
+      func test(req: Request) { let result = req.content }
+    expect_match_text: [req.content]
+  - name: unrelated content property negative
+    code: |
+      import Vapor
+      struct LocalRequest { let content: String }
+      func test(req: LocalRequest) { let result = req.content }
+    expect_no_match: true
   description: "Vapor req.content property read - request content container controlled by the client."
 
 - id: swift.vapor.request_parameters
@@ -189,12 +200,20 @@
   match:
     kind: read
     target:
-      attribute: [Request, parameters]
+      name: parameters
+      receiver_type_in: [Request]
   match_examples:
-  - name: declared shape
+  - name: typed vapor request parameters
     code: |
       import Vapor
-      func test() { let input = "x"; let amount = 1; let result = Request.parameters }
+      func test(req: Request) { let result = req.parameters }
+    expect_match_text: [req.parameters]
+  - name: unrelated parameters property negative
+    code: |
+      import Vapor
+      struct LocalRequest { let parameters: [String] }
+      func test(req: LocalRequest) { let result = req.parameters }
+    expect_no_match: true
   description: "Vapor req.parameters property read - route parameters from the remote request."
 
 - id: swift.vapor.request_headers
@@ -208,12 +227,20 @@
   match:
     kind: read
     target:
-      attribute: [Request, headers]
+      name: headers
+      receiver_type_in: [Request]
   match_examples:
-  - name: declared shape
+  - name: typed vapor request headers
     code: |
       import Vapor
-      func test() { let input = "x"; let amount = 1; let result = Request.headers }
+      func test(req: Request) { let result = req.headers }
+    expect_match_text: [req.headers]
+  - name: unrelated headers property negative
+    code: |
+      import Vapor
+      struct LocalRequest { let headers: [String] }
+      func test(req: LocalRequest) { let result = req.headers }
+    expect_no_match: true
   description: "Vapor req.headers property read - client-supplied HTTP headers."
 
 - id: swift.vapor.request_cookies
@@ -227,12 +254,20 @@
   match:
     kind: read
     target:
-      attribute: [Request, cookies]
+      name: cookies
+      receiver_type_in: [Request]
   match_examples:
-  - name: declared shape
+  - name: typed vapor request cookies
     code: |
       import Vapor
-      func test() { let input = "x"; let amount = 1; let result = Request.cookies }
+      func test(req: Request) { let result = req.cookies }
+    expect_match_text: [req.cookies]
+  - name: unrelated cookies property negative
+    code: |
+      import Vapor
+      struct LocalRequest { let cookies: [String] }
+      func test(req: LocalRequest) { let result = req.cookies }
+    expect_no_match: true
   description: "Vapor req.cookies property read - client-supplied cookie values."
 
 - id: swift.vapor.request_url
@@ -246,12 +281,20 @@
   match:
     kind: read
     target:
-      attribute: [Request, url]
+      name: url
+      receiver_type_in: [Request]
   match_examples:
-  - name: declared shape
+  - name: typed vapor request url
     code: |
       import Vapor
-      func test() { let input = "x"; let amount = 1; let result = Request.url }
+      func test(req: Request) { let result = req.url }
+    expect_match_text: [req.url]
+  - name: unrelated url property negative
+    code: |
+      import Vapor
+      struct LocalRequest { let url: String }
+      func test(req: LocalRequest) { let result = req.url }
+    expect_no_match: true
   description: "Vapor req.url property read - URL supplied by the client."
 
 - id: swift.vapor.request_body
@@ -265,13 +308,60 @@
   match:
     kind: read
     target:
-      attribute: [Request, body]
+      name: body
+      receiver_type_in: [Request]
   match_examples:
-  - name: declared shape
+  - name: typed vapor request body
     code: |
       import Vapor
-      func test() { let input = "x"; let amount = 1; let result = Request.body }
+      func test(req: Request) { let result = req.body }
+    expect_match_text: [req.body]
+  - name: unrelated body property negative
+    code: |
+      import Vapor
+      struct LocalRequest { let body: String }
+      func test(req: LocalRequest) { let result = req.body }
+    expect_no_match: true
   description: "Vapor req.body property read - raw request body bytes controlled by the client."
+
+- id: swift.vapor.route_handler_request
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [url, path, query, header, form, multipart, binary, json, text]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|\.)(?:get|post|put|patch|delete|options|head)$'
+  constraints:
+  - receiver_type_in: [RoutesBuilder]
+  - arg_count: 2
+  - arg_is_inline_callback: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: Vapor one-component route handler request
+    code: |
+      import Vapor
+      func boot(routes: RoutesBuilder) throws {
+        routes.post("restore") { request async throws -> String in request.body.string ?? "" }
+      }
+    expect_match_text: [routes.post]
+  - name: local route builder collision negative
+    code: |
+      struct RoutesBuilder { func post(_ path: String, _ body: (String) -> String) {} }
+      func boot(routes: RoutesBuilder) {
+        routes.post("restore") { value in value }
+      }
+    expect_no_match: true
+  description: "A compiler-typed Vapor RoutesBuilder one-component route registration supplies the inbound Request as callback parameter zero; the callback result is never sourced."
 
 - id: swift.vapor.file_filename
   enabled: true
@@ -284,12 +374,20 @@
   match:
     kind: read
     target:
-      attribute: [File, filename]
+      name: filename
+      receiver_type_in: [File]
   match_examples:
-  - name: swift.vapor.file_filename example
+  - name: typed vapor upload filename
     code: |
       import Vapor
-      func test() { let result = File.filename }
+      func test(file: File) { let result = file.filename }
+    expect_match_text: [file.filename]
+  - name: unrelated filename property negative
+    code: |
+      import Vapor
+      struct LocalFile { let filename: String }
+      func test(file: LocalFile) { let result = file.filename }
+    expect_no_match: true
   description: "Vapor File.filename - multipart Content-Disposition filename supplied by the client."
 
 - id: swift.hummingbird.request_query
@@ -313,6 +411,13 @@
         let q = req.uri.query
         return q
       }
+  - name: same query member on unrelated receiver negative
+    code: |
+      import Hummingbird
+      struct LocalURI { let query: String? }
+      struct LocalRequest { let uri: LocalURI }
+      func handle(req: LocalRequest) -> String? { req.uri.query }
+    expect_no_match: true
   description: "Hummingbird Request.uri.query - raw query string read on a typed Request receiver."
 
 - id: swift.hummingbird.request_body
@@ -336,6 +441,12 @@
         let b = req.body
         return b
       }
+  - name: same body member on unrelated receiver negative
+    code: |
+      import Hummingbird
+      struct LocalRequest { let body: ByteBuffer }
+      func handle(req: LocalRequest) -> ByteBuffer { req.body }
+    expect_no_match: true
   description: "Hummingbird Request.body - request body read on a typed Request receiver."
 
 - id: swift.kitura.request_query
@@ -359,6 +470,12 @@
         let q = request.queryParameters
         return q
       }
+  - name: same query parameters on unrelated receiver negative
+    code: |
+      import Kitura
+      struct LocalRequest { let queryParameters: [String: String] }
+      func handle(request: LocalRequest) -> [String: String] { request.queryParameters }
+    expect_no_match: true
   description: "Kitura RouterRequest.queryParameters - parsed query parameters read on a typed RouterRequest receiver."
 
 - id: swift.kitura.request_body
@@ -382,6 +499,12 @@
         let b = request.body
         return b
       }
+  - name: same body member on unrelated receiver negative
+    code: |
+      import Kitura
+      struct LocalRequest { let body: ParsedBody? }
+      func handle(request: LocalRequest) -> ParsedBody? { request.body }
+    expect_no_match: true
   description: "Kitura RouterRequest.body - parsed request body read on a typed RouterRequest receiver."
 
 - id: swift.perfect.request_param
@@ -439,118 +562,6 @@
     expect_no_match: true
   description: "URLSession.data(for:/from:) returns remote response Data on a compiler-typed URLSession receiver."
 
-- id: swift.alamofire_response
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: swift
-  trust: remote
-  tag: network-response
-  payload_types: [json, text]
-  frameworks: [alamofire]
-  packages: [Alamofire]
-  match:
-    kind: call
-    callee:
-      name: responseData
-  description: "Disabled - responseData call is not itself tainted; needs callback/result binding support."
-
-- id: swift.alamofire_response_json
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: swift
-  trust: remote
-  tag: network-response
-  payload_types: [json]
-  frameworks: [alamofire]
-  packages: [Alamofire]
-  match:
-    kind: call
-    callee:
-      name: responseJSON
-  description: "Disabled - responseJSON call is not itself tainted; needs callback/result binding support."
-
-- id: swift.alamofire_response_decodable
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: swift
-  trust: remote
-  tag: network-response
-  payload_types: [json]
-  frameworks: [alamofire]
-  packages: [Alamofire]
-  match:
-    kind: call
-    callee:
-      name: responseDecodable
-  description: "Disabled - responseDecodable call is not itself tainted; needs callback/result binding support."
-
-- id: swift.alamofire_publish_data
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: swift
-  trust: remote
-  tag: network-response
-  payload_types: [binary]
-  frameworks: [alamofire]
-  packages: [Alamofire]
-  match:
-    kind: call
-    callee:
-      name: publishData
-  description: "Disabled - publishData call is not itself tainted; needs Combine output binding support."
-
-- id: swift.alamofire_publish_decodable
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: swift
-  trust: remote
-  tag: network-response
-  payload_types: [json]
-  frameworks: [alamofire]
-  packages: [Alamofire]
-  match:
-    kind: call
-    callee:
-      name: publishDecodable
-  description: "Disabled - publishDecodable call is not itself tainted; needs Combine output binding support."
-
-- id: swift.alamofire_serializing_data
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: swift
-  trust: remote
-  tag: network-response
-  payload_types: [binary]
-  frameworks: [alamofire]
-  packages: [Alamofire]
-  match:
-    kind: call
-    callee:
-      name: serializingData
-  description: "Disabled - serializingData call is not itself tainted; needs async result binding support."
-
-- id: swift.alamofire_serializing_decodable
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: swift
-  trust: remote
-  tag: network-response
-  payload_types: [json]
-  frameworks: [alamofire]
-  packages: [Alamofire]
-  match:
-    kind: call
-    callee:
-      name: serializingDecodable
-  description: "Disabled - serializingDecodable call is not itself tainted; needs async result binding support."
-
 - id: swift.nio.channel_read
   enabled: true
   language: swift
@@ -581,26 +592,8 @@
     expect_no_match: true
   description: "The NIOAny parameter at index 1 of ChannelInboundHandler.channelRead(context:data:) carries inbound channel bytes/messages. Outbound fireChannelRead calls are not sources."
 
-- id: swift.grpc.request_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  trust: remote
-  tag: rpc-input
-  payload_types: [json]
-  frameworks: ["grpc-swift"]
-  packages: [GRPC]
-  match:
-    kind: param
-    target:
-      name: request
-  description: "Disabled - `kind: param` cannot currently prove the enclosing function is a grpc-swift service handler, so bare `request` overmatches ordinary Swift APIs."
-
 - id: swift.websocket_on_text
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: remote
   tag: ws-input
@@ -613,8 +606,8 @@
       regex: "\\.onText$"
   constraints:
   - receiver_type_in: [WebSocket]
-  - min_args: 1
-  - max_args: 1
+  - arg_count: 1
+  - arg_is_inline_callback: 0
   taint_semantics:
     source_callback_only: true
     source_callback_args:
@@ -631,12 +624,10 @@
       import Vapor
       func test() { logger.onText { ws, text in _ = text } }
     expect_no_match: true
-  description: "Disabled pending Swift receiver-type/callback ownership for trailing closures. The eventual source carrier is callback parameter 1, never the registration call result."
+  description: "Vapor WebSocket.onText delivers remote text through inline callback parameter 1 on a compiler-typed WebSocket; the registration call result is never sourced."
 
 - id: swift.websocket_on_binary
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: remote
   tag: ws-input
@@ -649,8 +640,8 @@
       regex: "\\.onBinary$"
   constraints:
   - receiver_type_in: [WebSocket]
-  - min_args: 1
-  - max_args: 1
+  - arg_count: 1
+  - arg_is_inline_callback: 0
   taint_semantics:
     source_callback_only: true
     source_callback_args:
@@ -667,4 +658,30 @@
       import Vapor
       func test() { logger.onBinary { ws, data in _ = data } }
     expect_no_match: true
-  description: "Disabled pending Swift receiver-type/callback ownership for trailing closures. The eventual source carrier is callback parameter 1, never the registration call result."
+  description: "Vapor WebSocket.onBinary delivers remote bytes through inline callback parameter 1 on a compiler-typed WebSocket; the registration call result is never sourced."
+
+- id: swift.nio.http_server_request_part_param
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [url, path, query, header, binary, text]
+  packages: [NIOHTTP1]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [HTTPServerRequestPart, NIOHTTP1.HTTPServerRequestPart]
+  match_examples:
+  - name: SwiftNIO HTTP request part carrier
+    code: |
+      import NIOHTTP1
+      func handle(part: HTTPServerRequestPart) { consume(part) }
+    expect_match_text: [part]
+  - name: similarly named non-request parameter negative
+    code: |
+      import NIOHTTP1
+      func handle(part: String) { consume(part) }
+    expect_no_match: true
+  description: "A typed SwiftNIO HTTPServerRequestPart parameter carries either the client-supplied request head (including URI/headers) or body bytes; enum projection remains ordinary compiler flow."

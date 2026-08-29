@@ -283,9 +283,9 @@ sequences, addressable places, and nested expression carriers into
 the same fact retains its Tree-sitter-lowered parameter bindings in source
 order. Unknown sequence elements remain explicit `None`
 slots, so a rule can prove `['sh', '-c', dynamic]` without guessing the
-dynamic value. Match constraints such as `arg_sequence_items_equal` compare
-those typed facts and fail closed when the adapter did not prove the shape;
-they never parse `CallArg::value_text`.
+dynamic value. Match constraints such as `arg_sequence_items_equal` and
+`arg_aggregate_fields_equal` compare those typed facts and fail closed when
+the adapter did not prove the shape; they never parse `CallArg::value_text`.
 
 Named aggregate proofs track each path independently. A dynamic value in an
 unrelated sibling does not erase an exact boolean/string field, but a spread,
@@ -563,6 +563,11 @@ interprocedural engine and not an alternate source-to-sink result.
 
 - `clean_output_overwrites: Vec<CleanOutputOverwrite>` — declarative
   overwrite shapes derived from rulepack `taint_semantics`.
+- `clean_receiver_overwrites: Vec<CleanReceiverOverwrite>` — exact
+  matcher-approved in-place sanitizer calls. Transfer evaluates the call
+  against the old receiver and then commits a fresh receiver writer with no
+  incoming taint edge. Provider/operator names remain in rule data and the
+  approved call spans participate in the transfer fingerprint.
 - `source_output_args: Vec<SourceOutputArgs>` — source calls whose
   listed output arguments receive taint, such as `recv`, `SSL_read`,
   and `fgets` buffers. A shape may instead carry
@@ -588,6 +593,10 @@ interprocedural engine and not an alternate source-to-sink result.
   registration spans are part of the transfer fingerprint. A whole callback
   parameter reaches only AST-materialized descendant fields whose definitions
   still come from the parameter; an exact later field overwrite wins normally.
+  A callback shape may provide explicit positions, an exact-arity
+  `source_param_indices_from` tail, or both. Expansion stops at the
+  compiler-declared callback signature and never creates a capped or guessed
+  parameter range; unselected parameters retain ordinary callback binding.
 - `source_callback_only: bool` — rule data distinguishes pure registration
   APIs from hybrid APIs whose synchronous result is also a source carrier.
 - `call_result_passthroughs: Vec<CallResultPassthrough>` — rulepack
@@ -602,9 +611,10 @@ interprocedural engine and not an alternate source-to-sink result.
   rulepack-declared receiver/method shapes that move argument taint into
   receiver state for later receiver-only sinks. The engine owns no global
   mutator-name list.
-- `max_edge_precision: Option<Precision>` — the accepted evidence class;
-  production consumers use exact/narrowed semantic edges and reject guessed
-  over-approximate edges.
+- `max_edge_precision: Option<Precision>` — an internal accepted-evidence
+  boundary; production consumers admit compiler-proven edges (`Exact` or
+  `Narrowed` provenance) and reject guessed over-approximate edges. It is not a
+  public analysis mode or finding-set selector.
 
 Language syntax and ABI intrinsics remain in adapter/compiler lowering (for
 example C variadic builtins). Library/framework API behavior belongs only in
@@ -712,6 +722,15 @@ Carrier passing where a specific field is tainted (`client.argv`,
 `param.cmd`). The carrier parameter itself isn't marked as a tainted
 scalar unless the caller had explicit value taint — so `free(client)`
 doesn't taint every field reachable below `client`.
+
+Exact projected state on a shared imported binding may also cross one
+compiler-resolved invocation when caller and callee aliases resolve to the
+same import target and the write precedes that call. The IDG records this as a
+non-positional `SharedStateCall`: it establishes source-to-callee lineage but
+does not claim that any call argument or receiver is tainted. Same-spelled
+fields on different imports, sibling fields, later writes, and ambiguous call
+targets remain disconnected. Allocation-insensitive field state is separate
+and never renders as a source-level call.
 
 ## Drift gates
 

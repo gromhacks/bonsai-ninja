@@ -20,9 +20,6 @@
   - name: dart openai chat create
     code: |
       import 'package:dart_openai/dart_openai.dart';
-      import 'package:dart_openai/dart_openai.dart';
-      import 'package:dart_openai/dart_openai.dart';
-      import 'package:dart_openai/dart_openai.dart';
       import 'package:dart_openai/dart_openai.dart'; // dart_openai
       void test(dynamic input) { OpenAI.instance.chat.create(input); }
     expect_match_text: [OpenAI.instance.chat.create]
@@ -54,10 +51,6 @@
   - name: dart openai create chat completion
     code: |
       import 'package:openai_dart/openai_dart.dart';
-      import 'package:openai_dart/openai_dart.dart';
-      import 'package:openai_dart/openai_dart.dart';
-      import 'package:openai_dart/openai_dart.dart';
-      import 'package:openai_dart/openai_dart.dart';
       void test(dynamic input) { createChatCompletion(input); }
     expect_match_text: [createChatCompletion]
   - name: literal dart openai create chat completion negative
@@ -84,10 +77,6 @@
   match_examples:
   - name: dart bedrock invoke model
     code: |
-      import 'package:aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart';
-      import 'package:aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart';
-      import 'package:aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart';
-      import 'package:aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart';
       import 'package:aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart';
       void test(dynamic input) { invokeModel(input); }
     expect_match_text: [invokeModel]

@@ -35,6 +35,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 ahash = { workspace = true }
+aho-corasick = { workspace = true }
 regex = { workspace = true }
 regex-syntax = { workspace = true }
 tracing = { workspace = true }

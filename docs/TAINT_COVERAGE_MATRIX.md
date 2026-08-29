@@ -39,7 +39,8 @@ measure different internal contracts:
 
 If a cell here passes but a sister-doc cell shows `Partial` /
 `-`, the user-facing contract is still one level of accuracy:
-only exact/narrowed semantic evidence is reported. Lower-quality
+only compiler-proven evidence is reported. The `exact` and `narrowed`
+labels record proof provenance; they are not analysis modes. Guessed
 over-approximate or unknown facts remain diagnostic-only.
 
 ## Legend

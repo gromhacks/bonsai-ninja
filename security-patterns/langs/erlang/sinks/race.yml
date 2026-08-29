@@ -1,6 +1,4 @@
 - id: erlang.race.gen_server_call_timeout
-  aliases:
-  - erlang.deser.gen_server_call_timeout
   enabled: true
   language: erlang
   tag: timeout-bypass

@@ -129,7 +129,8 @@ pub struct SymbolicFieldTransform {
     pub exact_field: u32,
     /// Resolved call/copy site.
     pub call_span: Span,
-    /// Target write site.
+    /// Target write site, or the exact evaluated argument-expression span for
+    /// an [`SymbolicFieldTransformKind::Argument`] transform.
     pub write_span: Span,
     /// Resolver/evidence precision.
     pub precision: Precision,

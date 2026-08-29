@@ -27,7 +27,7 @@
 //! Languages without a fixture yet are reported as `[lang] skipped:
 //! no fixture` so the audit rollout is visible.
 //!
-//! Per `docs/contributing/taint-engine-spec.mdx § Mega Flow Contract`: if tree-sitter
+//! Per `docs/contributing/taint-engine-spec.mdx § Language Gauntlet Contract`: if tree-sitter
 //! exposes the construct and a developer can follow the value flow,
 //! missing taint here is a bug in the adapter, resolver, CFG,
 //! callgraph, field/container facts, or taint propagation — not
@@ -42,7 +42,10 @@ fn repo_root() -> PathBuf {
 }
 
 fn fixture_root(lang: &str) -> Option<PathBuf> {
-    let p = repo_root().join("examples").join(lang).join("assign_chain");
+    let p = repo_root()
+        .join("test-fixtures/languages")
+        .join(lang)
+        .join("assign_chain");
     if !p.is_dir() {
         return None;
     }

@@ -1,22 +1,4 @@
 # Objective-C IPC / cross-app input sources.
-- id: objc.source.notification_userinfo
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: objc
-  trust: ipc
-  tag: ipc-input
-  payload_types: [json]
-  match:
-    kind: read
-    target:
-      name: userInfo
-  match_examples:
-    - name: declared shape
-      code: |
-        void test(id input) { id target = input; int amount = 1; id notification; id result = notification.userInfo; }
-  description: "Disabled - a bare `userInfo` property does not establish an IPC boundary. Ordinary NSNotificationCenter notifications are process-local, while Darwin notifications do not carry a userInfo payload. APNS input is modeled by the selector-scoped remote source."
-
 - id: objc.source.uipasteboard_string
   enabled: true
   language: objc
@@ -43,3 +25,33 @@
       void write(UIPasteboard *pasteboard) { [pasteboard setPersistent:YES]; }
     expect_no_match: true
   description: "UIPasteboard/NSPasteboard typed string/data accessors return clipboard payload supplied by another app or user paste action; pasteboard object factories and mutators are not sources."
+
+- id: objc.source.uipasteboard_direct_value
+  enabled: true
+  language: objc
+  trust: ipc
+  tag: clipboard-input
+  payload_types: [text, url]
+  packages: [UIKit]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(string|URL)$"
+  constraints:
+  - receiver_type_in: [UIPasteboard]
+  - arg_count: 0
+  match_examples:
+  - name: typed pasteboard direct string
+    code: |
+      #import <UIKit/UIKit.h>
+      NSString *read(UIPasteboard *pasteboard) { return [pasteboard string]; }
+    expect_match_text: [pasteboard.string]
+  - name: same selector on unrelated receiver negative
+    code: |
+      #import <UIKit/UIKit.h>
+      @interface Document : NSObject
+      - (NSString *)string;
+      @end
+      NSString *read(Document *document) { return [document string]; }
+    expect_no_match: true
+  description: "UIPasteboard string/URL accessors return clipboard or cross-application paste content; exact receiver typing keeps ubiquitous string/URL selectors quiet."

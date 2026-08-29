@@ -12,6 +12,7 @@ use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_db::AnalyzerDb;
 use bonsai_idg::{workspace_adapter, IdgQueryService, TransferOptions};
 use bonsai_lang_api::AdapterArc;
+use bonsai_lang_csharp::CSharpAdapter;
 use bonsai_lang_go::GoAdapter;
 use bonsai_lang_javascript::JavaScriptAdapter;
 use bonsai_lang_objc::ObjCAdapter;
@@ -160,7 +161,9 @@ fn strings_fields_passthrough() -> Vec<CallResultPassthrough> {
         callee: "strings.Fields".to_string(),
         receiver_type: None,
         input_arg_indices: vec![0],
+        input_arg_start_index: None,
         input_receiver: false,
+        resolved_call_sites: Vec::new(),
     }]
 }
 
@@ -423,6 +426,92 @@ def entry(cmd, user):
     assert!(
         !sink_reached(&result, "sink_cmd"),
         "constructor-stored receiver field must not taint sibling property field reads: {:?}",
+        result.tainted_calls
+    );
+}
+
+#[test]
+fn csharp_constructor_arguments_taint_only_fields_the_constructor_stores() {
+    let src = r#"
+class Box {
+    private readonly string stored;
+    private readonly string clean = "safe";
+
+    public Box(string unused, string stored) {
+        this.stored = stored;
+    }
+
+    public void Observe() {
+        sinkStored(this.stored);
+        sinkClean(this.clean);
+    }
+}
+
+class App {
+    public static void Entry(string unused, string stored) {
+        var box = new Box(unused, stored);
+        box.Observe();
+    }
+}
+"#;
+    let db = build_db(Arc::new(CSharpAdapter::new()), &[("App.cs", src)]);
+    let entry = func_id_or_none(&db, "Entry").expect("Entry should index");
+
+    let unused_result = interprocedural_taint(entry, &seed(&["unused"]), &cfg(), &db);
+    assert!(
+        !sink_reached(&unused_result, "sinkStored") && !sink_reached(&unused_result, "sinkClean"),
+        "an unused constructor argument must not taint the object or any field: {:?}",
+        unused_result.tainted_calls
+    );
+
+    let stored_result = interprocedural_taint(entry, &seed(&["stored"]), &cfg(), &db);
+    assert!(
+        sink_reached(&stored_result, "sinkStored"),
+        "an exact constructor receiver-field write must reach the matching read: {:?}",
+        stored_result.tainted_calls
+    );
+    assert!(
+        !sink_reached(&stored_result, "sinkClean"),
+        "constructor field state must not taint a clean sibling field: {:?}",
+        stored_result.tainted_calls
+    );
+}
+
+#[test]
+fn csharp_ref_and_out_assignments_write_back_to_the_exact_caller_values() {
+    let src = r#"
+class App {
+    static void FillRef(ref string target, string input) {
+        target = input;
+    }
+
+    static void FillOut(out string target, string input) {
+        target = input;
+    }
+
+    public static void Entry(string input) {
+        string refValue = "before";
+        FillRef(ref refValue, input);
+        sinkRef(refValue);
+
+        string outValue;
+        FillOut(out outValue, input);
+        sinkOut(outValue);
+    }
+}
+"#;
+    let db = build_db(Arc::new(CSharpAdapter::new()), &[("App.cs", src)]);
+    let entry = func_id_or_none(&db, "Entry").expect("Entry should index");
+    let result = interprocedural_taint(entry, &seed(&["input"]), &cfg(), &db);
+
+    assert!(
+        sink_reached(&result, "sinkRef"),
+        "a `ref` assignment must write the callee value back to its caller place: {:?}",
+        result.tainted_calls
+    );
+    assert!(
+        sink_reached(&result, "sinkOut"),
+        "an `out` assignment must write the callee value back to its caller place: {:?}",
         result.tainted_calls
     );
 }

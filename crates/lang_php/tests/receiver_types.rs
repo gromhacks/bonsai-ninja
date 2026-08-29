@@ -75,6 +75,130 @@ function save(PDOStatement $stmt, $id) {
 }
 
 #[test]
+fn imported_parameter_alias_preserves_declared_receiver_interface() {
+    let db = db_with(
+        r#"
+<?php
+use Psr\Http\Message\ServerRequestInterface as Incoming;
+function handle(Incoming $request) {
+  return $request->getBody();
+}
+"#,
+    );
+    let global = db.global_index();
+    let handle = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle function should be indexed");
+    let mut calls = Vec::new();
+    collect_calls(&handle.flow_events, &mut calls);
+
+    assert!(
+        calls.iter().any(|(name, receiver_types)| {
+            name.ends_with("getBody")
+                && receiver_types.iter().any(|ty| ty == "Incoming")
+                && receiver_types
+                    .iter()
+                    .any(|ty| ty == "Psr\\Http\\Message\\ServerRequestInterface")
+        }),
+        "PHP import aliases must retain both the local spelling and exact declared type, got {calls:?}"
+    );
+}
+
+#[test]
+fn receiver_call_initializers_and_state_reads_are_explicit_compiler_facts() {
+    let db = db_with(
+        r#"
+<?php
+interface Incoming { public function values(); }
+final class Scope {
+  private array $query = [];
+  public function capture(Incoming $request) {
+    $this->query = $request->values();
+    $local = $request->values();
+  }
+  public function resource() { return $this->query['resource']; }
+}
+"#,
+    );
+    let global = db.global_index();
+    let capture = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "capture")
+        .expect("capture method");
+    assert!(
+        capture.receiver_field_initializers.iter().any(|initializer| {
+            initializer.target == "$this.query" && initializer.call_name == "$request.values"
+        }),
+        "receiver field call initializer missing: {:#?}",
+        capture.receiver_field_initializers
+    );
+    assert!(
+        capture
+            .receiver_field_initializers
+            .iter()
+            .all(|initializer| initializer.target != "$local"),
+        "ordinary locals must not become receiver storage"
+    );
+    assert!(
+        capture
+            .receiver_field_writes
+            .iter()
+            .any(|write| { write.target == "$this.query" && write.source_param_indices == [0] }),
+        "receiver field write missing: {:#?}",
+        capture.receiver_field_writes
+    );
+
+    let resource = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "resource")
+        .expect("resource method");
+    assert!(
+        resource
+            .receiver_state_sources
+            .iter()
+            .any(|source| source == "$this.query.resource"),
+        "receiver state read missing: {:#?}",
+        resource.receiver_state_sources
+    );
+}
+
+#[test]
+fn promoted_constructor_property_types_receiver_in_sibling_method() {
+    let db = db_with(
+        r#"
+<?php
+final class Repository {
+  public function __construct(private PDO $database) {}
+  public function run(string $sql) { return $this->database->query($sql); }
+}
+"#,
+    );
+    let global = db.global_index();
+    let run = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "run")
+        .expect("run method should be indexed");
+    assert!(
+        run.parent.is_some(),
+        "a class method must retain its compiler-owned parent: {run:#?}"
+    );
+    let mut calls = Vec::new();
+    collect_calls(&run.flow_events, &mut calls);
+
+    assert!(
+        calls.iter().any(|(name, receiver_types)| {
+            name.ends_with("query") && receiver_types.iter().any(|ty| ty == "PDO")
+        }),
+        "PHP promoted properties must preserve their declared receiver type in sibling methods, got {calls:?}"
+    );
+}
+
+#[test]
 fn implicit_this_receiver_uses_enclosing_class_and_bases() {
     let db = db_with(
         r#"
@@ -152,6 +276,25 @@ class Child extends Base {}
         .expect("Child class should be indexed");
 
     assert_eq!(child.bases, vec!["Base"]);
+}
+
+#[test]
+fn interface_declaration_uses_the_shared_base_clause_shape() {
+    let db = db_with(
+        r#"
+<?php
+interface ParentContract {}
+interface ChildContract extends ParentContract {}
+"#,
+    );
+    let global = db.global_index();
+    let child = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "ChildContract")
+        .expect("child interface should be indexed");
+
+    assert_eq!(child.bases, vec!["ParentContract"]);
 }
 
 #[test]

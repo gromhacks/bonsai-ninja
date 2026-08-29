@@ -13,6 +13,20 @@
       attribute:
       - HTTPoison
       - get
+  analysis_semantics:
+    compiler_guard:
+      capability: case-arm.finite-pattern-membership
+      required_evidence:
+      - scrutinee-call:URI.parse
+      - scrutinee-root-unshadowed
+      - pattern-type:URI
+      - pattern-type=scrutinee-root
+      - static-field:scheme=string:https
+      - finite-string-membership-field:host
+      - guarded-argument:0=scrutinee-argument:0
+      - guarded-static-field:2.follow_redirect=boolean:false
+      sanitizer_tag: ssrf
+      category: finite-url-pattern-membership-guard
   constraints:
   - arg_tainted:
       index: 0
@@ -38,6 +52,7 @@
     \ including cloud metadata (169.254.169.254) and internal services."
   imports:
   - Httpoison
+  - HTTPoison
 - id: elixir.ssrf.httpoison_post
   enabled: true
   language: elixir
@@ -337,44 +352,6 @@
     \ redirects by default so DNS rebinding / 302-to-metadata tricks apply."
   imports:
   - Req
-- id: elixir.ssrf.req_post
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: elixir
-  tag: ssrf
-  severity: high
-  packages:
-  - req
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Req
-      - post
-  match_examples:
-  - name: tainted req post url or options
-    code: |
-      alias Req
-      defmodule App do
-        def test(input) do
-          Req.post(input)
-        end
-      end
-  - name: tainted req post body negative
-    code: |
-      alias Req
-      defmodule App do
-        def test(input) do
-          Req.post(url: "https://example.com", body: input)
-        end
-      end
-    expect_no_match: true
-  description: "Disabled - Req.post/2 takes URL/options and body in one keyword-list operand, so current arg-level taint cannot distinguish `url:` taint from harmless `body:` taint."
-  imports:
-  - Req
 - id: elixir.ssrf.req_request
   enabled: true
   language: elixir
@@ -495,8 +472,6 @@
   imports:
   - Mint
 - id: elixir.ssrf.hackney_request
-  aliases:
-  - elixir.tls.hackney_insecure
   enabled: true
   language: elixir
   tag: ssrf
@@ -531,9 +506,7 @@
         end
       end
     expect_no_match: true
-  description: ":hackney.request/5 - tainted URL reaches arbitrary hosts (the\
-    \ Erlang HTTP client underlying many Elixir libs). Also covers merged aliases:\
-    \ elixir.tls.hackney_insecure."
+  description: ":hackney.request/5 - tainted URL reaches arbitrary hosts (the Erlang HTTP client underlying many Elixir libs). TLS-option misconfiguration is a separate semantic target and is not aliased to this URL-flow sink."
   imports:
   - Hackney
 - id: elixir.ssrf.httpc_request
@@ -723,44 +696,6 @@
     \ endpoint."
   imports:
   - Tesla
-- id: elixir.ssrf.req_put
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: elixir
-  tag: ssrf
-  severity: high
-  packages:
-  - req
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Req
-      - put
-  match_examples:
-  - name: tainted req put url or options
-    code: |
-      alias Req
-      defmodule App do
-        def test(input) do
-          Req.put(input)
-        end
-      end
-  - name: tainted req put body negative
-    code: |
-      alias Req
-      defmodule App do
-        def test(input) do
-          Req.put(url: "https://example.com", body: input)
-        end
-      end
-    expect_no_match: true
-  description: "Disabled - Req.put/2 takes URL/options and body in one keyword-list operand, so current arg-level taint cannot distinguish `url:` taint from harmless `body:` taint."
-  imports:
-  - Req
 - id: elixir.ssrf.req_delete
   enabled: true
   language: elixir

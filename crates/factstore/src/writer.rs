@@ -2,13 +2,22 @@
 //!
 //! Usage shape:
 //!
-//! ```ignore
+//! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use bonsai_factstore::FactStoreWriter;
+//! # let path = std::env::temp_dir().join("compiler-objects.factstore");
+//! # let (table_id, pipeline_hash) = (1_u32, 2_u64);
 //! let writer = FactStoreWriter::create(&path, table_id, pipeline_hash)?;
 //! let str_id = writer.intern("hello");          // shared via &writer
-//! writer.add(key, body_hash, &payload_bytes)?;  // shared via &writer
-//! writer.add_owned(key, body_hash, encoded_vec)?; // transfers an owned buffer
+//! # let (key, body_hash) = (3_u64, 4_u64);
+//! # let payload_bytes = b"payload";
+//! writer.add(key, body_hash, payload_bytes)?;  // shared via &writer
+//! writer.add_owned(key + 1, body_hash, payload_bytes.to_vec())?; // transfers ownership
 //! // ... many concurrent intern/add calls from rayon workers ...
 //! writer.finish()?;
+//! # let _ = str_id;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Design

@@ -18,15 +18,7 @@
       index: 0
   match_examples:
   - name: tainted http get url
-    code: 'import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'' as http;
+    code: 'import ''package:http/http.dart'' as http;
 
       void test(dynamic input) { http.get(input); }
 
@@ -61,15 +53,7 @@
       index: 0
   match_examples:
   - name: tainted http post url
-    code: 'import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'' as http;
+    code: 'import ''package:http/http.dart'' as http;
 
       void test(dynamic input) { http.post(input); }
 
@@ -104,15 +88,7 @@
       index: 0
   match_examples:
   - name: tainted http put url
-    code: 'import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'' as http;
+    code: 'import ''package:http/http.dart'' as http;
 
       void test(dynamic input) { http.put(input); }
 
@@ -147,15 +123,7 @@
       index: 0
   match_examples:
   - name: tainted http delete url
-    code: 'import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'' as http;
+    code: 'import ''package:http/http.dart'' as http;
 
       void test(dynamic input) { http.delete(input); }
 
@@ -190,15 +158,7 @@
       index: 0
   match_examples:
   - name: tainted http patch url
-    code: 'import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'' as http;
+    code: 'import ''package:http/http.dart'' as http;
 
       void test(dynamic input) { http.patch(input); }
 
@@ -233,15 +193,7 @@
       index: 0
   match_examples:
   - name: tainted http head url
-    code: 'import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'' as http;
+    code: 'import ''package:http/http.dart'' as http;
 
       void test(dynamic input) { http.head(input); }
 
@@ -276,15 +228,7 @@
       index: 0
   match_examples:
   - name: tainted http read url
-    code: 'import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'' as http;
+    code: 'import ''package:http/http.dart'' as http;
 
       void test(dynamic input) { http.read(input); }
 
@@ -319,15 +263,7 @@
       index: 0
   match_examples:
   - name: tainted http client request
-    code: 'import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'';
-
-      import ''package:http/http.dart'' as http;
+    code: 'import ''package:http/http.dart'' as http;
 
       void test(dynamic input) { client.send(input); }
 
@@ -364,14 +300,6 @@
   - name: tainted dio get url
     code: 'import ''package:dio/dio.dart'';
 
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
       void test(String input) { dio.get(input); }
 
       '
@@ -406,14 +334,6 @@
   match_examples:
   - name: tainted dio post url
     code: 'import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
 
       void test(String input) { dio.post(input); }
 
@@ -450,14 +370,6 @@
   - name: tainted dio put url
     code: 'import ''package:dio/dio.dart'';
 
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
       void test(String input) { dio.put(input); }
 
       '
@@ -492,14 +404,6 @@
   match_examples:
   - name: tainted dio delete url
     code: 'import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
 
       void test(String input) { dio.delete(input); }
 
@@ -536,14 +440,6 @@
   - name: tainted dio patch url
     code: 'import ''package:dio/dio.dart'';
 
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
       void test(String input) { dio.patch(input); }
 
       '
@@ -579,14 +475,6 @@
   - name: tainted dio request url
     code: 'import ''package:dio/dio.dart'';
 
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
       void test(String input) { dio.request(input); }
 
       '
@@ -621,14 +509,6 @@
   match_examples:
   - name: tainted dio download url
     code: 'import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
-
-      import ''package:dio/dio.dart'';
 
       void test(String input) { dio.download(input); }
 
@@ -854,12 +734,6 @@
   - name: tainted image network url
     code: 'import ''package:flutter/flutter.dart'';
 
-      import ''package:flutter/flutter.dart'';
-
-      import ''package:flutter/flutter.dart'';
-
-      import ''package:flutter/flutter.dart'';
-
       import ''package:flutter/material.dart''; // flutter
 
       // uses flutter
@@ -897,12 +771,6 @@
   match_examples:
   - name: tainted network image url
     code: 'import ''package:flutter/flutter.dart'';
-
-      import ''package:flutter/flutter.dart'';
-
-      import ''package:flutter/flutter.dart'';
-
-      import ''package:flutter/flutter.dart'';
 
       import ''package:flutter/material.dart''; // flutter
 
@@ -946,10 +814,6 @@
   - name: declared shape
     code: |
       import 'package:webview_flutter/webview_flutter.dart';
-      import 'package:webview_flutter/webview_flutter.dart';
-      import 'package:webview_flutter/webview_flutter.dart';
-      import 'package:webview_flutter/webview_flutter.dart';
-      import 'package:webview_flutter/webview_flutter.dart';
       void test(String input) { var amount = 1; controller.loadRequest(input); }
   - name: literal webview request negative
     code: |
@@ -959,111 +823,3 @@
   description: "WebViewController.loadRequest(tainted URI) - loads attacker-controlled URL in an embedded browser."
   imports:
   - webview_flutter/webview_flutter.dart
-- id: dart.ssrf.webview_load_html_string
-  enabled: false
-  language: dart
-  tag: ssrf
-  severity: medium
-  packages:
-  - webview_flutter
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - controller
-      - loadHtmlString
-  match_examples:
-  - name: declared shape
-    code: 'import ''package:webview_flutter/webview_flutter.dart'';
-
-      import ''package:webview_flutter/webview_flutter.dart'';
-
-      import ''package:webview_flutter/webview_flutter.dart'';
-
-      import ''package:webview_flutter/webview_flutter.dart'';
-
-      import ''package:webview_flutter/webview_flutter.dart'';
-
-      void test() { var input = "x"; var amount = 1; controller.loadHtmlString(input); }
-
-      '
-  description: "WebViewController.loadHtmlString - tainted HTML/URI."
-  imports:
-  - webview_flutter/webview_flutter.dart
-  disabled_reason:
-    code: over-broad
-- id: dart.ssrf.uri_parse_audit
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: ssrf
-  severity: medium
-  cwe:
-  - CWE-918
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      regex: ^Uri\.parse$
-  description: "Disabled audit-only - Uri.parse(tainted) by itself does not perform a network or filesystem call. Enable when triaging URL-construction sites; the dangerous sinks are the http/HttpClient/File rules that consume the parsed Uri."
-- id: dart.ssrf.uri_https_constructor
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: ssrf
-  severity: medium
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Uri
-      - https
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: tainted uri https host
-    code: 'void test(String input) { Uri.https(input); }
-
-      '
-  - name: literal uri https host negative
-    code: 'void test() { Uri.https("example.com"); }
-
-      '
-    expect_no_match: true
-  description: "Disabled audit-only - Uri.https constructs a URI but does not perform a network request. Network clients that consume the URI are the security sinks."
-- id: dart.ssrf.uri_http_constructor
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: ssrf
-  severity: medium
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Uri
-      - http
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: tainted uri http host
-    code: 'void test(String input) { Uri.http(input); }
-
-      '
-  - name: literal uri http host negative
-    code: 'void test() { Uri.http("example.com"); }
-
-      '
-    expect_no_match: true
-  description: "Disabled audit-only - Uri.http constructs a URI but does not perform a network request. Network clients that consume the URI are the security sinks."

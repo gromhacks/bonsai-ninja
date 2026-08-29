@@ -4,7 +4,7 @@
 - id: erlang.log_injection.logger_info
   enabled: true
   language: erlang
-  tag: header-injection
+  tag: log-injection
   severity: medium
   cwe: [CWE-117]
   match:

@@ -20,7 +20,7 @@ body:
     id: version
     attributes:
       label: Version or commit
-      placeholder: "bonsai-ninja 0.1.0; commit …"
+      placeholder: "bonsai-ninja X.Y.Z; commit …"
     validations:
       required: true
   - type: input

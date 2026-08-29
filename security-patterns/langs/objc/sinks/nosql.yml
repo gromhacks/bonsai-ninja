@@ -1,18 +1,4 @@
 # Objective-C NoSQL / predicate-injection sinks (Realm, Core Data, MongoDB driver, Couchbase).
-- id: objc.nosql.realm_predicate_string
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: objc
-  tag: nosql-injection
-  severity: high
-  cwe: [CWE-943]
-  match:
-    kind: call
-    callee:
-      name: predicateWithFormat
-  description: "Disabled - canonical rule is objc.eval.nspredicate_format in eval.yml. NSPredicate +predicateWithFormat: with tainted format is predicate/DSL injection (a subset of code-injection)."
-
 - id: objc.nosql.realm_objects_where
   enabled: true
   language: objc

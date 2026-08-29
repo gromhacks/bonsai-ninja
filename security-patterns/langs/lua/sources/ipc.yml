@@ -1,0 +1,33 @@
+# Lua inter-process sources.
+- id: lua.ipc.lanes_linda_receive
+  enabled: true
+  language: lua
+  trust: ipc
+  tag: ipc-input
+  category: ipc-input
+  payload_types: [event]
+  packages: [lanes, LuaLanes]
+  imports: [lanes]
+  match:
+    kind: call
+    callee:
+      name: receive
+  constraints:
+  - receiver_type_in: [Linda]
+  - min_args: 1
+  match_examples:
+  - name: Lua Lanes Linda mailbox receive
+    code: |
+      local lanes = require("lanes").configure()
+      local mailbox = lanes.linda()
+      local key, value = mailbox:receive(nil, "work")
+      sink(value)
+    expect_match_text: [mailbox.receive]
+  - name: application receive method is not IPC input
+    code: |
+      local lanes = require("lanes").configure()
+      local mailbox = LocalMailbox()
+      local key, value = mailbox:receive(nil, "work")
+      sink(value)
+    expect_no_match: true
+  description: "Lua Lanes Linda:receive returns key/value messages sent by another OS-backed Lua lane on a compiler-typed mailbox receiver."

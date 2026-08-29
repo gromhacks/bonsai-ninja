@@ -106,8 +106,9 @@ pub use transfer::{
     transfer_function_for_with_options, transfer_function_for_with_options_and_assignment_values,
     transfer_function_for_with_options_and_compiler_facts,
     transfer_function_for_with_options_and_syntax_facts, CallResultPassthroughSpec, CallSiteRef,
-    CleanOutputOverwriteSpec, NameInterner, OutputArgFlowSpec, ReceiverStatePropagationSpec,
-    SourceCallbackArgSpec, SourceOutputArgSpec, ThrowSite, TransferOptions, TransferOutput,
+    CallbackInvocationSpec, CleanOutputOverwriteSpec, CleanReceiverOverwriteSpec, NameInterner,
+    OutputArgFlowSpec, ReceiverStatePropagationSpec, SourceCallbackArgSpec, SourceOutputArgSpec, ThrowSite,
+    TransferOptions, TransferOutput,
 };
 pub use workspace::{CrossFileEdge, CrossFileEdges, FieldFlowLink, IdgWorkspace, SegmentId};
 

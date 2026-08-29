@@ -22,7 +22,6 @@
     code: |
       <?php
       use twig\twig;
-      use twig\twig;
       function example($input, $url, $id, $payload, $request) {
         Environment::createTemplate($input);
       }
@@ -38,24 +37,6 @@
   imports:
   - twig\twig
   - twig
-- id: php.template.twig_render
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: ssti
-  severity: medium
-  packages:
-  - twig/twig
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Environment
-      - render
-  description: Disabled - Environment::render takes a template name, not source.
 - id: php.template.smarty_fetch
   enabled: true
   language: php
@@ -78,7 +59,6 @@
   - name: php.template.smarty_fetch example
     code: |
       <?php
-      use smarty\smarty;
       use smarty\smarty;
       function example($input, $url, $id, $payload, $request) {
         Smarty::fetch($input);
@@ -118,7 +98,6 @@
     code: |
       <?php
       use smarty\smarty;
-      use smarty\smarty;
       function example($input, $url, $id, $payload, $request) {
         Smarty::display($input);
       }
@@ -157,7 +136,6 @@
     code: |
       <?php
       use latte\latte;
-      use latte\latte;
       function example($input, $url, $id, $payload, $request) {
         Engine::render($input);
       }
@@ -173,24 +151,6 @@
   imports:
   - latte\latte
   - latte
-- id: php.template.blade_render
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: ssti
-  severity: medium
-  packages:
-  - illuminate/view
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Blade
-      - render
-  description: Disabled - Blade::render needs tainted-source check (constraint TBD).
 - id: php.template.twig_environment_autoescape_off
   enabled: true
   language: php
@@ -243,16 +203,25 @@
       attribute:
       - smarty
       - escape_html
+  constraints:
+  - arg_equals: {index: 0, value: "false"}
   match_examples:
-  - name: php.template.smarty_escape_html_off example
+  - name: Smarty HTML escaping disabled
     code: |
       <?php
       use smarty;
-      use smarty;
-      function example($input, $url, $id, $payload, $request) {
-        $smarty->escape_html = false;;
+      function configure($smarty) {
+        $smarty->escape_html = false;
       }
-  description: $smarty->escape_html = false - disables HTML autoescape on output.
+  - name: Smarty HTML escaping enabled negative
+    code: |
+      <?php
+      use smarty;
+      function configure($smarty) {
+        $smarty->escape_html = true;
+      }
+    expect_no_match: true
+  description: "`$smarty->escape_html = false` disables HTML autoescaping; the exact scalar value constraint rejects the secure setting."
 
 - id: php.template.twig_environment_array_loader
   enabled: true

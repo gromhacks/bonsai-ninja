@@ -1,24 +1,36 @@
-- id: kotlin.deser.object_input_stream
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+- id: kotlin.deser.object_input_stream_tainted_receiver
+  enabled: true
   language: kotlin
   tag: insecure-deserialization
   severity: critical
+  packages: [java.io]
   cwe: [CWE-502]
   match:
     kind: call
     callee:
-      regex: "^ObjectInputStream\\.readObject$"
+      attribute: [ObjectInputStream, readObject]
+  constraints:
+  - receiver_tainted: true
   match_examples:
-  - name: generated shape example
+  - name: object input stream from tainted bytes
     code: |
-      class App {
-        fun handle(input: String) {
-          ObjectInputStream.readObject(input)
-        }
+      import java.io.ByteArrayInputStream
+      import java.io.ObjectInputStream
+      fun restore(data: ByteArray): Any {
+        val stream = ObjectInputStream(ByteArrayInputStream(data))
+        return stream.readObject()
       }
-  description: "Disabled - ObjectInputStream.readObject() has no payload argument; needs receiver state showing the stream wraps untrusted bytes."
+    expect_match_text: [stream.readObject]
+  - name: clean object input stream receiver
+    code: |
+      import java.io.ByteArrayInputStream
+      import java.io.ObjectInputStream
+      fun restore(data: ByteArray): Any {
+        val stream = ObjectInputStream(ByteArrayInputStream(byteArrayOf()))
+        return stream.readObject()
+      }
+    expect_no_match: true
+  description: "ObjectInputStream.readObject() where the stream receiver was constructed from tainted bytes."
 
 - id: kotlin.deser.xstream_fromxml
   enabled: true
@@ -59,43 +71,28 @@
   tag: insecure-deserialization
   category: source-independent
   severity: critical
-  packages: ["com.fasterxml.jackson.core"]
+  packages: ["com.fasterxml.jackson.databind"]
+  imports: [com.fasterxml.jackson.databind]
   cwe: [CWE-502]
   match:
     kind: call
     callee:
-      attribute: [ObjectMapper, enableDefaultTyping]
+      name: enableDefaultTyping
+      receiver_type_in: [ObjectMapper, com.fasterxml.jackson.databind.ObjectMapper]
   match_examples:
-  - name: generated shape example
+  - name: typed Jackson mapper enables legacy default typing
     code: |
-      import com.fasterxml.jackson.core.*
+      import com.fasterxml.jackson.databind.ObjectMapper
       class App {
-        fun handle(input: String) {
-          ObjectMapper.enableDefaultTyping(input)
-        }
+        fun configure(mapper: ObjectMapper) { mapper.enableDefaultTyping() }
       }
+    expect_match_text: [mapper.enableDefaultTyping]
+  - name: unrelated mapper collision
+    code: |
+      class LocalMapper { fun enableDefaultTyping() {} }
+      class App { fun configure(mapper: LocalMapper) { mapper.enableDefaultTyping() } }
+    expect_no_match: true
   description: Jackson enableDefaultTyping - gadget-chain RCE.
-- id: kotlin.deser.xmldecoder
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: kotlin
-  tag: insecure-deserialization
-  severity: critical
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      regex: "^XMLDecoder\\.readObject$"
-  match_examples:
-  - name: generated shape example
-    code: |
-      class App {
-        fun handle(input: String) {
-          XMLDecoder.readObject(input)
-        }
-      }
-  description: "Disabled - XMLDecoder.readObject() executes XML supplied to the decoder constructor; needs receiver state tying the decoder to tainted XML."
 - id: kotlin.deser.snake_yaml
   enabled: true
   language: kotlin
@@ -162,29 +159,6 @@
       }
     expect_no_match: true
   description: Kryo readClassAndObject - unsafe with untrusted input.
-- id: kotlin.deser.hessian_readobject
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: kotlin
-  tag: insecure-deserialization
-  severity: critical
-  packages: ["com.caucho"]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      regex: "^HessianInput\\.readObject$"
-  match_examples:
-  - name: generated shape example
-    code: |
-      import com.caucho.*
-      class App {
-        fun handle(input: String) {
-          HessianInput.readObject(input)
-        }
-      }
-  description: "Disabled - HessianInput.readObject() has no payload argument; needs receiver state showing the HessianInput wraps untrusted bytes."
 - id: kotlin.deser.jackson_readvalue
   enabled: true
   language: kotlin
@@ -218,21 +192,6 @@
       }
     expect_no_match: true
   description: "ObjectMapper.readValue - RCE when polymorphic default typing enabled."
-- id: kotlin.deser.kotlinx_decodefromstring
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: insecure-deserialization
-  severity: medium
-  packages: ["org.jetbrains.kotlinx:kotlinx-serialization-json"]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [Json, decodeFromString]
-  description: "Disabled - kotlinx.serialization Json.decodeFromString is safe for typed @Serializable classes; only dangerous with polymorphism/open classes."
-
 - id: kotlin.deser.kotlinx_polymorphic_decode
   enabled: true
   language: kotlin
@@ -272,54 +231,39 @@
   imports:
   - org
   - org.jetbrains.kotlinx.kotlinxserializationjson
-- id: kotlin.deser.jackson_polymorphictypevalidator
-  enabled: true
-  language: kotlin
-  tag: insecure-deserialization
-  category: source-independent
-  severity: high
-  packages: ["com.fasterxml.jackson.core"]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [ObjectMapper, activateDefaultTyping]
-  match_examples:
-  - name: jackson activate default typing
-    code: |
-      import com.fasterxml.jackson.core.*
-      class App {
-        fun handle(mapper: ObjectMapper, ptv: Any) {
-          mapper.activateDefaultTyping(ptv)
-        }
-      }
-      class ObjectMapper {
-        fun activateDefaultTyping(vararg args: Any?) {}
-      }
-    expect_match_text: [mapper.activateDefaultTyping]
-  description: "Jackson ObjectMapper.activateDefaultTyping(...) - enables polymorphic deserialization; dangerous with permissive subtype validators or untrusted JSON."
-
 - id: kotlin.deser.jackson_enabledefaulttyping_with_as
   enabled: true
   language: kotlin
   tag: insecure-deserialization
   category: source-independent
   severity: critical
-  packages: ["com.fasterxml.jackson.core"]
+  packages: ["com.fasterxml.jackson.databind"]
+  imports: [com.fasterxml.jackson.databind]
   cwe: [CWE-502]
   match:
     kind: call
     callee:
-      attribute: [ObjectMapper, enableDefaultTypingAsProperty]
+      name: enableDefaultTypingAsProperty
+      receiver_type_in: [ObjectMapper, com.fasterxml.jackson.databind.ObjectMapper]
   match_examples:
-  - name: generated shape example
+  - name: typed Jackson mapper enables legacy property typing
     code: |
-      import com.fasterxml.jackson.core.*
+      import com.fasterxml.jackson.databind.ObjectMapper
       class App {
-        fun handle(input: String) {
-          ObjectMapper.enableDefaultTypingAsProperty(input)
+        fun configure(mapper: ObjectMapper) {
+          mapper.enableDefaultTypingAsProperty(ObjectMapper.DefaultTyping.NON_FINAL, "@type")
         }
       }
+    expect_match_text: [mapper.enableDefaultTypingAsProperty]
+  - name: unrelated property typing method collision
+    code: |
+      class LocalMapper { fun enableDefaultTypingAsProperty(value: Any, name: String) {} }
+      class App {
+        fun configure(mapper: LocalMapper) {
+          mapper.enableDefaultTypingAsProperty(Any(), "@type")
+        }
+      }
+    expect_no_match: true
   description: "Jackson ObjectMapper.enableDefaultTypingAsProperty - same gadget-chain RCE surface as enableDefaultTyping."
 
 - id: kotlin.deser.msgpack_messagepack_read
@@ -426,31 +370,3 @@
       }
     expect_no_match: true
   description: "msgpack-core MessageUnpacker.unpackValue(...) - parses attacker-controlled MessagePack payloads for downstream object mapping."
-
-- id: kotlin.deser.poi_xssfworkbook_stream
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: insecure-deserialization
-  severity: high
-  packages: ["org.apache.poi"]
-  cwe: [CWE-502, CWE-611]
-  match:
-    kind: new
-    callee:
-      name: XSSFWorkbook
-  match_examples:
-  - name: xssf workbook input stream
-    code: |
-      import org.apache.poi.*
-      class App {
-        fun handle(stream: Any): Any {
-          return XSSFWorkbook(stream)
-        }
-      }
-      class XSSFWorkbook(vararg args: Any?)
-    expect_match_text: [XSSFWorkbook]
-  description: "Disabled - XSSFWorkbook(InputStream) is not a generic object-deserialization boundary; archive resource exhaustion requires a separate version/config-aware rule."
-  imports:
-  - org

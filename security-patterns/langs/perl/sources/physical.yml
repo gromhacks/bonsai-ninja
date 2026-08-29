@@ -1,0 +1,76 @@
+# Perl physical-device sources. Package-qualified hardware functions and
+# compiler-typed serial receivers distinguish device input from ordinary
+# same-named application helpers.
+- id: perl.source.bcm2835_gpio_level
+  enabled: true
+  language: perl
+  trust: physical
+  category: hardware-io
+  tag: hw-input
+  payload_types: [sensor-frame]
+  packages: ["Device::BCM2835"]
+  imports: ["Device::BCM2835"]
+  match:
+    kind: call
+    callee:
+      regex: '^Device::BCM2835::(?:gpio_lev|gpio_eds)$'
+  constraints:
+  - arg_count: 1
+  match_examples:
+  - name: BCM2835 GPIO physical level
+    code: |
+      use Device::BCM2835;
+      sub read_pin {
+        my ($pin) = @_;
+        return Device::BCM2835::gpio_lev($pin);
+      }
+    expect_match_text: ["Device::BCM2835::gpio_lev"]
+  - name: local GPIO helper is not device input
+    code: |
+      use Device::BCM2835;
+      sub gpio_lev { return 0 }
+      sub read_pin {
+        my ($pin) = @_;
+        return gpio_lev($pin);
+      }
+    expect_no_match: true
+  description: "Device::BCM2835 gpio_lev/gpio_eds reads a GPIO voltage level or physical edge-detect state through an exact package-qualified call."
+
+- id: perl.source.device_serialport_read
+  enabled: true
+  language: perl
+  trust: physical
+  category: hardware-io
+  tag: hw-input
+  payload_types: [binary, text]
+  packages: ["Device::SerialPort"]
+  imports: ["Device::SerialPort"]
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|->)(?:read|lookfor)$'
+  constraints:
+  - receiver_type_in: ["Device::SerialPort"]
+  - max_args: 1
+  match_examples:
+  - name: serial device input
+    code: |
+      use Device::SerialPort;
+      sub read_frame {
+        my $port = Device::SerialPort->new('/dev/ttyUSB0');
+        my ($count, $bytes) = $port->read(128);
+        return $bytes;
+      }
+    expect_match_text: [port->read]
+  - name: ordinary stream read is not physical input
+    code: |
+      use Device::SerialPort;
+      package LocalBuffer;
+      sub read { return (5, 'local') }
+      package main;
+      sub read_frame {
+        my $buffer = LocalBuffer->new();
+        return $buffer->read(128);
+      }
+    expect_no_match: true
+  description: "Device::SerialPort read/lookfor returns bytes observed on an attached serial device through a compiler-typed receiver."

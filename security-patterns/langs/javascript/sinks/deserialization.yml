@@ -43,21 +43,6 @@
     expect_no_match: true
   description: node-serialize.unserialize - evaluates embedded function bodies; RCE on tainted input.
 
-- id: javascript.deser.serialize_javascript_deserialize
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: insecure-deserialization
-  severity: critical
-  packages: [serialize-javascript]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: deserialize
-  description: "Disabled - bare `deserialize(...)` fires on every ORM/queue/worker `.deserialize` call; enable with receiver narrowing to the serialize-javascript module."
-
 - id: javascript.deser.funcster_deepdeserialize
   enabled: true
   language: javascript

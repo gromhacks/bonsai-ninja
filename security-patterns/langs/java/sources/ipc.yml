@@ -1,34 +1,4 @@
 # Java IPC / cross-app input sources.
-- id: java.source.android_intent_getstringextra
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: java.source.android_intent_payload
-  language: java
-  trust: ipc
-  tag: ipc-input
-  packages: [android]
-  match:
-    kind: call
-    callee:
-      regex: "\\.getStringExtra$"
-  constraints:
-  - min_args: 1
-  match_examples:
-  - name: generated shape example
-    code: |
-      import android.*;
-      class App {
-        void handle(Intent intent, String key) throws Exception {
-          intent.getStringExtra(key);
-        }
-      }
-      class Intent {
-        String getStringExtra(Object... args) { return ""; }
-      }
-    expect_match_text: [intent.getStringExtra]
-  description: "Android Intent.getStringExtra(...) - package-scoped IPC extra read from a local intent receiver."
-
 - id: java.source.android_intent_payload
   enabled: true
   language: java

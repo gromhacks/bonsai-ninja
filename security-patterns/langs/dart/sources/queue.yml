@@ -44,6 +44,14 @@
         var d = message.data;
         return d;
       }
+  - name: same member on a non-message receiver
+    code: |
+      import 'package:firebase_messaging/firebase_messaging.dart';
+      Map<String, dynamic> handle(LocalEnvelope message) {
+        var d = message.data;
+        return d;
+      }
+    expect_no_match: true
   description: "RemoteMessage.data - FCM push payload read via `message.data` on a typed RemoteMessage receiver."
 
 - id: dart.queue.fcm_notification_title
@@ -65,4 +73,12 @@
         var n = message.notification;
         return n;
       }
+  - name: same member on a non-message receiver
+    code: |
+      import 'package:firebase_messaging/firebase_messaging.dart';
+      Object? handle(LocalEnvelope message) {
+        var n = message.notification;
+        return n;
+      }
+    expect_no_match: true
   description: "RemoteMessage.notification - FCM notification block read via `message.notification` on a typed RemoteMessage receiver."

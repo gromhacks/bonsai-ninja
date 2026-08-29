@@ -1,0 +1,148 @@
+# JavaScript database-result sources. These rules require compiler-derived
+# receiver types so an application method that shares the API spelling does
+# not become a database trust boundary merely because the package is present.
+- id: javascript.source.mongodb_collection_find_one
+  enabled: true
+  language: javascript
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [mongodb]
+  match:
+    kind: call
+    callee:
+      name: findOne
+  constraints:
+  - receiver_type_in: [Collection]
+  - max_args: 2
+  match_examples:
+  - name: typed MongoDB collection document
+    code: |
+      const { MongoClient } = require("mongodb");
+      async function load() {
+        const client = new MongoClient("mongodb://localhost");
+        const database = client.db("app");
+        const users = database.collection("users");
+        return await users.findOne({ active: true });
+      }
+    expect_match_text: [users.findOne]
+  - name: application repository is not a database carrier
+    code: |
+      require("mongodb");
+      class Repository { findOne(filter) { return { local: true }; } }
+      async function load() {
+        const repo = new Repository();
+        return repo.findOne({ active: true });
+      }
+    expect_no_match: true
+  description: "MongoDB Collection.findOne() returns a document read from persistent database state on a compiler-typed Collection receiver."
+
+- id: javascript.source.mongodb_collection_distinct
+  enabled: true
+  language: javascript
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [mongodb]
+  match:
+    kind: call
+    callee:
+      name: distinct
+  constraints:
+  - receiver_type_in: [Collection]
+  - min_args: 1
+  - max_args: 3
+  match_examples:
+  - name: typed MongoDB distinct values
+    code: |
+      const { MongoClient } = require("mongodb");
+      async function roles() {
+        const client = new MongoClient("mongodb://localhost");
+        const database = client.db("app");
+        const users = database.collection("users");
+        return await users.distinct("role");
+      }
+    expect_match_text: [users.distinct]
+  - name: application collection is not MongoDB input
+    code: |
+      require("mongodb");
+      class Values { distinct(name) { return [name]; } }
+      function roles() {
+        const values = new Values();
+        return values.distinct("role");
+      }
+    expect_no_match: true
+  description: "MongoDB Collection.distinct(field[, filter[, options]]) returns values read from persistent documents on a compiler-typed receiver."
+
+- id: javascript.source.pg_query_single_argument_result
+  enabled: true
+  language: javascript
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [pg]
+  match:
+    kind: call
+    callee:
+      name: query
+  constraints:
+  - receiver_type_in: [Client, Pool]
+  - arg_count: 1
+  match_examples:
+  - name: typed node-postgres promise query result
+    code: |
+      const { Pool } = require("pg");
+      async function load() {
+        const pool = new Pool();
+        return await pool.query({ text: "SELECT name FROM users" });
+      }
+    expect_match_text: [pool.query]
+  - name: application query builder is not database input
+    code: |
+      const { Pool } = require("pg");
+      class Builder { query(spec) { return spec; } }
+      function load(builder) { return builder.query({ table: "users" }); }
+    expect_no_match: true
+  description: "node-postgres Client/Pool.query(config-or-text) one-argument Promise form returns a QueryResult containing database rows."
+
+- id: javascript.source.pg_query_callback_result
+  enabled: true
+  language: javascript
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [pg]
+  match:
+    kind: call
+    callee:
+      name: query
+  constraints:
+  - receiver_type_in: [Client, Pool]
+  - arg_count: 3
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 2
+      source_param_indices: [1]
+  match_examples:
+  - name: typed node-postgres callback result
+    code: |
+      const { Client } = require("pg");
+      function load() {
+        const client = new Client();
+        client.query("SELECT name FROM users WHERE id = $1", [1], (error, result) => sink(result.rows));
+      }
+    expect_match_text: [client.query]
+  - name: promise overload is not the callback carrier
+    code: |
+      const { Client } = require("pg");
+      async function load() {
+        const client = new Client();
+        return await client.query("SELECT name FROM users WHERE id = $1", [1]);
+      }
+    expect_no_match: true
+  description: "Second callback parameter of node-postgres Client/Pool.query(text, values, callback) carries QueryResult rows; the registration return is not sourced."

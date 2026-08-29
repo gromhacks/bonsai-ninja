@@ -35,29 +35,6 @@
     expect_no_match: true
   description: "SAXParser.parse - disable external entities."
 
-- id: kotlin.xxe.saxparserfactory_newinstance
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: xxe
-  category: source-independent
-  severity: high
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      regex: "^SAXParserFactory\\.newInstance$"
-  match_examples:
-  - name: generated shape example
-    code: |
-      class App {
-        fun handle(input: String) {
-          SAXParserFactory.newInstance(input)
-        }
-      }
-  description: "Disabled - SAXParserFactory.newInstance only allocates a factory. Report the tainted parse/unmarshal boundary unless compiler facts prove the complete hardened configuration."
-
 - id: kotlin.xxe.documentbuilder_parse
   enabled: true
   language: kotlin
@@ -94,26 +71,113 @@
     expect_no_match: true
   description: "DocumentBuilder.parse."
 
-- id: kotlin.xxe.documentbuilderfactory_newinstance
+- id: kotlin.xxe.documentbuilder_parse_local
   enabled: true
   language: kotlin
   tag: xxe
-  category: source-independent
   severity: high
+  packages: [javax.xml.parsers]
+  imports: [javax.xml.parsers]
   cwe: [CWE-611]
   match:
     kind: call
     callee:
-      regex: "^DocumentBuilderFactory\\.newInstance$"
+      regex: '\.parse$'
+  constraints:
+  - receiver_type_in: [DocumentBuilder]
+  - arg_tainted:
+      index: 0
+  analysis_semantics:
+    receiver_callback_configuration_guard: &document_builder_apply_hardening
+      provider_factory:
+        attribute: [DocumentBuilderFactory, newInstance]
+      wrapper_call:
+        name: apply
+      callback_argument_index: 0
+      sink_receiver_builder:
+        name: newDocumentBuilder
+      required_calls:
+      - call: {name: setFeature}
+        identity_argument_indices: [0]
+        required_arguments:
+        - index: 0
+          accepted_static_values:
+          - {kind: string, value: "http://apache.org/xml/features/disallow-doctype-decl"}
+        - index: 1
+          accepted_static_values: [{kind: boolean, value: true}]
+      - call: {name: setFeature}
+        identity_argument_indices: [0]
+        required_arguments:
+        - index: 0
+          accepted_static_values:
+          - {kind: string, value: "http://xml.org/sax/features/external-general-entities"}
+        - index: 1
+          accepted_static_values: [{kind: boolean, value: false}]
+      - call: {name: setFeature}
+        identity_argument_indices: [0]
+        required_arguments:
+        - index: 0
+          accepted_static_values:
+          - {kind: string, value: "http://xml.org/sax/features/external-parameter-entities"}
+        - index: 1
+          accepted_static_values: [{kind: boolean, value: false}]
   match_examples:
-  - name: generated shape example
+  - name: typed document builder parses tainted input
     code: |
-      class App {
-        fun handle(input: String) {
-          DocumentBuilderFactory.newInstance(input)
-        }
-      }
-  description: "DocumentBuilderFactory.newInstance - flag without disallow-doctype-decl."
+      import javax.xml.parsers.DocumentBuilder
+      fun parse(builder: DocumentBuilder, input: String) = builder.parse(input)
+    expect_match_text: [builder.parse]
+  - name: typed document builder parses a literal
+    code: |
+      import javax.xml.parsers.DocumentBuilder
+      fun parse(builder: DocumentBuilder, input: String) = builder.parse("safe.xml")
+    expect_no_match: true
+  - name: local parser with same method is not XML
+    code: |
+      import javax.xml.parsers.DocumentBuilder
+      class LocalParser { fun parse(input: String): Any = Any() }
+      fun parse(parser: LocalParser, input: String) = parser.parse(input)
+    expect_no_match: true
+  description: "DocumentBuilder.parse on an exact typed receiver consumes tainted XML unless the factory lifecycle is hardened."
+
+- id: kotlin.xxe.documentbuilder_factory_chain_parse
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  packages: [javax.xml.parsers]
+  imports: [javax.xml.parsers]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.newDocumentBuilder\(\)\.parse$'
+  constraints:
+  - arg_tainted:
+      index: 0
+  analysis_semantics:
+    receiver_callback_configuration_guard: *document_builder_apply_hardening
+  match_examples:
+  - name: document-builder factory chain parses tainted input
+    code: |
+      import javax.xml.parsers.DocumentBuilderFactory
+      fun parse(factory: DocumentBuilderFactory, input: String) =
+        factory.newDocumentBuilder().parse(input)
+    expect_match_text: [factory.newDocumentBuilder().parse]
+  - name: document-builder factory chain parses a literal
+    code: |
+      import javax.xml.parsers.DocumentBuilderFactory
+      fun parse(factory: DocumentBuilderFactory, input: String) =
+        factory.newDocumentBuilder().parse("safe.xml")
+    expect_no_match: true
+  - name: local same-shaped builder chain is not javax XML
+    code: |
+      import javax.xml.parsers.DocumentBuilderFactory
+      class LocalBuilder { fun parse(input: String): Any = Any() }
+      class LocalFactory { fun newDocumentBuilder(): LocalBuilder = LocalBuilder() }
+      fun parse(factory: LocalFactory, input: String) = factory.newDocumentBuilder().parse(input)
+    expect_no_match: true
+  description: "Exact DocumentBuilderFactory.newDocumentBuilder().parse(...) call chain; provider identity remains in rule data while the adapter emits generic call/type facts."
 
 - id: kotlin.xxe.xmlinputfactory_createreader
   enabled: true
@@ -243,20 +307,6 @@
       }
     expect_no_match: true
   description: "SchemaFactory.newSchema."
-
-- id: kotlin.xxe.xpath_evaluate
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: xxe
-  severity: medium
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [XPath, evaluate]
-  description: "Disabled - XPath itself doesn't fetch entities; flag with XML source."
 
 - id: kotlin.xxe.unmarshaller_unmarshal
   enabled: true
@@ -405,43 +455,3 @@
   imports:
   - com
   - com.fasterxml.jackson.dataformat.jacksondataformatxml
-- id: kotlin.xxe.apache_poi_xssfworkbook_inputstream
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: xxe
-  severity: high
-  packages: ["org.apache.poi"]
-  cwe: [CWE-611]
-  match:
-    kind: new
-    callee:
-      name: XSSFWorkbook
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: apache poi xssf workbook input stream
-    code: |
-      import org.apache.poi.*
-      class App {
-        fun handle(stream: InputStream): Any {
-          return XSSFWorkbook(stream)
-        }
-      }
-      class InputStream
-      class XSSFWorkbook(vararg args: Any?)
-    expect_match_text: [XSSFWorkbook]
-  - name: arg tainted literal negative
-    code: |
-      import org.apache.poi.*
-      class App {
-      fun handle(stream: InputStream): Any {
-        return XSSFWorkbook("safe")
-      }
-      }
-      class InputStream
-      class XSSFWorkbook(vararg args: Any?)
-    expect_no_match: true
-  description: "Disabled - XSSFWorkbook(InputStream) is not itself an external-entity boundary. Apache POI's historical XXE affected XSSFExportToXml before 4.1.1; archive resource exhaustion requires a separate, version/config-aware rule."

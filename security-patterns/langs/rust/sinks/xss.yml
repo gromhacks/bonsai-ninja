@@ -153,31 +153,3 @@
       }
     expect_no_match: true
   description: "warp reply::html(tainted) - wraps body in a text/html response; no escaping applied."
-
-- id: rust.xss.actix_response_body_html
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: xss
-  severity: high
-  packages: [actix_web]
-  cwe: [CWE-79]
-  match:
-    kind: call
-    callee:
-      attribute: [HttpResponseBuilder, content_type]
-  match_examples:
-  - name: generated direct match
-    code: |
-      use actix_web;
-      use actix_web;
-      use actix_web::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          HttpResponseBuilder::content_type(target);
-      }
-  description: "Disabled - content_type(\"text/html\") only sets response state; the tainted body is supplied by a later builder call, so this requires receiver-state tracking."
-  imports:
-  - actix_web

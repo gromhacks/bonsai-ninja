@@ -1,10 +1,11 @@
 use std::path::Path;
 
 use super::{
-    default_workspace_bonsai_dir, ends_at_qualified_name_boundary, is_bonsai_case_probe_path,
-    normalize_qualified_name, qualified_name_owner, qualified_name_prefixes, qualified_names_match,
-    short_qualified_tail, split_qualified_name_head_tail, split_qualified_name_owner_tail,
-    starts_at_qualified_name_boundary, trim_leading_name_punctuation,
+    declaration_qualified_suffix, default_workspace_bonsai_dir, ends_at_qualified_name_boundary,
+    ensure_cache_directory_writable, is_bonsai_case_probe_path, normalize_qualified_name,
+    qualified_name_owner, qualified_name_prefixes, qualified_names_match, short_qualified_tail,
+    split_qualified_name_head_tail, split_qualified_name_owner_tail, starts_at_qualified_name_boundary,
+    trim_leading_name_punctuation, writable_default_workspace_bonsai_dir,
 };
 
 #[test]
@@ -26,6 +27,59 @@ fn default_workspace_cache_is_external_stable_and_namespaced() {
     );
     assert_ne!(first, other, "same basename in a different root must not collide");
     assert!(!first.starts_with("/work/acme project"));
+}
+
+#[test]
+fn unwritable_default_cache_falls_back_without_global_environment_mutation() {
+    let root = std::env::temp_dir().join(format!(
+        "bonsai-cache-fallback-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&root).expect("create test root");
+    let unusable = root.join("not-a-directory");
+    std::fs::write(&unusable, b"file").expect("create unusable cache root");
+    let fallback = root.join("fallback");
+
+    let selected =
+        writable_default_workspace_bonsai_dir(Path::new("/work/example"), Some(&unusable), &fallback);
+
+    assert!(selected.starts_with(fallback.join("bonsai-ninja/workspaces")));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn cache_writability_probe_rejects_a_file_and_cleans_up_after_success() {
+    let root = std::env::temp_dir().join(format!(
+        "bonsai-cache-probe-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&root).expect("create test root");
+    let file = root.join("plain-file");
+    std::fs::write(&file, b"not a directory").expect("write fixture");
+
+    assert!(!ensure_cache_directory_writable(&file));
+    assert!(ensure_cache_directory_writable(&root));
+    let absent = root.join("new-cache");
+    assert!(ensure_cache_directory_writable(&absent));
+    assert!(
+        !absent.exists(),
+        "probing an absent cache path must not materialize it"
+    );
+    assert_eq!(
+        std::fs::read_dir(&root)
+            .expect("read fixture root")
+            .filter_map(Result::ok)
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".bonsai-write-probe-"))
+            .count(),
+        0,
+        "successful probes must not leave cache artifacts"
+    );
+    std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
@@ -52,6 +106,20 @@ fn qualified_name_matching_uses_the_canonical_non_empty_tail() {
     assert!(qualified_names_match("App\\Service\\run", "Service.run"));
     assert!(!qualified_names_match("App::read", "App::write"));
     assert!(!qualified_names_match("App::", "Other::"));
+}
+
+#[test]
+fn declaration_suffix_preserves_adapter_emitted_syntax_after_the_concise_name() {
+    assert_eq!(
+        declaration_qualified_suffix("runAdminCommand", "AuthService.runAdminCommand:action:"),
+        Some("runAdminCommand:action:")
+    );
+    assert_eq!(
+        declaration_qualified_suffix("read", "crate::storage::read"),
+        Some("read")
+    );
+    assert_eq!(declaration_qualified_suffix("run", "Owner.runner"), None);
+    assert_eq!(declaration_qualified_suffix("", "Owner.run"), None);
 }
 
 #[test]

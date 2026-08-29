@@ -41,7 +41,7 @@ fn bin_path() -> Option<PathBuf> {
 }
 
 fn ws() -> PathBuf {
-    repo_root().join("examples/python/micro")
+    repo_root().join("test-fixtures/languages/python/micro")
 }
 
 fn run(args: &[&str]) -> Option<String> {
@@ -416,7 +416,7 @@ fn imports_surface_the_specific_symbol_on_multi_symbol_lines() {
     // used to render two visually-identical import rows because the
     // CLI dropped `original_name`. After the fix each row shows the
     // specific symbol it represents. JSON also includes the field.
-    let Some(ws) = Some(repo_root().join("examples/python/micro")) else {
+    let Some(ws) = Some(repo_root().join("test-fixtures/languages/python/micro")) else {
         return;
     };
     let Some(bin) = bin_path() else { return };
@@ -464,7 +464,7 @@ fn dart_refs_find_calls_through_selector_walker() {
     // adding a Dart-specific branch to `extract_call_refs` the
     // lookup returns both.
     let Some(bin) = bin_path() else { return };
-    let ws = repo_root().join("examples/dart/micro");
+    let ws = repo_root().join("test-fixtures/languages/dart/micro");
     let out = Command::new(&bin)
         .args([
             "refs",

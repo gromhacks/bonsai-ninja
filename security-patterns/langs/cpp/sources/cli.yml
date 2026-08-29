@@ -27,18 +27,29 @@
     expect_no_match: true
   description: "The char** parameter at argv's runtime position in C++ main(...) - matched from compiler signature facts, independent of the binding name."
 - id: cpp.input.cin_read
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: cpp
   trust: local
   tag: local-input
   payload_types: [text]
   match:
-    kind: read
-    target:
-      name: cin
+    kind: call
+    callee:
+      name: ">>"
+  constraints:
+  - receiver_matches_regex: "^std::cin$"
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
+  - name: standard input stream extraction
+    code: |
+      #include <iostream>
+      #include <string>
+      void example() {
+        std::string value;
+        std::cin >> value;
+      }
+    expect_match_text: [">>"]
   - name: member named cin is not standard input
     code: |
       struct IO { int cin; } io;
@@ -46,7 +57,13 @@
         auto x = io.cin;
       }
     expect_no_match: true
-  description: "Disabled - reading an identifier or member named `cin` is not a stream extraction. Enable only after the C++ adapter lowers `std::cin >> destination` as an exact overloaded-operator call with the destination carrier."
+  - name: numeric right shift is not standard input
+    code: |
+      int example(int value) {
+        return value >> 1;
+      }
+    expect_no_match: true
+  description: "std::cin stream extraction - the C++ frontend lowers the parsed overloaded `operator>>` with its exact receiver and write-back destination; a field read or numeric shift cannot match."
 - id: cpp.input.getenv
   enabled: true
   language: cpp
@@ -357,28 +374,6 @@
       }
     expect_match_text: ["std::cin.read"]
   description: "std::cin.read(buf, n) - reads raw stdin bytes into the destination buffer."
-- id: cpp.input.sscanf
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  trust: local
-  tag: local-input
-  payload_types: [text]
-  match:
-    kind: call
-    callee:
-      name: sscanf
-  match_examples:
-  - name: generated direct match
-    code: |
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        sscanf(arg);
-      }
-  description: "Disabled - sscanf parses an in-memory buffer; taint comes from the buffer, not sscanf itself. cpp.passthrough.sscanf_outputs preserves real input-buffer-to-output flows."
 - id: cpp.input.scanf
   enabled: true
   language: cpp
@@ -424,7 +419,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      #include <QtCore/Qt>
       #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example() {

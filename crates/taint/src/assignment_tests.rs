@@ -69,6 +69,7 @@ fn try_event(
         finally_events,
         catch_param: None,
         catch_types: Vec::new(),
+        catch_arms: Vec::new(),
     }
 }
 

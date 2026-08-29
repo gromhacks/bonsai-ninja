@@ -91,14 +91,21 @@
   - arg_tainted:
       index: 1
   analysis_semantics:
-    character_escape:
-      value_arg_indices: [1]
+    character_constraint:
       required_mappings:
       - {input: "\\", output: "\\5c"}
       - {input: "*", output: "\\2a"}
       - {input: "(", output: "\\28"}
       - {input: ")", output: "\\29"}
       - {input: "\u0000", output: "\\00"}
+      accepted_providers:
+      - operation: {regex: '^replace$'}
+      - factory: {name: String}
+        operation: {regex: '^String\.replace$'}
+      - factory: {name: map}
+        operation: {regex: '^map\.join$'}
+      - factory: {regex: '^charCodeAt\.toString\.padStart$'}
+        operation: {regex: '^(?:replace|String\.replace)$'}
   match_examples:
   - name: ldapjs search options filter
     code: |
@@ -298,23 +305,3 @@
       \ {\n  return ad.findGroup(\"safe-group\");\n}\n"
     expect_no_match: true
   description: activedirectory ad.findGroup.
-- id: typescript.ldap.activedirectory_authenticate
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: ldap-injection
-  severity: medium
-  packages:
-  - activedirectory
-  - activedirectory2
-  cwe:
-  - CWE-90
-  match:
-    kind: call
-    callee:
-      attribute:
-      - ad
-      - authenticate
-  description: "Disabled - authenticate accepts username+password directly; flag\
-    \ DN-injection only via higher-level finders."

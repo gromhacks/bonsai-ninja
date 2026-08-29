@@ -18,7 +18,7 @@ pub use capabilities::{
 };
 pub use kit::{
     alias_map_from_import_specs, alias_map_from_imports, apply_assign_call_result_types,
-    apply_call_receiver_types, apply_call_receiver_types_with_language_syntax,
+    apply_assignment_type_aliases, apply_call_receiver_types, apply_call_receiver_types_with_language_syntax,
     apply_call_receiver_types_with_super_tokens, apply_class_field_type_aliases,
     apply_constructor_result_type_aliases, apply_expression_value_kinds, apply_file_stem_semantic_identity,
     apply_local_closure_captures, apply_module_path_semantic_identity, assignment_trace_message,
@@ -28,17 +28,19 @@ pub use kit::{
     extend_alias_map_with_flow_events, extract_assignment_value_facts, extract_branch_condition_facts,
     extract_call_argument_value_facts, extract_call_receiver_facts, extract_imports_via,
     extract_runtime_type_narrowing_facts, for_each_flow_event, mark_namespace_call_receivers,
-    module_local_binding, normalize_call_result_assignment_sources, populate_decl_return_types,
-    qualify_implicit_member_assign_targets, qualify_implicit_member_reads_in_index,
-    qualify_receiver_field_expression_flows, rewrite_implicit_member_reads, tuple_result_projection_index,
-    AliasTarget, AssignmentNodeSemantics, CallTargetExtraction, ExpressionPlaceExtraction,
-    FunctionDefinitionExtraction, GrammarHandler, ImplicitMemberReadCall, ModifierVocabulary,
-    PatternBindingSite, PatternSourceProjection, ProjectedPatternBindingSite, SyntaxSpecialForm,
-    TypeAliasVocabulary, EMPTY_HANDLER, MODULE_DECL_NAME, WILDCARD_IMPORT_ALIAS_PREFIX,
+    module_local_binding, normalize_call_result_assignment_sources, normalize_decl_event_evaluation_order,
+    populate_decl_return_types, qualify_implicit_member_assign_targets,
+    qualify_implicit_member_reads_in_index, qualify_receiver_field_expression_flows,
+    rewrite_implicit_member_reads, tuple_result_projection_index, AliasTarget, AssignmentNodeSemantics,
+    CallTargetExtraction, ExpressionPlaceExtraction, FunctionDefinitionExtraction, GrammarHandler,
+    ImplicitMemberReadCall, ModifierVocabulary, PatternBindingSite, PatternSourceProjection,
+    ProjectedPatternBindingSite, SyntaxSpecialForm, TypeAliasVocabulary, EMPTY_HANDLER, MODULE_DECL_NAME,
+    WILDCARD_IMPORT_ALIAS_PREFIX,
 };
 pub use parse_recovery::{
-    branch_free_conditional_recovery_edits, c_family_declaration_macro_recovery_edits, syntax_damage_score,
-    ConditionalDirectiveSyntax, ParseRecoveryEdit,
+    branch_free_conditional_recovery_edits, c_family_declaration_macro_recovery_edits,
+    c_family_preprocessor_context_fingerprint, syntax_damage_score, ConditionalDirectiveSyntax,
+    ParseRecoveryEdit,
 };
 pub use registry::{AdapterArc, LanguageRegistry};
 pub use taxonomy::{flow_edge_spec, FlowEdgeKind, FlowEdgeSpec, FlowEdgeSupport, FLOW_EDGE_TAXONOMY};
@@ -48,19 +50,20 @@ pub use types::{
     finite_literal_selection_for_assignment, operations_from_flow_events, AggregateLayout,
     ArgumentPassingMode, AssignValueKind, AssignmentValueFact, AssignmentValueIndex, BranchConditionFact,
     BranchConditionPolarity, CallArg, CallArgumentValueFact, CallKind, CallReceiverFact, CallReceiverRole,
-    CharacterClass, CharacterConstraintDomain, CharacterConstraintFact, CharacterConstraintOutput,
-    CharacterSubstitutionDomain, CharacterSubstitutionFact, Comment, CommentKind, CompilerAssignmentAlias,
-    CompilerAttribution, CompilerBrowseHeader, CompilerBrowseTermGroup, CompilerCallArgumentAttribution,
-    CompilerCallAttribution, CompilerCallHeader, CompilerFactoryCallAssignment, CompilerFunctionAttribution,
-    CompilerGuardFact, CompilerReceiverTypeHeader, CompilerReturnHeader, CompilerSyntaxHeader,
-    CompilerWriteAttribution, ConditionEquality, ConditionExpressionFact, ConditionOperandFact, Decl,
-    DeclIndex, DeclKind, DynamicKeyFilterFact, ExpressionField, ExpressionFlow, ExpressionProjection,
-    FieldWrite, FiniteLiteralSelectionFact, FlowEvent, GuardedValueFilterFact, ImportIndex, ImportScope,
-    ImportSpec, LanguageId, LoopKind, MembershipConditionFact, ModulePath, Operation, OperationKind,
-    OperationOperand, OperationOperandRole, ReceiverFieldInitializer, Ref, RefKind, RuntimeTypeNarrowingFact,
-    SameOriginPathConstraintFact, StaticAggregateFieldValue, StaticScalarValue, StaticStringMapEntry,
-    StaticStringMapFact, StringCategory, StringCompositionFact, StringCompositionPart, StringLiteral,
-    TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
+    CatchArmFact, CharacterClass, CharacterConstraintDomain, CharacterConstraintFact,
+    CharacterConstraintOutput, CharacterConstraintProof, CharacterSubstitutionDomain,
+    CharacterSubstitutionFact, Comment, CommentKind, CompilerAssignmentAlias, CompilerAttribution,
+    CompilerBrowseHeader, CompilerBrowseTermGroup, CompilerCallArgumentAttribution, CompilerCallAttribution,
+    CompilerCallHeader, CompilerFactoryCallAssignment, CompilerFunctionAttribution, CompilerGuardFact,
+    CompilerReceiverTypeHeader, CompilerReturnHeader, CompilerSyntaxHeader, CompilerWriteAttribution,
+    ConditionEquality, ConditionExpressionFact, ConditionOperandFact, Decl, DeclIndex, DeclKind,
+    DynamicKeyFilterFact, ExpressionField, ExpressionFlow, ExpressionProjection, FieldWrite,
+    FiniteLiteralSelectionFact, FlowEvent, GuardedValueFilterFact, ImportIndex, ImportScope, ImportSpec,
+    InlineAggregateCallbackFact, LanguageId, LoopKind, MembershipConditionFact, ModulePath, Operation,
+    OperationKind, OperationOperand, OperationOperandRole, PredicateReturnFact, ReceiverFieldInitializer,
+    Ref, RefKind, RuntimeTypeNarrowingFact, SameOriginPathConstraintFact, StaticAggregateFieldValue,
+    StaticScalarValue, StaticStringMapEntry, StaticStringMapFact, StringCategory, StringCompositionFact,
+    StringCompositionPart, StringLiteral, TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
     COMPILER_GUARD_RELATIVE_PATH_BOUNDARY_REJECTION,
 };
 
@@ -257,6 +260,18 @@ pub trait LanguageAdapter: Send + Sync + 'static {
         Vec::new()
     }
 
+    /// Fingerprint external compiler context that can change this file's CST.
+    ///
+    /// Most grammars depend only on the source snapshot and inherit zero. A
+    /// frontend whose exact recovery consumes other compiler inputs (for
+    /// example reachable C-family preprocessor headers) returns a stable
+    /// digest of those inputs. The parser cache then cannot reuse a tree after
+    /// the external context changes while the source file itself stays fixed.
+    /// Security/library names never belong in this fingerprint.
+    fn parse_context_fingerprint(&self, _snapshot: &FileSnapshot, _vfs: &Vfs) -> u64 {
+        0
+    }
+
     /// Return same-width parser-buffer normalizations for a second,
     /// grammar-recovery parse.
     ///
@@ -277,6 +292,27 @@ pub trait LanguageAdapter: Send + Sync + 'static {
         Vec::new()
     }
 
+    /// Return independent recovery candidates for the current damaged tree.
+    ///
+    /// A frontend may own several unrelated recovery mechanisms (for
+    /// example, preprocessor-region normalization and declaration-macro
+    /// masking). Keeping those mechanisms in separate batches prevents one
+    /// configuration-dependent candidate from rejecting an otherwise exact
+    /// recovery. The parser evaluates every batch against the same current
+    /// tree and accepts only the candidate with the strictly lowest syntax
+    /// damage while preserving unrelated compiler nodes.
+    ///
+    /// Adapters with one recovery mechanism inherit the single-batch default.
+    fn parse_recovery_edit_batches(
+        &self,
+        snapshot: &FileSnapshot,
+        vfs: &Vfs,
+        tree: &SyntaxTree,
+    ) -> Vec<Vec<ParseRecoveryEdit>> {
+        let edits = self.parse_recovery_edits(snapshot, vfs, tree);
+        (!edits.is_empty()).then_some(edits).into_iter().collect()
+    }
+
     /// Wrapper required to parse a standalone mid-file source fragment.
     /// Returned bytes are adapter grammar metadata and never appear in output.
     fn fragment_parse_context(&self) -> FragmentParseContext {
@@ -286,6 +322,55 @@ pub trait LanguageAdapter: Send + Sync + 'static {
     /// What the adapter claims to support; unsupported constructs are
     /// surfaced as diagnostics by the pipeline.
     fn capabilities(&self) -> LanguageCapabilities;
+
+    /// Return the adapter-owned Tree-sitter syntax contract used by the
+    /// shared lowering kit.
+    ///
+    /// Production adapters override this so the common conformance suite can
+    /// verify every declared node kind against the adapter's actual grammar.
+    /// Multi-grammar adapters additionally override
+    /// [`LanguageAdapter::grammar_handler_for_path`]. Test-only adapters that
+    /// do not use the grammar-driven kit may retain the default.
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        None
+    }
+
+    /// Return the shared lowering contract for the grammar selected by
+    /// `path`. Multi-grammar adapters override this when a construct is valid
+    /// in only one representation; all other adapters inherit the common
+    /// handler.
+    fn grammar_handler_for_path(&self, _path: &std::path::Path) -> Option<&'static GrammarHandler> {
+        self.grammar_handler()
+    }
+
+    /// Return adapter-owned Tree-sitter node kinds consumed outside the
+    /// shared [`GrammarHandler`] lowering path.
+    ///
+    /// Custom post-processing (for example, language-specific scope or
+    /// evaluation-order normalization) must declare every node spelling it
+    /// inspects here. The common conformance suite validates this inventory
+    /// against the exact grammar selected for a representative path, using
+    /// [`LanguageAdapter::additional_grammar_node_kinds_for_path`] for
+    /// representation-specific inventories, so an upstream grammar rename
+    /// cannot silently disable compiler facts outside the shared handler.
+    /// The first tuple element is a stable, human-readable use-site label.
+    fn additional_grammar_node_kinds(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
+
+    /// Return adapter-specific node kinds for the grammar selected by `path`.
+    ///
+    /// Most adapters own one grammar vocabulary and inherit this default.
+    /// Multi-grammar adapters override it when a lowering path is genuinely
+    /// representation-specific (for example JSX nodes in TSX but not plain
+    /// TypeScript). Conformance validates the returned inventory against the
+    /// exact grammar selected for the same representative path.
+    fn additional_grammar_node_kinds_for_path(
+        &self,
+        _path: &std::path::Path,
+    ) -> &'static [(&'static str, &'static str)] {
+        self.additional_grammar_node_kinds()
+    }
 
     /// Discover workspace roots (packages, modules) from the set of files.
     /// Default implementation treats the workspace as a single root.

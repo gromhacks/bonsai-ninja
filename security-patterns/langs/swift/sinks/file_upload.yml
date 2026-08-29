@@ -44,7 +44,6 @@
     code: |
       import vapor
       import Vapor // vapor
-      import Vapor // vapor
       func test(input: String) { let amount = 1; collectFile(input) }
   - name: literal arg 0 negative
     code: |
@@ -74,18 +73,3 @@
       func test() { uploadTask("safe") }
     expect_no_match: true
   description: "URLSession.uploadTask - flag if URL/path tainted."
-
-- id: swift.upload.multipart_file_write
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: file-upload
-  severity: medium
-  packages: [vapor]
-  cwe: [CWE-434]
-  match:
-    kind: read
-    target:
-      name: filename
-  description: "Disabled - Multipart File.filename read is ubiquitous; enable with taint flow to path sink."

@@ -238,11 +238,7 @@ pub fn tree(
     };
 
     let report = match rulepack {
-        Some(pack) => Some(run_taint_analysis(
-            ws,
-            pack,
-            TaintAnalysisOptions::default().semantic_precision_only(),
-        )?),
+        Some(pack) => Some(run_taint_analysis(ws, pack, TaintAnalysisOptions::default())?),
         None => None,
     };
 

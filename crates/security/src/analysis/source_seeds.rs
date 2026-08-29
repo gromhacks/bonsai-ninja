@@ -122,11 +122,15 @@ pub(super) fn collect_source_seed_targets(
                             insert_taint_aliases(out, name);
                         }
                     }
-                    for name in source_call_args {
-                        if security_text_matches_source_strict(name, &src.match_text) {
-                            insert_taint_aliases(out, name);
-                        }
-                    }
+                    // `source_call_args` are rendered value expressions, not
+                    // compiler places. They are useful above only to prove
+                    // that the matched source is an input to this call result.
+                    // Never turn the rendering into a seed token: a ternary
+                    // such as `q == null ? "" : q` normalizes to the invented
+                    // field path `q.null.q`, which can then suppress the real
+                    // parameter place during field-sensitive seed projection.
+                    // Exact carrier places come from `source_names` and the
+                    // call-argument value facts instead.
                     if target_is_destructuring_pattern(target) {
                         for name in source_names {
                             insert_taint_aliases(out, name);

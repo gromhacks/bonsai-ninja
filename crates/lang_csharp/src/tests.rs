@@ -38,13 +38,13 @@ fn using_static_classification_comes_from_the_grammar_token() {
 }
 
 #[test]
-fn ordinary_using_does_not_emit_local_wildcard_binding() {
+fn ordinary_using_emits_only_the_namespace_type_wildcard() {
     let imports = parse_import_specs("using App;\n");
 
     assert!(imports.iter().any(|spec| {
         spec.module == "App"
             && spec.alias.is_none()
-            && !spec.is_wildcard
+            && spec.is_wildcard
             && spec.original_name.is_none()
             && spec.scope == ImportScope::Module
     }));

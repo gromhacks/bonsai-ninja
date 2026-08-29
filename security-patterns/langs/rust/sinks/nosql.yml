@@ -273,27 +273,3 @@
       }
     expect_no_match: true
   description: "scylla / cdrs-tokio Session::query - tainted CQL string = CQL injection (use prepared statements with bind values)."
-
-- id: rust.nosql.elasticsearch_search
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: rust
-  tag: nosql-injection
-  severity: high
-  packages: [elasticsearch]
-  cwe: [CWE-943]
-  match:
-    kind: call
-    callee:
-      attribute: [Elasticsearch, search]
-  match_examples:
-  - name: generated direct match
-    code: |
-      use elasticsearch::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          Elasticsearch::search("$where");
-      }
-  description: "Disabled - Elasticsearch::search selects the endpoint; the tainted query body is supplied through builder/body APIs that need a separate receiver-state rule."

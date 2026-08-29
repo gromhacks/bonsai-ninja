@@ -1,7 +1,7 @@
 - id: scala.log_injection.slf4j_info_format
   enabled: true
   language: scala
-  tag: header-injection
+  tag: log-injection
   severity: medium
   packages:
   - slf4j

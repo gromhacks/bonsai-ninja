@@ -268,39 +268,6 @@
     code: "const _u = require(\"mongodb\");\nfunction demo(db: any) {\n  return db.command({ ping: 1 });\n}\n"
     expect_no_match: true
   description: "mongodb db.command - arbitrary command document."
-- id: typescript.nosql.mongoose_model_find
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: typescript.nosql.mongo_find
-  language: typescript
-  tag: nosql-injection
-  severity: high
-  packages:
-  - mongoose
-  cwe:
-  - CWE-943
-  match:
-    kind: call
-    callee:
-      regex: ^Model\.find(?:One)?$
-  match_examples:
-  - name: mongoose model find
-    code: "const _u = require(\"mongoose\");\nfunction demo(input, req, obj) {\n  return Model.find(input, { \"$where\": input });\n}\n"
-  - name: mongoose findOne destructured shorthand
-    code: "const _u = require(\"mongoose\");\nfunction login(Model: any, req: any) {\n  const { username, password } = req.body;\n  return Model.findOne({ username, password });\n}\n"
-    expect_match_text:
-    - Model.findOne
-  description: Disabled duplicate - covered by canonical typescript.nosql.mongo_find generic Mongo-style find/findOne sink.
-  aliases:
-  - typescript.nosql.mongoose_model_findone
-  - typescript.nosql.mongoose_credential_object_filter
-  - typescript.nosql.mongoose_caller_controlled_filter_value
-  - typescript.nosql.mongoose_shorthand_credential_filter
-  - typescript.nosql.mongoose_findoneandupdate
-  - typescript.nosql.mongoose_findoneanddelete
-  - typescript.nosql.mongoose_findoneandreplace
-  - typescript.nosql.mongoose_model_findone_body_spread
 - id: typescript.nosql.mongoose_where
   enabled: true
   language: typescript
@@ -328,23 +295,6 @@
     code: "const _u = require(\"mongoose\");\nfunction demo(Model: any) {\n  return Model.where({ active: true });\n}\n"
     expect_no_match: true
   description: "Mongoose Model.where - $where operator allows JS execution."
-- id: typescript.nosql.mongoose_updatemany
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: typescript.nosql.mongo_updatemany
-  language: typescript
-  tag: nosql-injection
-  severity: high
-  packages:
-  - mongoose
-  cwe:
-  - CWE-943
-  match:
-    kind: call
-    callee:
-      regex: ^Model\.updateMany$
-  description: "Subsumed by typescript.nosql.mongo_updatemany - the receiver-agnostic regex covers both `collection.updateMany` and `Model.updateMany` (mongoose) shapes."
 - id: typescript.nosql.redis_eval
   enabled: true
   language: typescript
@@ -447,46 +397,6 @@
     code: "const _u = require(\"@elastic/elasticsearch\");\nfunction demo(Client: any) {\n  return Client.search({ index: \"users\", query: { match_all: {} } });\n}\n"
     expect_no_match: true
   description: elasticsearch Client.search(body=tainted DSL).
-- id: typescript.nosql.couchdb_find
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: typescript.nosql.mongo_find
-  language: typescript
-  tag: nosql-injection
-  severity: high
-  packages:
-  - nano
-  cwe:
-  - CWE-943
-  match:
-    kind: call
-    callee:
-      attribute:
-      - db
-      - find
-  match_examples:
-  - name: couchdb find
-    code: "const _u = require(\"nano\");\nfunction demo(input, req, obj) {\n  return db.find(input, { \"$where\": input });\n}\n"
-  description: Disabled duplicate - covered by canonical typescript.nosql.mongo_find generic Mongo-style find/findOne sink.
-- id: typescript.nosql.dynamodb_scan
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: nosql-injection
-  severity: medium
-  packages:
-  - '@aws-sdk/client-dynamodb'
-  cwe:
-  - CWE-943
-  match:
-    kind: call
-    callee:
-      attribute:
-      - client
-      - send
-  description: "Disabled - DynamoDB scan via .send(new ScanCommand); flag only with string-built FilterExpression."
 - id: typescript.nosql.dynamodb_scan_command
   enabled: true
   language: typescript

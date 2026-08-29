@@ -26,6 +26,7 @@
   tag: xxe
   severity: high
   packages: [LuaExpat]
+  imports: [lxp]
   cwe: [CWE-611]
   match:
     kind: call
@@ -109,18 +110,3 @@
       end
     expect_no_match: true
   description: "xml2lua.parse - resolves entities referenced by tainted XML."
-
-- id: lua.xxe.xml2lua_parser
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: lua
-  tag: xxe
-  severity: high
-  packages: [xml2lua]
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [parser, parse]
-  description: "Disabled duplicate - parser:parse is indistinguishable from LuaExpat parser:parse in v1 matching; xml2lua.parse remains enabled."

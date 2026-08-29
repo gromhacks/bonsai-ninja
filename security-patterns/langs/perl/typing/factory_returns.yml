@@ -1,0 +1,244 @@
+# External Perl factory return types. Provider and API identities remain in
+# rule data; shared matching consumes only generic local-to-type aliases.
+- id: perl.typing.cwd_abs_path_passthrough
+  enabled: true
+  language: perl
+  packages: [Cwd]
+  imports: [Cwd]
+  match:
+    kind: call
+    callee:
+      attribute: [Cwd, abs_path]
+      binding_origin: imported
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: imported Cwd abs_path preserves path provenance
+    code: |
+      use Cwd qw(abs_path);
+      my $canonical = abs_path($input);
+    expect_match_text: [abs_path]
+  - name: local abs_path helper shadows the imported function
+    code: |
+      use Cwd qw(abs_path);
+      sub abs_path { return '/srv/assets'; }
+      my $canonical = abs_path($input);
+    expect_no_match: true
+  description: "Cwd::abs_path canonicalizes its input path but preserves its provenance. The exact imported call site is matcher-compiled before generic argument-to-result transfer."
+
+- id: perl.typing.file_spec_catfile_passthrough
+  enabled: true
+  language: perl
+  packages: [File::Spec]
+  imports: [File::Spec]
+  match:
+    kind: call
+    callee:
+      attribute: [File::Spec, catfile]
+      binding_origin: imported
+  taint_semantics:
+    call_result_passthrough_args_from: 0
+  match_examples:
+  - name: File Spec joins every actual path component
+    code: |
+      use File::Spec;
+      my $path = File::Spec->catfile($root, $directory, $name);
+    expect_match_text: [File::Spec->catfile]
+  - name: unrelated package method is not File Spec
+    code: |
+      package LocalSpec;
+      sub catfile { return '/srv/assets/file'; }
+      package main;
+      my $path = LocalSpec->catfile($root, $name);
+    expect_no_match: true
+  description: "File::Spec->catfile derives its result from every compiler-observed path component. The variadic transfer expands to actual call arity and has no argument cap."
+
+- id: perl.typing.dbi_connect
+  enabled: true
+  language: perl
+  packages: [DBI]
+  imports: [DBI]
+  returns_type: "DBI::db"
+  match:
+    kind: call
+    callee:
+      attribute: [DBI, connect]
+      binding_origin: imported
+  match_examples:
+  - name: DBI connection factory
+    code: |
+      use DBI;
+      my $dbh = DBI->connect('dbi:SQLite:dbname=app.db');
+    expect_match_text: [DBI->connect]
+  - name: local connect function is not a DBI factory
+    code: |
+      use DBI;
+      package DBI;
+      sub connect { return bless {}, __PACKAGE__ }
+      package main;
+      my $dbh = DBI->connect('local');
+    expect_no_match: true
+  description: "DBI->connect returns a DBI::db handle. Typing-only; never a finding."
+
+- id: perl.typing.dbi_prepare
+  enabled: true
+  language: perl
+  packages: [DBI]
+  imports: [DBI]
+  returns_type: "DBI::st"
+  match:
+    kind: call
+    callee:
+      attribute: ["DBI::db", prepare]
+  match_examples:
+  - name: DBI statement factory
+    code: |
+      use DBI;
+      my $dbh = DBI->connect('dbi:SQLite:dbname=app.db');
+      my $sth = $dbh->prepare('select name from users');
+    expect_match_text: [dbh->prepare]
+  - name: unrelated prepare method is not a DBI statement factory
+    code: |
+      use DBI;
+      package LocalBuilder;
+      sub prepare { return LocalStatement->new() }
+      package main;
+      my $builder = LocalBuilder->new();
+      my $sth = $builder->prepare('local');
+    expect_no_match: true
+  description: "DBI::db prepare returns a DBI::st statement handle. Typing-only; never a finding."
+
+- id: perl.typing.net_amqp_rabbitmq_new
+  enabled: true
+  language: perl
+  packages: ["Net::AMQP::RabbitMQ"]
+  imports: ["Net::AMQP::RabbitMQ"]
+  returns_type: "Net::AMQP::RabbitMQ"
+  match:
+    kind: call
+    callee:
+      attribute: ["Net::AMQP::RabbitMQ", new]
+      binding_origin: imported
+  match_examples:
+  - name: RabbitMQ client constructor
+    code: |
+      use Net::AMQP::RabbitMQ;
+      my $rabbit = Net::AMQP::RabbitMQ->new();
+    expect_match_text: ["Net::AMQP::RabbitMQ->new"]
+  - name: local constructor is not a RabbitMQ factory
+    code: |
+      use Net::AMQP::RabbitMQ;
+      package Net::AMQP::RabbitMQ;
+      sub new { return bless {}, __PACKAGE__ }
+      package main;
+      my $rabbit = Net::AMQP::RabbitMQ->new();
+    expect_no_match: true
+  description: "Net::AMQP::RabbitMQ->new returns a RabbitMQ client. Typing-only; never a finding."
+
+- id: perl.typing.kafka_consumer_new
+  enabled: true
+  language: perl
+  packages: ["Kafka::Consumer"]
+  imports: ["Kafka::Consumer"]
+  returns_type: "Kafka::Consumer"
+  match:
+    kind: call
+    callee:
+      attribute: ["Kafka::Consumer", new]
+      binding_origin: imported
+  match_examples:
+  - name: Kafka consumer constructor
+    code: |
+      use Kafka::Consumer;
+      my $consumer = Kafka::Consumer->new(Connection => $connection);
+    expect_match_text: ["Kafka::Consumer->new"]
+  - name: local constructor is not a Kafka consumer factory
+    code: |
+      use Kafka::Consumer;
+      package Kafka::Consumer;
+      sub new { return bless {}, __PACKAGE__ }
+      package main;
+      my $consumer = Kafka::Consumer->new();
+    expect_no_match: true
+  description: "Kafka::Consumer->new returns a Kafka consumer. Typing-only; never a finding."
+
+- id: perl.typing.amazon_s3_thin_new
+  enabled: true
+  language: perl
+  packages: ["Amazon::S3::Thin"]
+  imports: ["Amazon::S3::Thin"]
+  returns_type: "Amazon::S3::Thin"
+  match:
+    kind: call
+    callee:
+      attribute: ["Amazon::S3::Thin", new]
+      binding_origin: imported
+  match_examples:
+  - name: Amazon S3 Thin client constructor
+    code: |
+      use Amazon::S3::Thin;
+      my $client = Amazon::S3::Thin->new({ aws_access_key_id => 'key' });
+    expect_match_text: ["Amazon::S3::Thin->new"]
+  - name: local S3 constructor is not a cloud client factory
+    code: |
+      use Amazon::S3::Thin;
+      package Amazon::S3::Thin;
+      sub new { return bless {}, __PACKAGE__ }
+      package main;
+      my $client = Amazon::S3::Thin->new();
+    expect_no_match: true
+  description: "Amazon::S3::Thin->new returns an S3 client. Typing-only; never a finding."
+
+- id: perl.typing.amazon_s3_lite_new
+  enabled: true
+  language: perl
+  packages: ["Amazon::S3::Lite"]
+  imports: ["Amazon::S3::Lite"]
+  returns_type: "Amazon::S3::Lite"
+  match:
+    kind: call
+    callee:
+      attribute: ["Amazon::S3::Lite", new]
+      binding_origin: imported
+  match_examples:
+  - name: Amazon S3 Lite client constructor
+    code: |
+      use Amazon::S3::Lite;
+      my $client = Amazon::S3::Lite->new(access_key => 'key', secret_key => 'secret');
+    expect_match_text: ["Amazon::S3::Lite->new"]
+  - name: local S3 constructor remains untyped
+    code: |
+      use Amazon::S3::Lite;
+      package Amazon::S3::Lite;
+      sub new { return bless {}, __PACKAGE__ }
+      package main;
+      my $client = Amazon::S3::Lite->new();
+    expect_no_match: true
+  description: "Amazon::S3::Lite->new returns an S3 client. Typing-only; never a finding."
+
+- id: perl.typing.device_serialport_new
+  enabled: true
+  language: perl
+  packages: ["Device::SerialPort"]
+  imports: ["Device::SerialPort"]
+  returns_type: "Device::SerialPort"
+  match:
+    kind: call
+    callee:
+      attribute: ["Device::SerialPort", new]
+      binding_origin: imported
+  match_examples:
+  - name: serial device constructor
+    code: |
+      use Device::SerialPort;
+      my $port = Device::SerialPort->new('/dev/ttyUSB0');
+    expect_match_text: ["Device::SerialPort->new"]
+  - name: local port constructor remains untyped
+    code: |
+      use Device::SerialPort;
+      package Device::SerialPort;
+      sub new { return bless {}, __PACKAGE__ }
+      package main;
+      my $port = Device::SerialPort->new('/tmp/test');
+    expect_no_match: true
+  description: "Device::SerialPort->new returns a serial-device receiver. Typing-only; never a finding."

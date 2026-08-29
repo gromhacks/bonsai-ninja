@@ -1,0 +1,90 @@
+# C++ standard-library value transfers. The matcher owns every library/type
+# spelling and compiles the complete rule to exact call spans. Shared IDG
+# lowering consumes only the declared receiver/argument value roles.
+- id: cpp.typing.istream_extracts_to_argument
+  enabled: true
+  language: cpp
+  match:
+    kind: call
+    callee:
+      name: ">>"
+      receiver_type_in: [basic_istream, istream, istringstream, std::basic_istream, std::istream, std::istringstream]
+  taint_semantics:
+    output_arg_flows:
+    - output_arg_index: 0
+      value_receiver: true
+  match_examples:
+  - name: string stream extraction writes the destination
+    code: |
+      #include <sstream>
+      #include <string>
+      void split(const std::string& input) {
+        std::istringstream stream(input);
+        std::string token;
+        stream >> token;
+      }
+    expect_match_text: [">>"]
+  - name: numeric shift is not stream extraction
+    code: 'int shift(int value, int count) { return value >> count; }'
+    expect_no_match: true
+  description: "A typed standard input-stream extraction writes receiver-derived value state into argument zero."
+
+- id: cpp.typing.vector_push_back_mutates_receiver
+  enabled: true
+  language: cpp
+  match:
+    kind: call
+    callee:
+      attribute: [vector, push_back]
+  taint_semantics:
+    taint_receiver_from_args: true
+  match_examples:
+  - name: vector push back stores its argument
+    code: |
+      #include <string>
+      #include <vector>
+      void collect(const std::string& input) {
+        std::vector<std::string> values;
+        values.push_back(input);
+      }
+    expect_match_text: [values.push_back]
+  description: "std::vector::push_back stores explicit argument values in receiver state."
+
+- id: cpp.typing.accumulate_result_passthrough
+  enabled: true
+  language: cpp
+  match:
+    kind: call
+    callee:
+      attribute: [std, accumulate]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3]
+  match_examples:
+  - name: accumulate result depends on its range and initial value
+    code: |
+      #include <numeric>
+      #include <string>
+      #include <vector>
+      std::string join(const std::vector<std::string>& values) {
+        return std::accumulate(values.begin(), values.end(), std::string{});
+      }
+    expect_match_text: [std::accumulate]
+  description: "std::accumulate returns a reduction of its iterator range and initial value."
+
+- id: cpp.typing.make_tuple_result_passthrough
+  enabled: true
+  language: cpp
+  match:
+    kind: call
+    callee:
+      attribute: [std, make_tuple]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: tuple elements come from call arguments
+    code: |
+      #include <string>
+      #include <tuple>
+      auto pair(const std::string& input) { return std::make_tuple(input, input.size()); }
+    expect_match_text: [std::make_tuple]
+  description: "std::make_tuple preserves each supplied element in its result."

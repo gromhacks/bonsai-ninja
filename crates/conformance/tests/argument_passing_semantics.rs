@@ -1,21 +1,12 @@
 use bonsai_lang_api::{ArgumentPassingMode, CallKind, FlowEvent};
 use bonsai_workspace::Workspace;
-use std::path::PathBuf;
 
-fn fixture_root(label: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    std::env::temp_dir().join(format!("bonsai-argument-mode-{label}-{nonce}"))
+fn fixture_workspace(file_name: &str, source: &str) -> Workspace {
+    bonsai_testkit::workspace_with(bonsai_adapters::all_adapters(), &[(file_name, source)])
 }
 
 fn helper_argument_mode(label: &str, file_name: &str, source: &str) -> ArgumentPassingMode {
-    let root = fixture_root(label);
-    std::fs::create_dir_all(&root).expect("fixture directory");
-    std::fs::write(root.join(file_name), source).expect("fixture source");
-    let workspace = Workspace::open_query(&root, bonsai_adapters::all_languages_registry())
-        .unwrap_or_else(|error| panic!("open {label} fixture: {error}"));
+    let workspace = fixture_workspace(file_name, source);
     let index = workspace.db().global_index();
     let mode = index
         .all_files()
@@ -28,17 +19,11 @@ fn helper_argument_mode(label: &str, file_name: &str, source: &str) -> ArgumentP
             _ => None,
         })
         .unwrap_or_else(|| panic!("{label}: helper argument"));
-    drop(workspace);
-    let _ = std::fs::remove_dir_all(root);
     mode
 }
 
-fn lowered_calls(label: &str, file_name: &str, source: &str) -> Vec<(String, CallKind, usize)> {
-    let root = fixture_root(label);
-    std::fs::create_dir_all(&root).expect("fixture directory");
-    std::fs::write(root.join(file_name), source).expect("fixture source");
-    let workspace = Workspace::open_query(&root, bonsai_adapters::all_languages_registry())
-        .unwrap_or_else(|error| panic!("open {label} fixture: {error}"));
+fn lowered_calls(_label: &str, file_name: &str, source: &str) -> Vec<(String, CallKind, usize)> {
+    let workspace = fixture_workspace(file_name, source);
     let index = workspace.db().global_index();
     let calls = index
         .all_files()
@@ -54,9 +39,6 @@ fn lowered_calls(label: &str, file_name: &str, source: &str) -> Vec<(String, Cal
             _ => None,
         })
         .collect();
-    drop(index);
-    drop(workspace);
-    let _ = std::fs::remove_dir_all(root);
     calls
 }
 
@@ -69,6 +51,11 @@ fn adapters_lower_writeback_syntax_to_one_language_neutral_fact() {
             "csharp",
             "Main.cs",
             "class C { void F() { string result; helper(out result); } }",
+        ),
+        (
+            "csharp-ref",
+            "Main.cs",
+            "class C { void F() { string result = \"\"; helper(ref result); } }",
         ),
         (
             "go",
@@ -105,6 +92,11 @@ fn ordinary_and_bitwise_arguments_remain_value_semantics() {
             "csharp-value",
             "Main.cs",
             "class C { void F() { string result = \"\"; helper(result); } }",
+        ),
+        (
+            "csharp-readonly-in",
+            "Main.cs",
+            "class C { void F() { string result = \"\"; helper(in result); } }",
         ),
         (
             "rust-value",

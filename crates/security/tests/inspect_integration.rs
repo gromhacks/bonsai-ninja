@@ -125,7 +125,6 @@ fn compile_rule_produces_non_empty_inspect_args_for_sink() {
                 ..Default::default()
             }),
             target: None,
-            search_depth: 0,
         },
         analysis_semantics: None,
         taint_semantics: None,
@@ -133,6 +132,7 @@ fn compile_rule_produces_non_empty_inspect_args_for_sink() {
         returns_type: None,
         callback_param_types: Vec::new(),
         callback_arg_index: None,
+        callback_field_path: Vec::new(),
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "os.system".into(),
@@ -351,7 +351,7 @@ fn security_flows_shares_taint_view_with_inspect() {
     // flow on python/micro, then `security taint-analysis` with the matching
     // source/sink pair should too. This verifies we wrap the same
     // engine (no second tracer).
-    let ws = repo_root().join("examples/python/micro");
+    let ws = repo_root().join("test-fixtures/languages/python/micro");
     if !ws.exists() {
         return;
     }
@@ -399,7 +399,7 @@ fn over_approx_filter_still_applies_under_security_wrapper() {
     // default. `security taint-analysis` inherits that automatically. Confirm
     // by checking that the rendered output contains no
     // `(over-approx)` annotation on python/micro's canonical pair.
-    let ws = repo_root().join("examples/python/micro");
+    let ws = repo_root().join("test-fixtures/languages/python/micro");
     if !ws.exists() {
         return;
     }
@@ -442,7 +442,10 @@ fn rulepack_loader_rejects_duplicate_ids() {
     let out = Command::new(bin_path().expect("release bin"))
         .args([
             "security",
-            repo_root().join("examples/python/micro").to_str().unwrap(),
+            repo_root()
+                .join("test-fixtures/languages/python/micro")
+                .to_str()
+                .unwrap(),
             "sinks",
             "--rules-dir",
             tmp.to_str().unwrap(),

@@ -1,5 +1,5 @@
 use bonsai_db::AnalyzerDb;
-use bonsai_lang_api::{DeclKind, FlowEvent, LanguageRegistry};
+use bonsai_lang_api::{DeclKind, FlowEvent, LanguageRegistry, StaticScalarValue};
 use bonsai_vfs::Vfs;
 use std::sync::Arc;
 
@@ -67,6 +67,113 @@ func Persist() int {
     );
 }
 
+#[test]
+fn qualified_embedded_base_identity_reaches_promoted_method_calls() {
+    let db = db_with(
+        r#"
+package main
+
+import "example.net/web"
+
+type Handler struct { web.Controller }
+func (h *Handler) Get() string { return h.GetString("name") }
+"#,
+    );
+    let global = db.global_index();
+    let mut calls = Vec::new();
+    let mut handler_bases = Vec::new();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if decl.name == "Handler" {
+                handler_bases = decl.bases.clone();
+            }
+            if decl.name == "Get" {
+                collect_calls(&decl.flow_events, &mut calls);
+            }
+        }
+    }
+    assert!(
+        handler_bases.iter().any(|base| base == "Controller")
+            && handler_bases.iter().any(|base| base == "web.Controller"),
+        "embedded bases must retain short and import-qualified identities: {handler_bases:?}"
+    );
+    assert!(
+        calls.iter().any(|(name, receiver_types)| {
+            name == "h.GetString"
+                && receiver_types.iter().any(|ty| ty == "Controller")
+                && receiver_types.iter().any(|ty| ty == "web.Controller")
+        }),
+        "promoted calls must carry the exact embedded-base identity: {calls:?}"
+    );
+}
+
+#[test]
+fn if_initializer_call_retains_literal_argument_value() {
+    let db = db_with(
+        r#"
+package main
+
+func Unpack(input any, root string) error { return nil }
+func Handle(input any) error {
+    if err := Unpack(input, "/srv/uploads"); err != nil {
+        return err
+    }
+    return nil
+}
+"#,
+    );
+    let file = db.vfs().all_files().into_iter().next().expect("Go source");
+    let index = db.decl_index(file).expect("Go declaration index");
+    let argument = index
+        .call_argument_values
+        .iter()
+        .find(|argument| {
+            argument.argument_index == 1
+                && matches!(
+                    argument.static_value.as_ref(),
+                    Some(StaticScalarValue::String(value)) if value == "/srv/uploads"
+                )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "if-initializer calls must retain exact literal arguments: {:#?}",
+                index.call_argument_values
+            )
+        });
+    assert_eq!(argument.argument_index, 1);
+}
+
+#[test]
+fn const_initializer_retains_exact_immutable_scalar_value() {
+    let db = db_with(
+        r#"
+package main
+
+const baseDir = "/srv/data"
+
+func Read(name string) string {
+    return baseDir + "/" + name
+}
+"#,
+    );
+    let file = db.vfs().all_files().into_iter().next().expect("Go source");
+    let index = db.decl_index(file).expect("Go declaration index");
+    let fact = index
+        .assignment_values
+        .iter()
+        .find(|fact| fact.target.as_deref() == Some("baseDir"))
+        .unwrap_or_else(|| panic!("missing const value fact: {:#?}", index.assignment_values));
+    assert!(
+        fact.target_is_immutable,
+        "const binding must be immutable: {fact:#?}"
+    );
+    assert_eq!(
+        fact.static_value,
+        Some(StaticScalarValue::String("/srv/data".to_string())),
+        "const binding must retain the grammar-decoded scalar: {fact:#?}"
+    );
+}
+
 fn collect_calls(events: &[FlowEvent], out: &mut Vec<(String, Vec<String>)>) {
     for event in events {
         match event {
@@ -131,7 +238,7 @@ func handle(r *http.Request) string {
 }
 
 #[test]
-fn func_literal_parameter_types_drive_receiver_matching() {
+fn passed_func_literal_parameter_types_drive_receiver_matching_in_callback_scope() {
     let db = db_with(
         r##"
 package main
@@ -149,7 +256,11 @@ func Register(r *gin.RouterGroup) {
     let mut calls = Vec::new();
     for file in global.all_files() {
         for decl in global.decls_in(file) {
-            if decl.name == "Register" {
+            // A passed function literal is a callable value, not executed by
+            // Register itself. Its calls and typed parameter facts therefore
+            // belong to the exact lambda declaration linked from r.GET's
+            // callback argument.
+            if decl.name.starts_with("<lambda@") {
                 collect_calls(&decl.flow_events, &mut calls);
             }
         }
@@ -237,5 +348,131 @@ func fetch(url string) {
             name == "client.Get" && receiver_types.iter().any(|ty| ty == "http.Client")
         }),
         "client.Get must carry http.Client receiver evidence: {calls:?}"
+    );
+}
+
+#[test]
+fn package_scope_declared_receiver_type_is_retained_on_module_scope() {
+    let db = db_with(
+        r#"
+package main
+
+import "database/sql"
+
+var Store *sql.DB
+
+func query(value string) {
+    _, _ = Store.Query(value)
+}
+"#,
+    );
+    let global = db.global_index();
+    let query = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "query")
+        .expect("query declaration");
+    assert!(
+        query
+            .type_aliases
+            .iter()
+            .any(|alias| alias.name == "Store" && alias.type_name == "sql.DB"),
+        "package-scope declared type must remain available to receiver matching: {:?}",
+        query.type_aliases
+    );
+}
+
+#[test]
+fn named_struct_field_receiver_uses_its_declared_type_not_the_owner_type() {
+    let db = db_with(
+        r#"
+package main
+
+import "database/sql"
+
+type Store struct { DB *sql.DB }
+func (s *Store) Query(ctx any, query string) {
+    s.DB.QueryContext(ctx, query)
+}
+
+type LocalDB struct{}
+type LocalStore struct { DB *LocalDB }
+func (s *LocalStore) Query(ctx any, query string) {
+    s.DB.QueryContext(ctx, query)
+}
+"#,
+    );
+    let global = db.global_index();
+    let mut external_calls = Vec::new();
+    let mut local_calls = Vec::new();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if decl.name != "Query" {
+                continue;
+            }
+            if decl
+                .type_aliases
+                .iter()
+                .any(|alias| alias.name == "s" && alias.type_name == "Store")
+            {
+                assert!(
+                    decl.type_aliases
+                        .iter()
+                        .any(|alias| alias.name == "s.DB" && alias.type_name == "sql.DB"),
+                    "the field declaration must retain its imported type: {:?}",
+                    decl.type_aliases
+                );
+                collect_calls(&decl.flow_events, &mut external_calls);
+            } else {
+                collect_calls(&decl.flow_events, &mut local_calls);
+            }
+        }
+    }
+    assert!(
+        external_calls.iter().any(|(name, receiver_types)| {
+            name == "s.DB.QueryContext"
+                && receiver_types.iter().any(|ty| ty == "sql.DB")
+                && !receiver_types.iter().any(|ty| ty == "Store")
+        }),
+        "external field call must use the field type, not the owner: {external_calls:?}"
+    );
+    assert!(
+        local_calls.iter().any(|(name, receiver_types)| {
+            name == "s.DB.QueryContext"
+                && receiver_types.iter().any(|ty| ty == "LocalDB")
+                && !receiver_types.iter().any(|ty| ty == "sql.DB")
+        }),
+        "a same-named local field type must not acquire provider identity: {local_calls:?}"
+    );
+}
+
+#[test]
+fn func_literal_captures_nearest_lexical_parameter_type() {
+    let db = db_with(
+        r#"
+package main
+
+import "example.net/store"
+
+func Handler(client *store.Client) func(string) {
+    return func(value string) {
+        client.Write(value)
+    }
+}
+"#,
+    );
+    let global = db.global_index();
+    let closure = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name.starts_with("<lambda@"))
+        .expect("function literal declaration");
+    assert!(
+        closure
+            .type_aliases
+            .iter()
+            .any(|alias| alias.name == "client" && alias.type_name == "store.Client"),
+        "closure must inherit the exact captured receiver type: {:?}",
+        closure.type_aliases
     );
 }

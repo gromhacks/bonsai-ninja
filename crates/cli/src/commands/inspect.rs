@@ -2258,15 +2258,23 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         .flatten()
         .filter(|literal| !is_regex && literal.len() >= 3);
     let files_in_path_order: Vec<bonsai_common::FileId> = {
-        let mut v: Vec<(String, bonsai_common::FileId)> = global
-            .all_files()
-            .filter(|file| {
-                taint_source_literal.is_none_or(|literal| {
+        let all_files = global.all_files().collect::<Vec<_>>();
+        let selected_files = if let Some(literal) = taint_source_literal {
+            use rayon::prelude::*;
+            all_files
+                .par_iter()
+                .copied()
+                .filter(|file| {
                     ws.vfs()
                         .snapshot(*file)
                         .is_ok_and(|snapshot| source_contains_inspect_literal(&snapshot.text, literal))
                 })
-            })
+                .collect::<Vec<_>>()
+        } else {
+            all_files
+        };
+        let mut v: Vec<(String, bonsai_common::FileId)> = selected_files
+            .into_iter()
             .map(|f| {
                 let path = ws
                     .vfs()
@@ -2713,12 +2721,19 @@ fn inspect_taint_flows(
         None
     };
     let target_stage = progress::ScopedSpinner::new("preparing taint target cut");
-    let (target_nodes_by_source, unresolved_target_funcs) = if prefer_warmed_idg {
+    let (mut target_nodes_by_source, unresolved_target_funcs) = if prefer_warmed_idg {
         ws.syntax_flow_target_nodes_by_source_with_session(&candidates.target_spans, session.as_ref())
             .unwrap_or_else(|| (ahash::AHashMap::new(), fallback_target_funcs.clone()))
     } else {
         (ahash::AHashMap::new(), fallback_target_funcs.clone())
     };
+    // Multiple syntax facts at one compiler point may resolve to the same IDG
+    // endpoint. Canonicalize each owner cut once before any fixed point uses
+    // it; this changes only repeated target identities, never target scope.
+    for nodes in target_nodes_by_source.values_mut() {
+        nodes.sort_unstable();
+        nodes.dedup();
+    }
     let mut target_nodes: Vec<_> = target_nodes_by_source.values().flatten().copied().collect();
     target_nodes.sort_unstable();
     target_nodes.dedup();
@@ -2742,6 +2757,21 @@ fn inspect_taint_flows(
     let source_rooted_targets = prefer_warmed_idg
         && !candidates.target_spans.is_empty()
         && lineage_funcs.as_ref().is_some_and(|funcs| !funcs.is_empty());
+    let owns_direct_target = |entry: &bonsai_common::FuncId| {
+        source_rooted_targets
+            && (target_nodes_by_source
+                .get(entry)
+                .is_some_and(|nodes| !nodes.is_empty())
+                || unresolved_target_funcs.contains(entry))
+    };
+    // A shared backward proof can filter only candidates that do not already
+    // own an exact query target. If every entry owns one, computing the union
+    // is duplicate external-memory work: every candidate is admitted before
+    // the proof is consulted. The per-entry forward fixed point below remains
+    // deliberately unpruned and therefore retains every raw flow rooted at
+    // the matching callable, including flows whose query match is the entry
+    // declaration rather than a terminal target.
+    let needs_shared_target_relevance = entries.iter().any(|entry| !owns_direct_target(entry));
     bonsai_diagnostics::debug_log!(
         "compiler-cache",
         "inspect taint target attribution: target_nodes={} unresolved_funcs={} elapsed={:.3}s",
@@ -2750,7 +2780,7 @@ fn inspect_taint_flows(
         target_nodes_started.elapsed().as_secs_f64()
     );
     let target_relevance_started = std::time::Instant::now();
-    let target_relevance = if prefer_warmed_idg {
+    let target_relevance = if prefer_warmed_idg && needs_shared_target_relevance {
         ws.syntax_flow_target_relevance_with_session(
             &target_nodes,
             &target_funcs,
@@ -2778,13 +2808,6 @@ fn inspect_taint_flows(
         // only about entries that do not themselves own a target, then merge
         // that proof with the direct compiler ownership facts. This changes
         // neither target demand nor forward-closure scope.
-        let owns_direct_target = |entry: &bonsai_common::FuncId| {
-            source_rooted_targets
-                && (target_nodes_by_source
-                    .get(entry)
-                    .is_some_and(|nodes| !nodes.is_empty())
-                    || unresolved_target_funcs.contains(entry))
-        };
         let entries_needing_proof = entries
             .iter()
             .copied()

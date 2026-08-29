@@ -116,32 +116,6 @@
     expect_match_text:
     - $mysqli.real_escape_string
   description: mysqli::real_escape_string - last-resort SQL escape.
-- id: php.sanitizer.pdo_quote
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: sql-parameter
-  match:
-    kind: call
-    callee:
-      attribute:
-      - PDO
-      - quote
-  description: Disabled - PDO::quote is a partial escape helper and v1 matching cannot prove it is used only for value literals;
-    prefer prepared statements.
-- id: php.sanitizer.addslashes
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: sql-parameter
-  match:
-    kind: call
-    callee:
-      name: addslashes
-  description: "Disabled - addslashes is a naive string escape and is not database-charset-aware; it can leave SQL injection
-    exploitable under multibyte encodings or non-string SQL contexts."
 - id: php.sanitizer.intval
   enabled: true
   language: php
@@ -170,41 +144,6 @@
     expect_match_text:
     - floatval
   description: floatval - coerces to float.
-- id: php.sanitizer.filter_var
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: validation
-  match:
-    kind: call
-    callee:
-      name: filter_var
-  description: "Disabled - bare filter_var($value) uses the default unsafe/raw filter and does not validate or sanitize attacker-controlled
-    data. Use constrained FILTER_VALIDATE_* rules instead."
-- id: php.sanitizer.filter_input
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: validation
-  match:
-    kind: call
-    callee:
-      name: filter_input
-  description: "Disabled - filter_input requires a specific FILTER_VALIDATE_* or context-appropriate FILTER_SANITIZE_* argument;
-    the bare call/default filter preserves dangerous taint."
-- id: php.sanitizer.json_encode
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: validation
-  match:
-    kind: call
-    callee:
-      name: json_encode
-  description: Disabled - json_encode escapes for JSON, not HTML.
 - id: php.sanitizer.basename
   enabled: true
   language: php
@@ -219,17 +158,6 @@
     expect_match_text:
     - basename
   description: basename - strips directory; mitigates path traversal in filename.
-- id: php.sanitizer.realpath
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: path-sanitize
-  match:
-    kind: call
-    callee:
-      name: realpath
-  description: Disabled - realpath canonicalizes but does not by itself enforce trusted-root containment.
 - id: php.sanitizer.preg_quote
   enabled: true
   language: php
@@ -273,7 +201,6 @@
     code: |
       <?php
       use symfony\htmlsanitizer;
-      use symfony\htmlsanitizer;
       use symfony\html-sanitizer;
       function example($input, $url, $id, $payload, $request) {
         HtmlSanitizer::sanitize($input);
@@ -302,7 +229,6 @@
     code: |
       <?php
       use ezyang\htmlpurifier;
-      use ezyang\htmlpurifier;
       function example($input, $url, $id, $payload, $request) {
         HTMLPurifier::purify($input);
       }
@@ -327,7 +253,6 @@
     code: |
       <?php
       use wordpress;
-      use wordpress;
       function example($input, $url, $id, $payload, $request) {
         esc_html($input);
       }
@@ -348,7 +273,6 @@
   - name: php.sanitizer.wordpress_esc_attr example
     code: |
       <?php
-      use wordpress;
       use wordpress;
       function example($input, $url, $id, $payload, $request) {
         esc_attr($input);
@@ -371,7 +295,6 @@
     code: |
       <?php
       use wordpress;
-      use wordpress;
       function example($input, $url, $id, $payload, $request) {
         esc_url($input);
       }
@@ -392,7 +315,6 @@
   - name: php.sanitizer.wordpress_sanitize_text example
     code: |
       <?php
-      use wordpress;
       use wordpress;
       function example($input, $url, $id, $payload, $request) {
         sanitize_text_field($input);
@@ -527,7 +449,6 @@
     code: |
       <?php
       use twig\twig;
-      use twig\twig;
       function example($input, $url, $id, $payload, $request) {
         twig_escape_filter($input);
       }
@@ -551,7 +472,6 @@
   - name: php.sanitizer.laravel_e example
     code: |
       <?php
-      use laravel\framework;
       use laravel\framework;
       function example($input, $url, $id, $payload, $request) {
         e($input);
@@ -577,7 +497,6 @@
     code: |
       <?php
       use wordpress;
-      use wordpress;
       function example($input, $url, $id, $payload, $request) {
         $wpdb->prepare($input);
       }
@@ -599,30 +518,12 @@
     code: |
       <?php
       use wordpress;
-      use wordpress;
       function example($input, $url, $id, $payload, $request) {
         esc_sql($input);
       }
     expect_match_text:
     - esc_sql
   description: WordPress esc_sql - last-resort SQL escape.
-- id: php.sanitizer.filter_var_int
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: php.sanitizer.filter_var_validate_int
-  language: php
-  tag: numeric-coerce
-  match:
-    kind: call
-    callee:
-      name: filter_var
-  constraints:
-  - arg_equals:
-      index: 1
-      value: FILTER_VALIDATE_INT
-  description: "Disabled duplicate - php.sanitizer.filter_var_validate_int is the enabled constrained FILTER_VALIDATE_INT
-    rule with examples."
 - id: php.sanitizer.htmlspecialchars_ent_quotes
   enabled: true
   language: php
@@ -632,9 +533,9 @@
     callee:
       name: htmlspecialchars
   constraints:
-  - arg_equals:
+  - arg_matches_regex:
       index: 1
-      value: ENT_QUOTES
+      regex: '^(?:\\?[A-Z_][A-Z0-9_]*\s*\|\s*)*\\?ENT_QUOTES(?:\s*\|\s*\\?[A-Z_][A-Z0-9_]*)*$'
   match_examples:
   - name: php.sanitizer.htmlspecialchars_ent_quotes example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  htmlspecialchars($input, ENT_QUOTES);\n}\n"
@@ -642,6 +543,27 @@
     - htmlspecialchars
   - name: php.sanitizer.htmlspecialchars_ent_quotes example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  htmlspecialchars();\n}\n"
+    expect_no_match: true
+  - name: composite quote and substitution flags retain the quote guarantee
+    code: |
+      <?php
+      function render_text($value) {
+        return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+      }
+    expect_match_text: [htmlspecialchars]
+  - name: flags without quote encoding do not satisfy the quote guarantee
+    code: |
+      <?php
+      function render_text($value) {
+        return htmlspecialchars($value, ENT_NOQUOTES | ENT_SUBSTITUTE, 'UTF-8');
+      }
+    expect_no_match: true
+  - name: quoted flag spelling is not the PHP bit flag
+    code: |
+      <?php
+      function render_text($value) {
+        return htmlspecialchars($value, 'ENT_QUOTES', 'UTF-8');
+      }
     expect_no_match: true
   description: htmlspecialchars(..., ENT_QUOTES) - encodes both single and double quotes, making output safe for double- AND
     single-quoted attribute contexts. Without ENT_QUOTES the default (ENT_HTML401|ENT_QUOTES varies by PHP version; in <8.1
@@ -656,9 +578,9 @@
     callee:
       name: htmlentities
   constraints:
-  - arg_equals:
+  - arg_matches_regex:
       index: 1
-      value: ENT_QUOTES
+      regex: '^(?:\\?[A-Z_][A-Z0-9_]*\s*\|\s*)*\\?ENT_QUOTES(?:\s*\|\s*\\?[A-Z_][A-Z0-9_]*)*$'
   match_examples:
   - name: php.sanitizer.htmlentities_ent_quotes example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  htmlentities($input, ENT_QUOTES);\n}\n"
@@ -666,6 +588,13 @@
     - htmlentities
   - name: php.sanitizer.htmlentities_ent_quotes example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  htmlentities();\n}\n"
+    expect_no_match: true
+  - name: flags without quote encoding do not satisfy the htmlentities quote guarantee
+    code: |
+      <?php
+      function render_text($value) {
+        return htmlentities($value, ENT_NOQUOTES | ENT_SUBSTITUTE, 'UTF-8');
+      }
     expect_no_match: true
   description: 'htmlentities(..., ENT_QUOTES) - same rationale as htmlspecialchars_ent_quotes: only the ENT_QUOTES variant
     is safe for single-quoted attribute contexts.'
@@ -767,20 +696,6 @@
   description: openssl_random_pseudo_bytes() - CSPRNG bytes. The 2nd by-ref parameter `$crypto_strong` returns true when OpenSSL
     used a cryptographically strong RNG; callers must check it before using the output for crypto. The bare-call match here
     is the source-visible site; the by-ref-check is enforced as a manual review item.
-- id: php.sanitizer.pdo_quote_value
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: sql-parameter
-  match:
-    kind: call
-    callee:
-      attribute:
-      - PDO
-      - quote
-  description: "Disabled - PDO::quote is only safe for string-literal value contexts and cannot prove the quoted output is
-    not used as an identifier, keyword, or larger SQL fragment. Prefer prepared statements and bind rules."
 - id: php.sanitizer.symfony_is_safe_redirect
   enabled: true
   language: php
@@ -797,7 +712,6 @@
   - name: php.sanitizer.symfony_is_safe_redirect example
     code: |
       <?php
-      use symfony\securityhttp;
       use symfony\securityhttp;
       use symfony\security-http;
       function example($input, $url, $id, $payload, $request) {
@@ -853,28 +767,6 @@
     expect_no_match: true
   description: in_array($value, $allowed, true) - strict enum allowlist check; third argument avoids PHP loose-comparison
     bypasses.
-- id: php.sanitizer.array_key_exists_allowlist
-  enabled: false
-  language: php
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      name: array_key_exists
-  constraints:
-  - any_arg_matches_regex: (?i)allow(ed|list)|permitted|valid
-  match_examples:
-  - name: php.sanitizer.array_key_exists_allowlist example
-    code: "<?php\nfunction example($role) {\n  array_key_exists($role, $allowedRoles);\n}\n"
-    expect_match_text:
-    - array_key_exists
-  - name: php.sanitizer.array_key_exists_allowlist example negative constraint boundary
-    code: "<?php\nfunction example($role) {\n  array_key_exists();\n}\n"
-    expect_no_match: true
-  description: Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    array_key_exists($value, $allowed*) - associative-array allowlist membership check.
-  disabled_reason:
-    code: over-broad
 - id: php.sanitizer.preg_match_full_string_shape
   enabled: true
   language: php
@@ -1318,7 +1210,6 @@
     code: |
       <?php
       use laravel\framework;
-      use laravel\framework;
       function example($input, $url, $id, $payload, $request) {
         RateLimiter::for($input);
       }
@@ -1345,7 +1236,6 @@
     code: |
       <?php
       use wordpress;
-      use wordpress;
       function example($input, $url, $id, $payload, $request) {
         wp_verify_nonce($input, 'export-report');
       }
@@ -1366,7 +1256,6 @@
   - name: php.csrf.wordpress_check_admin_referer example
     code: |
       <?php
-      use wordpress;
       use wordpress;
       function example($input, $url, $id, $payload, $request) {
         check_admin_referer('export-report');

@@ -3,6 +3,8 @@
   language: scala
   tag: xss
   severity: high
+  packages: [play.twirl.api]
+  imports: [play.twirl.api.Html]
   frameworks:
   - play
   cwe:
@@ -11,16 +13,37 @@
     kind: new
     callee:
       name: Html
+      binding_origin: imported
   constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(?:<\s*!?\s*[a-z]|&(?:lt|gt|quot|#(?:x0*3[cCeE]|0*6[02]));)'
   - arg_tainted:
       index: 0
   match_examples:
-  - name: generated shape example
-    code: "object App {\n  def handle(input: String): Unit = {\n    new Html(input)\n  }\n}\nclass Html(args: Any*)\n"
-  - name: arg tainted literal negative
-    code: "object App {\n  def handle(input: String): Unit = {\n    new Html(\"safe\")\n  }\n}\nclass Html(args: Any*)\n"
+  - name: imported Twirl constructor receives tainted markup
+    code: |
+      import play.twirl.api.Html
+      object Page {
+        def render(input: String): Html = new Html("<p>" + input + "</p>")
+      }
+    expect_match_text: [Html]
+  - name: literal Twirl markup negative
+    code: |
+      import play.twirl.api.Html
+      object Page {
+        def render(): Html = new Html("<p>safe</p>")
+      }
     expect_no_match: true
-  description: "Twirl Html(tainted) - bypasses auto-escaping."
+  - name: local Html constructor does not acquire Twirl identity
+    code: |
+      import play.twirl.api.{Html => TwirlHtml}
+      class Html(value: String)
+      object Page {
+        def render(input: String): Html = new Html("<p>" + input + "</p>")
+      }
+    expect_no_match: true
+  description: "Imported Twirl Html construction with tainted markup bypasses template escaping; constructor identity and markup shape are compiler/rule proven."
 - id: scala.xss.twirl_html_apply
   enabled: true
   language: scala
@@ -61,6 +84,45 @@
       }
     expect_no_match: true
   description: "Twirl Html.apply(tainted) - companion-object form of Html(...)."
+
+- id: scala.xss.twirl_html_companion
+  enabled: true
+  language: scala
+  tag: xss
+  severity: high
+  packages: [play.twirl.api]
+  frameworks: [play]
+  imports: [play.twirl.api.Html]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      name: Html
+      binding_origin: imported
+      call_kind_in: [function]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(?:<\s*!?\s*[a-z]|&(?:lt|gt|quot|#(?:x0*3[cCeE]|0*6[02]));)'
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: imported Twirl Html companion receives tainted markup
+    code: |
+      import play.twirl.api.Html
+      object Page {
+        def render(value: String) = Html(s"<html><body>$value</body></html>")
+      }
+    expect_match_text: [Html]
+  - name: local Html object is not the Twirl companion
+    code: |
+      import play.twirl.api.Html
+      object Html { def apply(value: String): String = value }
+      object Page {
+        def render(value: String) = Html(s"<html><body>$value</body></html>")
+      }
+    expect_no_match: true
+  description: "Imported Twirl Html companion called with tainted HTML markup bypasses template escaping."
 - id: scala.xss.scalatags_raw
   enabled: true
   language: scala
@@ -318,6 +380,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  - arg_matches_regex:
+      index: 0
+      regex: '<'
   match_examples:
   - name: play ok raw html
     code: |
@@ -333,6 +398,15 @@
       object App {
         def handle(name: String): Unit = {
           Ok("<p>safe</p>")
+        }
+      }
+    expect_no_match: true
+  - name: tainted non-HTML response is not an XSS sink
+    code: |
+      import play._
+      object App {
+        def handle(host: String): Unit = {
+          Ok(service.run(host))
         }
       }
     expect_no_match: true
@@ -380,20 +454,3 @@
       }
     expect_no_match: true
   description: "Vert.x HttpServerResponse.end(raw HTML concat) - reflected HTML response built from attacker-controlled text."
-- id: scala.xss.html_string_concat
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: scala
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: +
-  match_examples:
-  - name: generated shape example
-    code: "object App {\n  def handle(input: String): Unit = {\n    +(\"<b>\" + input)\n  }\n}\n"
-  description: Disabled broad concat shape. Raw HTML response APIs should be modeled as sinks; `+` alone is not an API sink in the taint-first rulepack.

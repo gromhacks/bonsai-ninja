@@ -64,9 +64,11 @@ pub mod chains;
 pub struct BuildTargetIndex {
 pub struct CallEdge {
 pub struct CallGraph {
+pub struct CallGraphCallableArgument {
 pub struct CallGraphFileSemantics<F, T, P, G, C> {
 pub struct CallGraphLocalBinding {
 pub struct CallGraphNode {
+pub struct CallbackExecutionAccumulator {
 pub struct EdgeProvenance {
 pub struct ResolvedCallGraph {
 pub struct ResolvedCallGraphBuildContext {
@@ -78,7 +80,7 @@ pub enum SyntheticBlockKind {
 pub enum Terminator {
 pub struct BasicBlock {
 pub struct Cfg {
-pub use builder::build_cfg_from_flow;
+pub use builder::{
 
 === common ===
 pub mod atomic_file;
@@ -268,12 +270,15 @@ pub fn apply_ecmascript_assigned_member_callable_owners(
 pub fn apply_javascript_getter_property_sources(
 pub fn apply_js_ts_commonjs_named_export_aliases(
 pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tree, src: &[u8], file: FileId) {
+pub fn ecmascript_expression_value_kind(
 pub fn ecmascript_source_file_representation(path: &std::path::Path) -> SourceFileRepresentation {
+pub fn ecmascript_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
 pub fn ecmascript_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {
 pub fn extract_ecmascript_pseudo_call(
 pub fn js_ts_imports(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<ImportSpec> {
 pub fn js_ts_module_segments(path: &std::path::Path) -> Vec<String> {
 pub fn js_ts_require_calls(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<ImportSpec> {
+pub fn normalize_node_builtin_scheme(module: &str) -> String {
 pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
 pub struct JavaScriptAdapter;
 
@@ -329,10 +334,12 @@ pub struct ParserOptions {
 
 === resolve ===
 pub fn alias_map_for_file(imports: &[ImportSpec]) -> AHashMap<String, String> {
+pub fn build_shared_interface_descendant_index<P, S>(
 pub fn build_shared_peer_class_index(global: &GlobalIndex) -> Arc<PeerClassIndex> {
 pub fn callee_without_call_args(callee: &str) -> &str {
 pub fn canonical_dispatch_type_name(name: &str) -> String {
 pub fn class_symbols_share_semantic_identity(global: &GlobalIndex, left: SymbolId, right: SymbolId) -> bool {
+pub fn collect_interface_descendants_cached(
 pub fn collect_method_candidates_for_class(
 pub fn collect_method_candidates_for_class_cached(
 pub fn collect_transitive_base_type_names(
@@ -357,6 +364,7 @@ pub fn qualified_module_alias_call(name: &str, aliases: &AHashMap<String, String
 pub fn resolve_callable(global: &GlobalIndex, name: &str) -> Vec<bonsai_common::FuncId> {
 pub fn resolve_callable_with_context(
 pub fn resolve_class(
+pub fn resolve_declared_receiver_class(
 pub fn semantic_import_binding_map_for_file(imports: &[ImportSpec]) -> AHashMap<String, String> {
 pub fn short_tail(name: &str) -> &str {
 pub fn split_qualified_head_tail(name: &str) -> Option<(&str, &str)> {
@@ -365,6 +373,7 @@ pub fn strip_module_path_prefix(name: &str, syntax: ModulePathSyntax) -> &str {
 pub fn visibility_allows(
 pub struct FilePathLookup<'a> {
 pub struct FilePathMatchLookup<'a> {
+pub struct InterfaceDescendantIndex {
 pub struct MethodCandidateCache {
 pub struct ResolveContext<'a> {
 pub type PeerClassIndex = AHashMap<(String, ModulePath), Vec<SymbolId>>;

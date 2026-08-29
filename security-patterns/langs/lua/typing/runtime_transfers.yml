@@ -1,0 +1,49 @@
+- id: lua.typing.pcall_callback_invocation
+  enabled: true
+  language: lua
+  taint_semantics:
+    callback_invocation:
+      callback_arg_index: 0
+      forwarded_args_from: 1
+      callback_return_result_offset: 1
+  match:
+    kind: call
+    callee:
+      name: pcall
+      binding_origin: runtime-global
+  match_examples:
+  - name: protected runtime callback
+    code: |
+      local ok, value = pcall(function(input) return transform(input) end, raw)
+    expect_match_text: [pcall]
+  - name: lexical pcall replacement is not the Lua runtime
+    code: |
+      local function pcall(callback) return false, "blocked" end
+      local ok, value = pcall(worker)
+    expect_no_match: true
+  description: "Lua runtime pcall invokes callback argument zero, forwards the remaining arguments, and prefixes callback results with the success-status slot. Typing-only."
+
+- id: lua.typing.xpcall_callback_invocation
+  enabled: true
+  language: lua
+  taint_semantics:
+    callback_invocation:
+      callback_arg_index: 0
+      forwarded_args_from: 2
+      callback_return_result_offset: 1
+  match:
+    kind: call
+    callee:
+      name: xpcall
+      binding_origin: runtime-global
+  match_examples:
+  - name: protected runtime callback with message handler
+    code: |
+      local ok, value = xpcall(function(input) return transform(input) end, on_error, raw)
+    expect_match_text: [xpcall]
+  - name: lexical xpcall replacement is not the Lua runtime
+    code: |
+      local function xpcall(callback, handler) return false, handler("blocked") end
+      local ok, value = xpcall(worker, on_error)
+    expect_no_match: true
+  description: "Lua runtime xpcall invokes callback argument zero, reserves argument one for the message handler, forwards later arguments, and prefixes callback results with the success-status slot. Typing-only."

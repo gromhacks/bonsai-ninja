@@ -274,7 +274,8 @@ prefix matches before broader substring matches, so SDK consumers get the
 same pre-pagination relevance ordering as the CLI. `PathOutcome`,
 `SliceOutcome`, `TreeOut`, and `ReadFileOut` are connected views; they
 carry `analysis_complete` plus `analysis_incomplete_reasons`. `paths` starts
-from resolver-backed exact/narrowed callgraph edges and augments them with
+from resolver-backed compiler-proven callgraph edges (retaining `Exact` or
+`Narrowed` provenance) and augments them with
 warmed IDG cross-call edges when the query open hydrated an IDG sidecar;
 `PathOutcome.backends`, `idg_available`, and `idg_semantic_edges` expose that
 planner decision. `PathOutcome` contains `representation:
@@ -379,12 +380,12 @@ let graphml = project.export().graphml()?;
 let cypher = project.export().cypher()?;
 ```
 
-Native JSON schema v7 emits workspace-relative code locations and one
+Native JSON schema v9 emits workspace-relative code locations and one
 top-level absolute `workspace_root`. SDK consumers should join the two only at
 the filesystem boundary; storing or comparing location identities by absolute
 host path is unsupported. Explicit export-cache rebuilds validate the schema
 version before reuse. The complete machine-readable contract is
-[`schemas/bonsai-native-export-v7.schema.json`](../../schemas/bonsai-native-export-v7.schema.json).
+[`schemas/bonsai-native-export-v9.schema.json`](../../schemas/bonsai-native-export-v9.schema.json).
 
 ---
 

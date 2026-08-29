@@ -1,14 +1,54 @@
 # Rust XXE sinks.
 #
-# Most pure-Rust XML parsers (quick-xml, xml-rs, roxmltree,
-# sxd-document) don't expand external entities by default - they're
-# listed disabled so an author can opt in per codebase after
-# reviewing whether the project configured entity expansion.
-#
 # The real RCE/file-disclosure surface is libxml2 bindings (`libxml`
 # crate), the `yaserde` serde-XML codec (which hands the buffer to
 # quick-xml but without disabling DTD loading in all configurations),
 # and anything routed through `xml-rs`'s DOCTYPE path.
+
+- id: rust.xxe.quick_xml_read_event_into
+  enabled: true
+  language: rust
+  tag: xxe
+  severity: high
+  packages: [quick-xml]
+  imports: [quick_xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: read_event_into
+  constraints:
+  - receiver_type_in: [QuickXmlReader]
+  - receiver_tainted: true
+  match_examples:
+  - name: tainted quick-xml reader consumes an event
+    code: |
+      use quick_xml::Reader;
+      fn parse(input: &str) {
+          let mut reader = Reader::from_str(input);
+          let mut buffer = Vec::new();
+          let _ = reader.read_event_into(&mut buffer);
+      }
+    expect_match_text: [reader.read_event_into]
+  - name: literal quick-xml reader is not tainted
+    code: |
+      use quick_xml::Reader;
+      fn parse() {
+          let mut reader = Reader::from_str("<root/>");
+          let mut buffer = Vec::new();
+          let _ = reader.read_event_into(&mut buffer);
+      }
+    expect_no_match: true
+  - name: unrelated reader method is not quick-xml
+    code: |
+      struct Reader;
+      impl Reader { fn read_event_into(&mut self, _: &mut Vec<u8>) {} }
+      fn parse(input: &str, reader: &mut Reader) {
+          let mut buffer = input.as_bytes().to_vec();
+          reader.read_event_into(&mut buffer);
+      }
+    expect_no_match: true
+  description: "A compiler-typed quick-xml reader consumes events from attacker-controlled XML. The receiver provenance comes from the rule-declared factory transfer rather than API logic in the engine."
 
 - id: rust.xxe.libxml_parse_string
   enabled: true
@@ -178,14 +218,12 @@
   - name: tainted serde xml string
     code: |
       use serde_xml_rs;
-      use serde_xml_rs;
       use serde_xml_rs::dummy;
       fn example(target: &str) {
           serde_xml_rs::from_str(target);
       }
   - name: literal serde xml string negative
     code: |
-      use serde_xml_rs;
       use serde_xml_rs;
       use serde_xml_rs::dummy;
       fn example() {
@@ -196,62 +234,3 @@
 
   imports:
   - serde_xml_rs
-- id: rust.xxe.xml_rs_parse
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: rust
-  tag: xxe
-  severity: medium
-  packages: [xml_rs]
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [EventReader, new]
-  description: "Disabled - xml-rs exposes DOCTYPE events but does not fetch external entities unless the caller wires a resolver; enable on codebases that implement `EntityResolver`."
-
-- id: rust.xxe.sxd_document_parser
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: xxe
-  severity: low
-  packages: [sxd_document]
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [parser, parse]
-  description: "Disabled - sxd-document doesn't resolve external entities."
-
-- id: rust.xxe.quick_xml_reader
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: xxe
-  severity: low
-  packages: [quick_xml]
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [Reader, from_str]
-  description: "Disabled - quick-xml doesn't resolve entities by default; enable if the codebase sets `expand_empty_elements(true)` with custom entity resolution."
-
-- id: rust.xxe.roxmltree_parse
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: xxe
-  severity: low
-  packages: [roxmltree]
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [Document, parse]
-  description: "Disabled - roxmltree rejects external entities; listed so an auditor can trace XML ingestion paths through the codebase."

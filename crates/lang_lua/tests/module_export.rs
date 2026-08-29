@@ -270,6 +270,12 @@ fn factory_receiver_field_write_uses_exact_member_assignment() {
         .find_map(|symbol| global.decl_of(*symbol))
         .expect("Repo.new declaration");
 
+    assert_eq!(
+        constructor.kind,
+        bonsai_lang_api::DeclKind::Constructor,
+        "a receiver-writing factory that returns that receiver is constructor syntax"
+    );
+
     assert!(
         constructor.flow_events.iter().any(|event| matches!(
             event,
@@ -291,6 +297,20 @@ fn factory_receiver_field_write_uses_exact_member_assignment() {
         constructor.params,
         constructor.receiver_field_writes
     );
+}
+
+#[test]
+fn receiver_mutator_without_receiver_return_is_not_a_constructor() {
+    let db =
+        db_with("local Repo = {}\nfunction Repo.capture(self, conn)\n  self.conn = conn\nend\nreturn Repo\n");
+    let global = db.global_index();
+    let capture = global
+        .find_by_name("capture")
+        .iter()
+        .find_map(|symbol| global.decl_of(*symbol))
+        .expect("Repo.capture declaration");
+
+    assert_ne!(capture.kind, bonsai_lang_api::DeclKind::Constructor);
 }
 
 #[test]
@@ -326,4 +346,60 @@ fn table_literal_emits_field_scoped_assignments() {
                 && source_names.is_empty()
                 && *value_kind == Some(bonsai_lang_api::AssignValueKind::Literal)
     )));
+}
+
+#[test]
+fn parallel_table_assignments_follow_exact_lua_value_ordinals() {
+    let db = db_with(
+        r#"
+function entry(raw, other, clean)
+  local first, second = clean, { cmd = raw, nested = { user = other } }
+  local left, right = { one = raw }, { two = other }
+  local present, missing = { kept = raw }
+  only = clean, { discarded = raw }
+  sink(second.cmd, second.nested.user, left.one, right.two, present.kept)
+end
+"#,
+    );
+    let global = db.global_index();
+    let entry = global
+        .find_by_name("entry")
+        .iter()
+        .find_map(|symbol| global.decl_of(*symbol))
+        .expect("entry declaration");
+    let field_sources = entry
+        .flow_events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Assign {
+                target, source_names, ..
+            } if target.contains('.') => Some((target.as_str(), source_names.as_slice())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert!(field_sources.contains(&("second.cmd", &["raw".to_string()][..])));
+    assert!(field_sources.contains(&("second.nested.user", &["other".to_string()][..])));
+    assert!(field_sources.contains(&("left.one", &["raw".to_string()][..])));
+    assert!(field_sources.contains(&("right.two", &["other".to_string()][..])));
+    assert!(field_sources.contains(&("present.kept", &["raw".to_string()][..])));
+
+    assert!(
+        !field_sources
+            .iter()
+            .any(|(target, _)| target.starts_with("first.")),
+        "a later RHS table must never be assigned to an earlier target: {field_sources:#?}"
+    );
+    assert!(
+        !field_sources
+            .iter()
+            .any(|(target, _)| target.starts_with("missing.")),
+        "a target filled with nil has no table fields: {field_sources:#?}"
+    );
+    assert!(
+        !field_sources
+            .iter()
+            .any(|(target, _)| target.starts_with("only.")),
+        "an extra RHS table is evaluated then discarded, not paired with the sole target: {field_sources:#?}"
+    );
 }

@@ -1,7 +1,5 @@
 # C# information-disclosure sinks (Console, logging, ASP.NET responses).
 - id: csharp.info_disclosure.console_writeline_secret
-  aliases:
-  - csharp.log_injection.console_writeline_newline
   enabled: true
   language: csharp
   tag: information-disclosure
@@ -23,11 +21,9 @@
     code: |
       class App { void Test() { Console.WriteLine("password=redacted"); } }
     expect_no_match: true
-  description: "Console.WriteLine of secret-shaped values can disclose credentials through stdout logs. Also covers merged aliases: csharp.log_injection.console_writeline_newline."
+  description: "Console.WriteLine of secret-shaped values can disclose credentials through stdout logs."
 
 - id: csharp.info_disclosure.ilogger_logerror_secret
-  aliases:
-  - csharp.log_injection.logger_logerror_concat
   enabled: true
   language: csharp
   tag: information-disclosure
@@ -52,4 +48,4 @@
       using Microsoft.Extensions.Logging;
       class App { void Test() { ILogger.LogError("api_key={Key}", "redacted"); } }
     expect_no_match: true
-  description: "ILogger.LogError with secret-shaped data persists sensitive values in application logs. Also covers merged aliases: csharp.log_injection.logger_logerror_concat."
+  description: "ILogger.LogError with secret-shaped data persists sensitive values in application logs."

@@ -194,21 +194,6 @@
     expect_no_match: true
   description: "openssl.cipher.new - flagged when algorithm is DES/3DES/RC4/RC2/Blowfish or any ECB mode (no confidentiality). Strong AEAD ciphers (aes-*-gcm) exempt via the algorithm-name constraint."
 
-- id: lua.crypto.openssl_cipher_encrypt_ecb
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: lua
-  tag: weak-crypto
-  severity: high
-  packages: [lua-openssl]
-  cwe: [CWE-327]
-  match:
-    kind: call
-    callee:
-      attribute: [cipher, encrypt]
-  description: "Disabled - cipher:encrypt is context-dependent; flag with ECB-mode narrowing."
-
 - id: lua.crypto.math_random
   enabled: true
   language: lua

@@ -23,7 +23,7 @@
   match:
     kind: call
     callee:
-      attribute: [ERB::Util, html_escape]
+      attribute: ["ERB::Util", html_escape]
   match_examples:
   - name: ruby.sanitizer.erb_html_escape example
     code: |
@@ -154,19 +154,6 @@
     expect_match_text: ["permit"]
   description: "Strong Parameters #permit - whitelists keys."
 
-- id: ruby.sanitizer.action_view_sanitize
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: html-sanitize
-  packages: [actionview]
-  match:
-    kind: call
-    callee:
-      name: sanitize
-  description: "Disabled - bare sanitize overmatches unrelated helpers; use receiver-qualified Loofah/Rails sanitizer rules."
-
 - id: ruby.sanitizer.loofah_scrub
   enabled: true
   language: ruby
@@ -267,18 +254,6 @@
     expect_match_text: ["Net::LDAP::Filter.escape"]
   description: "Net::LDAP::Filter.escape."
 
-- id: ruby.sanitizer.json_dump
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: validation
-  match:
-    kind: call
-    callee:
-      attribute: [JSON, dump]
-  description: "Disabled - JSON.dump escapes for JSON context, not HTML."
-
 - id: ruby.sanitizer.integer_coerce
   enabled: true
   language: ruby
@@ -322,7 +297,7 @@
   match:
     kind: call
     callee:
-      attribute: [Rack::Utils, escape_html]
+      attribute: ["Rack::Utils", escape_html]
   match_examples:
   - name: ruby.sanitizer.rack_escape_html example
     code: |
@@ -458,18 +433,6 @@
     expect_match_text: ["Integer"]
   description: "Integer(str[, base]) - raises on non-numeric; safer than to_i for path/ID coercion."
 
-- id: ruby.sanitizer.pathname_expand_path
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: path-sanitize
-  match:
-    kind: call
-    callee:
-      name: expand_path
-  description: "Disabled - expand_path normalizes paths but does not enforce root containment."
-
 - id: ruby.sanitizer.activesupport_secure_compare
   enabled: true
   language: ruby
@@ -516,7 +479,7 @@
   match:
     kind: call
     callee:
-      attribute: [BCrypt::Password, "=="]
+      attribute: ["BCrypt::Password", "=="]
   match_examples:
   - name: ruby.sanitizer.bcrypt_password_eq example
     code: |
@@ -535,7 +498,7 @@
   match:
     kind: call
     callee:
-      attribute: [Argon2::Password, verify_password]
+      attribute: ["Argon2::Password", verify_password]
   match_examples:
   - name: ruby.sanitizer.argon2_verify_password example
     code: |
@@ -553,7 +516,7 @@
   match:
     kind: call
     callee:
-      attribute: [ERB::Util, url_encode]
+      attribute: ["ERB::Util", url_encode]
   match_examples:
   - name: ruby.sanitizer.erb_url_encode example
     code: |
@@ -736,6 +699,38 @@
   description: "Rails redirect_to(..., allow_other_host: false) - Rails 7+ refuses off-host redirect targets."
 
 # -- Audit-derived validation / binding sanitizers -----------------------------
+- id: ruby.sanitizer.finite_literal_map_fetch
+  enabled: true
+  language: ruby
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: fetch
+  constraints:
+  - min_args: 2
+  - max_args: 2
+  taint_semantics:
+    finite_literal_map_selector:
+      key_argument_index: 0
+      fallback_argument_index: 1
+  match_examples:
+  - name: ruby.sanitizer.finite_literal_map_fetch example
+    code: |
+      def example(selector)
+        choices = {"first" => "alpha", "second" => "beta"}
+        choices.fetch(selector, "fallback")
+      end
+    expect_match_text: ["choices.fetch"]
+  - name: ruby.sanitizer.finite_literal_map_fetch wrong selector negative
+    code: |
+      def example(selector)
+        choices = {"first" => "alpha"}
+        choices.lookup(selector, "fallback")
+      end
+    expect_no_match: true
+  description: "Hash#fetch(key, fallback) is credited only when compiler facts prove a unique dominating local string map, an exact literal fallback, and no conflicting map use."
+
 - id: ruby.sanitizer.same_origin_start_with
   enabled: true
   language: ruby
@@ -760,27 +755,6 @@
     expect_no_match: true
   description: "String#start_with?(\"/\") - same-origin redirect/path guard for root-relative targets."
 
-- id: ruby.sanitizer.include_allowlist
-  enabled: false
-  language: ruby
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      regex: "^(ALLOWED|ALLOWLIST|allowed|allowlist|allowed_roles|permitted|valid_values)\\.include\\?$"
-  match_examples:
-  - name: ruby.sanitizer.include_allowlist example
-    code: |
-      ALLOWED = %w[user admin]
-      def example(role)
-        ALLOWED.include?(role)
-      end
-    expect_match_text: ["ALLOWED.include?"]
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    allowlist.include?(value) on known allowlist receiver names - enum/set membership validator for constrained values."
-
-  disabled_reason:
-    code: over-broad
 - id: ruby.sanitizer.match_full_string_shape
   enabled: true
   language: ruby
@@ -1073,7 +1047,7 @@
   match:
     kind: call
     callee:
-      attribute: [Rack::Attack, throttle]
+      attribute: ["Rack::Attack", throttle]
   match_examples:
   - name: ruby.ratelimit.rack_attack_throttle example
     code: |

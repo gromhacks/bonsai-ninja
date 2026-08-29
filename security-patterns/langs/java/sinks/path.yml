@@ -252,7 +252,8 @@
     guard_profile: path-consumer-containment
     path_consumer_containment_guard:
       canonicalizer: {name: normalize}
-      base_canonicalizer: {name: normalize}
+      canonicalizer_input_from_receiver: true
+      base_canonicalizer: {regex: '(?:^|\.)(?:toAbsolutePath|normalize)$'}
       path_constructor: {name: resolve}
       path_constructor_base_from_receiver: true
       containment_check: {name: startsWith}
@@ -392,7 +393,8 @@
     guard_profile: path-consumer-containment
     path_consumer_containment_guard:
       canonicalizer: {name: normalize}
-      base_canonicalizer: {name: normalize}
+      canonicalizer_input_from_receiver: true
+      base_canonicalizer: {regex: '(?:^|\.)(?:toAbsolutePath|normalize)$'}
       path_constructor: {name: resolve}
       path_constructor_base_from_receiver: true
       containment_check: {name: startsWith}
@@ -412,34 +414,6 @@
       safe\", \"dest\");\n  }\n}\n"
     expect_no_match: true
   description: "java.nio.file.Files.copy(source, tainted_dest) - attacker-controlled destination path."
-- id: java.path.path_resolve
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: path-traversal
-  severity: high
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      name: resolve
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: path resolve tainted child
-    code: "class App {\n  Object handle(Path basePath, String name) {\n    return\
-      \ basePath.resolve(name);\n  }\n}\nclass Path {\n  Object resolve(Object...\
-      \ args) { return null; }\n}\n"
-    expect_match_text:
-    - basePath.resolve
-  - name: arg tainted literal negative
-    code: "class App {\n  void handle(String input) throws Exception {\n    resolve(\"\
-      safe\");\n  }\n}\n"
-    expect_no_match: true
-  description: "Disabled as a finding: Path.resolve constructs a value but does not access the filesystem. Exact flow continues into real file consumers, where containment guards are evaluated."
 - id: java.path.files_move
   enabled: true
   language: java
@@ -754,23 +728,3 @@
   description: Apache Commons IO FileUtils.forceDelete.
   imports:
   - org.apache.commons.io
-- id: java.path.zip_entry_getname
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: path-traversal
-  severity: high
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      attribute:
-      - ZipEntry
-      - getName
-  match_examples:
-  - name: generated shape example
-    code: "class App {\n  void handle(String input) throws Exception {\n    ZipEntry.getName(input);\n\
-      \  }\n}\n"
-  description: "Disabled - ZipEntry.getName() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."

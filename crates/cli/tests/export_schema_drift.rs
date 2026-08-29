@@ -16,7 +16,8 @@
 
 use serde_json::Value;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -63,7 +64,10 @@ fn run_export(lang: &str) -> Option<Value> {
 
 fn run_export_with_args(lang: &str, extra_args: &[&str]) -> Option<Value> {
     let bin = bin_path()?;
-    let ws = repo_root().join("examples").join(lang).join("micro");
+    let ws = repo_root()
+        .join("test-fixtures/languages")
+        .join(lang)
+        .join("micro");
     if !ws.exists() {
         return None;
     }
@@ -73,6 +77,13 @@ fn run_export_with_args(lang: &str, extra_args: &[&str]) -> Option<Value> {
         .args(extra_args)
         .args(["--no-color", "--no-progress"]);
     let out = command
+        .env("BONSAI_WORKSPACE_DIR", export_test_cache_dir(&ws))
+        .env(
+            "HOME",
+            repo_root()
+                .join("target/test-home/export-schema-drift")
+                .join(lang),
+        )
         .current_dir(repo_root())
         .output()
         .expect("spawn bonsai-ninja");
@@ -88,10 +99,21 @@ fn run_export_with_args(lang: &str, extra_args: &[&str]) -> Option<Value> {
     Some(parsed)
 }
 
+fn export_test_cache_dir(workspace: &Path) -> PathBuf {
+    let canonical = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let mut hasher = DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    repo_root()
+        .join("target/test-cache/export-schema-drift")
+        .join(format!("{:016x}", hasher.finish()))
+}
+
 fn export_schema() -> &'static jsonschema::Validator {
     static VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
     VALIDATOR.get_or_init(|| {
-        let path = repo_root().join("schemas/bonsai-native-export-v7.schema.json");
+        let path = repo_root().join("schemas/bonsai-native-export-v9.schema.json");
         let schema: Value = serde_json::from_slice(&std::fs::read(&path).expect("read export schema"))
             .expect("export schema is JSON");
         jsonschema::validator_for(&schema).expect("export schema compiles")
@@ -107,7 +129,7 @@ fn assert_matches_export_schema(label: &str, export: &Value) {
         .collect::<Vec<_>>();
     assert!(
         errors.is_empty(),
-        "[{label}] native export does not match schemas/bonsai-native-export-v7.schema.json:\n{}",
+        "[{label}] native export does not match schemas/bonsai-native-export-v9.schema.json:\n{}",
         errors.join("\n")
     );
 }
@@ -404,12 +426,12 @@ fn every_lang_micro_export_funcid_refs_resolve() {
 }
 
 #[test]
-fn committed_schema_is_strict_v7_and_accepts_materialized_propagations() {
-    let schema_path = repo_root().join("schemas/bonsai-native-export-v7.schema.json");
+fn committed_schema_is_strict_v9_and_accepts_materialized_propagations() {
+    let schema_path = repo_root().join("schemas/bonsai-native-export-v9.schema.json");
     let schema: Value = serde_json::from_slice(&std::fs::read(schema_path).expect("read export schema"))
         .expect("export schema is JSON");
     assert_eq!(schema["$schema"], "https://json-schema.org/draft/2020-12/schema");
-    assert_eq!(schema["properties"]["schema_version"]["const"], 7);
+    assert_eq!(schema["properties"]["schema_version"]["const"], 9);
     assert_eq!(schema["additionalProperties"], false);
 
     let export =

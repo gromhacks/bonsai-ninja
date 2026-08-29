@@ -1,7 +1,5 @@
 # Lua path-traversal sinks (stdlib io / LuaFileSystem / lua-luv).
 - id: lua.path.io_open_read
-  aliases:
-  - lua.upload_io_open_client_filename
   enabled: true
   language: lua
   tag: path-traversal
@@ -26,7 +24,7 @@
         io.open("data/report.txt")
       end
     expect_no_match: true
-  description: "io.open(path, mode) - reads/writes arbitrary filesystem path when tainted. Also covers merged aliases: lua.upload_io_open_client_filename."
+  description: "io.open(path, mode) - reads/writes arbitrary filesystem path when tainted. Upload provenance requires its own source/context proof."
 
 - id: lua.path.io_lines
   enabled: true
@@ -134,21 +132,6 @@
       end
     expect_no_match: true
   description: "os.rename(old, new) - attacker-controlled destination path enables overwrite."
-
-- id: lua.path.lfs_attributes
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: lua
-  tag: path-traversal
-  severity: medium
-  packages: [luafilesystem]
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      attribute: [lfs, attributes]
-  description: "Disabled - lfs.attributes leaks filesystem metadata; enable with sensitive-path narrowing."
 
 - id: lua.path.lfs_rmdir
   enabled: true

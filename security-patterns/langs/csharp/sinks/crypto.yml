@@ -162,29 +162,40 @@
   category: source-independent
   severity: high
   cwe: [CWE-327]
+  imports: [System.Security.Cryptography]
   match:
     kind: write
     target:
-      name: Mode
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Mode$'
+      receiver_type_in: [Aes, System.Security.Cryptography.Aes]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:CipherMode\.)?ECB$'
   match_examples:
-  - name: declared shape
+  - name: typed AES instance configured for ECB
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Mode = input; } }
+      using System.Security.Cryptography;
+      class App { void Configure(Aes cipher) { cipher.Mode = CipherMode.ECB; } }
+    expect_match_text: [cipher.Mode]
+  - name: typed AES instance configured for CBC
+    code: |
+      using System.Security.Cryptography;
+      class App { void Configure(Aes cipher) { cipher.Mode = CipherMode.CBC; } }
+    expect_no_match: true
+  - name: unrelated mode property collision
+    code: |
+      using System.Security.Cryptography;
+      class LocalOptions { public CipherMode Mode { get; set; } }
+      class App { void Configure(LocalOptions options) { options.Mode = CipherMode.ECB; } }
+    expect_no_match: true
+  - name: local AES type shadows imported type
+    code: |
+      using System.Security.Cryptography;
+      class Aes { public CipherMode Mode { get; set; } }
+      class App { void Configure(Aes cipher) { cipher.Mode = CipherMode.ECB; } }
+    expect_no_match: true
   description: "Aes.Mode = CipherMode.ECB - leaks block patterns."
-
-- id: csharp.crypto.padding_zeros
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: weak-crypto
-  severity: medium
-  cwe: [CWE-327]
-  match:
-    kind: write
-    target:
-      name: Padding
-  description: "Disabled - flag only when Padding=Zeros (constraint TBD)."
 
 - id: csharp.crypto.random_ctor
   enabled: true

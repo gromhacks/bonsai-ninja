@@ -30,33 +30,3 @@
       }
     expect_no_match: true
   description: "header(...) - covers CGI $q->header, Plack::Response $res->header, Dancer2 header (same bare `header` name). Flag tainted -location/-status or name=>tainted."
-
-- id: perl.header.mojolicious_headers_add
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  tag: header-injection
-  severity: high
-  packages: [Mojolicious]
-  cwe: [CWE-113]
-  match:
-    kind: call
-    callee:
-      name: add
-  description: "Disabled - bare `name: add` collides with perl.ldap.net_ldap_add (Net::LDAP $ldap->add). Without receiver-type narrowing we cannot distinguish; the LDAP-injection finding is more severe so we keep that rule and drop this one."
-
-- id: perl.header.plack_headers_set
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  tag: header-injection
-  severity: high
-  packages: ["Plack::Response"]
-  cwe: [CWE-113]
-  match:
-    kind: call
-    callee:
-      name: header
-  description: "Disabled - merged into perl.header.cgi_header (same bare `header` name)."

@@ -1,47 +1,41 @@
 # c log_injection sinks.
 
 # Log-injection sinks (round 2 fill).
-- id: c.log_injection.printf_format_user
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: c.format.printf_tainted
+- id: c.log_injection.syslog_tainted_value
+  enabled: true
   language: c
-  tag: format-string
-  severity: high
-  cwe: [CWE-134]
+  tag: log-injection
+  severity: medium
+  packages: [syslog.h]
+  imports: [syslog.h]
+  cwe: [CWE-117]
+  analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
   match:
     kind: call
     callee:
-      name: printf
+      name: syslog
+  constraints:
+  - min_args: 3
+  - arg_matches_regex:
+      index: 1
+      regex: '%[#0 +\-\.\dhljztL]*[diouxXeEfFgGaAcspn]'
+  - arg_tainted:
+      index: 2
   match_examples:
-    - name: generated direct match
-      code: |
-        void example(void) {
-          char *arg = "tainted";
-          char *fmt = arg;
-          printf(arg);
-        }
-  description: 'Disabled duplicate - c.format.printf_tainted is the canonical CWE-134 rule for printf(user_str).'
-- id: c.log_injection.fprintf_format_user
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: c.format.fprintf_tainted
-  language: c
-  tag: format-string
-  severity: high
-  cwe: [CWE-134]
-  match:
-    kind: call
-    callee:
-      name: fprintf
-  match_examples:
-    - name: generated direct match
-      code: |
-        void example(void) {
-          char *arg = "tainted";
-          char *fmt = arg;
-          fprintf(arg);
-        }
-  description: 'Disabled duplicate - c.format.fprintf_tainted is the canonical CWE-134 rule for fprintf(stream, user_format).'
+  - name: syslog constant format with tainted value
+    code: |
+      #include <syslog.h>
+      void audit(const char *input) {
+        syslog(LOG_INFO, "user=%s", input);
+      }
+    expect_match_text: [syslog]
+  - name: syslog literal value is not tainted
+    code: |
+      #include <syslog.h>
+      void audit(void) {
+        syslog(LOG_INFO, "user=%s", "system");
+      }
+    expect_no_match: true
+  description: "syslog with a constant conversion and attacker-controlled value can accept CR/LF bytes that forge additional log entries."

@@ -1,23 +1,26 @@
 //! Rust language adapter.
 
-use bonsai_common::FileId;
+use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_param_type_aliases, decl_index_from_tree_with_handler,
     kit::{
-        collect_kinds, language_from_pack, node_text, parse_with, pattern_binding_sites_from_arms, span_of,
+        call_arg_from_node_with_handler, collect_kinds, language_from_pack, node_text, parse_with,
+        pattern_binding_sites_from_arms, span_of,
     },
-    AdapterContext, AdapterError, ArgumentPassingMode, CallKind, CallTargetExtraction, CapabilityLevel,
-    DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, PatternBindingSite, TypeAliasBinding,
-    TypeAliasVocabulary, Visibility, NO_CONSTRUCTOR_METHOD_NAMES,
+    AdapterContext, AdapterError, ArgumentPassingMode, CallArg, CallKind, CallTargetExtraction,
+    CapabilityLevel, DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, PatternBindingSite, StaticScalarValue,
+    TypeAliasBinding, TypeAliasVocabulary, Visibility, NO_CONSTRUCTOR_METHOD_NAMES,
 };
 
 const RUST_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     fn_kinds: &["function_item"],
-    // `let_declaration` captures typed locals (`let c: Foo = make();`)
-    // so cast / factory-typed receivers resolve `receiver_type_in` — it
-    // exposes the same `pattern` (name) + `type` fields as a parameter.
-    param_kinds: &["parameter", "let_declaration"],
+    // Parameters always carry a compiler-owned declared type. Rust locals
+    // are collected separately below because an untyped `let` can contain
+    // type syntax inside its initializer (`factory::<T>()`); recursively
+    // searching that initializer would incorrectly declare the binding as
+    // `T`.
+    param_kinds: &["parameter"],
     name_field: "pattern",
     type_field: "type",
 };
@@ -63,17 +66,6 @@ fn rust_pattern_bindings(node: Node<'_>) -> Vec<PatternBindingSite<'_>> {
             let mut cursor = current.walk();
             stack.extend(current.named_children(&mut cursor));
         }
-    } else if matches!(node.kind(), "if_let_expression" | "while_let_expression") {
-        if let (Some(pattern), Some(source)) = (
-            node.child_by_field_name("pattern"),
-            node.child_by_field_name("value"),
-        ) {
-            sites.push(PatternBindingSite {
-                span_node: node,
-                pattern,
-                source,
-            });
-        }
     }
     sites
 }
@@ -102,11 +94,18 @@ fn rust_indirect_place_operand(node: Node<'_>) -> Option<Node<'_>> {
 /// node text lets the later Rust resolution pass classify them without shared
 /// language or provider heuristics.
 fn rust_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
-    let target = match node.kind() {
+    let mut target = match node.kind() {
         "call_expression" => node.child_by_field_name("function")?,
         "macro_invocation" => node.child_by_field_name("macro")?,
         _ => return None,
     };
+    // A Rust turbofish is an instantiation of the same callable, not part of
+    // its symbol identity (`warp::query::<T>` calls `warp::query`). Keep the
+    // exact grammar-selected base target while type arguments remain in the
+    // surrounding CST/compiler object for consumers that need them.
+    while target.kind() == "generic_function" {
+        target = target.child_by_field_name("function")?;
+    }
     let mut full_text = node_text(&target, src).trim().to_string();
     if node.kind() == "macro_invocation" && !full_text.ends_with('!') {
         full_text.push('!');
@@ -115,6 +114,82 @@ fn rust_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetEx
         node: target,
         full_text,
     })
+}
+
+fn rust_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
+    match node.kind() {
+        "boolean_literal" | "true" | "false" => match node_text(&node, src).trim() {
+            "true" => Some(StaticScalarValue::Boolean(true)),
+            "false" => Some(StaticScalarValue::Boolean(false)),
+            _ => None,
+        },
+        "string_literal" | "raw_string_literal" | "char_literal" => {
+            rust_static_string(node_text(&node, src).trim()).map(StaticScalarValue::String)
+        }
+        _ => None,
+    }
+}
+
+fn rust_static_string(literal: &str) -> Option<String> {
+    let literal = literal.strip_prefix('b').unwrap_or(literal);
+    if let Some(raw) = literal.strip_prefix('r') {
+        let hash_count = raw.bytes().take_while(|byte| *byte == b'#').count();
+        let raw = raw.get(hash_count..)?;
+        let body = raw.strip_prefix('"')?;
+        let suffix = format!("\"{}", "#".repeat(hash_count));
+        return body.strip_suffix(&suffix).map(ToString::to_string);
+    }
+    let (quote, body) = if let Some(body) = literal.strip_prefix('"') {
+        ('"', body.strip_suffix('"')?)
+    } else if let Some(body) = literal.strip_prefix('\'') {
+        ('\'', body.strip_suffix('\'')?)
+    } else {
+        return None;
+    };
+    let mut out = String::new();
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next()? {
+            '\\' => out.push('\\'),
+            '"' if quote == '"' => out.push('"'),
+            '\'' if quote == '\'' => out.push('\''),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            '0' => out.push('\0'),
+            'x' => {
+                let hi = chars.next()?.to_digit(16)?;
+                let lo = chars.next()?.to_digit(16)?;
+                out.push(char::from_u32((hi << 4) | lo)?);
+            }
+            'u' => {
+                if chars.next()? != '{' {
+                    return None;
+                }
+                let mut digits = String::new();
+                loop {
+                    match chars.next()? {
+                        '}' => break,
+                        '_' => {}
+                        digit if digit.is_ascii_hexdigit() && digits.len() < 6 => digits.push(digit),
+                        _ => return None,
+                    }
+                }
+                out.push(char::from_u32(u32::from_str_radix(&digits, 16).ok()?)?);
+            }
+            '\n' => {
+                while chars.peek().is_some_and(|next| next.is_whitespace()) {
+                    chars.next();
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 const HANDLER: GrammarHandler = GrammarHandler {
@@ -137,8 +212,22 @@ const HANDLER: GrammarHandler = GrammarHandler {
     variadic_parameter_kinds: &["variadic_parameter"],
     self_parameter_kinds: &["self_parameter"],
     binding_identifier_kinds: &["identifier", "self"],
+    // Rust extractor parameters bind the identifiers inside the parsed
+    // pattern (`Query(value): Query<T>`). The tuple-struct constructor is
+    // type syntax, not the parameter identity seen by dataflow or rules.
+    destructured_parameter_kinds: &[
+        "tuple_struct_pattern",
+        "tuple_pattern",
+        "struct_pattern",
+        "slice_pattern",
+        "reference_pattern",
+        // A bare `_` formal is an anonymous grammar token selected through
+        // the parameter's `pattern` field. It occupies a source slot but
+        // introduces no addressable compiler binding.
+        "_",
+    ],
     pattern_binding_extractor: Some(rust_pattern_bindings),
-    non_binding_pattern_field_names: &["type", "path", "constructor", "field"],
+    non_binding_pattern_field_names: &["type", "path", "field"],
     identifier_kinds: &["identifier", "self"],
     aggregate_pattern_kinds: &["tuple_pattern", "struct_pattern", "slice_pattern"],
     named_aggregate_kinds: &["struct_expression"],
@@ -158,7 +247,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "try_expression",
         "await_expression",
     ],
-    single_expression_group_kinds: &["expression_list"],
+    single_expression_group_kinds: &[],
     assignment_target_wrapper_kinds: &["let_declaration"],
     binding_declaration_keyword_spellings: &["let", "const"],
     nested_type_ownership: true,
@@ -179,15 +268,26 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // joins it so each arm's pattern bindings (e.g. `Some(v) => sink(v)`)
     // are emitted as Assigns scoped to the arm body. Without this the
     // bound name `v` is invisible to the taint engine and full-match
-    // arm flows are lost (audit task #132). `if_let_expression` is the
-    // sugar form covered by the same binding extraction path.
-    if_kinds: &["if_expression", "match_expression", "if_let_expression"],
+    // arm flows are lost (audit task #132). Rust `if let` is an
+    // `if_expression` whose condition contains a
+    // `let_condition`; the grammar has no separate `if_let_expression` node.
+    if_kinds: &["if_expression", "match_expression"],
     branch_then_field_names: &["consequence", "body"],
     branch_else_field_names: &["alternative"],
     branch_condition_field_names: &["condition", "value"],
+    branch_condition_is_first_named_child: false,
+    condition_group_kinds: &["parenthesized_expression"],
+    condition_all_operators: &["&&"],
+    condition_any_operators: &["||"],
+    condition_not_operators: &["!"],
+    condition_not_operator_kinds: &[],
     loop_body_field_names: &["body"],
     loop_body_kinds: &["block", "expression_statement"],
+    loop_header_container_kinds: &[],
+    loop_update_field_names: &[],
     branch_arm_kinds: &["block", "match_arm"],
+    exclusive_branch_arm_kinds: &["match_arm"],
+    fallthrough_branch_arm_kinds: &[],
     for_kinds: &[],
     foreach_kinds: &["for_expression"],
     foreach_binding_extractor: Some(rust_foreach_binding),
@@ -199,17 +299,17 @@ const HANDLER: GrammarHandler = GrammarHandler {
     call_kinds: &["call_expression", "macro_invocation"],
     call_callee_field_names: &["function", "macro"],
     call_target_extractor: Some(rust_call_target),
-    call_argument_field_names: &["arguments", "token_tree"],
+    call_argument_field_names: &["arguments"],
     call_argument_container_kinds: &["arguments", "token_tree"],
     lambda_body_field_names: &["body"],
     argument_passing_mode_extractor: Some(rust_argument_passing_mode),
     call_ref_kinds: &["call_expression", "macro_invocation"],
     member_expression_kinds: &["field_expression", "scoped_identifier"],
-    subscript_expression_kinds: &["subscript_expression", "index_expression"],
-    member_base_field_names: &["value", "scope"],
+    subscript_expression_kinds: &["index_expression"],
+    member_base_field_names: &["value"],
     member_name_field_names: &["field", "name"],
     subscript_base_field_names: &["value"],
-    subscript_index_field_names: &["index"],
+    subscript_index_field_names: &[],
     call_name_suffix_tokens: &["!"],
     assignment_kinds: &[
         "assignment_expression",
@@ -226,10 +326,11 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // a structured body and therefore lowers to the shared Try event.
     try_kinds: &["try_block"],
     catch_kinds: &[],
+    exclusive_catch_arm_kinds: &[],
     finally_kinds: &[],
     break_kinds: &["break_expression"],
     continue_kinds: &["continue_expression"],
-    control_label_field_names: &["label"],
+    control_label_field_names: &[],
     yield_kinds: &["yield_expression"],
     yield_value_field_names: &["value"],
     await_kinds: &["await_expression"],
@@ -246,6 +347,72 @@ const HANDLER: GrammarHandler = GrammarHandler {
     void_return_type_names: &[],
     ..bonsai_lang_api::EMPTY_HANDLER
 };
+
+/// Rust CST kinds consumed by adapter-owned normalization after/beside the
+/// shared handler. Keeping this explicit makes grammar upgrades fail in
+/// conformance instead of silently disabling compiler facts.
+const ADDITIONAL_GRAMMAR_NODE_KINDS: &[(&str, &str)] = &[
+    ("pattern-bindings", "for_expression"),
+    ("pattern-bindings", "match_expression"),
+    ("pattern-bindings", "match_arm"),
+    ("pattern-bindings", "if_expression"),
+    ("pattern-bindings", "while_expression"),
+    ("pattern-bindings", "let_condition"),
+    ("indirect-place", "unary_expression"),
+    ("indirect-place", "reference_expression"),
+    ("indirect-place-operator", "*"),
+    ("indirect-place-operator", "&"),
+    ("call-target", "call_expression"),
+    ("call-target", "macro_invocation"),
+    ("call-target", "generic_function"),
+    ("receiver-parameter", "self_parameter"),
+    ("exported-use", "use_declaration"),
+    ("macro-item-view", "source_file"),
+    ("macro-item-view", "declaration_list"),
+    ("macro-item-view", "token_tree"),
+    ("macro-item-view", "const_item"),
+    ("macro-item-view", "enum_item"),
+    ("macro-item-view", "extern_crate_declaration"),
+    ("macro-item-view", "foreign_mod_item"),
+    ("macro-item-view", "function_item"),
+    ("macro-item-view", "impl_item"),
+    ("macro-item-view", "macro_definition"),
+    ("macro-item-view", "macro_invocation"),
+    ("macro-item-view", "mod_item"),
+    ("macro-item-view", "static_item"),
+    ("macro-item-view", "struct_item"),
+    ("macro-item-view", "trait_item"),
+    ("macro-item-view", "type_item"),
+    ("macro-item-view", "union_item"),
+    ("macro-item-view", "use_declaration"),
+    ("self-constructor", "identifier"),
+    ("scoped-call", "scoped_identifier"),
+    ("struct-literal", "let_declaration"),
+    ("struct-literal", "assignment_expression"),
+    ("struct-literal", "struct_expression"),
+    ("struct-literal", "field_initializer_list"),
+    ("struct-literal", "field_initializer"),
+    ("struct-literal", "shorthand_field_initializer"),
+    ("cast-local-type", "type_cast_expression"),
+    ("destructured-parameter", "parameter"),
+    ("visibility", "visibility_modifier"),
+    ("tuple-struct-fields", "ordered_field_declaration_list"),
+    ("struct-fields", "field_declaration_list"),
+    ("struct-fields", "field_declaration"),
+    ("field-type", "reference_type"),
+    ("field-type", "pointer_type"),
+    ("field-type", "generic_type"),
+    ("field-type", "type_identifier"),
+    ("field-type", "scoped_type_identifier"),
+    ("imports", "scoped_use_list"),
+    ("imports", "use_list"),
+    ("imports", "use_as_clause"),
+    ("imports", "use_wildcard"),
+    ("imports", "self"),
+    ("imports", "metavariable"),
+    ("imports", "crate"),
+    ("imports", "super"),
+];
 
 /// Rust associated functions share `function_item` syntax with methods, but
 /// only an exact `self_parameter` child establishes a receiver binding.
@@ -340,9 +507,17 @@ impl LanguageAdapter for RustAdapter {
             callable_reference_syntax: bonsai_lang_api::CallableReferenceSyntax::none(),
             call_text_prefilter: bonsai_lang_api::CallTextPrefilter::Disabled,
             module_resolution_extensions: &[],
+            unqualified_imports_search_current_directory: false,
             workspace_manifest_context_extensions: &[],
         }
     }
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        Some(&HANDLER)
+    }
+    fn additional_grammar_node_kinds(&self) -> &'static [(&'static str, &'static str)] {
+        ADDITIONAL_GRAMMAR_NODE_KINDS
+    }
+
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let Some((snapshot, raw_tree)) = parse_with(PACK_NAME, file, ctx) else {
             return DeclIndex {
@@ -357,23 +532,47 @@ impl LanguageAdapter for RustAdapter {
             .map_or(raw_src, |(source, _)| source.as_slice());
         let tree = compiler_view.as_ref().map_or(raw_tree.as_ref(), |(_, tree)| tree);
         let mut idx = decl_index_from_tree_with_handler(file, src, tree, &HANDLER);
+        mark_rust_format_macro_values_as_syntax_propagated(&mut idx, src);
         // Phase-6 return-type extraction: `fn f() -> T {}` populates
         // `Decl.return_type` for `apply_assign_call_result_types`.
         bonsai_lang_api::populate_decl_return_types(&mut idx, tree, src, &HANDLER);
-        let arm_spans = collect_rust_match_arm_spans(tree, src, file);
         let struct_literal_field_assigns = collect_rust_struct_literal_field_assigns(tree, file, src);
+        let chained_method_assignment_receivers =
+            collect_rust_chained_method_assignment_receivers(tree, file, src);
         let scoped_call_spans = collect_rust_scoped_call_spans(tree, file);
         let self_constructor_call_spans = collect_rust_self_constructor_call_spans(tree, file, src);
         let exported_import_aliases = collect_rust_exported_import_aliases(tree, file, src);
+        let format_nested_calls = collect_rust_format_nested_calls(tree, file, src);
         for decl in &mut idx.defs {
             enrich_rust_struct_literal_field_assigns(&mut decl.flow_events, &struct_literal_field_assigns);
-            bonsai_lang_api::kit::split_match_arms_in_branch_events(&mut decl.flow_events, &arm_spans);
+            enrich_rust_chained_method_assignment_receivers(
+                &mut decl.flow_events,
+                &chained_method_assignment_receivers,
+            );
             classify_rust_scoped_calls(&mut decl.flow_events, &scoped_call_spans);
             classify_rust_self_constructor_calls(&mut decl.flow_events, &self_constructor_call_spans);
             enrich_rust_format_macro_operands(&mut decl.flow_events);
+            enrich_rust_format_nested_call_events(&mut decl.flow_events, &format_nested_calls);
             enrich_rust_tail_return_sources(&mut decl.flow_events, &decl.params);
             enrich_rust_constructor_field_writes(decl);
         }
+        enrich_rust_format_nested_call_value_facts(&mut idx, &format_nested_calls);
+        idx.finite_literal_selections = idx
+            .defs
+            .iter()
+            .filter_map(|decl| {
+                bonsai_lang_api::kit::complete_finite_literal_return_span(&decl.flow_events).map(
+                    |selection_span| bonsai_lang_api::FiniteLiteralSelectionFact {
+                        selection_span,
+                        assignment_span: None,
+                        target: None,
+                        call_span: None,
+                        argument_index: None,
+                    },
+                )
+            })
+            .collect();
+        bonsai_lang_api::kit::sort_dedup_finite_literal_selections(&mut idx.finite_literal_selections);
         append_rust_exported_import_decls(&mut idx, exported_import_aliases);
         // Rust module_path: relative file path under workspace root,
         // dropping `src/` and `lib.rs`/`mod.rs`/`<name>.rs` to produce
@@ -395,9 +594,46 @@ impl LanguageAdapter for RustAdapter {
         // `pub(in path)`. Absence = private (file/mod-scoped).
         {
             let visibility_by_span = collect_rust_visibility(tree.root_node(), file, src);
-            let alias_map = collect_param_type_aliases(tree, file, src, &RUST_TYPE_ALIASES);
+            let mut alias_map = collect_param_type_aliases(tree, file, src, &RUST_TYPE_ALIASES);
+            for (span, bindings) in collect_rust_explicit_local_type_aliases(tree, file, src) {
+                let aliases = alias_map.entry(span).or_default();
+                for binding in bindings {
+                    if !aliases.contains(&binding) {
+                        aliases.push(binding);
+                    }
+                }
+            }
+            for (span, bindings) in collect_rust_cast_local_type_aliases(tree, file, src) {
+                let aliases = alias_map.entry(span).or_default();
+                for binding in bindings {
+                    if !aliases.contains(&binding) {
+                        aliases.push(binding);
+                    }
+                }
+            }
+            for (span, bindings) in collect_rust_param_type_identities(tree, file, src) {
+                let aliases = alias_map.entry(span).or_default();
+                for binding in bindings {
+                    if !aliases.contains(&binding) {
+                        aliases.push(binding);
+                    }
+                }
+            }
+            // The shared short-type collector intentionally handles many
+            // grammars. Rust reference syntax can otherwise leave a modifier
+            // fragment such as `mut Client` beside the exact nominal
+            // identities emitted above. That fragment is not a Rust type
+            // path and must never participate in receiver/provider identity.
+            // Keep only grammar-valid nominal paths; the Rust-specific type
+            // walk already preserves `Client` and every qualified import.
+            for aliases in alias_map.values_mut() {
+                aliases.retain(|alias| rust_nominal_type_alias(&alias.type_name));
+            }
             let tuple_struct_bases = collect_rust_tuple_struct_bases(tree, file, src);
+            let impl_trait_bases = collect_rust_impl_trait_bases(tree, src);
+            let trait_impl_method_spans = collect_rust_trait_impl_method_spans(tree, file);
             let struct_field_aliases = collect_rust_struct_field_aliases(tree, src);
+            let imports = parse_imports(tree, src, file);
             let impl_method_parents = collect_rust_impl_method_parents(tree, file, src);
             let impl_method_parent_symbols = impl_method_parents
                 .iter()
@@ -422,6 +658,15 @@ impl LanguageAdapter for RustAdapter {
                 if let Some(vis) = visibility_by_span.get(&decl.span).copied() {
                     decl.visibility = vis;
                 }
+                // Rust forbids an explicit `pub` modifier on trait-impl
+                // methods: their callable visibility is supplied by the
+                // implemented trait. Preserve that compiler fact so a typed
+                // call from another module can resolve to the exact declared
+                // implementation instead of treating its syntactically bare
+                // method as module-private.
+                if trait_impl_method_spans.contains(&decl.span) {
+                    decl.visibility = Visibility::Public;
+                }
                 if let Some(aliases) = alias_map.get(&decl.span) {
                     decl.type_aliases = aliases.clone();
                 }
@@ -429,6 +674,14 @@ impl LanguageAdapter for RustAdapter {
                     (*span == decl.span || name == &decl.name).then_some(bases)
                 }) {
                     decl.bases = bases.clone();
+                }
+                for (_, trait_name) in impl_trait_bases
+                    .iter()
+                    .filter(|(type_name, _)| type_name == &decl.name)
+                {
+                    if !decl.bases.iter().any(|base| base == trait_name) {
+                        decl.bases.push(trait_name.clone());
+                    }
                 }
                 if decl.parent.is_none() {
                     if let Some(parent_symbol) = impl_method_parent_symbols
@@ -466,6 +719,7 @@ impl LanguageAdapter for RustAdapter {
                 }
             }
             apply_rust_struct_field_aliases(&mut idx, &struct_field_aliases);
+            qualify_rust_declared_type_aliases(&mut idx, &imports);
             enrich_rust_self_tuple_constructor_returns(&mut idx);
             classify_rust_declared_constructor_calls(&mut idx);
         }
@@ -481,6 +735,17 @@ impl LanguageAdapter for RustAdapter {
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
         }
+        normalize_rust_assigned_match_arm_exits(&mut idx, tree, file, src);
+        normalize_rust_match_unwrap_assignments(&mut idx, tree, file, src);
+        populate_rust_const_static_values(&mut idx, tree, file, src);
+        bonsai_lang_api::kit::populate_call_argument_static_values(
+            &mut idx,
+            tree,
+            file,
+            src,
+            &HANDLER,
+            rust_static_scalar,
+        );
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
@@ -490,6 +755,12 @@ impl LanguageAdapter for RustAdapter {
         // receivers so later method dispatch consumes the same semantic fact.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
+        // Parameter-pattern aliases are attached after generic lowering. Rejoin
+        // those exact compiler types to receiver calls once all adapter-owned
+        // aliases are present; otherwise `Wrapper(value): Wrapper<dyn Trait>`
+        // retains the declaration fact but leaves `value.method()` untyped.
+        bonsai_lang_api::apply_call_receiver_types(&mut idx);
+        apply_rust_iife_receiver_types(&mut idx, tree, file, src);
         idx
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
@@ -519,6 +790,399 @@ impl LanguageAdapter for RustAdapter {
         }
         ImportIndex { file, imports }
     }
+}
+
+/// A Rust match arm's final expression is the value of the `match`, but it is
+/// only a function return when the complete match is itself in callable-tail
+/// position. The shared tail-return lowering intentionally synthesizes arm
+/// returns for the latter case. When a `match` is the RHS of an assignment,
+/// those same events would instead terminate the enclosing CFG and erase every
+/// statement after the assignment.
+///
+/// Remove only the synthetic returns whose spans are the exact Tree-sitter
+/// `value` nodes of arms owned by an assigned match. Explicit `return`,
+/// `break`, and `continue` expressions have different CST spans and remain
+/// abrupt. The assignment's compiler value-flow already retains the union of
+/// its arm operands, so this changes control-flow classification without
+/// discarding data dependencies.
+fn normalize_rust_assigned_match_arm_exits(index: &mut DeclIndex, tree: &Tree, file: FileId, _src: &[u8]) {
+    let mut value_spans = std::collections::HashSet::new();
+    for assignment in collect_kinds(tree, &["let_declaration", "assignment_expression"]) {
+        let Some(value) = assignment.child_by_field_name("value") else {
+            continue;
+        };
+        let Some(match_expression) = rust_transparent_assigned_match(value) else {
+            continue;
+        };
+        let Some(body) = match_expression.child_by_field_name("body") else {
+            continue;
+        };
+        let mut cursor = body.walk();
+        for arm in body
+            .named_children(&mut cursor)
+            .filter(|node| node.kind() == "match_arm")
+        {
+            let Some(arm_value) = arm.child_by_field_name("value") else {
+                continue;
+            };
+            if matches!(
+                arm_value.kind(),
+                "return_expression" | "break_expression" | "continue_expression"
+            ) {
+                continue;
+            }
+            value_spans.insert(span_of(file, &arm_value));
+        }
+    }
+    if value_spans.is_empty() {
+        return;
+    }
+    for declaration in &mut index.defs {
+        remove_rust_synthetic_arm_returns(&mut declaration.flow_events, &value_spans);
+    }
+}
+
+fn rust_transparent_assigned_match(mut value: Node<'_>) -> Option<Node<'_>> {
+    while value.kind() == "parenthesized_expression" && value.named_child_count() == 1 {
+        value = value.named_child(0)?;
+    }
+    (value.kind() == "match_expression").then_some(value)
+}
+
+fn remove_rust_synthetic_arm_returns(
+    events: &mut Vec<FlowEvent>,
+    value_spans: &std::collections::HashSet<Span>,
+) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                remove_rust_synthetic_arm_returns(then_events, value_spans);
+                remove_rust_synthetic_arm_returns(else_events, value_spans);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                remove_rust_synthetic_arm_returns(body, value_spans);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                remove_rust_synthetic_arm_returns(body, value_spans);
+                remove_rust_synthetic_arm_returns(catch_events, value_spans);
+                remove_rust_synthetic_arm_returns(finally_events, value_spans);
+            }
+            _ => {}
+        }
+    }
+    events.retain(|event| !matches!(event, FlowEvent::Return { span, .. } if value_spans.contains(span)));
+}
+
+/// Treat a `match call() { Pattern(value) => value, ...abrupt arms... }`
+/// initializer as the exact result of `call()`. This is a Rust control-flow
+/// fact, independent of the enum or API spelling: every continuing arm must
+/// return the one binding introduced by its own pattern, while every other
+/// arm must leave the function.
+fn normalize_rust_match_unwrap_assignments(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    for declaration in collect_kinds(tree, &["let_declaration"]) {
+        let (Some(pattern), Some(value)) = (
+            declaration.child_by_field_name("pattern"),
+            declaration.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        if pattern.kind() != "identifier" || value.kind() != "match_expression" {
+            continue;
+        }
+        let Some(discriminant) = value.child_by_field_name("value") else {
+            continue;
+        };
+        if discriminant.kind() != "call_expression" {
+            continue;
+        }
+        let Some(block) = value.child_by_field_name("body") else {
+            continue;
+        };
+        let mut continuing_bindings = Vec::new();
+        let mut every_other_arm_abrupt = true;
+        let mut cursor = block.walk();
+        for arm in block
+            .named_children(&mut cursor)
+            .filter(|node| node.kind() == "match_arm")
+        {
+            let (Some(arm_pattern), Some(arm_value)) = (
+                arm.child_by_field_name("pattern"),
+                arm.child_by_field_name("value"),
+            ) else {
+                every_other_arm_abrupt = false;
+                break;
+            };
+            if matches!(
+                arm_value.kind(),
+                "return_expression" | "break_expression" | "continue_expression"
+            ) {
+                continue;
+            }
+            if arm_value.kind() != "identifier" {
+                every_other_arm_abrupt = false;
+                break;
+            }
+            let returned = node_text(&arm_value, src).trim();
+            let mut bound_here = false;
+            let mut stack = vec![arm_pattern];
+            while let Some(node) = stack.pop() {
+                if node.kind() == "identifier" && node_text(&node, src).trim() == returned {
+                    bound_here = true;
+                    break;
+                }
+                let mut cursor = node.walk();
+                stack.extend(node.named_children(&mut cursor));
+            }
+            if !bound_here {
+                every_other_arm_abrupt = false;
+                break;
+            }
+            continuing_bindings.push(returned.to_string());
+        }
+        if !every_other_arm_abrupt || continuing_bindings.len() != 1 {
+            continue;
+        }
+        let target = node_text(&pattern, src).trim().to_string();
+        if target.is_empty() {
+            continue;
+        }
+        let Some(call_target) = rust_call_target(discriminant, src) else {
+            continue;
+        };
+        let call_span = span_of(file, &call_target.node);
+        let mut call_args = None;
+        for decl in &index.defs {
+            if decl.span.file == call_span.file
+                && decl.span.start <= call_span.start
+                && call_span.end <= decl.span.end
+            {
+                call_args = rust_flow_call_args(&decl.flow_events, call_span);
+                if call_args.is_some() {
+                    break;
+                }
+            }
+        }
+        let Some(call_args) = call_args else {
+            continue;
+        };
+        let declaration_span = span_of(file, &declaration);
+        for decl in &mut index.defs {
+            rewrite_rust_match_assignment_event(
+                &mut decl.flow_events,
+                declaration_span,
+                &target,
+                &call_target.full_text,
+                &call_args,
+            );
+        }
+        if let Some(fact) = index
+            .assignment_values
+            .iter_mut()
+            .find(|fact| fact.assignment_span == declaration_span && fact.target.as_deref() == Some(&target))
+        {
+            fact.direct_call_name = Some(call_target.full_text.clone());
+            fact.direct_call_receiver = call_target
+                .full_text
+                .rsplit_once("::")
+                .map(|(receiver, _)| receiver.to_string());
+            fact.value_flow = bonsai_lang_api::kit::expression_flow_from_node_with_handler(
+                discriminant,
+                file,
+                src,
+                &HANDLER,
+            );
+            fact.call_sites = fact.value_flow.call_sites.clone();
+            fact.value_span = span_of(file, &discriminant);
+        }
+    }
+}
+
+fn rust_flow_call_args(events: &[FlowEvent], call_span: Span) -> Option<Vec<String>> {
+    for event in events {
+        match event {
+            FlowEvent::Call { span, args, .. } if *span == call_span => {
+                return Some(args.iter().map(|arg| arg.value_text.clone()).collect());
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(args) = rust_flow_call_args(then_events, call_span)
+                    .or_else(|| rust_flow_call_args(else_events, call_span))
+                {
+                    return Some(args);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(args) = rust_flow_call_args(body, call_span) {
+                    return Some(args);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(args) = rust_flow_call_args(body, call_span)
+                    .or_else(|| rust_flow_call_args(catch_events, call_span))
+                    .or_else(|| rust_flow_call_args(finally_events, call_span))
+                {
+                    return Some(args);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn rewrite_rust_match_assignment_event(
+    events: &mut [FlowEvent],
+    assignment_span: Span,
+    target: &str,
+    source_call: &str,
+    source_call_args: &[String],
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target: event_target,
+                source_call: event_source_call,
+                source_call_args: event_args,
+                value_kind,
+                ..
+            } if *span == assignment_span && event_target == target => {
+                *event_source_call = Some(source_call.to_string());
+                *event_args = source_call_args.to_vec();
+                *value_kind = Some(bonsai_lang_api::AssignValueKind::CallResult);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_rust_match_assignment_event(
+                    then_events,
+                    assignment_span,
+                    target,
+                    source_call,
+                    source_call_args,
+                );
+                rewrite_rust_match_assignment_event(
+                    else_events,
+                    assignment_span,
+                    target,
+                    source_call,
+                    source_call_args,
+                );
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rewrite_rust_match_assignment_event(
+                    body,
+                    assignment_span,
+                    target,
+                    source_call,
+                    source_call_args,
+                );
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_rust_match_assignment_event(
+                    body,
+                    assignment_span,
+                    target,
+                    source_call,
+                    source_call_args,
+                );
+                rewrite_rust_match_assignment_event(
+                    catch_events,
+                    assignment_span,
+                    target,
+                    source_call,
+                    source_call_args,
+                );
+                rewrite_rust_match_assignment_event(
+                    finally_events,
+                    assignment_span,
+                    target,
+                    source_call,
+                    source_call_args,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn populate_rust_const_static_values(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    for declaration in collect_kinds(tree, &["const_item"]) {
+        let (Some(name), Some(value)) = (
+            declaration.child_by_field_name("name"),
+            declaration.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        let Some(static_value) = rust_static_scalar(value, src) else {
+            continue;
+        };
+        let target = node_text(&name, src).trim();
+        let span = span_of(file, &declaration);
+        if index
+            .assignment_values
+            .iter()
+            .any(|fact| fact.assignment_span == span && fact.target.as_deref() == Some(target))
+        {
+            continue;
+        }
+        index
+            .assignment_values
+            .push(bonsai_lang_api::AssignmentValueFact {
+                assignment_span: span,
+                target: Some(target.to_string()),
+                target_is_immutable: true,
+                target_owner: None,
+                target_span: Some(span_of(file, &name)),
+                value_span: span_of(file, &value),
+                call_sites: Vec::new(),
+                value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(
+                    value, file, src, &HANDLER,
+                ),
+                static_value: Some(static_value),
+                exact_callable_return: None,
+                inline_callback_static_return: None,
+                inline_callback_fields: Vec::new(),
+                exact_static_call_args: None,
+                direct_call_name: None,
+                direct_call_span: None,
+                direct_call_receiver: None,
+                direct_call_receiver_span: None,
+                direct_call_receiver_flow: None,
+            });
+    }
+    index.assignment_values.sort_by_key(|fact| {
+        (
+            fact.assignment_span.start,
+            fact.assignment_span.end,
+            fact.target_span.map_or(0, |span| span.start),
+        )
+    });
+    index.assignment_values.dedup();
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -779,7 +1443,23 @@ fn collect_rust_scoped_call_spans(
         .into_iter()
         .filter_map(|call| {
             let function = call.child_by_field_name("function")?;
-            rust_call_target_is_scoped_path(function).then(|| span_of(file, &function))
+            if !rust_call_target_is_scoped_path(function) {
+                return None;
+            }
+            // `rust_call_target` deliberately unwraps `generic_function` so
+            // `path::call::<T>` has the same callable identity/span as
+            // `path::call`. Classification must use that exact canonical
+            // target span as well; comparing the surrounding turbofish span
+            // cannot match the emitted Call fact.
+            let canonical = if function.kind() == "generic_function" {
+                function
+                    .child_by_field_name("function")
+                    .or_else(|| function.child_by_field_name("name"))
+                    .or_else(|| function.named_child(0))?
+            } else {
+                function
+            };
+            Some(span_of(file, &canonical))
         })
         .collect()
 }
@@ -795,6 +1475,115 @@ fn rust_call_target_is_scoped_path(node: Node<'_>) -> bool {
         .or_else(|| node.child_by_field_name("name"))
         .or_else(|| node.named_child(0))
         .is_some_and(rust_call_target_is_scoped_path)
+}
+
+/// Attach the explicit return type of an immediately-invoked closure to a
+/// method call on that result.
+///
+/// Rust permits expressions such as
+/// `(|| -> Result<T, E> { ... })().unwrap_or_else(...)`. The shared receiver
+/// typer intentionally works from addressable bindings and therefore cannot
+/// infer the type of the anonymous call result. Tree-sitter exposes the
+/// closure's declared `return_type` exactly, so the Rust frontend can retain
+/// that compiler fact without assigning meaning to `Result` or to the method
+/// being called. Rulepack typing summaries may then select the exact typed
+/// call span.
+fn apply_rust_iife_receiver_types(idx: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    let mut types_by_call_span = std::collections::HashMap::<Span, Vec<String>>::new();
+    for call in collect_kinds(tree, &["call_expression"]) {
+        let Some(function) = call.child_by_field_name("function") else {
+            continue;
+        };
+        if function.kind() != "field_expression" {
+            continue;
+        }
+        let Some(receiver_call) = function.child_by_field_name("value") else {
+            continue;
+        };
+        if receiver_call.kind() != "call_expression" {
+            continue;
+        }
+        let Some(mut invoked) = receiver_call.child_by_field_name("function") else {
+            continue;
+        };
+        while invoked.kind() == "parenthesized_expression" {
+            let mut cursor = invoked.walk();
+            let Some(inner) = invoked.named_children(&mut cursor).next() else {
+                break;
+            };
+            invoked = inner;
+        }
+        if invoked.kind() != "closure_expression" {
+            continue;
+        }
+        let Some(return_type) = invoked.child_by_field_name("return_type") else {
+            continue;
+        };
+        let nominal = if return_type.kind() == "generic_type" {
+            return_type.child_by_field_name("type").unwrap_or(return_type)
+        } else {
+            return_type
+        };
+        let type_name = node_text(&nominal, src).trim().to_string();
+        if type_name.is_empty() || !rust_nominal_type_alias(&type_name) {
+            continue;
+        }
+        types_by_call_span
+            .entry(span_of(file, &function))
+            .or_default()
+            .push(type_name);
+    }
+    if types_by_call_span.is_empty() {
+        return;
+    }
+    for decl in &mut idx.defs {
+        apply_rust_iife_receiver_types_to_events(&mut decl.flow_events, &types_by_call_span);
+    }
+}
+
+fn apply_rust_iife_receiver_types_to_events(
+    events: &mut [FlowEvent],
+    types_by_call_span: &std::collections::HashMap<Span, Vec<String>>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span, receiver_types, ..
+            } => {
+                if let Some(types) = types_by_call_span.get(span) {
+                    for type_name in types {
+                        if !receiver_types.contains(type_name) {
+                            receiver_types.push(type_name.clone());
+                        }
+                    }
+                    receiver_types.sort();
+                    receiver_types.dedup();
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                apply_rust_iife_receiver_types_to_events(then_events, types_by_call_span);
+                apply_rust_iife_receiver_types_to_events(else_events, types_by_call_span);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                apply_rust_iife_receiver_types_to_events(body, types_by_call_span);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                apply_rust_iife_receiver_types_to_events(body, types_by_call_span);
+                apply_rust_iife_receiver_types_to_events(catch_events, types_by_call_span);
+                apply_rust_iife_receiver_types_to_events(finally_events, types_by_call_span);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn classify_rust_scoped_calls(
@@ -834,6 +1623,160 @@ fn classify_rust_scoped_calls(
                 classify_rust_scoped_calls(body, scoped_call_spans);
                 classify_rust_scoped_calls(catch_events, scoped_call_spans);
                 classify_rust_scoped_calls(finally_events, scoped_call_spans);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Preserve the addressable base of a chained method-call result used as an
+/// assignment value. Rust represents `values.into_iter().map(...).collect()`
+/// as nested call/field expressions. Shared call-result normalization keeps
+/// data-bearing receivers, but the outer receiver is itself a call and has no
+/// addressable place. Lower the exact parsed chain base (`values`) so iterator
+/// and builder pipelines retain their input dependency without assigning
+/// semantics to any method name.
+fn collect_rust_chained_method_assignment_receivers(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(Span, String)> {
+    let mut out = Vec::new();
+    for assignment in collect_kinds(tree, &["let_declaration", "assignment_expression"]) {
+        let Some(value) = assignment.child_by_field_name("value") else {
+            continue;
+        };
+        let Some(base) = rust_chained_method_call_base(value, file, src) else {
+            continue;
+        };
+        out.push((span_of(file, &assignment), base));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn rust_chained_method_call_base(node: Node<'_>, file: FileId, src: &[u8]) -> Option<String> {
+    let node = rust_transparent_value_node(node)?;
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    let function = rust_transparent_call_target(node.child_by_field_name("function")?)?;
+    if function.kind() != "field_expression" {
+        return None;
+    }
+    let receiver = function.child_by_field_name("value")?;
+    rust_method_receiver_base(receiver, file, src)
+}
+
+fn rust_method_receiver_base(node: Node<'_>, file: FileId, src: &[u8]) -> Option<String> {
+    let node = rust_transparent_value_node(node)?;
+    match node.kind() {
+        "call_expression" => {
+            let function = rust_transparent_call_target(node.child_by_field_name("function")?)?;
+            if function.kind() != "field_expression" {
+                return None;
+            }
+            rust_method_receiver_base(function.child_by_field_name("value")?, file, src)
+        }
+        "field_expression" => rust_method_receiver_base(node.child_by_field_name("value")?, file, src),
+        _ => call_arg_from_node_with_handler(node, file, src, None, &HANDLER).and_then(|arg| arg.place),
+    }
+}
+
+fn rust_transparent_call_target(mut node: Node<'_>) -> Option<Node<'_>> {
+    while node.kind() == "generic_function" {
+        node = node
+            .child_by_field_name("function")
+            .or_else(|| node.child_by_field_name("name"))
+            .or_else(|| node.named_child(0))?;
+    }
+    Some(node)
+}
+
+fn rust_transparent_value_node(mut node: Node<'_>) -> Option<Node<'_>> {
+    while matches!(
+        node.kind(),
+        "parenthesized_expression" | "try_expression" | "await_expression"
+    ) && node.named_child_count() == 1
+    {
+        node = node.named_child(0)?;
+    }
+    Some(node)
+}
+
+fn enrich_rust_chained_method_assignment_receivers(events: &mut [FlowEvent], receivers: &[(Span, String)]) {
+    let outer_calls = events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Assign {
+                span,
+                source_call: Some(source_call),
+                ..
+            } => receivers.iter().find_map(|(assignment_span, receiver)| {
+                (assignment_span == span).then(|| (*span, source_call.clone(), receiver.clone()))
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                source_call: Some(_),
+                source_names,
+                ..
+            } => {
+                for (_, receiver) in receivers
+                    .iter()
+                    .filter(|(assignment_span, _)| assignment_span == span)
+                {
+                    if !source_names.iter().any(|source| source == receiver) {
+                        source_names.push(receiver.clone());
+                    }
+                }
+                source_names.sort();
+                source_names.dedup();
+            }
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                call_kind,
+                ..
+            } => {
+                if let Some((_, _, base)) = outer_calls.iter().find(|(assignment_span, source_call, _)| {
+                    assignment_span.file == span.file
+                        && assignment_span.start <= span.start
+                        && span.end <= assignment_span.end
+                        && source_call == name
+                }) {
+                    if receiver.is_none() {
+                        *receiver = Some(base.clone());
+                    }
+                    *call_kind = CallKind::Method;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                enrich_rust_chained_method_assignment_receivers(then_events, receivers);
+                enrich_rust_chained_method_assignment_receivers(else_events, receivers);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                enrich_rust_chained_method_assignment_receivers(body, receivers);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                enrich_rust_chained_method_assignment_receivers(body, receivers);
+                enrich_rust_chained_method_assignment_receivers(catch_events, receivers);
+                enrich_rust_chained_method_assignment_receivers(finally_events, receivers);
             }
             _ => {}
         }
@@ -922,6 +1865,239 @@ fn enrich_rust_format_macro_operands(events: &mut [FlowEvent]) {
                 enrich_rust_format_macro_operands(finally_events);
             }
             _ => {}
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RustFormatNestedCall {
+    format_call_span: Span,
+    call_span: Span,
+    name: String,
+    args: Vec<CallArg>,
+}
+
+/// Lower ordinary Rust expression calls nested inside `format!` and
+/// `format_args!` token trees. Tree-sitter intentionally exposes macro input
+/// as a token tree rather than a Rust expression, so the generic walker cannot
+/// see `normalize(value)` in `format!("{}", normalize(value))`. The Rust
+/// frontend still has exact CST structure for a function target immediately
+/// followed by its argument token tree; retain that call edge without parsing
+/// rendered text or assigning any library/security meaning.
+fn collect_rust_format_nested_calls(tree: &Tree, file: FileId, src: &[u8]) -> Vec<RustFormatNestedCall> {
+    let mut calls = Vec::new();
+    for invocation in collect_kinds(tree, &["macro_invocation"]) {
+        let Some(macro_node) = invocation.child_by_field_name("macro") else {
+            continue;
+        };
+        if !matches!(node_text(&macro_node, src).trim(), "format" | "format_args") {
+            continue;
+        }
+        let Some(token_tree) = first_named_child_of_kind_local(invocation, "token_tree") else {
+            continue;
+        };
+        collect_rust_calls_from_format_token_tree(
+            token_tree,
+            span_of(file, &macro_node),
+            file,
+            src,
+            &mut calls,
+        );
+    }
+    calls.sort_by_key(|call| (call.call_span.start, call.call_span.end));
+    calls.dedup_by(|left, right| left.call_span == right.call_span && left.name == right.name);
+    calls
+}
+
+fn collect_rust_calls_from_format_token_tree(
+    token_tree: Node<'_>,
+    format_call_span: Span,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<RustFormatNestedCall>,
+) {
+    let mut cursor = token_tree.walk();
+    let named = token_tree.named_children(&mut cursor).collect::<Vec<_>>();
+    for pair in named.windows(2) {
+        let [target, arguments] = pair else {
+            continue;
+        };
+        if arguments.kind() != "token_tree"
+            || !matches!(
+                target.kind(),
+                "identifier" | "scoped_identifier" | "generic_function"
+            )
+            || src
+                .get(target.end_byte()..arguments.start_byte())
+                .is_none_or(|gap| !gap.iter().all(u8::is_ascii_whitespace))
+        {
+            continue;
+        }
+        let name = bonsai_lang_api::kit::normalize_call_name_whitespace(node_text(target, src));
+        if name.is_empty() {
+            continue;
+        }
+        out.push(RustFormatNestedCall {
+            format_call_span,
+            call_span: span_of(file, target),
+            name,
+            args: rust_token_tree_call_args(*arguments, file, src),
+        });
+    }
+    for child in named {
+        if child.kind() == "token_tree" {
+            collect_rust_calls_from_format_token_tree(child, format_call_span, file, src, out);
+        }
+    }
+}
+
+fn rust_token_tree_call_args(arguments: Node<'_>, file: FileId, src: &[u8]) -> Vec<CallArg> {
+    let mut groups = Vec::<Vec<Node<'_>>>::new();
+    let mut current = Vec::new();
+    let mut cursor = arguments.walk();
+    for child in arguments.children(&mut cursor) {
+        if child.kind() == "," {
+            if !current.is_empty() {
+                groups.push(std::mem::take(&mut current));
+            }
+        } else if child.is_named() {
+            current.push(child);
+        }
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+
+    groups
+        .into_iter()
+        .filter_map(|nodes| {
+            if let [node] = nodes.as_slice() {
+                return call_arg_from_node_with_handler(*node, file, src, None, &HANDLER);
+            }
+            let first = nodes.first()?;
+            let last = nodes.last()?;
+            let start = first.start_byte();
+            let end = last.end_byte();
+            let value_text = std::str::from_utf8(src.get(start..end)?).ok()?.trim().to_string();
+            if value_text.is_empty() {
+                return None;
+            }
+            let mut source_names = nodes
+                .iter()
+                .filter_map(|node| call_arg_from_node_with_handler(*node, file, src, None, &HANDLER))
+                .flat_map(|argument| {
+                    argument
+                        .place
+                        .into_iter()
+                        .chain(argument.source_names)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            source_names.sort();
+            source_names.dedup();
+            Some(CallArg {
+                span: Span::new(file, start as u64, end as u64),
+                passing_mode: ArgumentPassingMode::Value,
+                name: None,
+                value_text,
+                place: None,
+                source_names,
+            })
+        })
+        .collect()
+}
+
+fn enrich_rust_format_nested_call_events(events: &mut Vec<FlowEvent>, calls: &[RustFormatNestedCall]) {
+    let mut enriched = Vec::with_capacity(events.len() + calls.len());
+    for mut event in std::mem::take(events) {
+        match &mut event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                enrich_rust_format_nested_call_events(then_events, calls);
+                enrich_rust_format_nested_call_events(else_events, calls);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                enrich_rust_format_nested_call_events(body, calls);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                enrich_rust_format_nested_call_events(body, calls);
+                enrich_rust_format_nested_call_events(catch_events, calls);
+                enrich_rust_format_nested_call_events(finally_events, calls);
+            }
+            _ => {}
+        }
+        if let FlowEvent::Call { span, .. } = &event {
+            for call in calls.iter().filter(|call| call.format_call_span == *span) {
+                enriched.push(FlowEvent::Call {
+                    span: call.call_span,
+                    name: call.name.clone(),
+                    receiver: None,
+                    receiver_types: Vec::new(),
+                    call_kind: CallKind::Function,
+                    args: call.args.clone(),
+                });
+            }
+        }
+        enriched.push(event);
+    }
+    *events = enriched;
+}
+
+fn enrich_rust_format_nested_call_value_facts(index: &mut DeclIndex, calls: &[RustFormatNestedCall]) {
+    for fact in &mut index.assignment_values {
+        for call in calls.iter().filter(|call| {
+            call.call_span.file == fact.value_span.file
+                && fact.value_span.start <= call.call_span.start
+                && call.call_span.end <= fact.value_span.end
+        }) {
+            fact.call_sites.push(call.call_span);
+            fact.value_flow.call_sites.push(call.call_span);
+        }
+        fact.call_sites.sort_unstable();
+        fact.call_sites.dedup();
+        fact.value_flow.call_sites.sort_unstable();
+        fact.value_flow.call_sites.dedup();
+    }
+    for fact in &mut index.call_argument_values {
+        for call in calls.iter().filter(|call| {
+            call.call_span.file == fact.argument_span.file
+                && fact.argument_span.start <= call.call_span.start
+                && call.call_span.end <= fact.argument_span.end
+        }) {
+            fact.value_flow.call_sites.push(call.call_span);
+        }
+        fact.value_flow.call_sites.sort_unstable();
+        fact.value_flow.call_sites.dedup();
+    }
+}
+
+/// `format!` and `format_args!` are compiler-expanded value expressions: the
+/// rendered result contains their format operands by Rust language semantics.
+/// They are not ordinary calls whose result depends on an unresolved callee
+/// body. Marking the exact argument expression this way lets shared IDG
+/// lowering consume the adapter-emitted operand facts without teaching the
+/// graph core any Rust macro names.
+fn mark_rust_format_macro_values_as_syntax_propagated(index: &mut DeclIndex, src: &[u8]) {
+    for fact in &mut index.call_argument_values {
+        let start = usize::try_from(fact.argument_span.start).unwrap_or(usize::MAX);
+        let end = usize::try_from(fact.argument_span.end).unwrap_or(usize::MAX);
+        let Some(text) = src
+            .get(start..end)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        else {
+            continue;
+        };
+        let text = text.trim_start();
+        if text.starts_with("format!(") || text.starts_with("format_args!(") {
+            fact.direct_call_span = None;
         }
     }
 }
@@ -1614,6 +2790,16 @@ fn collect_rust_struct_literal_field_events(
                 if source_names.is_empty() {
                     continue;
                 }
+                // The synthetic field assignment is added after the generic
+                // declaration walk because the field's storage base comes
+                // from the assignment target type. Preserve the executable
+                // facts inside the initializer as well: a value such as
+                // `routed.clone()` is a method result derived from `routed`,
+                // not a structural read of a hypothetical `clone` field.
+                // Reuse the canonical Tree-sitter flow walker so shared IDG
+                // lowering never has to infer call syntax from rendered
+                // source names.
+                bonsai_lang_api::kit::walk_flow_node_into(value, file, src, &HANDLER, &[], out);
                 out.push(FlowEvent::Assign {
                     span: span_of(file, &field_node),
                     target: format!("{target}.{field_name}"),
@@ -1654,8 +2840,235 @@ fn rust_struct_expression_name(node: Node<'_>, src: &[u8]) -> Option<String> {
     rust_type_tail(node_text(&name, src))
 }
 
+/// Collect only explicit `let binding: Type = value` receiver types.
+///
+/// An untyped initializer may itself contain arbitrary type syntax, notably
+/// Rust's turbofish (`let filter = factory::<Payload>()`). That payload type
+/// is an argument to the factory, not the declared type of `filter`, so this
+/// frontend must never recover it through a descendant search. Complex
+/// destructuring is excluded as well because one outer annotation does not
+/// prove that every inner binding has the outer type. For one bare binding,
+/// retain every nominal identity in the declared type (`Box<dyn Task>` proves
+/// both `Box` and `Task`). These are compiler type facts, not initializer
+/// guesses.
+fn collect_rust_explicit_local_type_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<bonsai_common::Span, Vec<TypeAliasBinding>> {
+    let mut out = std::collections::HashMap::new();
+    for function in collect_kinds(tree, &["function_item"]) {
+        let mut aliases = Vec::new();
+        let mut stack = vec![function];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "let_declaration" {
+                let binding = node.child_by_field_name("pattern");
+                let type_node = node.child_by_field_name("type");
+                if let (Some(binding), Some(type_node)) = (binding, type_node) {
+                    if binding.kind() == "identifier" {
+                        let name = node_text(&binding, src).trim();
+                        if rust_bare_identifier(name) {
+                            for type_name in rust_parameter_type_identities(type_node, src) {
+                                let alias = TypeAliasBinding {
+                                    name: name.to_string(),
+                                    type_name,
+                                };
+                                if !aliases.contains(&alias) {
+                                    aliases.push(alias);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            stack.extend(node.named_children(&mut cursor));
+        }
+        if !aliases.is_empty() {
+            out.insert(span_of(file, &function), aliases);
+        }
+    }
+    out
+}
+
+/// Collect the receiver type proven by an exact Rust `as`-cast initializer.
+///
+/// Only `let name = value as Type` is admitted: the binding must be a bare
+/// identifier and the declaration's direct `value` field must be a
+/// `type_cast_expression`. A cast nested inside a call argument therefore
+/// cannot mistype the result binding, and turbofish type arguments remain
+/// ordinary call syntax rather than receiver evidence.
+fn collect_rust_cast_local_type_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<bonsai_common::Span, Vec<TypeAliasBinding>> {
+    let mut out = std::collections::HashMap::new();
+    for function in collect_kinds(tree, &["function_item"]) {
+        let mut aliases = Vec::new();
+        let mut stack = vec![function];
+        while let Some(node) = stack.pop() {
+            // A nested item owns its locals. Its own `collect_kinds` iteration
+            // will attach them to that declaration instead of leaking them
+            // into the enclosing function.
+            if node != function && node.kind() == "function_item" {
+                continue;
+            }
+            if node.kind() == "let_declaration" {
+                let binding = node.child_by_field_name("pattern");
+                let value = node.child_by_field_name("value");
+                if let (Some(binding), Some(value)) = (binding, value) {
+                    if binding.kind() == "identifier" && value.kind() == "type_cast_expression" {
+                        let name = node_text(&binding, src).trim();
+                        let type_name = value
+                            .child_by_field_name("type")
+                            .and_then(|type_node| rust_type_tail(node_text(&type_node, src)));
+                        if let Some(type_name) = type_name.filter(|_| rust_bare_identifier(name)) {
+                            let alias = TypeAliasBinding {
+                                name: name.to_string(),
+                                type_name,
+                            };
+                            if !aliases.contains(&alias) {
+                                aliases.push(alias);
+                            }
+                        }
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            stack.extend(node.named_children(&mut cursor));
+        }
+        if !aliases.is_empty() {
+            out.insert(span_of(file, &function), aliases);
+        }
+    }
+    out
+}
+
+/// Retain every exact nominal type identity for Rust parameter bindings.
+///
+/// The shared short-type collector supplies the ordinary cross-language
+/// alias. Rust additionally needs its grammar-classified qualified identity
+/// (`crate::Type`) and nested trait identities (`Wrapper<dyn Trait>`) for
+/// exact provider and dynamic-dispatch proofs. Tuple-struct patterns bind the
+/// inner value rather than their constructor token.
+fn collect_rust_param_type_identities(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<bonsai_common::Span, Vec<TypeAliasBinding>> {
+    let mut out = std::collections::HashMap::new();
+    for function in collect_kinds(tree, &["function_item"]) {
+        let Some(parameters) = function.child_by_field_name("parameters") else {
+            continue;
+        };
+        let mut aliases = Vec::new();
+        let mut cursor = parameters.walk();
+        for parameter in parameters.named_children(&mut cursor) {
+            if parameter.kind() != "parameter" {
+                continue;
+            }
+            let Some(pattern) = parameter.child_by_field_name("pattern") else {
+                continue;
+            };
+            let Some(type_node) = parameter.child_by_field_name("type") else {
+                continue;
+            };
+            let type_names = rust_parameter_type_identities(type_node, src);
+            if type_names.is_empty() {
+                continue;
+            }
+            let excluded_constructor = pattern
+                .child_by_field_name("type")
+                .or_else(|| pattern.child_by_field_name("path"));
+            let mut names = Vec::new();
+            collect_rust_pattern_binding_names(pattern, excluded_constructor, src, &mut names);
+            for name in names {
+                for type_name in &type_names {
+                    let binding = TypeAliasBinding {
+                        name: name.clone(),
+                        type_name: type_name.clone(),
+                    };
+                    if !aliases.contains(&binding) {
+                        aliases.push(binding);
+                    }
+                }
+            }
+        }
+        if !aliases.is_empty() {
+            out.insert(span_of(file, &function), aliases);
+        }
+    }
+    out
+}
+
+/// Return every compiler-declared nominal identity carried by a parameter
+/// type, from the outer extractor wrapper through nested generic/trait types.
+///
+/// Rust extractor parameters commonly bind the inner value while annotating
+/// the parameter with `State<Arc<dyn Gateway>>`. Retaining only the outer
+/// `State` identity prevents exact trait dispatch for `gateway.method()`.
+/// Walking type syntax (never value tokens) preserves all identities without
+/// teaching the adapter any framework or API names.
+fn rust_parameter_type_identities(type_node: Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut identities = Vec::new();
+    let mut stack = vec![type_node];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "type_identifier" | "scoped_type_identifier") {
+            let identity = bonsai_common::normalize_qualified_name(node_text(&node, src));
+            if !identity.is_empty() && !identities.contains(&identity) {
+                identities.push(identity);
+            }
+            // A scoped type is already one canonical identity. Its children
+            // are path components, not independent receiver types.
+            if node.kind() == "scoped_type_identifier" {
+                continue;
+            }
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    identities
+}
+
+fn collect_rust_pattern_binding_names(
+    node: Node<'_>,
+    excluded_constructor: Option<Node<'_>>,
+    src: &[u8],
+    out: &mut Vec<String>,
+) {
+    if excluded_constructor.is_some_and(|excluded| {
+        node.start_byte() >= excluded.start_byte() && node.end_byte() <= excluded.end_byte()
+    }) {
+        return;
+    }
+    if node.kind() == "identifier" {
+        let name = node_text(&node, src).trim();
+        if !name.is_empty() && !out.iter().any(|existing| existing == name) {
+            out.push(name.to_string());
+        }
+        return;
+    }
+    for index in 0..node.child_count() {
+        let Ok(index) = u32::try_from(index) else {
+            continue;
+        };
+        let Some(child) = node.child(index).filter(Node::is_named) else {
+            continue;
+        };
+        if matches!(
+            node.field_name_for_child(index),
+            Some("type" | "path" | "constructor" | "field" | "value")
+        ) {
+            continue;
+        }
+        collect_rust_pattern_binding_names(child, excluded_constructor, src, out);
+    }
+}
+
 fn rust_type_tail(text: &str) -> Option<String> {
-    let tail = text
+    let outer = text.split_once('<').map_or(text, |(outer, _)| outer);
+    let tail = outer
         .trim()
         .trim_matches('&')
         .trim()
@@ -1796,6 +3209,15 @@ fn rust_bare_identifier(value: &str) -> bool {
     (first == '_' || first.is_ascii_alphabetic()) && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
+fn rust_nominal_type_alias(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let segments = bonsai_common::qualified_name_segments(value);
+    !segments.is_empty() && segments.into_iter().all(rust_bare_identifier)
+}
+
 fn rust_format_named_captures(text: &str) -> Vec<String> {
     let trimmed = text.trim_start();
     let Some(after_macro) = trimmed
@@ -1877,42 +3299,6 @@ fn is_rust_ident_start(byte: u8) -> bool {
 
 fn is_rust_ident_continue(byte: u8) -> bool {
     is_rust_ident_start(byte) || byte.is_ascii_digit()
-}
-
-/// Per-arm body spans for every `match_expression` in the file.
-/// Mirrors the Scala/Swift collectors; passed to the kit's
-/// `split_match_arms_in_branch_events` to peel the kit-emitted flat
-/// Branch into per-arm forks.
-fn collect_rust_match_arm_spans(tree: &Tree, _src: &[u8], file: FileId) -> Vec<Vec<bonsai_common::Span>> {
-    let mut out: Vec<Vec<bonsai_common::Span>> = Vec::new();
-    for match_node in collect_kinds(tree, &["match_expression"]) {
-        let mut arm_body_spans: Vec<bonsai_common::Span> = Vec::new();
-        let body = match_node
-            .child_by_field_name("body")
-            .or_else(|| match_node.child_by_field_name("block"));
-        let Some(body) = body else { continue };
-        let mut bcur = body.walk();
-        for arm in body.named_children(&mut bcur) {
-            if !matches!(
-                arm.kind(),
-                "match_arm" | "match_block_arm" | "match_expression_arm"
-            ) {
-                continue;
-            }
-            // The arm's body is in the `value` field (or the last
-            // named child for grammars without a labeled value field).
-            let arm_body = arm
-                .child_by_field_name("value")
-                .or_else(|| arm.child_by_field_name("body"));
-            if let Some(body_node) = arm_body {
-                arm_body_spans.push(span_of(file, &body_node));
-            }
-        }
-        if !arm_body_spans.is_empty() {
-            out.push(arm_body_spans);
-        }
-    }
-    out
 }
 
 /// Walk the Rust tree and map function/struct/enum/trait/impl spans
@@ -2183,6 +3569,113 @@ fn collect_rust_impl_method_parents(
         }
     }
     out
+}
+
+/// Retain Rust's exact `impl Trait for Type` inheritance relation.
+///
+/// The callgraph uses declaration bases for compiler-justified dynamic trait
+/// dispatch. Both identities come from Tree-sitter's named `trait` and `type`
+/// fields; this does not infer a relationship from method spellings.
+fn collect_rust_impl_trait_bases(tree: &Tree, src: &[u8]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for impl_node in collect_kinds(tree, &["impl_item"]) {
+        let Some(type_node) = impl_node.child_by_field_name("type") else {
+            continue;
+        };
+        let Some(trait_node) = impl_node.child_by_field_name("trait") else {
+            continue;
+        };
+        let type_name = bonsai_lang_api::kit::canonical_simple_type_name(node_text(&type_node, src));
+        let trait_name = bonsai_common::normalize_qualified_name(node_text(&trait_node, src));
+        let trait_name = trait_name.rsplit('.').next().unwrap_or(&trait_name).to_string();
+        if type_name.is_empty() || trait_name.is_empty() {
+            continue;
+        }
+        let relation = (type_name, trait_name);
+        if !out.contains(&relation) {
+            out.push(relation);
+        }
+    }
+    out
+}
+
+/// Return every function declaration syntactically owned by an
+/// `impl Trait for Type` block.
+///
+/// These methods cannot carry their own Rust visibility modifier; their
+/// cross-module callable visibility comes from the trait implementation.
+fn collect_rust_trait_impl_method_spans(tree: &Tree, file: FileId) -> Vec<bonsai_common::Span> {
+    let functions = collect_kinds(tree, &["function_item"]);
+    let mut out = Vec::new();
+    for impl_node in collect_kinds(tree, &["impl_item"]) {
+        if impl_node.child_by_field_name("trait").is_none() {
+            continue;
+        }
+        let impl_span = span_of(file, &impl_node);
+        for function in &functions {
+            let function_span = span_of(file, function);
+            if function_span.start >= impl_span.start
+                && function_span.end <= impl_span.end
+                && !out.contains(&function_span)
+            {
+                out.push(function_span);
+            }
+        }
+    }
+    out
+}
+
+/// Add the exact imported identity for compiler-declared receiver types.
+///
+/// `use provider::Client as ExternalClient; value: ExternalClient` carries
+/// both a local type spelling and an exact provider binding. Retaining both
+/// lets rules and call resolution require the complete imported identity
+/// without losing ordinary local type navigation. Wildcard imports remain
+/// ambiguous and therefore cannot qualify a type.
+fn qualify_rust_declared_type_aliases(idx: &mut DeclIndex, imports: &[ImportSpec]) {
+    let imported_types = imports
+        .iter()
+        .filter(|import| !import.is_wildcard)
+        .filter_map(|import| {
+            let imported_name = import
+                .alias
+                .clone()
+                .or_else(|| import.original_name.clone())
+                .or_else(|| bonsai_lang_api::module_local_binding(&import.module))?;
+            let target = if let Some(original) = import.original_name.as_deref() {
+                if import.module.is_empty() {
+                    original.to_string()
+                } else {
+                    format!("{}::{original}", import.module)
+                }
+            } else {
+                import.module.clone()
+            };
+            let target = bonsai_common::normalize_qualified_name(&target);
+            (!imported_name.is_empty() && !target.is_empty()).then_some((imported_name, target))
+        })
+        .collect::<Vec<_>>();
+    if imported_types.is_empty() {
+        return;
+    }
+
+    for decl in &mut idx.defs {
+        let existing = decl.type_aliases.clone();
+        for alias in existing {
+            for (_, target) in imported_types
+                .iter()
+                .filter(|(local, _)| local == &alias.type_name)
+            {
+                let qualified = TypeAliasBinding {
+                    name: alias.name.clone(),
+                    type_name: target.clone(),
+                };
+                if !decl.type_aliases.contains(&qualified) {
+                    decl.type_aliases.push(qualified);
+                }
+            }
+        }
+    }
 }
 
 fn rust_impl_self_type(text: &str) -> Option<String> {

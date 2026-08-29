@@ -49,7 +49,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Message, AMQP::Message]
+      param_type_in: [Message, "AMQP::Message"]
   match_examples:
   - name: amqp cpp received message
     code: |

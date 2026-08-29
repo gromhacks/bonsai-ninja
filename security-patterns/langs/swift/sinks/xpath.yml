@@ -10,12 +10,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.nodes$
-      base_name_in:
-      - node
-      - doc
-      - element
-      - root
-      - xml
+      receiver_type_in: [XMLNode]
   constraints:
   - arg_tainted:
       index: 0
@@ -33,6 +28,14 @@
       import Foundation
       func handle(node: XMLNode) throws -> [XMLNode] {
         return try node.nodes(forXPath: "//safe")
+      }
+    expect_no_match: true
+  - name: local XMLNode is not Foundation XML
+    code: |
+      import Foundation
+      struct XMLNode {}
+      func handle(node: XMLNode, name: String) throws {
+        _ = try node.nodes(forXPath: name)
       }
     expect_no_match: true
   description: "XMLNode.nodes(forXPath:) - XPath injection on a Foundation XML node."

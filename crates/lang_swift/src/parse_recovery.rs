@@ -6,7 +6,17 @@ pub(crate) fn swift_parse_recovery_edits(
     snapshot: &FileSnapshot,
     tree: &SyntaxTree,
 ) -> Vec<ParseRecoveryEdit> {
-    let mut edits = bonsai_lang_api::branch_free_conditional_recovery_edits(
+    swift_parse_recovery_edit_batches(snapshot, tree)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+pub(crate) fn swift_parse_recovery_edit_batches(
+    snapshot: &FileSnapshot,
+    tree: &SyntaxTree,
+) -> Vec<Vec<ParseRecoveryEdit>> {
+    let conditionals = bonsai_lang_api::branch_free_conditional_recovery_edits(
         snapshot,
         tree,
         bonsai_lang_api::ConditionalDirectiveSyntax {
@@ -15,16 +25,27 @@ pub(crate) fn swift_parse_recovery_edits(
             alternatives_without_condition: &["#else"],
             closing: "#endif",
             trailing_comment_prefixes: &["//"],
+            non_directive_node_kinds: &[
+                "comment",
+                "multiline_comment",
+                "line_string_literal",
+                "multi_line_string_literal",
+                "raw_string_literal",
+            ],
         },
     );
     if !tree.root_node().has_error() {
-        return edits;
+        return (!conditionals.is_empty())
+            .then_some(conditionals)
+            .into_iter()
+            .collect();
     }
 
     let source = snapshot.text.as_ref();
+    let mut syntax = Vec::new();
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
-        collect_conditional_cast_before_coalescing(node, source, &mut edits);
+        collect_conditional_cast_before_coalescing(node, source, &mut syntax);
         if node.kind() == "tuple_expression"
             && source.get(node.start_byte()..node.end_byte()) == Some("()")
             && has_zero_width_bang(node)
@@ -32,7 +53,7 @@ pub(crate) fn swift_parse_recovery_edits(
             // The grammar currently requires a synthetic `!` child for
             // Swift's valid empty-tuple value. A scalar literal is the exact
             // dataflow equivalent here: both contain no identifier carrier.
-            edits.push(ParseRecoveryEdit::replace_ascii(
+            syntax.push(ParseRecoveryEdit::replace_ascii(
                 node.start_byte(),
                 node.end_byte(),
                 b"0",
@@ -42,8 +63,8 @@ pub(crate) fn swift_parse_recovery_edits(
             let Some(fragment) = source.get(node.start_byte()..node.end_byte()) else {
                 continue;
             };
-            collect_keyword(fragment, node.start_byte(), "sending", &mut edits);
-            collect_exact_fragment(fragment, node.start_byte(), "nonisolated(unsafe)", &mut edits);
+            collect_keyword(fragment, node.start_byte(), "sending", &mut syntax);
+            collect_exact_fragment(fragment, node.start_byte(), "nonisolated(unsafe)", &mut syntax);
             continue;
         }
         let mut cursor = node.walk();
@@ -53,9 +74,12 @@ pub(crate) fn swift_parse_recovery_edits(
             }
         }
     }
-    edits.sort_by_key(|edit| (edit.start_byte, edit.end_byte));
-    edits.dedup();
-    edits
+    syntax.sort_by_key(|edit| (edit.start_byte, edit.end_byte));
+    syntax.dedup();
+    [conditionals, syntax]
+        .into_iter()
+        .filter(|batch| !batch.is_empty())
+        .collect()
 }
 
 /// Recover `value as? Type ?? fallback`, which older Swift grammars can read

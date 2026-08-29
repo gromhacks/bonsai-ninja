@@ -1,23 +1,7 @@
 # PHP cloud sources. AWS Lambda PHP runtime bootstrap handler events.
 # trust: service.
-- id: php.source.aws_lambda_handler_event
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: cloud-event
-  trust: service
-  packages: [bref/bref]
-  match:
-    kind: param
-    target:
-      name: event
-  description: "Disabled - too broad; enable per-project via a narrower rule."
-
 - id: php.source.bref_handler_handle
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: php
   tag: cloud-event
   trust: service
@@ -25,7 +9,7 @@
   match:
     kind: param
     target:
-      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*$"
       in_method: [handle]
       in_class: [Handler]
       param_index_in: [0]
@@ -41,6 +25,7 @@
           return $event;
         }
       }
+    expect_match_text: [$event]
   - name: ordinary handle method negative
     code: |
       <?php
@@ -51,7 +36,47 @@
         }
       }
     expect_no_match: true
-  description: "Disabled - Bref supplies parameter zero of Handler.handle(event, context), but the PHP adapter does not yet retain enough implemented-interface ancestry to prove that an arbitrary handle/2 method implements Bref\\Event\\Handler. The old call-result rule was wrong-direction because handle() returns the application response."
+  description: "Parameter zero of Bref Handler.handle(event, context), constrained by method name, arity, implemented-interface ancestry, and imported Bref identity. The handle return remains the application response, not a source."
 
   imports:
   - Bref
+
+- id: php.source.google_functions_http_callback
+  enabled: true
+  language: php
+  tag: cloud-event
+  trust: service
+  category: cloud-event
+  payload_types: [event, json]
+  packages: [google/cloud-functions-framework]
+  imports: [Google\CloudFunctions\FunctionsFramework]
+  match:
+    kind: call
+    callee:
+      attribute: [FunctionsFramework, http]
+  constraints:
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: Google Functions Framework inline HTTP handler
+    code: |
+      <?php
+      use Google\CloudFunctions\FunctionsFramework;
+      use Psr\Http\Message\ServerRequestInterface;
+      FunctionsFramework::http('audit', function (ServerRequestInterface $request): string {
+          return $request->getUri()->getQuery();
+      });
+    expect_match_text: ["FunctionsFramework::http"]
+  - name: unrelated framework registration is not cloud input
+    code: |
+      <?php
+      use Google\CloudFunctions\FunctionsFramework;
+      Router::http('audit', function ($request): string {
+          return 'local';
+      });
+    expect_no_match: true
+  description: "Google Cloud FunctionsFramework::http(name, callback) supplies the PSR-7 request as callback parameter zero; the registration call result is not a source."

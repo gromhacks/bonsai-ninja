@@ -87,18 +87,3 @@
       }
     expect_no_match: true
   description: "redis/ioredis client.eval - Lua script injection on tainted script body. `min_args: 1` rejects 0-arg `client.eval()` decoys (the script body is required)."
-
-- id: javascript.redis.client_evalsha
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: nosql-injection
-  severity: medium
-  packages: [redis, ioredis]
-  cwe: [CWE-943]
-  match:
-    kind: call
-    callee:
-      attribute: [client, evalsha]
-  description: "Disabled - evalsha runs a pre-loaded script by hash; only dangerous if the hash itself is attacker-controlled."

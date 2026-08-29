@@ -4,45 +4,237 @@
   language: swift
   tag: command-injection
   severity: critical
+  packages: [Foundation]
+  imports: [Foundation]
   cwe: [CWE-78]
   match:
     kind: call
     callee:
       name: launch
   constraints:
-  - arg_tainted:
-      index: 0
+  - receiver_type_in: [Process]
+  - receiver_tainted: true
+  - arg_count: 0
+  - requires_prior_receiver_write:
+      target: {name: launchPath}
+      accepted_values:
+      - {kind: string, value: /bin/sh}
+      - {kind: string, value: /bin/bash}
+      - {kind: string, value: /bin/zsh}
+      - {kind: string, value: /usr/bin/sh}
+      - {kind: string, value: /usr/bin/bash}
+      - {kind: string, value: /usr/bin/zsh}
   match_examples:
-  - name: declared shape
+  - name: Process launch after tainted shell argv configuration
     code: |
-      func test(input: String) { let amount = 1; launch(input) }
-  - name: literal arg 0 negative
+      import Foundation
+      func test(input: String) {
+        let process = Process()
+        process.launchPath = "/bin/sh"
+        process.arguments = ["-c", input]
+        process.launch()
+      }
+    expect_match_text: [process.launch]
+  - name: literal Process configuration negative
     code: |
-      func test() { launch("safe") }
+      import Foundation
+      func test() {
+        let process = Process()
+        process.launchPath = "/bin/sh"
+        process.arguments = ["-c", "echo safe"]
+        process.launch()
+      }
     expect_no_match: true
-  description: "Process / NSTask launch (deprecated) - subprocess execution. May FP on AppKit/SwiftUI launch() - rare."
+  - name: direct executable argv does not invoke a shell
+    code: |
+      import Foundation
+      func test(input: String) {
+        let process = Process()
+        process.launchPath = "/usr/bin/printf"
+        process.arguments = ["%s", input]
+        process.launch()
+      }
+    expect_no_match: true
+  - name: unrelated launch receiver negative
+    code: |
+      import Foundation
+      struct Worker { var command: String; func launch() {} }
+      func test(input: String) { Worker(command: input).launch() }
+    expect_no_match: true
+  description: "Foundation Process.launch() is a shell-injection boundary when compiler-typed receiver state contains tainted arguments and a dominating launchPath write selects a known shell; direct executable argv remains data."
+- id: swift.cmdi.process_launch_executable_url
+  enabled: true
+  language: swift
+  tag: command-injection
+  severity: critical
+  packages: [Foundation]
+  imports: [Foundation]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee: {name: launch}
+  constraints:
+  - receiver_type_in: [Process]
+  - receiver_tainted: true
+  - arg_count: 0
+  - requires_prior_receiver_write:
+      target: {name: executableURL}
+      accepted_calls:
+      - call: {name: URL, binding_origin: imported}
+        items:
+        - index: 0
+          accepted_values:
+          - {kind: string, value: /bin/sh}
+          - {kind: string, value: /bin/bash}
+          - {kind: string, value: /bin/zsh}
+          - {kind: string, value: /usr/bin/sh}
+          - {kind: string, value: /usr/bin/bash}
+          - {kind: string, value: /usr/bin/zsh}
+  match_examples:
+  - name: Process launch after exact shell URL and tainted argv
+    code: |
+      import Foundation
+      func test(input: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", input]
+        process.launch()
+      }
+    expect_match_text: [process.launch]
+  - name: direct executable URL argv remains data
+    code: |
+      import Foundation
+      func test(input: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/printf")
+        process.arguments = ["%s", input]
+        process.launch()
+      }
+    expect_no_match: true
+  description: "Foundation Process.launch() with an exact shell executableURL and tainted receiver argv; the rule joins compiler-decoded URL constructor arguments to dominating receiver state."
 - id: swift.cmdi.process_run
   enabled: true
   language: swift
   tag: command-injection
   severity: critical
+  packages: [Foundation]
+  imports: [Foundation]
   cwe: [CWE-78]
   match:
     kind: call
     callee:
-      attribute: [process, run]
+      name: run
   constraints:
-  - arg_tainted:
-      index: 0
+  - receiver_type_in: [Process]
+  - receiver_tainted: true
+  - arg_count: 0
+  - requires_prior_receiver_write:
+      target: {name: launchPath}
+      accepted_values:
+      - {kind: string, value: /bin/sh}
+      - {kind: string, value: /bin/bash}
+      - {kind: string, value: /bin/zsh}
+      - {kind: string, value: /usr/bin/sh}
+      - {kind: string, value: /usr/bin/bash}
+      - {kind: string, value: /usr/bin/zsh}
   match_examples:
-  - name: declared shape
+  - name: Process run after tainted argv configuration
     code: |
-      func test(input: String) { process.run(input) }
-  - name: literal process run negative
+      import Foundation
+      func test(input: String) throws {
+        let process = Process()
+        process.launchPath = "/bin/sh"
+        process.arguments = ["-c", input]
+        try process.run()
+      }
+    expect_match_text: [process.run]
+  - name: literal Process configuration negative
     code: |
-      func test() { process.run("whoami") }
+      import Foundation
+      func test() throws {
+        let process = Process()
+        process.launchPath = "/bin/sh"
+        process.arguments = ["-c", "echo safe"]
+        try process.run()
+      }
     expect_no_match: true
-  description: "Process.run() / task.run() - Foundation subprocess execution. Kept narrow through the Process-shaped call target and tainted command argument."
+  - name: direct executable argv does not invoke a shell
+    code: |
+      import Foundation
+      func test(input: String) throws {
+        let process = Process()
+        process.launchPath = "/usr/bin/printf"
+        process.arguments = ["%s", input]
+        try process.run()
+      }
+    expect_no_match: true
+  - name: unrelated run receiver negative
+    code: |
+      import Foundation
+      struct Worker { var command: String; func run() {} }
+      func test(input: String) { Worker(command: input).run() }
+    expect_no_match: true
+  description: "Foundation Process.run() is a shell-injection boundary when compiler-typed receiver state contains tainted arguments and a dominating launchPath write selects a known shell; direct executable argv remains data."
+- id: swift.cmdi.process_run_executable_url
+  enabled: true
+  language: swift
+  tag: command-injection
+  severity: critical
+  packages: [Foundation]
+  imports: [Foundation]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee: {name: run}
+  constraints:
+  - receiver_type_in: [Process]
+  - receiver_tainted: true
+  - arg_count: 0
+  - requires_prior_receiver_write:
+      target: {name: executableURL}
+      accepted_calls:
+      - call: {name: URL, binding_origin: imported}
+        items:
+        - index: 0
+          accepted_values:
+          - {kind: string, value: /bin/sh}
+          - {kind: string, value: /bin/bash}
+          - {kind: string, value: /bin/zsh}
+          - {kind: string, value: /usr/bin/sh}
+          - {kind: string, value: /usr/bin/bash}
+          - {kind: string, value: /usr/bin/zsh}
+  match_examples:
+  - name: Process run after exact shell URL and tainted argv
+    code: |
+      import Foundation
+      func test(input: String) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", input]
+        try process.run()
+      }
+    expect_match_text: [process.run]
+  - name: direct executable URL argv remains data
+    code: |
+      import Foundation
+      func test(input: String) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/printf")
+        process.arguments = ["%s", input]
+        try process.run()
+      }
+    expect_no_match: true
+  - name: dynamic executable URL fails closed
+    code: |
+      import Foundation
+      func test(path: String, input: String) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = ["-c", input]
+        try process.run()
+      }
+    expect_no_match: true
+  description: "Foundation Process.run() with an exact shell executableURL and tainted receiver argv; direct and dynamically selected executables fail closed."
 - id: swift.cmdi.system_libc
   enabled: true
   language: swift
@@ -136,14 +328,19 @@
   language: swift
   tag: command-injection
   severity: high
+  packages: [Foundation]
+  imports: [Foundation]
   cwe: [CWE-78]
   match:
     kind: write
     target:
-      regex: ^(?:process|task|proc|p)\.launchPath$
+      name: launchPath
+      receiver_type_in: [Process]
   constraints:
   - arg_tainted:
       index: 0
+  taint_semantics:
+    taint_receiver_from_args: true
   match_examples:
   - name: process launch path member write
     code: |
@@ -165,14 +362,19 @@
   language: swift
   tag: command-injection
   severity: high
+  packages: [Foundation]
+  imports: [Foundation]
   cwe: [CWE-78]
   match:
     kind: write
     target:
-      regex: ^(?:process|task|proc|p)\.executableURL$
+      name: executableURL
+      receiver_type_in: [Process]
   constraints:
   - arg_tainted:
       index: 0
+  taint_semantics:
+    taint_receiver_from_args: true
   match_examples:
   - name: process executable url member write
     code: |
@@ -189,32 +391,3 @@
       }
     expect_no_match: true
   description: "Process.executableURL = tainted - Swift-preferred variant."
-- id: swift.cmdi.arguments_write
-  enabled: true
-  language: swift
-  tag: command-injection
-  severity: high
-  cwe: [CWE-78]
-  match:
-    kind: write
-    target:
-      regex: ^(?:process|task|proc|p)\.arguments$
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: process arguments member write
-    code: |
-      import Foundation
-      func test(input: String) {
-        let process = Process()
-        process.arguments = [input]
-      }
-  - name: local arguments variable negative
-    code: |
-      import Foundation
-      func test(input: String) {
-        let arguments = [input]
-      }
-    expect_no_match: true
-  description: "Process.arguments = [tainted] - argv injection."

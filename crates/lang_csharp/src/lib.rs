@@ -3,16 +3,18 @@ mod parse_recovery;
 
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
-    collect_assign_targets, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
+    collect_assign_targets, collect_param_type_aliases, decl_index_from_tree_with_handler,
+    extract_imports_via,
     kit::{
         call_arg_from_node_with_handler, canonical_simple_type_name, collect_kinds,
-        collect_receiver_field_writes, language_from_pack, node_text,
-        package_module_segments_with_workspace_prefix, parse_with, span_of,
+        collect_receiver_field_writes, expression_flow_from_node_with_handler, language_from_pack, node_text,
+        package_module_segments_with_workspace_prefix, parse_with, sort_dedup_finite_literal_selections,
+        span_of,
     },
     AdapterContext, AdapterError, ArgumentPassingMode, CallArg, CallKind, CallTargetExtraction, DeclIndex,
     DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, PatternBindingSite, TypeAliasBinding, TypeAliasVocabulary, Visibility,
-    EMPTY_HANDLER,
+    LanguageCapabilities, LanguageId, PatternBindingSite, StaticAggregateFieldValue, StaticScalarValue,
+    TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
 use parse_recovery::csharp_parse_recovery_edits;
 use tree_sitter::Node;
@@ -28,6 +30,90 @@ fn csharp_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTarget
         node: target,
         full_text: full_text.to_string(),
     })
+}
+
+/// Lower member assignments inside a directly assigned object initializer as
+/// ordinary qualified writes on that newly-bound receiver.
+///
+/// C#'s CST stores `var options = new Config { Mode = value }` as a
+/// constructor call containing a bare `Mode = value` assignment. The bare
+/// member has no receiver in source syntax, but the enclosing direct
+/// initializer proves that its receiver is exactly `options`. This adapter
+/// fact keeps the shared write matcher and IDG vocabulary-free. Object
+/// creations nested in another expression are deliberately rejected because
+/// their fields do not belong to the outer assignment target.
+fn csharp_object_initializer_member_write_events(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<FlowEvent> {
+    if node.kind() != "object_creation_expression" {
+        return Vec::new();
+    }
+    let Some(parent) = node.parent() else {
+        return Vec::new();
+    };
+    let owner = match parent.kind() {
+        "variable_declarator" => parent.child_by_field_name("name").filter(|_| {
+            let mut cursor = parent.walk();
+            parent
+                .named_children(&mut cursor)
+                .last()
+                .is_some_and(|value| value.id() == node.id())
+        }),
+        "assignment_expression" => parent
+            .child_by_field_name("right")
+            .filter(|value| value.id() == node.id())
+            .and_then(|_| parent.child_by_field_name("left")),
+        _ => None,
+    };
+    let Some(owner) = owner else {
+        return Vec::new();
+    };
+    let owner = expression_flow_from_node_with_handler(owner, file, src, handler)
+        .place
+        .unwrap_or_else(|| node_text(&owner, src).trim().to_string());
+    if owner.is_empty() {
+        return Vec::new();
+    }
+    let Some(initializer) = node.child_by_field_name("initializer") else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    let mut cursor = initializer.walk();
+    for member in initializer
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "assignment_expression")
+    {
+        let (Some(left), Some(right)) = (
+            member.child_by_field_name("left"),
+            member.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if left.kind() != "identifier" {
+            continue;
+        }
+        let field = node_text(&left, src).trim();
+        if field.is_empty() {
+            continue;
+        }
+        let value_flow = expression_flow_from_node_with_handler(right, file, src, handler);
+        let source_name = value_flow.place.clone().filter(|place| !place.contains('.'));
+        out.push(FlowEvent::Assign {
+            span: span_of(file, &member),
+            target: format!("{owner}.{field}"),
+            source_name,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: value_flow.source_names,
+            declares_new_binding: false,
+            value_kind: handler.expression_value_kind(right, src),
+        });
+    }
+    out
 }
 
 fn csharp_pattern_bindings(node: Node<'_>) -> Vec<PatternBindingSite<'_>> {
@@ -222,7 +308,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     aggregate_pattern_kinds: &["tuple_pattern"],
     positional_aggregate_kinds: &[
         "tuple_expression",
-        "array_initializer",
+        "initializer_expression",
         "array_creation_expression",
     ],
     aggregate_value_field_names: &["value", "expression"],
@@ -234,7 +320,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "parenthesized_expression",
         "await_expression",
         "as_expression",
-        "non_null_expression",
+        "postfix_unary_expression",
     ],
     assignment_target_wrapper_kinds: &["variable_declarator", "variable_declaration"],
     binding_declaration_keyword_spellings: &["const"],
@@ -250,6 +336,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     call_callee_field_names: &["function"],
     constructor_type_field_names: &["type"],
     call_target_extractor: Some(csharp_call_target),
+    syntax_events_extractor: Some(csharp_object_initializer_member_write_events),
     call_argument_field_names: &["arguments"],
     call_argument_container_kinds: &["argument_list"],
     argument_wrapper_kinds: &["argument"],
@@ -257,7 +344,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     argument_value_field_names: &["expression"],
     writeback_operand_field_names: &["expression"],
     transparent_expression_wrapper_kinds: &["expression"],
-    lambda_body_field_names: &["body", "expression_body"],
+    lambda_body_field_names: &["body"],
     argument_passing_mode_extractor: Some(csharp_argument_passing_mode),
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     runtime_type_guard_operators: &["is"],
@@ -265,12 +352,12 @@ const HANDLER: GrammarHandler = GrammarHandler {
     value_free_expression_kinds: &["sizeof_expression", "typeof_expression"],
     value_free_call_names: &["nameof"],
     call_ref_kinds: &["invocation_expression", "object_creation_expression"],
-    member_expression_kinds: &["member_access_expression", "property_access_expression"],
+    member_expression_kinds: &["member_access_expression"],
     subscript_expression_kinds: &["element_access_expression"],
-    member_base_field_names: &["expression", "object"],
+    member_base_field_names: &["expression"],
     member_name_field_names: &["name"],
-    subscript_base_field_names: &["expression", "object"],
-    subscript_index_field_names: &["argument", "index"],
+    subscript_base_field_names: &["expression"],
+    subscript_index_field_names: &["argument"],
     class_kinds: &[
         "class_declaration",
         "struct_declaration",
@@ -302,9 +389,16 @@ const HANDLER: GrammarHandler = GrammarHandler {
     branch_then_field_names: &["consequence", "body"],
     branch_else_field_names: &["alternative"],
     branch_condition_field_names: &["condition", "value"],
+    condition_group_kinds: &["parenthesized_expression"],
+    condition_all_operators: &["&&"],
+    condition_any_operators: &["||"],
+    condition_not_operators: &["!"],
     loop_body_field_names: &["body"],
     loop_body_kinds: &["block", "expression_statement"],
+    loop_update_field_names: &["update"],
     branch_arm_kinds: &["block", "expression_statement", "switch_section"],
+    exclusive_branch_arm_kinds: &["switch_section"],
+    fallthrough_branch_arm_kinds: &[],
     for_kinds: &["for_statement"],
     foreach_kinds: &["foreach_statement"],
     foreach_binding_extractor: Some(csharp_foreach_binding),
@@ -330,6 +424,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     lambda_kinds: &["lambda_expression"],
     try_kinds: &["try_statement"],
     catch_kinds: &["catch_clause"],
+    exclusive_catch_arm_kinds: &["catch_clause"],
     finally_kinds: &["finally_clause"],
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
@@ -350,7 +445,7 @@ fn csharp_argument_passing_mode(argument: Node<'_>, value: Node<'_>) -> Argument
             let mut cursor = node.walk();
             let has_writeback_marker = node
                 .children(&mut cursor)
-                .any(|child| matches!(child.kind(), "ref" | "out" | "in" | "ref_kind_keyword"));
+                .any(|child| matches!(child.kind(), "ref" | "out"));
             has_writeback_marker
         }
     }) {
@@ -393,6 +488,14 @@ impl LanguageAdapter for CSharpAdapter {
     ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
         csharp_parse_recovery_edits(snapshot, tree)
     }
+    fn parse_recovery_edit_batches(
+        &self,
+        snapshot: &bonsai_lang_api::FileSnapshot,
+        _vfs: &bonsai_lang_api::Vfs,
+        tree: &Tree,
+    ) -> Vec<Vec<bonsai_lang_api::ParseRecoveryEdit>> {
+        parse_recovery::csharp_parse_recovery_edit_batches(snapshot, tree)
+    }
     fn capabilities(&self) -> LanguageCapabilities {
         // Exceptions: the adapter populates `Throw::thrown_type` from
         // `throw new IOException(...)` and `Try::catch_types` from
@@ -411,22 +514,105 @@ impl LanguageAdapter for CSharpAdapter {
             ..LanguageCapabilities::partial_baseline()
         }
     }
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        Some(&HANDLER)
+    }
+    fn additional_grammar_node_kinds(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("custom lowering", "and_pattern"),
+            ("custom lowering", "argument"),
+            ("custom lowering", "argument_list"),
+            ("custom lowering", "arrow_expression_clause"),
+            ("custom lowering", "as_expression"),
+            ("custom lowering", "base"),
+            ("custom lowering", "base_list"),
+            ("custom lowering", "block"),
+            ("custom lowering", "cast_expression"),
+            ("custom lowering", "catch_clause"),
+            ("custom lowering", "catch_declaration"),
+            ("custom lowering", "class_declaration"),
+            ("custom lowering", "constructor_declaration"),
+            ("custom lowering", "constructor_initializer"),
+            ("custom lowering", "declaration_pattern"),
+            ("custom lowering", "delegate_declaration"),
+            ("custom lowering", "destructor_declaration"),
+            ("custom lowering", "enum_declaration"),
+            ("custom lowering", "event_declaration"),
+            ("custom lowering", "event_field_declaration"),
+            ("custom lowering", "field_declaration"),
+            ("custom lowering", "file_scoped_namespace_declaration"),
+            ("custom lowering", "foreach_statement"),
+            ("custom lowering", "generic_name"),
+            ("custom lowering", "identifier"),
+            ("custom lowering", "implicit_type"),
+            ("custom lowering", "in"),
+            ("custom lowering", "interface_declaration"),
+            ("custom lowering", "invocation_expression"),
+            ("custom lowering", "is_pattern_expression"),
+            ("custom lowering", "list_pattern"),
+            ("custom lowering", "local_declaration_statement"),
+            ("custom lowering", "local_function_statement"),
+            ("custom lowering", "method_declaration"),
+            ("custom lowering", "modifier"),
+            ("custom lowering", "namespace_declaration"),
+            ("custom lowering", "negated_pattern"),
+            ("custom lowering", "object_creation_expression"),
+            ("custom lowering", "or_pattern"),
+            ("custom lowering", "out"),
+            ("custom lowering", "parenthesized_expression"),
+            ("custom lowering", "parenthesized_pattern"),
+            ("custom lowering", "parenthesized_variable_designation"),
+            ("custom lowering", "pattern"),
+            ("custom lowering", "positional_pattern_clause"),
+            ("custom lowering", "property_declaration"),
+            ("custom lowering", "property_pattern_clause"),
+            ("custom lowering", "qualified_name"),
+            ("custom lowering", "record_declaration"),
+            ("custom lowering", "recursive_pattern"),
+            ("custom lowering", "ref"),
+            ("custom lowering", "ref_expression"),
+            ("custom lowering", "static"),
+            ("custom lowering", "struct"),
+            ("custom lowering", "struct_declaration"),
+            ("custom lowering", "subpattern"),
+            ("custom lowering", "switch_section"),
+            ("custom lowering", "switch_expression_arm"),
+            ("custom lowering", "this"),
+            ("custom lowering", "tuple_pattern"),
+            ("custom lowering", "type"),
+            ("custom lowering", "using_directive"),
+            ("custom lowering", "var_pattern"),
+            ("custom lowering", "variable_declaration"),
+            ("custom lowering", "variable_declarator"),
+        ]
+    }
+
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
-        let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
+        let parsed = parse_with(PACK_NAME, file, ctx);
+        let mut idx = parsed.as_ref().map_or_else(
+            || DeclIndex {
+                file,
+                ..DeclIndex::default()
+            },
+            |(snapshot, tree)| {
+                decl_index_from_tree_with_handler(file, snapshot.text.as_bytes(), tree, &HANDLER)
+            },
+        );
         let mut class_member_names_by_symbol: std::collections::HashMap<
             bonsai_common::SymbolId,
             std::collections::HashSet<String>,
         > = std::collections::HashMap::new();
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+        if let Some((snapshot, tree)) = parsed.as_ref() {
             let src = snapshot.text.as_bytes();
+            mark_csharp_record_structs(&mut idx, tree, file);
             // Phase-6 return-type extraction: `T Method() {}` populates
             // `Decl.return_type` for `apply_assign_call_result_types`.
-            bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
+            bonsai_lang_api::populate_decl_return_types(&mut idx, tree, src, &HANDLER);
             for decl in &mut idx.defs {
-                populate_csharp_exception_types(&mut decl.flow_events, &tree, src);
+                populate_csharp_exception_types(&mut decl.flow_events, tree, src);
             }
         }
-        let pkg = parse_with(PACK_NAME, file, ctx).and_then(|(snapshot, tree)| {
+        let pkg = parsed.as_ref().and_then(|(snapshot, tree)| {
             extract_csharp_namespace(tree.root_node(), snapshot.text.as_bytes())
         });
         if let Some(segments) = pkg {
@@ -435,12 +621,12 @@ impl LanguageAdapter for CSharpAdapter {
         } else {
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
         }
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+        if let Some((snapshot, tree)) = parsed.as_ref() {
             let src = snapshot.text.as_bytes();
             let vis_map = collect_csharp_visibility(tree.root_node(), file, src);
-            let alias_map = collect_param_type_aliases(&tree, file, src, &CSHARP_TYPE_ALIASES);
+            let alias_map = collect_param_type_aliases(tree, file, src, &CSHARP_TYPE_ALIASES);
             // Locally-declared receiver types (casts / typed locals).
-            let local_alias_map = collect_csharp_local_type_aliases(&tree, file, src);
+            let local_alias_map = collect_csharp_local_type_aliases(tree, file, src);
             // Class-level field/property type bindings extend each
             // method's `type_aliases`. A field declared as `private
             // readonly AuthService _authService = new AuthService();`
@@ -451,7 +637,7 @@ impl LanguageAdapter for CSharpAdapter {
             // `lang_java` and applies symmetrically to property
             // declarations (`public Foo Bar { get; set; }` carries
             // the same `Bar : Foo` binding).
-            let class_field_aliases = collect_csharp_class_field_aliases(&tree, file, src);
+            let class_field_aliases = collect_csharp_class_field_aliases(tree, file, src);
             // Pre-compute the parent class span for each method-like
             // decl so the per-decl pass below can patch `type_aliases`
             // without re-borrowing `idx.defs` while it's already
@@ -519,7 +705,7 @@ impl LanguageAdapter for CSharpAdapter {
             // Per-class `bases`: `class Echo : Base, IFoo` → ["Base", "IFoo"].
             // C# uses a single `base_list` for both class super and
             // interface impls — they're indistinguishable in syntax.
-            let bases_by_span = collect_csharp_class_bases(&tree, file, src);
+            let bases_by_span = collect_csharp_class_bases(tree, file, src);
             for decl in &mut idx.defs {
                 if !is_class_like(decl.kind) {
                     continue;
@@ -539,28 +725,38 @@ impl LanguageAdapter for CSharpAdapter {
         // declarations (canonical constructor + component accessors) so
         // `new R(.., tainted, ..)` and `r.Comp` thread taint — C#
         // records have no grammar nodes for these. Shared with lang_java.
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+        if let Some((snapshot, tree)) = parsed.as_ref() {
             let src = snapshot.text.as_bytes();
-            bonsai_lang_api::kit::synthesize_record_members(&mut idx, &tree, src, file);
+            bonsai_lang_api::kit::synthesize_record_members(&mut idx, tree, src, file);
             // Expression-bodied properties (`X => expr;`) have no
             // accessor node, so synthesize their getter before resolving
             // bare property reads below.
-            synthesize_csharp_expression_bodied_properties(&mut idx, &tree, src, file);
-            // C# constructor bodies are `block` kind — excluded from
-            // the kit's `body_has_implicit_return` set — so the kit
-            // emits no synthetic Return for them. Java's equivalent
-            // (`constructor_body` kind) IS treated as an expression-
-            // body, so each Java ctor gets a `Return{value_text=body}`
-            // event whose identifier tokenization bridges param taint
-            // to the return → caller's CallRet → caller's `repo`
-            // allocation. Mirror that by synthesizing a ctor Return
-            // whose value_text includes the body text + constructor_
-            // initializer text (`: base(data)`) so params propagate
-            // through the inheritance chain even when the body is
-            // empty — `new AuditedRepository(envelope)` then taints
-            // `repo` whole-object (Java-style), letting the existing
-            // 1-level receiver-field bridge carry it.
-            synthesize_csharp_constructor_implicit_returns(&mut idx, &tree, src, file);
+            synthesize_csharp_expression_bodied_properties(&mut idx, tree, src, file);
+            // Constructor initializer clauses are not ordinary body calls in
+            // the C# grammar, so lower their exact `this(...)` / `base(...)`
+            // call facts explicitly. Constructor arguments do not become a
+            // synthetic whole-object return: instance state is represented by
+            // the exact receiver-field writes collected below.
+            synthesize_csharp_constructor_initializer_calls(&mut idx, tree, src, file);
+            let selections = collect_csharp_finite_literal_selections(&idx, tree, file);
+            idx.finite_literal_selections.extend(selections);
+            sort_dedup_finite_literal_selections(&mut idx.finite_literal_selections);
+            bonsai_lang_api::kit::populate_call_argument_static_values(
+                &mut idx,
+                tree,
+                file,
+                src,
+                &HANDLER,
+                csharp_static_scalar,
+            );
+            bonsai_lang_api::kit::populate_assignment_inline_callback_static_returns(
+                &mut idx,
+                tree,
+                src,
+                &HANDLER,
+                csharp_static_scalar,
+            );
+            populate_csharp_assigned_aggregate_arguments(&mut idx, tree, file, src);
         }
         // Resolve bare implicit-`this` property reads/writes. C# accesses a
         // zero-arg property/getter by its bare name (`var c = Cmd;` for
@@ -588,6 +784,353 @@ impl LanguageAdapter for CSharpAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+#[derive(Clone)]
+struct CSharpAggregateAssignment {
+    scope: Option<Span>,
+    assignment_span: Span,
+    target: String,
+    fields: Option<Vec<StaticAggregateFieldValue>>,
+}
+
+/// Carry exact object-initializer fields through one latest preceding local
+/// assignment into call-argument facts. This is compiler structure only:
+/// framework/API identities and the security meaning of fields stay in rule
+/// data. Same-spelled locals in another callable are never considered, and a
+/// later non-aggregate/dynamic assignment clears the earlier proof.
+fn populate_csharp_assigned_aggregate_arguments(
+    index: &mut DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) {
+    let root = tree.root_node();
+    let assignments: Vec<_> = index
+        .assignment_values
+        .iter()
+        .filter_map(|fact| {
+            let target = fact.target.as_ref()?;
+            if !is_csharp_local_identifier(target) {
+                return None;
+            }
+            let value = csharp_node_for_exact_span(root, fact.value_span)?;
+            Some(CSharpAggregateAssignment {
+                scope: csharp_callable_scope(value, file),
+                assignment_span: fact.assignment_span,
+                target: target.clone(),
+                fields: csharp_object_initializer_fields(value, src),
+            })
+        })
+        .collect();
+
+    for argument in &mut index.call_argument_values {
+        let Some(place) = argument
+            .value_flow
+            .place
+            .as_deref()
+            .filter(|place| is_csharp_local_identifier(place))
+        else {
+            continue;
+        };
+        let Some(argument_node) = csharp_node_for_exact_span(root, argument.argument_span) else {
+            continue;
+        };
+        let scope = csharp_callable_scope(argument_node, file);
+        let Some(latest) = assignments
+            .iter()
+            .filter(|assignment| {
+                assignment.scope == scope
+                    && assignment.target == place
+                    && assignment.assignment_span.end <= argument.argument_span.start
+            })
+            .max_by_key(|assignment| (assignment.assignment_span.start, assignment.assignment_span.end))
+        else {
+            continue;
+        };
+        argument.exact_static_aggregate_fields = latest.fields.clone().unwrap_or_default();
+    }
+}
+
+fn is_csharp_local_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_alphanumeric())
+}
+
+fn csharp_node_for_exact_span(root: Node<'_>, span: Span) -> Option<Node<'_>> {
+    let start = usize::try_from(span.start).ok()?;
+    let end = usize::try_from(span.end).ok()?;
+    let mut node = root.descendant_for_byte_range(start, end)?;
+    loop {
+        if node.start_byte() == start && node.end_byte() == end {
+            return Some(node);
+        }
+        node = node.parent()?;
+    }
+}
+
+fn csharp_callable_scope(mut node: Node<'_>, file: FileId) -> Option<Span> {
+    loop {
+        if HANDLER.fn_kinds.contains(&node.kind()) || HANDLER.lambda_kinds.contains(&node.kind()) {
+            return Some(span_of(file, &node));
+        }
+        node = node.parent()?;
+    }
+}
+
+fn csharp_object_initializer_fields(value: Node<'_>, src: &[u8]) -> Option<Vec<StaticAggregateFieldValue>> {
+    let initializer = if value.kind() == "initializer_expression" {
+        value
+    } else if value.kind() == "object_creation_expression" {
+        value.child_by_field_name("initializer").or_else(|| {
+            let mut cursor = value.walk();
+            let initializer = value
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "initializer_expression");
+            initializer
+        })?
+    } else {
+        return None;
+    };
+
+    let mut fields = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut saw_member = false;
+    let mut cursor = initializer.walk();
+    for member in initializer.named_children(&mut cursor) {
+        if member.kind() != "assignment_expression" {
+            return None;
+        }
+        let key = member.child_by_field_name("left")?;
+        let value = member.child_by_field_name("right")?;
+        if key.kind() != "identifier" {
+            return None;
+        }
+        let path = vec![node_text(&key, src).trim().to_string()];
+        if path[0].is_empty() || !seen.insert(path.clone()) {
+            return None;
+        }
+        saw_member = true;
+        if let Some(value) = csharp_static_scalar(value, src) {
+            fields.push(StaticAggregateFieldValue { path, value });
+        }
+    }
+    saw_member.then_some(fields)
+}
+
+fn csharp_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
+    match node.kind() {
+        "null_literal" => Some(StaticScalarValue::Null),
+        "boolean_literal" | "true" | "false" => match node_text(&node, src).trim() {
+            "true" => Some(StaticScalarValue::Boolean(true)),
+            "false" => Some(StaticScalarValue::Boolean(false)),
+            _ => None,
+        },
+        "string_literal" | "verbatim_string_literal" | "raw_string_literal" => {
+            csharp_static_string_literal(node, src).map(StaticScalarValue::String)
+        }
+        _ => None,
+    }
+}
+
+/// Decode the runtime value of a complete non-interpolated C# string
+/// literal. C# escape and delimiter syntax belongs to this frontend; shared
+/// analysis receives only the exact scalar or no fact at all.
+fn csharp_static_string_literal(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let text = node_text(&node, src).trim();
+    match node.kind() {
+        "string_literal" => {
+            let inner = text.strip_prefix('"')?.strip_suffix('"')?;
+            decode_csharp_regular_string(inner)
+        }
+        "verbatim_string_literal" => {
+            let inner = text.strip_prefix("@\"")?.strip_suffix('"')?;
+            let mut decoded = String::with_capacity(inner.len());
+            let mut chars = inner.chars().peekable();
+            while let Some(character) = chars.next() {
+                if character != '"' {
+                    decoded.push(character);
+                    continue;
+                }
+                if chars.next() != Some('"') {
+                    return None;
+                }
+                decoded.push('"');
+            }
+            Some(decoded)
+        }
+        "raw_string_literal" => {
+            // Single-line raw literals have no indentation normalization.
+            // Multiline raw strings require column-sensitive trimming, so
+            // leave those unknown until the frontend carries that exact
+            // grammar fact rather than approximating their runtime value.
+            if text.contains(['\r', '\n']) {
+                return None;
+            }
+            let delimiter = text.bytes().take_while(|byte| *byte == b'"').count();
+            if delimiter < 3 || text.bytes().rev().take_while(|byte| *byte == b'"').count() != delimiter {
+                return None;
+            }
+            text.get(delimiter..text.len().checked_sub(delimiter)?)
+                .map(str::to_string)
+        }
+        _ => None,
+    }
+}
+
+fn decode_csharp_regular_string(inner: &str) -> Option<String> {
+    let mut chars = inner.chars().peekable();
+    let mut decoded = String::with_capacity(inner.len());
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        match chars.next()? {
+            '\'' => decoded.push('\''),
+            '"' => decoded.push('"'),
+            '\\' => decoded.push('\\'),
+            '0' => decoded.push('\0'),
+            'a' => decoded.push('\u{0007}'),
+            'b' => decoded.push('\u{0008}'),
+            'f' => decoded.push('\u{000c}'),
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            't' => decoded.push('\t'),
+            'v' => decoded.push('\u{000b}'),
+            'u' => decoded.push(decode_csharp_hex_scalar(&mut chars, 4, 4)?),
+            'U' => decoded.push(decode_csharp_hex_scalar(&mut chars, 8, 8)?),
+            'x' => decoded.push(decode_csharp_hex_scalar(&mut chars, 1, 4)?),
+            _ => return None,
+        }
+    }
+    Some(decoded)
+}
+
+fn decode_csharp_hex_scalar<I>(
+    chars: &mut std::iter::Peekable<I>,
+    minimum: usize,
+    maximum: usize,
+) -> Option<char>
+where
+    I: Iterator<Item = char>,
+{
+    let mut value = 0_u32;
+    let mut digits = 0;
+    while digits < maximum {
+        let Some(digit) = chars.peek().and_then(|character| character.to_digit(16)) else {
+            break;
+        };
+        chars.next();
+        value = value.checked_mul(16)?.checked_add(digit)?;
+        digits += 1;
+    }
+    (digits >= minimum).then(|| char::from_u32(value)).flatten()
+}
+
+/// Lower a C# switch expression only when every arm produces a compiler
+/// literal. The selected key can remain dynamic, but it cannot become part of
+/// the returned value. This is syntax/value-shape evidence only; consumers
+/// decide whether a finite literal selection is security-relevant.
+fn collect_csharp_finite_literal_selections(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+) -> Vec<bonsai_lang_api::FiniteLiteralSelectionFact> {
+    let mut facts = Vec::new();
+    for selection in collect_kinds(tree, &["switch_expression"]) {
+        if !csharp_switch_outputs_are_literals(selection) {
+            continue;
+        }
+        let selection_span = span_of(file, &selection);
+        if let Some(fact) = bonsai_lang_api::kit::finite_literal_selection_fact_for_span(
+            index,
+            tree,
+            selection_span,
+            |value| value.id() == selection.id(),
+        ) {
+            facts.push(fact);
+            continue;
+        }
+        if csharp_switch_is_complete_return_value(selection) {
+            facts.push(bonsai_lang_api::FiniteLiteralSelectionFact {
+                selection_span,
+                assignment_span: None,
+                target: None,
+                call_span: None,
+                argument_index: None,
+            });
+        }
+    }
+    facts
+}
+
+fn csharp_switch_outputs_are_literals(selection: Node<'_>) -> bool {
+    let mut cursor = selection.walk();
+    let arms = selection
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "switch_expression_arm")
+        .collect::<Vec<_>>();
+    !arms.is_empty()
+        && arms.into_iter().all(|arm| {
+            let mut arm_cursor = arm.walk();
+            arm.named_children(&mut arm_cursor).last().is_some_and(|value| {
+                matches!(
+                    value.kind(),
+                    "null_literal"
+                        | "boolean_literal"
+                        | "integer_literal"
+                        | "real_literal"
+                        | "string_literal"
+                        | "verbatim_string_literal"
+                        | "raw_string_literal"
+                        | "character_literal"
+                )
+            })
+        })
+}
+
+fn csharp_switch_is_complete_return_value(selection: Node<'_>) -> bool {
+    let Some(parent) = selection.parent() else {
+        return false;
+    };
+    match parent.kind() {
+        "arrow_expression_clause" => {
+            let mut cursor = parent.walk();
+            parent
+                .named_children(&mut cursor)
+                .last()
+                .is_some_and(|value| value.id() == selection.id())
+        }
+        "return_statement" => parent
+            .child_by_field_name("expression")
+            .is_some_and(|value| value.id() == selection.id()),
+        _ => false,
+    }
+}
+
+/// Current tree-sitter-c-sharp represents both `record class` and `record
+/// struct` with `record_declaration`; the anonymous `struct` token is the
+/// discriminant. Preserve that exact syntax distinction in the compiler IR
+/// instead of depending on the obsolete `record_struct_declaration` alias.
+fn mark_csharp_record_structs(index: &mut DeclIndex, tree: &Tree, file: FileId) {
+    for record in collect_kinds(tree, &["record_declaration"]) {
+        let mut cursor = record.walk();
+        if !record.children(&mut cursor).any(|child| child.kind() == "struct") {
+            continue;
+        }
+        let record_span = span_of(file, &record);
+        if let Some(decl) = index
+            .defs
+            .iter_mut()
+            .find(|decl| decl.span == record_span && decl.kind == DeclKind::Class)
+        {
+            decl.kind = DeclKind::Struct;
+        }
     }
 }
 
@@ -754,18 +1297,14 @@ fn synthesize_csharp_expression_bodied_properties(
     index.defs.extend(synthesized);
 }
 
-/// For each C# `constructor_declaration` whose extracted decl has
-/// no `Return` event yet, synthesize one whose `value_text` includes
-/// the constructor body + initializer text (`: base(data)`). The IDG
-/// transfer's Return handler tokenizes that text via
-/// `bridge_value_expr_to_node`, so each identifier (in particular the
-/// `data` param forwarded to `base`) bridges to `Place::Return`. The
-/// caller's `new R(envelope)` site then connects via the standard
-/// callee-Return → caller-CallRet edge, tainting `repo` whole-object
-/// — matching the Java adapter's constructor propagation
-/// (`constructor_body` falls into the kit's implicit-
-/// return path automatically; C#'s `block` doesn't).
-fn synthesize_csharp_constructor_implicit_returns(
+/// Lower exact `this(...)` / `base(...)` constructor initializer calls.
+///
+/// The initializer is a distinct C# grammar node rather than an ordinary
+/// invocation in the constructor body. Retaining it as a constructor call is
+/// required for inherited receiver-field writes. It must not also synthesize
+/// a constructor return: doing so promotes every parameter mentioned in the
+/// body to the entire constructed object and destroys field sensitivity.
+fn synthesize_csharp_constructor_initializer_calls(
     index: &mut DeclIndex,
     tree: &Tree,
     src: &[u8],
@@ -787,16 +1326,10 @@ fn synthesize_csharp_constructor_implicit_returns(
             continue;
         };
         let parent_info = decl.parent.and_then(|parent| class_info_by_symbol.get(&parent));
-        // Build value_text from the constructor_initializer + body
-        // texts. Concatenating both surfaces param identifiers from
-        // either side (`: base(data)` or `{ Data = data; }`) so
-        // tokenization can bridge them.
-        let mut parts: Vec<String> = Vec::new();
         let mut initializer_call: Option<FlowEvent> = None;
         let mut cw = ctor_node.walk();
         for child in ctor_node.children(&mut cw) {
             if child.kind() == "constructor_initializer" {
-                let t = node_text(&child, src).trim().to_string();
                 if let Some((callee, args)) =
                     csharp_constructor_initializer_call(child, file, src, parent_info)
                 {
@@ -809,14 +1342,6 @@ fn synthesize_csharp_constructor_implicit_returns(
                         call_kind: CallKind::Constructor,
                         args,
                     });
-                }
-                if !t.is_empty() {
-                    parts.push(t);
-                }
-            } else if child.kind() == "block" {
-                let t = node_text(&child, src).trim().to_string();
-                if !t.is_empty() {
-                    parts.push(t);
                 }
             }
         }
@@ -834,26 +1359,6 @@ fn synthesize_csharp_constructor_implicit_returns(
                 decl.flow_events.insert(0, call);
             }
         }
-        if decl
-            .flow_events
-            .iter()
-            .any(|e| matches!(e, FlowEvent::Return { .. }))
-            || parts.is_empty()
-        {
-            continue;
-        }
-        let value_text = parts.join(" ");
-        let body_span = ctor_node
-            .child_by_field_name("body")
-            .map(|b| span_of(file, &b))
-            .unwrap_or_else(|| span_of(file, &ctor_node));
-        decl.flow_events.push(FlowEvent::Return {
-            span: body_span,
-            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
-            value_text: Some(value_text),
-            value_name: None,
-            value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(decl.params.clone()),
-        });
     }
 }
 
@@ -1322,15 +1827,21 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         let alias = using_node
             .child_by_field_name("name")
             .map(|alias_node| node_text(&alias_node, src).to_string());
+        let is_static = csharp_using_is_static(&using_node);
         imports.push(ImportSpec {
             span: span_of(file, &using_node),
             module: module.clone(),
+            // `using Namespace;` makes the namespace's public type names
+            // available unqualified, which is the ImportSpec wildcard
+            // contract. Aliases bind one exact local name instead. Static
+            // imports receive a separate local-scope wildcard below because
+            // they expose members rather than namespace types.
+            is_wildcard: alias.is_none() && !is_static,
             alias,
-            is_wildcard: false,
             original_name: None,
             scope: ImportScope::Module,
         });
-        if csharp_using_is_static(&using_node) {
+        if is_static {
             imports.push(ImportSpec {
                 span: span_of(file, &using_node),
                 module,
@@ -1855,6 +2366,7 @@ fn populate_csharp_exception_types(
                 finally_events,
                 catch_types,
                 catch_param,
+                catch_arms,
                 ..
             } => {
                 if let Some(node) =
@@ -1869,6 +2381,14 @@ fn populate_csharp_exception_types(
                     // we have the structural context.
                     if let Some(name) = collect_csharp_catch_param_name(node, src) {
                         *catch_param = Some(name);
+                    }
+                    for arm in catch_arms {
+                        if let Some(clause) =
+                            bonsai_lang_api::kit::node_at_span(tree.root_node(), arm.span, &["catch_clause"])
+                        {
+                            arm.parameter = csharp_catch_clause_param_name(clause, src);
+                            arm.types = csharp_catch_clause_types(clause, src);
+                        }
                     }
                 }
                 populate_csharp_exception_types(body, tree, src);
@@ -1932,27 +2452,34 @@ fn collect_csharp_catch_param_name(try_node: tree_sitter::Node<'_>, src: &[u8]) 
         if child.kind() != "catch_clause" {
             continue;
         }
-        let mut clause_cursor = child.walk();
-        for sub in child.named_children(&mut clause_cursor) {
-            if sub.kind() != "catch_declaration" {
-                continue;
+        if let Some(parameter) = csharp_catch_clause_param_name(child, src) {
+            return Some(parameter);
+        }
+    }
+    None
+}
+
+fn csharp_catch_clause_param_name(clause: tree_sitter::Node<'_>, src: &[u8]) -> Option<String> {
+    let mut clause_cursor = clause.walk();
+    for sub in clause.named_children(&mut clause_cursor) {
+        if sub.kind() != "catch_declaration" {
+            continue;
+        }
+        // The `name` field is the binding identifier; the `type`
+        // field is the exception type.
+        if let Some(name_node) = sub.child_by_field_name("name") {
+            return Some(node_text(&name_node, src).trim().to_string());
+        }
+        // Fallback: rightmost named identifier after the type.
+        let mut pcur = sub.walk();
+        let mut last_ident: Option<tree_sitter::Node<'_>> = None;
+        for n in sub.named_children(&mut pcur) {
+            if n.kind() == "identifier" {
+                last_ident = Some(n);
             }
-            // The `name` field is the binding identifier; the `type`
-            // field is the exception type.
-            if let Some(name_node) = sub.child_by_field_name("name") {
-                return Some(node_text(&name_node, src).trim().to_string());
-            }
-            // Fallback: rightmost named identifier after the type.
-            let mut pcur = sub.walk();
-            let mut last_ident: Option<tree_sitter::Node<'_>> = None;
-            for n in sub.named_children(&mut pcur) {
-                if n.kind() == "identifier" {
-                    last_ident = Some(n);
-                }
-            }
-            if let Some(n) = last_ident {
-                return Some(node_text(&n, src).trim().to_string());
-            }
+        }
+        if let Some(n) = last_ident {
+            return Some(node_text(&n, src).trim().to_string());
         }
     }
     None
@@ -1967,17 +2494,27 @@ fn collect_csharp_catch_types(try_node: tree_sitter::Node<'_>, src: &[u8]) -> Ve
         if child.kind() != "catch_clause" {
             continue;
         }
-        // catch_clause > catch_declaration > type
-        let mut clause_cursor = child.walk();
-        for sub in child.named_children(&mut clause_cursor) {
-            if sub.kind() != "catch_declaration" {
-                continue;
+        for name in csharp_catch_clause_types(child, src) {
+            if !catch_types.iter().any(|existing| existing == &name) {
+                catch_types.push(name);
             }
-            if let Some(type_node) = sub.child_by_field_name("type") {
-                let name = bonsai_lang_api::kit::canonical_simple_type_name(node_text(&type_node, src));
-                if !name.is_empty() && !catch_types.iter().any(|existing| existing == &name) {
-                    catch_types.push(name);
-                }
+        }
+    }
+    catch_types
+}
+
+fn csharp_catch_clause_types(clause: tree_sitter::Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut catch_types = Vec::new();
+    // catch_clause > catch_declaration > type
+    let mut clause_cursor = clause.walk();
+    for sub in clause.named_children(&mut clause_cursor) {
+        if sub.kind() != "catch_declaration" {
+            continue;
+        }
+        if let Some(type_node) = sub.child_by_field_name("type") {
+            let name = bonsai_lang_api::kit::canonical_simple_type_name(node_text(&type_node, src));
+            if !name.is_empty() && !catch_types.iter().any(|existing| existing == &name) {
+                catch_types.push(name);
             }
         }
     }

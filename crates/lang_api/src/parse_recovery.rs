@@ -15,7 +15,7 @@
 //! represents as an expression plus an `ERROR` node; recovery masks only the
 //! pointer declarator token proven by that CST shape.
 
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashSet;
 use bonsai_vfs::{FileSnapshot, Vfs};
 use std::path::{Path, PathBuf};
 use tree_sitter::{Node, Tree};
@@ -28,6 +28,7 @@ pub struct ParseRecoveryEdit {
     pub start_byte: usize,
     pub end_byte: usize,
     action: ParseRecoveryAction,
+    damaged_descendant_owner: Option<(usize, usize)>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -39,10 +40,18 @@ enum ParseRecoveryAction {
 
 /// Exact syntax-damage score for a concrete Tree-sitter tree.
 ///
-/// The first component counts every `ERROR` and missing node; the second
-/// totals the source bytes covered by them. The tuple ordering therefore
-/// prefers fewer damaged constructs, then the narrower recovery when counts
-/// tie. The walk is exhaustive and shared by grammar selection and recovery.
+/// The first component totals source bytes inside errors that are not covered
+/// by a valid named descendant; the second counts every concrete error or
+/// missing node. Tuple ordering therefore preserves the greatest amount of
+/// compiler-visible source before using error count as a tie-breaker.
+///
+/// Tree-sitter may wrap an otherwise structured translation unit in one
+/// whole-file `ERROR` node. Treating that wrapper's complete byte range as
+/// damaged makes every recovery candidate tie even when one restores a lost
+/// function. For an error container, valid named children subtract their
+/// exact non-overlapping ranges from the damage total, while nested
+/// ERROR/MISSING children are measured recursively. Unnamed tokens inside an
+/// error remain damaged: their grammar role has not been established.
 #[must_use]
 pub fn syntax_damage_score(tree: &Tree) -> (usize, usize) {
     let mut count = 0usize;
@@ -50,16 +59,33 @@ pub fn syntax_damage_score(tree: &Tree) -> (usize, usize) {
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         let is_error = node.is_error();
-        if is_error || node.is_missing() {
+        if node.is_missing() {
             count += 1;
-            covered_bytes = covered_bytes.saturating_add(node.end_byte().saturating_sub(node.start_byte()));
+            continue;
         }
-        if !is_error {
+        if is_error {
+            count += 1;
+            let mut covered_until = node.start_byte();
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if child.has_error() || child.is_missing() {
-                    stack.push(child);
+                let carries_damage = child.is_missing() || child.has_error();
+                if carries_damage || child.is_named() {
+                    covered_bytes =
+                        covered_bytes.saturating_add(child.start_byte().saturating_sub(covered_until));
+                    if carries_damage {
+                        stack.push(child);
+                    }
+                    covered_until = covered_until.max(child.end_byte());
                 }
+            }
+            covered_bytes = covered_bytes.saturating_add(node.end_byte().saturating_sub(covered_until));
+            continue;
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.has_error() || child.is_missing() {
+                stack.push(child);
             }
         }
     }
@@ -69,9 +95,9 @@ pub fn syntax_damage_score(tree: &Tree) -> (usize, usize) {
     // win, but do not pretend the hidden zero-width production covers the
     // entire file.
     if count == 0 && tree.root_node().has_error() {
-        (1, 0)
+        (0, 1)
     } else {
-        (count, covered_bytes)
+        (covered_bytes, count)
     }
 }
 
@@ -92,6 +118,11 @@ pub struct ConditionalDirectiveSyntax {
     /// Adapter-owned line/block comment prefixes accepted after a no-argument
     /// directive.
     pub trailing_comment_prefixes: &'static [&'static str],
+    /// Grammar-owned comment and literal nodes in which directive-looking
+    /// text is ordinary data. The shared scanner checks the exact
+    /// Tree-sitter ancestor chain at the directive marker; it never guesses
+    /// language string/comment syntax from raw bytes.
+    pub non_directive_node_kinds: &'static [&'static str],
 }
 
 /// Mask directive lines around branch-free conditional-compilation regions.
@@ -115,6 +146,10 @@ pub fn branch_free_conditional_recovery_edits(
     let mut edits = Vec::new();
     for (start, end, line) in source_lines_with_ranges(snapshot.text.as_ref()) {
         let directive = line.trim_start();
+        let directive_start = start + line.len().saturating_sub(directive.len());
+        if directive_is_inside_non_directive_node(tree, directive_start, syntax.non_directive_node_kinds) {
+            continue;
+        }
         if syntax
             .openings_with_condition
             .iter()
@@ -150,6 +185,31 @@ pub fn branch_free_conditional_recovery_edits(
     edits.sort_by_key(|edit| (edit.start_byte, edit.end_byte));
     edits.dedup();
     edits
+}
+
+fn directive_is_inside_non_directive_node(
+    tree: &Tree,
+    byte: usize,
+    non_directive_node_kinds: &[&str],
+) -> bool {
+    if non_directive_node_kinds.is_empty() || byte >= tree.root_node().end_byte() {
+        return false;
+    }
+    let Some(mut node) = tree
+        .root_node()
+        .descendant_for_byte_range(byte, byte.saturating_add(1))
+    else {
+        return false;
+    };
+    loop {
+        if non_directive_node_kinds.contains(&node.kind()) {
+            return true;
+        }
+        let Some(parent) = node.parent() else {
+            return false;
+        };
+        node = parent;
+    }
 }
 
 struct ConditionalRegion {
@@ -189,6 +249,43 @@ impl ParseRecoveryEdit {
             start_byte,
             end_byte,
             action: ParseRecoveryAction::Mask,
+            damaged_descendant_owner: None,
+        }
+    }
+
+    /// Mask one compiler-proven token inside a syntactically damaged
+    /// production. The adapter must derive the range from concrete frontend
+    /// or preprocessor facts; the parser additionally requires strictly less
+    /// damage and preservation of every unrelated clean compiler node.
+    #[must_use]
+    pub const fn mask_damaged_descendant(start_byte: usize, end_byte: usize) -> Self {
+        Self {
+            start_byte,
+            end_byte,
+            action: ParseRecoveryAction::Mask,
+            damaged_descendant_owner: Some((start_byte, end_byte)),
+        }
+    }
+
+    /// Mask one prefix inside a larger clean descendant that is wholly owned
+    /// by an enclosing error production.
+    ///
+    /// Some grammars parse a qualified construct as one clean node but accept
+    /// only its unqualified terminal in the intended production. The adapter
+    /// supplies the exact CST owner span so monotonic recovery may reclassify
+    /// that subtree while still protecting every disjoint compiler node.
+    #[must_use]
+    pub const fn mask_damaged_descendant_prefix(
+        start_byte: usize,
+        end_byte: usize,
+        owner_start_byte: usize,
+        owner_end_byte: usize,
+    ) -> Self {
+        Self {
+            start_byte,
+            end_byte,
+            action: ParseRecoveryAction::Mask,
+            damaged_descendant_owner: Some((owner_start_byte, owner_end_byte)),
         }
     }
 
@@ -202,6 +299,20 @@ impl ParseRecoveryEdit {
             start_byte: byte_offset,
             end_byte: byte_offset + 1,
             action: ParseRecoveryAction::UppercaseAscii,
+            damaged_descendant_owner: None,
+        }
+    }
+
+    /// Uppercase one contextual-keyword byte inside a clean node that is
+    /// wholly owned by an enclosing error production. See
+    /// [`Self::replace_damaged_descendant_ascii`].
+    #[must_use]
+    pub const fn uppercase_damaged_descendant_ascii(byte_offset: usize) -> Self {
+        Self {
+            start_byte: byte_offset,
+            end_byte: byte_offset + 1,
+            action: ParseRecoveryAction::UppercaseAscii,
+            damaged_descendant_owner: Some((byte_offset, byte_offset + 1)),
         }
     }
 
@@ -216,7 +327,64 @@ impl ParseRecoveryEdit {
             start_byte,
             end_byte,
             action: ParseRecoveryAction::ReplaceAscii(replacement),
+            damaged_descendant_owner: None,
         }
+    }
+
+    /// Replace a clean descendant that is wholly owned by an enclosing
+    /// Tree-sitter error production.
+    ///
+    /// This narrowly supports valid syntax whose current grammar parses one
+    /// non-executable subexpression cleanly inside a damaged type/declaration
+    /// node. The parser still requires the edit to cover that exact descendant
+    /// and to reduce syntax damage; clean nodes outside an error ancestor stay
+    /// protected by the monotonic recovery contract.
+    #[must_use]
+    pub const fn replace_damaged_descendant_ascii(
+        start_byte: usize,
+        end_byte: usize,
+        replacement: &'static [u8],
+    ) -> Self {
+        Self {
+            start_byte,
+            end_byte,
+            action: ParseRecoveryAction::ReplaceAscii(replacement),
+            damaged_descendant_owner: Some((start_byte, end_byte)),
+        }
+    }
+
+    /// Replace one token inside a larger CST-proven damaged production.
+    ///
+    /// This is the replacement analogue of
+    /// [`Self::mask_damaged_descendant_prefix`]. It is reserved for adapters
+    /// whose raw damaged tree proves the complete owner region and whose
+    /// same-width replacement leaves every unrelated compiler node intact.
+    /// The parser independently requires strictly less syntax damage before
+    /// accepting the recovered tree.
+    #[must_use]
+    pub const fn replace_damaged_descendant_prefix_ascii(
+        start_byte: usize,
+        end_byte: usize,
+        replacement: &'static [u8],
+        owner_start_byte: usize,
+        owner_end_byte: usize,
+    ) -> Self {
+        Self {
+            start_byte,
+            end_byte,
+            action: ParseRecoveryAction::ReplaceAscii(replacement),
+            damaged_descendant_owner: Some((owner_start_byte, owner_end_byte)),
+        }
+    }
+
+    #[must_use]
+    pub const fn allows_damaged_descendant_replacement(self) -> bool {
+        self.damaged_descendant_owner.is_some()
+    }
+
+    #[must_use]
+    pub const fn damaged_descendant_owner(self) -> Option<(usize, usize)> {
+        self.damaged_descendant_owner
     }
 
     /// Apply this normalization to a same-length parser buffer.
@@ -290,6 +458,12 @@ pub fn c_family_declaration_macro_recovery_edits(
     collect_variadic_pointer_type_recovery_edits(source, tree, variadic_read_builtins, &mut edits);
 
     let macros = reachable_object_macros(snapshot, vfs);
+    bonsai_diagnostics::debug_log!(
+        "parse-recovery",
+        "file={} reachable_object_macros={}",
+        snapshot.path.display(),
+        macros.len()
+    );
     if macros.is_empty() {
         edits.sort_by_key(|edit| (edit.start_byte, edit.end_byte));
         edits.dedup();
@@ -304,7 +478,6 @@ pub fn c_family_declaration_macro_recovery_edits(
                 let prefix_start = container.start_byte().min(prefix_end);
                 collect_defined_identifier_ranges(source, prefix_start, prefix_end, &macros, &mut edits);
             }
-            continue;
         }
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -334,11 +507,8 @@ fn collect_variadic_pointer_type_recovery_edits(
 ) {
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
-        if node.is_error() {
-            if variadic_pointer_type_error(node, source, variadic_read_builtins) {
-                edits.push(ParseRecoveryEdit::new(node.start_byte(), node.end_byte()));
-            }
-            continue;
+        if node.is_error() && variadic_pointer_type_error(node, source, variadic_read_builtins) {
+            edits.push(ParseRecoveryEdit::new(node.start_byte(), node.end_byte()));
         }
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -445,7 +615,7 @@ fn collect_defined_identifier_ranges(
             continue;
         };
         if macros.contains(name) && !line_is_preprocessor_directive(source, token_start) {
-            edits.push(ParseRecoveryEdit::new(token_start, cursor));
+            edits.push(ParseRecoveryEdit::mask_damaged_descendant(token_start, cursor));
         }
     }
 }
@@ -462,40 +632,53 @@ fn line_is_preprocessor_directive(source: &[u8], offset: usize) -> bool {
 }
 
 fn reachable_object_macros(snapshot: &FileSnapshot, vfs: &Vfs) -> AHashSet<String> {
-    let files: Vec<_> = vfs
-        .all_files()
-        .into_iter()
-        .filter_map(|file| {
-            let path = vfs.path(file).ok()?;
-            Some((file, path))
-        })
-        .collect();
-    let mut path_to_file = AHashMap::new();
-    for (file, path) in &files {
-        path_to_file.insert(path.as_ref().clone(), *file);
-    }
+    reachable_preprocessor_context(snapshot, vfs).0
+}
 
+/// Stable digest of exact C-family source/header context consumed by parser
+/// recovery. This is adapter-facing compiler identity, not security meaning.
+#[must_use]
+pub fn c_family_preprocessor_context_fingerprint(snapshot: &FileSnapshot, vfs: &Vfs) -> u64 {
+    reachable_preprocessor_context(snapshot, vfs).1
+}
+
+fn reachable_preprocessor_context(snapshot: &FileSnapshot, vfs: &Vfs) -> (AHashSet<String>, u64) {
     let mut macros = AHashSet::new();
     let mut visited = AHashSet::new();
     let mut pending = vec![(snapshot.file_id, snapshot.path.as_ref().clone())];
+    let mut context = Vec::new();
     while let Some((file, path)) = pending.pop() {
         if !visited.insert(file) {
             continue;
         }
-        let Ok(current) = vfs.snapshot(file) else {
-            continue;
+        let current = if file == snapshot.file_id {
+            snapshot.clone()
+        } else {
+            let Ok(current) = vfs.snapshot(file) else {
+                continue;
+            };
+            current
         };
         let directives = preprocessor_directives(&current.text);
+        context.push((path.clone(), current.version, current.text.clone()));
         macros.extend(directives.object_macros);
         for include in directives.includes {
-            if let Some((included_file, included_path)) =
-                resolve_include(&path, &include, &files, &path_to_file)
-            {
+            if let Some((included_file, included_path)) = resolve_include(vfs, &path, &include) {
                 pending.push((included_file, included_path));
             }
         }
     }
-    macros
+    context.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let mut hasher = bonsai_hash::Hasher::new();
+    for (path, version, text) in context {
+        hasher.absorb(path.to_string_lossy().as_bytes());
+        hasher.absorb_separator();
+        hasher.absorb(&version.to_le_bytes());
+        hasher.absorb_separator();
+        hasher.absorb(text.as_bytes());
+        hasher.absorb_separator();
+    }
+    (macros, hasher.finish())
 }
 
 #[derive(Default)]
@@ -552,24 +735,18 @@ fn directive_argument<'a>(line: &'a str, directive: &str) -> Option<&'a str> {
 }
 
 fn resolve_include(
+    vfs: &Vfs,
     including_path: &Path,
     include: &Path,
-    files: &[(bonsai_common::FileId, std::sync::Arc<PathBuf>)],
-    path_to_file: &AHashMap<PathBuf, bonsai_common::FileId>,
 ) -> Option<(bonsai_common::FileId, PathBuf)> {
     if let Some(parent) = including_path.parent() {
         let local = parent.join(include);
-        if let Some(file) = path_to_file.get(&local).copied() {
+        if let Some(file) = vfs.lookup(&local) {
             return Some((file, local));
         }
     }
-
-    let mut matches = files
-        .iter()
-        .filter(|(_, path)| path.ends_with(include))
-        .map(|(file, path)| (*file, path.as_ref().clone()));
-    let first = matches.next()?;
-    matches.next().is_none().then_some(first)
+    vfs.unique_file_ending_with(include)
+        .map(|(file, path)| (file, path.as_ref().clone()))
 }
 
 const fn is_identifier_start(byte: u8) -> bool {
@@ -616,12 +793,65 @@ mod tests {
             .expect("parse malformed Python fixture");
 
         assert!(tree.root_node().has_error());
-        let (count, covered_bytes) = syntax_damage_score(&tree);
+        let (covered_bytes, count) = syntax_damage_score(&tree);
         assert!(count > 0, "syntax damage must count a concrete error node");
         assert!(
             covered_bytes > 0,
             "syntax damage must retain its concrete byte extent"
         );
         assert!(covered_bytes <= source.len());
+    }
+
+    #[test]
+    fn syntax_damage_never_prefers_one_whole_source_error_over_local_damage() {
+        let language = crate::kit::language_from_pack("c").expect("C grammar");
+        let parse = |source: &str| {
+            let mut parser = tree_sitter::Parser::new();
+            parser.set_language(&language).expect("set C grammar");
+            parser.parse(source, None).expect("parse C damage fixture")
+        };
+        let local = parse("int ok(void) { return 0; }\n@@@\nint also_ok(void) { return 1; }\n");
+        let collapsed = parse("def not_c():\n    return {'broken': [1, 2}\n");
+
+        assert!(local.root_node().has_error());
+        assert!(collapsed.root_node().has_error());
+        assert!(
+            syntax_damage_score(&local) < syntax_damage_score(&collapsed),
+            "localized syntax damage must preserve more compiler evidence: local={:?}, collapsed={:?}",
+            syntax_damage_score(&local),
+            syntax_damage_score(&collapsed)
+        );
+    }
+
+    #[test]
+    fn syntax_damage_recurses_through_named_children_that_carry_errors() {
+        let source =
+            "#if MODE\nint value(int x) { if (x)\n#else\nint value(int x) {\n#endif\nreturn (1 + );\n}\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&crate::kit::language_from_pack("c").expect("C grammar"))
+            .expect("set C grammar");
+        let tree = parser.parse(source, None).expect("parse damage fixture");
+        let mut stack = vec![tree.root_node()];
+        let mut has_nested_named_damage = false;
+        let mut concrete_count = 0usize;
+        while let Some(node) = stack.pop() {
+            concrete_count += usize::from(node.is_error() || node.is_missing());
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                has_nested_named_damage |=
+                    node.is_error() && child.is_named() && child.has_error() && !child.is_error();
+                stack.push(child);
+            }
+        }
+        assert!(
+            has_nested_named_damage,
+            "fixture must retain named damage below an ERROR container"
+        );
+        assert_eq!(
+            syntax_damage_score(&tree).1,
+            concrete_count,
+            "the recovery score must enumerate nested concrete damage rather than treating its named container as clean"
+        );
     }
 }

@@ -138,8 +138,9 @@ pub fn dump_cfg(ws: &Workspace, symbol: &str) -> Result<Option<bonsai_cfg::Cfg>,
     let Some(decl) = resolve_single_callable(ws, symbol)? else {
         return Ok(None);
     };
-    Ok(Some(bonsai_cfg::build_cfg_from_flow(
+    Ok(Some(bonsai_cfg::build_cfg_from_flow_in_span(
         &decl.name,
+        Some(decl.span),
         &runtime_flow_events(&decl),
     )))
 }

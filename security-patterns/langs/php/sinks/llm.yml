@@ -22,7 +22,6 @@
     code: |
       <?php
       use openaiphp\client;
-      use openaiphp\client;
       use openai-php\client;
       function example($client, $input) {
         return $client->chat($input);
@@ -67,7 +66,6 @@
     code: |
       <?php
       use anthropicphp\anthropic;
-      use anthropicphp\anthropic;
       use anthropic-php\anthropic;
       function example($anthropic, $input) {
         return $anthropic->messages->create($input);
@@ -110,7 +108,6 @@
   - name: bedrock invoke model
     code: |
       <?php
-      use aws\awssdkphp;
       use aws\awssdkphp;
       use aws\aws-sdk-php;
       function example($bedrock, $input) {

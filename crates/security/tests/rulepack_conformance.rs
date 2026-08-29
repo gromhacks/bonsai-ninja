@@ -9,7 +9,7 @@ use bonsai_security::{
 use rayon::prelude::*;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 fn repo_root() -> PathBuf {
     let mut p = std::env::current_dir().expect("cwd");
@@ -19,6 +19,18 @@ fn repo_root() -> PathBuf {
 
 fn rules_dir() -> PathBuf {
     repo_root().join("security-patterns")
+}
+
+fn checked_in_pack_validation_report() -> &'static bonsai_security::PackValidationReport {
+    static REPORT: OnceLock<bonsai_security::PackValidationReport> = OnceLock::new();
+    REPORT.get_or_init(|| {
+        let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+        bonsai_security::validate_pack(
+            &pack,
+            &bonsai_security::PackInventoryOptions::default(),
+            bonsai_adapters::all_languages_registry(),
+        )
+    })
 }
 
 fn default_example_path(language: &str) -> String {
@@ -108,43 +120,8 @@ fn documented_sink_tags() -> BTreeSet<&'static str> {
     ])
 }
 
-fn documented_source_tags() -> BTreeSet<&'static str> {
-    BTreeSet::from([
-        "archive-input",
-        "browser-input",
-        "caller-input",
-        "cli-input",
-        "clipboard-input",
-        "cloud-event",
-        "cloud-input",
-        "config-input",
-        "db-input",
-        "db-row",
-        "deep-link",
-        "deprecated-auth",
-        "env-input",
-        "event-input",
-        "file-input",
-        "graphql-input",
-        "http-input",
-        "hw-input",
-        "ipc-input",
-        "ipc-message",
-        "local-input",
-        "net-input",
-        "network-input",
-        "network-response",
-        "oracle-input",
-        "push-input",
-        "push-message",
-        "queue-input",
-        "queue-message",
-        "rpc-input",
-        "socket-input",
-        "token-input",
-        "ui-input",
-        "ws-input",
-    ])
+fn rule_family(rule_id: &str) -> Option<&str> {
+    rule_id.split('.').nth(1)
 }
 
 fn documented_sink_files() -> BTreeSet<&'static str> {
@@ -363,16 +340,20 @@ fn enabled_param_sources_require_compiler_context() {
             || !target.in_method.is_empty()
             || !target.in_method_prefix.is_empty()
             || !target.param_type_in.is_empty()
+            || !target.param_type_exact_in.is_empty()
             || !target.receiver_type_in.is_empty()
             || !target.decl_kind_in.is_empty()
             || !target.visibility_in.is_empty();
         let target_has_signature_position = (!target.param_index_in.is_empty()
+            || !target.param_index_not_in.is_empty()
             || !target.base_param_index_in.is_empty())
             && !target.param_count_in.is_empty();
         let constraint_has_context = rule.constraints.0.iter().any(|constraint| {
             matches!(
                 constraint,
-                ConstraintKind::EnclosingDecoratorIn { .. } | ConstraintKind::EnclosingModifierIn { .. }
+                ConstraintKind::EnclosingDecoratorIn { .. }
+                    | ConstraintKind::EnclosingDecoratorNotIn { .. }
+                    | ConstraintKind::EnclosingModifierIn { .. }
             )
         });
         if !target_has_context && !target_has_signature_position && !constraint_has_context {
@@ -700,31 +681,53 @@ fn fast_xml_parser_entity_expansion_is_precise_without_claiming_external_xxe() {
             "{rule_id} must preserve the external-entity boundary rationale"
         );
     }
-    let parse = pack
-        .find_rule_by_id("typescript.xxe.fast_xml_parser_parse")
-        .expect("fast-xml-parser parse rule");
-    assert!(
-        !parse.enabled,
-        "tainted fast-xml-parser input alone must not claim external XXE"
-    );
 }
 
 #[test]
 fn xssfworkbook_input_stream_is_not_misclassified_as_an_xxe_sink() {
     let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
-    for rule_id in [
-        "java.xxe.apache_poi_xssfworkbook_inputstream",
-        "kotlin.xxe.apache_poi_xssfworkbook_inputstream",
-        "scala.xxe.apache_poi_xssfworkbook_inputstream",
+    for (language, code) in [
+        (
+            "java",
+            r#"import java.io.InputStream;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+class Reader { Object parse(InputStream input) throws Exception { return new XSSFWorkbook(input); } }
+"#,
+        ),
+        (
+            "kotlin",
+            r#"import java.io.InputStream
+import org.apache.poi.xssf.usermodel.XSSFWorkbook
+fun parse(input: InputStream): Any = XSSFWorkbook(input)
+"#,
+        ),
+        (
+            "scala",
+            r#"import java.io.InputStream
+import org.apache.poi.xssf.usermodel.XSSFWorkbook
+def parse(input: InputStream): Any = new XSSFWorkbook(input)
+"#,
+        ),
     ] {
-        let rule = pack.find_rule_by_id(rule_id).expect("Apache POI rule");
+        let ws = example_workspace(language, None, code);
+        let hits = pack
+            .all_rules()
+            .into_iter()
+            .filter(|rule| {
+                rule.enabled
+                    && rule.language == language
+                    && rule.kind == RuleKind::Sink
+                    && rule.tag.as_deref() == Some("xxe")
+            })
+            .flat_map(|rule| {
+                match_rule_against_facts(&ws, rule)
+                    .into_iter()
+                    .map(move |_| rule.id.clone())
+            })
+            .collect::<Vec<_>>();
         assert!(
-            !rule.enabled,
-            "{rule_id} must remain disabled: XSSFWorkbook(InputStream) is not the vulnerable XSSFExportToXml boundary"
-        );
-        assert!(
-            rule.description.contains("XSSFExportToXml") && rule.description.contains("before 4.1.1"),
-            "{rule_id} must preserve the versioned Apache POI boundary rationale"
+            hits.is_empty(),
+            "{language}: ordinary workbook construction is not an XML external-entity boundary: {hits:?}"
         );
     }
 }
@@ -732,17 +735,32 @@ fn xssfworkbook_input_stream_is_not_misclassified_as_an_xxe_sink() {
 #[test]
 fn lxml_parser_construction_is_not_misclassified_as_xml_consumption() {
     let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
-    let rule = pack
-        .find_rule_by_id("python.xxe.lxml_xmlparser")
-        .expect("lxml XMLParser rule");
-    assert!(
-        !rule.enabled,
-        "constructing a configured or unused XMLParser must not be reported as an XXE sink"
+    let ws = example_workspace(
+        "python",
+        None,
+        r#"from lxml import etree
+def parser():
+    return etree.XMLParser(resolve_entities=False, no_network=True)
+"#,
     );
+    let hits = pack
+        .all_rules()
+        .into_iter()
+        .filter(|rule| {
+            rule.enabled
+                && rule.language == "python"
+                && rule.kind == RuleKind::Sink
+                && rule.tag.as_deref() == Some("xxe")
+        })
+        .flat_map(|rule| {
+            match_rule_against_facts(&ws, rule)
+                .into_iter()
+                .map(move |_| rule.id.clone())
+        })
+        .collect::<Vec<_>>();
     assert!(
-        rule.description.contains("not an XML-consumption boundary")
-            && rule.description.contains("parse/fromstring"),
-        "the disabled rule must preserve the flow-aware replacement rationale"
+        hits.is_empty(),
+        "constructing a hardened or unused parser is not XML consumption: {hits:?}"
     );
 }
 
@@ -852,6 +870,11 @@ def mid():
 def top():
     cmd = mid()
     os.system(cmd)
+
+def same_frame_no_flow():
+    source = os.environ["SIBLING"]
+    safe = "echo safe"
+    os.system(safe)
 "#,
     );
     let report = run_taint_analysis(
@@ -885,6 +908,17 @@ def top():
             .iter()
             .all(|finding| finding.finding.source.enclosing_fn.as_deref() != Some("unrelated_source")),
         "caller scheduling must not borrow an unrelated source for the chain: {:#?}",
+        report.findings
+    );
+    assert!(
+        report.findings.iter().all(|finding| {
+            !finding
+                .finding
+                .chain_display
+                .iter()
+                .any(|hop| hop == "same_frame_no_flow")
+        }),
+        "a matched descendant read must not taint an unrelated sibling value in the same frame: {:#?}",
         report.findings
     );
 }
@@ -1197,6 +1231,31 @@ fn legacy_sink_tag_aliases_are_not_present() {
 }
 
 #[test]
+fn aliases_never_hide_a_distinct_security_family() {
+    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+    let mut invalid = Vec::new();
+    for rule in pack.all_rules() {
+        let Some(owner_family) = rule_family(&rule.id) else {
+            continue;
+        };
+        for alias in &rule.aliases {
+            if rule_family(alias).is_some_and(|alias_family| alias_family != owner_family) {
+                invalid.push(format!(
+                    "{} aliases {} even though their security families differ",
+                    rule.id, alias
+                ));
+            }
+        }
+    }
+    invalid.sort();
+    assert!(
+        invalid.is_empty(),
+        "cross-family aliases hide independent targets, constraints, taxonomy, or package ownership; model them as separate enabled rules:\n{}",
+        invalid.join("\n")
+    );
+}
+
+#[test]
 fn sink_tags_stay_documented() {
     let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
     let documented = documented_sink_tags();
@@ -1220,7 +1279,12 @@ fn sink_tags_stay_documented() {
 #[test]
 fn source_tags_stay_documented() {
     let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
-    let documented = documented_source_tags();
+    let documented = pack
+        .metadata
+        .canonical_source_tags
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     let mut invalid = Vec::new();
     for rule in pack.all_rules() {
         if rule.kind != RuleKind::Source {
@@ -1340,12 +1404,7 @@ fn every_rule_id_is_dotted_lowercase() {
 
 #[test]
 fn rulepack_validator_accepts_checked_in_pack() {
-    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
-    let report = bonsai_security::validate_pack(
-        &pack,
-        &bonsai_security::PackInventoryOptions::default(),
-        bonsai_adapters::all_languages_registry(),
-    );
+    let report = checked_in_pack_validation_report();
     assert!(
         report.valid,
         "checked-in rulepack validator issues:\n{:#?}",
@@ -1441,13 +1500,135 @@ fn shipped_rules_do_not_use_receiver_name_constraints() {
 }
 
 #[test]
-fn declared_rule_match_examples_fire() {
-    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
-    let report = bonsai_security::validate_pack(
-        &pack,
-        &bonsai_security::PackInventoryOptions::default(),
-        bonsai_adapters::all_languages_registry(),
+fn shipped_rule_examples_do_not_repeat_adjacent_dependency_directives() {
+    fn is_dependency_directive(line: &str) -> bool {
+        let line = line.trim_start();
+        [
+            "import ",
+            "from ",
+            "require ",
+            "require(",
+            "use ",
+            "#import ",
+            "#include ",
+            "using ",
+            "require_once ",
+            "include ",
+            "-include(",
+            "-include_lib(",
+        ]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+    }
+
+    fn visit(path: &Path, offenders: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, offenders);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("yml") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let lines = text.lines().collect::<Vec<_>>();
+            for (index, pair) in lines.windows(2).enumerate() {
+                if pair[0].trim() == pair[1].trim()
+                    && !pair[0].trim().is_empty()
+                    && is_dependency_directive(pair[0])
+                {
+                    offenders.push(format!(
+                        "{}:{} repeats `{}`",
+                        path.display(),
+                        index + 1,
+                        pair[0].trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut offenders = Vec::new();
+    visit(&rules_dir().join("langs"), &mut offenders);
+    assert!(
+        offenders.is_empty(),
+        "rule examples must not repeat adjacent dependency directives:\n{}",
+        offenders.join("\n")
     );
+}
+
+#[test]
+fn source_independent_write_rules_prove_the_assigned_value() {
+    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+    let offenders = pack
+        .all_rules()
+        .into_iter()
+        .filter(|rule| {
+            rule.enabled
+                && rule.kind == RuleKind::Sink
+                && rule.category.as_deref() == Some("source-independent")
+                && rule.match_spec.kind == MatchKind::Write
+                && rule.constraints.0.is_empty()
+                && rule.analysis_semantics.is_none()
+        })
+        .map(|rule| {
+            format!(
+                "{} ({}) matches every assignment without proving its unsafe right-hand value",
+                rule.id, rule.source_path
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        offenders.is_empty(),
+        "source-independent write rules need compiler-decoded value constraints:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn source_independent_write_rules_prove_the_written_owner() {
+    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+    let offenders = pack
+        .all_rules()
+        .into_iter()
+        .filter(|rule| {
+            if !rule.enabled
+                || rule.kind != RuleKind::Sink
+                || rule.category.as_deref() != Some("source-independent")
+                || rule.match_spec.kind != MatchKind::Write
+            {
+                return false;
+            }
+            let Some(target) = rule.match_spec.target.as_ref() else {
+                return true;
+            };
+            target.attribute.is_none() && target.receiver_type_in.is_empty()
+        })
+        .map(|rule| {
+            format!(
+                "{} ({}) matches an unowned assignment name",
+                rule.id, rule.source_path
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        offenders.is_empty(),
+        "source-independent writes must identify an exact global/static owner or an adapter-proven receiver type:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn declared_rule_match_examples_fire() {
+    let report = checked_in_pack_validation_report();
     assert!(
         report.enabled_example_count > 0,
         "rulepack must include YAML match_examples"
@@ -1462,12 +1643,7 @@ fn declared_rule_match_examples_fire() {
 
 #[test]
 fn enabled_rule_match_examples_do_not_collide() {
-    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
-    let report = bonsai_security::validate_pack(
-        &pack,
-        &bonsai_security::PackInventoryOptions::default(),
-        bonsai_adapters::all_languages_registry(),
-    );
+    let report = checked_in_pack_validation_report();
     assert!(
         report.enabled_example_count > 0,
         "enabled rulepack entries must include YAML match_examples"

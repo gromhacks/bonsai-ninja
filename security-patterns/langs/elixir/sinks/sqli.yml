@@ -172,6 +172,7 @@
   description: "Ecto.Adapters.SQL.query/3 - tainted SQL string is executed verbatim."
   imports:
   - Ecto_sql
+  - Ecto
 - id: elixir.sqli.ecto_adapters_sql_query_bang
   enabled: true
   language: elixir
@@ -213,6 +214,7 @@
   description: "Ecto.Adapters.SQL.query!/3 - raw SQL variant with exception on error."
   imports:
   - Ecto_sql
+  - Ecto
 - id: elixir.sqli.postgrex_query
   enabled: true
   language: elixir

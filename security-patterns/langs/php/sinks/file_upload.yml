@@ -42,7 +42,6 @@
     code: |
       <?php
       use symfony\httpfoundation;
-      use symfony\httpfoundation;
       use symfony\http-foundation;
       function example($input, $url, $id, $payload, $request) {
         UploadedFile::move($input);
@@ -121,7 +120,6 @@
   - name: php.upload.laravel_uploadedfile_store_as example
     code: |
       <?php
-      use laravel\framework;
       use laravel\framework;
       function example($file, $input) {
         $file->storeAs("uploads", $input);

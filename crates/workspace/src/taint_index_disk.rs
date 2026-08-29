@@ -10,7 +10,7 @@
 //!
 //! Payload shape (MessagePack):
 //!
-//! ```ignore
+//! ```text
 //! struct OnDiskTaintGraphEntry {
 //!     func_raw: u32,
 //!     seeds: Vec<String>,

@@ -1,10 +1,5 @@
-# Elixir TLS misconfig. Most HTTP clients read `ssl: [verify:
-# :verify_none]` from a keyword list; v1 constraint engine only
-# inspects the immediate kw list, so `keyword_arg_equals` hits the
-# top-level (Tesla.client insecure: true, :ssl.connect verify:
-# :verify_none). Nested kw lists (HTTPoison `ssl: [verify: :verify_none]`)
-# cannot be inspected in v1 - those rules stay disabled to avoid
-# firing on every HTTP call.
+# Elixir TLS misconfiguration rules. Exact option names and values remain
+# rulepack data; the adapter supplies only typed aggregate/scalar facts.
 - id: elixir.tls.ssl_connect_verify_none
   enabled: true
   language: elixir
@@ -16,14 +11,36 @@
     kind: call
     callee:
       regex: "^:ssl\\.connect$"
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 1
+      required_fields:
+      - path: [verify]
+        value: {kind: string, value: verify_none}
   match_examples:
-  - name: declared shape
+  - name: exact disabled verification option
     code: |
       defmodule App do
         def test(input) do
           :ssl.connect(input, verify: :verify_none)
         end
       end
+  - name: peer verification remains enabled
+    code: |
+      defmodule App do
+        def test(input) do
+          :ssl.connect(input, verify: :verify_peer)
+        end
+      end
+    expect_no_match: true
+  - name: same option on an unrelated call
+    code: |
+      defmodule App do
+        def test(input) do
+          LocalSocket.connect(input, verify: :verify_none)
+        end
+      end
+    expect_no_match: true
   description: "Erlang :ssl.connect(_, verify: :verify_none) - peer certificate is not validated; MITM trivial."
 
 - id: elixir.tls.tesla_insecure_adapter
@@ -38,8 +55,15 @@
     kind: call
     callee:
       attribute: [Tesla, client]
+      binding_origin: imported
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 1
+      required_fields:
+      - path: [insecure]
+        value: {kind: boolean, value: true}
   match_examples:
-  - name: declared shape
+  - name: exact insecure client option
     code: |
       alias Tesla
       # uses tesla
@@ -48,36 +72,29 @@
           Tesla.client(input, insecure: true)
         end
       end
+  - name: secure client option
+    code: |
+      alias Tesla
+      # uses tesla
+      defmodule App do
+        def test(input) do
+          Tesla.client(input, insecure: false)
+        end
+      end
+    expect_no_match: true
+  - name: same method and option on a local module
+    code: |
+      # uses tesla
+      defmodule Tesla do
+        def client(input, options), do: {input, options}
+      end
+      defmodule App do
+        def test(input) do
+          Tesla.client(input, insecure: true)
+        end
+      end
+    expect_no_match: true
   description: "Tesla.client(_, insecure: true) - Hackney adapter with cert validation disabled; MITM trivial."
 
   imports:
   - Tesla
-- id: elixir.tls.httpoison_ssl_verify_none
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: elixir
-  tag: weak-tls
-  severity: high
-  packages: [httpoison]
-  cwe: [CWE-295]
-  match:
-    kind: call
-    callee:
-      attribute: [HTTPoison, get]
-  description: "Disabled - HTTPoison.get with ssl: [verify: :verify_none] disables cert validation. v1 constraints can't peek into nested kw lists; enable manually when auditing TLS posture."
-
-- id: elixir.tls.finch_no_verify
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: elixir
-  tag: weak-tls
-  severity: medium
-  packages: [finch]
-  cwe: [CWE-295]
-  match:
-    kind: call
-    callee:
-      attribute: [Finch, build]
-  description: "Disabled - Finch.build with conn_opts: [transport_opts: [verify: :verify_none]] disables cert validation. v1 constraints can't peek into nested kw lists; enable manually when auditing TLS posture."

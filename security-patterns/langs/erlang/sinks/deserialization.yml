@@ -10,6 +10,7 @@
     callee:
       regex: "^binary_to_term$"
   constraints:
+  - arg_count: 1
   - arg_tainted:
       index: 0
   match_examples:
@@ -28,9 +29,7 @@
       expect_no_match: true
   description: "binary_to_term/1 - crafted term triggers atom-table exhaustion (DoS) and record/pid forging. Use binary_to_term/2 with [safe]."
 - id: erlang.deser.binary_to_term_2
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: erlang
   tag: insecure-deserialization
   severity: medium
@@ -38,22 +37,26 @@
   match:
     kind: call
     callee:
-      regex: "^binary_to_term/2$"
-  description: "Disabled - arity-2 with [safe] is the safe form; cannot distinguish without constraint support."
-- id: erlang.deser.term_to_binary
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: erlang
-  tag: insecure-deserialization
-  severity: low
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      regex: "^term_to_binary$"
-  description: "Disabled - encoding side is not an attack surface."
-
+      regex: "^binary_to_term$"
+  constraints:
+  - arg_count: 2
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: untrusted term with dynamic decoding options
+    code: |
+      -module(example).
+      -export([test/2]).
+      test(Input, Options) ->
+        binary_to_term(Input, Options).
+  - name: literal term is not attacker controlled
+    code: |
+      -module(example).
+      -export([test/0]).
+      test() ->
+        binary_to_term(<<131,100,0,2,111,107>>, []).
+    expect_no_match: true
+  description: "binary_to_term/2 with attacker-controlled bytes remains an unsafe decode unless an exact safe-option sanitizer is proven on the call."
 - id: erlang.deser.list_to_atom
   enabled: true
   language: erlang

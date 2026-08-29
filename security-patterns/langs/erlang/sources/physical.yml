@@ -1,0 +1,31 @@
+# Erlang physical-device sources. Module-qualified GRiSP calls are exact
+# enough to use without relying on a local handle or variable spelling.
+- id: erlang.source.grisp_gpio_get
+  enabled: true
+  language: erlang
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  payload_types: [sensor-frame]
+  packages: [grisp]
+  match:
+    kind: call
+    callee:
+      attribute: [grisp_gpio, get]
+  constraints:
+  - arg_count: 1
+  match_examples:
+  - name: GRiSP GPIO input value
+    code: |
+      -module(sensor).
+      -include_lib("grisp/include/grisp.hrl").
+      -export([sample/1]).
+      sample(Pin) -> grisp_gpio:get(Pin).
+    expect_match_text: ['grisp_gpio:get']
+  - name: GRiSP GPIO write is not input
+    code: |
+      -module(sensor).
+      -export([drive/2]).
+      drive(Pin, Value) -> grisp_gpio:set(Pin, Value).
+    expect_no_match: true
+  description: "GRiSP grisp_gpio:get/1 returns the voltage-derived value currently observed on a physical GPIO pin."

@@ -21,7 +21,6 @@
     code: |
       <?php
       use illuminate\http;
-      use illuminate\http;
       function example($input, $url, $id, $payload, $request) {
         header("Access-Control-Allow-Origin: *");
       }
@@ -33,11 +32,7 @@
         header("Content-Type: application/json");
       }
     expect_no_match: true
-  description: 'header(''Access-Control-Allow-Origin: *'') - explicit wildcard CORS via header(). The arg_matches_regex gate keeps this off ordinary header() calls (Content-Type, Location, etc.) and fires only on the wildcard ACAO shape. Merged aliases: php.header.builtin, php.smuggle.header_dual_cl_te.'
-  aliases:
-  - php.header.builtin
-  - php.smuggle.header_dual_cl_te
-  - php.header.laravel_response_header
+  description: 'header(''Access-Control-Allow-Origin: *'') - explicit wildcard CORS via header(). The arg_matches_regex gate keeps this off ordinary header() calls (Content-Type, Location, etc.) and fires only on the wildcard ACAO shape.'
   packages:
   - illuminate/http
   imports:

@@ -168,33 +168,6 @@
 # code-injection so reviewer enumerates with `security sinks
 # --tag code-injection`. Treats reflection as eval-equivalent
 # when the dispatched name comes from attacker input.
-- id: scala.eval.method_invoke
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: scala
-  tag: code-injection
-  severity: high
-  packages: [java.lang.reflect]
-  cwe: [CWE-470]
-  match:
-    kind: call
-    callee:
-      attribute: [Method, invoke]
-  match_examples:
-  - name: generated shape example
-    code: |
-      import java.lang.reflect._
-      // uses java.lang.reflect
-      object App {
-        def handle(input: String): Unit = {
-          Method.invoke(input)
-        }
-      }
-  description: "Disabled - Method.invoke() executes the reflected receiver Method; needs state linking the Method object to a tainted lookup/name."
-
-# IMain interpreter - evaluates Scala source at runtime. Used by REPL
-# tooling and by some script-eval libraries. Tainted source = RCE.
 - id: scala.eval.imain_interpret
   enabled: true
   language: scala

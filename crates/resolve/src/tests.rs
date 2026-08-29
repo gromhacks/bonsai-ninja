@@ -67,10 +67,57 @@ fn insert_one(global: &mut GlobalIndex, file: FileId, decl: Decl) {
 }
 
 #[test]
+fn interface_descendant_index_is_shared_across_file_resolver_caches() {
+    let interface_file = FileId::new(1);
+    let implementation_file = FileId::new(2);
+    let mut global = GlobalIndex::new();
+    insert_one(
+        &mut global,
+        interface_file,
+        decl(interface_file, DeclKind::Interface, "Port", &["app"], 10),
+    );
+    let mut implementation = decl(implementation_file, DeclKind::Class, "LivePort", &["app"], 20);
+    implementation.bases = vec!["Port".to_string()];
+    insert_one(&mut global, implementation_file, implementation);
+    global.finalize_semantic_facts();
+
+    let path_for_file = |_file| None;
+    let module_syntax = |_file| ModulePathSyntax::none();
+    let descendants = build_shared_interface_descendant_index(&global, &path_for_file, &module_syntax);
+    let peers = build_shared_peer_class_index(&global);
+    let mut first = MethodCandidateCache::with_shared_indexes(peers.clone(), descendants.clone());
+    let mut second = MethodCandidateCache::with_shared_indexes(peers, descendants.clone());
+    assert!(Arc::ptr_eq(
+        first.interface_descendants.as_ref().expect("first shared index"),
+        second
+            .interface_descendants
+            .as_ref()
+            .expect("second shared index"),
+    ));
+
+    let interface = global.find_by_name("Port")[0];
+    let caller_module = ModulePath::from_segments(["app"]);
+    let context = ResolveContext::new(interface_file, &caller_module);
+    let first_hits = collect_interface_descendants_cached(&global, interface, &context, &mut first);
+    let second_hits = collect_interface_descendants_cached(&global, interface, &context, &mut second);
+    assert_eq!(first_hits, second_hits);
+    assert_eq!(first_hits.len(), 1);
+    assert_eq!(
+        descendants
+            .transitive
+            .lock()
+            .expect("shared descendant cache")
+            .len(),
+        1,
+        "the transitive closure must be memoized once across file resolver caches"
+    );
+}
+
+#[test]
 fn unqualified_callable_resolution_rejects_sibling_module_without_import() {
     let mut global = GlobalIndex::new();
     let cross_file = FileId::new(1);
-    let mega_file = FileId::new(2);
+    let gauntlet_file = FileId::new(2);
     insert_one(
         &mut global,
         cross_file,
@@ -84,12 +131,12 @@ fn unqualified_callable_resolution_rejects_sibling_module_without_import() {
     );
     insert_one(
         &mut global,
-        mega_file,
+        gauntlet_file,
         decl(
-            mega_file,
+            gauntlet_file,
             DeclKind::Function,
             "run_pipeline",
-            &["python", "mega_flow", "pipeline"],
+            &["python", "language_gauntlet", "pipeline"],
             20,
         ),
     );
@@ -278,7 +325,7 @@ fn unqualified_class_resolution_rejects_sibling_module_without_import() {
             local_file,
             DeclKind::Class,
             "Repository",
-            &["go", "mega_flow", "repository"],
+            &["go", "language_gauntlet", "repository"],
             10,
         ),
     );
@@ -294,7 +341,7 @@ fn unqualified_class_resolution_rejects_sibling_module_without_import() {
         ),
     );
 
-    let caller_module = ModulePath::from_segments(["go", "mega_flow", "app"]);
+    let caller_module = ModulePath::from_segments(["go", "language_gauntlet", "app"]);
     let ctx = ResolveContext::new(FileId::new(99), &caller_module);
     let hits = resolve_class(&global, "Repository", &ctx);
 
@@ -516,7 +563,7 @@ fn relative_alias_target_resolves_against_caller_module() {
             sibling_file,
             DeclKind::Function,
             "execute",
-            &["javascript", "mega_flow", "executor"],
+            &["javascript", "language_gauntlet", "executor"],
             20,
         ),
     );
@@ -561,8 +608,9 @@ fn rust_crate_root_member_import_resolves_by_exact_workspace_path() {
             member: "get_user".to_string(),
         },
     );
-    let path_lookup =
-        |file| (file == callee_file).then(|| "/repo/examples/rust/micro/user_service.rs".to_string());
+    let path_lookup = |file| {
+        (file == callee_file).then(|| "/repo/test-fixtures/languages/rust/micro/user_service.rs".to_string())
+    };
     let ctx = ResolveContext::new(caller_file, &caller_module)
         .with_alias_map(&aliases)
         .with_module_path_syntax(bonsai_lang_api::ModulePathSyntax {
@@ -588,7 +636,7 @@ fn multi_segment_import_path_does_not_match_by_leaf_alone() {
         },
     );
     assert!(
-        !module_target_matches_path(target, "/repo/examples/rust/micro/user_service.rs",),
+        !module_target_matches_path(target, "/repo/test-fixtures/languages/rust/micro/user_service.rs",),
         "multi-segment imports must match their parent path, not only the file stem"
     );
 }
@@ -868,6 +916,57 @@ fn class_resolution_uses_import_target_before_bare_duplicate_scan() {
     assert_eq!(
         hit.qualified_name.as_deref(),
         Some("shard_042.flow_00042_executor.CommandRunner")
+    );
+}
+
+#[test]
+fn declared_receiver_type_accepts_one_cross_file_semantic_family() {
+    let mut global = GlobalIndex::new();
+    for (raw, start) in [(1, 10), (2, 20)] {
+        let file = FileId::new(raw);
+        insert_one(
+            &mut global,
+            file,
+            decl(file, DeclKind::Class, "AuthService", &["AuthService"], start),
+        );
+    }
+    let caller_module = ModulePath::from_segments(["UserService"]);
+    let ctx = ResolveContext::new(FileId::new(99), &caller_module);
+
+    assert!(
+        resolve_class(&global, "AuthService", &ctx).is_empty(),
+        "ordinary lexical resolution must still require reachability"
+    );
+    let hits = resolve_declared_receiver_class(&global, "AuthService", &ctx);
+    assert_eq!(
+        hits.len(),
+        2,
+        "a declaration and implementation with one exact semantic identity are one type family"
+    );
+}
+
+#[test]
+fn declared_receiver_type_rejects_ambiguous_workspace_short_name() {
+    let mut global = GlobalIndex::new();
+    for (raw, module) in [(1, "first"), (2, "second")] {
+        let file = FileId::new(raw);
+        insert_one(
+            &mut global,
+            file,
+            decl(
+                file,
+                DeclKind::Class,
+                "AuthService",
+                &[module],
+                u64::from(raw) * 10,
+            ),
+        );
+    }
+    let caller_module = ModulePath::from_segments(["caller"]);
+    let ctx = ResolveContext::new(FileId::new(99), &caller_module);
+    assert!(
+        resolve_declared_receiver_class(&global, "AuthService", &ctx).is_empty(),
+        "an exact source type is not permission to guess between distinct semantic families"
     );
 }
 

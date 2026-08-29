@@ -70,7 +70,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
-      base_name_in: [conn, con, db, database, connection, client]
+      receiver_type_in: [ActiveRecordConnection, Sqlite3Database]
   constraints:
   - arg_tainted:
       index: 0
@@ -78,17 +78,35 @@
   - name: ruby.sqli.ar_execute example
     code: |
       require "activerecord"
-      def example(input, url, id, payload, request, params)
-        connection.execute(input)
+      def example(input)
+        arbitrary_handle = ActiveRecord::Base.connection
+        arbitrary_handle.execute(input)
       end
   - name: ruby.sqli.ar_execute literal negative
     code: |
       require "activerecord"
-      def example(input, url, id, payload, request, params)
-        connection.execute("SELECT * FROM users WHERE id = 1")
+      def example(input)
+        arbitrary_handle = ActiveRecord::Base.connection
+        arbitrary_handle.execute("SELECT * FROM users WHERE id = 1")
       end
     expect_no_match: true
-  description: "connection.execute - raw SQL (ActiveRecord / PG / SQLite3 / arbitrary driver)."
+  - name: unrelated execute method is not an ActiveRecord connection
+    code: |
+      require "activerecord"
+      def example(input)
+        arbitrary_handle = LocalExecutor.new
+        arbitrary_handle.execute(input)
+      end
+    expect_no_match: true
+  - name: SQLite3 database execute
+    code: |
+      require "sqlite3"
+      def example(input)
+        arbitrary_handle = SQLite3::Database.new("app.db")
+        arbitrary_handle.execute(input)
+      end
+    expect_match_text: [arbitrary_handle.execute]
+  description: "Raw SQL execution on an exactly typed ActiveRecord connection or SQLite3 database. Provider factory typing, rather than the receiver variable spelling, excludes unrelated execute methods."
 
 - id: ruby.sqli.ar_exec_query
   enabled: true
@@ -218,27 +236,30 @@
   language: ruby
   tag: sql-injection
   severity: high
-  packages: [activerecord]
   cwe: [CWE-89]
   match:
     kind: call
     callee:
-      name: order
+      regex: '^(?:[A-Z][A-Za-z0-9_]*::)*[A-Z][A-Za-z0-9_]*\.order$'
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: ruby.sqli.ar_order example
     code: |
-      require "activerecord"
-      def example(input, url, id, payload, request, params)
-        order(input)
+      def example(input)
+        ArbitraryModel.order(input)
       end
   - name: ruby.sqli.ar_order literal negative
     code: |
-      require "activerecord"
-      def example(input, url, id, payload, request, params)
-        order("created_at DESC")
+      def example(input)
+        ArbitraryModel.order("created_at DESC")
+      end
+    expect_no_match: true
+  - name: same method on an ordinary object is not an ActiveRecord model shape
+    code: |
+      def example(input)
+        scheduler.order(input)
       end
     expect_no_match: true
   description: "ActiveRecord order - string form is unparameterized (columns come from user input in sort UIs)."
@@ -362,21 +383,6 @@
       end
     expect_no_match: true
   description: "ActiveRecord from - string form is raw SQL."
-
-- id: ruby.sqli.ar_pluck
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: sql-injection
-  severity: medium
-  packages: [activerecord]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      name: pluck
-  description: "Disabled - pluck arg is column name, rarely tainted."
 
 - id: ruby.sqli.sequel_run
   enabled: true
@@ -539,13 +545,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.query$
-      base_name_in:
-      - client
-      - db
-      - conn
-      - mysql
-      - mysql2
-      - c
+      receiver_type_in: [Mysql2Client]
   constraints:
   - arg_tainted:
       index: 0
@@ -554,64 +554,26 @@
     code: |
       require "mysql2"
       def example(input, url, id, payload, request, params)
-        client = Mysql2::Client.new
-        client.query(input)
+        arbitrary_handle = Mysql2::Client.new
+        arbitrary_handle.query(input)
       end
   - name: ruby.sqli.mysql2_query literal negative
     code: |
       require "mysql2"
       def example(input, url, id, payload, request, params)
-        client = Mysql2::Client.new
-        client.query("SELECT * FROM users")
+        arbitrary_handle = Mysql2::Client.new
+        arbitrary_handle.query("SELECT * FROM users")
+      end
+    expect_no_match: true
+  - name: unrelated query method is not a Mysql2 client
+    code: |
+      require "mysql2"
+      def example(input)
+        arbitrary_handle = LocalClient.new
+        arbitrary_handle.query(input)
       end
     expect_no_match: true
   description: "Mysql2::Client#query - raw SQL sent through a semantic Mysql2 client receiver."
-
-- id: ruby.sqli.pg_exec
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: sql-injection
-  severity: critical
-  packages: [pg]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      name: exec
-  description: "Disabled - bare `name: exec` collides with ruby.cmdi.kernel_exec (Kernel#exec = cmdi sink). Without receiver-type narrowing (PG::Connection vs Kernel) we cannot distinguish; Kernel#exec is the far more common dangerous call."
-
-- id: ruby.sqli.pg_exec_params
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: sql-injection
-  severity: low
-  packages: [pg]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      name: exec_params
-  description: "Disabled - exec_params takes a placeholder template + bind array; safe if used correctly."
-
-- id: ruby.sqli.sqlite3_execute
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: ruby.sqli.ar_execute
-  language: ruby
-  tag: sql-injection
-  severity: critical
-  packages: [sqlite3]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
-  description: "Subsumed by ruby.sqli.ar_execute - same shape; canonical rule should add sqlite3 to its packages list."
 
 - id: ruby.sqli.sqlite3_execute_batch
   enabled: true

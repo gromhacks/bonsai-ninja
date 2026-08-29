@@ -51,13 +51,32 @@
     kind: call
     callee:
       attribute: [hashlib, new]
+      binding_origin: imported
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)^["\x27](?:md2|md4|md5|sha1|sha-1)["\x27]$'
   match_examples:
   - name: crypto hashlib new md4
     code: |
       import hashlib
       def example(user_input):
           return hashlib.new("md4")
-  description: "hashlib.new('md4')."
+  - name: hashlib new secure digest negative
+    code: |
+      import hashlib
+      def example():
+          return hashlib.new("sha256")
+    expect_no_match: true
+  - name: application hashlib collision negative
+    code: |
+      class hashlib:
+          @staticmethod
+          def new(name): return name
+      def example():
+          return hashlib.new("md4")
+    expect_no_match: true
+  description: "`hashlib.new` with an exact weak digest name is insecure; compiler-decoded algorithm values and provider identity keep SHA-2/SHA-3 and local callables quiet."
 
 - id: python.crypto.pycryptodome_des
   enabled: true
@@ -152,13 +171,32 @@
     kind: call
     callee:
       attribute: [AES, new]
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '^(?:AES\.)?MODE_ECB$'
   match_examples:
   - name: crypto pycryptodome aes ecb
     code: |
       from Crypto.Cipher import AES
       def example(user_input):
           return AES.new(user_input, AES.MODE_ECB)
-  description: "AES.new(..., MODE_ECB) - leaks block patterns."
+  - name: pycryptodome AES authenticated mode negative
+    code: |
+      from Crypto.Cipher import AES
+      def example(key, nonce):
+          return AES.new(key, AES.MODE_GCM, nonce=nonce)
+    expect_no_match: true
+  - name: application AES constructor collision negative
+    code: |
+      class AES:
+          MODE_ECB = 1
+          @staticmethod
+          def new(key, mode): return key
+      def example(key):
+          return AES.new(key, AES.MODE_ECB)
+    expect_no_match: true
+  description: "`AES.new(..., MODE_ECB)` leaks block patterns; the exact compiler-decoded mode and provider identity keep authenticated/non-ECB modes and local constructors quiet."
 
 - id: python.crypto.cryptography_des_cbc
   enabled: true
@@ -414,20 +452,6 @@
           return md5_crypt.hash(user_input)
   description: "passlib md5_crypt - broken."
 
-- id: python.crypto.cryptography_constant_time_eq_missing
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: timing-attack
-  severity: medium
-  packages: [cryptography]
-  cwe: [CWE-208]
-  match:
-    kind: call
-    callee:
-      name: __eq__
-  description: "Disabled - flag custom comparators that should use hmac.compare_digest."
 - id: python.crypto.rsa_weak_key_size
   enabled: true
   language: python

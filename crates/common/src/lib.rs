@@ -27,11 +27,11 @@ pub use atomic_file::write_atomic_bytes;
 pub use file_lock::normalize_advisory_lock_error;
 pub use ids::{BasicBlockId, FileId, FuncId, PackageId, SymbolId, TraceStepId, TypeId, ValueId};
 pub use names::{
-    ends_at_qualified_name_boundary, is_bonsai_case_probe_path, is_name_punctuation,
-    normalize_qualified_name, qualified_name_owner, qualified_name_prefixes, qualified_name_segments,
-    qualified_names_match, short_qualified_tail, split_qualified_name_head_tail,
-    split_qualified_name_owner_tail, starts_at_qualified_name_boundary, trim_leading_name_punctuation,
-    workspace_bonsai_dir, BONSAI_CASE_PROBE_PREFIX,
+    declaration_qualified_suffix, ends_at_qualified_name_boundary, ensure_cache_directory_writable,
+    is_bonsai_case_probe_path, is_name_punctuation, normalize_qualified_name, qualified_name_owner,
+    qualified_name_prefixes, qualified_name_segments, qualified_names_match, short_qualified_tail,
+    split_qualified_name_head_tail, split_qualified_name_owner_tail, starts_at_qualified_name_boundary,
+    trim_leading_name_punctuation, workspace_bonsai_dir, BONSAI_CASE_PROBE_PREFIX,
 };
 pub use path_filter::{
     canonicalize_path_or_existing_parent, filter_looks_like_absolute_path, normalize_path_for_filter,

@@ -1,14 +1,14 @@
 //! Go language adapter.
 use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
-    decl_index_with_handler, extract_imports_via,
+    decl_index_from_tree_with_handler, extract_imports_via,
     kit::{
         call_arg_from_node_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
         node_text, parse_with, span_of,
     },
     AdapterContext, AdapterError, ArgumentPassingMode, CallKind, CallTargetExtraction,
     CharacterConstraintDomain, CharacterConstraintFact, CharacterConstraintOutput, CompilerGuardFact,
-    ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclIndex, ExpressionField,
+    ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclIndex, DeclKind, ExpressionField,
     ExpressionFlow, ExpressionPlaceExtraction, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
     ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, SameOriginPathConstraintFact,
     StaticScalarValue, StaticStringMapEntry, StringCompositionFact, StringCompositionPart, TypeAliasBinding,
@@ -39,7 +39,7 @@ fn go_expression_places(node: Node<'_>, src: &[u8]) -> ExpressionPlaceExtraction
                 let value = node_text(&node, src).trim();
                 (!value.is_empty()).then(|| value.to_string())
             }
-            "selector_expression" | "field_expression" => {
+            "selector_expression" => {
                 let base = place(node.child_by_field_name("operand")?, src)?;
                 let field = node_text(&node.child_by_field_name("field")?, src).trim();
                 (!field.is_empty()).then(|| format!("{base}.{field}"))
@@ -63,7 +63,7 @@ fn go_expression_places(node: Node<'_>, src: &[u8]) -> ExpressionPlaceExtraction
         }
     }
 
-    if !matches!(node.kind(), "selector_expression" | "field_expression") {
+    if node.kind() != "selector_expression" {
         return ExpressionPlaceExtraction::default();
     }
     place(node, src).map_or_else(ExpressionPlaceExtraction::default, |place| {
@@ -72,6 +72,16 @@ fn go_expression_places(node: Node<'_>, src: &[u8]) -> ExpressionPlaceExtraction
             consumed_node_ids: vec![node.id()],
         }
     })
+}
+
+/// Go selector expressions are storage/property reads when evaluated as
+/// values. This remains true when the operand is a zero-argument call, for
+/// example `c.Request().Body`: the nested call produces the receiver and the
+/// terminal selector produces the value passed to the enclosing expression.
+/// Keeping both identities in compiler IR lets the IDG preserve the selected
+/// value without assigning any API-specific meaning to `Request` or `Body`.
+fn go_expression_value_kind(node: Node<'_>, _src: &[u8]) -> Option<bonsai_lang_api::AssignValueKind> {
+    (node.kind() == "selector_expression").then_some(bonsai_lang_api::AssignValueKind::PropertyRead)
 }
 
 fn go_type_switch_alias(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
@@ -135,6 +145,7 @@ type GoIfInitAssignments = Vec<FlowEvent>;
 type GoIfInitAssignmentsByDecl = Vec<(Span, Vec<(Span, GoIfInitAssignments)>)>;
 type GoIndexAssignments = Vec<FlowEvent>;
 type GoIndexAssignmentsByDecl = Vec<(Span, Vec<(Span, GoIndexAssignments)>)>;
+type GoStructFieldTypes = std::collections::HashMap<String, Vec<(String, String)>>;
 
 fn apply_go_type_declaration_kinds(index: &mut DeclIndex, tree: &Tree, file: FileId) {
     for type_spec in collect_kinds(tree, &["type_spec"]) {
@@ -151,7 +162,7 @@ fn apply_go_type_declaration_kinds(index: &mut DeclIndex, tree: &Tree, file: Fil
 }
 
 const HANDLER: GrammarHandler = GrammarHandler {
-    expression_value_kind_extractor: None,
+    expression_value_kind_extractor: Some(go_expression_value_kind),
     literal_value_kinds: &[
         "nil",
         "int_literal",
@@ -166,7 +177,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     parameter_container_kinds: &["parameter_list"],
     parameter_kinds: &["parameter_declaration", "variadic_parameter_declaration"],
     parameter_annotation_name_extractor: None,
-    variadic_parameter_kinds: &["variadic_parameter"],
+    variadic_parameter_kinds: &["variadic_parameter_declaration"],
     binding_identifier_kinds: &["identifier"],
     identifier_kinds: &["identifier"],
     aggregate_pattern_kinds: &["expression_list"],
@@ -189,14 +200,34 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "if_statement",
         "expression_switch_statement",
         "type_switch_statement",
+        "select_statement",
     ],
     branch_then_field_names: &["consequence", "body"],
     branch_else_field_names: &["alternative"],
     branch_condition_field_names: &["condition", "value"],
+    condition_group_kinds: &["parenthesized_expression"],
+    condition_all_operators: &["&&"],
+    condition_any_operators: &["||"],
+    condition_not_operators: &["!"],
     branch_alias_extractor: Some(go_type_switch_alias),
     loop_body_field_names: &["body"],
     loop_body_kinds: &["block", "expression_statement"],
-    branch_arm_kinds: &["block", "expression_case", "type_case", "default_case"],
+    loop_header_container_kinds: &["for_clause"],
+    loop_update_field_names: &["update"],
+    branch_arm_kinds: &[
+        "block",
+        "expression_case",
+        "type_case",
+        "default_case",
+        "communication_case",
+    ],
+    exclusive_branch_arm_kinds: &[
+        "expression_case",
+        "type_case",
+        "default_case",
+        "communication_case",
+    ],
+    fallthrough_branch_arm_kinds: &[],
     for_kinds: &["for_statement"],
     foreach_binding_extractor: Some(go_foreach_binding),
     call_kinds: GO_CALL_KINDS,
@@ -214,7 +245,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     argument_passing_mode_extractor: Some(go_argument_passing_mode),
     indirect_place_operand_extractor: Some(go_indirect_place_operand),
     call_ref_kinds: GO_CALL_KINDS,
-    member_expression_kinds: &["selector_expression", "field_expression"],
+    member_expression_kinds: &["selector_expression"],
     subscript_expression_kinds: &["index_expression"],
     member_base_field_names: &["operand"],
     member_name_field_names: &["field"],
@@ -332,15 +363,79 @@ impl LanguageAdapter for GoAdapter {
             ..LanguageCapabilities::partial_baseline()
         }
     }
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        Some(&HANDLER)
+    }
+    fn additional_grammar_node_kinds(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("custom lowering", "&"),
+            ("custom lowering", "*"),
+            ("custom lowering", "assignment_statement"),
+            ("custom lowering", "binary_expression"),
+            ("custom lowering", "call_expression"),
+            ("custom lowering", "channel_type"),
+            ("custom lowering", "composite_literal"),
+            ("custom lowering", "expression_list"),
+            ("custom lowering", "false"),
+            ("custom lowering", "field_declaration"),
+            ("custom lowering", "field_identifier"),
+            ("custom lowering", "for_statement"),
+            ("custom lowering", "func_literal"),
+            ("custom lowering", "function_declaration"),
+            ("custom lowering", "identifier"),
+            ("custom lowering", "if_statement"),
+            ("custom lowering", "import_declaration"),
+            ("custom lowering", "index_expression"),
+            ("custom lowering", "interface_type"),
+            ("custom lowering", "interpreted_string_literal"),
+            ("custom lowering", "interpreted_string_literal_content"),
+            ("custom lowering", "keyed_element"),
+            ("custom lowering", "literal_element"),
+            ("custom lowering", "literal_value"),
+            ("custom lowering", "method_declaration"),
+            ("custom lowering", "nil"),
+            ("custom lowering", "package_clause"),
+            ("custom lowering", "package_identifier"),
+            ("custom lowering", "parameter_declaration"),
+            ("custom lowering", "parenthesized_expression"),
+            ("custom lowering", "qualified_type"),
+            ("custom lowering", "range_clause"),
+            ("custom lowering", "raw_string_literal"),
+            ("custom lowering", "return_statement"),
+            ("custom lowering", "selector_expression"),
+            ("custom lowering", "send_statement"),
+            ("custom lowering", "short_var_declaration"),
+            ("custom lowering", "slice_expression"),
+            ("custom lowering", "statement_list"),
+            ("custom lowering", "struct_type"),
+            ("custom lowering", "true"),
+            ("custom lowering", "type"),
+            ("custom lowering", "type_assertion_expression"),
+            ("custom lowering", "type_identifier"),
+            ("custom lowering", "type_spec"),
+            ("custom lowering", "type_switch_statement"),
+            ("custom lowering", "unary_expression"),
+            ("custom lowering", "variadic_parameter_declaration"),
+        ]
+    }
+
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
-        let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
+        let parsed = parse_with(PACK_NAME, file, ctx);
+        let mut idx = parsed.as_ref().map_or_else(
+            || DeclIndex {
+                file,
+                ..DeclIndex::default()
+            },
+            |(snapshot, tree)| {
+                decl_index_from_tree_with_handler(file, snapshot.text.as_bytes(), tree, &HANDLER)
+            },
+        );
         // Go module_path = workspace-relative package directory plus
         // the file's `package <name>` declaration. The package name
         // alone is not semantic identity: unrelated command packages
         // are often all named `main`, and must not resolve into one
         // another. Falls back to file-stem when the package
         // declaration isn't present.
-        let parsed = parse_with(PACK_NAME, file, ctx);
         let package_segment = parsed.as_ref().and_then(|(snapshot, tree)| {
             extract_go_package(tree.root_node(), snapshot.text.as_bytes())
                 .map(|name| go_module_segments(file, ctx, &name))
@@ -369,27 +464,34 @@ impl LanguageAdapter for GoAdapter {
         // languages. Brings Go in lockstep with Java/Kotlin/Scala/
         // TS/C#/Swift/Rust/Python/Dart per
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
-        if let Some((snapshot, tree)) = parsed {
+        if let Some((snapshot, tree)) = parsed.as_ref() {
             let src = snapshot.text.as_bytes();
-            apply_go_type_declaration_kinds(&mut idx, &tree, file);
-            populate_go_condition_expressions(&mut idx.branch_conditions, &tree, file, src);
-            let exact_argument_flows = populate_go_call_argument_values(&mut idx, &tree, file, src);
-            populate_go_assignment_values(&mut idx, &tree, file, src);
-            idx.string_compositions = go_string_compositions(&idx, &tree, file, src);
-            idx.same_origin_path_constraints = go_same_origin_path_constraints(&idx, &tree, file, src);
-            idx.compiler_guards = go_compiler_guards(&tree, file, src);
-            let return_value_flows = collect_go_return_value_flows(&tree, file, src);
-            populate_go_exact_callable_assignments(&mut idx, &tree, file, src);
+            apply_go_type_declaration_kinds(&mut idx, tree, file);
+            populate_go_condition_expressions(&mut idx.branch_conditions, tree, file, src);
+            let exact_argument_flows = populate_go_call_argument_values(&mut idx, tree, file, src);
+            populate_go_assignment_values(&mut idx, tree, file, src);
+            idx.string_compositions = go_string_compositions(&idx, tree, file, src);
+            idx.same_origin_path_constraints = go_same_origin_path_constraints(&idx, tree, file, src);
+            idx.compiler_guards = go_compiler_guards(tree, file, src);
+            let return_value_flows = collect_go_return_value_flows(tree, file, src);
+            populate_go_exact_callable_assignments(&mut idx, tree, file, src);
             // Phase-6 return-type extraction: `func f() T {}` populates
             // `Decl.return_type` for `apply_assign_call_result_types`.
             // Go uses `result` field for return type in the grammar.
-            bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
-            let aliases_by_span = collect_go_method_type_aliases(&tree, file, src);
-            let method_receivers_by_span = collect_go_method_receiver_types(&tree, file, src);
-            let bases_by_span = collect_go_class_bases(&tree, file, src);
-            let range_assignments_by_span = collect_go_range_assignments_by_decl(&tree, file, src);
-            let if_init_assignments_by_span = collect_go_if_init_assignments_by_decl(&tree, file, src);
-            let index_assignments_by_span = collect_go_index_assignments_by_decl(&tree, file, src);
+            bonsai_lang_api::populate_decl_return_types(&mut idx, tree, src, &HANDLER);
+            let aliases_by_span = collect_go_method_type_aliases(tree, file, src);
+            let module_type_aliases = collect_go_module_type_aliases(tree, src);
+            let struct_field_types = collect_go_struct_field_types(tree, src);
+            let closure_spans = collect_kinds(tree, &["func_literal"])
+                .into_iter()
+                .map(|node| span_of(file, &node))
+                .collect::<std::collections::HashSet<_>>();
+            let method_receivers_by_span = collect_go_method_receiver_types(tree, file, src);
+            let bases_by_span = collect_go_class_bases(tree, file, src);
+            let range_assignments_by_span = collect_go_range_assignments_by_decl(tree, file, src);
+            let channel_return_functions = collect_go_channel_return_functions(tree, src);
+            let if_init_assignments_by_span = collect_go_if_init_assignments_by_decl(tree, file, src);
+            let index_assignments_by_span = collect_go_index_assignments_by_decl(tree, file, src);
             let class_symbols: Vec<(String, SymbolId)> = idx
                 .defs
                 .iter()
@@ -411,6 +513,16 @@ impl LanguageAdapter for GoAdapter {
                     .find_map(|(span, aliases)| (*span == decl.span).then_some(aliases))
                 {
                     decl.type_aliases = aliases.clone();
+                }
+                let local_alias_names = decl
+                    .type_aliases
+                    .iter()
+                    .map(|alias| alias.name.clone())
+                    .collect::<std::collections::HashSet<_>>();
+                for alias in &module_type_aliases {
+                    if !local_alias_names.contains(&alias.name) && !decl.type_aliases.contains(alias) {
+                        decl.type_aliases.push(alias.clone());
+                    }
                 }
                 if let Some(receiver_type) = method_receivers_by_span
                     .iter()
@@ -435,6 +547,9 @@ impl LanguageAdapter for GoAdapter {
                 {
                     augment_go_range_assignments(&mut decl.flow_events, range_assignments);
                 }
+                if channel_return_functions.iter().any(|name| name == &decl.name) {
+                    augment_go_returned_channel_yields(&mut decl.flow_events);
+                }
                 if let Some(if_init_assignments) = if_init_assignments_by_span
                     .iter()
                     .find_map(|(span, assignments)| (*span == decl.span).then_some(assignments.as_slice()))
@@ -452,30 +567,32 @@ impl LanguageAdapter for GoAdapter {
                     replace_go_index_selection_assignments(&mut decl.flow_events, index_assignments);
                 }
             }
+            apply_go_declared_struct_field_aliases(&mut idx, &struct_field_types);
+            apply_go_closure_capture_type_aliases(&mut idx, &closure_spans);
             // Go `if init; condition` and range/index rewrites above add exact
             // call events that the generic first lowering pass cannot see.
             // Rejoin argument syntax only after those adapter-owned FlowEvents
             // are final, then attach Go-decoded literals/aggregates. This is a
             // compiler pass-order dependency, not a source-text fallback.
-            idx.call_argument_values = bonsai_lang_api::kit::extract_call_argument_value_facts(
-                &tree, file, &idx.defs, src, &HANDLER,
-            );
-            let final_argument_flows = populate_go_call_argument_values(&mut idx, &tree, file, src);
+            idx.call_argument_values =
+                bonsai_lang_api::kit::extract_call_argument_value_facts(tree, file, &idx.defs, src, &HANDLER);
+            let final_argument_flows = populate_go_call_argument_values(&mut idx, tree, file, src);
             for decl in &mut idx.defs {
                 rewrite_go_exact_call_args(&mut decl.flow_events, &final_argument_flows);
             }
             bonsai_lang_api::kit::populate_call_argument_static_values(
                 &mut idx,
-                &tree,
+                tree,
                 file,
                 src,
                 &HANDLER,
                 go_static_scalar,
             );
+            populate_go_const_static_values(&mut idx, tree, file, src);
             // Character transforms consume final rewritten flow events and
             // adapter-decoded call scalars. Building this table earlier makes
             // escaped literals and adapter-synthesized calls invisible.
-            idx.character_constraints = go_character_constraints(&idx, &tree, file, src);
+            idx.character_constraints = go_character_constraints(&idx, tree, file, src);
         }
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
@@ -636,15 +753,21 @@ fn populate_go_exact_callable_assignments(index: &mut DeclIndex, tree: &Tree, fi
             value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(
                 value, file, src, &HANDLER,
             ),
+            static_value: None,
             exact_callable_return: Some(bonsai_lang_api::kit::expression_flow_from_node_with_handler(
                 return_value,
                 file,
                 src,
                 &HANDLER,
             )),
+            inline_callback_static_return: None,
+            inline_callback_fields: Vec::new(),
             exact_static_call_args: None,
             direct_call_name: None,
+            direct_call_span: None,
             direct_call_receiver: None,
+            direct_call_receiver_span: None,
+            direct_call_receiver_flow: None,
         });
     }
     index.assignment_values.extend(additions);
@@ -685,11 +808,7 @@ fn go_exact_single_return_value(callable: Node<'_>) -> Option<Node<'_>> {
 fn lower_go_value_expression(mut node: Node<'_>, file: FileId, src: &[u8]) -> ExpressionFlow {
     while matches!(
         node.kind(),
-        "literal_element"
-            | "expression"
-            | "expression_list"
-            | "parenthesized_expression"
-            | "unary_expression"
+        "literal_element" | "expression_list" | "parenthesized_expression" | "unary_expression"
     ) && node.named_child_count() == 1
     {
         node = node.named_child(0).expect("single named child");
@@ -720,11 +839,7 @@ fn go_adapter_owned_value_shape(mut node: Node<'_>) -> Option<Node<'_>> {
         }
         if !matches!(
             node.kind(),
-            "literal_element"
-                | "expression"
-                | "expression_list"
-                | "parenthesized_expression"
-                | "unary_expression"
+            "literal_element" | "expression_list" | "parenthesized_expression" | "unary_expression"
         ) || node.named_child_count() != 1
         {
             return None;
@@ -1034,6 +1149,7 @@ fn merge_go_condition_junction(
 fn go_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
     ConditionOperandFact {
         span: span_of(file, &node),
+        direct_call_span: (node.kind() == "call_expression").then(|| span_of(file, &node)),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER),
         static_string: go_static_string_literal(node, src),
         static_value: go_static_scalar(node, src),
@@ -1052,10 +1168,57 @@ fn go_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
     }
 }
 
+/// Attach exact scalar values to immutable Go `const` bindings.
+///
+/// Tree-sitter wraps the initializer in an `expression_list`, so the generic
+/// assignment-value pass cannot decode the enclosing span as a scalar. The
+/// adapter owns that grammar shape and maps names to values positionally;
+/// downstream analyses consume only the resulting immutable compiler fact.
+fn populate_go_const_static_values(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    fn list_items(node: Node<'_>) -> Vec<Node<'_>> {
+        if node.named_child_count() == 0 {
+            vec![node]
+        } else {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor).collect::<Vec<_>>()
+        }
+    }
+    for spec in collect_kinds(tree, &["const_spec"]) {
+        let (Some(names), Some(values)) = (
+            spec.child_by_field_name("name"),
+            spec.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        let names = list_items(names);
+        let values = list_items(values);
+        if names.len() != values.len() {
+            continue;
+        }
+        for (name, value) in names.into_iter().zip(values) {
+            let target = node_text(&name, src).trim();
+            let Some(static_value) = go_static_scalar(value, src) else {
+                continue;
+            };
+            let spec_span = span_of(file, &spec);
+            if let Some(fact) = index.assignment_values.iter_mut().find(|fact| {
+                fact.assignment_span.file == file
+                    && fact.assignment_span.start <= spec_span.start
+                    && spec_span.end <= fact.assignment_span.end
+                    && fact.target.as_deref() == Some(target)
+            }) {
+                fact.target_is_immutable = true;
+                fact.value_span = span_of(file, &value);
+                fact.static_value = Some(static_value);
+            }
+        }
+    }
+}
+
 fn go_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {
     match go_static_scalar(node, src)? {
         StaticScalarValue::String(value) => Some(value),
-        StaticScalarValue::Boolean(_) | StaticScalarValue::Null => None,
+        StaticScalarValue::Boolean(_) | StaticScalarValue::Integer(_) | StaticScalarValue::Null => None,
     }
 }
 
@@ -1176,6 +1339,7 @@ fn go_string_compositions(
                 .map_or(value_span, |assignment| assignment.assignment_span),
             value_span,
             target,
+            dynamic_anchor_span: None,
             parts,
         });
     }
@@ -1309,6 +1473,7 @@ fn go_character_constraints(
             transform_span: span_of(file, &callee),
             input_place: input_name.to_string(),
             input_param_index: Some(input_param_index),
+            proof: bonsai_lang_api::CharacterConstraintProof::ExactRuntimeSemantics,
             output: CharacterConstraintOutput::Return,
             domain: CharacterConstraintDomain::ProviderBound {
                 factory_call: provider_call.clone(),
@@ -1525,6 +1690,7 @@ fn go_configured_character_substitution_constraints(index: &DeclIndex) -> Vec<Ch
                     .iter()
                     .position(|parameter| parameter == &input_place),
                 input_place,
+                proof: bonsai_lang_api::CharacterConstraintProof::ExactRuntimeSemantics,
                 output,
                 domain: CharacterConstraintDomain::ProviderBound {
                     factory_call: transform.factory_call.clone(),
@@ -1693,6 +1859,7 @@ fn go_guarded_append_character_constraints(index: &DeclIndex) -> Vec<CharacterCo
                 transform_span,
                 input_place,
                 input_param_index: Some(input_param_index),
+                proof: bonsai_lang_api::CharacterConstraintProof::ExactRuntimeSemantics,
                 output: CharacterConstraintOutput::Assignment { target },
                 domain: CharacterConstraintDomain::ExcludesExact {
                     characters: vec!["\r".to_string(), "\n".to_string()],
@@ -2730,6 +2897,187 @@ fn collect_go_method_type_aliases(
     aliases_by_fn
 }
 
+/// Collect explicit package-scope variable types without opening function
+/// bodies. Package variables are lexical receiver facts for every declaration
+/// in the file; nested `var` declarations remain owned by their callable.
+fn collect_go_module_type_aliases(tree: &Tree, src: &[u8]) -> Vec<TypeAliasBinding> {
+    let mut aliases = Vec::new();
+    for var_spec in collect_kinds(tree, &["var_spec"]) {
+        let mut ancestor = var_spec.parent();
+        let mut inside_callable = false;
+        while let Some(node) = ancestor {
+            if matches!(
+                node.kind(),
+                "function_declaration" | "method_declaration" | "func_literal"
+            ) {
+                inside_callable = true;
+                break;
+            }
+            ancestor = node.parent();
+        }
+        if !inside_callable {
+            collect_go_var_spec_type_aliases(var_spec, src, &mut aliases);
+        }
+    }
+    dedup_go_type_aliases(&mut aliases);
+    aliases
+}
+
+/// Compile named Go struct fields into exact projected receiver bindings.
+///
+/// A method receiver such as `store *Store` proves the type of `store`, but
+/// the type of `store.DB` comes from the `DB *sql.DB` field declaration, not
+/// from the owner type. Keeping that distinction in the adapter prevents the
+/// shared receiver matcher from treating an arbitrary owner projection as the
+/// owner itself, while allowing rules to require the exact imported field
+/// type. Nested anonymous structs are intentionally handled by their own
+/// nearest `struct_type`; their fields are not flattened into the outer type.
+fn collect_go_struct_field_types(tree: &Tree, src: &[u8]) -> GoStructFieldTypes {
+    let mut out = GoStructFieldTypes::new();
+    for type_spec in collect_kinds(tree, &["type_spec"]) {
+        let (Some(name_node), Some(struct_type)) = (
+            type_spec.child_by_field_name("name"),
+            type_spec.child_by_field_name("type"),
+        ) else {
+            continue;
+        };
+        if struct_type.kind() != "struct_type" {
+            continue;
+        }
+        let owner = node_text(&name_node, src).trim();
+        if owner.is_empty() {
+            continue;
+        }
+        for field in collect_kinds_under(&struct_type, &["field_declaration"]) {
+            let nearest_struct = field
+                .parent()
+                .and_then(|parent| parent.parent())
+                .filter(|parent| parent.kind() == "struct_type");
+            if nearest_struct.map(|node| node.id()) != Some(struct_type.id()) {
+                continue;
+            }
+            let Some(type_node) = field.child_by_field_name("type") else {
+                continue;
+            };
+            let mut field_names = Vec::new();
+            let mut cursor = field.walk();
+            for child in field.named_children(&mut cursor) {
+                if child.start_byte() >= type_node.start_byte() {
+                    continue;
+                }
+                if child.kind() == "field_identifier" {
+                    let name = node_text(&child, src).trim();
+                    if !name.is_empty() {
+                        field_names.push(name.to_string());
+                    }
+                }
+            }
+            if field_names.is_empty() {
+                continue;
+            }
+            let raw_type = node_text(&type_node, src);
+            let mut types = Vec::new();
+            if let Some(name) = canonical_go_type_name(raw_type) {
+                push_unique_string(&mut types, name);
+            }
+            if let Some(name) = qualified_go_type_name(raw_type) {
+                push_unique_string(&mut types, name);
+            }
+            for field_name in field_names {
+                for field_type in &types {
+                    let pair = (field_name.clone(), field_type.clone());
+                    let fields = out.entry(owner.to_string()).or_default();
+                    if !fields.contains(&pair) {
+                        fields.push(pair);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn apply_go_declared_struct_field_aliases(idx: &mut DeclIndex, fields: &GoStructFieldTypes) {
+    if fields.is_empty() {
+        return;
+    }
+    for decl in &mut idx.defs {
+        let base_aliases = decl.type_aliases.clone();
+        for base in base_aliases {
+            if !go_identifier_like(&base.name) {
+                continue;
+            }
+            let Some(owner) = canonical_go_type_name(&base.type_name) else {
+                continue;
+            };
+            let Some(owner_fields) = fields.get(&owner) else {
+                continue;
+            };
+            for (field, field_type) in owner_fields {
+                let alias = TypeAliasBinding {
+                    name: format!("{}.{}", base.name, field),
+                    type_name: field_type.clone(),
+                };
+                if !decl.type_aliases.contains(&alias) {
+                    decl.type_aliases.push(alias);
+                }
+            }
+        }
+    }
+}
+
+/// A Go function literal closes over the nearest lexical callable's typed
+/// bindings. Copying those compiler facts into the closure declaration lets
+/// receiver resolution use the captured value without relying on its local
+/// spelling. Inner bindings shadow outer aliases naturally.
+fn apply_go_closure_capture_type_aliases(
+    idx: &mut DeclIndex,
+    closure_spans: &std::collections::HashSet<Span>,
+) {
+    loop {
+        let mut additions = Vec::new();
+        for (inner_index, inner) in idx.defs.iter().enumerate() {
+            if !closure_spans.contains(&inner.span) {
+                continue;
+            }
+            let parent = idx
+                .defs
+                .iter()
+                .enumerate()
+                .filter(|(outer_index, outer)| {
+                    *outer_index != inner_index
+                        && outer.span.file == inner.span.file
+                        && outer.span.start <= inner.span.start
+                        && inner.span.end <= outer.span.end
+                        && matches!(outer.kind, DeclKind::Function | DeclKind::Method)
+                })
+                .min_by_key(|(_, outer)| outer.span.end.saturating_sub(outer.span.start));
+            let Some((_, parent)) = parent else {
+                continue;
+            };
+            for alias in &parent.type_aliases {
+                if inner.type_aliases.iter().any(|local| local.name == alias.name) {
+                    continue;
+                }
+                additions.push((inner_index, alias.clone()));
+            }
+        }
+        if additions.is_empty() {
+            break;
+        }
+        let mut changed = false;
+        for (inner_index, alias) in additions {
+            if !idx.defs[inner_index].type_aliases.contains(&alias) {
+                idx.defs[inner_index].type_aliases.push(alias);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
 fn collect_go_method_receiver_types(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, String)> {
     let mut out = Vec::new();
     for method in collect_kinds(tree, &["method_declaration"]) {
@@ -2913,7 +3261,9 @@ fn go_range_clause_assignments(
 
     if targets.len() >= 2 {
         if let Some(target) = targets.get(1).filter(|target| target.as_str() != "_") {
-            out.push(go_range_value_assignment(span, target, right, right_text, src));
+            out.push(go_range_value_assignment(
+                span, target, right, right_text, src, false,
+            ));
         }
         return out;
     }
@@ -2922,7 +3272,9 @@ fn go_range_clause_assignments(
     if target == "_" || !go_range_single_target_is_value(right, src, channel_returns) {
         return Vec::new();
     }
-    out.push(go_range_value_assignment(span, target, right, right_text, src));
+    out.push(go_range_value_assignment(
+        span, target, right, right_text, src, true,
+    ));
     out
 }
 
@@ -2946,6 +3298,7 @@ fn go_range_value_assignment(
     right: Node<'_>,
     right_text: &str,
     src: &[u8],
+    yield_result: bool,
 ) -> FlowEvent {
     let call = go_call_expression_parts(right, src);
     let source_call = call.as_ref().map(|(name, _)| name.clone());
@@ -2964,7 +3317,9 @@ fn go_range_value_assignment(
     } else {
         Vec::new()
     };
-    let value_kind = if source_call.is_some() {
+    let value_kind = if source_call.is_some() && yield_result {
+        bonsai_lang_api::AssignValueKind::YieldResult
+    } else if source_call.is_some() {
         bonsai_lang_api::AssignValueKind::CallResult
     } else {
         bonsai_lang_api::AssignValueKind::Compound
@@ -2978,6 +3333,120 @@ fn go_range_value_assignment(
         source_names,
         declares_new_binding: true,
         value_kind: Some(value_kind),
+    }
+}
+
+/// A value sent on a channel that the same function returns is an exact
+/// yielded element of that function's channel result. Preserve the ordinary
+/// `ChannelSend` call for navigation and add the generic `Yield` endpoint used
+/// by cross-function element stitching. The function is invoked only for
+/// declarations whose parsed result type is a channel; matching the returned
+/// carrier below prevents unrelated sends from being exposed as results.
+fn augment_go_returned_channel_yields(events: &mut Vec<FlowEvent>) {
+    fn returned_channel_names(events: &[FlowEvent], out: &mut std::collections::HashSet<String>) {
+        for event in events {
+            match event {
+                FlowEvent::Return {
+                    value_name,
+                    value_flow,
+                    ..
+                } => {
+                    if let Some(name) = value_flow.place.as_ref().or(value_name.as_ref()) {
+                        if !name.trim().is_empty() {
+                            out.insert(name.trim().to_string());
+                        }
+                    }
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    returned_channel_names(then_events, out);
+                    returned_channel_names(else_events, out);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => returned_channel_names(body, out),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    returned_channel_names(body, out);
+                    returned_channel_names(catch_events, out);
+                    returned_channel_names(finally_events, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn inject(events: &mut Vec<FlowEvent>, returned: &std::collections::HashSet<String>) {
+        for event in events.iter_mut() {
+            match event {
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    inject(then_events, returned);
+                    inject(else_events, returned);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => inject(body, returned),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    inject(body, returned);
+                    inject(catch_events, returned);
+                    inject(finally_events, returned);
+                }
+                _ => {}
+            }
+        }
+
+        let mut rewritten = Vec::with_capacity(events.len());
+        for event in events.drain(..) {
+            let yielded = match &event {
+                FlowEvent::Call {
+                    span,
+                    receiver: Some(receiver),
+                    call_kind: CallKind::ChannelSend,
+                    args,
+                    ..
+                } if returned.contains(receiver.trim()) => args.get(1).map(|value| FlowEvent::Yield {
+                    span: *span,
+                    value_text: Some(value.value_text.clone()),
+                    value_flow: bonsai_lang_api::ExpressionFlow {
+                        place: value.place.clone(),
+                        projection: value
+                            .place
+                            .as_deref()
+                            .and_then(bonsai_lang_api::ExpressionProjection::from_adapter_place),
+                        source_names: value.source_names.clone(),
+                        ..bonsai_lang_api::ExpressionFlow::default()
+                    },
+                }),
+                _ => None,
+            };
+            rewritten.push(event);
+            if let Some(yielded) = yielded {
+                rewritten.push(yielded);
+            }
+        }
+        *events = rewritten;
+    }
+
+    let mut returned = std::collections::HashSet::new();
+    returned_channel_names(events, &mut returned);
+    if !returned.is_empty() {
+        inject(events, &returned);
     }
 }
 
@@ -3346,7 +3815,17 @@ fn collect_go_embedded_type_names(node: Node<'_>, src: &[u8], bases: &mut Vec<St
             let named_field = current.child_by_field_name("name").is_some();
             if !named_field {
                 if let Some(type_node) = current.child_by_field_name("type") {
-                    if let Some(base) = canonical_go_type_name(node_text(&type_node, src)) {
+                    let raw_type = node_text(&type_node, src);
+                    if let Some(base) = canonical_go_type_name(raw_type) {
+                        push_unique_string(bases, base);
+                    }
+                    // Keep the import-qualified identity alongside the short
+                    // dispatch name. An embedded `web.Controller` promotes
+                    // its methods onto the containing struct, and security
+                    // rules must be able to prove that ownership without
+                    // treating every local type named `Controller` as the
+                    // framework base.
+                    if let Some(base) = qualified_go_type_name(raw_type) {
                         push_unique_string(bases, base);
                     }
                 } else if let Some(base) = first_type_identifier_text(current, src) {
@@ -3363,40 +3842,7 @@ fn collect_go_embedded_type_names(node: Node<'_>, src: &[u8], bases: &mut Vec<St
 
 fn collect_go_local_type_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<TypeAliasBinding>) {
     for var_spec in collect_kinds_under(&node, &["var_spec"]) {
-        let names = go_var_spec_names(var_spec, src);
-        if names.is_empty() {
-            continue;
-        }
-        let declared_type = var_spec
-            .child_by_field_name("type")
-            .and_then(|type_node| canonical_go_type_name(node_text(&type_node, src)));
-        let concrete_type = var_spec
-            .child_by_field_name("value")
-            .and_then(|value_node| first_go_composite_literal_type(value_node, src));
-        let concrete_qualified_type = var_spec
-            .child_by_field_name("value")
-            .and_then(|value_node| first_go_composite_literal_qualified_type(value_node, src));
-        // WS2: `var c = make().(Foo)` — the type assertion is the only
-        // type signal; binds the (first) name to the asserted type.
-        let assertion_type = var_spec
-            .child_by_field_name("value")
-            .and_then(|value_node| go_direct_type_assertion_type(value_node, src));
-        for (index, name) in names.iter().enumerate() {
-            if let Some(ty) = declared_type.as_deref() {
-                push_go_type_alias(aliases, name, ty);
-            }
-            if let Some(ty) = concrete_type.as_deref() {
-                push_go_type_alias(aliases, name, ty);
-            }
-            if let Some(ty) = concrete_qualified_type.as_deref() {
-                push_go_type_alias(aliases, name, ty);
-            }
-            if index == 0 {
-                if let Some(ty) = assertion_type.as_deref() {
-                    push_go_type_alias(aliases, name, ty);
-                }
-            }
-        }
+        collect_go_var_spec_type_aliases(var_spec, src, aliases);
     }
     // Short declarations are not `var_spec` nodes. Bind each top-level LHS
     // to the corresponding AST-proven composite-literal type, and retain the
@@ -3431,6 +3877,48 @@ fn collect_go_local_type_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<T
         // second result is a boolean, never the asserted type.
         if let (Some(name_node), Some(ty)) = (names.first(), go_direct_type_assertion_type(right, src)) {
             push_go_type_alias(aliases, node_text(name_node, src).trim(), &ty);
+        }
+    }
+}
+
+fn collect_go_var_spec_type_aliases(var_spec: Node<'_>, src: &[u8], aliases: &mut Vec<TypeAliasBinding>) {
+    let names = go_var_spec_names(var_spec, src);
+    if names.is_empty() {
+        return;
+    }
+    let declared_type = var_spec
+        .child_by_field_name("type")
+        .and_then(|type_node| canonical_go_type_name(node_text(&type_node, src)));
+    let declared_qualified_type = var_spec
+        .child_by_field_name("type")
+        .and_then(|type_node| qualified_go_type_name(node_text(&type_node, src)))
+        .filter(|qualified| declared_type.as_deref() != Some(qualified.as_str()));
+    let concrete_type = var_spec
+        .child_by_field_name("value")
+        .and_then(|value_node| first_go_composite_literal_type(value_node, src));
+    let concrete_qualified_type = var_spec
+        .child_by_field_name("value")
+        .and_then(|value_node| first_go_composite_literal_qualified_type(value_node, src));
+    let assertion_type = var_spec
+        .child_by_field_name("value")
+        .and_then(|value_node| go_direct_type_assertion_type(value_node, src));
+    for (index, name) in names.iter().enumerate() {
+        if let Some(ty) = declared_type.as_deref() {
+            push_go_type_alias(aliases, name, ty);
+        }
+        if let Some(ty) = declared_qualified_type.as_deref() {
+            push_go_type_alias(aliases, name, ty);
+        }
+        if let Some(ty) = concrete_type.as_deref() {
+            push_go_type_alias(aliases, name, ty);
+        }
+        if let Some(ty) = concrete_qualified_type.as_deref() {
+            push_go_type_alias(aliases, name, ty);
+        }
+        if index == 0 {
+            if let Some(ty) = assertion_type.as_deref() {
+                push_go_type_alias(aliases, name, ty);
+            }
         }
     }
 }
@@ -3479,6 +3967,9 @@ fn collect_go_projected_receiver_aliases(
                 receiver: Some(receiver),
                 ..
             } => {
+                if base_aliases.iter().any(|alias| alias.name == *receiver) {
+                    continue;
+                }
                 if let Some(root) = go_projected_receiver_root(receiver) {
                     for alias in base_aliases.iter().filter(|alias| alias.name == root) {
                         let projected = TypeAliasBinding {

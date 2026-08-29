@@ -77,21 +77,6 @@
     expect_no_match: true
   description: "Template.Parse(tainted) - covers Scriban and DotLiquid (same `[Template, Parse]` attribute chain)."
 
-- id: csharp.template.dotliquid_template_parse
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: ssti
-  severity: high
-  packages: [DotLiquid]
-  cwe: [CWE-1336]
-  match:
-    kind: call
-    callee:
-      attribute: [Template, Parse]
-  description: "Disabled - merged into csharp.template.scriban_template_parse."
-
 - id: csharp.template.handlebars_compile
   enabled: true
   language: csharp

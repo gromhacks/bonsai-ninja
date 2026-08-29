@@ -115,26 +115,12 @@
     expect_no_match: true
   description: "Process.runSync(runInShell: true) - shell-interpreted exec where tainted command arguments execute arbitrary commands."
 
-- id: dart.cmdi.process_start
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: command-injection
-  severity: high
-  cwe: [CWE-78]
-  match:
-    kind: call
-    callee:
-      attribute: [Process, start]
-  description: "Disabled - Process.start without `runInShell: true` is argv-form (safe). The real RCE sink is dart.cmdi.process_start_in_shell."
-
 - id: dart.cmdi.process_start_in_shell
   enabled: true
   language: dart
   tag: command-injection
   severity: critical
-  packages: [dart:io]
+  packages: ["dart:io"]
   cwe: [CWE-78]
   match:
     kind: call
@@ -172,7 +158,7 @@
   language: dart
   tag: command-injection
   severity: critical
-  packages: [dart:io]
+  packages: ["dart:io"]
   cwe: [CWE-78]
   match:
     kind: call
@@ -200,7 +186,7 @@
   language: dart
   tag: command-injection
   severity: critical
-  packages: [dart:io]
+  packages: ["dart:io"]
   cwe: [CWE-78]
   match:
     kind: call
@@ -228,7 +214,7 @@
   language: dart
   tag: command-injection
   severity: critical
-  packages: [dart:io]
+  packages: ["dart:io"]
   cwe: [CWE-78]
   match:
     kind: call

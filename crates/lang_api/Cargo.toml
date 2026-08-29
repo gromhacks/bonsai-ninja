@@ -18,6 +18,7 @@ path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }
+bonsai_hash = { workspace = true }
 bonsai_diagnostics = { workspace = true }
 bonsai_vfs = { workspace = true }
 tree-sitter = { workspace = true }

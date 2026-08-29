@@ -57,7 +57,9 @@ Typing rules declare at least one non-finding compiler model:
   constructor result type.
 - `callback_param_types` plus `match.kind: call` and
   `callback_arg_index` declares an external signature for an inline callback
-  argument.
+  argument. Optional `callback_field_path` selects a callback nested beneath
+  exact static aggregate fields of that argument. Dynamic keys, spreads,
+  duplicate paths, and different fields fail closed.
 - `callback_param_types` plus `match.kind: type` declares an external
   functional-interface/callable signature; `callback_arg_index` is omitted.
 - `taint_semantics` declares a library transfer summary.
@@ -84,29 +86,26 @@ without inventing a runtime method name. Pair syntax-only call kinds with
 rule-owned receiver/package/type constraints; shared matching never maps them
 to a framework API.
 
-## Disabled rules
+## Executable bundled rules
 
-Disabled rules need a reason:
+Every rule in the bundled pack is enabled and executable. Duplicate identities
+belong in an enabled canonical rule's `aliases`; family-level inapplicability
+belongs in `metadata.yml`; proposals that still need a compiler fact or a safe
+constraint do not belong in production YAML. Workspace-local overlays retain
+the ability to disable a bundled rule as explicit project policy.
 
-```yaml
-enabled: false
-disabled_reason:
-  code: requires-constraint
-  reenable_when: "A receiver-type constraint is available."
-```
-
-Allowed codes are `subsumed`, `over-broad`, `requires-constraint`, and
-`pending-adapter-fact`. `subsumed` additionally requires `subsumed_by`; that
-chain must terminate at an enabled rule. The validator catches invalid codes
-and broken chains.
+For that overlay-only replacement case, `disabled_reason.code` accepts
+`subsumed`, `over-broad`, `requires-constraint`, or `pending-adapter-fact`.
+`subsumed` also requires `subsumed_by` to name an enabled replacement. These
+codes document a deliberate local policy; they are not accepted as parking
+states in the bundled pack.
 
 ## Capability-gated loading
 
 The matcher reads each adapter's `LanguageCapabilities` at rulepack load time;
-see the [Coverage Baseline](COVERAGE_BASELINE.md). A rule that anchors on
-a construct the adapter declares `Unsupported` is rejected - typically
-with `disabled_reason.code: pending-adapter-fact` - so it can't fire on
-shapes the engine wouldn't analyse precisely.
+see the [Coverage Baseline](COVERAGE_BASELINE.md). A bundled rule that anchors
+on a construct the adapter declares `Unsupported` is rejected, so it cannot
+silently claim a shape the compiler does not analyse precisely.
 
 Recent capability promotions unblock several rule families:
 
@@ -150,6 +149,17 @@ meaning. When a parameter target declares both `annotation` and
 rule cover `Annotated[..., Body()]` and `value = Body(...)` without duplicating
 the security identity.
 
+Call, constructor, and write targets may declare `binding_origin: imported` or
+`binding_origin: runtime-global`. `imported` requires the target root to resolve
+through an exact adapter-emitted import alias and rejects a workspace-local
+module with that identity. `runtime-global` requires the runtime-provided root
+to remain unshadowed. In both modes, a parameter, preceding local value,
+file-scope binding, same-scope callable, or compiler-resolved workspace
+callable with the same root wins and rejects the rule match. Reference-only
+write fallbacks do not carry enough scope evidence and fail closed. Provider
+and global spellings remain in rule YAML; shared matching evaluates only
+lexical, import, module-resolution, and resolved-call facts.
+
 ## Constraints
 
 Constraints are post-filters applied after the basic match. All must pass.
@@ -160,6 +170,8 @@ Constraints are post-filters applied after the basic match. All must pass.
 | `receiver_type_not_in: [SafeType]` | Reject the match when a known receiver type matches the list. Missing type evidence does not prove the safe exclusion. |
 | `receiver_matches_regex: <regex>` / `receiver_not_matches_regex: <regex>` | Match or reject the adapter-normalized receiver expression. A call without a receiver cannot satisfy either receiver-regex proof. |
 | `unless_prior_receiver_call: { call, static_string_args_regex }` | Keep the sink active unless a guaranteed earlier call on the same parsed receiver matches both the rule-owned target and decoded static-string argument sequence. Branch-only or dynamic arguments do not suppress it. |
+| `requires_prior_receiver_call: { call, static_string_args_regex }` | Require a guaranteed earlier call on the same parsed receiver with the declared callable identity and complete decoded static-string argument sequence. |
+| `requires_prior_receiver_write: { target, accepted_values, accepted_calls }` | Require the exact reaching definition of a rule-declared member on the same compiler receiver to equal a listed adapter-decoded scalar or an exact call whose declared scalar arguments match. Conflicting branches, loops, exception paths, dynamic writes, and receiver collisions fail closed. |
 | `second_arg_equals: <value>` | Compatibility shorthand for exact text equality on positional argument 1. Prefer `arg_equals: { index: 1, value }` in new rules. |
 | `arg_equals: { index, value }` | Arg N must equal `value`. |
 | `arg_tainted: { index \| kw }` | Engine must prove the named arg flows from a source. |
@@ -174,6 +186,7 @@ Constraints are post-filters applied after the basic match. All must pass.
 | `any_arg_matches_regex: <regex>` | Any argument matches regex (varargs / option bags). |
 | `arg_value_not_aggregate: N` | Reject a compiler-proven aggregate, sequence, or spread at arg N. Missing value-shape evidence keeps the dangerous rule active. |
 | `arg_sequence_items_equal: { argument_index, items }` | Require selected positions in one completely decoded positional sequence to equal one of the listed typed scalar values. |
+| `arg_aggregate_fields_equal: { argument_index, required_fields }` | Require exact typed scalar values at the listed static field paths in one complete, spread-free aggregate argument. Dynamic, duplicate, computed, or missing fields fail closed. |
 | `format_arg_index: N` | Treat arg N as a format string. |
 | `top_level: true \| false` | Legacy name for callable qualification: `true` requires a bare/unqualified callee; `false` requires a receiver- or namespace-qualified callee. It does not test lexical module scope. |
 | `arg_count: N` / `max_args: N` / `min_args: N` | Exact / upper / lower argcount bounds. |
@@ -245,22 +258,23 @@ is not simply "return value is tainted" or "arg N is tainted."
 |---|---|---|
 | `taint_semantics.source_output_args: [N, ...]` | source | Treat only the listed call arguments as tainted outputs. The call return is not a source. Use for out-buffer APIs such as `recv(fd, buf, len, flags)`, `SSL_read(ssl, buf, len)`, and `fgets(buf, size, stdin)`. |
 | `taint_semantics.source_output_args_from: N` | source | Treat every actual argument from `N` through the compiler-observed call arity as a tainted output. The call return is not a source. Use for true variadic output tails such as `scanf(format, ...)`, `fscanf(stream, format, ...)`, and database `Scan(...)`; this never imposes a destination cap. |
-| `taint_semantics.source_callback_args` | source | Declare the callback argument position and callback parameter positions that receive external data. The IDG uses compiler-resolved callback bindings and a distinct event-delivery edge. |
+| `taint_semantics.source_callback_args` | source | Declare the callback argument position and callback parameter positions that receive external data. Each entry uses explicit `source_param_indices`, an exact-arity `source_param_indices_from` tail, or both. The IDG uses compiler-resolved callback bindings and a distinct event-delivery edge. |
 | `taint_semantics.source_callback_only: true` | source | Suppress the ordinary call-result seed when the API returns a registration, task, status, or server handle. Omit it for hybrid APIs where both the synchronous return and callback delivery can carry input. |
 | `taint_semantics.call_result_passthrough_args: [N, ...]` | sanitizer/passthrough | Treat the listed call arguments as flowing unchanged to the call result. Use for decode/unescape APIs that preserve attacker control while changing representation. |
 | `taint_semantics.call_result_passthrough_receiver: true` | sanitizer/passthrough | Treat the method receiver as flowing unchanged to the call result. Use for receiver transforms such as `value.removingPercentEncoding`. |
 | `taint_semantics.output_arg_flows` | source/sink/sanitizer/passthrough | Treat selected value arguments as flowing into a listed output argument. Use for formatter/copy APIs that write a tainted payload into a caller-owned buffer. |
 | `taint_semantics.clean_output_overwrite` | sanitizer | Treat an output argument as clean when the configured value inputs are clean. |
-| `taint_semantics.taint_receiver_from_args: true` | sink | Treat tainted arguments as mutating the receiver state for later `receiver_tainted` sinks, using the rule's structured callee target. |
+| `taint_semantics.clean_receiver_overwrite: true` | sanitizer | At matcher-approved call spans, commit a fresh clean definition for the exact compiler receiver after the call. Use only for in-place sanitizer operations; the callee, constraints, and security meaning remain rule data. |
+| `taint_semantics.taint_receiver_from_args: true` | sink/typing | Treat tainted call arguments or an exact matched property-write value as mutating receiver state for later `receiver_tainted` sinks. |
 
 For a receiver-mutating rule with an external `receiver_type_in` constraint,
-security first compiles the rule through the canonical AST matcher. A call is
-admitted only after its imports, package evidence, call kind, exact external
-typing, and workspace-shadowing checks succeed. The resulting exact call span
-is part of the IDG transfer fingerprint; the IDG does not match the library
-name itself. This rule match proves the receiver identity only—the fixed point
-must still prove that the configured argument is tainted before receiver state
-changes.
+security first compiles the rule through the canonical AST matcher. A call or
+property write is admitted only after its imports, package evidence, operation
+kind, exact external typing, and workspace-shadowing checks succeed. The
+resulting exact syntax span is part of the IDG transfer fingerprint; the IDG
+does not match the library name itself. This rule match proves the receiver
+identity only—the fixed point must still prove that the argument or assigned
+value is tainted before receiver state changes.
 
 `source_output_args` is intentionally narrow. It prevents source calls
 from tainting unrelated operands such as file descriptors, size
@@ -287,6 +301,19 @@ assigned listener/server/subscription handle from becoming a false source.
 The approved registration spans are fingerprinted graph inputs. Whole
 structured callback parameters reach compiler-materialized field reads, and
 ordinary exact field overwrites still kill the earlier value.
+`source_param_indices_from: N` expands only through the compiler-declared
+callback arity, so a variadic delivery contract has neither a guessed ceiling
+nor invented parameters. Callback parameters not selected by the rule keep
+their ordinary compiler argument bindings.
+
+`clean_receiver_overwrite` models an in-place operation whose matched call
+constrains or replaces the receiver itself. Security compiles the complete
+sanitizer match—including imports, types, arguments, and other constraints—to
+exact call spans before IDG construction. The IDG reads the old receiver for
+the call, then commits a fresh receiver writer with no incoming taint edge;
+same-named calls outside those approved spans remain ordinary mutations/calls.
+The semantic is valid only for sanitizer `kind: call` rules with an exact
+callee target.
 
 `call_result_passthrough_args` and `call_result_passthrough_receiver`
 keep representation-changing APIs configurable in the rulepack. The
@@ -473,11 +500,15 @@ binding. Shared package matching applies those declarations generically and
 does not know runtime schemes, header extensions, namespace syntax, or a
 language id.
 
-Call constraints can also require exact positional aggregate values with
-`arg_sequence_items_equal`. The adapter decodes array/list initializer
-elements into `StaticScalarValue` entries; dynamic elements remain explicit
-`None`. This distinguishes direct argv execution from an explicit `sh -c`
-wrapper without parsing source tokens in the matcher.
+Call constraints can require exact positional sequence values with
+`arg_sequence_items_equal` or exact aggregate configuration fields with
+`arg_aggregate_fields_equal`. The adapter decodes array/list initializer
+elements and static object/map/hash field paths into `StaticScalarValue`
+entries; dynamic sequence elements remain explicit `None`, while a spread,
+computed key, duplicate required field, or dynamic required value makes the
+aggregate proof fail closed. This distinguishes direct argv execution from an
+explicit `sh -c` wrapper and insecure configuration from a similarly named
+safe/local option without parsing source tokens in the matcher.
 
 ## Output formats
 
@@ -507,7 +538,7 @@ semantic evidence today, so the field is normally `true` with an empty reason
 list; if a future mode reports incomplete evidence, it must populate the same
 fields instead of relying on implicit precision.
 
-## Source-analysis mode
+## Source-analysis command
 
 `security source-analysis` runs the engine forward from each matched
 source without requiring a sink rule. Useful for "where does this data
@@ -529,7 +560,7 @@ and `lineage`. If representative lineage rendering hits its hop or path
 budget, the row is explicitly marked incomplete instead of being presented
 as complete evidence.
 
-## Sink-analysis mode
+## Sink-analysis command
 
 `security sink-analysis` is the sink-centric counterpart to source-analysis.
 It retains every selected taint-relevant sink endpoint and maps exact
@@ -542,8 +573,10 @@ Sink-analysis shares the taint-analysis endpoint matcher, compiler-resolved
 call graph, typed transfer facts, and sparse IDG fixed point. It compiles one
 sink-relevant scope and validates each candidate compiler origin forward to
 the exact sink node; reverse relevance is pruning evidence, never the public
-proof. Pagination affects only which sink rows and bodies are rendered; it
-does not cap matching or propagation.
+proof. Source-rule matching is a separate demand-driven enrichment and is not
+performed for the default source-independent view. Pagination affects only
+which sink rows and bodies are rendered; it does not cap matching or
+propagation.
 
 ## Text flow labels
 
@@ -568,7 +601,7 @@ locally without scanning a workspace. It catches:
 
 - missing `match_examples`,
 - examples that wouldn't fire on their own canonical shape,
-- broken `subsumed_by` chains,
+- disabled entries in a bundled pack,
 - severity / CWE typos,
 - match shapes incompatible with the language's adapter capabilities.
 

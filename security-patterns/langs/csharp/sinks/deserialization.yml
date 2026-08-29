@@ -244,56 +244,52 @@
   match:
     kind: write
     target:
-      name: TypeNameHandling
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.TypeNameHandling$'
+      receiver_type_in: [JsonSerializerSettings, Newtonsoft.Json.JsonSerializerSettings]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:TypeNameHandling\.)?(?:Auto|All|Arrays|Objects)$'
   match_examples:
-  - name: declared shape
+  - name: typed serializer settings enable runtime type names
     code: |
       using Newtonsoft.Json;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TypeNameHandling = input; } }
+      class App {
+        void Configure(JsonSerializerSettings settings) {
+          settings.TypeNameHandling = TypeNameHandling.Auto;
+        }
+      }
+    expect_match_text: [settings.TypeNameHandling]
+  - name: typed serializer settings disable runtime type names
+    code: |
+      using Newtonsoft.Json;
+      class App {
+        void Configure(JsonSerializerSettings settings) {
+          settings.TypeNameHandling = TypeNameHandling.None;
+        }
+      }
+    expect_no_match: true
+  - name: unrelated settings collision
+    code: |
+      using Newtonsoft.Json;
+      class LocalSettings { public TypeNameHandling TypeNameHandling { get; set; } }
+      class App {
+        void Configure(LocalSettings settings) {
+          settings.TypeNameHandling = TypeNameHandling.Auto;
+        }
+      }
+    expect_no_match: true
+  - name: local serializer settings type collision
+    code: |
+      using Newtonsoft.Json;
+      class JsonSerializerSettings { public TypeNameHandling TypeNameHandling { get; set; } }
+      class App {
+        void Configure(JsonSerializerSettings settings) {
+          settings.TypeNameHandling = TypeNameHandling.Auto;
+        }
+      }
+    expect_no_match: true
   description: "JsonSerializerSettings.TypeNameHandling != None - gadget-chain RCE."
-
-- id: csharp.deser.jsonconvert_deserialize_types
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: insecure-deserialization
-  severity: high
-  packages: [Newtonsoft.Json]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [JsonConvert, DeserializeObject]
-  description: "Disabled - DeserializeObject is safe unless TypeNameHandling set."
-
-- id: csharp.deser.xmlserializer_deserialize_dynamictype
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: insecure-deserialization
-  severity: medium
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [XmlSerializer, Deserialize]
-  description: "Disabled - XmlSerializer is safe unless type-resolver tainted."
-
-- id: csharp.deser.datacontractjson_deserialize
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: insecure-deserialization
-  severity: medium
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [DataContractJsonSerializer, ReadObject]
-  description: "Disabled - DataContractJsonSerializer is type-bounded."
 
 - id: csharp.deser.yamldotnet_deserialize_object
   enabled: true
@@ -412,21 +408,6 @@
     expect_no_match: true
   description: "MessagePackSerializer.Typeless - typeless API path used to deserialize attacker bytes into arbitrary types."
 
-- id: csharp.deser.servicestack_text_deserialize
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: insecure-deserialization
-  severity: medium
-  packages: [ServiceStack.Text]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [JsonSerializer, DeserializeFromString]
-  description: "Disabled - ServiceStack.Text JsonSerializer.DeserializeFromString is type-bounded; flag only when target type uses runtime type discrimination."
-
 - id: csharp.deser.fastjson_toobject
   enabled: true
   language: csharp
@@ -453,21 +434,6 @@
     expect_no_match: true
   description: "fastJSON JSON.ToObject - uses $type metadata by default (UseExtensions=true), enabling gadget instantiation."
 
-- id: csharp.deser.jsonconvert_deserialize_with_typename
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: insecure-deserialization
-  severity: high
-  packages: [Newtonsoft.Json]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [JsonSerializer, Deserialize]
-  description: "Disabled - JsonSerializer.Deserialize is safe unless TypeNameHandling != None on the configured serializer; flag with constraint."
-
 - id: csharp.deser.objectstateformatter_deserialize_string
   enabled: true
   language: csharp
@@ -490,24 +456,3 @@
       class App { void Test() { ObjectStateFormatter.DeserializeWithAssert("safe"); } }
     expect_no_match: true
   description: "ObjectStateFormatter.DeserializeWithAssert - ViewState parsing path; gadget RCE when MAC is disabled or key leaked."
-
-# Historical alias retained disabled; the canonical BinaryFormatter rule owns
-# this exact/typed receiver surface under the strict matcher.
-- id: csharp.deser.binaryformatter
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: csharp.deser.binaryformatter_deserialize
-  language: csharp
-  tag: insecure-deserialization
-  severity: critical
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [BinaryFormatter, Deserialize]
-  match_examples:
-  - name: declared shape
-    code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; BinaryFormatter.Deserialize(input); } }
-  description: "Disabled - duplicate of csharp.deser.binaryformatter_deserialize under strict exact/typed receiver matching."

@@ -46,13 +46,11 @@
   description: "NSFileManager -removeItemAtPath: / -removeItemAtURL: - deletes arbitrary file when path is tainted."
 
 - id: objc.path.move_item_at_path
-  aliases:
-    - objc.upload_gcdwebserver_uploaded_file_path
   enabled: true
   language: objc
   tag: path-traversal
   severity: high
-  cwe: [CWE-22, CWE-434]
+  cwe: [CWE-22]
   match:
     kind: call
     callee:
@@ -68,15 +66,13 @@
       code: |
         void test(void) { moveItemAtPath(@"/tmp/input.txt", @"/tmp/safe.txt"); }
       expect_no_match: true
-  description: "NSFileManager -moveItemAtPath:toPath: / -moveItemAtURL:toURL: - relocates files; tainted src/dst permits arbitrary overwrite. Also covers merged aliases: objc.upload_gcdwebserver_uploaded_file_path."
+  description: "NSFileManager -moveItemAtPath:toPath: / -moveItemAtURL:toURL: - a tainted source path permits an arbitrary move."
 - id: objc.path.move_item_at_path_dest
-  aliases:
-    - objc.upload_gcdwebserver_uploaded_file_path_dest
   enabled: true
   language: objc
   tag: path-traversal
   severity: high
-  cwe: [CWE-22, CWE-434]
+  cwe: [CWE-22]
   match:
     kind: call
     callee:
@@ -213,23 +209,70 @@
   language: objc
   tag: path-traversal
   severity: high
+  packages: [Foundation]
+  imports: [Foundation]
   cwe: [CWE-22]
   match:
     kind: call
     callee:
-      regex: "^(dataWithContentsOfFile|dataWithContentsOfMappedFile)$"
+      regex: '^(?:NSData\.)?(?:dataWithContentsOfFile(?::options:error:)?|dataWithContentsOfMappedFile)$'
+      binding_origin: imported
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {name: stringByStandardizingPath}
+      canonicalizer_input_from_receiver: true
+      base_canonicalizer: {name: stringByStandardizingPath}
+      path_constructor: {name: stringByAppendingPathComponent}
+      path_constructor_base_from_receiver: true
+      containment_check: {name: hasPrefix}
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: []
+      boundary_builders:
+      - call: {name: stringByAppendingString}
+        base_from_receiver: true
+        boundary_arg_index: 0
+        accepted_boundary_values:
+        - {kind: string, value: "/"}
   match_examples:
     - name: declared shape
       code: |
-        void test(id input) { id target = input; int amount = 1; dataWithContentsOfFile(input); }
+        #import <Foundation/Foundation.h>
+        void test(NSString *input) { [NSData dataWithContentsOfFile:input]; }
     - name: literal data file negative
       code: |
-        void test(void) { dataWithContentsOfFile(@"/tmp/safe.txt"); }
+        #import <Foundation/Foundation.h>
+        void test(void) { [NSData dataWithContentsOfFile:@"/tmp/safe.txt"]; }
       expect_no_match: true
-  description: "NSData +dataWithContentsOfFile: / +dataWithContentsOfMappedFile: - reads arbitrary file into memory when path is tainted."
+    - name: options overload retains the path argument
+      code: |
+        #import <Foundation/Foundation.h>
+        void test(NSString *input) {
+          NSError *error = nil;
+          [NSData dataWithContentsOfFile:input options:0 error:&error];
+        }
+      expect_match_text: ['NSData.dataWithContentsOfFile:options:error:']
+    - name: literal options overload negative
+      code: |
+        #import <Foundation/Foundation.h>
+        void test(void) {
+          NSError *error = nil;
+          [NSData dataWithContentsOfFile:@"/tmp/safe.txt" options:0 error:&error];
+        }
+      expect_no_match: true
+    - name: local class collision negative
+      code: |
+        #import <Foundation/Foundation.h>
+        @interface NSData
+        + (id)dataWithContentsOfFile:(id)value;
+        @end
+        void test(id input) { [NSData dataWithContentsOfFile:input]; }
+      expect_no_match: true
+  description: "NSData +dataWithContentsOfFile:, +dataWithContentsOfFile:options:error:, and +dataWithContentsOfMappedFile: read arbitrary files into memory when the path argument is tainted."
 
 - id: objc.path.string_with_contents_of_file
   enabled: true
@@ -347,20 +390,3 @@
         void test(void) { [SSZipArchive unzipFileAtPath:@"bundle.zip" toDestination:@"/tmp/out"]; }
       expect_no_match: true
   description: "SSZipArchive unzipFileAtPath:toDestination: - extracts archive entries; entry names are attacker-controlled, so any name with `..` escapes the destination dir."
-- id: objc.path.sszip_unzip_with_password
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: objc
-  tag: zip-slip
-  severity: high
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      name: unzipFileAtPath
-  match_examples:
-    - name: declared shape
-      code: |
-        void test(id input) { id target = input; int amount = 1; [SSZipArchive unzipFileAtPath:input toDestination:input overwrite:YES password:input error:nil]; }
-  description: "Disabled duplicate - Objective-C selector facts expose the same `unzipFileAtPath` call shape as objc.path.sszip_unzip_file_at_path, which is the canonical SSZipArchive Zip Slip rule."

@@ -31,6 +31,73 @@ fn db_with_one_file() -> AnalyzerDb {
 }
 
 #[test]
+fn cached_source_inputs_match_legacy_workspace_content_fingerprint() {
+    let vfs = Arc::new(Vfs::new());
+    vfs.write(
+        "src/z.py".to_string(),
+        Arc::<str>::from("def z(value):\n    return value\n"),
+    );
+    vfs.write(
+        "src/a.py".to_string(),
+        Arc::<str>::from("def a(value):\n    return value\n"),
+    );
+    let db = AnalyzerDb::new(vfs.clone(), Arc::new(LanguageRegistry::new()));
+    let source_inputs = vfs
+        .all_files()
+        .into_iter()
+        .map(|file| {
+            let path = vfs.path(file).expect("source path");
+            let snapshot = vfs.snapshot(file).expect("source snapshot");
+            (
+                file.raw(),
+                path.to_string_lossy().into_owned(),
+                bonsai_hash::fnv1a_bytes64(snapshot.text.as_bytes()),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        workspace_content_fingerprint_from_cached_inputs(&db, Some(&source_inputs)),
+        crate::cache_fingerprint::workspace_content_fingerprint(&db),
+        "validated source-input hashes must reconstruct the legacy byte-hash identity exactly"
+    );
+}
+
+#[test]
+fn cached_source_fingerprint_preserves_path_identity_and_order_stability() {
+    let db = db_with_one_file();
+    let mut source_inputs = vec![
+        (41, "src/z.py".to_string(), 0x0123_4567_89ab_cdef),
+        (7, "src/a.py".to_string(), 0xfedc_ba98_7654_3210),
+    ];
+    let expected = workspace_content_fingerprint_from_cached_inputs(&db, Some(&source_inputs));
+
+    source_inputs.reverse();
+    assert_eq!(
+        workspace_content_fingerprint_from_cached_inputs(&db, Some(&source_inputs)),
+        expected,
+        "compiler input enumeration order must not change workspace identity"
+    );
+
+    source_inputs[0].1 = "src/renamed.py".to_string();
+    assert_ne!(
+        workspace_content_fingerprint_from_cached_inputs(&db, Some(&source_inputs)),
+        expected,
+        "source paths remain part of the exact workspace identity"
+    );
+}
+
+#[test]
+fn missing_cached_source_inputs_fall_back_to_legacy_vfs_hashing() {
+    let db = db_with_one_file();
+    assert_eq!(
+        workspace_content_fingerprint_from_cached_inputs(&db, None),
+        crate::cache_fingerprint::workspace_content_fingerprint(&db),
+        "a cache miss must preserve the existing exact VFS fingerprint path"
+    );
+}
+
+#[test]
 fn idg_pipeline_hash_tracks_dependency_metadata() {
     let root = tempdir_for_test("bonsai-idg-pipeline-deps");
     std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"demo\"\n").expect("write pyproject");
@@ -118,6 +185,10 @@ fn workspace_generation_reuses_pipeline_identity_until_an_edit() {
     std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"demo\"\n").expect("write pyproject");
     let workspace = Workspace::new(Arc::new(LanguageRegistry::new()));
     workspace.apply_edit(&root.join("app.py"), "def entry(x):\n    return x\n".to_string());
+    workspace.set_complete_workspace_index(true);
+    workspace
+        .complete_source_content_hashes()
+        .expect("cache exact source inputs");
 
     let before = workspace.cached_idg_workspace_pipeline_hash(Some(&root));
     std::fs::write(
@@ -235,12 +306,14 @@ fn idg_transfer_fingerprint_is_order_stable() {
                 callee: "source.callback".to_string(),
                 callback_arg_index: 2,
                 source_param_indices: vec![1, 0, 1],
+                source_param_indices_from: None,
                 resolved_call_sites: vec![source_transfer_site(30)],
             },
             bonsai_idg::SourceCallbackArgSpec {
                 callee: "source.callback".to_string(),
                 callback_arg_index: 2,
                 source_param_indices: vec![0, 1],
+                source_param_indices_from: None,
                 resolved_call_sites: vec![source_transfer_site(30)],
             },
         ],
@@ -277,6 +350,7 @@ fn idg_transfer_fingerprint_is_order_stable() {
             callee: "source.callback".to_string(),
             callback_arg_index: 2,
             source_param_indices: vec![0, 1],
+            source_param_indices_from: None,
             resolved_call_sites: vec![source_transfer_site(30)],
         }],
         ..bonsai_idg::TransferOptions::default()
@@ -297,6 +371,7 @@ fn idg_transfer_fingerprint_tracks_source_callback_shapes() {
             callee: "source.callback".to_string(),
             callback_arg_index: 1,
             source_param_indices: vec![0],
+            source_param_indices_from: None,
             resolved_call_sites: vec![source_transfer_site(10)],
         }],
         ..bonsai_idg::TransferOptions::default()
@@ -306,6 +381,36 @@ fn idg_transfer_fingerprint_tracks_source_callback_shapes() {
         idg_transfer_options_fingerprint(&plain),
         idg_transfer_options_fingerprint(&with_callback),
         "source-callback semantics change graph edges and must invalidate the transfer sidecar"
+    );
+}
+
+#[test]
+fn idg_transfer_fingerprint_tracks_variadic_source_callback_shapes() {
+    let fixed = bonsai_idg::TransferOptions {
+        source_callback_args: vec![bonsai_idg::SourceCallbackArgSpec {
+            callee: "source.callback".to_string(),
+            callback_arg_index: 1,
+            source_param_indices: vec![0],
+            source_param_indices_from: None,
+            resolved_call_sites: vec![source_transfer_site(10)],
+        }],
+        ..bonsai_idg::TransferOptions::default()
+    };
+    let variadic = bonsai_idg::TransferOptions {
+        source_callback_args: vec![bonsai_idg::SourceCallbackArgSpec {
+            callee: "source.callback".to_string(),
+            callback_arg_index: 1,
+            source_param_indices: Vec::new(),
+            source_param_indices_from: Some(0),
+            resolved_call_sites: vec![source_transfer_site(10)],
+        }],
+        ..bonsai_idg::TransferOptions::default()
+    };
+
+    assert_ne!(
+        idg_transfer_options_fingerprint(&fixed),
+        idg_transfer_options_fingerprint(&variadic),
+        "callback arity semantics change graph edges and must invalidate the transfer sidecar"
     );
 }
 

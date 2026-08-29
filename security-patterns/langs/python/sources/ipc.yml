@@ -1,0 +1,101 @@
+# Python cross-process IPC sources. Receiver types are required because the
+# method spellings also occur on ordinary application objects.
+- id: python.source.multiprocessing_connection_recv
+  enabled: true
+  language: python
+  trust: ipc
+  category: ipc-input
+  tag: ipc-input
+  payload_types: [event, json, text, binary]
+  packages: [multiprocessing]
+  imports: [multiprocessing]
+  match:
+    kind: call
+    callee:
+      name: recv
+  constraints:
+  - receiver_type_in: [Connection]
+  - arg_count: 0
+  match_examples:
+  - name: multiprocessing connection object receive
+    code: |
+      from multiprocessing.connection import Connection
+      def receive(connection: Connection):
+          return connection.recv()
+    expect_match_text: [connection.recv]
+  - name: application receiver is not IPC input
+    code: |
+      from multiprocessing.connection import Connection
+      class Mailbox:
+          def recv(self): return "local"
+      def receive(mailbox: Mailbox):
+          return mailbox.recv()
+    expect_no_match: true
+  description: "multiprocessing.connection.Connection.recv() deserializes one object supplied by the peer process on a compiler-typed connection."
+
+- id: python.source.multiprocessing_connection_recv_bytes
+  enabled: true
+  language: python
+  trust: ipc
+  category: ipc-input
+  tag: ipc-input
+  payload_types: [binary]
+  packages: [multiprocessing]
+  imports: [multiprocessing]
+  match:
+    kind: call
+    callee:
+      name: recv_bytes
+  constraints:
+  - receiver_type_in: [Connection]
+  - max_args: 1
+  match_examples:
+  - name: multiprocessing connection byte receive
+    code: |
+      from multiprocessing.connection import Connection
+      def receive(connection: Connection):
+          return connection.recv_bytes(4096)
+    expect_match_text: [connection.recv_bytes]
+  - name: unrelated byte reader is not IPC input
+    code: |
+      from multiprocessing.connection import Connection
+      class Reader:
+          def recv_bytes(self, limit): return b"local"
+      def receive(reader: Reader):
+          return reader.recv_bytes(4096)
+    expect_no_match: true
+  description: "multiprocessing.connection.Connection.recv_bytes([maxlength]) returns raw bytes supplied by the peer process."
+
+- id: python.source.subprocess_popen_communicate
+  enabled: true
+  language: python
+  trust: ipc
+  category: ipc-input
+  tag: ipc-input
+  payload_types: [text, binary]
+  packages: [subprocess]
+  imports: [subprocess]
+  match:
+    kind: call
+    callee:
+      name: communicate
+  constraints:
+  - receiver_type_in: [Popen]
+  - max_args: 2
+  match_examples:
+  - name: subprocess stdout and stderr receive
+    code: |
+      import subprocess
+      def receive(process: subprocess.Popen):
+          stdout, stderr = process.communicate(timeout=5)
+          return stdout
+    expect_match_text: [process.communicate]
+  - name: application protocol is not subprocess IPC
+    code: |
+      import subprocess
+      class Session:
+          def communicate(self, timeout=None): return ("local", "")
+      def receive(session: Session):
+          return session.communicate(timeout=5)
+    expect_no_match: true
+  description: "subprocess.Popen.communicate(input=None, timeout=None) returns stdout/stderr received from a child process on a compiler-typed Popen receiver."

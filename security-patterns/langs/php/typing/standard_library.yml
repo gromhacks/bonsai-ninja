@@ -1,5 +1,38 @@
 # Non-finding PHP standard-library transfer summaries. These values belong in
 # the rulepack so the compiler/IDG remains provider- and API-name agnostic.
+- id: php.typing.slim_app_factory_create
+  enabled: true
+  language: php
+  packages: [slim/slim]
+  # The PHP adapter emits this same fully-qualified import for both direct
+  # `use Slim\Factory\AppFactory` and grouped `use Slim\Factory\{AppFactory}`
+  # syntax, so the typing model stays exact without a namespace-prefix guess.
+  imports: [Slim\Factory\AppFactory]
+  returns_type: App
+  match:
+    kind: call
+    callee:
+      name: AppFactory::create
+      binding_origin: imported
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: Slim application factory
+    code: |
+      <?php
+      use Slim\Factory\AppFactory;
+      $app = AppFactory::create();
+      $app->get('/health', function ($request, $response) { return $response; });
+    expect_match_text: ["AppFactory::create"]
+  - name: unrelated create factory is not a Slim application
+    code: |
+      <?php
+      use Slim\Factory\AppFactory as SlimAppFactory;
+      class AppFactory { public static function create() { return new self(); } }
+      $app = AppFactory::create();
+    expect_no_match: true
+  description: "Slim AppFactory::create() returns a Slim App receiver. Typing-only; never a finding."
+
 - id: php.typing.array_map_result
   enabled: true
   language: php

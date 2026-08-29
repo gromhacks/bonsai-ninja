@@ -19,7 +19,6 @@
     code: |
       <?php
       use aws\awssdkphp;
-      use aws\awssdkphp;
       use aws\aws-sdk-php;
       function example($input, $url, $id, $payload, $request) {
         sendMessage($input);
@@ -37,20 +36,3 @@
   - aws
   - aws/awssdkphp
   - aws\awssdkphp
-- id: php.queue.publish
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: queue-injection
-  severity: high
-  packages:
-  - aws/aws-sdk-php
-  - google/cloud-pubsub
-  cwe:
-  - CWE-20
-  match:
-    kind: call
-    callee:
-      name: publish
-  description: Disabled - cloud publish is real queue fanout, but bare `publish` is too generic across PHP clients and app code.

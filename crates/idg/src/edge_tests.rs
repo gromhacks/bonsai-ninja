@@ -34,6 +34,7 @@ fn is_inter_only_for_inter_kinds() {
     assert!(IdgEdgeKind::InterThrow.is_inter());
     assert!(IdgEdgeKind::InterYield.is_inter());
     assert!(IdgEdgeKind::InterSourceCallback.is_inter());
+    assert!(IdgEdgeKind::InterSharedFieldState.is_inter());
     assert!(!IdgEdgeKind::IntraAssign.is_inter());
     assert!(!IdgEdgeKind::IntraRead.is_inter());
     assert!(!IdgEdgeKind::IntraReturn.is_inter());
@@ -42,7 +43,7 @@ fn is_inter_only_for_inter_kinds() {
 
 #[test]
 fn is_intra_is_negation_of_is_inter() {
-    for tag in 0u8..=15 {
+    for tag in 0u8..=16 {
         let kind = IdgEdgeKind::from_tag(tag).expect("known tag");
         assert_ne!(kind.is_intra(), kind.is_inter());
     }
@@ -50,7 +51,7 @@ fn is_intra_is_negation_of_is_inter() {
 
 #[test]
 fn tag_roundtrips_via_from_tag() {
-    for tag in 0u8..=15 {
+    for tag in 0u8..=16 {
         let kind = IdgEdgeKind::from_tag(tag).expect("known tag");
         assert_eq!(kind.tag(), tag);
     }
@@ -58,7 +59,7 @@ fn tag_roundtrips_via_from_tag() {
 
 #[test]
 fn from_tag_rejects_unknown_values() {
-    assert_eq!(IdgEdgeKind::from_tag(16), None);
+    assert_eq!(IdgEdgeKind::from_tag(17), None);
     assert_eq!(IdgEdgeKind::from_tag(255), None);
 }
 
@@ -91,11 +92,12 @@ fn edge_kind_tag_values_are_pinned() {
     assert_eq!(IdgEdgeKind::IntraAggregateConsume.tag(), 13);
     assert_eq!(IdgEdgeKind::InterYield.tag(), 14);
     assert_eq!(IdgEdgeKind::InterSourceCallback.tag(), 15);
+    assert_eq!(IdgEdgeKind::InterSharedFieldState.tag(), 16);
 }
 
 #[test]
 fn every_idg_edge_kind_declares_taxonomy_families() {
-    for tag in 0u8..=15 {
+    for tag in 0u8..=16 {
         let kind = IdgEdgeKind::from_tag(tag).expect("known tag");
         assert!(
             !kind.taxonomy().is_empty(),

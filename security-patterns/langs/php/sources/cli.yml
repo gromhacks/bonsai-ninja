@@ -13,18 +13,6 @@
   - name: php.source.argv example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $argv;;\n}\n"
   description: $argv - CLI arguments.
-- id: php.source.argc_read
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: cli-input
-  trust: local
-  match:
-    kind: read
-    target:
-      name: argc
-  description: Disabled - argc is a count, not a string source.
 - id: php.source.stdin_file_get_contents
   enabled: true
   language: php
@@ -202,7 +190,6 @@
     code: |
       <?php
       use symfony\console;
-      use symfony\console;
       function example($input, $url, $id, $payload, $request) {
         $input->getArgument($input);
       }
@@ -227,7 +214,6 @@
   - name: php.source.symfony_console_input_get_option example
     code: |
       <?php
-      use symfony\console;
       use symfony\console;
       function example($input, $url, $id, $payload, $request) {
         $input->getOption($input);

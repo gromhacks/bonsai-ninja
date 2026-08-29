@@ -1,7 +1,7 @@
 - id: kotlin.log_injection.slf4j_info_format
   enabled: true
   language: kotlin
-  tag: header-injection
+  tag: log-injection
   severity: medium
   packages:
   - slf4j

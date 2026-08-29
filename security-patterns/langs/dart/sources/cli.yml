@@ -24,21 +24,6 @@
     expect_no_match: true
   description: "First and only List parameter of Dart main - local command-line arguments, independent of the parameter name."
 
-- id: dart.cli.args_param
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: dart.cli.main_arguments
-  language: dart
-  trust: local
-  tag: local-input
-  payload_types: [text]
-  match:
-    kind: param
-    target:
-      name: args
-  description: "Subsumed by dart.cli.main_arguments, which matches Dart main(List<String>) by compiler signature instead of the name args."
-
 - id: dart.cli.stdin_readline_sync
   enabled: true
   language: dart
@@ -106,59 +91,8 @@
     expect_no_match: true
   description: "Platform.environment - process environment variables read via the static `Platform.environment` map."
 
-- id: dart.os.platform_script
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  trust: local
-  tag: local-input
-  payload_types: [text]
-  match:
-    kind: read
-    target:
-      attribute: [Platform, script]
-  match_examples:
-  - name: platform script read
-    code: |
-      import 'dart:io';
-      Uri run() {
-        var s = Platform.script;
-        return s;
-      }
-  description: "Disabled - Platform.script is runtime metadata identifying the executing script, not input supplied by a caller or external service."
-
-- id: dart.args.argparser_parse
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  trust: local
-  tag: local-input
-  payload_types: [text]
-  packages: [args]
-  match:
-    kind: call
-    callee:
-      attribute: [parser, parse]
-  match_examples:
-  - name: declared shape
-    code: |
-      import 'package:args/args.dart';
-      void test() { var input = "x"; var amount = 1; parser.parse(input); }
-  - name: unrelated parser method negative
-    code: |
-      import 'package:args/args.dart';
-      void test() { var input = "x"; parser.addOption(input); }
-    expect_no_match: true
-  description: "Disabled - ArgParser.parse transforms the list supplied by its caller; constants remain trusted and command-line provenance must come from main(List<String>)."
-
-  imports:
-  - args/args.dart
 - id: dart.flutter.text_editing_controller
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   trust: local
   tag: ui-input
@@ -182,7 +116,7 @@
       class Label { final String text = 'local'; }
       String read(Label label) => label.text;
     expect_no_match: true
-  description: "Disabled - the API is a valid local UI boundary, but the Dart adapter does not yet expose receiver-type evidence on property reads strongly enough for this rule to match without widening to every `.text` field."
+  description: "TextEditingController.text - local user-entered UI text. The rule requires the adapter-emitted receiver type, so unrelated application `.text` fields remain clean."
 
 - id: dart.local.file_content_read
   enabled: true
@@ -190,7 +124,7 @@
   trust: local
   tag: file-input
   payload_types: [text, binary]
-  packages: [dart:io]
+  packages: ["dart:io"]
   match:
     kind: call
     callee:

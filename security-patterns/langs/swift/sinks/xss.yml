@@ -1,4 +1,52 @@
-# Swift XSS sinks (WKWebView / UIWebView).
+# Swift XSS sinks (Vapor response emission / WKWebView / UIWebView).
+- id: swift.xss.vapor_response_body_constructor
+  enabled: true
+  language: swift
+  tag: xss
+  severity: high
+  packages: [Vapor]
+  imports: [Vapor]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      name: Response
+      binding_origin: imported
+  constraints:
+  - arg_tainted:
+      index: 1
+  analysis_semantics:
+    character_escape:
+      value_arg_indices: [1]
+      required_mappings:
+      - {input: "&", output: "&amp;"}
+      - {input: "<", output: "&lt;"}
+      - {input: ">", output: "&gt;"}
+      - {input: '"', output: "&quot;"}
+      - {input: "'", output: "&#39;"}
+  match_examples:
+  - name: Vapor Response constructed from a dynamic body
+    code: |
+      import Vapor
+      func emit(_ body: String) -> Response {
+        Response(status: .ok, body: .init(string: body))
+      }
+    expect_match_text: [Response]
+  - name: constant Vapor Response body is not tainted
+    code: |
+      import Vapor
+      func emit() -> Response {
+        Response(status: .ok, body: .init(string: "<p>safe</p>"))
+      }
+    expect_no_match: true
+  - name: local Response type is not the imported Vapor response
+    code: |
+      import Vapor
+      struct Response { init(status: Int, body: String) {} }
+      func emit(_ body: String) -> Response { Response(status: 200, body: body) }
+    expect_no_match: true
+  description: "Vapor's imported Response initializer is the framework emission boundary for a dynamic response body, including bodies produced by a separate view helper."
+
 - id: swift.xss.wkwebview_loadhtmlstring
   enabled: true
   language: swift
@@ -102,29 +150,3 @@
       func test() { userContentController.add("safe-script") }
     expect_no_match: true
   description: "WKUserContentController.add(WKUserScript) - untrusted user scripts can inject DOM code into every matching page."
-- id: swift.xss.webview_load_data
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: xss
-  severity: high
-  cwe: [CWE-79]
-  match:
-    kind: call
-    callee:
-      name: load
-  description: "Disabled - WKWebView.load(_: URLRequest); bare `.load()` is ubiquitous (Image/URL/Codable/etc.) without receiver narrowing."
-- id: swift.xss.html_string_from
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: xss
-  severity: medium
-  cwe: [CWE-79]
-  match:
-    kind: call
-    callee:
-      regex: "^loadHTML.*String$"
-  description: "Disabled - superseded by exact-match loadHTMLString rule; kept for reference."

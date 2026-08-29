@@ -1,33 +1,39 @@
-# C cloud / serverless sources.
-# C does not have a common first-party handler signature across AWS/Azure/GCP,
-# so keep conservative scaffolding here rather than pretending remote socket
-# reads cover FaaS payloads.
-- id: c.cloud.aws_lambda_event
-  enabled: false
-  disabled_reason:
-    code: over-broad
+# C cloud-service sources. C has no portable serverless handler ABI, so these
+# rules use concrete SDK-declared parameter types rather than conventional
+# variable names.
+- id: c.cloud.aws_iot_mqtt_deserialized_event
+  enabled: true
   language: c
   trust: service
   tag: cloud-event
-  payload_types: [event, json]
-  packages: [aws-lambda-c-runtime]
+  category: cloud-input
+  payload_types: [event, binary]
+  frameworks: [aws-iot]
+  packages: [core_mqtt.h, coreMQTT, aws-iot-device-sdk-embedded-c]
+  imports: [core_mqtt.h]
   match:
     kind: param
     target:
-      name: event
-  description: "Disabled - AWS Lambda custom-runtime `event` param is too broad without a runtime-specific bootstrap shape."
-
-- id: c.cloud.aws_lambda_context
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  trust: service
-  tag: cloud-event
-  payload_types: [event]
-  packages: [aws-lambda-c-runtime]
-  match:
-    kind: param
-    target:
-      name: context
-  description: "Disabled - Lambda context is runtime metadata; enable only with a concrete custom-runtime wrapper."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [MQTTDeserializedInfo_t, MQTTDeserializedInfo]
+  match_examples:
+  - name: AWS IoT coreMQTT deserialized callback event
+    code: |
+      #include "core_mqtt.h"
+      static bool on_mqtt_event(MQTTContext_t *ctx,
+                                MQTTPacketInfo_t *packet,
+                                MQTTDeserializedInfo_t *decoded,
+                                MQTTSuccessFailReasonCode_t *reason,
+                                MQTTPropBuilder_t *send_props,
+                                MQTTPropBuilder_t *recv_props) {
+        consume(decoded->pPublishInfo->pPayload);
+        return true;
+      }
+    expect_match_text: [decoded]
+  - name: similarly named application event is not AWS IoT input
+    code: |
+      #include "core_mqtt.h"
+      typedef struct { const char *payload; } LocalEvent;
+      static void helper(LocalEvent *decoded) { consume(decoded->payload); }
+    expect_no_match: true
+  description: "coreMQTT MQTTEventCallback_t deserialized-event parameter - incoming AWS IoT/MQTT packet data proven by the SDK's declared MQTTDeserializedInfo type."

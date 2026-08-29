@@ -13,6 +13,13 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    configured_call_argument_guard:
+      configuration_argument_index: 1
+      guarded_value_argument_indices: [0]
+      required_fields:
+      - path: [allow_entities]
+        value: {kind: boolean, value: false}
   match_examples:
   - name: declared shape
     code: |
@@ -99,21 +106,6 @@
 
   imports:
   - Sweet_xml
-- id: elixir.xxe.sweet_xml_sigil
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: elixir
-  tag: xxe
-  severity: low
-  packages: [sweet_xml]
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      name: sigil_x
-  description: "Disabled - SweetXml ~x sigil is usually a static XPath pattern, not tainted; enable when auditing dynamic XPath construction."
-
 - id: elixir.xxe.saxy_parse_string
   enabled: true
   language: elixir

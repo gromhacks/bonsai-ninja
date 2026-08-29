@@ -166,7 +166,7 @@ Assign {
   source_call_args: Vec<String>,   // call-arg texts when source_call set
   source_names: Vec<String>,       // bare identifiers in a compound RHS
   declares_new_binding: bool,      // CST node is a declaration (let/var/val/...)
-  value_kind: Option<AssignValueKind>, // Literal | CallResult | YieldResult | Destructure | CallableReference | Compound | Unknown
+  value_kind: Option<AssignValueKind>, // Literal | CallResult | PropertyRead | YieldResult | Destructure | CallableReference | AddressOfAggregate | Compound | WholeValueSelection | Unknown
 }
 ```
 
@@ -181,7 +181,7 @@ Adapter obligations:
   empty. Identifier sigils retained by the concrete grammar (`$x`,
   `@x`, `%x`) are canonicalized before argument-carrier pruning, so a
   call argument cannot also appear as an independent call-result source.
-- For a **compound RHS** (`y = a + b`, `y = f"{x}"`, `y = obj.field`):
+- For a **compound RHS** (`y = a + b`, `y = f"{x}"`):
   set `source_names` to every bare identifier visited; leave
   `source_name` and `source_call` empty.
 - For a **literal RHS** (`y = "abc"`, `y = 42`, `y = true`,
@@ -191,11 +191,19 @@ Adapter obligations:
   exact non-empty quoted token in `source_name` for runtime callable
   resolution. The value remains `Literal`, so IDG overwrite semantics still
   commit a clean writer and never treat the quoted token as value taint.
+- `PropertyRead` marks a compiler-proven property projection whose storage
+  value or resolved accessor return may supply the binding.
 - `YieldResult` marks a binding supplied by a callee yield/callback boundary;
   `Destructure` marks one field or position projected from an aggregate; and
   `CallableReference` marks a syntax-proven function value rather than an
   invocation. These shapes preserve their typed transfer role without
   inferring it from `source_name` text.
+- `AddressOfAggregate` marks an address-of expression whose operand is a
+  compiler-resolved aggregate object; rule data, not the adapter, assigns any
+  security meaning to that role.
+- `WholeValueSelection` marks a conditional or short-circuit expression that
+  selects one complete operand without combining it, preserving the selected
+  value's later field projections.
 - `declares_new_binding` is `true` when the CST kind unambiguously
   introduces a new local binding (`let`, `var`, `val`, `const`, `my`,
   `our`, `local`, Python first-assignment in scope, etc.). It is
@@ -302,10 +310,11 @@ Try {
 Adapter obligations:
 
 - `body` holds the try / begin block events.
-- `catch_events` is the **flattened union** of every catch / except /
-  rescue arm. Adapters that need to preserve per-arm precision should
-  emit separate `Try` events per arm; the canonical shape merges arms
-  to give the engine one catch region to reason about.
+- `catch_events` holds the catch / except / rescue region. A single arm
+  contains its events directly. Multiple arms are encoded as nested
+  conditionless `Branch` alternatives, preserving the runtime invariant that
+  one thrown value enters at most one matching handler. Adapters must not
+  flatten mutually exclusive arms into a sequential event list.
 - `catch_param` is the catch-arm's first-parameter binding: `e` in
   `catch (e)` / `except Exception as e:` / `rescue => e`. When
   present, the engine seeds the catch region with this name

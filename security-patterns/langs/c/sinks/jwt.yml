@@ -26,45 +26,6 @@
     expect_no_match: true
   description: "libjwt jwt_decode - flag if jwt_set_alg not pinned."
 
-- id: c.jwt.libjwt_new_with_string
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  tag: jwt
-  severity: medium
-  packages: [libjwt]
-  cwe: [CWE-347]
-  match:
-    kind: call
-    callee:
-      name: jwt_new
-  description: "Disabled - jwt_new creates token; flag with alg=none only."
-
-- id: c.jwt.cjose_jws_verify
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: c
-  tag: jwt
-  severity: high
-  packages: [cjose]
-  cwe: [CWE-347]
-  match:
-    kind: call
-    callee:
-      name: cjose_jws_verify
-  match_examples:
-  - name: generated direct match
-    code: |
-      #include <cjose.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        cjose_jws_verify(arg);
-      }
-  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT configuration, not just the broad API shape. cjose cjose_jws_verify - flag if alg whitelist missing."
-
 - id: c.jwt.l8w8jwt_decode
   enabled: true
   language: c
@@ -91,27 +52,3 @@
     code: "#include <l8w8jwt.h>\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  l8w8jwt_decode(arg);\n}\n"
     expect_no_match: true
   description: "l8w8jwt_decode."
-
-- id: c.jwt.jose_jws_verify_jwk
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: c
-  tag: jwt
-  severity: high
-  packages: [libjose]
-  cwe: [CWE-347]
-  match:
-    kind: call
-    callee:
-      name: jose_jws_ver
-  match_examples:
-  - name: generated direct match
-    code: |
-      #include <libjose/jose.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        jose_jws_ver(arg);
-      }
-  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT configuration, not just the broad API shape. libjose jose_jws_ver."

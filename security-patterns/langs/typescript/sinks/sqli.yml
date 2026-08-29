@@ -135,42 +135,6 @@
       }
     expect_no_match: true
   description: "Prisma prisma.$executeRawUnsafe - string-built SQL."
-- id: typescript.sqli.prisma_query_raw
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: typescript
-  tag: sql-injection
-  severity: medium
-  packages:
-  - '@prisma/client'
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - prisma
-      - $queryRaw
-  description: "Disabled - prisma.$queryRaw uses tagged templates (parameterised); only dangerous if tainted Prisma.sql is spliced as raw."
-- id: typescript.sqli.better_sqlite3_prepare
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: typescript
-  tag: sql-injection
-  severity: medium
-  packages:
-  - better-sqlite3
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - db
-      - prepare
-  description: "Disabled - db.prepare is parameterised; only dangerous if tainted string interpolation forms the SQL."
 - id: typescript.sqli.sqlite3_run
   enabled: true
   language: typescript
@@ -236,25 +200,6 @@
       }
     expect_no_match: true
   description: "sqlite3 / better-sqlite3 db.exec runs multiple statements as one raw string - no binding support."
-- id: typescript.sqli.better_sqlite3_exec
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: typescript.sqli.sqlite3_exec
-  language: typescript
-  tag: sql-injection
-  severity: high
-  packages:
-  - better-sqlite3
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - db
-      - exec
-  description: "Disabled duplicate - same db.exec shape is covered by typescript.sqli.sqlite3_exec with both package names."
 - id: typescript.sqli.method_query_concat
   enabled: true
   language: typescript
@@ -285,7 +230,6 @@
   description: "<recv>.query(sql) - package-anchored SQL-injection sink for database clients and ORMs that share the standard query verb. Merged aliases: typescript.sqli.method_query_sql_variable."
   aliases:
   - typescript.sqli.method_query_sql_variable
-  - typescript.nosql.typeorm_query
   - typescript.sqli.typeorm_entitymanager_query
   - typescript.sqli.typeorm_repository_query
   - typescript.sqli.typeorm_connection_query
@@ -313,7 +257,6 @@
   severity: critical
   cwe:
   - CWE-89
-  - CWE-943
   match:
     kind: call
     callee:
@@ -321,28 +264,24 @@
   constraints:
   - arg_tainted: {index: 0}
   match_examples:
-  - name: method execute concat
+  - name: mysql execute concat
     code: |
-      const _u = require("graphql");
+      const _u = require("mysql2");
       function demo(input, req, obj) {
         return conn.execute("SELECT * FROM users WHERE id = " + input);
       }
   - name: arg tainted literal negative
     code: |
-      const _u = require("graphql");
+      const _u = require("mysql2");
       function demo(input, req, obj) {
         return conn.execute("SELECT 1");
       }
     expect_no_match: true
-  description: "<recv>.execute(sql) - same shape as `query`. Merged collision aliases: typescript.graphql.schema_execute, typescript.nosql.cassandra_execute, typescript.sqli.mysql_execute, typescript.sqli.mysql_execute_db."
+  description: "mysql2 <recv>.execute(sql) - tainted SQL text reaches the database execution boundary."
   aliases:
-  - typescript.graphql.schema_execute
-  - typescript.nosql.cassandra_execute
   - typescript.sqli.mysql_execute
   - typescript.sqli.mysql_execute_db
   packages:
-  - graphql
-  - cassandra-driver
   - mysql2
 - id: typescript.sqli.prisma_client_query_raw_unsafe
   enabled: true

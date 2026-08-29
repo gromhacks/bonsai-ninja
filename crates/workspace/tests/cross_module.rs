@@ -528,7 +528,8 @@ fn javascript_receiver_callback_trace() {
         Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
         &[(
             "/w/app.js",
-            "function entry(items) { items.forEach(cb); }\n\
+            "class Runner { forEach(callback, value) { callback(value); } }\n\
+             function entry(items) { const runner = new Runner(); runner.forEach(cb, items[0]); }\n\
              function cb(item) { sink(item); }\n\
              function sink(x) {}\n",
         )],
@@ -536,13 +537,24 @@ fn javascript_receiver_callback_trace() {
     let trace = ws.trace_from("entry").expect("trace_from entry");
     let global = ws.db().global_index();
     let entry = collect_callable_targets(&global, "entry")[0];
+    let host = collect_callable_targets(&global, "forEach")[0];
     let cb = collect_callable_targets(&global, "cb")[0];
     let graph = ws.resolved_call_graph();
     assert!(
         graph
             .callees_of(entry)
+            .any(|edge| edge.to == host && edge.kind == EdgeKind::Direct),
+        "resolved call graph did not include exact entry -> Runner.forEach edge"
+    );
+    assert!(
+        graph
+            .callees_of(host)
             .any(|edge| edge.to == cb && edge.kind == EdgeKind::Indirect),
-        "resolved call graph did not include entry -> cb receiver-callback edge"
+        "resolved call graph did not include compiler-proven Runner.forEach -> cb callback edge"
+    );
+    assert!(
+        graph.callees_of(entry).all(|edge| edge.to != cb),
+        "passing cb must not manufacture an entry -> cb execution edge"
     );
     assert!(
         trace

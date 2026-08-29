@@ -58,7 +58,7 @@ fn collect_import_type_qualifier_edits(
                         .get(object.end_byte()..property.start_byte())
                         .is_some_and(|separator| separator.contains(&b'.'))
                 {
-                    edits.push(ParseRecoveryEdit::replace_ascii(
+                    edits.push(ParseRecoveryEdit::replace_damaged_descendant_ascii(
                         object.start_byte(),
                         object.end_byte(),
                         b"IMPORTTYPE",

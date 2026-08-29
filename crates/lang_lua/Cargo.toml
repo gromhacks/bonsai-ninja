@@ -27,3 +27,4 @@ workspace = true
 [dev-dependencies]
 bonsai_db = { package = "bonsai-ninja-db", path = "../db" }
 bonsai_vfs = { package = "bonsai-ninja-vfs", path = "../vfs" }
+bonsai_conformance = { package = "bonsai-ninja-conformance", path = "../conformance" }

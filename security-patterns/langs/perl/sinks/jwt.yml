@@ -30,22 +30,6 @@
     Without `accepted_alg => [...]` the library accepts alg=none and forged HS256-via-RS256-pubkey
     tokens."
 
-- id: perl.jwt.json_webtoken_decode
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  tag: jwt
-  severity: high
-  packages: ["JSON::WebToken"]
-  cwe: [CWE-347]
-  match:
-    kind: call
-    callee:
-      name: decode_jwt
-  description: "Disabled - merged into perl.jwt.crypt_jwt_decode (same bare `decode_jwt`
-    name)."
-
 - id: perl.jwt.mojo_jwt_decode
   enabled: true
   language: perl

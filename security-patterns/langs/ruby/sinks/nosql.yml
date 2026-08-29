@@ -99,22 +99,6 @@
       end
     expect_no_match: true
   description: "Mongo::Database#command - runs arbitrary command document."
-- id: ruby.nosql.mongoid_where
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: ruby
-  tag: nosql-injection
-  severity: high
-  packages:
-  - mongoid
-  cwe:
-  - CWE-943
-  match:
-    kind: call
-    callee:
-      name: where
-  description: "Disabled duplicate - bare where collides with ActiveRecord SQLi in v1 matching; enable only when receiver typing can prove Mongoid."
 - id: ruby.nosql.mongoid_javascript
   enabled: true
   language: ruby

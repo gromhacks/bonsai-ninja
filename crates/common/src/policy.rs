@@ -15,6 +15,9 @@
 /// per `docs/contributing/design-patterns.mdx::Semantic Resolution Always`),
 /// or when IDG/taint propagation semantics change enough to affect
 /// source-to-sink reachability.
+// v58: rule-declared imported/runtime-global callable identities fail closed
+// on compiler-proven lexical/workspace collisions, and semantic decorator
+// configuration no longer becomes a lossy raw-source anchor.
 // v57: rules can require exact fields in a configured receiver's factory
 // argument, and prototype guards prove membership against the collection's
 // exact literal values rather than treating every membership test alike.
@@ -25,5 +28,5 @@
 // v54: typed receiver evidence is authoritative for receiver-constrained
 // rules, and qualified/import candidates use structural compiler names rather
 // than a shared source-separator vocabulary.
-pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_0039_u128;
+pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_003a_u128;
 const _: () = assert!(MATCHER_POLICY_FINGERPRINT != 0);

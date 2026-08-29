@@ -11,6 +11,10 @@
     kind: call
     callee:
       attribute: [CorsSettings, allowedOrigins]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^HttpOriginMatcher\.(?:Star|\*)$'
   match_examples:
   - name: generated shape example
     code: |
@@ -20,5 +24,14 @@
           CorsSettings.allowedOrigins(HttpOriginMatcher.Star)
         }
       }
+  - name: Akka HTTP CORS explicit origin negative
+    code: |
+      import ch.megard.akka.http.cors._
+      object App {
+        def configure(settings: CorsSettings): Unit = {
+          settings.allowedOrigins(HttpOriginMatcher("https://app.example"))
+        }
+      }
+    expect_no_match: true
   description: |-
-    Akka HTTP CorsSettings allowedOrigins HttpOriginMatcher.* - allow-all CORS.
+    Akka HTTP CORS with the exact `HttpOriginMatcher.Star`/wildcard value permits every origin; explicit origin matchers stay quiet.

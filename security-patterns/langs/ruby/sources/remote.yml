@@ -13,23 +13,26 @@
     kind: call
     callee:
       name: params
+      in_class: ["ActionController::Base", "Sinatra::Base", "Grape::API", "Hanami::Action", Roda]
   constraints:
   - top_level: true
   match_examples:
   - name: ruby.source.params example
     code: |
       require "actionpack"
-      def example(input, url, id, item, req_obj, options)
-        params(input)
+      class UsersController < ActionController::Base
+        def show
+          params("id")
+        end
       end
   - name: ruby.source.params unrelated call negative
     code: |
       require "actionpack"
       def example(input)
-        permit(input)
+        params(input)
       end
     expect_no_match: true
-  description: "Controller/action `params` - HTTP request parameters (Rails, Sinatra, Grape, Hanami, Roda)."
+  description: "Controller/action params(name) - HTTP request parameters constrained to an adapter-emitted qualified framework superclass. The compiler-owned enclosing class/base supplies provenance; package evidence is optional corroboration rather than a second gate."
 
 - id: ruby.source.params_read
   enabled: true
@@ -42,15 +45,34 @@
     kind: read
     target:
       name: params
+      in_class: ["ActionController::Base", ApplicationController, "Sinatra::Base", "Grape::API", "Hanami::Action", Roda]
   match_examples:
   - name: ruby params subscript read
     code: |
       require "actionpack"
-      def example
-        value = params["name"]
+      class UsersController < ActionController::Base
+        def show
+          value = params["name"]
+        end
       end
     expect_match_text: [params]
-  description: "Controller/action params hash read - covers `params[:id]` / `params[\"id\"]` source use where the adapter emits a read rather than a call."
+  - name: unrelated params binding in framework project
+    code: |
+      require "actionpack"
+      def helper(params)
+        params["name"]
+      end
+    expect_no_match: true
+  - name: Rails application controller parameters
+    code: |
+      require "actionpack"
+      class SearchController < ApplicationController
+        def show
+          params[:q]
+        end
+      end
+    expect_match_text: [params]
+  description: "Controller/action params hash read - covers params[:id] / params[\"id\"] only inside a class with an adapter-emitted qualified framework superclass. The exact enclosing class/base is sufficient provenance, while a package manifest alone cannot taint unrelated helpers."
 
 - id: ruby.source.rails_request_body
   enabled: true
@@ -71,6 +93,13 @@
       def example(input, url, id, item, req_obj, options)
         request.body()
       end
+  - name: body method with an argument is not the Rails request accessor
+    code: |
+      require "actionpack"
+      def example(value)
+        request.body(value)
+      end
+    expect_no_match: true
   description: "Rails/Sinatra request.body - raw HTTP body IO. Property-style getter (no args); `max_args: 0` rejects unrelated `request.body(...)` setter/builder decoys."
 
 - id: ruby.source.rails_request_raw_post
@@ -78,20 +107,36 @@
   language: ruby
   tag: http-input
   trust: remote
-  packages: [actionpack]
   match:
     kind: call
     callee:
       attribute: [request, raw_post]
+      in_class: ["ActionController::Base", ApplicationController]
   constraints:
   - max_args: 0
   match_examples:
   - name: ruby.source.rails_request_raw_post example
     code: |
-      require "actionpack"
-      def example(input, url, id, item, req_obj, options)
-        request.raw_post()
+      class ReportsController < ApplicationController
+        def create
+          request.raw_post()
+        end
       end
+  - name: raw post method with an argument is not the Rails accessor
+    code: |
+      require "actionpack"
+      def example(value)
+        request.raw_post(value)
+      end
+    expect_no_match: true
+  - name: same request helper outside a Rails controller is not remote input
+    code: |
+      class Importer
+        def load
+          request.raw_post()
+        end
+      end
+    expect_no_match: true
   description: "Rails request.raw_post - raw request body as String. Property-style getter (no args)."
 
 - id: ruby.source.rails_request_query_parameters
@@ -113,6 +158,13 @@
       def example(input, url, id, item, req_obj, options)
         request.query_parameters()
       end
+  - name: query parameters method with an argument is not the Rails accessor
+    code: |
+      require "actionpack"
+      def example(value)
+        request.query_parameters(value)
+      end
+    expect_no_match: true
   description: "Rails request.query_parameters. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
 
 - id: ruby.source.rails_request_path_parameters
@@ -134,6 +186,13 @@
       def example(input, url, id, item, req_obj, options)
         request.path_parameters()
       end
+  - name: path parameters method with an argument is not the Rails accessor
+    code: |
+      require "actionpack"
+      def example(value)
+        request.path_parameters(value)
+      end
+    expect_no_match: true
   description: "Rails request.path_parameters. Property-style getter (no args)."
 
 - id: ruby.source.rails_request_headers
@@ -155,6 +214,13 @@
       def example(input, url, id, item, req_obj, options)
         request.headers()
       end
+  - name: headers method with an argument is not the Rails accessor
+    code: |
+      require "actionpack"
+      def example(value)
+        request.headers(value)
+      end
+    expect_no_match: true
   description: "Rails request.headers - attacker-controlled when crossing trust boundary. Property-style getter (no args)."
 
 - id: ruby.source.rails_request_url
@@ -357,20 +423,6 @@
     expect_no_match: true
   description: "Rails cookies - client-controlled."
 
-- id: ruby.source.rails_session
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: http-input
-  trust: remote
-  packages: [actionpack]
-  match:
-    kind: call
-    callee:
-      name: session
-  description: "Disabled - Rails session is integrity-protected (signed cookie/encrypted store) by default."
-
 - id: ruby.source.rack_request_params
   enabled: true
   language: ruby
@@ -380,7 +432,7 @@
   match:
     kind: call
     callee:
-      attribute: [Rack::Request, params]
+      attribute: ["Rack::Request", params]
   match_examples:
   - name: ruby.source.rack_request_params example
     code: |
@@ -400,7 +452,7 @@
   match:
     kind: call
     callee:
-      attribute: [Rack::Request, cookies]
+      attribute: ["Rack::Request", cookies]
   match_examples:
   - name: ruby.source.rack_request_cookies example
     code: |
@@ -458,18 +510,37 @@
   description: "ActionDispatch::Http::UploadedFile#original_filename - client-controlled filename."
 
 - id: ruby.source.actioncable_receive
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: ruby
   tag: http-input
   trust: remote
-  packages: [actioncable]
+  packages: [action_cable]
   match:
     kind: param
     target:
       name: data
-  description: "Disabled - bare `data` param matches ordinary helper methods; needs class/context-aware ActionCable receive matching."
+      in_method: [receive, received]
+      in_class: ["ActionCable::Channel::Base"]
+      param_index_in: [0]
+  match_examples:
+  - name: Action Cable inbound channel payload
+    code: |
+      require "action_cable"
+      class MessagesChannel < ActionCable::Channel::Base
+        def receive(data)
+          broadcast_to(current_user, data)
+        end
+      end
+    expect_match_text: [data]
+  - name: ordinary data parameter outside the callback signature
+    code: |
+      require "action_cable"
+      def helper(data)
+        data
+      end
+    expect_no_match: true
+  description: "Action Cable receive(data)/received(data) parameter zero - client-supplied channel payload constrained by callback name/index and the adapter-emitted qualified channel superclass."
+  imports: [action_cable]
 
 - id: ruby.source.graphql_resolver_args
   enabled: true
@@ -521,24 +592,147 @@
       def example(input, url, id, item, req_obj, options)
         request.params()
       end
+  - name: params method with an argument is not the Hanami accessor
+    code: |
+      require "hanami"
+      def example(value)
+        request.params(value)
+      end
+    expect_no_match: true
   description: "Hanami action request.params - HTTP parameters via Hanami request object. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
 
 # Generic untrusted-blob parameter for YAML.load / Marshal.load /
 # Oj.load deserialization-style entry points. The canonical shape is
 # `def import(blob); YAML.load(blob); end`. Bare-name match
 # overmatches, but the deser sinks are the second gate.
-- id: ruby.source.bytes_blob_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: ruby.source.roda_route_request
+  enabled: true
   language: ruby
   trust: remote
-  tag: caller-input
-  payload_types: [binary]
+  category: http-input
+  tag: http-input
+  payload_types: [path, query, form, cookie, header, multipart, file, json, text, binary]
+  packages: [roda]
   match:
-    kind: param
-    target:
-      regex: "^(blob|payload|data|raw|bytes)$"
+    kind: call
+    callee:
+      name: route
+      in_class: [Roda]
   constraints:
-  - sink_tag_in: [insecure-deserialization]
-  description: "Disabled - a data-like parameter reaching deserialization is not necessarily remote input; an actual HTTP, queue, file, or IPC source must establish the trust boundary."
+  - arg_is_inline_callback: 0
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
+  match_examples:
+  - name: Roda request parameters
+    code: |
+      require "roda"
+      class App < Roda
+        route do |r|
+          sink(r.params["q"])
+        end
+      end
+    expect_match_text: [route]
+  - name: application parameter object is not the Roda request
+    code: |
+      require "roda"
+      class App < Roda
+        configure do |request|
+          sink(request.params)
+        end
+      end
+    expect_no_match: true
+  description: "Parameter zero of the inline `route` block on an exact Roda descendant is the inbound request carrier. One compiler-owned callback boundary covers params, GET, POST, path, headers, cookies, and body reads without guessing the block variable name."
+
+- id: ruby.source.rack_request_path_info
+  enabled: true
+  language: ruby
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [path]
+  packages: [rack, actionpack, sinatra, padrino, cuba]
+  match:
+    kind: call
+    callee:
+      attribute: [request, path_info]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: Rack inbound path
+    code: |
+      require "rack"
+      def call(request)
+        request.path_info
+      end
+    expect_match_text: [request.path_info]
+  - name: configured route path is not an inbound request
+    code: |
+      require "rack"
+      def helper(route)
+        route.path_info
+      end
+    expect_no_match: true
+  description: "Rack::Request#path_info and compatible Rack-family request.path_info accessors - client-selected request path."
+
+- id: ruby.source.rack_request_body_read
+  enabled: true
+  language: ruby
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [binary, form, json]
+  packages: [rack, actionpack, sinatra, padrino, cuba]
+  match:
+    kind: call
+    callee:
+      attribute: [request, body, read]
+  constraints:
+  - max_args: 1
+  match_examples:
+  - name: Rack inbound body bytes
+    code: |
+      require "rack"
+      def call(request)
+        request.body.read
+      end
+    expect_match_text: [request.body.read]
+  - name: response body is not an inbound request
+    code: |
+      require "rack"
+      def helper(response)
+        response.body.read
+      end
+    expect_no_match: true
+  description: "Rack::Request#body.read and compatible Rack-family request body streams - raw client request bytes."
+
+- id: ruby.source.rack_env_request_fields
+  enabled: true
+  language: ruby
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [header, path, query]
+  packages: [rack, actionpack, sinatra, padrino, cuba, roda]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(HTTP_[A-Z0-9_]+|CONTENT_TYPE|CONTENT_LENGTH|PATH_INFO|REQUEST_URI)$"
+  match_examples:
+  - name: Rack client header environment entry
+    code: |
+      require "rack"
+      def call(env)
+        env["HTTP_X_FORWARDED_HOST"]
+      end
+    expect_match_text: [env.HTTP_X_FORWARDED_HOST]
+  - name: Rack server software metadata is not client input
+    code: |
+      require "rack"
+      def call(env)
+        env["SERVER_SOFTWARE"]
+      end
+    expect_no_match: true
+  description: "Rack environment request fields - HTTP_*/content headers plus client-selected path/URI values. Process/server metadata keys are intentionally excluded."

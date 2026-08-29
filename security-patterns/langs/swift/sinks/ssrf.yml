@@ -3,74 +3,59 @@
   language: swift
   tag: ssrf
   severity: high
+  packages: [Foundation]
+  imports: [Foundation]
   cwe:
   - CWE-918
   match:
     kind: call
     callee:
       name: dataTask
+      receiver_type_in: [URLSession]
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: declared shape
-    code: 'func test(input: String) { dataTask(input) }
-
-      '
+    code: |
+      import Foundation
+      func test(session: URLSession, input: URL) { session.dataTask(with: input) }
   - name: literal data task negative
-    code: 'func test() { dataTask("https://safe.example") }
-
-      '
+    code: |
+      import Foundation
+      func test(session: URLSession) {
+        session.dataTask(with: URL(string: "https://safe.example")!)
+      }
     expect_no_match: true
   description: URLSession dataTask(with:) with tainted URL.
-- id: swift.ssrf.urlsession_data_task_with_request
-  enabled: true
-  language: swift
-  tag: ssrf
-  severity: high
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: dataTaskWithRequest
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: declared shape
-    code: 'func test(input: String) { dataTaskWithRequest(input) }
-
-      '
-  - name: literal data task request negative
-    code: 'func test() { dataTaskWithRequest("https://safe.example") }
-
-      '
-    expect_no_match: true
-  description: URLSession dataTaskWithRequest (Obj-C bridge).
 - id: swift.ssrf.urlsession_download_task
   enabled: true
   language: swift
   tag: ssrf
   severity: high
+  packages: [Foundation]
+  imports: [Foundation]
   cwe:
   - CWE-918
   match:
     kind: call
     callee:
       name: downloadTask
+      receiver_type_in: [URLSession]
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: declared shape
-    code: 'func test(input: String) { downloadTask(input) }
-
-      '
+    code: |
+      import Foundation
+      func test(session: URLSession, input: URL) { session.downloadTask(with: input) }
   - name: literal download task negative
-    code: 'func test() { downloadTask("https://safe.example") }
-
-      '
+    code: |
+      import Foundation
+      func test(session: URLSession) {
+        session.downloadTask(with: URL(string: "https://safe.example")!)
+      }
     expect_no_match: true
   description: URLSession.downloadTask(with:).
 - id: swift.ssrf.urlsession_data_async
@@ -78,42 +63,37 @@
   language: swift
   tag: ssrf
   severity: high
+  packages: [Foundation]
+  imports: [Foundation]
   cwe:
   - CWE-918
   match:
     kind: call
     callee:
-      attribute:
-      - URLSession
-      - data
+      attribute: [URLSession, shared, data]
+      binding_origin: imported
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: declared shape
-    code: 'func test(input: String) { URLSession.data(input) }
-
-      '
+    code: |
+      import Foundation
+      func test(input: URL) async throws { _ = try await URLSession.shared.data(from: input) }
   - name: literal urlsession data negative
-    code: 'func test() { URLSession.data("https://safe.example") }
-
-      '
+    code: |
+      import Foundation
+      func test() async throws {
+        _ = try await URLSession.shared.data(from: URL(string: "https://safe.example")!)
+      }
+    expect_no_match: true
+  - name: local URLSession collision negative
+    code: |
+      import Foundation
+      struct URLSession { static let shared = URLSession(); func data(from: String) {} }
+      func test(input: String) { URLSession.shared.data(from: input) }
     expect_no_match: true
   description: "URLSession.data(from:) async - suffix-match via `URLSession.data`."
-- id: swift.ssrf.urlrequest_init
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: ssrf
-  severity: medium
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: URLRequest
-  description: "Disabled - URLRequest(url:) bare init flags every URLRequest; enable with taint flow to dataTask."
 - id: swift.ssrf.alamofire_request
   enabled: true
   language: swift

@@ -169,10 +169,10 @@ jobs:
           ./target/release/bonsai-ninja security . taint-analysis \
             --profile production --format json --all --no-color --no-progress \
             > /tmp/bonsai-self-security.json
-          ./target/release/bonsai-ninja security examples/python/micro taint-analysis \
+          ./target/release/bonsai-ninja security examples/python/language_gauntlet taint-analysis \
             --format sarif --all --no-color --no-progress \
             > /tmp/bonsai-smoke.sarif.json
-          ./target/release/bonsai-ninja defs examples/python/micro \
+          ./target/release/bonsai-ninja defs examples/python/language_gauntlet \
             --html-output /tmp/bonsai-smoke.html --no-color --no-progress
           python3 - <<'PY'
           import json
@@ -330,19 +330,19 @@ jobs:
           bin="target/${{ matrix.target }}/release/${{ matrix.bin }}"
           "$bin" --version
           "$bin" --help >/dev/null
-          "$bin" index examples/python/micro --no-color --no-progress \
+          "$bin" index examples/python/language_gauntlet --no-color --no-progress \
             >/tmp/bonsai-index.txt
-          "$bin" diagnostics examples/python/micro --no-color --no-progress \
+          "$bin" diagnostics examples/python/language_gauntlet --no-color --no-progress \
             >/tmp/bonsai-diagnostics.txt
-          "$bin" inspect examples/python/micro --query os.system --context 4k \
+          "$bin" inspect examples/python/language_gauntlet --query os.system --context 4k \
             --format json --no-color --no-progress >/tmp/bonsai-inspect.json
-          "$bin" trace examples/python/micro handle_request --format json \
+          "$bin" trace examples/python/language_gauntlet handle_request --format json \
             --no-color --no-progress >/tmp/bonsai-trace.json
-          "$bin" security examples/python/micro taint-analysis --format sarif --all \
+          "$bin" security examples/python/language_gauntlet taint-analysis --format sarif --all \
             --no-color --no-progress >/tmp/bonsai-taint.sarif.json
-          "$bin" export examples/python/micro --format networkx \
+          "$bin" export examples/python/language_gauntlet --format networkx \
             --no-color --no-progress >/tmp/bonsai-networkx.json
-          "$bin" defs examples/python/micro --html-output /tmp/bonsai-defs.html \
+          "$bin" defs examples/python/language_gauntlet --html-output /tmp/bonsai-defs.html \
             --no-color --no-progress
           python3 - <<'PY'
           import json
@@ -373,19 +373,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $bin --help | Out-Null
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin index examples/python/micro --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-index.txt"
+          & $bin index examples/python/language_gauntlet --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-index.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin diagnostics examples/python/micro --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-diagnostics.txt"
+          & $bin diagnostics examples/python/language_gauntlet --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-diagnostics.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin inspect examples/python/micro --query os.system --context 4k --format json --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-inspect.json"
+          & $bin inspect examples/python/language_gauntlet --query os.system --context 4k --format json --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-inspect.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin trace examples/python/micro handle_request --format json --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-trace.json"
+          & $bin trace examples/python/language_gauntlet handle_request --format json --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-trace.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin security examples/python/micro taint-analysis --format sarif --all --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-taint.sarif.json"
+          & $bin security examples/python/language_gauntlet taint-analysis --format sarif --all --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-taint.sarif.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin export examples/python/micro --format networkx --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-networkx.json"
+          & $bin export examples/python/language_gauntlet --format networkx --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-networkx.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin defs examples/python/micro --html-output "$env:RUNNER_TEMP/bonsai-defs.html" --no-color --no-progress
+          & $bin defs examples/python/language_gauntlet --html-output "$env:RUNNER_TEMP/bonsai-defs.html" --no-color --no-progress
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           @(
@@ -428,7 +428,7 @@ jobs:
               XDG_CACHE_HOME="$smoke_dir/parser-cache" \
               BONSAI_WORKSPACE_DIR="$smoke_dir/workspace-cache" \
               "$smoke_dir/${{ matrix.bin }}" \
-              security "$GITHUB_WORKSPACE/examples/python/micro" taint-analysis \
+              security "$GITHUB_WORKSPACE/examples/python/language_gauntlet" taint-analysis \
               --format json --all --no-color --no-progress \
               > packaged-security.json
           )
@@ -490,7 +490,7 @@ jobs:
             $env:LOCALAPPDATA = "$profile/AppData/Local"
             $env:APPDATA = "$profile/AppData/Roaming"
             $env:BONSAI_WORKSPACE_DIR = "$profile/workspace-cache"
-            & $standalone security "$repo/examples/python/micro" taint-analysis --format json --all --no-color --no-progress > $smoke
+            & $standalone security "$repo/examples/python/language_gauntlet" taint-analysis --format json --all --no-color --no-progress > $smoke
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
             Pop-Location

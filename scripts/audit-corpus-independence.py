@@ -9,8 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS_PATTERNS = {
-    "construct-fixture": re.compile(r"\bmega_flow\b", re.IGNORECASE),
-    "benchmark-case": re.compile(r"\bCB2-", re.IGNORECASE),
+    "construct-fixture": re.compile(r"\blanguage_gauntlet\b", re.IGNORECASE),
     "benchmark-snapshot": re.compile(r"\brepo_(?:vulnerable|fixed)\b", re.IGNORECASE),
 }
 HOST_PATH_PATTERNS = {
@@ -72,13 +71,28 @@ def main() -> int:
                         (label, path.relative_to(ROOT), number, line.strip())
                     )
 
+    public_docs = [ROOT / "README.md", ROOT / "AGENTS.md"]
+    public_docs.extend(sorted((ROOT / "docs").glob("**/*.md")))
+    public_docs.extend(sorted((ROOT / "docs").glob("**/*.mdx")))
+    for path in public_docs:
+        if not path.is_file():
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for label, pattern in HOST_PATH_PATTERNS.items():
+                if pattern.search(line):
+                    violations.append(
+                        (label, path.relative_to(ROOT), number, line.strip())
+                    )
+
     if violations:
         print("corpus-independence violations:", file=sys.stderr)
         for label, path, number, line in violations:
             print(f"{label}\t{path}:{number}\t{line}", file=sys.stderr)
         return 1
     print(
-        f"corpus-independence: 0 violations ({len(rust_files)} Rust files, {len(rule_files)} rule files)"
+        "corpus-independence: 0 violations "
+        f"({len(rust_files)} Rust files, {len(rule_files)} rule files, "
+        f"{sum(path.is_file() for path in public_docs)} public docs)"
     )
     return 0
 

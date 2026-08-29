@@ -44,6 +44,8 @@
     kind: call
     callee:
       name: enableCors
+  constraints:
+  - arg_count: 0
   match_examples:
   - name: nest enablecors default
     code: |
@@ -53,6 +55,13 @@
       }
     expect_match_text:
     - app.enableCors
+  - name: nest enablecors explicit allowlist negative
+    code: |
+      const _u = require("@nestjs/core");
+      function bootstrap(app: any) {
+        return app.enableCors({ origin: "https://app.example" });
+      }
+    expect_no_match: true
   description: 'NestJS app.enableCors() with no origin allowlist enables permissive CORS defaults. Merged aliases: typescript.cors.nest_enablecors_wildcard.'
   aliases:
   - typescript.cors.nest_enablecors_wildcard

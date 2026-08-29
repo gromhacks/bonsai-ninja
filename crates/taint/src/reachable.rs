@@ -54,6 +54,19 @@ enum IdgSeedPolicy {
     TokenApi,
 }
 
+/// Compiler endpoint selected by a span-anchored rule match.
+///
+/// A call source produces its `CallRet`; a read source produces the exact
+/// adapter-lowered storage `Read`, even when that expression is nested inside
+/// a wider assignment or call. `General` preserves the public token/legacy
+/// rule-match contract for callers that do not own matcher-kind evidence.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum IdgRuleMatchKind {
+    #[default]
+    General,
+    Read,
+}
+
 /// Input to [`compose_idg_seed_nodes`].
 #[derive(Copy, Clone, Debug)]
 pub struct IdgSeedRequest<'a> {
@@ -63,6 +76,7 @@ pub struct IdgSeedRequest<'a> {
     output_arg_names: &'a [String],
     callback_only: bool,
     output_only: bool,
+    match_kind: IdgRuleMatchKind,
     policy: IdgSeedPolicy,
 }
 
@@ -71,13 +85,23 @@ impl<'a> IdgSeedRequest<'a> {
     /// Keeping this projection on the request prevents cache-key builders
     /// from accepting an argument list that can drift from seed composition.
     #[must_use]
-    pub const fn cache_key_parts(&self) -> (&'a TokenSet, Option<Span>, &'a [String], bool, bool) {
+    pub const fn cache_key_parts(
+        &self,
+    ) -> (
+        &'a TokenSet,
+        Option<Span>,
+        &'a [String],
+        bool,
+        bool,
+        IdgRuleMatchKind,
+    ) {
         (
             self.names,
             self.anchor,
             self.output_arg_names,
             self.callback_only,
             self.output_only,
+            self.match_kind,
         )
     }
 
@@ -95,6 +119,27 @@ impl<'a> IdgSeedRequest<'a> {
             output_arg_names,
             callback_only: false,
             output_only: false,
+            match_kind: IdgRuleMatchKind::General,
+            policy: IdgSeedPolicy::RuleMatch,
+        }
+    }
+
+    /// Exact storage-read source selected by a rule matcher.
+    #[must_use]
+    pub fn read_rule_match(
+        func: FuncId,
+        names: &'a TokenSet,
+        anchor: Option<Span>,
+        output_arg_names: &'a [String],
+    ) -> Self {
+        Self {
+            func,
+            names,
+            anchor,
+            output_arg_names,
+            callback_only: false,
+            output_only: false,
+            match_kind: IdgRuleMatchKind::Read,
             policy: IdgSeedPolicy::RuleMatch,
         }
     }
@@ -113,6 +158,7 @@ impl<'a> IdgSeedRequest<'a> {
             output_arg_names,
             callback_only: false,
             output_only: true,
+            match_kind: IdgRuleMatchKind::General,
             policy: IdgSeedPolicy::RuleMatch,
         }
     }
@@ -126,6 +172,7 @@ impl<'a> IdgSeedRequest<'a> {
             output_arg_names: &[],
             callback_only: true,
             output_only: false,
+            match_kind: IdgRuleMatchKind::General,
             policy: IdgSeedPolicy::RuleMatch,
         }
     }
@@ -139,6 +186,7 @@ impl<'a> IdgSeedRequest<'a> {
             output_arg_names: &[],
             callback_only: false,
             output_only: false,
+            match_kind: IdgRuleMatchKind::General,
             policy: IdgSeedPolicy::TokenApi,
         }
     }
@@ -668,10 +716,16 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
 ) -> (KindedTokens, EntryTaintGraph) {
     let mut facts = KindedTokens::default();
     let mut graph = EntryTaintGraph::default();
-    let global = db.global_index();
-    let entry_decl = global.decl_of(SymbolId::new(entry_func.raw()));
-    let seed = default_entry_taint_seed(entry_decl);
-    let graph_seed = default_entry_graph_seed(entry_decl);
+    // This facade is IDG-backed even on a cold database. Reuse the compact
+    // linkage generation owned by that exact graph, then stream only the
+    // selected callable body needed to compose its seed. Materializing
+    // `AnalyzerDb::global_index()` here would retain every workspace body
+    // beside the IDG and could pair a query with a different header snapshot.
+    let idg = crate::idg_build::compiler_idg_service(db);
+    let global = idg.global_linkage_index();
+    let entry_decl = exact_decl_for_func(db, global.as_ref(), entry_func);
+    let seed = default_entry_taint_seed(entry_decl.as_ref());
+    let graph_seed = default_entry_graph_seed(entry_decl.as_ref());
 
     // Structural facts: even with no param-seeded propagation we
     // populate the entry's own name and param list so filters that
@@ -697,7 +751,6 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
         // service, but it still uses the one canonical IDG engine. The
         // semantic-fingerprint cache shares this compiler graph across entry
         // misses without changing `AnalyzerDb::idg_service()` lifecycle.
-        let idg = crate::idg_build::compiler_idg_service(db);
         caches.mark_used();
         let config = crate::idg_api::InterTaintConfig {
             max_edge_precision: Some(Precision::Narrowed),
@@ -1285,6 +1338,26 @@ fn rule_match_seed_nodes(
     // proved reachable.
     let seed_names = field_sensitive_rule_seed_names(request.names);
     if let Some(anchor) = request.anchor {
+        if request.match_kind == IdgRuleMatchKind::Read {
+            let read_nodes = idg.source_read_value_nodes_at_span(request.func, anchor);
+            seed_nodes.extend(
+                read_nodes
+                    .into_iter()
+                    // A read rule is already anchored to one exact compiler
+                    // span. Some property/subscript matchers intentionally
+                    // emit no rendered seed name; in that case the read
+                    // value node at the anchor is the complete identity.
+                    // Name filtering remains mandatory when the matcher did
+                    // provide a narrower projected carrier.
+                    .filter(|(_, source_name)| {
+                        seed_names.is_empty() || rule_seed_name_matches(&seed_names, source_name)
+                    })
+                    .map(|(node, _)| node),
+            );
+            seed_nodes.sort();
+            seed_nodes.dedup();
+            return seed_nodes;
+        }
         let anchor_nodes = idg.source_seed_nodes_at_span(request.func, anchor);
         let anchor_has_call_return = anchor_nodes.iter().any(|node| {
             idg.resolve_point(*node)
@@ -1839,6 +1912,7 @@ pub fn source_seed_reaches_return_from_idg_query(request: IdgReturnQuery<'_>) ->
             output_arg_names,
             callback_only,
             output_only,
+            match_kind,
         } => {
             let request = if callback_only {
                 source_anchor.map_or_else(
@@ -1848,7 +1922,14 @@ pub fn source_seed_reaches_return_from_idg_query(request: IdgReturnQuery<'_>) ->
             } else if output_only {
                 IdgSeedRequest::output_rule_match(source_func, seeds, source_anchor, output_arg_names)
             } else {
-                IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names)
+                match match_kind {
+                    IdgRuleMatchKind::General => {
+                        IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names)
+                    }
+                    IdgRuleMatchKind::Read => {
+                        IdgSeedRequest::read_rule_match(source_func, seeds, source_anchor, output_arg_names)
+                    }
+                }
             };
             compose_idg_seed_nodes(request, global, idg)
         }
@@ -1932,6 +2013,7 @@ fn compose_idg_taint_query_seeds<'a>(
             output_arg_names,
             callback_only,
             output_only,
+            match_kind,
         } => {
             let (nodes, callback_boundaries) = if callback_only {
                 source_anchor.map_or_else(
@@ -1955,7 +2037,20 @@ fn compose_idg_taint_query_seeds<'a>(
             } else {
                 (
                     compose_idg_seed_nodes(
-                        IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
+                        match match_kind {
+                            IdgRuleMatchKind::General => IdgSeedRequest::rule_match(
+                                source_func,
+                                seeds,
+                                source_anchor,
+                                output_arg_names,
+                            ),
+                            IdgRuleMatchKind::Read => IdgSeedRequest::read_rule_match(
+                                source_func,
+                                seeds,
+                                source_anchor,
+                                output_arg_names,
+                            ),
+                        },
                         global,
                         idg,
                     ),
@@ -2196,7 +2291,9 @@ fn renderable_cross_calls_from_closure(
     // Allocation-insensitive projected heap state is valid closure evidence,
     // but it does not prove that one function calls another. The fixed point
     // above already consumed those links; compatibility records expose only
-    // source-level call and return relations.
+    // source-level call and return relations. Exact shared-state transfers at
+    // a compiler-resolved call site use `SharedStateCall` and remain here as
+    // provenance-only call records with no positional taint claim.
     edges.retain(|edge| edge.relation.is_renderable_call());
     if bonsai_diagnostics::debug::is_enabled("idg-closure") {
         bonsai_diagnostics::debug_log!(
@@ -2284,6 +2381,18 @@ fn materialize_call_records<'a>(
         if !synthetic_back_to_source {
             first_inflow.entry(edge.callee).or_insert(trace_id);
         }
+        bonsai_diagnostics::debug_log!(
+            "idg-lineage",
+            "trace={} parent={:?} caller={} callee={} relation={:?} span={:?} arg={} param={}",
+            trace_id,
+            parent_trace_id,
+            edge.caller.raw(),
+            edge.callee.raw(),
+            edge.relation,
+            edge.call_span,
+            edge.arg_idx,
+            edge.param_idx,
+        );
         precision = precision.meet(edge.precision);
 
         let callee_decl = global.decl_of(bonsai_common::SymbolId::new(edge.callee.raw()));
@@ -2477,27 +2586,31 @@ fn materialize_synthetic_tainted_calls(
             .is_none_or(|targets| targets.contains(func))
     });
     let funcs_in_closure_set = funcs_in_closure.iter().copied().collect::<AHashSet<_>>();
-    let mut tainted_names_by_caller: ahash::AHashMap<FuncId, AHashSet<String>> = ahash::AHashMap::new();
-    for (func, name) in context.idg.read_write_storage_names_in_reachable_nodes_for_funcs(
-        context.closure_nodes,
-        Some(&funcs_in_closure_set),
-    ) {
-        tainted_names_by_caller.entry(func).or_default().insert(name);
+    let mut reachable_writes_by_caller: ahash::AHashMap<FuncId, AHashSet<(Span, String)>> =
+        ahash::AHashMap::new();
+    for (func, span, name) in context
+        .idg
+        .write_storage_spans_in_reachable_nodes_for_funcs(context.closure_nodes, Some(&funcs_in_closure_set))
+    {
+        reachable_writes_by_caller
+            .entry(func)
+            .or_default()
+            .insert((span, normalize_storage_text(&name)));
     }
     for func in funcs_in_closure {
         let Some(summaries) = cached_function_attribution(func, context.global, call_summary_cache) else {
             continue;
         };
-        let Some(names) = tainted_names_by_caller
+        let Some(reachable_writes) = reachable_writes_by_caller
             .get(&func)
-            .filter(|names| !names.is_empty())
+            .filter(|writes| !writes.is_empty())
         else {
             continue;
         };
         collect_tainted_writes(
             &summaries.writes,
             func,
-            names,
+            reachable_writes,
             context.first_inflow.get(&func).copied(),
             &mut tainted_calls,
         );
@@ -2949,7 +3062,7 @@ pub fn apply_configured_transfer_fixpoint(
 fn collect_tainted_writes(
     writes: &[WriteEventSummary],
     func: FuncId,
-    tainted_names: &ahash::AHashSet<String>,
+    reachable_writes: &ahash::AHashSet<(Span, String)>,
     parent_trace_id: Option<u64>,
     out: &mut Vec<crate::idg_api::TaintedCall>,
 ) {
@@ -2957,30 +3070,26 @@ fn collect_tainted_writes(
         if write.target.is_empty() {
             continue;
         }
-        let mut tainted_args: Vec<crate::idg_api::TaintedArgAtCall> = Vec::new();
-        for value in &write.source_names {
-            if value.is_empty() || !structured_storage_fact_matches_tainted(value, tainted_names) {
-                continue;
-            }
-            if tainted_args.iter().any(|arg| arg.value_text == *value) {
-                continue;
-            }
-            tainted_args.push(crate::idg_api::TaintedArgAtCall {
-                index: tainted_args.len(),
-                value_text: value.clone(),
-                place: Some(value.clone()),
-                source_names: vec![value.clone()],
-            });
-        }
-        if tainted_args.is_empty() {
+        let normalized_target = normalize_storage_text(&write.target);
+        if !reachable_writes.contains(&(write.span, normalized_target)) {
             continue;
         }
+        let value_text = write
+            .source_names
+            .first()
+            .cloned()
+            .unwrap_or_else(|| write.target.clone());
         out.push(crate::idg_api::TaintedCall {
             parent_trace_id,
             caller: func,
             name: write.target.clone(),
             call_span: write.span,
-            tainted_args,
+            tainted_args: vec![crate::idg_api::TaintedArgAtCall {
+                index: 0,
+                value_text,
+                place: Some(write.target.clone()),
+                source_names: write.source_names.clone(),
+            }],
             tainted_receiver: None,
             tainted_receiver_source_names: Vec::new(),
             kind: crate::idg_api::TaintedCallKind::Write,
@@ -3222,6 +3331,7 @@ fn apply_call_result_passthrough_fixpoint(
 ) -> bool {
     let passthroughs = compile_call_result_passthroughs(passthroughs);
     let mut passthroughs_by_arg: ahash::AHashMap<u32, Vec<usize>> = ahash::AHashMap::default();
+    let mut variadic_passthroughs: Vec<(u32, usize)> = Vec::new();
     let mut receiver_passthroughs: Vec<usize> = Vec::new();
     for (idx, configured) in passthroughs.iter().enumerate() {
         if configured.passthrough.input_receiver {
@@ -3232,7 +3342,13 @@ fn apply_call_result_passthrough_fixpoint(
                 passthroughs_by_arg.entry(arg_idx).or_default().push(idx);
             }
         }
+        if let Some(start) = configured.passthrough.input_arg_start_index {
+            if let Ok(start) = u32::try_from(start) {
+                variadic_passthroughs.push((start, idx));
+            }
+        }
     }
+    variadic_passthroughs.sort_unstable();
     let mut seeded: ahash::AHashSet<bonsai_idg::WsNodeId> = seed_nodes.iter().copied().collect();
     let mut applied: ahash::AHashSet<(FuncId, bonsai_common::Span, u32, String)> = ahash::AHashSet::default();
     let mut callee_name_cache = CalleeNameCache::default();
@@ -3248,21 +3364,36 @@ fn apply_call_result_passthrough_fixpoint(
             else {
                 continue;
             };
-            let candidate_indices = if arg_idx == u32::MAX {
-                receiver_passthroughs.as_slice()
+            let mut candidate_indices = if arg_idx == u32::MAX {
+                receiver_passthroughs.clone()
             } else {
-                passthroughs_by_arg.get(&arg_idx).map_or(&[][..], Vec::as_slice)
+                let mut candidates = passthroughs_by_arg.get(&arg_idx).cloned().unwrap_or_default();
+                let end = variadic_passthroughs.partition_point(|(start, _)| *start <= arg_idx);
+                candidates.extend(
+                    variadic_passthroughs[..end]
+                        .iter()
+                        .map(|(_, configured_idx)| *configured_idx),
+                );
+                candidates
             };
-            for &configured_idx in candidate_indices {
+            candidate_indices.sort_unstable();
+            candidate_indices.dedup();
+            for configured_idx in candidate_indices {
                 let configured = &passthroughs[configured_idx];
                 let passthrough = configured.passthrough;
-                if !configured.callee.matches(&summary.name, &mut callee_name_cache) {
+                let exact_site = passthrough.resolved_call_sites.binary_search(&call_span).is_ok();
+                if (!passthrough.resolved_call_sites.is_empty() && !exact_site)
+                    || (passthrough.resolved_call_sites.is_empty()
+                        && !configured.callee.matches(&summary.name, &mut callee_name_cache))
+                {
                     continue;
                 }
-                if !configured_receiver_type_matches(
-                    passthrough.receiver_type.as_deref(),
-                    &summary.receiver_types,
-                ) {
+                if passthrough.resolved_call_sites.is_empty()
+                    && !configured_receiver_type_matches(
+                        passthrough.receiver_type.as_deref(),
+                        &summary.receiver_types,
+                    )
+                {
                     continue;
                 }
                 let key = (caller, call_span, arg_idx, passthrough.callee.clone());
@@ -3291,13 +3422,19 @@ fn apply_call_result_passthrough_fixpoint(
             for (call_span, summary) in &summaries.by_span {
                 for configured in &passthroughs {
                     let passthrough = configured.passthrough;
-                    if !configured.callee.matches(&summary.name, &mut callee_name_cache) {
+                    let exact_site = passthrough.resolved_call_sites.binary_search(call_span).is_ok();
+                    if (!passthrough.resolved_call_sites.is_empty() && !exact_site)
+                        || (passthrough.resolved_call_sites.is_empty()
+                            && !configured.callee.matches(&summary.name, &mut callee_name_cache))
+                    {
                         continue;
                     }
-                    if !configured_receiver_type_matches(
-                        passthrough.receiver_type.as_deref(),
-                        &summary.receiver_types,
-                    ) {
+                    if passthrough.resolved_call_sites.is_empty()
+                        && !configured_receiver_type_matches(
+                            passthrough.receiver_type.as_deref(),
+                            &summary.receiver_types,
+                        )
+                    {
                         continue;
                     }
                     if passthrough.input_receiver
@@ -3318,7 +3455,13 @@ fn apply_call_result_passthrough_fixpoint(
                             any_grew = true;
                         }
                     }
-                    for &arg_idx in &passthrough.input_arg_indices {
+                    let mut input_indices = passthrough.input_arg_indices.clone();
+                    if let Some(start) = passthrough.input_arg_start_index {
+                        input_indices.extend(start..summary.args_span.len());
+                    }
+                    input_indices.sort_unstable();
+                    input_indices.dedup();
+                    for arg_idx in input_indices {
                         let Ok(arg_idx_u32) = u32::try_from(arg_idx) else {
                             continue;
                         };
@@ -4070,6 +4213,7 @@ fn call_preorder_from_source(
 struct CallEventSummary {
     name: String,
     call_kind: bonsai_lang_api::CallKind,
+    args_name: Vec<Option<String>>,
     args_value_text: Vec<String>,
     args_span: Vec<bonsai_common::Span>,
     args_place: Vec<Option<String>>,
@@ -4341,6 +4485,9 @@ fn estimated_function_call_event_summaries_bytes(summaries: &FunctionCallEventSu
             .saturating_add(estimated_vec_buffer_bytes::<String>(
                 summary.args_value_text.capacity(),
             ))
+            .saturating_add(estimated_vec_buffer_bytes::<Option<String>>(
+                summary.args_name.capacity(),
+            ))
             .saturating_add(estimated_vec_buffer_bytes::<bonsai_common::Span>(
                 summary.args_span.capacity(),
             ))
@@ -4358,6 +4505,9 @@ fn estimated_function_call_event_summaries_bytes(summaries: &FunctionCallEventSu
             ));
         for value in &summary.args_value_text {
             bytes = bytes.saturating_add(estimated_string_capacity_bytes(value));
+        }
+        for name in summary.args_name.iter().flatten() {
+            bytes = bytes.saturating_add(estimated_string_capacity_bytes(name));
         }
         for place in summary.args_place.iter().flatten() {
             bytes = bytes.saturating_add(estimated_string_capacity_bytes(place));
@@ -4418,6 +4568,39 @@ fn tainted_args_for_cross_call_edge(
     call_summary: Option<&CallEventSummary>,
 ) -> Vec<crate::idg_api::TaintedArg> {
     if edge.arg_idx == u32::MAX {
+        if edge.relation == bonsai_idg::CrossCallRelation::Argument
+            && edge.param_idx != u32::MAX
+            && call_summary.is_some_and(|summary| !summary.args_value_text.is_empty())
+        {
+            let Some((summary, argument_index)) = call_summary.and_then(|summary| {
+                call_argument_index_for_param(summary, callee_decl?, edge.param_idx as usize)
+                    .map(|index| (summary, index))
+            }) else {
+                // This is a projected explicit-argument relation. If the
+                // compact compiler facts cannot recover its actual slot, fail
+                // closed for display attribution instead of mislabelling a
+                // namespace/value receiver as the tainted argument.
+                return Vec::new();
+            };
+            let param_name = callee_decl
+                .and_then(|decl| decl.params.get(edge.param_idx as usize).cloned())
+                .unwrap_or_default();
+            return vec![crate::idg_api::TaintedArg {
+                index: argument_index,
+                value_text: summary
+                    .args_value_text
+                    .get(argument_index)
+                    .cloned()
+                    .unwrap_or_default(),
+                param_name,
+                place: summary.args_place.get(argument_index).cloned().flatten(),
+                source_names: summary
+                    .args_source_names
+                    .get(argument_index)
+                    .cloned()
+                    .unwrap_or_default(),
+            }];
+        }
         if matches!(
             edge.relation,
             bonsai_idg::CrossCallRelation::Argument | bonsai_idg::CrossCallRelation::Capture
@@ -4499,6 +4682,39 @@ fn tainted_args_for_cross_call_edge(
             .cloned()
             .unwrap_or_default(),
     }]
+}
+
+/// Recover the explicit actual slot for one formal parameter using the same
+/// adapter-owned named/positional contract as IDG call stitching.
+fn call_argument_index_for_param(
+    summary: &CallEventSummary,
+    callee_decl: &bonsai_lang_api::Decl,
+    param_index: usize,
+) -> Option<usize> {
+    let receiver_index = callee_decl.receiver_param_index;
+    summary
+        .args_name
+        .iter()
+        .enumerate()
+        .find_map(|(argument_index, name)| {
+            let mapped_param = name.as_deref().map_or_else(
+                || match receiver_index {
+                    Some(receiver) if argument_index >= receiver => argument_index.saturating_add(1),
+                    _ => argument_index,
+                },
+                |name| {
+                    callee_decl
+                        .params
+                        .iter()
+                        .enumerate()
+                        .find(|(index, parameter)| {
+                            Some(*index) != receiver_index && parameter.trim() == name.trim()
+                        })
+                        .map_or(usize::MAX, |(index, _)| index)
+                },
+            );
+            (mapped_param == param_index).then_some(argument_index)
+        })
 }
 
 /// Link an outer call edge to the exact nested return that produced its
@@ -4634,15 +4850,6 @@ fn call_arg_structured_carriers(summary: &CallEventSummary, index: usize) -> Vec
     carriers.into_iter().collect()
 }
 
-fn structured_storage_fact_matches_tainted(value: &str, tainted_names: &ahash::AHashSet<String>) -> bool {
-    let value = normalize_storage_text(value);
-    !value.is_empty()
-        && tainted_names.iter().any(|tainted| {
-            let tainted = normalize_storage_text(tainted);
-            !tainted.is_empty() && structured_storage_names_overlap(&value, &tainted)
-        })
-}
-
 fn structured_storage_names_overlap(left: &str, right: &str) -> bool {
     if left == right {
         return true;
@@ -4664,7 +4871,7 @@ impl CrossCallTransitIndex {
     fn new(edges: &[bonsai_idg::CrossCallEdge]) -> Self {
         let mut index = Self::default();
         for edge in edges {
-            if edge.arg_idx == u32::MAX {
+            if edge.relation == bonsai_idg::CrossCallRelation::Return {
                 index.tainted_return_spans.push(edge.call_span);
             }
         }
@@ -4798,6 +5005,7 @@ fn tainted_arg_is_clean_nested_call_return(
     }
     if nested_call_return_matches_configured_passthrough(
         &nested_summary.name,
+        nested_span,
         nested_summary.args_value_text.len(),
         call_result_passthroughs,
         callee_name_cache,
@@ -4826,18 +5034,32 @@ fn tainted_arg_is_clean_nested_call_return(
 
 fn nested_call_return_matches_configured_passthrough(
     callee_text: &str,
+    call_span: bonsai_common::Span,
     nested_arg_count: usize,
     passthroughs: &[CompiledCallResultPassthrough<'_>],
     callee_name_cache: &mut CalleeNameCache,
 ) -> bool {
     passthroughs.iter().any(|configured| {
-        configured.callee.matches(callee_text, callee_name_cache)
+        let call_matches = if configured.passthrough.resolved_call_sites.is_empty() {
+            configured.callee.matches(callee_text, callee_name_cache)
+        } else {
+            configured
+                .passthrough
+                .resolved_call_sites
+                .binary_search(&call_span)
+                .is_ok()
+        };
+        call_matches
             && (configured.passthrough.input_receiver
                 || configured
                     .passthrough
                     .input_arg_indices
                     .iter()
-                    .any(|idx| *idx < nested_arg_count))
+                    .any(|idx| *idx < nested_arg_count)
+                || configured
+                    .passthrough
+                    .input_arg_start_index
+                    .is_some_and(|start| start < nested_arg_count))
     })
 }
 
@@ -4935,6 +5157,7 @@ fn build_function_call_event_summaries_from_attribution(
             std::sync::Arc::new(CallEventSummary {
                 name: call.name.clone(),
                 call_kind: call.call_kind,
+                args_name: call.args.iter().map(|argument| argument.name.clone()).collect(),
                 args_value_text: call
                     .args
                     .iter()
@@ -5045,6 +5268,7 @@ fn collect_call_event_summaries(
                     std::sync::Arc::new(CallEventSummary {
                         name: name.clone(),
                         call_kind: *call_kind,
+                        args_name: args.iter().map(|arg| arg.name.clone()).collect(),
                         args_value_text: args.iter().map(|arg| arg.value_text.clone()).collect(),
                         args_span: args.iter().map(|arg| arg.span).collect(),
                         args_place: args.iter().map(|arg| arg.place.clone()).collect(),
@@ -5065,6 +5289,7 @@ fn collect_call_event_summaries(
                     std::sync::Arc::new(CallEventSummary {
                         name: name.clone(),
                         call_kind: bonsai_lang_api::CallKind::Function,
+                        args_name: source_call_args.iter().map(|_| None).collect(),
                         args_value_text: source_call_args.clone(),
                         args_span: source_call_args.iter().map(|_| *span).collect(),
                         // Assignment-only compatibility events retain

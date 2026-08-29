@@ -83,7 +83,7 @@ fn r_19_ruby() {
             adapter: Arc::new(bonsai_lang_ruby::RubyAdapter::new()),
             files: &[(
                 "a.rb",
-                "def helper(*p)\n  p.each { |x| sink(x) }\nend\ndef entry(args)\n  helper(args)\nend\n",
+                "def helper(*p)\n  for x in p\n    sink(x)\n  end\nend\ndef entry(args)\n  helper(args)\nend\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -157,5 +157,5 @@ fn r_19_objc() {
 
 #[test]
 fn r_19_scala() {
-    run_positive_cell("R_19", LangFixture { lang: "scala", adapter: Arc::new(bonsai_lang_scala::ScalaAdapter::new()), files: &[("a.scala", "object Demo { def helper(p: String*): Unit = p.foreach(x => sink(x)); def entry(args: String): Unit = helper(args) }\n")], entry: "entry", seed: &["args"], sink: "sink" });
+    run_positive_cell("R_19", LangFixture { lang: "scala", adapter: Arc::new(bonsai_lang_scala::ScalaAdapter::new()), files: &[("a.scala", "object Demo { def helper(p: String*): Unit = for (x <- p) sink(x); def entry(args: String): Unit = helper(args) }\n")], entry: "entry", seed: &["args"], sink: "sink" });
 }

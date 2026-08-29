@@ -1,7 +1,5 @@
 # Lua XSS sinks (OpenResty / Lapis).
 - id: lua.xss.ngx_say
-  aliases:
-    - lua.info_disclosure.ngx_say_traceback
   enabled: true
   language: lua
   tag: xss
@@ -12,9 +10,22 @@
     kind: call
     callee:
       attribute: [ngx, say]
+  analysis_semantics:
+    character_constraint:
+      required_mappings:
+      - {input: "&", output: "&amp;"}
+      - {input: "<", output: "&lt;"}
+      - {input: ">", output: "&gt;"}
+      - {input: '"', output: "&quot;"}
+      - {input: "'", output: "&#39;"}
+      accepted_providers:
+      - operation: {name: gsub}
   constraints:
   - arg_tainted:
       index: 0
+  - arg_matches_regex:
+      index: 0
+      regex: '<[A-Za-z!/][^>]*>'
   match_examples:
     - name: lua.xss.ngx_say example
       code: |
@@ -27,11 +38,15 @@
           ngx.say("<p>ok</p>")
         end
       expect_no_match: true
-  description: "ngx.say(body) - writes response body + newline; XSS when Content-Type is text/html and body is tainted. Also covers merged aliases: lua.info_disclosure.ngx_say_traceback."
+    - name: raw dynamic body has no proven HTML execution context
+      code: |
+        function example(input)
+          ngx.say(render(input))
+        end
+      expect_no_match: true
+  description: "ngx.say(body) is an XSS boundary only when the exact argument syntax contains HTML markup. Raw dynamic response bytes require independent Content-Type evidence and remain outside this rule."
 
 - id: lua.xss.ngx_print
-  aliases:
-    - lua.info_disclosure.ngx_print_error
   enabled: true
   language: lua
   tag: xss
@@ -42,6 +57,16 @@
     kind: call
     callee:
       attribute: [ngx, print]
+  analysis_semantics:
+    character_constraint:
+      required_mappings:
+      - {input: "&", output: "&amp;"}
+      - {input: "<", output: "&lt;"}
+      - {input: ">", output: "&gt;"}
+      - {input: '"', output: "&quot;"}
+      - {input: "'", output: "&#39;"}
+      accepted_providers:
+      - operation: {name: gsub}
   constraints:
   - arg_tainted:
       index: 0
@@ -57,4 +82,4 @@
           ngx.print("<p>ok</p>")
         end
       expect_no_match: true
-  description: "ngx.print(body) - writes raw response body; XSS when Content-Type is text/html and body is tainted. Also covers merged aliases: lua.info_disclosure.ngx_print_error."
+  description: "ngx.print(body) - writes raw response body; XSS when Content-Type is text/html and body is tainted. Error disclosure is a separate value shape."

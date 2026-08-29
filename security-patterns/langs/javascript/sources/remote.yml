@@ -362,6 +362,11 @@
         return req.header("referer");
       }
     expect_match_text: [req.header]
+  - name: same method on a differently bound application object
+    code: |
+      const _u = require("express");
+      function demo(request) { return request.get("x-forwarded-host"); }
+    expect_no_match: true
   description: "Express/Nest req.get()/req.header() - single request header value, attacker-controlled."
 
 - id: javascript.source.express_signed_cookies
@@ -484,32 +489,6 @@
       }
   description: Koa/Fastify/Hapi/Next request.headers. Same adapter fact is canonicalized here to avoid duplicate framework-specific header sources.
 
-- id: javascript.source.koa_ctx_request_body
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.source.koa_request_body
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [json]
-  frameworks: [koa]
-  packages: [koa, koa-body, koa-bodyparser, "@koa/bodyparser"]
-  match:
-    kind: read
-    target:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.request\\.body$"
-  match_examples:
-  - name: koa ctx request body
-    code: |
-      const _u = require("koa");
-      function demo(ctx) {
-        return ctx.request.body;
-      }
-    expect_match_text: [ctx.request.body]
-  description: "Disabled duplicate - attribute suffix matching lets javascript.source.koa_request_body cover both request.body and ctx.request.body with the merged Koa package evidence."
-
 - id: javascript.source.koa_ctx_query
   enabled: true
   language: javascript
@@ -556,24 +535,6 @@
     expect_match_text: [ctx.headers]
   description: "Koa ctx.headers - HTTP request headers."
 
-- id: javascript.source.koa_ctx_headers_referer
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.source.koa_ctx_headers
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [header]
-  frameworks: [koa]
-  packages: [koa]
-  match:
-    kind: read
-    target:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.headers(\\[['\"]referer['\"]\\]|\\.referer)$"
-  description: "Subsumed by javascript.source.koa_ctx_headers, which taints the whole Koa request-header object (the adapter normalizes the `.headers[...]`/`.headers.referer` subscript read to the parent header object)."
-
 - id: javascript.source.koa_cookie_get
   enabled: true
   language: javascript
@@ -587,6 +548,7 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.cookies\\.get$"
+      base_name_in: [ctx]
   constraints:
   - min_args: 1
   match_examples:
@@ -597,39 +559,14 @@
         return ctx.cookies.get("sid");
       }
     expect_match_text: [ctx.cookies.get]
+  - name: same cookie method on an application session
+    code: |
+      const _u = require("koa");
+      function demo(session) { return session.cookies.get("sid"); }
+    expect_no_match: true
   description: "Koa ctx.cookies.get(name) - single client-controlled cookie value."
 
 # -- Fastify -----------------------------------------------------------------
-- id: javascript.source.fastify_request_body
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  packages: [fastify]
-  match:
-    kind: read
-    target:
-      attribute: [request, body]
-  description: "Disabled duplicate - same `request.body` shape as javascript.source.koa_request_body; package metadata is merged there."
-
-- id: javascript.source.fastify_request_query
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  packages: [fastify]
-  match:
-    kind: read
-    target:
-      attribute: [request, query]
-  description: "Disabled duplicate - same `request.query` shape as javascript.source.koa_request_query; package metadata is merged there."
-
 - id: javascript.source.fastify_request_params
   enabled: true
   language: javascript
@@ -650,55 +587,6 @@
       }
   description: Fastify/Hapi request.params.
 
-- id: javascript.source.fastify_request_headers
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  packages: [fastify]
-  match:
-    kind: read
-    target:
-      attribute: [request, headers]
-  description: "Disabled duplicate - same `request.headers` shape as javascript.source.koa_request_headers; package metadata is merged there."
-
-- id: javascript.source.fastify_req_user_agent
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.source.koa_request_headers
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [header]
-  frameworks: [fastify]
-  packages: [fastify]
-  match:
-    kind: read
-    target:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.headers$|^[A-Za-z_$][A-Za-z0-9_$]*\\.headers\\.userAgent$"
-  match_examples:
-  - name: fastify req headers user agent
-    code: |
-      const _u = require("fastify");
-      function demo(req) {
-        return req.headers["user-agent"];
-      }
-    expect_match_text: [req.headers]
-  - name: fastify request headers userAgent
-    code: |
-      const _u = require("fastify");
-      function demo(request) {
-        return request.headers.userAgent;
-      }
-    expect_match_text: [request.headers.userAgent]
-  description: "Disabled duplicate - bracket User-Agent reads are surfaced as the whole `req.headers` / `request.headers` object and are already covered by the framework header-object rules; dot `request.headers.userAgent` cannot be kept without colliding on the same example family."
-
-# -- Hapi --------------------------------------------------------------------
 - id: javascript.source.hapi_request_payload
   enabled: true
   language: javascript
@@ -743,24 +631,6 @@
     expect_match_text: [req.payload]
   description: "Hapi req.payload - HTTP request body when the handler parameter is named `req`."
 
-- id: javascript.source.hapi_request_headers
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.source.koa_request_headers
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [header]
-  frameworks: [hapi]
-  packages: ["@hapi/hapi"]
-  match:
-    kind: read
-    target:
-      attribute: [request, headers]
-  description: "Disabled duplicate - same `request.headers` shape is covered by javascript.source.koa_request_headers with Hapi package metadata merged."
-
 - id: javascript.source.hapi_request_state
   enabled: true
   language: javascript
@@ -784,113 +654,6 @@
     expect_match_text: [request.state]
   description: "Hapi request.state - parsed cookies from the request."
 
-- id: javascript.source.hapi_request_query
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  packages: ["@hapi/hapi"]
-  match:
-    kind: read
-    target:
-      attribute: [request, query]
-  description: "Disabled duplicate - same `request.query` shape as javascript.source.koa_request_query; package metadata is merged there."
-
-- id: javascript.source.hapi_request_params
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  packages: ["@hapi/hapi"]
-  match:
-    kind: read
-    target:
-      attribute: [request, params]
-  description: "Disabled duplicate - same `request.params` shape as javascript.source.fastify_request_params; package metadata is merged there."
-
-# -- NestJS decorators (disabled until decorator metadata is indexed) --------
-- id: javascript.source.nestjs_param_decorator
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  packages: ["@nestjs/common"]
-  match:
-    kind: param
-    target:
-      name: Body
-  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
-
-- id: javascript.source.nestjs_query_decorator
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  packages: ["@nestjs/common"]
-  match:
-    kind: param
-    target:
-      name: Query
-  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
-
-- id: javascript.source.nestjs_param_path
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  packages: ["@nestjs/common"]
-  match:
-    kind: param
-    target:
-      name: Param
-  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
-
-- id: javascript.source.nestjs_headers_decorator
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  packages: ["@nestjs/common"]
-  match:
-    kind: param
-    target:
-      name: Headers
-  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
-
-- id: javascript.source.nestjs_message_body_decorator
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
-  language: javascript
-  trust: remote
-  tag: ws-input
-  payload_types: [event]
-  packages: ["@nestjs/websockets"]
-  match:
-    kind: param
-    target:
-      annotation: MessageBody
-  description: "Disabled for JavaScript - NestJS websocket decorators are not reliably emitted as parameter annotations by the JS adapter."
-
-# -- Browser DOM -------------------------------------------------------------
 - id: javascript.source.window_location_hash
   enabled: true
   language: javascript
@@ -1084,6 +847,7 @@
     kind: call
     callee:
       attribute: [localStorage, getItem]
+      binding_origin: runtime-global
   constraints:
   - arg_count: 1
   match_examples:
@@ -1093,6 +857,13 @@
         return localStorage.getItem("next");
       }
     expect_match_text: [localStorage.getItem]
+  - name: locally shadowed storage object is not browser input
+    code: |
+      function demo() {
+        const localStorage = { getItem(key) { return "fixed"; } };
+        return localStorage.getItem("next");
+      }
+    expect_no_match: true
   description: "localStorage.getItem(key) - browser-persistent client storage that can carry attacker-controlled state into DOM sinks."
 
 - id: javascript.source.sessionstorage_getitem
@@ -1105,6 +876,7 @@
     kind: call
     callee:
       attribute: [sessionStorage, getItem]
+      binding_origin: runtime-global
   constraints:
   - arg_count: 1
   match_examples:
@@ -1114,22 +886,14 @@
         return sessionStorage.getItem("html");
       }
     expect_match_text: [sessionStorage.getItem]
+  - name: locally shadowed session storage is not browser input
+    code: |
+      function demo() {
+        const sessionStorage = { getItem(key) { return "fixed"; } };
+        return sessionStorage.getItem("html");
+      }
+    expect_no_match: true
   description: "sessionStorage.getItem(key) - browser session storage that can carry attacker-controlled state into DOM sinks."
-
-- id: javascript.cloud.gcf_http_req
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: cloud-event
-  frameworks: [gcloud]
-  packages: ["@google-cloud/functions-framework"]
-  match:
-    kind: param
-    target:
-      name: req
-  description: "Google Cloud HTTP function `req` parameter. Disabled - bare `req` fires on every Express handler; enable in GCF-only audits."
 
 - id: javascript.cloud.azure_context_req
   enabled: true
@@ -1380,30 +1144,6 @@
     expect_no_match: true
   description: "First callback parameter of Deno.serve(options, handler) - the inbound Web Request."
 
-- id: javascript.source.websocket_structured_frame_data
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: ws-input
-  payload_types: [text, binary]
-  frameworks: [ws, socket.io]
-  packages: [ws, socket.io]
-  match:
-    kind: read
-    target:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.data$"
-  match_examples:
-  - name: websocket frame data
-    code: |
-      const _u = require("ws");
-      function demo(frame) {
-        return frame.data;
-      }
-    expect_match_text: [frame.data]
-  description: "Disabled - receiver-agnostic .data collides with event.data; enable only after adapter facts can distinguish WebSocket frame/packet payload objects."
-
 - id: javascript.source.socketio_handshake
   enabled: true
   language: javascript
@@ -1433,50 +1173,47 @@
     expect_match_text: [socket.handshake.auth]
   description: "Socket.IO handshake query/header/auth objects - remote-controlled connection metadata."
 
-- id: javascript.source.postmessage_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: ipc-input
-  match:
-    kind: param
-    target:
-      name: message
-  description: "Disabled - bare param `message` is ubiquitous (loggers, handlers); enable only in DOM-only audits."
-
 - id: javascript.source.eventsource_message_data
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: javascript
   trust: remote
   tag: network-input
   payload_types: [text, json]
   frameworks: [eventsource, sse]
-  packages: [eventsource]
   match:
-    kind: read
-    target:
-      attribute: [event, data]
-  description: "Disabled - `event.data` needs callback-delivery evidence from an EventSource `message` listener; the bare property shape is not a source boundary."
+    kind: call
+    callee:
+      name: addEventListener
+  constraints:
+  - receiver_type_in: [EventSource]
+  - arg_count: 2
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"]message['\"]$"
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: EventSource message listener callback
+    code: |
+      const feed = new EventSource("/events");
+      feed.addEventListener("message", event => sink(event.data));
+    expect_match_text: [feed.addEventListener]
+  - name: same named listener on an application receiver
+    code: |
+      class Feed { addEventListener(name, callback) { callback({ data: "fixed" }); } }
+      const feed = new Feed();
+      feed.addEventListener("message", event => sink(event.data));
+    expect_no_match: true
+  - name: EventSource non-message event is not payload input
+    code: |
+      const feed = new EventSource("/events");
+      feed.addEventListener("open", event => sink(event.type));
+    expect_no_match: true
+  description: "EventSource message-listener callback parameter - compiler-derived EventSource receiver type and exact static event name prove the delivery boundary; the registration result remains clean."
 
-- id: javascript.source.socketio_event_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: ws-input
-  packages: [socket.io]
-  match:
-    kind: param
-    target:
-      name: payload
-  description: "Disabled - Socket.IO `socket.on(event, (payload) => ...)` payload param; bare param `payload` is ubiquitous and would over-match. Enable with consumer-class matching (or framework-aware decorator) when available."
-
-# -- GraphQL / raw-HTTP -----------------------------------------------------
 - id: javascript.source.graphql_resolver_args
   enabled: true
   language: javascript
@@ -1593,41 +1330,14 @@
         return info.context.args.q;
       }
     expect_match_text: [info.context.args.q]
+  - name: graphql info at the wrong parameter position
+    code: |
+      const _u = require("graphql");
+      function resolver(parent, args, info, context) {
+        return info.context.args;
+      }
+    expect_no_match: true
   description: "GraphQL info.context.args - framework-propagated resolver args exposed through GraphQL context."
-
-- id: javascript.source.http_incoming_message
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  packages: [http]
-  match:
-    kind: param
-    target:
-      name: req
-  description: "Disabled - bare `req` in http.createServer((req,res)=>...); enable only when framework-agnostic Node servers are the primary surface."
-
-# -- Hono (modern edge framework) --------------------------------------------
-- id: javascript.source.hono_ctx_req_query
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.source.express_req_query
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [query]
-  frameworks: [hono]
-  packages: [hono]
-  match:
-    kind: call
-    callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.req\\.query$"
-  description: "Disabled duplicate - current matching also emits `req.query`; javascript.source.express_req_query carries Hono package metadata for this adapter fact."
 
 - id: javascript.source.hono_ctx_req_json
   enabled: true
@@ -1718,24 +1428,6 @@
   description: "Hono c.req.parseBody() - multipart/urlencoded form body."
 
 # -- Next.js (Pages router req object + App router Request) ------------------
-- id: javascript.source.next_pages_req_body
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.source.express_req_body
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [json]
-  frameworks: [next, nextjs]
-  packages: [next]
-  match:
-    kind: read
-    target:
-      attribute: [req, body]
-  description: "Disabled duplicate - same `req.body` shape is covered by javascript.source.express_req_body with Next.js package metadata merged."
-
 - id: javascript.source.next_request_body_methods
   enabled: true
   language: javascript
@@ -2039,29 +1731,6 @@
     expect_no_match: true
   description: "First parameter of a tRPC procedure callback registered through procedure.input(...).query/mutation/subscription - the compiler-bound procedure options containing client input. The returned router/procedure object is not a source."
 
-- id: javascript.source.trpc_resolver_input_property
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: rpc-input
-  payload_types: [json]
-  packages: ["@trpc/server"]
-  match:
-    kind: read
-    target:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.input$"
-  match_examples:
-  - name: trpc opts input
-    code: |
-      const _u = require("@trpc/server");
-      function resolver(opts) {
-        return opts.input;
-      }
-    expect_match_text: [opts.input]
-  description: "Disabled - tRPC passes input through the procedure callback's options parameter. A bare `.input` property cannot prove that callback boundary; enable through callback-argument seeding instead."
-
 - id: javascript.source.adonis_request_input
   enabled: true
   language: javascript
@@ -2085,6 +1754,11 @@
         return request.input("q");
       }
     expect_match_text: [request.input]
+  - name: same method on a differently bound application object
+    code: |
+      const _u = require("@adonisjs/core");
+      function show(form) { return form.input("q"); }
+    expect_no_match: true
   description: "AdonisJS request.input(name) - merged body/query/route input value controlled by the HTTP client."
 
 - id: javascript.source.adonis_request_all
@@ -2100,6 +1774,7 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(all|only|except)$"
+      base_name_in: [request]
   constraints:
   - max_args: 1
   match_examples:
@@ -2117,6 +1792,11 @@
         return request.only(["name"]);
       }
     expect_match_text: [request.only]
+  - name: same collection methods on an application object
+    code: |
+      const _u = require("@adonisjs/core");
+      function store(collection) { return collection.all(); }
+    expect_no_match: true
   description: "AdonisJS request.all()/only()/except() - selected or complete client-controlled request input."
 
 - id: javascript.source.h3_get_query
@@ -2132,16 +1812,23 @@
     kind: call
     callee:
       name: getQuery
+      binding_origin: imported
   constraints:
   - min_args: 1
   match_examples:
   - name: h3 getQuery
     code: |
-      const _u = require("h3");
+      import { getQuery } from "h3";
       export default eventHandler((event) => {
         return getQuery(event);
       });
     expect_match_text: [getQuery]
+  - name: locally shadowed helper is not h3 input
+    code: |
+      import * as h3 from "h3";
+      function getQuery(value) { return value; }
+      function local(event) { return getQuery(event); }
+    expect_no_match: true
   description: "h3 getQuery(event) - parsed request query object."
 
 - id: javascript.source.h3_read_body
@@ -2157,16 +1844,23 @@
     kind: call
     callee:
       name: readBody
+      binding_origin: imported
   constraints:
   - min_args: 1
   match_examples:
   - name: h3 readBody
     code: |
-      const _u = require("h3");
+      import { readBody } from "h3";
       export default eventHandler(async (event) => {
         return readBody(event);
       });
     expect_match_text: [readBody]
+  - name: locally shadowed helper is not h3 input
+    code: |
+      import * as h3 from "h3";
+      function readBody(value) { return value; }
+      function local(event) { return readBody(event); }
+    expect_no_match: true
   description: "h3 readBody(event) - parsed request body controlled by the HTTP client."
 
 - id: javascript.source.h3_event_req
@@ -2215,49 +1909,3 @@
   description: "SvelteKit event.url - URL object including searchParams; attacker-controlled."
 
 # -- AWS Lambda direct invoke event ------------------------------------------
-- id: javascript.cloud.lambda_event
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: cloud-event
-  packages: ["aws-lambda"]
-  match:
-    kind: param
-    target:
-      name: event
-  description: "Disabled - bare `event` parameter collides with h3/nitro event handlers; attribute-chain Lambda event body/header/query/path rules remain enabled."
-
-# -- Express raw stream chunk (disabled) -------------------------------------
-- id: javascript.source.req_on_data_chunk
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  frameworks: [express, http]
-  packages: [express, http]
-  match:
-    kind: param
-    target:
-      name: chunk
-  description: "Disabled - `chunk` in req.on('data', chunk => ...) is attacker-controlled but bare-name fires across non-HTTP streams; enable narrowed."
-
-# -- Bun.serve ---------------------------------------------------------------
-- id: javascript.source.bun_serve_request
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  trust: remote
-  tag: http-input
-  category: http-input
-  packages: [bun]
-  match:
-    kind: param
-    target:
-      name: req
-  description: "Disabled - Bun.serve({fetch(req){...}}) - `req` is a stdlib Request; enable narrowed by Bun-only audit."

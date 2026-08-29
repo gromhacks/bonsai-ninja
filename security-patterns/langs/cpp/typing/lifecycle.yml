@@ -60,7 +60,7 @@
   match_examples:
   - name: std move changes the source state
     code: 'void f(std::string value) { auto moved = std::move(value); }'
-    expect_match_text: [std::move]
+    expect_match_text: ["std::move"]
   description: "std::move and imported move change argument zero to moved. Typing-only; never a finding."
 
 - id: cpp.typing.lifecycle_unlocked_argument

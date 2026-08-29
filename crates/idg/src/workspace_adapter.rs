@@ -33,7 +33,8 @@ use std::{
 };
 
 use crate::builder::{
-    stitch_idg_from_segment_batches, stitch_idg_from_spooled_segment_batches, CalleeResolver, ResolvedCallee,
+    stitch_idg_from_segment_batches, stitch_idg_from_spooled_segment_batches,
+    stitch_inline_lexical_capture_environment, CallbackBindingOrigin, CalleeResolver, ResolvedCallee,
     ReverseLookupRetention, SpooledStitchOptions,
 };
 use crate::transfer::{
@@ -55,6 +56,9 @@ pub trait CallGraphRelation: Sync {
     fn visit_callers(&self, callee: FuncId, visit: &mut dyn FnMut(&CallEdge));
     /// Visit every compiler-proven caller-local callable alias.
     fn visit_local_callable_bindings(&self, visit: &mut dyn FnMut(FuncId, &str, FuncId));
+    /// Visit every compiler-proven callable value passed at an exact argument
+    /// span. This relation carries no execution semantics by itself.
+    fn visit_callable_arguments(&self, caller: FuncId, visit: &mut dyn FnMut(bonsai_common::Span, FuncId));
 
     /// Surface a deferred partition read/validation error after compiler
     /// visitors finish. Resident graphs are infallible.
@@ -79,6 +83,15 @@ impl CallGraphRelation for ResolvedCallGraph {
     fn visit_local_callable_bindings(&self, visit: &mut dyn FnMut(FuncId, &str, FuncId)) {
         for (caller, alias, target) in self.local_callable_bindings() {
             visit(caller, alias, target);
+        }
+    }
+
+    fn visit_callable_arguments(&self, caller: FuncId, visit: &mut dyn FnMut(bonsai_common::Span, FuncId)) {
+        for argument in self
+            .callable_arguments()
+            .filter(|argument| argument.caller == caller)
+        {
+            visit(argument.span, argument.target);
         }
     }
 }
@@ -295,6 +308,16 @@ struct WorkspaceCalleeResolver<'a> {
     class_symbols_by_import_alias_file: &'a AHashMap<(FileId, String), Vec<bonsai_common::SymbolId>>,
     class_constructors_by_parent: &'a AHashMap<bonsai_common::SymbolId, Vec<FuncId>>,
     class_methods_by_parent: &'a AHashMap<bonsai_common::SymbolId, Vec<FuncId>>,
+    /// Exact local import binding -> semantic target per compiler file. The
+    /// target is opaque to the IDG and is used only as a shared-state identity
+    /// for projected fields across resolved calls.
+    import_bindings_by_file: &'a AHashMap<FileId, AHashMap<String, String>>,
+    /// Constructor-injected receiver storage owned by each class, lowered to
+    /// an exact workspace type identity. Entries exist only when the adapter
+    /// proves the receiver-field write, its source parameter, and that
+    /// parameter's declared type, and workspace resolution finds one type
+    /// declaration. The language-neutral IDG sees only the opaque identity.
+    injected_fields_by_parent: &'a AHashMap<bonsai_common::SymbolId, Vec<(String, bonsai_common::SymbolId)>>,
     /// Per-caller local callable bindings (`let f = <lambda/function>`),
     /// keyed caller → binding name → bound FuncId. Lets `resolve` connect
     /// invocation-shaped calls on a locally-bound callable — `f(args)`,
@@ -319,6 +342,7 @@ struct WorkspaceCalleeResolver<'a> {
 struct CallerCallbackBindings {
     caller: FuncId,
     by_param: AHashMap<u32, Vec<ResolvedCallee>>,
+    origins: AHashMap<(u32, FuncId), Vec<CallbackBindingOrigin>>,
 }
 
 struct CallerAncestorDispatch {
@@ -415,7 +439,7 @@ fn call_edges_for_caller(
             precision: edge.precision,
         };
         let target_decl = global.decl_of(bonsai_common::SymbolId::new(edge.to.raw()));
-        let target_name = target_decl.map(|target| target.name.as_str());
+        let target_name = target_decl.map(decl_call_identity);
         let target_is_constructor = target_decl.is_some_and(|target| target.kind == DeclKind::Constructor);
         let mapped_sites = caller_decl.map_or_else(Vec::new, |decl| {
             linkage_facts.map_or_else(
@@ -762,41 +786,45 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         if out.is_empty() {
             self.resolve_typed_receiver_method_fallback(caller, callee_name, receiver_types, &mut out);
         }
-        // Local-callable-binding fallback: `let f = <lambda>` then
+        // Local-callable-binding dispatch: `let f = <lambda>` then
         // `f(args)` / `f.accept(args)` / `f.call(args)` / `f.(args)`.
-        // The callgraph models these for some adapters but not all
-        // functional-invocation forms; when nothing else resolved and
-        // the receiver (method form) or the bare callee name (direct
-        // form) is a local callable binding of this caller, route to
-        // the bound function. Indirect + Narrowed mirrors how the
-        // callgraph classifies value-typed dispatch.
-        if out.is_empty() {
-            if let Some(bindings) = self.local_callable_bindings.get(&caller) {
-                // Some adapters preserve trailing call punctuation on a
-                // direct callable value. Remove only structural edge
-                // punctuation, then reject any genuinely qualified identity.
-                let stripped_callee = callee_name
-                    .trim()
-                    .trim_matches(bonsai_common::is_name_punctuation);
-                let binding_name = receiver
-                    .map(str::trim)
-                    .filter(|receiver| !receiver.is_empty())
-                    .or_else(|| {
-                        (!stripped_callee.is_empty()
-                            && bonsai_common::qualified_name_owner(stripped_callee).is_none())
-                        .then_some(stripped_callee)
-                    });
-                if let Some(name) = binding_name {
-                    if let Some(&func) = bindings.get(name) {
-                        if self.funcs_share_language(caller, func) {
-                            Self::push_resolved_edge(
-                                &mut out,
-                                &mut seen,
-                                func,
-                                bonsai_callgraph::EdgeKind::Indirect,
-                                bonsai_common::Precision::Narrowed,
-                            );
-                        }
+        // A compiler-proven lexical binding takes precedence over a static
+        // interface/signature edge. For example, Java may resolve
+        // `router.apply(x)` to `CommandStage.apply` from the declared type,
+        // while the same AST proves `router = x -> route(x)`. The interface
+        // declaration is a type contract, not the executed body. Requiring
+        // `out.is_empty()` here therefore dropped the lambda whenever the
+        // callgraph also retained that contract edge. The binding table is
+        // built from exact callable-assignment spans and excludes ambiguous
+        // aliases, so replacing the type-only candidates is lexical
+        // shadowing, not a name-based fallback.
+        if let Some(bindings) = self.local_callable_bindings.get(&caller) {
+            // Some adapters preserve trailing call punctuation on a direct
+            // callable value. Remove only structural edge punctuation, then
+            // reject any genuinely qualified identity.
+            let stripped_callee = callee_name
+                .trim()
+                .trim_matches(bonsai_common::is_name_punctuation);
+            let binding_name = receiver
+                .map(str::trim)
+                .filter(|receiver| !receiver.is_empty())
+                .or_else(|| {
+                    (!stripped_callee.is_empty()
+                        && bonsai_common::qualified_name_owner(stripped_callee).is_none())
+                    .then_some(stripped_callee)
+                });
+            if let Some(name) = binding_name {
+                if let Some(&func) = bindings.get(name) {
+                    if self.funcs_share_language(caller, func) {
+                        out.clear();
+                        seen.clear();
+                        Self::push_resolved_edge(
+                            &mut out,
+                            &mut seen,
+                            func,
+                            bonsai_callgraph::EdgeKind::Indirect,
+                            bonsai_common::Precision::Narrowed,
+                        );
                     }
                 }
             }
@@ -806,6 +834,22 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
 
     fn callback_bindings(&self, host: FuncId, param_idx: u32) -> Vec<ResolvedCallee> {
         self.callback_bindings_indexed(host, param_idx)
+    }
+
+    fn callback_binding_origins(
+        &self,
+        host: FuncId,
+        param_idx: u32,
+        callback: FuncId,
+    ) -> Vec<CallbackBindingOrigin> {
+        let _ = self.callback_bindings_indexed(host, param_idx);
+        self.callback_cache
+            .read()
+            .as_ref()
+            .filter(|cache| cache.caller == host)
+            .and_then(|cache| cache.origins.get(&(param_idx, callback)))
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn callable_arg(&self, caller: FuncId, arg_text: &str) -> Vec<ResolvedCallee> {
@@ -839,6 +883,83 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
 
     fn callable_args_in_span(&self, caller: FuncId, arg_span: bonsai_common::Span) -> Vec<ResolvedCallee> {
         self.callable_args_in_span_indexed(caller, arg_span)
+    }
+
+    fn callable_is_inline_in_span(
+        &self,
+        caller: FuncId,
+        arg_span: bonsai_common::Span,
+        candidate: FuncId,
+    ) -> bool {
+        let Some(candidate_decl) = self.func_decl(candidate) else {
+            return false;
+        };
+        if candidate_decl.span.file != arg_span.file
+            || candidate_decl.span.start < arg_span.start
+            || candidate_decl.span.end > arg_span.end
+        {
+            return false;
+        }
+        let caller_symbol = bonsai_common::SymbolId::new(caller.raw());
+        let mut parent = candidate_decl.parent;
+        while let Some(symbol) = parent {
+            if symbol == caller_symbol {
+                return true;
+            }
+            parent = self.global.decl_of(symbol).and_then(|decl| decl.parent);
+        }
+        false
+    }
+
+    fn imported_binding_target(
+        &self,
+        func: FuncId,
+        binding: &str,
+        at_span: bonsai_common::Span,
+    ) -> Option<String> {
+        let file = self.func_file(func)?;
+        let bindings = self.import_bindings_by_file.get(&file)?;
+        let binding = binding.trim();
+        if binding.is_empty() {
+            return None;
+        }
+        let decl = self.func_decl(func)?;
+        if decl
+            .params
+            .iter()
+            .any(|param| bonsai_common::normalize_qualified_name(param) == binding)
+            || binding_is_reassigned_before(&decl.flow_events, binding, at_span)
+        {
+            return None;
+        }
+        bindings.get(binding).cloned().or_else(|| {
+            let canonical = bonsai_common::normalize_qualified_name(binding);
+            (canonical != binding)
+                .then(|| bindings.get(&canonical).cloned())
+                .flatten()
+        })
+    }
+
+    fn injected_storage_target(
+        &self,
+        func: FuncId,
+        storage: &str,
+        _at_span: bonsai_common::Span,
+    ) -> Option<(String, String)> {
+        let decl = self.func_decl(func)?;
+        let parent = decl.parent?;
+        let storage = canonical_storage_path(storage);
+        let fields = self.injected_fields_by_parent.get(&parent)?;
+        let (base, type_symbol) = fields.iter().find(|(base, _)| {
+            storage
+                .strip_prefix(base)
+                .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1)
+        })?;
+        let suffix = storage.strip_prefix(base)?.strip_prefix('.')?;
+        Some((
+            format!("receiver-injected:{}", type_symbol.raw()),
+            suffix.to_string(),
+        ))
     }
 
     fn receiver_type_for(&self, func: FuncId) -> Option<String> {
@@ -890,9 +1011,13 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
 }
 
 impl WorkspaceCalleeResolver<'_> {
-    /// Return only compiler-resolved callable values whose indirect call edge
-    /// is contained by this AST argument. A textual identifier is not proof:
-    /// an ordinary object variable can share its spelling with an unrelated
+    /// Return only compiler-resolved callable values whose exact callable
+    /// relation is contained by this AST argument. Some grammars retain a
+    /// transparent argument-list wrapper as the callable relation while a
+    /// normalized call event points at its sole lambda child; when no
+    /// contained relation exists, accept an exact enclosing relation from the
+    /// same compiler call graph. A textual identifier is never proof: an
+    /// ordinary object variable can share its spelling with an unrelated
     /// method elsewhere in the workspace.
     fn callable_args_in_span_indexed(
         &self,
@@ -901,18 +1026,111 @@ impl WorkspaceCalleeResolver<'_> {
     ) -> Vec<ResolvedCallee> {
         let mut out = Vec::new();
         let mut seen = ahash::AHashSet::new();
-        self.call_graph.visit_callees(caller, &mut |edge| {
-            if edge.kind != bonsai_callgraph::EdgeKind::Indirect
-                || edge.span.file != arg_span.file
-                || edge.span.start < arg_span.start
-                || edge.span.end > arg_span.end
-                || !edge.precision.is_semantic()
-                || !self.funcs_share_language(caller, edge.to)
-            {
-                return;
+        let mut enclosing = Vec::new();
+        self.call_graph
+            .visit_callable_arguments(caller, &mut |span, target| {
+                if span.file != arg_span.file || !self.funcs_share_language(caller, target) {
+                    return;
+                }
+                if span.start >= arg_span.start && span.end <= arg_span.end {
+                    Self::push_resolved_edge(
+                        &mut out,
+                        &mut seen,
+                        target,
+                        bonsai_callgraph::EdgeKind::Indirect,
+                        bonsai_common::Precision::Narrowed,
+                    );
+                } else if span.start <= arg_span.start && span.end >= arg_span.end {
+                    enclosing.push(target);
+                }
+            });
+        if out.is_empty() {
+            for target in enclosing {
+                Self::push_resolved_edge(
+                    &mut out,
+                    &mut seen,
+                    target,
+                    bonsai_callgraph::EdgeKind::Indirect,
+                    bonsai_common::Precision::Narrowed,
+                );
             }
-            Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.kind, edge.precision);
-        });
+        }
+        // Resident/custom call graphs may predate the compact callable-
+        // argument relation while still carrying the same compiler-proven
+        // fact as an exact semantic indirect edge. Preserve that public graph
+        // contract as a structural fallback; no textual callable lookup is
+        // involved. Production persisted graphs normally resolve above.
+        if out.is_empty() {
+            self.call_graph.visit_callees(caller, &mut |edge| {
+                if edge.kind != bonsai_callgraph::EdgeKind::Indirect
+                    || edge.span.file != arg_span.file
+                    || edge.span.start < arg_span.start
+                    || edge.span.end > arg_span.end
+                    || !edge.precision.is_semantic()
+                    || !self.funcs_share_language(caller, edge.to)
+                {
+                    return;
+                }
+                Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.kind, edge.precision);
+            });
+        }
+        // A rule-declared external/runtime API can prove that an inline
+        // callable argument is invoked even though there is deliberately no
+        // first-party callgraph edge for the external method. In that case,
+        // recover only declarations the compiler placed wholly inside the
+        // exact argument span and whose declaration ancestry reaches this
+        // caller. This identifies the callable value; the matched transfer
+        // rule remains the sole proof that the outer API invokes it.
+        if out.is_empty() {
+            let caller_symbol = bonsai_common::SymbolId::new(caller.raw());
+            if let Some(file) = self.global.declaring_file(caller_symbol) {
+                let declarations = self.global.decls_in(file);
+                bonsai_diagnostics::debug_log!(
+                    "idg-build",
+                    "inline callback lookup caller={} arg={:?} decls={:?}",
+                    caller.raw(),
+                    arg_span,
+                    declarations
+                        .iter()
+                        .map(|decl| (&decl.name, decl.span, decl.parent.map(|parent| parent.raw())))
+                        .collect::<Vec<_>>()
+                );
+                for candidate in declarations {
+                    if candidate.symbol == caller_symbol
+                        || candidate.span.file != arg_span.file
+                        || candidate.span.start < arg_span.start
+                        || candidate.span.end > arg_span.end
+                    {
+                        continue;
+                    }
+                    let mut parent = candidate.parent;
+                    let mut nested = false;
+                    while let Some(symbol) = parent {
+                        if symbol == caller_symbol {
+                            nested = true;
+                            break;
+                        }
+                        parent = declarations
+                            .iter()
+                            .find(|decl| decl.symbol == symbol)
+                            .and_then(|decl| decl.parent)
+                            .or_else(|| self.global.decl_of(symbol).and_then(|decl| decl.parent));
+                    }
+                    if nested {
+                        let target = FuncId::new(candidate.symbol.raw());
+                        if self.funcs_share_language(caller, target) {
+                            Self::push_resolved_edge(
+                                &mut out,
+                                &mut seen,
+                                target,
+                                bonsai_callgraph::EdgeKind::Indirect,
+                                bonsai_common::Precision::Narrowed,
+                            );
+                        }
+                    }
+                }
+            }
+        }
         out
     }
 }
@@ -1063,10 +1281,10 @@ impl WorkspaceCalleeResolver<'_> {
         precision: bonsai_common::Precision,
         callee_name: &str,
     ) {
-        let Some(decl_name) = self.func_decl(to).map(|decl| decl.name.as_str()) else {
+        let Some(decl) = self.func_decl(to) else {
             return;
         };
-        let mut matched = names_match_for_callee(decl_name, callee_name);
+        let mut matched = decl_names_match_for_callee(decl, callee_name);
         if !matched {
             // Alias-aware fallback: each FuncId tracks every textual
             // name it can be called as, built from import-alias maps.
@@ -1152,6 +1370,7 @@ impl WorkspaceCalleeResolver<'_> {
         // when some unrelated declaration is also named `analyzer`.
         let mut out: Vec<ResolvedCallee> = Vec::new();
         let mut seen: ahash::AHashSet<FuncId> = ahash::AHashSet::new();
+        let mut origins: AHashMap<FuncId, Vec<CallbackBindingOrigin>> = AHashMap::new();
         let mut seen_callers = ahash::AHashSet::new();
         self.call_graph.visit_callers(host, &mut |edge| {
             let caller = edge.from;
@@ -1164,24 +1383,89 @@ impl WorkspaceCalleeResolver<'_> {
             };
             let caller_edges = self.call_edges_for_caller(caller);
             let site_targets_host = |span| caller_edges.edges(span).any(|edge| edge.to == host);
-            let mut arg_spans = Vec::new();
+            let mut call_args = Vec::new();
             if let Some(facts) = self.global.linkage_facts(caller_symbol) {
-                collect_linkage_arg_spans_for_resolved_callee(
+                collect_linkage_args_for_resolved_callee(
                     &facts.calls,
                     param_idx as usize,
                     &site_targets_host,
-                    &mut arg_spans,
+                    &mut call_args,
                 );
             } else {
-                collect_arg_spans_for_resolved_callee(
+                collect_args_for_resolved_callee(
                     &caller_decl.flow_events,
                     param_idx as usize,
                     &site_targets_host,
-                    &mut arg_spans,
+                    &mut call_args,
                 );
             }
-            for arg_span in arg_spans {
-                for candidate in self.callable_args_in_span_indexed(caller, arg_span) {
+            for arg in call_args {
+                let mut candidates = self.callable_args_in_span_indexed(caller, arg.span);
+                let graph_binding = match (candidates.as_slice(), arg.place.as_deref()) {
+                    ([candidate], Some(binding)) if !binding.trim().is_empty() => {
+                        Some((candidate.func, Some(binding.to_string())))
+                    }
+                    _ => None,
+                };
+                let local_binding = arg.place.as_deref().and_then(|place| {
+                    let canonical = bonsai_common::normalize_qualified_name(place);
+                    self.local_callable_bindings
+                        .get(&caller)
+                        .and_then(|bindings| {
+                            bindings
+                                .get(place)
+                                .or_else(|| (canonical != place).then(|| bindings.get(&canonical)).flatten())
+                        })
+                        .copied()
+                        .filter(|func| self.funcs_share_language(host, *func))
+                        .map(|func| (func, Some(place.to_string())))
+                });
+                let inline_origin = match candidates.as_slice() {
+                    [candidate] => self
+                        .global
+                        .decl_of(bonsai_common::SymbolId::new(candidate.func.raw()))
+                        .filter(|decl| {
+                            decl.span.file == arg.span.file
+                                && decl.span.start >= arg.span.start
+                                && decl.span.end <= arg.span.end
+                        })
+                        .map(|_| (candidate.func, None)),
+                    _ => None,
+                };
+                // A bare caller-local callable value has no invocation inside
+                // its argument span, so the callgraph cannot emit an indirect
+                // edge contained by that span. The compact linkage header
+                // retains the adapter-normalized argument place; resolve it
+                // only through the caller's compiler-proven local binding
+                // table. An ordinary same-spelled value has no such binding
+                // and therefore remains disconnected.
+                if candidates.is_empty() {
+                    if let Some((func, _)) = local_binding.as_ref() {
+                        candidates.push(ResolvedCallee {
+                            func: *func,
+                            edge_kind: bonsai_callgraph::EdgeKind::Indirect,
+                            precision: bonsai_common::Precision::Narrowed,
+                        });
+                    }
+                }
+                let lexical_origin = match (local_binding, graph_binding, inline_origin) {
+                    (Some(local), Some(graph), _) if local.0 != graph.0 => None,
+                    (Some(local), _, _) => Some(local),
+                    (None, Some(graph), _) => Some(graph),
+                    (None, None, inline) => inline,
+                };
+                if let Some((func, binding)) = lexical_origin {
+                    let entry = origins.entry(func).or_default();
+                    let origin = CallbackBindingOrigin {
+                        caller,
+                        call_site: arg.call_site,
+                        binding,
+                    };
+                    if !entry.contains(&origin) {
+                        entry.push(origin);
+                    }
+                }
+                for candidate in candidates {
                     if self.funcs_share_language(host, candidate.func) && seen.insert(candidate.func) {
                         out.push(candidate);
                     }
@@ -1193,13 +1477,24 @@ impl WorkspaceCalleeResolver<'_> {
             *cache = Some(CallerCallbackBindings {
                 caller: host,
                 by_param: AHashMap::new(),
+                origins: AHashMap::new(),
             });
         }
-        cache
-            .as_mut()
-            .expect("callback cache initialized above")
-            .by_param
-            .insert(param_idx, out.clone());
+        let cache = cache.as_mut().expect("callback cache initialized above");
+        cache.by_param.insert(param_idx, out.clone());
+        for (callback, mut callback_origins) in origins {
+            callback_origins.sort_by_key(|origin| {
+                (
+                    origin.caller.raw(),
+                    origin.call_site.file.raw(),
+                    origin.call_site.start,
+                    origin.call_site.end,
+                    origin.binding.clone(),
+                )
+            });
+            callback_origins.dedup();
+            cache.origins.insert((param_idx, callback), callback_origins);
+        }
         out
     }
 }
@@ -1641,7 +1936,7 @@ impl<'a> WorkspaceCalleeResolver<'a> {
                         if self.funcs_share_language(caller, func)
                             && self
                                 .func_decl(func)
-                                .is_some_and(|decl| names_match_for_callee(&decl.name, callee_name))
+                                .is_some_and(|decl| decl_names_match_for_callee(decl, callee_name))
                         {
                             methods.push(func);
                         }
@@ -1891,6 +2186,79 @@ fn scan_call_site_arg_presence(
     }
 }
 
+fn binding_is_reassigned_before(events: &[FlowEvent], binding: &str, at_span: bonsai_common::Span) -> bool {
+    let is_projection_mirror = |span: bonsai_common::Span| {
+        events.iter().any(|event| {
+            let FlowEvent::Assign {
+                span: candidate_span,
+                target,
+                ..
+            } = event
+            else {
+                return false;
+            };
+            if *candidate_span != span {
+                return false;
+            }
+            let target = bonsai_common::normalize_qualified_name(target.trim());
+            target
+                .strip_prefix(binding)
+                .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1)
+        })
+    };
+    for event in events {
+        let event_precedes_use = event.span().file == at_span.file && event.span().start <= at_span.start;
+        match event {
+            FlowEvent::Assign { span, target, .. }
+                if event_precedes_use
+                    && bonsai_common::normalize_qualified_name(target.trim()) == binding
+                    && !is_projection_mirror(*span) =>
+            {
+                return true;
+            }
+            FlowEvent::AggregateAssign { target, .. }
+                if event_precedes_use
+                    && bonsai_common::normalize_qualified_name(target.trim()) == binding =>
+            {
+                return true;
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } if event_precedes_use => {
+                if binding_is_reassigned_before(then_events, binding, at_span)
+                    || binding_is_reassigned_before(else_events, binding, at_span)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. }
+                if event_precedes_use =>
+            {
+                if binding_is_reassigned_before(body, binding, at_span) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } if event_precedes_use => {
+                if binding_is_reassigned_before(body, binding, at_span)
+                    || binding_is_reassigned_before(catch_events, binding, at_span)
+                    || binding_is_reassigned_before(finally_events, binding, at_span)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn span_contains(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
     outer.start <= inner.start && inner.end <= outer.end
 }
@@ -2005,6 +2373,174 @@ fn class_symbols_by_name_scope_for_files(
     out
 }
 
+fn canonical_storage_path(path: &str) -> String {
+    bonsai_common::qualified_name_segments(&bonsai_common::normalize_qualified_name(path))
+        .into_iter()
+        .map(bonsai_common::trim_leading_name_punctuation)
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn constructor_injected_fields_by_parent(
+    global: &GlobalIndex,
+    file_to_directory: &AHashMap<FileId, String>,
+    class_symbols_by_name: &AHashMap<String, Vec<bonsai_common::SymbolId>>,
+    class_symbols_by_name_scope: &AHashMap<(String, LocalScopeKey), Vec<bonsai_common::SymbolId>>,
+    class_symbols_by_import_alias_file: &AHashMap<(FileId, String), Vec<bonsai_common::SymbolId>>,
+) -> AHashMap<bonsai_common::SymbolId, Vec<(String, bonsai_common::SymbolId)>> {
+    let mut exact: AHashMap<(bonsai_common::SymbolId, String), bonsai_common::SymbolId> = AHashMap::new();
+    let mut ambiguous = AHashSet::new();
+
+    for file in global.all_files() {
+        for constructor in global.functions_in(file) {
+            if !matches!(constructor.kind, DeclKind::Constructor) {
+                continue;
+            }
+            let Some(parent) = constructor.parent else {
+                continue;
+            };
+            for write in &constructor.receiver_field_writes {
+                if write.source_param_indices.is_empty() {
+                    continue;
+                }
+                let field = canonical_storage_path(&write.target);
+                if field.is_empty() {
+                    continue;
+                }
+                let mut type_names = Vec::new();
+                for source_idx in &write.source_param_indices {
+                    let Some(param) = constructor.params.get(*source_idx) else {
+                        continue;
+                    };
+                    let param = canonical_storage_path(param);
+                    type_names.extend(
+                        constructor
+                            .type_aliases
+                            .iter()
+                            .filter(|alias| canonical_storage_path(&alias.name) == param)
+                            .map(|alias| alias.type_name.as_str()),
+                    );
+                }
+                type_names.extend(
+                    constructor
+                        .type_aliases
+                        .iter()
+                        .filter(|alias| canonical_storage_path(&alias.name) == field)
+                        .map(|alias| alias.type_name.as_str()),
+                );
+
+                let mut type_symbols = AHashSet::new();
+                for type_name in type_names {
+                    type_symbols.extend(resolve_type_symbols_for_constructor(
+                        global,
+                        file,
+                        parent,
+                        type_name,
+                        file_to_directory,
+                        class_symbols_by_name,
+                        class_symbols_by_name_scope,
+                        class_symbols_by_import_alias_file,
+                    ));
+                }
+                if type_symbols.len() != 1 {
+                    continue;
+                }
+                let type_symbol = *type_symbols.iter().next().expect("one injected type symbol");
+                let key = (parent, field);
+                if ambiguous.contains(&key) {
+                    continue;
+                }
+                match exact.get(&key).copied() {
+                    None => {
+                        exact.insert(key, type_symbol);
+                    }
+                    Some(existing) if existing == type_symbol => {}
+                    Some(_) => {
+                        exact.remove(&key);
+                        ambiguous.insert(key);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out: AHashMap<bonsai_common::SymbolId, Vec<(String, bonsai_common::SymbolId)>> = AHashMap::new();
+    for ((parent, field), type_symbol) in exact {
+        out.entry(parent).or_default().push((field, type_symbol));
+    }
+    for fields in out.values_mut() {
+        fields.sort_by(|left, right| {
+            right
+                .0
+                .split('.')
+                .count()
+                .cmp(&left.0.split('.').count())
+                .then_with(|| left.0.cmp(&right.0))
+                .then_with(|| left.1.raw().cmp(&right.1.raw()))
+        });
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_type_symbols_for_constructor(
+    global: &GlobalIndex,
+    file: FileId,
+    parent: bonsai_common::SymbolId,
+    type_name: &str,
+    file_to_directory: &AHashMap<FileId, String>,
+    class_symbols_by_name: &AHashMap<String, Vec<bonsai_common::SymbolId>>,
+    class_symbols_by_name_scope: &AHashMap<(String, LocalScopeKey), Vec<bonsai_common::SymbolId>>,
+    class_symbols_by_import_alias_file: &AHashMap<(FileId, String), Vec<bonsai_common::SymbolId>>,
+) -> Vec<bonsai_common::SymbolId> {
+    let simple = bonsai_lang_api::kit::canonical_simple_type_name(type_name);
+    if simple.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates = AHashSet::new();
+    for spelling in [type_name.trim(), simple.as_str()] {
+        if let Some(imported) = class_symbols_by_import_alias_file.get(&(file, spelling.to_string())) {
+            candidates.extend(imported.iter().copied());
+        }
+    }
+    if let Some(scope) = symbol_scope_key(global, file_to_directory, parent) {
+        if let Some(scoped) = class_symbols_by_name_scope.get(&(simple.clone(), scope)) {
+            candidates.extend(scoped.iter().copied());
+        }
+    }
+    if candidates.is_empty() {
+        let normalized_type = bonsai_common::normalize_qualified_name(type_name);
+        if normalized_type.contains('.') {
+            candidates.extend(
+                class_symbols_by_name
+                    .get(&simple)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter(|symbol| {
+                        global.decl_of(*symbol).is_some_and(|decl| {
+                            decl.qualified_name.as_deref().is_some_and(|qualified| {
+                                bonsai_common::normalize_qualified_name(qualified) == normalized_type
+                            })
+                        })
+                    }),
+            );
+        }
+    }
+    if candidates.is_empty() {
+        if let Some(global_candidates) = class_symbols_by_name.get(&simple) {
+            if global_candidates.len() == 1 {
+                candidates.insert(global_candidates[0]);
+            }
+        }
+    }
+    let mut out = candidates.into_iter().collect::<Vec<_>>();
+    out.sort_by_key(|symbol| symbol.raw());
+    out
+}
+
 fn decl_kind_is_type_receiver(kind: bonsai_lang_api::DeclKind) -> bool {
     matches!(
         kind,
@@ -2084,15 +2620,39 @@ fn names_match_for_callee(decl_name: &str, event_name: &str) -> bool {
     bonsai_common::qualified_names_match(decl_name, event_name)
 }
 
+/// Compare a call-site identity against every exact semantic spelling emitted
+/// for a declaration. `Decl::name` remains the concise source/search name;
+/// adapters may use the qualified-name tail to retain richer grammar identity
+/// such as a multipart selector. Shared IDG code consumes that generic
+/// identity without interpreting language punctuation or API spellings.
+fn decl_names_match_for_callee(decl: &bonsai_lang_api::Decl, event_name: &str) -> bool {
+    names_match_for_callee(&decl.name, event_name)
+        || names_match_for_callee(decl_call_identity(decl), event_name)
+}
+
+fn decl_call_identity(decl: &bonsai_lang_api::Decl) -> &str {
+    decl.qualified_name
+        .as_deref()
+        .and_then(|qualified| bonsai_common::declaration_qualified_suffix(&decl.name, qualified))
+        .unwrap_or(&decl.name)
+}
+
 /// Walk `events` and collect the requested argument span only from Call
 /// events that the target-aware callgraph index resolves to `host`. Callback
 /// discovery then consumes indirect callgraph edges inside these AST spans;
 /// source spelling is never reinterpreted as a symbol here.
-fn collect_arg_spans_for_resolved_callee(
+#[derive(Clone, Debug)]
+struct ResolvedCallArgumentFact {
+    call_site: bonsai_common::Span,
+    span: bonsai_common::Span,
+    place: Option<String>,
+}
+
+fn collect_args_for_resolved_callee(
     events: &[bonsai_lang_api::FlowEvent],
     arg_idx: usize,
     site_targets_host: &impl Fn(bonsai_common::Span) -> bool,
-    out: &mut Vec<bonsai_common::Span>,
+    out: &mut Vec<ResolvedCallArgumentFact>,
 ) {
     use bonsai_lang_api::FlowEvent;
     for event in events {
@@ -2100,7 +2660,11 @@ fn collect_arg_spans_for_resolved_callee(
             FlowEvent::Call { span, args, .. } => {
                 if site_targets_host(*span) {
                     if let Some(arg) = args.get(arg_idx) {
-                        out.push(arg.span);
+                        out.push(ResolvedCallArgumentFact {
+                            call_site: *span,
+                            span: arg.span,
+                            place: arg.place.clone(),
+                        });
                     }
                 }
             }
@@ -2109,8 +2673,8 @@ fn collect_arg_spans_for_resolved_callee(
                 else_events,
                 ..
             } => {
-                collect_arg_spans_for_resolved_callee(then_events, arg_idx, site_targets_host, out);
-                collect_arg_spans_for_resolved_callee(else_events, arg_idx, site_targets_host, out);
+                collect_args_for_resolved_callee(then_events, arg_idx, site_targets_host, out);
+                collect_args_for_resolved_callee(else_events, arg_idx, site_targets_host, out);
             }
             FlowEvent::Try {
                 body,
@@ -2118,28 +2682,36 @@ fn collect_arg_spans_for_resolved_callee(
                 finally_events,
                 ..
             } => {
-                collect_arg_spans_for_resolved_callee(body, arg_idx, site_targets_host, out);
-                collect_arg_spans_for_resolved_callee(catch_events, arg_idx, site_targets_host, out);
-                collect_arg_spans_for_resolved_callee(finally_events, arg_idx, site_targets_host, out);
+                collect_args_for_resolved_callee(body, arg_idx, site_targets_host, out);
+                collect_args_for_resolved_callee(catch_events, arg_idx, site_targets_host, out);
+                collect_args_for_resolved_callee(finally_events, arg_idx, site_targets_host, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_arg_spans_for_resolved_callee(body, arg_idx, site_targets_host, out);
+                collect_args_for_resolved_callee(body, arg_idx, site_targets_host, out);
             }
             _ => {}
         }
     }
 }
 
-fn collect_linkage_arg_spans_for_resolved_callee(
+fn collect_linkage_args_for_resolved_callee(
     calls: &[CallLinkageFact],
     arg_idx: usize,
     site_targets_host: &impl Fn(bonsai_common::Span) -> bool,
-    out: &mut Vec<bonsai_common::Span>,
+    out: &mut Vec<ResolvedCallArgumentFact>,
 ) {
     for call in calls {
         if site_targets_host(call.span) {
             if let Some(arg_span) = call.arg_spans.get(arg_idx) {
-                out.push(*arg_span);
+                out.push(ResolvedCallArgumentFact {
+                    call_site: call.span,
+                    span: *arg_span,
+                    place: call
+                        .arg_places
+                        .get(arg_idx)
+                        .and_then(|place| place.as_deref())
+                        .map(str::to_string),
+                });
             }
         }
     }
@@ -2236,12 +2808,14 @@ where
 ///
 /// # Example
 ///
-/// ```ignore
-/// let global: Arc<GlobalIndex> = db.global_index();
-/// let call_graph: ResolvedCallGraph =
-///     ResolvedCallGraph::build_with(&global, alias_provider);
-/// let idg: IdgWorkspace =
-///     bonsai_idg::workspace_adapter::build(&global, &call_graph);
+/// ```no_run
+/// # fn compile_workspace(
+/// #     global: &bonsai_index::GlobalIndex,
+/// #     call_graph: &bonsai_callgraph::ResolvedCallGraph,
+/// # ) {
+/// let idg = bonsai_idg::workspace_adapter::build(global, call_graph);
+/// # let _ = idg;
+/// # }
 /// ```
 #[must_use]
 pub fn build(global: &GlobalIndex, call_graph: &ResolvedCallGraph) -> IdgWorkspace {
@@ -2861,8 +3435,9 @@ where
         maps.file_to_language.len()
     ));
     let phase_started = Instant::now();
-    // Build `func_to_call_names`: every textual name a func can be
-    // called as. Decl name plus every alias declared in any file
+    // Build `func_to_call_names`: every exact semantic name a func can be
+    // called as. The concise declaration name is matched directly by the
+    // resolver; a richer qualified-name tail and every alias declared in any file
     // that imports the func by a renamed identifier. We invert the
     // per-file `{local_name → original_name}` map: when a file
     // imports `persist as persistEnvelope`, every persist FuncId
@@ -2871,6 +3446,7 @@ where
     let mut func_to_call_names: AHashMap<FuncId, Vec<String>> = AHashMap::new();
     let mut class_symbols_by_import_alias_file: AHashMap<(FileId, String), Vec<bonsai_common::SymbolId>> =
         AHashMap::new();
+    let mut import_bindings_by_file: AHashMap<FileId, AHashMap<String, String>> = AHashMap::new();
     // Compiler-style declaration indexes make import-alias resolution a
     // narrow candidate lookup followed by exact module/qualified-name
     // validation. Rescanning every declaration for every alias is
@@ -2884,10 +3460,17 @@ where
                     .entry(decl.name.clone())
                     .or_default()
                     .push(func);
+                let semantic_name = decl_call_identity(decl);
+                if semantic_name != decl.name {
+                    add_func_call_alias(&mut func_to_call_names, func, semantic_name);
+                }
             }
         }
     }
-    let class_symbols_by_name = class_symbols_by_name_for_files(global, included_files);
+    // Class/type headers are workspace linkage, not selected function bodies.
+    // Scoped IDGs must still resolve an imported/injected type whose class
+    // declaration lives outside the source-to-sink body corridor.
+    let class_symbols_by_name = class_symbols_by_name_for_files(global, None);
     let module_prefixes = module_prefixes_by_file(global);
     let module_default_exports = module_default_export_funcs_by_module(
         global,
@@ -2899,6 +3482,7 @@ where
             continue;
         }
         let aliases = semantics.aliases(file);
+        import_bindings_by_file.insert(file, aliases.clone());
         let caller_module = module_prefixes.get(&file).map(String::as_str);
         let module_path_syntax = maps
             .file_to_module_path_syntax
@@ -2963,17 +3547,40 @@ where
     // surfaced anywhere in the workspace contributes its lhs as an
     // additional call-name for the callable's FuncId.
     let mut local_callable_bindings: AHashMap<FuncId, AHashMap<String, FuncId>> = AHashMap::new();
+    let mut ambiguous_local_callable_bindings = AHashSet::new();
+    let mut saw_compiler_local_callable_binding = false;
     call_graph.visit_local_callable_bindings(&mut |caller, alias, target| {
-        local_callable_bindings
-            .entry(caller)
-            .or_default()
-            .insert(alias.to_string(), target);
+        let alias = alias.trim();
+        if alias.is_empty() {
+            return;
+        }
+        saw_compiler_local_callable_binding = true;
+        let canonical = bonsai_common::normalize_qualified_name(alias);
+        for (variant_index, binding) in [alias, canonical.as_str()].into_iter().enumerate() {
+            if binding.is_empty()
+                || (variant_index == 1 && canonical == alias)
+                || ambiguous_local_callable_bindings.contains(&(caller, binding.to_string()))
+            {
+                continue;
+            }
+            let bindings = local_callable_bindings.entry(caller).or_default();
+            match bindings.get(binding).copied() {
+                None => {
+                    bindings.insert(binding.to_string(), target);
+                }
+                Some(existing) if existing == target => {}
+                Some(_) => {
+                    bindings.remove(binding);
+                    ambiguous_local_callable_bindings.insert((caller, binding.to_string()));
+                }
+            }
+        }
     });
     // Graphs assembled directly by tests/importers predate the compact
     // binding table. Preserve the resident API contract there; production
     // compiler graphs always carry the exact bindings resolved while their
     // streamed bodies are live.
-    if local_callable_bindings.is_empty() {
+    if !saw_compiler_local_callable_binding {
         local_callable_bindings =
             bonsai_callgraph::collect_workspace_local_callable_bindings(global, |file| {
                 semantics.capabilities(file)
@@ -2987,11 +3594,45 @@ where
             add_func_call_alias(&mut func_to_call_names, *func, alias);
         }
     }
-    let capture_funcs = local_callable_bindings
+    let mut capture_funcs = local_callable_bindings
         .values()
         .flat_map(|bindings| bindings.values())
         .copied()
         .collect::<AHashSet<_>>();
+    // Inline callbacks do not have a caller-local binding name. Their exact
+    // callable-argument relation is nevertheless compiler proof that the
+    // body owns a lexical environment at the registration site. Retain
+    // capture endpoints for those targets as well; the higher-order stitch
+    // still requires a unique formal binding and exact origin before it can
+    // emit an edge. Use the relation visitor so resident and partitioned
+    // callgraphs keep identical behavior.
+    for &caller in maps.func_to_seg.keys() {
+        call_graph.visit_callable_arguments(caller, &mut |_, target| {
+            if maps.func_to_seg.contains_key(&target) {
+                capture_funcs.insert(caller);
+                capture_funcs.insert(target);
+            }
+        });
+    }
+    // Rule-declared external callback invocations are intentionally absent
+    // from the first-party callgraph until their API contract is matched.
+    // Retain compact lexical endpoint facts for nested callable declarations
+    // and their enclosing functions so an exact matched callback span can be
+    // stitched later without reopening compiler bodies. Declaration ancestry
+    // is compiler identity; it does not imply that the callback executes.
+    for &candidate in maps.func_to_seg.keys() {
+        let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(candidate.raw())) else {
+            continue;
+        };
+        let Some(parent) = decl.parent else {
+            continue;
+        };
+        let parent_func = FuncId::new(parent.raw());
+        if maps.func_to_seg.contains_key(&parent_func) {
+            capture_funcs.insert(parent_func);
+            capture_funcs.insert(candidate);
+        }
+    }
     let alias_count: usize = func_to_call_names.values().map(Vec::len).sum();
     idg_build_log(format_args!(
         "call-name aliases: {:.3}s funcs={} aliases={}",
@@ -3000,8 +3641,27 @@ where
         alias_count
     ));
     let phase_started = Instant::now();
+    let mut linkage_file_to_directory = maps.file_to_directory.clone();
+    for file in global.all_files() {
+        if linkage_file_to_directory.contains_key(&file) {
+            continue;
+        }
+        if let Some(directory) = semantics
+            .path(file)
+            .and_then(|path| parent_dir_key(path.as_str()))
+        {
+            linkage_file_to_directory.insert(file, directory);
+        }
+    }
     let class_symbols_by_name_scope =
-        class_symbols_by_name_scope_for_files(global, &maps.file_to_directory, included_files);
+        class_symbols_by_name_scope_for_files(global, &linkage_file_to_directory, None);
+    let injected_fields_by_parent = constructor_injected_fields_by_parent(
+        global,
+        &linkage_file_to_directory,
+        &class_symbols_by_name,
+        &class_symbols_by_name_scope,
+        &class_symbols_by_import_alias_file,
+    );
     let class_symbol_count: usize = class_symbols_by_name.values().map(Vec::len).sum();
     let class_constructors_by_parent =
         class_constructors_by_parent_for_files(global, included_files, included_funcs);
@@ -3023,7 +3683,7 @@ where
         global,
         func_to_call_names: &func_to_call_names,
         funcs_by_callback_name: &maps.funcs_by_callback_name,
-        file_to_directory: &maps.file_to_directory,
+        file_to_directory: &linkage_file_to_directory,
         included_funcs: &maps.func_to_seg,
         file_to_language: &maps.file_to_language,
         file_to_capabilities: &maps.file_to_capabilities,
@@ -3032,6 +3692,8 @@ where
         class_symbols_by_import_alias_file: &class_symbols_by_import_alias_file,
         class_constructors_by_parent: &class_constructors_by_parent,
         class_methods_by_parent: &class_methods_by_parent,
+        import_bindings_by_file: &import_bindings_by_file,
+        injected_fields_by_parent: &injected_fields_by_parent,
         local_callable_bindings: &local_callable_bindings,
         call_edge_site_cache: RwLock::new(None),
         callback_cache: RwLock::new(None),
@@ -3159,6 +3821,27 @@ where
             ))
         }
     })?;
+    // Materialize lexical environments for exact inline callable arguments
+    // independently of whether the host API executes them. This preserves
+    // captured value identity for later source/sink queries without adding a
+    // callgraph edge or guessing a callback convention.
+    let mut inline_capture_relations = Vec::new();
+    for &parent in maps.func_to_seg.keys() {
+        call_graph.visit_callable_arguments(parent, &mut |span, callback| {
+            let is_lexically_nested = global
+                .decl_of(bonsai_common::SymbolId::new(callback.raw()))
+                .and_then(|decl| decl.parent)
+                .is_some_and(|owner| owner.raw() == parent.raw());
+            if is_lexically_nested && maps.func_to_seg.contains_key(&callback) {
+                inline_capture_relations.push((parent, callback, span));
+            }
+        });
+    }
+    inline_capture_relations.sort_unstable();
+    inline_capture_relations.dedup();
+    for (parent, callback, span) in inline_capture_relations {
+        stitch_inline_lexical_capture_environment(&mut ws, parent, callback, span);
+    }
     stitch_declared_exception_hierarchy(&mut ws, &resolver)?;
     idg_build_log(format_args!(
         "stitch-idg: {:.3}s segments={} funcs={} intra_edges={} cross_edges={} field_links={}",
@@ -3583,9 +4266,8 @@ fn stitch_receiver_method_propagation(
     // via `decl.bases` so a subclass method that reads a base
     // class's field still finds the field-write in the base
     // class's bucket. Mirror Phase 3c's traversal.
-    let class_by_name: ahash::AHashMap<(Option<&'static str>, String, LocalScopeKey), SymbolId> = scope_files
-        .iter()
-        .copied()
+    let class_by_name: ahash::AHashMap<(Option<&'static str>, String, LocalScopeKey), SymbolId> = global
+        .all_files()
         .flat_map(|file| {
             let language = file_language(file_to_language, file);
             global

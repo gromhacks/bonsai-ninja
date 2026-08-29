@@ -139,6 +139,12 @@
           parser = argparse.ArgumentParser()
           return parser.parse_args(user_input)
     expect_match_text: [parser.parse_args]
+  - name: unrelated parse args overload is not argparse input
+    code: |
+      import argparse
+      def example(parser, a, b, c):
+          return parser.parse_args(a, b, c)
+    expect_no_match: true
   description: "argparse parser.parse_args(...) - receiver-regex match across local parser variable names, gated by argparse imports."
 
 # click/typer source rule removed - needs decorator-scoped parameter

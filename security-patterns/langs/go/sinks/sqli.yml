@@ -10,8 +10,9 @@
   match:
     kind: call
     callee:
-      regex: ^(db|tx|stmt|conn|database|d|t|client|sqlDB|sqlTx|DB|Tx|Stmt|Conn|Database|dbConn|sqlConn)\.Query$
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Query$'
   constraints:
+  - receiver_type_in: [sql.DB, sql.Tx, DB, Tx]
   - arg_tainted:
       index: 0
   match_examples:
@@ -33,7 +34,25 @@
         db.Query("SELECT * FROM users WHERE name = ?", name)
       }
     expect_no_match: true
-  description: "database/sql DB.Query / Tx.Query / Stmt.Query - tainted SQL = injection; use ? / $1 placeholders."
+  - name: local query method collision negative
+    code: |
+      package main
+      import "database/sql"
+      type localStore struct{}
+      func (localStore) Query(string) {}
+      func example(_ *sql.DB, store localStore, target string) {
+        store.Query(target)
+      }
+    expect_no_match: true
+  - name: prepared statement values are not SQL text negative
+    code: |
+      package main
+      import "database/sql"
+      func example(stmt *sql.Stmt, value string) {
+        stmt.Query(value)
+      }
+    expect_no_match: true
+  description: "database/sql DB.Query / Tx.Query - tainted SQL = injection; use ? / $1 placeholders. Prepared Stmt.Query receives only bound values and is intentionally excluded."
 - id: go.sqli.db_queryrow
   enabled: true
   language: go
@@ -48,6 +67,7 @@
     callee:
       regex: \.QueryRow$
   constraints:
+  - receiver_type_in: [sql.DB, sql.Tx, DB, Tx]
   - arg_tainted:
       index: 0
   match_examples:
@@ -84,6 +104,7 @@
     callee:
       regex: \.QueryContext$
   constraints:
+  - receiver_type_in: [sql.DB, sql.Tx, DB, Tx]
   - arg_tainted:
       index: 1
   match_examples:
@@ -126,6 +147,7 @@
     callee:
       regex: \.QueryRowContext$
   constraints:
+  - receiver_type_in: [sql.DB, sql.Tx, DB, Tx]
   - arg_tainted:
       index: 1
   match_examples:
@@ -168,6 +190,7 @@
     callee:
       regex: \.ExecContext$
   constraints:
+  - receiver_type_in: [sql.DB, sql.Tx, DB, Tx]
   - arg_tainted:
       index: 1
   match_examples:
@@ -196,6 +219,59 @@
       }
     expect_no_match: true
   description: database/sql DB.ExecContext / Tx.ExecContext.
+- id: go.sqli.db_exec
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - database/sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Exec$'
+  constraints:
+  - receiver_type_in: [sql.DB, sql.Tx, DB, Tx]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: database sql exec tainted statement
+    code: |
+      package main
+      import "database/sql"
+      func update(db *sql.DB, statement string) {
+        _, _ = db.Exec(statement)
+      }
+    expect_match_text: [db.Exec]
+  - name: database sql exec parameterized negative
+    code: |
+      package main
+      import "database/sql"
+      func update(db *sql.DB, name string) {
+        _, _ = db.Exec("UPDATE users SET name = ? WHERE id = 1", name)
+      }
+    expect_no_match: true
+  - name: prepared statement exec value negative
+    code: |
+      package main
+      import "database/sql"
+      func update(stmt *sql.Stmt, value string) {
+        _, _ = stmt.Exec(value)
+      }
+    expect_no_match: true
+  - name: local exec method collision negative
+    code: |
+      package main
+      import "database/sql"
+      type localRunner struct{}
+      func (localRunner) Exec(string) {}
+      func update(_ *sql.DB, runner localRunner, statement string) {
+        runner.Exec(statement)
+      }
+    expect_no_match: true
+  description: "database/sql DB.Exec / Tx.Exec accepts SQL text at argument zero. Prepared Stmt.Exec receives only bound values and is intentionally excluded."
 - id: go.sqli.gorm_raw
   enabled: true
   language: go
@@ -247,9 +323,7 @@
     expect_no_match: true
   description: "GORM DB.Where(tainted) - string-built Where clause is SQLi; use struct/map or ? placeholders."
 - id: go.sqli.gorm_exec
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: go
   tag: sql-injection
   severity: high
@@ -261,12 +335,34 @@
     kind: call
     callee:
       regex: \.Exec$
+  constraints:
+  - receiver_type_in: [gorm.DB, DB]
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: gorm exec raw sql
-    code: "package main\nimport (\n  \"net/http\"\n  \"gorm.io/gorm\"\n)\nfunc update(db *gorm.DB, r *http.Request) {\n  role := \"admin\"\n  db.Exec(\"UPDATE users SET role = '\" + role + \"'\")\n}\n"
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc update(db *gorm.DB, role string) {\n  db.Exec(\"UPDATE users SET role = '\" + role + \"'\")\n}\n"
     expect_match_text:
     - db.Exec
-  description: "Disabled - duplicate call shape with go.sqli.db_exec for receiver `db.Exec`; until semantic receiver facts distinguish GORM from database/sql, the database/sql rule owns Exec sinks, including GORM-style raw SQL examples."
+  - name: gorm exec placeholder negative
+    code: |
+      package main
+      import "gorm.io/gorm"
+      func update(db *gorm.DB, role string) {
+        db.Exec("UPDATE users SET role = ?", role)
+      }
+    expect_no_match: true
+  - name: local exec method collision negative
+    code: |
+      package main
+      import "gorm.io/gorm"
+      type localRunner struct{}
+      func (localRunner) Exec(string) {}
+      func update(_ *gorm.DB, runner localRunner, statement string) {
+        runner.Exec(statement)
+      }
+    expect_no_match: true
+  description: "GORM DB.Exec(tainted SQL) executes raw SQL. Exact receiver typing keeps database/sql and unrelated Exec methods in their own rules."
 - id: go.sqli.gorm_order
   enabled: true
   language: go
@@ -507,22 +603,3 @@
       }
     expect_no_match: true
   description: sqlx DB.MustExec with string-built SQL.
-- id: go.sqli.pgx_query
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: sql-injection
-  severity: high
-  packages:
-  - github.com/jackc/pgx
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - pgx
-      - Conn
-      - Query
-  description: "Disabled - real pgx usage is `conn.Query(ctx, sql, args...)` on a local var, not the literal chain `pgx.Conn.Query`; the bare `.Query$` rule (go.sqli.db_query) already covers pgx call shape."

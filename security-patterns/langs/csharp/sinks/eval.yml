@@ -77,20 +77,6 @@
     expect_no_match: true
   description: "CodeDom CompileAssemblyFromSource - runtime compilation."
 
-- id: csharp.eval.activator_create_instance
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: code-injection
-  severity: medium
-  cwe: [CWE-470]
-  match:
-    kind: call
-    callee:
-      attribute: [Activator, CreateInstance]
-  description: "Disabled - too generic; flag only when type name is tainted."
-
 - id: csharp.eval.assembly_load
   enabled: true
   language: csharp
@@ -183,20 +169,6 @@
     expect_no_match: true
   description: "AppDomain.ExecuteAssembly."
 
-- id: csharp.eval.type_invokemember
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: code-injection
-  severity: medium
-  cwe: [CWE-470]
-  match:
-    kind: call
-    callee:
-      name: InvokeMember
-  description: "Disabled - Type.InvokeMember; flag only when method name tainted."
-
 - id: csharp.eval.scriptengine_run
   enabled: true
   language: csharp
@@ -275,21 +247,6 @@
     expect_no_match: true
   description: "CodeDom CompileAssemblyFromFile(tainted path) - compiles attacker-controlled source file."
 
-- id: csharp.eval.csharpsyntaxtree_parsetext
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: code-injection
-  severity: medium
-  packages: [Microsoft.CodeAnalysis.CSharp]
-  cwe: [CWE-94]
-  match:
-    kind: call
-    callee:
-      attribute: [CSharpSyntaxTree, ParseText]
-  description: "Disabled - ParseText alone is not exec; flag only when followed by Compilation.Emit / EvaluateAsync."
-
 - id: csharp.eval.scriptblock_create
   enabled: true
   language: csharp
@@ -315,20 +272,6 @@
       class App { void Test() { ScriptBlock.Create("Get-Process"); } }
     expect_no_match: true
   description: "ScriptBlock.Create(tainted) - builds executable PowerShell script block from string."
-
-- id: csharp.eval.dynamicmethod_ctor
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: code-injection
-  severity: medium
-  cwe: [CWE-94]
-  match:
-    kind: new
-    callee:
-      name: DynamicMethod
-  description: "Disabled - DynamicMethod is rarely fed user input directly; flag with constraint when name/IL is tainted."
 
 - id: csharp.eval.scripthost_evaluate
   enabled: true

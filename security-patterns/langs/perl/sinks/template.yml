@@ -95,36 +95,6 @@
     expect_no_match: true
   description: "Text::Template fill_in_string - evaluates embedded Perl from tainted string."
 
-- id: perl.template.mason_exec
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  tag: ssti
-  severity: critical
-  packages: ["HTML::Mason"]
-  cwe: [CWE-94, CWE-1336]
-  match:
-    kind: call
-    callee:
-      name: exec
-  description: "Disabled - bare `name: exec` collides with perl.cmdi.exec (Perl's builtin exec = cmdi sink). Without receiver-type narrowing we cannot distinguish; the builtin cmdi rule is strictly stronger and already covers the call shape."
-
-- id: perl.template.mojolicious_render_inline
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  tag: ssti
-  severity: critical
-  packages: [Mojolicious]
-  cwe: [CWE-94, CWE-1336]
-  match:
-    kind: call
-    callee:
-      name: render
-  description: "Disabled - bare `name: render` collides with perl.xss.mojolicious_render. Without kwarg-name narrowing we cannot distinguish (inline => tainted) from (text|data => tainted); the xss rule covers the call shape."
-
 - id: perl.template.xslate_render_string
   enabled: true
   language: perl

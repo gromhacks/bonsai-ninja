@@ -35,8 +35,8 @@
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.executeQuery$"
-      base_name_in: [stmt, statement]
+      name: executeQuery
+      receiver_type_in: [Statement]
   constraints:
   - arg_tainted:
       index: 0
@@ -61,7 +61,17 @@
         }
       }
     expect_no_match: true
-  description: "Local JDBC Statement variable executeQuery(sql). Kotlin adapters do not always recover the Statement receiver type from createStatement(), so this rulepack-level fallback is constrained to conventional statement receiver names plus java.sql package evidence."
+  - name: unrelated local executeQuery method is not JDBC
+    code: |
+      import java.sql.DriverManager
+      class LocalStatement { fun executeQuery(value: String) = value }
+      class App {
+        fun handle(statement: LocalStatement, input: String) {
+          statement.executeQuery(input)
+        }
+      }
+    expect_no_match: true
+  description: "JDBC Statement.executeQuery(sql) on an exact compiler-typed Statement receiver. The type is inferred through rulepack-owned DriverManager/Connection return summaries rather than receiver variable spelling."
 - id: kotlin.sqli.statement_executeupdate
   enabled: true
   language: kotlin
@@ -216,27 +226,6 @@
       }
     expect_no_match: true
   description: "Statement.executeBatch() after tainted SQL was added with addBatch."
-- id: kotlin.sqli.jdbc_create_statement
-  enabled: false
-  language: kotlin
-  tag: sql-injection
-  severity: high
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Connection
-      - createStatement
-  match_examples:
-  - name: generated shape example
-    code: "class App {\n  fun handle(input: String) {\n    Connection.createStatement(input)\n\
-      \  }\n}\n"
-  description: 'JDBC createStatement returns Statement (no params). `max_args: 2`
-    keeps the rule on canonical 0/1/2-arg JDBC overloads.'
-  disabled_reason:
-    code: over-broad
 - id: kotlin.sqli.jdbc_prepare_call
   enabled: true
   language: kotlin
@@ -456,25 +445,6 @@
     expect_no_match: true
   description: "Hibernate Session.createNativeQuery - raw SQL. Typed-receiver\
     \ sqli; `min_args: 1` rejects 0-arg decoys."
-- id: kotlin.sqli.mybatis_select_one
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: sql-injection
-  severity: medium
-  packages:
-  - org.apache.ibatis
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - SqlSession
-      - selectOne
-  description: "Disabled - MyBatis selectOne usually safe; flag with $ {} interpolation\
-    \ analysis."
 - id: kotlin.sqli.jpa_create_native_query
   enabled: true
   language: kotlin

@@ -131,22 +131,6 @@
       // satisfies the package gate at match time.
       class DESEngine(vararg args: Any?)
   description: BouncyCastle DESEngine.
-- id: kotlin.crypto.keyfactory_dh_512
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: weak-crypto
-  severity: medium
-  cwe:
-  - CWE-326
-  match:
-    kind: call
-    callee:
-      attribute:
-      - KeyPairGenerator
-      - initialize
-  description: "Disabled - flag only on key sizes < 2048 (RSA) / < 256 (EC)."
 - id: kotlin.crypto.kotlin_random_nextbytes
   enabled: true
   language: kotlin

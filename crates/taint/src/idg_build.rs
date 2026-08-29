@@ -18,6 +18,8 @@
 //! ids, paths) is derivable from the db, and `crates/taint` already
 //! depends on every crate involved, so no layering is violated.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bonsai_db::AnalyzerDb;
@@ -145,8 +147,10 @@ pub(crate) fn idg_service_for_inter_config(
     config: &crate::idg_api::InterTaintConfig,
 ) -> Arc<IdgQueryService> {
     if config.clean_output_overwrites.is_empty()
+        && config.clean_receiver_overwrites.is_empty()
         && config.source_output_args.is_empty()
         && config.source_callback_args.is_empty()
+        && config.callback_invocations.is_empty()
         && config.call_result_passthroughs.is_empty()
         && config.output_arg_flows.is_empty()
         && config.receiver_state_propagations.is_empty()
@@ -163,6 +167,14 @@ pub(crate) fn idg_service_for_inter_config(
                 callee: shape.callee.clone(),
                 output_arg_index: shape.output_arg_index,
                 value_start_arg_index: shape.value_start_arg_index,
+            })
+            .collect(),
+        clean_receiver_overwrites: config
+            .clean_receiver_overwrites
+            .iter()
+            .map(|shape| bonsai_idg::CleanReceiverOverwriteSpec {
+                callee: shape.callee.clone(),
+                resolved_call_sites: shape.resolved_call_sites.clone(),
             })
             .collect(),
         source_output_args: config
@@ -182,7 +194,24 @@ pub(crate) fn idg_service_for_inter_config(
                 callee: shape.callee.clone(),
                 callback_arg_index: shape.callback_arg_index,
                 source_param_indices: shape.source_param_indices.clone(),
+                source_param_indices_from: shape.source_param_indices_from,
                 resolved_call_sites: shape.resolved_call_sites.clone(),
+            })
+            .collect(),
+        callback_invocations: config
+            .callback_invocations
+            .iter()
+            .map(|shape| bonsai_idg::CallbackInvocationSpec {
+                callee: shape.callee.clone(),
+                callback_arg_index: shape.callback_arg_index,
+                callback_map_field_path: shape.callback_map_field_path.clone(),
+                forwarded_argument_field_path: shape.forwarded_argument_field_path.clone(),
+                forwarded_callback_param_index: shape.forwarded_callback_param_index,
+                forwarded_args_from: shape.forwarded_args_from,
+                receiver_to_callback_param: shape.receiver_to_callback_param,
+                callback_return_result_offset: shape.callback_return_result_offset,
+                resolved_call_sites: shape.resolved_call_sites.clone(),
+                resolved_callback_targets: shape.resolved_callback_targets.clone(),
             })
             .collect(),
         call_result_passthroughs: config
@@ -192,7 +221,9 @@ pub(crate) fn idg_service_for_inter_config(
                 callee: shape.callee.clone(),
                 receiver_type: shape.receiver_type.clone(),
                 input_arg_indices: shape.input_arg_indices.clone(),
+                input_arg_start_index: shape.input_arg_start_index,
                 input_receiver: shape.input_receiver,
+                resolved_call_sites: shape.resolved_call_sites.clone(),
             })
             .collect(),
         output_arg_flows: config
@@ -201,8 +232,10 @@ pub(crate) fn idg_service_for_inter_config(
             .map(|shape| bonsai_idg::OutputArgFlowSpec {
                 callee: shape.callee.clone(),
                 output_arg_index: shape.output_arg_index,
+                input_receiver: shape.input_receiver,
                 value_arg_indices: shape.value_arg_indices.clone(),
                 value_start_arg_index: shape.value_start_arg_index,
+                resolved_call_sites: shape.resolved_call_sites.clone(),
             })
             .collect(),
         receiver_state_propagations: config
@@ -242,7 +275,10 @@ fn build_idg_service(
     transfer_options: &bonsai_idg::TransferOptions,
 ) -> Arc<IdgQueryService> {
     let global = db.build_global_linkage_index();
-    let call_graph = build_resolved_call_graph_snapshot(db);
+    // Resolve calls against the same immutable linkage headers the IDG will
+    // retain. Building a fresh header index here duplicates complete
+    // workspace lowering and can mix snapshots if a file changes mid-phase.
+    let call_graph = build_resolved_call_graph_snapshot_with_headers(db, global.as_ref());
     let semantics = compiler_idg_file_semantics(db);
     let ws = bonsai_idg::workspace_adapter::build_streaming_with_file_semantics_and_options(
         global.as_ref(),
@@ -308,6 +344,50 @@ where
     build_resolved_call_graph_snapshot_with_headers_scoped(db, global, None, on_file)
 }
 
+/// Return the two exact alias projections consumed by callgraph resolution
+/// while decoding the adapter-owned import header only once per file.
+///
+/// `CallGraphFileSemantics` materializes a file's simple aliases immediately
+/// before its typed alias targets. Keeping the second projection in this
+/// one-row handoff avoids a second FactStore lookup/decompression for every
+/// source file without retaining a workspace-sized import cache. A future
+/// callgraph API that changes that pairing fails loudly here instead of
+/// silently reusing another file's compiler facts.
+#[allow(clippy::type_complexity)]
+pub fn callgraph_alias_projection_callbacks(
+    db: &AnalyzerDb,
+) -> (
+    impl FnMut(bonsai_common::FileId) -> ahash::AHashMap<String, String> + '_,
+    impl FnMut(bonsai_common::FileId) -> ahash::AHashMap<String, bonsai_lang_api::AliasTarget> + '_,
+) {
+    let pending = Rc::new(RefCell::new(None));
+    let pending_targets = Rc::clone(&pending);
+    let aliases = move |file| {
+        let imports = db.imports_for_uncached(file);
+        let aliases = bonsai_resolve::alias_map_for_file(&imports);
+        let targets = bonsai_lang_api::alias_map_from_import_specs(&imports)
+            .into_iter()
+            .collect();
+        let previous = pending.replace(Some((file, targets)));
+        assert!(
+            previous.is_none(),
+            "callgraph requested aliases for a second file before consuming the first file's typed targets"
+        );
+        aliases
+    };
+    let targets = move |file| {
+        let (pending_file, targets) = pending_targets
+            .take()
+            .expect("callgraph requested typed alias targets before exact import aliases");
+        assert_eq!(
+            pending_file, file,
+            "callgraph alias projections crossed compiler file identities"
+        );
+        targets
+    };
+    (aliases, targets)
+}
+
 fn build_resolved_call_graph_snapshot_with_headers_scoped<Q>(
     db: &AnalyzerDb,
     global: &bonsai_index::GlobalIndex,
@@ -317,26 +397,6 @@ fn build_resolved_call_graph_snapshot_with_headers_scoped<Q>(
 where
     Q: Fn() + Sync,
 {
-    let semantics = bonsai_callgraph::CallGraphFileSemantics::new(
-        |file| bonsai_resolve::alias_map_for_file(&db.imports_for_uncached(file)),
-        |file| {
-            bonsai_lang_api::alias_map_from_import_specs(&db.imports_for_uncached(file))
-                .into_iter()
-                .collect()
-        },
-        |file| {
-            db.vfs()
-                .path(file)
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned())
-        },
-        |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-        |file| {
-            db.adapter_for(file)
-                .map(|adapter| adapter.capabilities())
-                .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported)
-        },
-    );
     match included_files {
         Some(files) => {
             let context = bonsai_callgraph::ResolvedCallGraph::build_context(
@@ -354,26 +414,42 @@ where
                         .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported)
                 },
             );
+            let (aliases_for_file, alias_targets_for_file) = callgraph_alias_projection_callbacks(db);
             bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_streaming_with_context_and_progress(
                 global,
-                |file| bonsai_resolve::alias_map_for_file(&db.imports_for_uncached(file)),
-                |file| {
-                    bonsai_lang_api::alias_map_from_import_specs(&db.imports_for_uncached(file))
-                        .into_iter()
-                        .collect()
-                },
+                aliases_for_file,
+                alias_targets_for_file,
                 files,
                 &context,
                 |file| db.decl_index_remapped_to_headers(global, file),
                 on_file,
             )
         }
-        None => bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_streaming_with_progress(
-            global,
-            semantics,
-            |file| db.decl_index_remapped_to_headers(global, file),
-            on_file,
-        ),
+        None => {
+            let (aliases_for_file, alias_targets_for_file) = callgraph_alias_projection_callbacks(db);
+            let semantics = bonsai_callgraph::CallGraphFileSemantics::new(
+                aliases_for_file,
+                alias_targets_for_file,
+                |file| {
+                    db.vfs()
+                        .path(file)
+                        .ok()
+                        .map(|path| path.to_string_lossy().into_owned())
+                },
+                |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+                |file| {
+                    db.adapter_for(file)
+                        .map(|adapter| adapter.capabilities())
+                        .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported)
+                },
+            );
+            bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_streaming_with_progress(
+                global,
+                semantics,
+                |file| db.decl_index_remapped_to_headers(global, file),
+                on_file,
+            )
+        }
     }
 }
 
@@ -381,7 +457,79 @@ where
 mod tests {
     use super::*;
     use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    struct CountingImportPythonAdapter {
+        import_calls: Arc<AtomicUsize>,
+    }
+
+    impl bonsai_lang_api::LanguageAdapter for CountingImportPythonAdapter {
+        fn language_id(&self) -> bonsai_lang_api::LanguageId {
+            bonsai_lang_api::LanguageId::new("python")
+        }
+
+        fn display_name(&self) -> &'static str {
+            "Python import-header counter"
+        }
+
+        fn file_extensions(&self) -> &'static [&'static str] {
+            &["py"]
+        }
+
+        fn tree_sitter_language(&self) -> Result<tree_sitter::Language, bonsai_lang_api::AdapterError> {
+            bonsai_lang_python::PythonAdapter::new().tree_sitter_language()
+        }
+
+        fn capabilities(&self) -> bonsai_lang_api::LanguageCapabilities {
+            bonsai_lang_python::PythonAdapter::new().capabilities()
+        }
+
+        fn extract_declarations(
+            &self,
+            file: bonsai_common::FileId,
+            ctx: &bonsai_lang_api::AdapterContext<'_>,
+        ) -> bonsai_lang_api::DeclIndex {
+            bonsai_lang_python::PythonAdapter::new().extract_declarations(file, ctx)
+        }
+
+        fn extract_imports(
+            &self,
+            file: bonsai_common::FileId,
+            ctx: &bonsai_lang_api::AdapterContext<'_>,
+        ) -> bonsai_lang_api::ImportIndex {
+            self.import_calls.fetch_add(1, Ordering::SeqCst);
+            bonsai_lang_python::PythonAdapter::new().extract_imports(file, ctx)
+        }
+    }
+
+    #[test]
+    fn callgraph_alias_projections_decode_each_import_header_once() {
+        let vfs = Arc::new(bonsai_vfs::Vfs::new());
+        vfs.write("first.py", "from package import execute as run\n");
+        vfs.write("second.py", "import client as api\n");
+        let import_calls = Arc::new(AtomicUsize::new(0));
+        let registry = Arc::new(bonsai_lang_api::LanguageRegistry::new());
+        registry.register(Arc::new(CountingImportPythonAdapter {
+            import_calls: Arc::clone(&import_calls),
+        }));
+        let db = AnalyzerDb::new(vfs, registry);
+        let (mut aliases_for_file, mut alias_targets_for_file) = callgraph_alias_projection_callbacks(&db);
+
+        let files = db.vfs().all_files();
+        for file in &files {
+            let _aliases = aliases_for_file(*file);
+            let _targets = alias_targets_for_file(*file);
+        }
+        drop(aliases_for_file);
+        drop(alias_targets_for_file);
+
+        assert_eq!(
+            import_calls.load(Ordering::SeqCst),
+            files.len(),
+            "simple and typed callgraph aliases must share one exact import-header decode per file"
+        );
+    }
 
     #[test]
     fn public_taint_reuses_the_canonical_default_service() {

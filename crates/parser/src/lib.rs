@@ -75,6 +75,11 @@ pub struct ParsedFile {
     pub grammar_name: &'static str,
     source: Arc<str>,
     used_recovery: bool,
+    /// Stable adapter-owned digest of compiler inputs outside `source` that
+    /// can affect parsing/recovery (for example reachable preprocessor files).
+    context_fingerprint: u64,
+    /// Workspace revision observed for cache insertion ordering only.
+    context_revision: u64,
 }
 
 impl std::fmt::Debug for ParsedFile {
@@ -215,9 +220,11 @@ impl ParserCache {
         let file = snapshot.file_id;
         let path = vfs.path(file)?;
         let grammar_name = adapter.grammar_name_for_path(&path);
+        let context_fingerprint = adapter.parse_context_fingerprint(snapshot, vfs);
+        let context_revision = vfs.revision();
         let key = (vfs.instance_id(), file, adapter.language_id(), grammar_name);
         if let Some(entry) = self.cache.read().get(&key).cloned() {
-            if parsed_matches_snapshot(&entry, snapshot) {
+            if parsed_matches_snapshot(&entry, snapshot, context_fingerprint) {
                 return Ok(entry);
             }
         }
@@ -227,7 +234,7 @@ impl ParserCache {
         // Re-check after checkout. A peer may have finished this exact
         // snapshot between the initial cache read and parser lookup.
         if let Some(entry) = self.cache.read().get(&key).cloned() {
-            if parsed_matches_snapshot(&entry, snapshot) {
+            if parsed_matches_snapshot(&entry, snapshot, context_fingerprint) {
                 return Ok(entry);
             }
         }
@@ -236,15 +243,24 @@ impl ParserCache {
             .set_language(&language)
             .map_err(|e| AdapterError::ParserSetup(e.to_string()))?;
 
-        let mut parser_source = snapshot.text.as_bytes().to_vec();
         let normalization_edits = adapter.parse_normalization_edits(snapshot, vfs);
-        let used_normalization =
-            apply_recovery_edits(snapshot.text.as_ref(), &mut parser_source, &normalization_edits);
+        let mut normalized_source = None;
+        if !normalization_edits.is_empty() {
+            let mut candidate = Vec::from(snapshot.text.as_bytes());
+            if apply_recovery_edits(snapshot.text.as_ref(), &mut candidate, &normalization_edits) {
+                normalized_source = Some(candidate);
+            }
+        }
+        let used_normalization = normalized_source.is_some();
+        let parser_bytes = normalized_source
+            .as_deref()
+            .unwrap_or_else(|| snapshot.text.as_bytes());
         let parser_text =
-            std::str::from_utf8(&parser_source).expect("same-width parser normalization preserves UTF-8");
+            std::str::from_utf8(parser_bytes).expect("same-width parser normalization preserves UTF-8");
         let incremental_tree = (!used_normalization)
             .then(|| {
                 old.as_deref()
+                    .filter(|parsed| parsed.context_fingerprint == context_fingerprint)
                     .and_then(|parsed| incremental_tree(parsed, &snapshot.text))
             })
             .flatten();
@@ -253,22 +269,64 @@ impl ParserCache {
             parse_with_timeout(&mut parser, parser_text, old_tree, self.options.parse_timeout)?;
         let mut used_recovery = used_normalization;
         if timed_out.is_none() && tree.root_node().has_error() {
-            let mut recovery_source = parser_source;
+            // The common valid-source path never allocates a second source
+            // buffer. Recovery needs mutable bytes only after Tree-sitter has
+            // proven syntax damage or an adapter requested normalization.
+            let mut recovery_source = normalized_source
+                .take()
+                .unwrap_or_else(|| Vec::from(snapshot.text.as_bytes()));
             loop {
-                let edits = adapter.parse_recovery_edits(snapshot, vfs, &tree);
-                if !apply_recovery_edits(snapshot.text.as_ref(), &mut recovery_source, &edits) {
-                    break;
-                }
-                let recovery_text = std::str::from_utf8(&recovery_source)
-                    .expect("same-width recovery normalization preserves UTF-8");
-                let (candidate, candidate_timed_out) =
-                    parse_with_timeout(&mut parser, recovery_text, None, self.options.parse_timeout)?;
-                if candidate_timed_out.is_some()
-                    || bonsai_lang_api::syntax_damage_score(&candidate)
-                        >= bonsai_lang_api::syntax_damage_score(&tree)
+                let current_score = bonsai_lang_api::syntax_damage_score(&tree);
+                let current_recovery_key = recovery_ordering_key(current_score);
+                let mut best = None;
+                for (batch_index, edits) in adapter
+                    .parse_recovery_edit_batches(snapshot, vfs, &tree)
+                    .into_iter()
+                    .enumerate()
                 {
-                    break;
+                    let mut candidate_source = recovery_source.clone();
+                    if !apply_recovery_edits(snapshot.text.as_ref(), &mut candidate_source, &edits) {
+                        continue;
+                    }
+                    let recovery_text = std::str::from_utf8(&candidate_source)
+                        .expect("same-width recovery normalization preserves UTF-8");
+                    let (candidate, candidate_timed_out) =
+                        parse_with_timeout(&mut parser, recovery_text, None, self.options.parse_timeout)?;
+                    let candidate_score = bonsai_lang_api::syntax_damage_score(&candidate);
+                    let preserves_clean_nodes = candidate_timed_out.is_none()
+                        && recovery_preserves_clean_compiler_nodes(
+                            adapter.as_ref(),
+                            &path,
+                            &tree,
+                            &candidate,
+                            &edits,
+                        );
+                    bonsai_diagnostics::debug_log!(
+                        "parse-recovery",
+                        "file={} batch={} edits={} current_damage={:?} candidate_damage={:?} timed_out={} preserves_clean_nodes={}",
+                        path.display(),
+                        batch_index,
+                        edits.len(),
+                        current_score,
+                        candidate_score,
+                        candidate_timed_out.is_some(),
+                        preserves_clean_nodes
+                    );
+                    if candidate_timed_out.is_some()
+                        || recovery_ordering_key(candidate_score) >= current_recovery_key
+                        || !preserves_clean_nodes
+                        || best.as_ref().is_some_and(|(_, _, best_score)| {
+                            recovery_ordering_key(*best_score) <= recovery_ordering_key(candidate_score)
+                        })
+                    {
+                        continue;
+                    }
+                    best = Some((candidate_source, candidate, candidate_score));
                 }
+                let Some((candidate_source, candidate, _)) = best else {
+                    break;
+                };
+                recovery_source = candidate_source;
                 tree = candidate;
                 used_recovery = true;
             }
@@ -287,16 +345,20 @@ impl ParserCache {
             grammar_name,
             source: Arc::clone(&snapshot.text),
             used_recovery,
+            context_fingerprint,
+            context_revision,
         });
         // Cache the newest version, but always return the tree for the exact
         // snapshot requested by this caller. Returning a peer's newer entry
         // here would pair that newer tree with the caller's older source.
         let mut cache = self.cache.write();
         if let Some(existing) = cache.get(&key) {
-            if parsed_matches_snapshot(existing, snapshot) {
+            if parsed_matches_snapshot(existing, snapshot, context_fingerprint) {
                 return Ok(existing.clone());
             }
-            if existing.version >= parsed.version {
+            if existing.version > parsed.version
+                || (existing.version == parsed.version && existing.context_revision > parsed.context_revision)
+            {
                 return Ok(parsed);
             }
         }
@@ -345,8 +407,122 @@ impl ParserCache {
     }
 }
 
-fn parsed_matches_snapshot(parsed: &ParsedFile, snapshot: &FileSnapshot) -> bool {
-    parsed.version == snapshot.version && Arc::ptr_eq(&parsed.source, &snapshot.text)
+/// Rank fact-backed recovery candidates after clean-node preservation has
+/// succeeded. Each remaining ERROR/MISSING node is one concrete failed
+/// grammar production, so reducing that count is primary; uncovered bytes
+/// break ties. A collapsed whole-file candidate cannot win merely by reducing
+/// the count because [`recovery_preserves_clean_compiler_nodes`] rejects the
+/// declarations/expressions it displaced.
+const fn recovery_ordering_key((uncovered_bytes, concrete_errors): (usize, usize)) -> (usize, usize) {
+    (concrete_errors, uncovered_bytes)
+}
+
+/// A recovery parse may add compiler evidence, but it must never replace or
+/// delete a construct that the preceding CST had already parsed cleanly.
+///
+/// Syntax-damage scores alone are not a semantic ordering: on a damaged
+/// translation unit Tree-sitter can trade one clean callable for another while
+/// still reducing the number of `ERROR` bytes.  Recovery is therefore
+/// monotone over the adapter's grammar contract.  Every clean structural node
+/// that feeds declaration, call, parameter, control-flow, assignment, or
+/// return lowering must retain the exact kind and byte span in the candidate
+/// tree.  This is range-directed CST validation, not a source-text or API-name
+/// heuristic.
+fn recovery_preserves_clean_compiler_nodes(
+    adapter: &dyn bonsai_lang_api::LanguageAdapter,
+    path: &std::path::Path,
+    current: &Tree,
+    candidate: &Tree,
+    edits: &[bonsai_lang_api::ParseRecoveryEdit],
+) -> bool {
+    let Some(handler) = adapter.grammar_handler_for_path(path) else {
+        return true;
+    };
+
+    let protected_kinds = handler
+        .declared_node_kinds()
+        .into_iter()
+        // Leaf/value/operator inventories help decode an already-protected
+        // construct but are not independently emitted compiler structure.
+        // Keeping them outside this set also permits a CST-proven recovery to
+        // mask a declaration macro that Tree-sitter currently sees as an
+        // identifier token. Every declaration, parameter/pattern, call,
+        // argument, control, assignment, closure, exception, and projection
+        // node remains protected.
+        .filter(|(role, _)| {
+            !matches!(
+                *role,
+                "literal_value_kinds"
+                    | "string_literal_kinds"
+                    | "comment_kinds"
+                    | "doc_comment_kinds"
+                    | "identifier_kinds"
+                    | "binding_identifier_kinds"
+                    | "static_field_name_kinds"
+                    | "runtime_type_guard_operators"
+                    | "runtime_typeof_operators"
+                    | "runtime_type_equality_operators"
+                    | "value_free_unary_operators"
+                    | "sigil_variable_kinds"
+                    | "global_variable_kinds"
+            )
+        })
+        .map(|(_, kind)| kind)
+        .collect::<ahash::AHashSet<_>>();
+
+    let mut stack = vec![current.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.is_named()
+            && !node.has_error()
+            && protected_kinds.contains(node.kind())
+            && !clean_node_is_explicit_damaged_descendant_replacement(node, edits)
+            && !tree_has_exact_clean_node(candidate, node.kind(), node.start_byte(), node.end_byte())
+        {
+            return false;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    true
+}
+
+fn clean_node_is_explicit_damaged_descendant_replacement(
+    node: tree_sitter::Node<'_>,
+    edits: &[bonsai_lang_api::ParseRecoveryEdit],
+) -> bool {
+    let has_error_ancestor =
+        std::iter::successors(node.parent(), |parent| parent.parent()).any(|ancestor| ancestor.has_error());
+    has_error_ancestor
+        && edits.iter().any(|edit| {
+            edit.damaged_descendant_owner().is_some_and(|(start, end)| {
+                start <= edit.start_byte
+                    && edit.end_byte <= end
+                    && ((start >= node.start_byte() && end <= node.end_byte())
+                        || (node.start_byte() >= start && node.end_byte() <= end))
+            })
+        })
+}
+
+fn tree_has_exact_clean_node(tree: &Tree, kind: &str, start: usize, end: usize) -> bool {
+    let probe_end = end.max(start.saturating_add(1)).min(tree.root_node().end_byte());
+    let mut node = tree.root_node().descendant_for_byte_range(start, probe_end);
+    while let Some(current) = node {
+        if current.start_byte() == start
+            && current.end_byte() == end
+            && current.kind() == kind
+            && !current.has_error()
+        {
+            return true;
+        }
+        node = current.parent();
+    }
+    false
+}
+
+fn parsed_matches_snapshot(parsed: &ParsedFile, snapshot: &FileSnapshot, context_fingerprint: u64) -> bool {
+    parsed.version == snapshot.version
+        && Arc::ptr_eq(&parsed.source, &snapshot.text)
+        && parsed.context_fingerprint == context_fingerprint
 }
 
 /// Clone and edit the previous tree so tree-sitter's incremental parser sees
@@ -416,14 +592,17 @@ fn diagnostics_for_tree(
             };
             diagnostics.push(Diagnostic::new(span, Severity::Warning, msg).with_code("syntax-error"));
         }
-        if !is_error {
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.has_error() || child.is_missing() {
-                    stack.push(child);
-                }
-            }
-        }
+        // ERROR nodes may themselves contain narrower ERROR/MISSING nodes.
+        // Descend through them as well: stopping at the outer recovery node
+        // hid the precise nested compiler diagnostics. Push in reverse so
+        // diagnostics remain in source order despite the LIFO work stack.
+        let mut cursor = node.walk();
+        let mut damaged_children = node
+            .children(&mut cursor)
+            .filter(|child| child.has_error() || child.is_error() || child.is_missing())
+            .collect::<Vec<_>>();
+        damaged_children.reverse();
+        stack.extend(damaged_children);
     }
     if diagnostics.is_empty() {
         diagnostics.push(

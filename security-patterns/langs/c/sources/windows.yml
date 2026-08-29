@@ -87,8 +87,6 @@
   - name: generated direct match
     code: |
       #include <windows.h>
-      #include <windows.h>
-      #include <windows.h> /* win32 */
       #include <windows.h> /* win32 */
       void example(void) {
         char *arg = "tainted";
@@ -114,8 +112,6 @@
   - name: generated direct match
     code: |
       #include <windows.h>
-      #include <windows.h>
-      #include <windows.h> /* win32 */
       #include <windows.h> /* win32 */
       void example(void) {
         char *arg = "tainted";
@@ -382,29 +378,3 @@
       }
     expect_match_text: [WSARecvFrom]
   description: "WSARecvFrom(socket, buffers, ...) - datagram bytes from a remote peer taint the caller-supplied WSABUF array; same shape as WSARecv."
-- id: c.input.win_recv
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: c.input.recv
-  language: c
-  trust: remote
-  tag: network-input
-  payload_types: [binary]
-  packages: [winsock]
-  match:
-    kind: call
-    callee:
-      name: recv
-  taint_semantics:
-    source_output_args: [1]
-  match_examples:
-  - name: Winsock recv output buffer
-    code: |
-      #include <winsock2.h>
-      void handle(SOCKET s) {
-        char buf[4096];
-        recv(s, buf, sizeof(buf), 0);
-      }
-    expect_match_text: [recv]
-  description: "Disabled duplicate - Winsock recv(socket, buf, len, flags) has the same call shape as c.input.recv, which now models the output buffer precisely."

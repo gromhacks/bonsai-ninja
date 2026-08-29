@@ -159,21 +159,6 @@
     expect_no_match: true
   description: "ldap3 Connection.delete."
 
-- id: python.ldap.ldap3_bind
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: python
-  tag: ldap-injection
-  severity: medium
-  packages: [ldap3]
-  cwe: [CWE-90]
-  match:
-    kind: call
-    callee:
-      attribute: [Connection, bind]
-  description: "Disabled - bind is auth, not injection; flag DN-injection only with constraint."
-
 - id: python.ldap.python_ldap_search_s
   enabled: true
   language: python
@@ -334,17 +319,3 @@
 
   imports:
   - pythonldap
-- id: python.ldap.django_auth_ldap_filter
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: ldap-injection
-  severity: medium
-  packages: [django_auth_ldap]
-  cwe: [CWE-90]
-  match:
-    kind: write
-    target:
-      name: AUTH_LDAP_USER_SEARCH
-  description: "Disabled - config-only check; flag if filter built from user input."

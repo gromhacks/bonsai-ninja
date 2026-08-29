@@ -230,22 +230,6 @@
           return cPickle.load('safe')
     expect_no_match: true
   description: Python 2 cPickle.load.
-- id: python.deser.copyreg
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: insecure-deserialization
-  severity: medium
-  cwe:
-  - CWE-502
-  match:
-    kind: call
-    callee:
-      attribute:
-      - copyreg
-      - __reduce_ex__
-  description: "Disabled - copyreg helpers; rarely a direct sink."
 - id: python.deser.dill_loads
   enabled: true
   language: python
@@ -576,22 +560,6 @@
           return shelve.open('safe')
     expect_no_match: true
   description: "shelve.open - uses pickle under the hood."
-- id: python.deser.dbm_open
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: insecure-deserialization
-  severity: medium
-  cwe:
-  - CWE-502
-  match:
-    kind: call
-    callee:
-      attribute:
-      - dbm
-      - open
-  description: "Disabled - dbm itself is bytes; pickling depends on caller."
 - id: python.deser.yaml_load
   enabled: true
   language: python
@@ -947,24 +915,6 @@
           return torch.load('safe')
     expect_no_match: true
   description: "torch.load - PyTorch model pickle loader (pre-2.4 default)."
-- id: python.deser.tf_load_model
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: insecure-deserialization
-  severity: high
-  packages:
-  - tensorflow
-  cwe:
-  - CWE-502
-  match:
-    kind: call
-    callee:
-      attribute:
-      - keras
-      - load_model
-  description: "Disabled - tf.keras.models.load_model can pickle Lambda layers."
 - id: python.deser.xmlrpc_loads
   enabled: true
   language: python
@@ -998,38 +948,6 @@
           return xmlrpc.loads('safe')
     expect_no_match: true
   description: "xmlrpc.client.loads - also XXE-capable."
-- id: python.deser.plistlib_loads
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: insecure-deserialization
-  severity: medium
-  cwe:
-  - CWE-502
-  match:
-    kind: call
-    callee:
-      attribute:
-      - plistlib
-      - loads
-  description: "Disabled - plistlib can be exploited via crafted XML; rare."
-- id: python.deser.toml_loads
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: insecure-deserialization
-  severity: low
-  cwe:
-  - CWE-502
-  match:
-    kind: call
-    callee:
-      attribute:
-      - tomllib
-      - loads
-  description: "Disabled - TOML is generally safe."
 - id: python.deser.msgpack_unpack_use_list
   enabled: true
   language: python
@@ -1066,24 +984,6 @@
   description: 'msgpack.unpackb(..., raw=False) - untrusted MessagePack frames materialize string/object values; audit callers that then trust decoded object structure. Merged aliases: python.deser.msgpack_unpackb_object_hook.'
   aliases:
   - python.deser.msgpack_unpackb_object_hook
-- id: python.deser.bson_decode
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: insecure-deserialization
-  severity: medium
-  packages:
-  - bson
-  cwe:
-  - CWE-502
-  match:
-    kind: call
-    callee:
-      attribute:
-      - bson
-      - decode
-  description: "Disabled - BSON itself is type-bounded."
 - id: python.deser.django_signed_cookie_loads
   enabled: true
   language: python
@@ -1116,51 +1016,3 @@
           return signing.loads('safe', serializer=PickleSerializer)
     expect_no_match: true
   description: django.core.signing.loads with PickleSerializer.
-- id: python.deser.flask_session_pickle
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: insecure-deserialization
-  severity: high
-  packages:
-  - flask_session
-  cwe:
-  - CWE-502
-  match:
-    kind: write
-    target:
-      name: SESSION_SERIALIZATION_FORMAT
-  description: "Disabled - config check; flask-session pickle serializer is dangerous."
-- id: python.deser.celery_pickle_serializer
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: python
-  tag: insecure-deserialization
-  severity: critical
-  packages:
-  - celery
-  cwe:
-  - CWE-502
-  match:
-    kind: write
-    target:
-      name: CELERY_TASK_SERIALIZER
-  description: "Disabled - only CELERY_TASK_SERIALIZER='pickle' is the dangerous configuration; write-value equality is not available for this target shape."
-- id: python.deser.multiprocessing_connection_recv
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: python
-  tag: insecure-deserialization
-  severity: medium
-  packages:
-  - multiprocessing
-  cwe:
-  - CWE-502
-  match:
-    kind: call
-    callee:
-      regex: ^(multiprocessing\.connection\.)?(Connection|Client)\.recv$
-  description: "multiprocessing.connection Connection.recv()/Client.recv() - recv unpickles received bytes; use only over authenticated/trusted connections."

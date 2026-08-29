@@ -6,7 +6,7 @@
   tag: event-input
   payload_types: [event, json, text, binary]
   frameworks: [aws-lambda]
-  packages: [com.amazonaws:aws-lambda-java-core]
+  packages: ["com.amazonaws:aws-lambda-java-core"]
   imports: [com.amazonaws.services.lambda.runtime]
   match:
     kind: param
@@ -33,18 +33,3 @@
       }
     expect_no_match: true
   description: "First parameter of an AWS Lambda Scala RequestHandler or RequestStreamHandler handleRequest method - invocation event payload proven by interface, method, and position."
-
-- id: scala.aws.lambda_input
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: scala.aws.lambda_event
-  language: scala
-  trust: service
-  tag: event-input
-  payload_types: [event, json]
-  frameworks: [aws-lambda]
-  match:
-    kind: param
-    target: { name: input }
-  description: "Subsumed by scala.aws.lambda_event, which does not depend on whether the Lambda payload parameter is named event or input."

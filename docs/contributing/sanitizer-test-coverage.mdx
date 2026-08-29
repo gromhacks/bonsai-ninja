@@ -5,7 +5,7 @@ description: "How per-language sanitizer fixtures prove raw and sanitized source
 
 # sanitizer_test — per-language fixtures exercising enabled sanitizers
 
-Each `examples/<lang>/sanitizer_test/` directory contains one or more
+Each `test-fixtures/languages/<lang>/sanitizer_test/` directory contains one or more
 handler files with parallel `<name>_raw` / `<name>_safe` pairs. The
 raw form reaches the sink directly; the safe form keeps the tainted
 value flowing to the sink with the sanitizer wrapping it so the
@@ -75,7 +75,7 @@ the tainted value flowing to the sink.
 ## Running
 
 ```shell
-bonsai-ninja security examples/python/sanitizer_test taint-analysis \
+bonsai-ninja security test-fixtures/languages/python/sanitizer_test taint-analysis \
     --show-sanitized --format json --all | \
     jq '.rows[] | {id: .finding_id, sanitizers: (.sanitizers_seen | length)}'
 ```
@@ -88,6 +88,6 @@ The paginated `security sanitizers` surface lists every enabled
 sanitizer rule's hits independently of flows:
 
 ```shell
-bonsai-ninja security examples/python/sanitizer_test sanitizers
-bonsai-ninja security examples/python/sanitizer_test sanitizers --tag shell-escape
+bonsai-ninja security test-fixtures/languages/python/sanitizer_test sanitizers
+bonsai-ninja security test-fixtures/languages/python/sanitizer_test sanitizers --tag shell-escape
 ```

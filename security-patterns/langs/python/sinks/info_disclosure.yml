@@ -5,7 +5,6 @@
   severity: medium
   cwe:
   - CWE-200
-  - CWE-117
   match:
     kind: call
     callee:
@@ -15,29 +14,27 @@
   constraints:
   - arg_tainted:
       index: 0
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(secret|token|password|passwd|api[_-]?key|credential|private[_-]?key)'
   match_examples:
   - name: logging error secret
     code: |
-      import structlog
+      import logging
       def example(secret_token):
           return logging.error(secret_token)
     expect_match_text:
     - logging.error
   - name: logging error secret literal negative
     code: |
-      import structlog
+      import logging
 
       def example(secret_token):
           return logging.error('safe')
     expect_no_match: true
-  description: "logging.error(secret/token/password) - secret-shaped data written to application logs. Merged collision aliases: python.log_injection.logger_error_concat, python.log_injection.structlog_error_concat."
-  aliases:
-  - python.log_injection.logger_error_concat
-  - python.log_injection.structlog_error_concat
-  packages:
-  - structlog
-  imports:
-  - structlog
+  description: "logging.error(secret/token/password) - secret-shaped data written to application logs."
+  packages: [logging]
+  imports: [logging]
 - id: python.info_disclosure.flask_jsonify_exception
   enabled: true
   language: python

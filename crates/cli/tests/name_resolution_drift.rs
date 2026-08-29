@@ -96,7 +96,10 @@ fn defs_and_inspect_agree_on_function_locations() {
     };
     let mut langs_checked = 0;
     for lang in LANGS {
-        let ws = repo_root().join("examples").join(lang).join("micro");
+        let ws = repo_root()
+            .join("test-fixtures/languages")
+            .join(lang)
+            .join("micro");
         if !ws.exists() {
             continue;
         }

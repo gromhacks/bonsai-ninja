@@ -5,6 +5,7 @@
   tag: jwt
   severity: high
   packages: [jsonwebtoken]
+  imports: [jsonwebtoken]
   cwe: [CWE-345, CWE-347]
   match:
     kind: call
@@ -66,20 +67,32 @@
   category: source-independent
   severity: high
   packages: [jsonwebtoken]
+  imports: [jsonwebtoken]
   cwe: [CWE-347]
   match:
     kind: call
     callee:
-      attribute: [Validation, insecure_disable_signature_validation]
+      name: insecure_disable_signature_validation
+  constraints:
+  - receiver_type_in: [Validation, "jsonwebtoken::Validation"]
+  - arg_count: 0
   match_examples:
-  - name: generated direct match
+  - name: jsonwebtoken signature validation explicitly disabled
     code: |
-      use jsonwebtoken::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          Validation::insecure_disable_signature_validation(target);
+      use jsonwebtoken::Validation;
+      fn configure(validation: &mut Validation) {
+          validation.insecure_disable_signature_validation();
       }
+    expect_match_text: [validation.insecure_disable_signature_validation]
+  - name: local Validation method is not jsonwebtoken
+    code: |
+      use jsonwebtoken::Validation as JwtValidation;
+      struct Validation;
+      impl Validation { fn insecure_disable_signature_validation(&mut self) {} }
+      fn configure(validation: &mut Validation) {
+          validation.insecure_disable_signature_validation();
+      }
+    expect_no_match: true
   description: "jsonwebtoken Validation::insecure_disable_signature_validation - explicitly turns off signature check."
 
 - id: rust.jwt.jsonwebtoken_decode

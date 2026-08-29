@@ -53,9 +53,23 @@ fn javascript_db(files: &[(&str, &str)]) -> AnalyzerDb {
 }
 
 fn func_id(db: &AnalyzerDb, name: &str) -> FuncId {
-    let mut candidates = bonsai_resolve::resolve_callable(&db.global_index(), name);
-    assert!(!candidates.is_empty(), "fixture missing function `{name}`");
-    candidates.remove(0)
+    let global = db.global_index();
+    let candidates = bonsai_resolve::resolve_callable(&global, name);
+    let executable = candidates
+        .iter()
+        .copied()
+        .filter(|func| {
+            global
+                .decl_of(bonsai_common::SymbolId::new(func.raw()))
+                .is_some_and(|decl| decl.body_span.is_some() || !decl.flow_events.is_empty())
+        })
+        .collect::<Vec<_>>();
+    match executable.as_slice() {
+        [only] => *only,
+        [] if candidates.len() == 1 => candidates[0],
+        [] => panic!("fixture missing function `{name}`"),
+        many => panic!("fixture function `{name}` is ambiguous across executable definitions: {many:?}"),
+    }
 }
 
 fn seed(names: &[&str]) -> TokenSet {

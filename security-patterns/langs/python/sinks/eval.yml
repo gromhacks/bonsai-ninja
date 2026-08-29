@@ -78,20 +78,6 @@
     expect_no_match: true
   description: "compile() - compiles tainted source to a code object."
 
-- id: python.eval.input_python2
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: code-injection
-  severity: critical
-  cwe: [CWE-94]
-  match:
-    kind: call
-    callee:
-      name: input
-  description: "Disabled - Python 3 input() just returns a string; firing on every CLI `input()` call is pure FP. Only dangerous under Python 2. Enable with a py2-runtime gate."
-
 - id: python.eval.execfile
   enabled: true
   language: python
@@ -167,34 +153,6 @@
     expect_no_match: true
   description: "__import__(tainted) - arbitrary module load."
 
-- id: python.eval.ast_literal_eval
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: code-injection
-  severity: low
-  cwe: [CWE-94]
-  match:
-    kind: call
-    callee:
-      attribute: [ast, literal_eval]
-  description: "Disabled - ast.literal_eval is bounded to literals."
-
-- id: python.eval.code_interactconsole
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: code-injection
-  severity: critical
-  cwe: [CWE-94]
-  match:
-    kind: call
-    callee:
-      attribute: [code, interact]
-  description: "Disabled - code.interact() opens an interpreter, but its first argument is a banner, not code; needs an interactive-exposure source model."
-
 - id: python.eval.timeit_timer
   enabled: true
   language: python
@@ -250,20 +208,6 @@
           return pdb.run('safe')
     expect_no_match: true
   description: "pdb.run(tainted) - eval+exec."
-
-- id: python.eval.flask_g_setattr
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: python
-  tag: code-injection
-  severity: low
-  cwe: [CWE-94]
-  match:
-    kind: call
-    callee:
-      name: setattr
-  description: "Disabled - setattr is generic; flag only when name tainted."
 
 - id: python.eval.numexpr_evaluate
   enabled: true
@@ -323,21 +267,6 @@
     expect_no_match: true
   description: "pd.eval(tainted) - pandas expression eval."
 
-- id: python.eval.dataframe_query
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: code-injection
-  severity: medium
-  packages: [pandas]
-  cwe: [CWE-94]
-  match:
-    kind: call
-    callee:
-      attribute: [DataFrame, query]
-  description: "Disabled - DataFrame.query allows expressions; flag with tainted source."
-
 - id: python.eval.simpleeval_simple_eval
   enabled: true
   language: python
@@ -396,24 +325,6 @@
     expect_no_match: true
   description: "asteval.Interpreter.eval - sandboxed Python interpreter; bypasses are well-known, treat tainted input as RCE-prone."
 
-- id: python.eval.rexec_compile
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: code-injection
-  severity: critical
-  cwe: [CWE-94]
-  match:
-    kind: call
-    callee:
-      attribute: [rexec, RExec]
-  description: "Disabled (legacy) - Python 2 rexec module; ships removed in Python 3 but appears in legacy bases."
-
-# Reflection-based dynamic invocation (T406). Tag
-# code-injection so reviewer enumerates with `security sinks
-# --tag code-injection`. Treats reflection as eval-equivalent
-# when the dispatched name comes from attacker input.
 - id: python.eval.getattr_dynamic_chain
   enabled: true
   language: python

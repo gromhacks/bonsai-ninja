@@ -8,28 +8,20 @@ mod parse_recovery;
 
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
-    decl_index_with_handler, extract_imports_via,
+    decl_index_from_tree_with_handler, extract_imports_via,
     kit::{
         c_family_preproc_imports, collect_kinds, first_named_child_of_kind, language_from_pack, node_text,
         package_module_segments_with_workspace_prefix, parse_with, span_of,
     },
-    AdapterContext, AdapterError, ArgumentPassingMode, AssignValueKind, DeclIndex, DeclKind,
-    ExpressionPlaceExtraction, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, SyntaxSpecialForm, TypeAliasBinding,
+    AdapterContext, AdapterError, ArgumentPassingMode, AssignValueKind, CallTargetExtraction, DeclIndex,
+    DeclKind, ExpressionPlaceExtraction, FieldWrite, FiniteLiteralSelectionFact, FlowEvent, GrammarHandler,
+    ImportIndex, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath,
+    StaticScalarValue, SyntaxSpecialForm, TypeAliasBinding,
 };
 use parse_recovery::{objc_parse_recovery_edits, objc_tree_proves_language};
 use tree_sitter::{Language, Node, Tree};
 
 fn objc_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
-    if node.kind() == "for_in_statement" {
-        let binding = node
-            .child_by_field_name("left")
-            .or_else(|| node.child_by_field_name("declarator"))?;
-        let iterable = node
-            .child_by_field_name("right")
-            .or_else(|| node.child_by_field_name("value"))?;
-        return Some((binding, iterable));
-    }
     if node.kind() != "for_statement" {
         return None;
     }
@@ -72,8 +64,10 @@ fn objc_indirect_place_operand(node: Node<'_>) -> Option<Node<'_>> {
 }
 
 // Objective-C handler. Mixes C-style functions with Objective-C
-// methods. `*_method_declaration` covers `@interface` headers (no body)
-// and `method_definition` covers `@implementation` bodies. ObjC's
+// methods. `method_declaration` covers bodyless `@interface` prototypes;
+// `method_definition` covers executable `@implementation` bodies. The global
+// compiler index merges matching declaration/definition identities while the
+// raw adapter IR preserves both syntax roles. ObjC's
 // `@try/@catch/@finally` parses as `try_statement`. `@synchronized`
 // and `@autoreleasepool` are scope-bracketed regions modeled as
 // `using` (resource-managed scope) since `body` then runs under the
@@ -85,11 +79,11 @@ const HANDLER: GrammarHandler = GrammarHandler {
     doc_comment_prefixes: &["///", "//!", "/**"],
     decorator_kinds: &["attribute"],
     parameter_container_kinds: &["parameter_list"],
-    parameter_kinds: &["parameter", "method_parameter", "parameter_declaration"],
+    parameter_kinds: &["method_parameter", "parameter_declaration"],
     parameter_annotation_kinds: &["attribute"],
     parameter_annotation_name_extractor: None,
-    keyword_parameter_kinds: &["keyword_argument", "keyword_declarator"],
-    parameter_selector_kinds: &["keyword", "selector_keyword", "identifier"],
+    keyword_parameter_kinds: &["keyword_declarator"],
+    parameter_selector_kinds: &["method_identifier", "identifier"],
     last_identifier_parameter_kinds: &["method_parameter"],
     binding_identifier_kinds: &["identifier"],
     anonymous_variadic_token: Some("..."),
@@ -104,10 +98,9 @@ const HANDLER: GrammarHandler = GrammarHandler {
     static_subscript_key_extractor: Some(objc_static_string_key),
     aggregate_syntax_only_kinds: &["type_identifier"],
     transparent_call_wrapper_kinds: &["field_expression", "parenthesized_expression"],
-    single_expression_group_kinds: &["expression_list"],
+    single_expression_group_kinds: &[],
     assignment_target_wrapper_kinds: &[
         "init_declarator",
-        "declarator",
         "function_declarator",
         "pointer_declarator",
         "parenthesized_declarator",
@@ -115,38 +108,35 @@ const HANDLER: GrammarHandler = GrammarHandler {
     ],
     binding_declaration_keyword_spellings: &["auto", "const"],
     nested_type_ownership: true,
-    fn_kinds: &[
-        "function_definition",
-        "method_definition",
-        "class_method_declaration",
-        "instance_method_declaration",
-    ],
-    class_kinds: &[
-        "class_interface",
-        "class_implementation",
-        "category_interface",
-        "category_implementation",
-        "protocol_declaration",
-    ],
+    fn_kinds: &["function_definition", "method_definition", "method_declaration"],
+    class_kinds: &["class_interface", "class_implementation", "protocol_declaration"],
     class_decl_kinds: &[
         ("class_interface", DeclKind::Class),
         ("class_implementation", DeclKind::Class),
-        ("category_interface", DeclKind::Class),
-        ("category_implementation", DeclKind::Class),
         ("protocol_declaration", DeclKind::Interface),
     ],
-    method_kinds: &["method_definition"],
-    method_context_kinds: &["class_implementation", "category_implementation"],
+    method_kinds: &["method_definition", "method_declaration"],
+    method_context_kinds: &["class_implementation", "class_interface"],
     method_owner_barrier_kinds: &[],
     constructor_method_kinds: &[],
     constructor_names: &["init"],
-    if_kinds: &["if_statement"],
+    if_kinds: &["if_statement", "switch_statement"],
     branch_then_field_names: &["consequence", "body"],
     branch_else_field_names: &["alternative"],
     branch_condition_field_names: &["condition"],
+    branch_condition_is_first_named_child: false,
+    condition_group_kinds: &["parenthesized_expression"],
+    condition_all_operators: &["&&"],
+    condition_any_operators: &["||"],
+    condition_not_operators: &["!"],
+    condition_not_operator_kinds: &[],
     loop_body_field_names: &["body"],
     loop_body_kinds: &["compound_statement", "expression_statement"],
+    loop_header_container_kinds: &[],
+    loop_update_field_names: &["update"],
     branch_arm_kinds: &["compound_statement", "expression_statement"],
+    exclusive_branch_arm_kinds: &["case_statement"],
+    fallthrough_branch_arm_kinds: &["case_statement"],
     for_kinds: &["for_statement"],
     foreach_kinds: &[],
     foreach_binding_extractor: Some(objc_foreach_binding),
@@ -160,6 +150,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     call_argument_field_names: &["arguments"],
     call_argument_container_kinds: &["argument_list"],
     direct_call_argument_excluded_fields: &["receiver", "method"],
+    call_target_extractor: Some(objc_call_target),
     lambda_body_field_names: &["body"],
     argument_passing_mode_extractor: Some(objc_argument_passing_mode),
     indirect_place_operand_extractor: Some(objc_indirect_place_operand),
@@ -179,11 +170,10 @@ const HANDLER: GrammarHandler = GrammarHandler {
     positional_aggregate_value_kinds: &["initializer_list"],
     return_kinds: &["return_statement"],
     throw_kinds: &["throw_statement"],
-    // Current tree-sitter-objc emits `block_literal`; keep the older
-    // `block_literal_expression` spelling for grammar-version compatibility.
-    lambda_kinds: &["block_literal", "block_literal_expression"],
+    lambda_kinds: &["block_literal"],
     try_kinds: &["try_statement"],
     catch_kinds: &["catch_clause"],
+    exclusive_catch_arm_kinds: &["catch_clause"],
     finally_kinds: &["finally_clause"],
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
@@ -191,7 +181,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     yield_kinds: &[],
     await_kinds: &[],
     defer_kinds: &[],
-    using_kinds: &["synchronized_statement", "autoreleasepool_statement"],
+    using_kinds: &["synchronized_statement"],
     using_body_field_names: &["body"],
     try_body_field_names: &["body"],
     special_forms: &[SyntaxSpecialForm::DirectCallArguments],
@@ -209,6 +199,115 @@ fn objc_expression_value_kind(node: Node<'_>, _src: &[u8]) -> Option<AssignValue
         .then_some(AssignValueKind::Literal)
 }
 
+/// Decode Objective-C scalar literal syntax into the language-neutral
+/// compiler fact consumed by exact rule semantics.
+///
+/// This is deliberately syntax-only. Framework names and security meaning
+/// remain in rule data, while the adapter owns Objective-C's `@"..."`
+/// spelling and C-family escape rules. Unknown escapes and multi-character
+/// character constants fail closed instead of being guessed.
+fn objc_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
+    match node.kind() {
+        "true" => Some(StaticScalarValue::Boolean(true)),
+        "false" => Some(StaticScalarValue::Boolean(false)),
+        "null" => Some(StaticScalarValue::Null),
+        // Objective-C's null object/class pointer sentinels are identifiers in
+        // tree-sitter-objc even though the compiler defines their value as
+        // zero. Retain that exact language literal fact for variadic
+        // Foundation constructors such as `setWithObjects:..., nil`.
+        "identifier" if matches!(node_text(&node, src).trim(), "nil" | "Nil") => {
+            Some(StaticScalarValue::Null)
+        }
+        "string_literal" => Some(StaticScalarValue::String(objc_static_string_literal(node, src)?)),
+        "char_literal" => {
+            let value = objc_static_string_literal(node, src)?;
+            (value.chars().count() == 1).then_some(StaticScalarValue::String(value))
+        }
+        "concatenated_string" => {
+            let mut value = String::new();
+            let mut saw_part = false;
+            let mut cursor = node.walk();
+            for part in node.named_children(&mut cursor) {
+                if !matches!(part.kind(), "string_literal" | "char_literal") {
+                    return None;
+                }
+                value.push_str(&objc_static_string_literal(part, src)?);
+                saw_part = true;
+            }
+            saw_part.then_some(StaticScalarValue::String(value))
+        }
+        _ => None,
+    }
+}
+
+fn objc_static_string_literal(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let raw = node_text(&node, src).trim();
+    let raw = raw.strip_prefix('@').unwrap_or(raw);
+    let quote = raw.chars().next()?;
+    if !matches!(quote, '\'' | '"') || !raw.ends_with(quote) {
+        return None;
+    }
+    let quote_len = quote.len_utf8();
+    let body = raw.get(quote_len..raw.len().checked_sub(quote_len)?)?;
+    let mut decoded = String::new();
+    let mut chars = body.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        let escaped = chars.next()?;
+        match escaped {
+            '\\' => decoded.push('\\'),
+            '\'' => decoded.push('\''),
+            '"' => decoded.push('"'),
+            '?' => decoded.push('?'),
+            'a' => decoded.push('\u{7}'),
+            'b' => decoded.push('\u{8}'),
+            'f' => decoded.push('\u{c}'),
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            't' => decoded.push('\t'),
+            'v' => decoded.push('\u{b}'),
+            '\n' => {}
+            'x' => {
+                let mut value = 0_u32;
+                let mut digits = 0_u32;
+                while let Some(digit) = chars.peek().and_then(|ch| ch.to_digit(16)) {
+                    chars.next();
+                    value = value.checked_mul(16)?.checked_add(digit)?;
+                    digits += 1;
+                }
+                if digits == 0 {
+                    return None;
+                }
+                decoded.push(char::from_u32(value)?);
+            }
+            'u' | 'U' => {
+                let digits = if escaped == 'u' { 4 } else { 8 };
+                let mut value = 0_u32;
+                for _ in 0..digits {
+                    value = value.checked_mul(16)?.checked_add(chars.next()?.to_digit(16)?)?;
+                }
+                decoded.push(char::from_u32(value)?);
+            }
+            '0'..='7' => {
+                let mut value = escaped.to_digit(8)?;
+                for _ in 1..3 {
+                    let Some(digit) = chars.peek().and_then(|ch| ch.to_digit(8)) else {
+                        break;
+                    };
+                    chars.next();
+                    value = value.checked_mul(8)?.checked_add(digit)?;
+                }
+                decoded.push(char::from_u32(value)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(decoded)
+}
+
 fn objc_argument_passing_mode(argument: Node<'_>, value: Node<'_>) -> ArgumentPassingMode {
     if [argument, value].into_iter().any(|node| {
         matches!(node.kind(), "unary_expression" | "pointer_expression") && {
@@ -221,6 +320,86 @@ fn objc_argument_passing_mode(argument: Node<'_>, value: Node<'_>) -> ArgumentPa
     } else {
         ArgumentPassingMode::Value
     }
+}
+
+/// Preserve the complete keyword selector of an Objective-C message send.
+///
+/// The grammar labels every selector keyword with the `method` field and the
+/// receiver independently. A one-keyword message keeps the established
+/// `receiver.method` identity; a multi-keyword message appends the exact `:`
+/// punctuation to every parsed keyword so overload-like selector families
+/// cannot collide. This is a generic Objective-C syntax fact: provider and
+/// security meaning remain entirely in rule data.
+fn objc_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    if node.kind() == "call_expression" {
+        let callee = node.child_by_field_name("function")?;
+        let full_text = node_text(&callee, src).trim().to_string();
+        return (!full_text.is_empty()).then_some(CallTargetExtraction {
+            node: callee,
+            full_text,
+        });
+    }
+    if node.kind() != "message_expression" {
+        return None;
+    }
+
+    let receiver = node.child_by_field_name("receiver")?;
+    let receiver_text = objc_receiver_identity(receiver, src)?;
+    if receiver_text.is_empty() {
+        return None;
+    }
+    let mut first_method = None;
+    let mut keywords = Vec::new();
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.is_named() && cursor.field_name() == Some("method") {
+                first_method.get_or_insert(child);
+                let keyword = node_text(&child, src).trim();
+                if !keyword.is_empty() {
+                    keywords.push(keyword);
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    let first_method = first_method?;
+    let selector = match keywords.as_slice() {
+        [] => return None,
+        [keyword] => (*keyword).to_string(),
+        keywords => objc_selector_keywords(keywords),
+    };
+    Some(CallTargetExtraction {
+        node: first_method,
+        full_text: format!("{receiver_text}.{selector}"),
+    })
+}
+
+fn objc_selector_keywords(keywords: &[&str]) -> String {
+    let mut selector = String::with_capacity(keywords.iter().map(|keyword| keyword.len() + 1).sum());
+    for keyword in keywords {
+        selector.push_str(keyword);
+        selector.push(':');
+    }
+    selector
+}
+
+/// Canonicalize a message-send receiver from its CST shape.
+///
+/// Objective-C permits another message expression as the receiver
+/// (`[[Type sharedInstance] values]`). Recursing through that exact grammar
+/// node preserves one stable compiler identity (`Type.sharedInstance.values`)
+/// instead of embedding raw bracket syntax. Provider and API meaning remain
+/// in rule data.
+fn objc_receiver_identity(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() == "message_expression" {
+        return objc_call_target(node, src).map(|target| target.full_text);
+    }
+    let text = node_text(&node, src).trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
 /// Zero-sized adapter handle; all state lives in the shared parser pack.
@@ -262,6 +441,13 @@ impl LanguageAdapter for ObjCAdapter {
             bonsai_lang_api::LanguageOwnershipEvidence::Excluded
         }
     }
+    fn parse_context_fingerprint(
+        &self,
+        snapshot: &bonsai_lang_api::FileSnapshot,
+        vfs: &bonsai_lang_api::Vfs,
+    ) -> u64 {
+        bonsai_lang_api::c_family_preprocessor_context_fingerprint(snapshot, vfs)
+    }
     fn parse_recovery_edits(
         &self,
         snapshot: &bonsai_lang_api::FileSnapshot,
@@ -269,6 +455,14 @@ impl LanguageAdapter for ObjCAdapter {
         tree: &Tree,
     ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
         objc_parse_recovery_edits(snapshot, vfs, tree)
+    }
+    fn parse_recovery_edit_batches(
+        &self,
+        snapshot: &bonsai_lang_api::FileSnapshot,
+        vfs: &bonsai_lang_api::Vfs,
+        tree: &Tree,
+    ) -> Vec<Vec<bonsai_lang_api::ParseRecoveryEdit>> {
+        parse_recovery::objc_parse_recovery_edit_batches(snapshot, vfs, tree)
     }
     fn capabilities(&self) -> LanguageCapabilities {
         // Macros: tree-sitter-objc parses `NSAssert(...)` / `NS_INLINE`
@@ -289,10 +483,78 @@ impl LanguageAdapter for ObjCAdapter {
             ..LanguageCapabilities::partial_baseline()
         }
     }
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        Some(&HANDLER)
+    }
+    fn additional_grammar_node_kinds(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("custom lowering", "&"),
+            ("custom lowering", "*"),
+            ("custom lowering", "NULL"),
+            ("custom lowering", "argument_list"),
+            ("custom lowering", "array_literal"),
+            ("custom lowering", "at_expression"),
+            ("custom lowering", "call_expression"),
+            ("custom lowering", "cast_expression"),
+            ("custom lowering", "catch_clause"),
+            ("custom lowering", "char_literal"),
+            ("custom lowering", "class_implementation"),
+            ("custom lowering", "class_interface"),
+            ("custom lowering", "conditional_expression"),
+            ("custom lowering", "declaration"),
+            ("custom lowering", "dictionary_literal"),
+            ("custom lowering", "dictionary_pair"),
+            ("custom lowering", "false"),
+            ("custom lowering", "field_expression"),
+            ("custom lowering", "field_identifier"),
+            ("custom lowering", "for_statement"),
+            ("custom lowering", "function_definition"),
+            ("custom lowering", "identifier"),
+            ("custom lowering", "in"),
+            ("custom lowering", "init_declarator"),
+            ("custom lowering", "message_expression"),
+            ("custom lowering", "method_declaration"),
+            ("custom lowering", "method_definition"),
+            ("custom lowering", "method_parameter"),
+            ("custom lowering", "method_type"),
+            ("custom lowering", "null"),
+            ("custom lowering", "number_literal"),
+            ("custom lowering", "parameter_declaration"),
+            ("custom lowering", "parameter_list"),
+            ("custom lowering", "parenthesized_expression"),
+            ("custom lowering", "pointer_expression"),
+            ("custom lowering", "primitive_type"),
+            ("custom lowering", "protocol_declaration"),
+            ("custom lowering", "protocol_reference_list"),
+            ("custom lowering", "sized_type_specifier"),
+            ("custom lowering", "string_literal"),
+            ("custom lowering", "subscript_expression"),
+            ("custom lowering", "true"),
+            ("custom lowering", "type_descriptor"),
+            ("custom lowering", "type_identifier"),
+            ("custom lowering", "type_name"),
+            ("custom lowering", "unary_expression"),
+            ("custom lowering", "update_expression"),
+        ]
+    }
+
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
-        let mut decl_index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
+        let parsed = parse_with(PACK_NAME, file, ctx);
+        let mut decl_index = parsed.as_ref().map_or_else(
+            || DeclIndex {
+                file,
+                ..DeclIndex::default()
+            },
+            |(snapshot, tree)| {
+                decl_index_from_tree_with_handler(file, snapshot.text.as_bytes(), tree, &HANDLER)
+            },
+        );
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
         apply_objc_class_semantic_identity(&mut decl_index, ctx);
+        if let Some((snapshot, tree)) = parsed.as_ref() {
+            mark_objc_method_prototypes_bodyless(&mut decl_index, tree);
+            apply_objc_method_selector_identities(&mut decl_index, tree, snapshot.text.as_bytes());
+        }
         // The leading `_` on an Objective-C method/selector is an Apple
         // naming convention, not a linkage boundary: selectors dispatch
         // dynamically across files. Marking `_`-prefixed decls
@@ -308,18 +570,6 @@ impl LanguageAdapter for ObjCAdapter {
             .filter(|decl| decl.kind == DeclKind::Constructor)
             .map(|decl| decl.name.clone())
             .collect::<std::collections::HashSet<_>>();
-        let declared_class_names = decl_index
-            .defs
-            .iter()
-            .filter(|decl| {
-                matches!(
-                    decl.kind,
-                    DeclKind::Class | DeclKind::Interface | DeclKind::Trait | DeclKind::Struct
-                )
-            })
-            .flat_map(|decl| std::iter::once(decl.name.clone()).chain(decl.qualified_name.clone()))
-            .map(|name| bonsai_common::short_qualified_tail(&name).to_string())
-            .collect::<std::collections::HashSet<_>>();
         // Per-decl `type_aliases` from typed parameters
         // (`(NSString *)name`, `(HTTPRequest *)req`). Objective-C
         // method signatures and C-style function parameters both
@@ -327,16 +577,38 @@ impl LanguageAdapter for ObjCAdapter {
         // `attribute: [NSURL, absoluteString]`-style rules can
         // resolve `req.absoluteString` semantically per
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+        if let Some((snapshot, tree)) = parsed.as_ref() {
             let src = snapshot.text.as_bytes();
-            bonsai_lang_api::kit::inject_c_family_function_pointer_aliases(&mut decl_index, &tree, src, file);
-            let aliases_by_span = collect_objc_method_type_aliases(&tree, file, src);
+            bonsai_lang_api::kit::inject_c_family_function_pointer_aliases(&mut decl_index, tree, src, file);
+            let aliases_by_span = collect_objc_method_type_aliases(tree, file, src);
             for decl in &mut decl_index.defs {
-                if let Some(aliases) = aliases_by_span
+                if !matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) {
+                    continue;
+                }
+                // The generic kit deliberately gives a callable the span of
+                // its executable body, while Tree-sitter's Objective-C method
+                // node also owns the selector and typed parameter list. Match
+                // those two exact compiler facts by containment of the
+                // declaration's name, preferring the smallest owning method.
+                // This stays syntax-only: no framework or API spelling enters
+                // the adapter.
+                if let Some((_, aliases)) = aliases_by_span
                     .iter()
-                    .find_map(|(span, aliases)| (*span == decl.span).then_some(aliases))
+                    .filter(|(span, _)| {
+                        span.file == decl.name_span.file
+                            && span.start <= decl.name_span.start
+                            && span.end >= decl.name_span.end
+                    })
+                    .min_by_key(|(span, _)| span.len())
                 {
-                    decl.type_aliases = aliases.clone();
+                    for alias in aliases {
+                        if !decl.type_aliases.contains(alias) {
+                            decl.type_aliases.push(alias.clone());
+                        }
+                    }
                 }
             }
             // Per-class `bases`: `@interface AuditedRepository :
@@ -347,7 +619,7 @@ impl LanguageAdapter for ObjCAdapter {
             // `run` method instead of falling back to a name-only
             // candidate enumeration. Without populated bases,
             // every super dispatch is invisible.
-            let bases_by_class = collect_objc_class_bases(&tree, file, src);
+            let bases_by_class = collect_objc_class_bases(tree, file, src);
             for decl in &mut decl_index.defs {
                 if !matches!(
                     decl.kind,
@@ -385,12 +657,23 @@ impl LanguageAdapter for ObjCAdapter {
                 }
             }
             for decl in &mut decl_index.defs {
-                suppress_objc_dynamic_subscript_literal_overwrites(&mut decl.flow_events, &tree, src);
-                augment_objc_dictionary_flow_events(&mut decl.flow_events, &tree, src);
+                suppress_objc_dynamic_subscript_literal_overwrites(&mut decl.flow_events, tree, src);
+                augment_objc_dictionary_flow_events(&mut decl.flow_events, tree, src);
             }
+            bonsai_lang_api::kit::populate_call_argument_static_values(
+                &mut decl_index,
+                tree,
+                file,
+                src,
+                &HANDLER,
+                objc_static_scalar,
+            );
+            decl_index.finite_literal_selections =
+                collect_objc_finite_literal_selections(&decl_index, tree, file, src);
         }
         for decl in &mut decl_index.defs {
             enrich_objc_receiver_field_writes(decl);
+            let value_binding_starts = objc_value_binding_starts(decl);
             // Tag `[[Class alloc] init...]` / `[[Class new] ...]`
             // chains with the constructed class so the engine's
             // receiver-type dispatch recognises the alloc-init
@@ -399,7 +682,7 @@ impl LanguageAdapter for ObjCAdapter {
             tag_objc_alloc_receiver_types(
                 &mut decl.flow_events,
                 &constructor_selectors,
-                &declared_class_names,
+                &value_binding_starts,
             );
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
         }
@@ -407,10 +690,10 @@ impl LanguageAdapter for ObjCAdapter {
         // returns the first identifier descendant of `@catch
         // (NSException *e)`, which is the type — we want the
         // binding identifier.
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+        if let Some((snapshot, tree)) = parsed.as_ref() {
             let src = snapshot.text.as_bytes();
             for decl in &mut decl_index.defs {
-                fix_objc_catch_params(&mut decl.flow_events, &tree, src);
+                fix_objc_catch_params(&mut decl.flow_events, tree, src);
             }
         }
         // Precompute `self.<field> → Type` bindings from each
@@ -445,8 +728,119 @@ fn apply_objc_class_semantic_identity(decl_index: &mut DeclIndex, ctx: &AdapterC
     }
 }
 
+/// Attach the complete multipart selector to each method declaration's
+/// qualified semantic identity while retaining the first selector piece as
+/// its concise display/search name. Interface prototypes are bodyless compiler
+/// declarations; implementations remain the executable definitions.
+///
+/// Tree-sitter represents `-run:user:` as alternating direct `identifier`
+/// and `method_parameter` children. The adapter owns that grammar fact. A
+/// qualified tail such as `run:user:` lets compiler resolution distinguish
+/// sibling selectors that share their first piece; shared crates only consume
+/// the already-lowered qualified identity.
+fn apply_objc_method_selector_identities(decl_index: &mut DeclIndex, tree: &Tree, src: &[u8]) {
+    let selectors = collect_kinds(tree, &["method_definition", "method_declaration"])
+        .into_iter()
+        .filter_map(|node| objc_multipart_method_selector(node, decl_index.file, src))
+        .collect::<Vec<_>>();
+    for decl in &mut decl_index.defs {
+        if decl.kind != DeclKind::Method {
+            continue;
+        }
+        let Some((_, selector)) = selectors
+            .iter()
+            .filter(|(span, _)| {
+                span.file == decl.name_span.file
+                    && span.start <= decl.name_span.start
+                    && span.end >= decl.name_span.end
+            })
+            .min_by_key(|(span, _)| span.len())
+        else {
+            continue;
+        };
+        let owner = decl
+            .qualified_name
+            .as_deref()
+            .and_then(bonsai_common::qualified_name_owner)
+            .map(ToString::to_string);
+        decl.qualified_name = owner.map_or_else(
+            || Some(selector.clone()),
+            |owner| Some(format!("{owner}.{selector}")),
+        );
+    }
+}
+
+/// The generic declaration kit uses the declaration node itself as a fallback
+/// body span when a configured callable kind has no `body` child. That is
+/// correct for expression-bodied callables, but an Objective-C
+/// `method_declaration` is a prototype by grammar definition. Clear the
+/// fallback so resolvers can link it to a peer implementation without treating
+/// the header as executable code.
+fn mark_objc_method_prototypes_bodyless(decl_index: &mut DeclIndex, tree: &Tree) {
+    let prototype_spans = collect_kinds(tree, &["method_declaration"])
+        .into_iter()
+        .map(|node| span_of(decl_index.file, &node))
+        .collect::<Vec<_>>();
+    for decl in &mut decl_index.defs {
+        if decl.kind != DeclKind::Method {
+            continue;
+        }
+        if prototype_spans.iter().any(|span| {
+            span.file == decl.name_span.file
+                && span.start <= decl.name_span.start
+                && span.end >= decl.name_span.end
+        }) {
+            decl.body_span = None;
+            decl.flow_events.clear();
+        }
+    }
+}
+
+fn objc_multipart_method_selector(node: Node<'_>, file: FileId, src: &[u8]) -> Option<(Span, String)> {
+    if !matches!(node.kind(), "method_definition" | "method_declaration") {
+        return None;
+    }
+    let mut pieces = Vec::new();
+    let mut cursor = node.walk();
+    let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+    for pair in children.windows(2) {
+        if pair[0].kind() != "identifier" || pair[1].kind() != "method_parameter" {
+            continue;
+        }
+        let piece = node_text(&pair[0], src).trim();
+        if !piece.is_empty() {
+            pieces.push(piece);
+        }
+    }
+    // One-piece selectors retain the established short identity. Multipart
+    // selectors require every keyword to prevent overload-family collisions.
+    (pieces.len() > 1).then(|| {
+        let selector = objc_selector_keywords(&pieces);
+        (span_of(file, &node), selector)
+    })
+}
+
 fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
-    c_family_preproc_imports(tree, src, file)
+    let mut imports = c_family_preproc_imports(tree, src, file);
+    let framework_spans = collect_kinds(tree, &["preproc_include"])
+        .into_iter()
+        .filter(|include| {
+            include
+                .child_by_field_name("path")
+                .is_some_and(|path| path.kind() == "system_lib_string")
+        })
+        .map(|include| span_of(file, &include))
+        .collect::<std::collections::HashSet<_>>();
+    for import in &mut imports {
+        if framework_spans.contains(&import.span) {
+            // `#import <Framework/Header.h>` exposes the header's public
+            // declarations in the translation unit. This is a wildcard
+            // compiler binding, unlike a quoted project header whose exact
+            // path remains available to workspace resolution.
+            import.is_wildcard = true;
+        }
+    }
+    imports
 }
 
 /// Walk a decl's flow events and populate
@@ -463,7 +857,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
 fn tag_objc_alloc_receiver_types(
     events: &mut [bonsai_lang_api::FlowEvent],
     constructor_selectors: &std::collections::HashSet<String>,
-    declared_class_names: &std::collections::HashSet<String>,
+    value_binding_starts: &std::collections::HashMap<String, u64>,
 ) {
     for event in events {
         match event {
@@ -472,6 +866,7 @@ fn tag_objc_alloc_receiver_types(
                 receiver,
                 receiver_types,
                 call_kind,
+                span,
                 ..
             } => {
                 // Adapter-emitted `receiver` field takes precedence;
@@ -483,7 +878,11 @@ fn tag_objc_alloc_receiver_types(
                     .as_deref()
                     .and_then(objc_alloc_class_name)
                     .or_else(|| objc_alloc_class_name_from_call_name(name));
-                if let Some(class_name) = class_name.filter(|name| declared_class_names.contains(name)) {
+                if let Some(class_name) = class_name.filter(|name| {
+                    value_binding_starts
+                        .get(name)
+                        .is_none_or(|binding_start| *binding_start > span.start)
+                }) {
                     if !receiver_types.iter().any(|existing| existing == &class_name) {
                         receiver_types.push(class_name);
                     }
@@ -492,7 +891,7 @@ fn tag_objc_alloc_receiver_types(
                     // is construction syntax. Use those AST/declaration facts
                     // instead of teaching the IDG selector spellings.
                     let selector = name.rsplit('.').next().unwrap_or(name).trim();
-                    if constructor_selectors.contains(selector) {
+                    if constructor_selectors.contains(selector) || objc_selector_is_initializer(selector) {
                         *call_kind = bonsai_lang_api::CallKind::Constructor;
                     }
                 }
@@ -502,11 +901,11 @@ fn tag_objc_alloc_receiver_types(
                 else_events,
                 ..
             } => {
-                tag_objc_alloc_receiver_types(then_events, constructor_selectors, declared_class_names);
-                tag_objc_alloc_receiver_types(else_events, constructor_selectors, declared_class_names);
+                tag_objc_alloc_receiver_types(then_events, constructor_selectors, value_binding_starts);
+                tag_objc_alloc_receiver_types(else_events, constructor_selectors, value_binding_starts);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                tag_objc_alloc_receiver_types(body, constructor_selectors, declared_class_names);
+                tag_objc_alloc_receiver_types(body, constructor_selectors, value_binding_starts);
             }
             FlowEvent::Try {
                 body,
@@ -514,9 +913,9 @@ fn tag_objc_alloc_receiver_types(
                 finally_events,
                 ..
             } => {
-                tag_objc_alloc_receiver_types(body, constructor_selectors, declared_class_names);
-                tag_objc_alloc_receiver_types(catch_events, constructor_selectors, declared_class_names);
-                tag_objc_alloc_receiver_types(finally_events, constructor_selectors, declared_class_names);
+                tag_objc_alloc_receiver_types(body, constructor_selectors, value_binding_starts);
+                tag_objc_alloc_receiver_types(catch_events, constructor_selectors, value_binding_starts);
+                tag_objc_alloc_receiver_types(finally_events, constructor_selectors, value_binding_starts);
             }
             _ => {}
         }
@@ -526,11 +925,76 @@ fn tag_objc_alloc_receiver_types(
 fn mark_objc_initializer_methods(decl_index: &mut DeclIndex) {
     for decl in &mut decl_index.defs {
         if matches!(decl.kind, DeclKind::Method | DeclKind::Function)
-            && (decl.name == "init" || decl.name.starts_with("initWith"))
+            && objc_selector_is_initializer(&decl.name)
         {
             decl.kind = DeclKind::Constructor;
         }
     }
+}
+
+fn objc_selector_is_initializer(selector: &str) -> bool {
+    selector == "init" || selector.starts_with("initWith")
+}
+
+fn objc_value_binding_starts(decl: &bonsai_lang_api::Decl) -> std::collections::HashMap<String, u64> {
+    let mut starts = std::collections::HashMap::new();
+    for name in decl
+        .params
+        .iter()
+        .chain(decl.type_aliases.iter().map(|alias| &alias.name))
+    {
+        if objc_simple_identifier(name) {
+            starts.entry(name.clone()).or_insert(0);
+        }
+    }
+    collect_objc_value_binding_starts(&decl.flow_events, &mut starts);
+    starts
+}
+
+fn collect_objc_value_binding_starts(
+    events: &[FlowEvent],
+    starts: &mut std::collections::HashMap<String, u64>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { span, target, .. } if objc_simple_identifier(target) => {
+                starts
+                    .entry(target.clone())
+                    .and_modify(|start| *start = (*start).min(span.start))
+                    .or_insert(span.start);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_objc_value_binding_starts(then_events, starts);
+                collect_objc_value_binding_starts(else_events, starts);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_objc_value_binding_starts(body, starts);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_objc_value_binding_starts(body, starts);
+                collect_objc_value_binding_starts(catch_events, starts);
+                collect_objc_value_binding_starts(finally_events, starts);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn objc_simple_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 fn suppress_objc_dynamic_subscript_literal_overwrites(events: &mut Vec<FlowEvent>, tree: &Tree, src: &[u8]) {
@@ -723,6 +1187,421 @@ fn objc_dictionary_pair_nodes(pair: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
     let key = children.next()?;
     let value = children.next()?;
     Some((key, value))
+}
+
+#[derive(Copy, Clone)]
+struct ObjcFiniteDictionaryBinding<'tree> {
+    target: Node<'tree>,
+    initializer: Node<'tree>,
+    scope: Node<'tree>,
+    owner: Node<'tree>,
+}
+
+/// Prove selections from one local dictionary literal without attaching any
+/// library, helper, or security meaning to the syntax. The dynamic subscript
+/// controls which literal is selected, while every dictionary key/value and
+/// the nil-coalescing fallback must be a compiler literal.
+fn collect_objc_finite_literal_selections(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<FiniteLiteralSelectionFact> {
+    let bindings = collect_objc_finite_dictionary_bindings(index, tree, src);
+    if bindings.is_empty() {
+        return Vec::new();
+    }
+
+    let mut facts = Vec::new();
+    let mut direct_return_candidates = vec![Vec::<Span>::new(); index.defs.len()];
+    // A direct lookup from a stable literal dictionary is finite even
+    // without an explicit `?:` fallback: a missing key produces ObjC `nil`,
+    // so the result remains one of the literal values or the language null
+    // value. Attach the fact only when the complete assignment/call argument
+    // is exactly this subscript; compound expressions retain their ordinary
+    // dataflow.
+    for lookup in collect_kinds(tree, &["subscript_expression"]) {
+        if objc_expression_is_assignment_target(lookup) {
+            continue;
+        }
+        let Some(base) = lookup.child_by_field_name("argument") else {
+            continue;
+        };
+        if base.kind() != "identifier"
+            || !objc_has_one_finite_dictionary_binding(&bindings, lookup, base, src)
+        {
+            continue;
+        }
+        let selection_span = span_of(file, &lookup);
+        if let Some(fact) = bonsai_lang_api::kit::finite_literal_selection_fact_for_span(
+            index,
+            tree,
+            selection_span,
+            |value| objc_value_is_exact_selection(value, lookup),
+        ) {
+            facts.push(fact);
+            continue;
+        }
+        if objc_selection_is_complete_return_value(lookup) {
+            if let Some((decl_index, _)) = index
+                .defs
+                .iter()
+                .enumerate()
+                .filter(|(_, decl)| {
+                    matches!(
+                        decl.kind,
+                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                    ) && decl.span.file == selection_span.file
+                        && decl.span.start <= selection_span.start
+                        && selection_span.end <= decl.span.end
+                })
+                .min_by_key(|(_, decl)| decl.span.len())
+            {
+                direct_return_candidates[decl_index].push(selection_span);
+            }
+        }
+    }
+    for selection in collect_kinds(tree, &["conditional_expression"]) {
+        let Some((lookup, base)) = objc_finite_dictionary_selection(selection, src) else {
+            continue;
+        };
+        if !objc_has_one_finite_dictionary_binding(&bindings, lookup, base, src) {
+            continue;
+        }
+
+        let selection_span = span_of(file, &selection);
+        if let Some(fact) = bonsai_lang_api::kit::finite_literal_selection_fact_for_span(
+            index,
+            tree,
+            selection_span,
+            |value| objc_value_is_exact_selection(value, selection),
+        ) {
+            facts.push(fact);
+            continue;
+        }
+        if !objc_selection_is_complete_return_value(selection) {
+            continue;
+        }
+        let Some((decl_index, _)) = index
+            .defs
+            .iter()
+            .enumerate()
+            .filter(|(_, decl)| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) && decl.span.file == selection_span.file
+                    && decl.span.start <= selection_span.start
+                    && selection_span.end <= decl.span.end
+            })
+            .min_by_key(|(_, decl)| decl.span.len())
+        else {
+            continue;
+        };
+        direct_return_candidates[decl_index].push(selection_span);
+    }
+
+    for (decl_index, selections) in direct_return_candidates.into_iter().enumerate() {
+        if selections.is_empty()
+            || bonsai_lang_api::kit::complete_finite_selection_return_span(
+                &index.defs[decl_index].flow_events,
+                &selections,
+            )
+            .is_none()
+        {
+            continue;
+        }
+        facts.extend(
+            selections
+                .into_iter()
+                .map(|selection_span| FiniteLiteralSelectionFact {
+                    selection_span,
+                    assignment_span: None,
+                    target: None,
+                    call_span: None,
+                    argument_index: None,
+                }),
+        );
+    }
+    bonsai_lang_api::kit::sort_dedup_finite_literal_selections(&mut facts);
+    facts
+}
+
+fn objc_has_one_finite_dictionary_binding(
+    bindings: &[ObjcFiniteDictionaryBinding<'_>],
+    lookup: Node<'_>,
+    base: Node<'_>,
+    src: &[u8],
+) -> bool {
+    let base_name = node_text(&base, src).trim();
+    let mut matching = bindings.iter().filter(|binding| {
+        node_text(&binding.target, src).trim() == base_name
+            && binding.initializer.end_byte() <= lookup.start_byte()
+            && binding.scope.start_byte() <= lookup.start_byte()
+            && lookup.end_byte() <= binding.scope.end_byte()
+            && objc_enclosing_callable(lookup).is_some_and(|owner| owner.id() == binding.owner.id())
+    });
+    matching.next().is_some() && matching.next().is_none()
+}
+
+fn collect_objc_finite_dictionary_bindings<'tree>(
+    index: &DeclIndex,
+    tree: &'tree Tree,
+    src: &[u8],
+) -> Vec<ObjcFiniteDictionaryBinding<'tree>> {
+    let mut bindings = Vec::new();
+    for declarator in collect_kinds(tree, &["init_declarator"]) {
+        let (Some(target), Some(initializer)) = (
+            declarator
+                .child_by_field_name("declarator")
+                .and_then(objc_simple_binding_identifier),
+            declarator.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        let initializer = objc_unwrap_parenthesized(initializer);
+        if !objc_finite_dictionary_literal(initializer, src) {
+            continue;
+        }
+        let (Some(owner), Some(scope)) = (
+            objc_enclosing_callable(declarator),
+            objc_enclosing_compound_scope(declarator),
+        ) else {
+            continue;
+        };
+        let binding = ObjcFiniteDictionaryBinding {
+            target,
+            initializer,
+            scope,
+            owner,
+        };
+        if objc_finite_dictionary_binding_is_stable(index, binding, src) {
+            bindings.push(binding);
+        }
+    }
+    bindings
+}
+
+fn objc_finite_dictionary_binding_is_stable(
+    index: &DeclIndex,
+    binding: ObjcFiniteDictionaryBinding<'_>,
+    src: &[u8],
+) -> bool {
+    let name = node_text(&binding.target, src).trim();
+    if name.is_empty() {
+        return false;
+    }
+    let target_span = span_of(index.file, &binding.target);
+    let Some(owner_decl) = index
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            ) && decl.span.file == target_span.file
+                && decl.span.start <= target_span.start
+                && target_span.end <= decl.span.end
+        })
+        .min_by_key(|decl| decl.span.len())
+    else {
+        return false;
+    };
+    if owner_decl.params.iter().any(|parameter| parameter == name) {
+        return false;
+    }
+
+    let body = binding.owner.child_by_field_name("body").unwrap_or(binding.scope);
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "identifier"
+            && node_text(&node, src).trim() == name
+            && node.id() != binding.target.id()
+            && !objc_identifier_is_finite_dictionary_read(node, binding)
+        {
+            return false;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    true
+}
+
+fn objc_identifier_is_finite_dictionary_read(
+    identifier: Node<'_>,
+    binding: ObjcFiniteDictionaryBinding<'_>,
+) -> bool {
+    if identifier.start_byte() < binding.initializer.end_byte()
+        || identifier.start_byte() < binding.scope.start_byte()
+        || binding.scope.end_byte() < identifier.end_byte()
+    {
+        return false;
+    }
+    let Some(subscript) = identifier
+        .parent()
+        .filter(|parent| parent.kind() == "subscript_expression")
+    else {
+        return false;
+    };
+    if subscript
+        .child_by_field_name("argument")
+        .is_none_or(|base| base.id() != identifier.id())
+    {
+        return false;
+    }
+    !objc_expression_is_assignment_target(subscript)
+}
+
+fn objc_expression_is_assignment_target(expression: Node<'_>) -> bool {
+    let mut current = expression;
+    while let Some(parent) = current.parent() {
+        if matches!(parent.kind(), "assignment_expression" | "update_expression") {
+            return parent.child_by_field_name("left").is_none_or(|left| {
+                left.start_byte() <= expression.start_byte() && expression.end_byte() <= left.end_byte()
+            });
+        }
+        if matches!(
+            parent.kind(),
+            "expression_statement"
+                | "declaration"
+                | "return_statement"
+                | "argument_list"
+                | "compound_statement"
+        ) {
+            break;
+        }
+        current = parent;
+    }
+    false
+}
+
+fn objc_finite_dictionary_selection<'tree>(
+    selection: Node<'tree>,
+    src: &[u8],
+) -> Option<(Node<'tree>, Node<'tree>)> {
+    if selection.kind() != "conditional_expression" || selection.child_by_field_name("consequence").is_some()
+    {
+        return None;
+    }
+    let lookup = objc_unwrap_parenthesized(selection.child_by_field_name("condition")?);
+    let fallback = objc_unwrap_parenthesized(selection.child_by_field_name("alternative")?);
+    if lookup.kind() != "subscript_expression" || !objc_finite_scalar_literal(fallback, src) {
+        return None;
+    }
+    let base = lookup.child_by_field_name("argument")?;
+    let subscript = lookup.child_by_field_name("index")?;
+    (base.kind() == "identifier" && !node_text(&subscript, src).trim().is_empty()).then_some((lookup, base))
+}
+
+fn objc_finite_dictionary_literal(node: Node<'_>, src: &[u8]) -> bool {
+    if node.kind() != "dictionary_literal" || node.named_child_count() == 0 {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let finite = node.named_children(&mut cursor).all(|pair| {
+        if pair.kind() != "dictionary_pair" || pair.named_child_count() != 2 {
+            return false;
+        }
+        let Some((key, value)) = objc_dictionary_pair_nodes(pair) else {
+            return false;
+        };
+        objc_finite_scalar_literal(key, src) && objc_finite_scalar_literal(value, src)
+    });
+    finite
+}
+
+fn objc_finite_scalar_literal(node: Node<'_>, src: &[u8]) -> bool {
+    let node = objc_unwrap_parenthesized(node);
+    if node.kind() == "at_expression" {
+        let mut cursor = node.walk();
+        let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+        let [value] = children.as_slice() else {
+            return false;
+        };
+        return objc_finite_scalar_literal(*value, src);
+    }
+    match node.kind() {
+        "number_literal" => !node_text(&node, src).trim().is_empty(),
+        "string_literal" | "char_literal" | "concatenated_string" | "true" | "false" | "null" => {
+            objc_static_scalar(node, src).is_some()
+        }
+        _ => false,
+    }
+}
+
+fn objc_value_is_exact_selection(mut value: Node<'_>, selection: Node<'_>) -> bool {
+    while value.kind() == "parenthesized_expression" {
+        let mut cursor = value.walk();
+        let children = value.named_children(&mut cursor).collect::<Vec<_>>();
+        let [inner] = children.as_slice() else {
+            return false;
+        };
+        value = *inner;
+    }
+    value.id() == selection.id()
+}
+
+fn objc_selection_is_complete_return_value(selection: Node<'_>) -> bool {
+    let mut value = selection;
+    while let Some(parent) = value.parent() {
+        if parent.kind() == "return_statement" {
+            return parent.named_child_count() == 1;
+        }
+        if parent.kind() != "parenthesized_expression" || parent.named_child_count() != 1 {
+            return false;
+        }
+        value = parent;
+    }
+    false
+}
+
+fn objc_simple_binding_identifier(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() == "identifier" {
+        return Some(node);
+    }
+    if !matches!(node.kind(), "pointer_declarator" | "parenthesized_declarator") {
+        return None;
+    }
+    objc_simple_binding_identifier(node.child_by_field_name("declarator")?)
+}
+
+fn objc_unwrap_parenthesized(mut node: Node<'_>) -> Node<'_> {
+    while node.kind() == "parenthesized_expression" && node.named_child_count() == 1 {
+        let Some(inner) = node.named_child(0) else {
+            break;
+        };
+        node = inner;
+    }
+    node
+}
+
+fn objc_enclosing_callable(mut node: Node<'_>) -> Option<Node<'_>> {
+    while let Some(parent) = node.parent() {
+        if matches!(
+            parent.kind(),
+            "function_definition" | "method_definition" | "block_literal"
+        ) {
+            return Some(parent);
+        }
+        node = parent;
+    }
+    None
+}
+
+fn objc_enclosing_compound_scope(mut node: Node<'_>) -> Option<Node<'_>> {
+    while let Some(parent) = node.parent() {
+        if parent.kind() == "compound_statement" {
+            return Some(parent);
+        }
+        if matches!(
+            parent.kind(),
+            "function_definition" | "method_definition" | "block_literal"
+        ) {
+            return None;
+        }
+        node = parent;
+    }
+    None
 }
 
 fn objc_static_string_key(node: Node<'_>, src: &[u8]) -> Option<String> {
@@ -1009,11 +1888,13 @@ fn objc_receiver_field_target(target: &str) -> String {
     }
 }
 
-/// Repair `catch_param` on ObjC `Try` events. The kit's generic
+/// Repair ObjC catch bindings on `Try` events. The kit's generic
 /// extractor returns the first identifier descendant of `@catch
 /// (NSException *e)`, which is the type identifier. Re-extract the
 /// binding from the `parameter_declaration` → `declarator`
-/// chain.
+/// chain and retain it on the exact arm that owns it. Arm-local facts are the
+/// authoritative compiler contract; the aggregate `catch_param` exists only
+/// for compatibility with older compiler objects.
 fn fix_objc_catch_params(events: &mut [bonsai_lang_api::FlowEvent], tree: &Tree, src: &[u8]) {
     for event in events {
         match event {
@@ -1023,6 +1904,7 @@ fn fix_objc_catch_params(events: &mut [bonsai_lang_api::FlowEvent], tree: &Tree,
                 catch_events,
                 finally_events,
                 catch_param,
+                catch_arms,
                 ..
             } => {
                 if let Some(node) =
@@ -1030,6 +1912,16 @@ fn fix_objc_catch_params(events: &mut [bonsai_lang_api::FlowEvent], tree: &Tree,
                 {
                     if let Some(name) = objc_catch_param_binding(node, src) {
                         *catch_param = Some(name);
+                    }
+                }
+                for arm in catch_arms {
+                    let Some(clause) =
+                        bonsai_lang_api::kit::node_at_span(tree.root_node(), arm.span, &["catch_clause"])
+                    else {
+                        continue;
+                    };
+                    if let Some(name) = objc_catch_clause_param_binding(clause, src) {
+                        arm.parameter = Some(name);
                     }
                 }
                 fix_objc_catch_params(body, tree, src);
@@ -1058,23 +1950,27 @@ fn objc_catch_param_binding(try_node: Node<'_>, src: &[u8]) -> Option<String> {
         if child.kind() != "catch_clause" {
             continue;
         }
-        // tree-sitter-objc flattens `@catch (T *name)` into a single
-        // `type_name` node that contains both the type and the
-        // identifier. The trailing identifier descendant is the
-        // binding.
-        let mut ccur = child.walk();
-        for sub in child.named_children(&mut ccur) {
-            if !matches!(
-                sub.kind(),
-                "type_name" | "parameter_list" | "parameter_declaration"
-            ) {
-                continue;
-            }
-            // Walk every descendant; the binding is the last
-            // identifier (after the type).
-            if let Some(text) = last_identifier_text_in_subtree(sub, src) {
-                return Some(text);
-            }
+        if let Some(name) = objc_catch_clause_param_binding(child, src) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn objc_catch_clause_param_binding(clause: Node<'_>, src: &[u8]) -> Option<String> {
+    // tree-sitter-objc flattens `@catch (T *name)` into a single
+    // `type_name` node that contains both the type and the identifier. The
+    // trailing identifier descendant is the binding.
+    let mut cursor = clause.walk();
+    for child in clause.named_children(&mut cursor) {
+        if !matches!(
+            child.kind(),
+            "type_name" | "parameter_list" | "parameter_declaration"
+        ) {
+            continue;
+        }
+        if let Some(text) = last_identifier_text_in_subtree(child, src) {
+            return Some(text);
         }
     }
     None
@@ -1159,29 +2055,17 @@ fn objc_alloc_class_name(receiver: &str) -> Option<String> {
     Some(class.to_string())
 }
 
-/// Walk Objective-C class / category / interface / implementation
-/// nodes and pull bare base type names from the
-/// `superclass`/`superclass_reference` field plus any
-/// protocol-qualifier identifiers. Both `@interface
-/// AuditedRepository : Repository` and `@interface Foo (Cat) :
-/// Bar` shapes surface here so super dispatch + protocol
-/// conformance both inform the resolver.
+/// Walk Objective-C interface / implementation nodes and pull bare base type
+/// names from the grammar's exact `superclass` field plus protocol references.
+/// Categories use the same `class_interface` / `class_implementation` nodes
+/// with a `category` field in the current grammar.
 fn collect_objc_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, String, Vec<String>)> {
-    let class_kinds = &[
-        "class_interface",
-        "class_implementation",
-        "category_interface",
-        "category_implementation",
-    ];
+    let class_kinds = &["class_interface", "class_implementation"];
     let mut out: Vec<(Span, String, Vec<String>)> = Vec::new();
     for class_node in collect_kinds(tree, class_kinds) {
         let class_name = objc_class_name(class_node, src).unwrap_or_default();
         let mut bases: Vec<String> = Vec::new();
-        if let Some(superclass) = class_node
-            .child_by_field_name("superclass")
-            .or_else(|| class_node.child_by_field_name("superclass_reference"))
-            .or_else(|| class_node.child_by_field_name("base"))
-        {
+        if let Some(superclass) = class_node.child_by_field_name("superclass") {
             let raw = node_text(&superclass, src).trim().to_string();
             if let Some(name) = canonical_objc_base_name(&raw) {
                 if !bases.iter().any(|existing| existing == &name) {
@@ -1189,14 +2073,9 @@ fn collect_objc_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span,
                 }
             }
         }
-        // Fallback: a few grammar revisions expose the superclass as
-        // a `superclass_reference` named child rather than a field.
         let mut cursor = class_node.walk();
         for child in class_node.named_children(&mut cursor) {
-            if matches!(
-                child.kind(),
-                "superclass_reference" | "superclass" | "protocol_reference_list" | "protocol_qualifiers"
-            ) {
+            if child.kind() == "protocol_reference_list" {
                 let raw = node_text(&child, src).trim().to_string();
                 for piece in raw.split(',') {
                     let cleaned = piece
@@ -1261,12 +2140,14 @@ fn canonical_objc_base_name(raw: &str) -> Option<String> {
     Some(bare.to_string())
 }
 
-/// Walk every Objective-C method / function declaration once and
+/// Walk every Objective-C method declaration / definition and C function
+/// definition once and
 /// record parameter type-alias bindings. The grammar names
-/// instance/class methods as `*_method_declaration` and
-/// `method_definition`; their `parameters` field holds
-/// `keyword_argument` (Objective-C style `name:(Type)param`) or
-/// `parameter_list` of C-style `(Type) name` declarations. C
+/// implementation methods as `method_definition`; interface-only
+/// `method_declaration` nodes have no runtime body and must not become a
+/// second callable candidate. Selector pieces are `method_parameter` nodes.
+/// A nested `parameter_list`
+/// carries C-style `(Type) name` declarations. C
 /// `function_definition` is also included so plain C helpers in
 /// `.m` files participate in receiver narrowing.
 fn collect_objc_method_type_aliases(
@@ -1277,12 +2158,7 @@ fn collect_objc_method_type_aliases(
     let mut aliases_by_fn = Vec::new();
     for fn_node in collect_kinds(
         tree,
-        &[
-            "function_definition",
-            "method_definition",
-            "class_method_declaration",
-            "instance_method_declaration",
-        ],
+        &["function_definition", "method_definition", "method_declaration"],
     ) {
         let mut aliases: Vec<TypeAliasBinding> = Vec::new();
         // C-style parameters live under a nested
@@ -1293,11 +2169,11 @@ fn collect_objc_method_type_aliases(
             collect_objc_c_parameter_aliases(params_list, src, &mut aliases);
         }
         collect_objc_local_type_aliases(fn_node, src, &mut aliases);
-        // ObjC selector parameters appear as `keyword_argument`
-        // children of the method declaration node.
+        // Selector parameters are direct `method_parameter` children and
+        // retain an exact type/name pair.
         let mut cursor = fn_node.walk();
         for child in fn_node.named_children(&mut cursor) {
-            if child.kind() == "keyword_argument" {
+            if child.kind() == "method_parameter" {
                 objc_keyword_argument_alias(child, src, &mut aliases);
             }
         }
@@ -1400,11 +2276,7 @@ fn objc_declaration_type_node(node: Node<'_>) -> Option<Node<'_>> {
     for child in node.named_children(&mut cursor) {
         if matches!(
             child.kind(),
-            "type_identifier"
-                | "primitive_type"
-                | "sized_type_specifier"
-                | "qualified_type_identifier"
-                | "generic_type_specifier"
+            "type_identifier" | "primitive_type" | "sized_type_specifier"
         ) {
             return Some(child);
         }
@@ -1511,6 +2383,14 @@ fn objc_keyword_argument_alias(node: Node<'_>, src: &[u8], aliases: &mut Vec<Typ
         match child.kind() {
             "type_descriptor" | "type" | "primitive_type" => {
                 type_text = Some(node_text(&child, src).to_string());
+            }
+            "method_type" => {
+                // `method_type` includes the surrounding parentheses and
+                // pointer declarator. The named type descendant is the exact
+                // declared receiver/value type and avoids text heuristics.
+                type_text = objc_first_descendant_of_kind(&child, "type_identifier")
+                    .or_else(|| objc_first_descendant_of_kind(&child, "primitive_type"))
+                    .map(|type_node| node_text(&type_node, src).to_string());
             }
             "identifier" => {
                 name_text = Some(node_text(&child, src).trim().to_string());

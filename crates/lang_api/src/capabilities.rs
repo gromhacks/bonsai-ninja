@@ -218,6 +218,11 @@ pub struct LanguageCapabilities {
     /// Source suffixes considered when an extensionless/dotted relative
     /// import is resolved inside this language's module system.
     pub module_resolution_extensions: &'static [&'static str],
+    /// A syntactically unqualified import may resolve to a source module in
+    /// the importing file's directory. Python's `from storage import X` is
+    /// the canonical example; JavaScript deliberately leaves this false
+    /// because a local module requires `./storage`.
+    pub unqualified_imports_search_current_directory: bool,
     /// Non-source template suffixes that share the language workspace's
     /// dependency manifest context.
     pub workspace_manifest_context_extensions: &'static [&'static str],
@@ -278,6 +283,7 @@ impl LanguageCapabilities {
             callable_reference_syntax: CallableReferenceSyntax::none(),
             call_text_prefilter: CallTextPrefilter::Disabled,
             module_resolution_extensions: &[],
+            unqualified_imports_search_current_directory: false,
             workspace_manifest_context_extensions: &[],
         }
     }
@@ -322,6 +328,7 @@ impl LanguageCapabilities {
             callable_reference_syntax: CallableReferenceSyntax::none(),
             call_text_prefilter: CallTextPrefilter::Disabled,
             module_resolution_extensions: &[],
+            unqualified_imports_search_current_directory: false,
             workspace_manifest_context_extensions: &[],
         }
     }

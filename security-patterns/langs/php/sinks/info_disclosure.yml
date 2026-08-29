@@ -21,10 +21,7 @@
   - name: literal error log negative
     code: "<?php\nfunction example($secretToken) {\n  error_log(\"startup ok\");\n}\n"
     expect_no_match: true
-  description: 'error_log(secret/token/password) - secret-shaped data written to PHP error logs. Merged aliases: php.log_injection.error_log_newline, php.log_injection.error_log_concat.'
-  aliases:
-  - php.log_injection.error_log_newline
-  - php.log_injection.error_log_concat
+  description: 'error_log(secret/token/password) - secret-shaped data written to PHP error logs. Newline and concatenation log-forging require independent constraints.'
 - id: php.info_disclosure.symfony_response_exception
   enabled: true
   language: php
@@ -47,7 +44,6 @@
     code: |
       <?php
       use symfony\httpfoundation;
-      use symfony\httpfoundation;
       use symfony\http-foundation;
       function example($exception) {
         return new Response($exception->getMessage());
@@ -62,9 +58,7 @@
         return new Response("Internal Server Error");
       }
     expect_no_match: true
-  description: 'new Response(exception->getMessage/trace) - exposes internal exception details to the client. Merged aliases: php.xss.symfony_response_html.'
-  aliases:
-  - php.xss.symfony_response_html
+  description: 'new Response(exception->getMessage/trace) - exposes internal exception details to the client. Generic HTML response XSS is a distinct value shape.'
   imports:
   - symfony
   - symfony/httpfoundation

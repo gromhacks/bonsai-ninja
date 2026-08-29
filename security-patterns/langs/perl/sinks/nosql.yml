@@ -317,18 +317,3 @@
       }
     expect_no_match: true
   description: "Redis->evalsha - Lua script injection via SHA."
-
-- id: perl.nosql.redis_eval_direct
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  tag: nosql-injection
-  severity: high
-  packages: ["Redis"]
-  cwe: [CWE-943]
-  match:
-    kind: call
-    callee:
-      name: eval
-  description: "Disabled - overlaps Perl builtin eval (see eval.builtin_eval)."

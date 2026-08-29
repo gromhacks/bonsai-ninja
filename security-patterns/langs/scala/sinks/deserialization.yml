@@ -1,8 +1,6 @@
 # Scala deserialization sinks (JVM interop + Scala-native).
 - id: scala.deser.object_input_stream
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: scala
   tag: insecure-deserialization
   severity: critical
@@ -10,16 +8,28 @@
   match:
     kind: call
     callee:
-      regex: "^ObjectInputStream\\.readObject$"
+      name: readObject
+      receiver_type_in: [ObjectInputStream]
+  constraints:
+  - receiver_tainted: true
   match_examples:
   - name: generated shape example
     code: |
+      import java.io._
       object App {
-        def handle(input: String): Unit = {
-          ObjectInputStream.readObject(input)
+        def handle(input: Array[Byte]): Any = {
+          val stream = new ObjectInputStream(new ByteArrayInputStream(input))
+          stream.readObject()
         }
       }
-  description: "Disabled - ObjectInputStream.readObject() has no payload argument; needs receiver state showing the stream wraps untrusted bytes."
+    expect_match_text: [stream.readObject]
+  - name: local readObject receiver is not an object input stream
+    code: |
+      import java.io._
+      class LocalReader { def readObject(): Any = null }
+      object App { def handle(reader: LocalReader, input: String): Any = reader.readObject() }
+    expect_no_match: true
+  description: "ObjectInputStream.readObject on a receiver whose constructor state carries untrusted bytes."
 
 - id: scala.deser.kryo_readobject
   enabled: true
@@ -304,46 +314,3 @@
         }
       }
   description: "Jackson 2.10+ activateDefaultTyping(ptv) - same polymorphic gadget RCE class as the deprecated enableDefaultTyping."
-
-- id: scala.deser.spray_json_unmarshal_unsafe
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: scala
-  tag: insecure-deserialization
-  severity: low
-  packages: ["io.spray.spray-json"]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [JsonReader, read]
-  description: "Disabled - spray-json is generally safe (static typeclass format); enable only with polymorphic discriminator."
-
-- id: scala.deser.poi_xssfworkbook_stream
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: scala
-  tag: insecure-deserialization
-  severity: high
-  packages: ["org.apache.poi"]
-  cwe: [CWE-502, CWE-611]
-  match:
-    kind: new
-    callee:
-      name: XSSFWorkbook
-  match_examples:
-  - name: xssf workbook input stream
-    code: |
-      import org.apache.poi._
-      object App {
-        def handle(stream: Any): Any = {
-          new XSSFWorkbook(stream)
-        }
-      }
-      class XSSFWorkbook(args: Any*)
-    expect_match_text: [XSSFWorkbook]
-  description: "Disabled - XSSFWorkbook(InputStream) is not a generic object-deserialization boundary; archive resource exhaustion requires a separate version/config-aware rule."
-  imports:
-  - org

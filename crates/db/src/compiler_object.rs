@@ -36,6 +36,137 @@ use std::sync::{
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v158: JavaScript/TypeScript assignments distinguish compiler-proven
+// whole-value selection (`||`, `&&`, `??`, and conditional expressions) from
+// combining compound expressions. Cached v157 objects cannot safely decide
+// whether a selected aggregate remains a complete root for later projections.
+// v157: C arguments distinguish the address of a complete aggregate from
+// scalar and byte-buffer addresses; Lua concatenations retain exact string
+// composition facts; and JavaScript/TypeScript assignments retain parsed
+// declaration-vs-mutation scope. Cached v156 objects can therefore omit or
+// misclassify facts consumed by rule constraints and lexical-capture flow.
+// v156: JavaScript/TypeScript member and subscript values retain property-read
+// identity, and root bindings of compiler-proven property values remain
+// complete addressable values for later exact projections. Cached v155
+// objects can disconnect `file = req.files.avatar; file.name`.
+// v155: Perl `<HANDLE>` assignment expressions retain their exact parsed
+// filehandle value as an assignment input. Cached v154 objects can match a
+// filehandle read without connecting that value to its assigned carrier.
+// v154: Swift navigation expressions retain their exact property-read value
+// kind alongside the adapter-emitted getter pseudo-call. Cached v153 objects
+// can omit the projected storage producer from argument and assignment flow.
+// v153: Rust assigned-match arms no longer lower their value expressions as
+// enclosing-function returns, and explicitly typed immediately invoked
+// closures retain the nominal receiver result used by rule-owned transfer
+// summaries. Cached v152 objects can terminate the CFG before later calls or
+// omit that exact receiver-type fact.
+// v147: declaration-name identifiers are excluded from flat parameter
+// fallback lowering, and exact higher-order callback environments retain
+// lexical capture inputs at their compiler-proven registration site.
+// v146: Go selector values retain property-read identity when their receiver
+// is a nested call, and call-argument read edges retain the exact argument
+// span. Cached v145 objects can collapse `c.Request().Body` to the nested
+// `Request()` call result and disconnect exact read sources from the outer
+// call boundary.
+// v133: Dart switch-local breaks are resolved from exact Tree-sitter ancestry
+// and no longer terminate the enclosing function after structured switch
+// lowering. Cached v132 objects can prune every post-switch fact.
+// v132: Dart collection-literal cascade initializers consume their exact
+// post-cascade receiver state instead of replaying the bare literal as a clean
+// overwrite. Cached v131 objects can erase a preceding cascade mutation.
+// v131: Dart collection-literal locals retain their language-defined nominal
+// receiver type even through cascades, enabling rule-owned core collection
+// transfer summaries without method-name guesses. Cached v130 objects omit
+// that exact receiver evidence.
+// v130: C++ switch-targeted breaks are resolved from exact Tree-sitter
+// ancestry and no longer terminate the enclosing function after structured
+// switch lowering. Cached v129 objects can prune every post-switch fact.
+// v129: C++ structured-binding declarators lower one exact positional
+// call-result assignment per parsed binding. Cached v128 objects can retain
+// the tuple-producing call while omitting every bound local value.
+// v128: receiver typing preserves the qualified outer generic constructor
+// while excluding nested type arguments from method-owner identity. Cached
+// v127 objects can retain malformed/truncated generic receiver strings and
+// miss an otherwise exact typed call rule.
+// v127: C++ file-scope type aliases and unambiguous TU-private template
+// instantiations refine generic local/receiver types from exact syntax. Cached
+// v126 objects retain only the template-parameter placeholder and can suppress
+// rule-owned typed transfer summaries inside an otherwise resolved body.
+// v126: Go `select` communication cases retain mutually exclusive branch
+// structure and returned-channel sends expose exact yield endpoints; Erlang
+// assigned branch expressions no longer manufacture function termination;
+// Kotlin terminal property reads and nested data-class copies retain their
+// exact value facts; and Rust nested struct initializers retain canonical call
+// facts. Cached v125 objects can flatten a terminating select arm over its
+// live send sibling or omit these adapter-lowered transfers.
+// v122: source ingestion preserves byte coordinates while admitting legacy
+// bytes only in grammar-proven comments, and C-family parser-cache identity
+// includes exact reachable preprocessor context. Cached v121 objects can
+// reject otherwise valid translation units or replay recovery derived from a
+// stale header snapshot.
+// v121: fact-backed parser recovery mechanisms are evaluated independently;
+// declaration identity remains stable when recovery masks preprocessing
+// metadata outside the exact name/body anchors. Cached v120 objects can retain
+// avoidable syntax damage or disagree with streamed body identities.
+// v120: anonymous function-expression syntax is lowered as its own callable
+// even when a grammar also lists that node kind among named functions;
+// callable-valued arguments no longer absorb captured names as scalar host
+// operands; and TypeScript retains exact aggregate/callable syntax instead of
+// fabricating provider-specific dispatch calls. Cached v119 objects can drop
+// callback bodies, mix closure captures into host arguments, or contain
+// synthetic framework edges that were not proved by compiler facts.
+// v119: Elixir `do_block` syntax is retained as a block argument rather than
+// synthesized as an anonymous callable declaration. Cached v118 objects can
+// fabricate module-definition call edges and hide real entrypoints.
+// v118: Kotlin's transparent `annotated_lambda` wrapper no longer emits a
+// second declaration beside its executable `lambda_literal`. Cached v117
+// objects can contain duplicate symbols for one callback span.
+// v117: call-argument lambdas retain independent callable declarations;
+// passing a callable no longer inlines or executes its body in the caller.
+// Cached v116 objects have the former mixed-scope callback lowering.
+// v116: exception regions retain ordered, arm-local catch bindings and static
+// types. Cached v115 objects flatten sibling handlers into one lossy binding
+// and type union, which can connect a thrown value to an incompatible arm.
+// v115: post-adapter event normalization preserves evaluator order for calls
+// recovered by grammar-specific syntax passes, and IDG transfer consumes the
+// canonical executable/defer-normalized control tree. Cached v114 objects may
+// reverse nested calls or retain events after unconditional terminators.
+// v113: typed branch operands retain an exact direct-call-result span. Rule
+// semantics may now distinguish equality against a call result from an
+// arithmetic or concatenation expression that merely contains a call.
+// v112: character-constraint facts retain whether the adapter proved exact
+// runtime predicate semantics or requires independently rule-declared source
+// payload evidence. Cached v111 objects cannot represent that distinction.
+// v110: Scala generator bindings preserve exact enumerator execution order;
+// Dart awaited selector results and constructor cascades retain their direct
+// value identity; Swift guard bindings and Kotlin primary constructors retain
+// their complete adapter-lowered value flow. Cached v109 objects can omit or
+// misorder those facts and must not feed callgraph or IDG sidecars.
+// v108: direct-call assignment facts retain complete adapter-decoded static
+// scalar arguments. Receiver/factory-state rules can consume exact constructor
+// configuration without reparsing source; cached v107 bodies always omit it.
+// v107: call-argument headers retain the adapter-proven exact scalar returned
+// by a complete inline callback. Older objects cannot safely satisfy rules
+// that distinguish accept-all callbacks from rejecting or mixed callbacks.
+// v106: compact assignment-alias and factory-call headers retain their exact
+// owner and assignment spans. Workspace call-result typing can now enforce
+// lexical scope and shadowing without reopening compiler bodies; cached v105
+// headers cannot safely answer that question.
+// v105: compact return headers retain exact assignment-RHS spans for returned
+// local bindings. Broad return-rule planning can now schedule a body from
+// compiler-proven assignment evidence without scanning unrelated source text;
+// cached v104 headers omit those spans and can suppress valid return matches.
+// v103: Objective-C executable methods retain exact multipart selectors in
+// their qualified semantic identity. Cached v102 objects only carry the first
+// selector piece and can therefore merge distinct selector families.
+// v102: Objective-C interface method prototypes remain declaration syntax but
+// no longer lower as executable callable bodies beside their implementation.
+// Cached v101 objects can therefore contain duplicate callable headers and
+// ambiguous selector edges that the current frontend must reject.
+// v101: call-argument facts and compact syntax headers retain inline callbacks
+// nested beneath exact static aggregate-field paths. Rulepack typing can bind
+// a configuration callback without parsing source text or assigning an API
+// name in shared compiler code. Cached v100 objects omit that relationship.
 // v98: Python keyed reads nested inside arbitrary call arguments no longer
 // rewrite the outer call's assignment target. Exact keyed selections remain
 // compiler projections when they are the value expression itself; resolved
@@ -229,6 +360,21 @@ use std::sync::{
 // v47: PHP's adapter types sigiled implicit receivers from their enclosing
 // class/base declarations so streamed bodies and persisted compiler objects
 // resolve `$this` calls from the same syntax facts.
+// v141: call-argument value facts classify only adapter-proven callable-value
+// syntax as `CallableReference`; callgraph resolution no longer has to infer
+// that role from a rendered qualified value.
+// v142: Lua receiver-writing factories that return that receiver are exact
+// constructor declarations, enabling persisted IDG receiver-state projection.
+// v143: exact adapter-lowered assignment aliases inherit unambiguous local
+// receiver types. Cached v142 bodies can omit those derived receiver facts and
+// therefore lose alias-mediated method call and IDG boundaries.
+// v144: qualified Perl packages separate their terminal declaration name from
+// the owning module path while retaining the complete qualified identity.
+// Cached v143 objects can fail exact typed dispatch across package files.
+// v145: fact-backed parse recovery may replace one exact damaged descendant
+// subtree while preserving every disjoint compiler node. TypeScript import
+// type queries and qualified Java record patterns therefore lower cleanly;
+// cached v144 objects can retain syntax diagnostics or omit those facts.
 // v46: Perl conditional and postfix-conditional expression nodes lower to
 // explicit branch IR instead of being flattened into unconditional events.
 // v45: JavaScript `super(...)` retains constructor dispatch kind.
@@ -260,6 +406,16 @@ use std::sync::{
 // v19: exact browse/search candidate terms became an independently decodable
 // projection. Candidate-index construction no longer inflates declaration and
 // flow bodies for every file.
+// v151: Objective-C scalar lowering retains the language-defined `nil`/`Nil`
+// null sentinels as exact static call arguments. Cached v150 objects cannot
+// prove finite variadic Foundation collection construction.
+// v150: finite literal-selection and exact write-transfer lowering changed
+// across language adapters; invalidate every derived compiler object.
+// v149: assignment value facts retain exact static callback-map field paths
+// and callback declaration spans for rule-declared external dispatch.
+// v148: Perl foreach lowering distinguishes split-pattern regex syntax from
+// executable match operations, preserving exact loop binding evaluation
+// order in the compiler IR and every derived callgraph/IDG sidecar.
 // v17: compiler attribution is stored as independently compressed function
 // frames behind a small span index. A function-scoped query never decodes the
 // attribution for every sibling method in a large source file.
@@ -276,10 +432,14 @@ use std::sync::{
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 98;
+// v159: compact per-function call attribution retains adapter-decoded named
+// argument labels. Sparse taint-lineage rendering can now recover the same
+// actual-to-formal mapping as IDG stitching without reparsing source or
+// misattributing projected argument fields to a static receiver.
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 159;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
-const COMPILER_OBJECT_TABLE_ID: u32 = 104;
+const COMPILER_OBJECT_TABLE_ID: u32 = 105;
 const METADATA_KEY: u64 = 0;
 const COMPILER_OBJECT_COMPRESSION_LEVEL: i32 = 1;
 // Keep several units available per worker so compiler threads never wait for
@@ -416,7 +576,14 @@ struct CompilerObjectFileMetadata {
     browse_payload_len: u32,
 }
 
-/// Run a bounded continuous worklist and visit results as workers finish.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ParallelVisitOrder {
+    Completion,
+    Input,
+}
+
+/// Run a bounded continuous worklist and visit results in the requested
+/// physical order.
 ///
 /// Physical payload order is not semantic: FactStore sorts its key index and
 /// validates each payload independently. Visiting completion order therefore
@@ -427,6 +594,7 @@ fn try_visit_parallel<T, R>(
     items: &[T],
     worker_count: usize,
     max_in_flight: usize,
+    visit_order: ParallelVisitOrder,
     work: impl Fn(usize, &T) -> std::io::Result<R> + Sync,
     mut visit: impl FnMut(usize, R) -> std::io::Result<()>,
 ) -> std::io::Result<()>
@@ -490,21 +658,43 @@ where
 
         let outcome = (|| {
             let mut completed = vec![false; items.len()];
-            let mut completed_count = 0usize;
-            while completed_count < items.len() {
+            let mut published_count = 0usize;
+            let mut next_to_publish = 0usize;
+            let mut reorder = std::collections::BTreeMap::new();
+            while published_count < items.len() {
                 let (index, result) = result_rx
                     .recv()
                     .map_err(|_| std::io::Error::other("compiler result queue disconnected"))?;
                 if index >= items.len() || std::mem::replace(&mut completed[index], true) {
                     return Err(invalid_data("duplicate or stale compiler work result"));
                 }
-                visit(index, result?)?;
-                completed_count += 1;
-                if next_to_schedule < items.len() {
-                    work_tx
-                        .send(next_to_schedule)
-                        .map_err(|_| std::io::Error::other("compiler work queue disconnected"))?;
-                    next_to_schedule += 1;
+                match visit_order {
+                    ParallelVisitOrder::Completion => {
+                        visit(index, result?)?;
+                        published_count += 1;
+                        if next_to_schedule < items.len() {
+                            work_tx
+                                .send(next_to_schedule)
+                                .map_err(|_| std::io::Error::other("compiler work queue disconnected"))?;
+                            next_to_schedule += 1;
+                        }
+                    }
+                    ParallelVisitOrder::Input => {
+                        if reorder.insert(index, result?).is_some() {
+                            return Err(invalid_data("duplicate compiler reorder result"));
+                        }
+                        while let Some(result) = reorder.remove(&next_to_publish) {
+                            visit(next_to_publish, result)?;
+                            next_to_publish += 1;
+                            published_count += 1;
+                            if next_to_schedule < items.len() {
+                                work_tx
+                                    .send(next_to_schedule)
+                                    .map_err(|_| std::io::Error::other("compiler work queue disconnected"))?;
+                                next_to_schedule += 1;
+                            }
+                        }
+                    }
                 }
             }
             Ok(())
@@ -1068,6 +1258,9 @@ impl AnalyzerDb {
         workspace_root: &Path,
         selected_path: &Path,
     ) -> std::io::Result<Option<FileId>> {
+        if !self.inner.load_compiler_object_sidecar {
+            return Ok(None);
+        }
         let store = CompilerObjectStore::open_reusable(workspace_root)?;
         if store.reader.len() != compiler_object_entry_count(store.metadata.files.len()) {
             return Err(invalid_data("compiler-object entry count mismatch"));
@@ -1113,6 +1306,9 @@ impl AnalyzerDb {
         I: IntoIterator<Item = (P, u64)>,
         P: AsRef<Path>,
     {
+        if !self.inner.load_compiler_object_sidecar {
+            return Ok(0);
+        }
         let store = compiler_object_store_for_source_fingerprints(workspace_root, fingerprints)?;
         let files = store.metadata.files.len();
         *self.inner.compiler_object_store.write() = Some(Arc::new(store));
@@ -1237,9 +1433,9 @@ impl AnalyzerDb {
         )
     }
 
-    /// Visit parser diagnostics for a deterministic file sequence in
-    /// memory-aware parallel batches. Parsing is exact and exhaustive; batch
-    /// width changes storage pressure only, never the audited file set.
+    /// Visit parser diagnostics for a deterministic file sequence through a
+    /// bounded source-weighted worklist. Parsing is exact and exhaustive;
+    /// scheduling changes storage pressure only, never the audited file set.
     pub fn visit_parser_diagnostics_uncached(
         &self,
         files: &[FileId],
@@ -1256,20 +1452,35 @@ impl AnalyzerDb {
                     .unwrap_or(0)
             })
             .collect::<Vec<_>>();
-        let batches = bonsai_common::compiler_weighted_batches(&source_bytes, compiler_object_cpu_workers());
-        let mut visited = 0usize;
-        for range in batches {
-            use rayon::prelude::*;
-            let batch = files[range]
-                .par_iter()
-                .map(|file| (*file, self.parser_diagnostics_uncached(*file)))
-                .collect::<Vec<_>>();
-            for (file, diagnostics) in batch {
+        let workers =
+            bonsai_common::syntax_worker_count_for_sources(&source_bytes, compiler_object_cpu_workers());
+        let max_in_flight = workers
+            .saturating_mul(COMPILER_OBJECT_PREFETCH_PER_WORKER)
+            .max(1)
+            .min(files.len().max(1));
+        let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
+        try_visit_parallel(
+            files,
+            workers,
+            max_in_flight,
+            ParallelVisitOrder::Input,
+            |_, file| {
+                let source_bytes = self
+                    .inner
+                    .vfs
+                    .snapshot(*file)
+                    .ok()
+                    .and_then(|snapshot| u64::try_from(snapshot.text.len()).ok())
+                    .unwrap_or(0);
+                let permit = memory_permits.acquire(source_bytes);
+                Ok((*file, self.parser_diagnostics_uncached(*file), permit))
+            },
+            |_, (file, diagnostics, _permit)| {
                 visit(file, diagnostics);
-                visited = visited.saturating_add(1);
-            }
-        }
-        debug_assert_eq!(visited, files.len());
+                Ok(())
+            },
+        )
+        .expect("bounded parser-diagnostic worklist failed");
     }
 
     /// Load the independently decodable import header for one exact source
@@ -1497,16 +1708,13 @@ impl AnalyzerDb {
     }
 
     /// Visit exact compiler objects for a deterministic file sequence using
-    /// memory-aware parallel batches.
+    /// a bounded source-weighted worklist.
     ///
     /// `visit` is called in `files` order exactly once per requested file.
-    /// Each completed batch is projected and dropped before the next batch is
-    /// compiled, so retained memory follows the scheduler's batch width
-    /// rather than workspace size. Batches use the current/shared Rayon
-    /// scheduler instead of creating nested private pools, preventing
-    /// oversubscription when several exact analyses run concurrently. Memory
-    /// availability changes only how many independent Tree-sitter units are
-    /// present in a batch; it never changes the file set or compiler facts.
+    /// Completed results retain their source-size permit until a bounded
+    /// reorder window publishes them in input order. Memory availability
+    /// changes only how many independent Tree-sitter units are in flight; it
+    /// never changes the file set or compiler facts.
     pub fn visit_compiler_file_objects_uncached(
         &self,
         files: &[FileId],
@@ -1523,20 +1731,35 @@ impl AnalyzerDb {
                     .unwrap_or(0)
             })
             .collect::<Vec<_>>();
-        let batches = bonsai_common::compiler_weighted_batches(&source_bytes, compiler_object_cpu_workers());
-        let mut visited = 0usize;
-        for range in batches {
-            use rayon::prelude::*;
-            let batch = files[range]
-                .par_iter()
-                .map(|file| (*file, self.compiler_file_object_uncached(*file)))
-                .collect::<Vec<_>>();
-            for (file, object) in batch {
+        let workers =
+            bonsai_common::syntax_worker_count_for_sources(&source_bytes, compiler_object_cpu_workers());
+        let max_in_flight = workers
+            .saturating_mul(COMPILER_OBJECT_PREFETCH_PER_WORKER)
+            .max(1)
+            .min(files.len().max(1));
+        let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
+        try_visit_parallel(
+            files,
+            workers,
+            max_in_flight,
+            ParallelVisitOrder::Input,
+            |_, file| {
+                let source_bytes = self
+                    .inner
+                    .vfs
+                    .snapshot(*file)
+                    .ok()
+                    .and_then(|snapshot| u64::try_from(snapshot.text.len()).ok())
+                    .unwrap_or(0);
+                let permit = memory_permits.acquire(source_bytes);
+                Ok((*file, self.compiler_file_object_uncached(*file), permit))
+            },
+            |_, (file, object, _permit)| {
                 visit(file, object);
-                visited = visited.saturating_add(1);
-            }
-        }
-        debug_assert_eq!(visited, files.len());
+                Ok(())
+            },
+        )
+        .expect("bounded compiler-object worklist failed");
     }
 
     /// Attach the existing immutable compiler-object generation when it
@@ -1550,6 +1773,9 @@ impl AnalyzerDb {
     /// therefore fails closed and continues through its canonical
     /// Tree-sitter fallback.
     pub fn attach_reusable_compiler_object_store_for_files(&self, files: &[FileId]) -> std::io::Result<bool> {
+        if !self.inner.load_compiler_object_sidecar {
+            return Ok(false);
+        }
         if files.is_empty() {
             return Ok(true);
         }
@@ -1693,14 +1919,16 @@ impl AnalyzerDb {
         // false cache hit. This keeps path-filtered security scans on the
         // already-published Tree-sitter IR without making syntax-only commands
         // pay to hydrate unrelated compiler metadata.
-        if let Some(root) = self.workspace_root() {
-            if let Ok(store) = CompilerObjectStore::open_reusable(&root) {
-                if store.covers(&descriptors) {
-                    *self.inner.compiler_object_store.write() = Some(Arc::new(store));
-                    self.inner
-                        .compiler_object_store_requires_repair
-                        .store(false, std::sync::atomic::Ordering::Release);
-                    return Ok(0);
+        if self.inner.load_compiler_object_sidecar {
+            if let Some(root) = self.workspace_root() {
+                if let Ok(store) = CompilerObjectStore::open_reusable(&root) {
+                    if store.covers(&descriptors) {
+                        *self.inner.compiler_object_store.write() = Some(Arc::new(store));
+                        self.inner
+                            .compiler_object_store_requires_repair
+                            .store(false, std::sync::atomic::Ordering::Release);
+                        return Ok(0);
+                    }
                 }
             }
         }
@@ -1765,6 +1993,7 @@ impl AnalyzerDb {
             &descriptors,
             parallel_width,
             max_in_flight,
+            ParallelVisitOrder::Completion,
             |_, descriptor| {
                 let permit = memory_permits.acquire(descriptor.source_bytes);
                 prepare_compiler_object(self, descriptor).map(|encoded| (encoded, permit))
@@ -2992,6 +3221,7 @@ mod tests {
             &items,
             3,
             9,
+            ParallelVisitOrder::Completion,
             {
                 let release_head = Arc::clone(&release_head);
                 let active = Arc::clone(&active);
@@ -3047,6 +3277,51 @@ mod tests {
     }
 
     #[test]
+    fn ordered_parallel_visit_crosses_the_first_worker_batch() {
+        let items = (0usize..8).collect::<Vec<_>>();
+        let later_started = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let mut visited = Vec::new();
+
+        try_visit_parallel(
+            &items,
+            2,
+            4,
+            ParallelVisitOrder::Input,
+            {
+                let later_started = Arc::clone(&later_started);
+                move |index, value| {
+                    let (lock, ready) = &*later_started;
+                    if index == 0 {
+                        let started = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let (started, timeout) = ready
+                            .wait_timeout_while(started, std::time::Duration::from_secs(2), |started| {
+                                !*started
+                            })
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if !*started || timeout.timed_out() {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "ordered worklist stopped at a per-worker batch barrier",
+                            ));
+                        }
+                    } else if index == 2 {
+                        *lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+                        ready.notify_all();
+                    }
+                    Ok(*value)
+                }
+            },
+            |_, value| {
+                visited.push(value);
+                Ok(())
+            },
+        )
+        .expect("ordered continuous parallel visit");
+
+        assert_eq!(visited, items, "ordered publication must remain deterministic");
+    }
+
+    #[test]
     fn parallel_visit_bounds_workers_and_propagates_errors() {
         let items = (0usize..12).collect::<Vec<_>>();
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3056,6 +3331,7 @@ mod tests {
             &items,
             2,
             4,
+            ParallelVisitOrder::Completion,
             {
                 let active = Arc::clone(&active);
                 let max_active = Arc::clone(&max_active);
@@ -3084,6 +3360,7 @@ mod tests {
             &items,
             3,
             6,
+            ParallelVisitOrder::Completion,
             |index, value| {
                 if index == 3 {
                     Err(std::io::Error::other("injected compiler failure"))

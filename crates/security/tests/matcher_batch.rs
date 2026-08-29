@@ -1,7 +1,7 @@
 use bonsai_lang_api::{DeclKind, LanguageRegistry, Visibility};
 use bonsai_security::rule::{
     ArgRegexSpec, ConstraintKind, KeywordArgEqualsSpec, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind,
-    RuleTarget, Severity,
+    RuleTarget, Severity, SignatureParamTypeRequirement,
 };
 use bonsai_security::{
     match_rule_against_facts, match_rules_against_facts, match_rules_against_facts_with_progress,
@@ -15,6 +15,19 @@ fn python_ws(source: &str) -> Workspace {
     registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
     let ws = Workspace::new(registry);
     ws.vfs().write("app.py".to_string(), Arc::<str>::from(source));
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
+fn python_ws_files(files: &[(&str, &str)]) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    for (path, source) in files {
+        ws.vfs().write((*path).to_string(), Arc::<str>::from(*source));
+    }
     for file in ws.vfs().all_files() {
         let _ = ws.db().decl_index(file);
         let _ = ws.db().import_index(file);
@@ -121,6 +134,17 @@ fn objc_ws(source: &str) -> Workspace {
     let registry = bonsai_adapters::all_languages_registry();
     let ws = Workspace::new(registry);
     ws.vfs().write("Example.m".to_string(), Arc::<str>::from(source));
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
+fn dart_ws(source: &str) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    ws.vfs().write("app.dart".to_string(), Arc::<str>::from(source));
     for file in ws.vfs().all_files() {
         let _ = ws.db().decl_index(file);
         let _ = ws.db().import_index(file);
@@ -272,7 +296,6 @@ fn base_rule(id: &str, kind: RuleKind, match_kind: MatchKind) -> Rule {
             kind: match_kind,
             callee: None,
             target: None,
-            search_depth: 0,
         },
         analysis_semantics: None,
         taint_semantics: None,
@@ -280,6 +303,7 @@ fn base_rule(id: &str, kind: RuleKind, match_kind: MatchKind) -> Rule {
         returns_type: None,
         callback_param_types: Vec::new(),
         callback_arg_index: None,
+        callback_field_path: Vec::new(),
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "test rule".to_string(),
@@ -752,6 +776,71 @@ def handler(user_input):
         hit.line, 2,
         "param source should point at the declaration, not the first body read"
     );
+}
+
+#[test]
+fn parameter_signature_and_enclosing_base_suffix_are_exact_context_facts() {
+    let mut rule = base_rule(
+        "dart.test.generated_service_payload",
+        RuleKind::Source,
+        MatchKind::Param,
+    );
+    rule.language = "dart".to_string();
+    rule.match_spec.target = Some(RuleTarget {
+        in_class_suffix: vec!["ServiceBase".to_string()],
+        param_index_in: vec![1],
+        param_count_in: vec![2],
+        signature_param_types: vec![SignatureParamTypeRequirement {
+            index: 0,
+            type_in: vec!["ServiceCall".to_string()],
+        }],
+        ..RuleTarget::default()
+    });
+    rule.constraints = RuleConstraint(vec![ConstraintKind::EnclosingDecoratorIn {
+        enclosing_decorator_in: vec!["override".to_string()],
+    }]);
+
+    let positive = dart_ws(
+        r#"
+class Greeter extends GreeterServiceBase {
+  @override
+  void handle(ServiceCall context, Payload renamed) { sink(renamed); }
+}
+"#,
+    );
+    let hits = match_rule_against_facts(&positive, &rule);
+    assert_eq!(
+        hits.len(),
+        1,
+        "complete compiler signature should match once: {hits:?}"
+    );
+    assert_eq!(hits[0].match_text, "renamed");
+
+    for source in [
+        r#"
+class Greeter extends LocalBase {
+  @override
+  void handle(ServiceCall context, Payload renamed) { sink(renamed); }
+}
+"#,
+        r#"
+class Greeter extends GreeterServiceBase {
+  @override
+  void handle(Object context, Payload renamed) { sink(renamed); }
+}
+"#,
+        r#"
+class Greeter extends GreeterServiceBase {
+  void handle(ServiceCall context, Payload renamed) { sink(renamed); }
+}
+"#,
+    ] {
+        let ws = dart_ws(source);
+        assert!(
+            match_rule_against_facts(&ws, &rule).is_empty(),
+            "each missing compiler fact must fail closed"
+        );
+    }
 }
 
 #[test]
@@ -1272,6 +1361,80 @@ function unrelated(req) {
 }
 
 #[test]
+fn sink_package_evidence_follows_only_connected_local_modules_with_exact_receiver_shape() {
+    let ws = javascript_ws_files(&[
+        (
+            "src/db.js",
+            r#"
+const sqlite3 = require("sqlite3");
+module.exports = sqlite3.open("app.db");
+"#,
+        ),
+        (
+            "src/service.js",
+            r#"
+const db = require("./db");
+function lookup(sql) {
+  return db.execute(sql);
+}
+"#,
+        ),
+        (
+            "isolated/other.js",
+            r#"
+function unrelated(sql) {
+  return db.execute(sql);
+}
+"#,
+        ),
+    ]);
+    let mut rule =
+        call_attr_rule_for_language("javascript.test.sqlite_execute", "javascript", &["db", "execute"]);
+    rule.packages = vec!["sqlite3".to_string()];
+
+    let matches = match_rule_against_facts(&ws, &rule);
+    assert_eq!(
+        matches.len(),
+        1,
+        "component package evidence must reach the exact member sink without bleeding into disconnected code: {matches:#?}"
+    );
+    assert!(
+        matches[0].file.ends_with("src/service.js"),
+        "connected service module should own the exact sink: {matches:#?}"
+    );
+    assert_eq!(matches[0].match_text, "db.execute");
+}
+
+#[test]
+fn python_unqualified_import_connects_component_package_evidence() {
+    let ws = python_ws_files(&[
+        (
+            "src/db.py",
+            "import sqlite3\nconnection = sqlite3.connect('app.db')\n",
+        ),
+        (
+            "src/service.py",
+            "from db import connection\ndef lookup(cursor, sql):\n    return cursor.execute(sql)\n",
+        ),
+        (
+            "isolated/other.py",
+            "def unrelated(cursor, sql):\n    return cursor.execute(sql)\n",
+        ),
+    ]);
+    let mut rule =
+        call_attr_rule_for_language("python.test.sqlite_execute", "python", &["cursor", "execute"]);
+    rule.packages = vec!["sqlite3".to_string()];
+
+    let matches = match_rule_against_facts(&ws, &rule);
+    assert_eq!(
+        matches.len(),
+        1,
+        "Python same-directory imports must connect exact package-gated sinks without authorizing disconnected files: {matches:#?}"
+    );
+    assert!(matches[0].file.ends_with("src/service.py"), "{matches:#?}");
+}
+
+#[test]
 fn attribute_match_accepts_php_arrow_callees() {
     let ws = php_ws(
         r#"<?php
@@ -1470,5 +1633,32 @@ def handler(user_input):
                 .flat_map(|rule| match_rule_against_facts(&ws, rule))
                 .collect::<Vec<_>>()
         )
+    );
+}
+
+#[test]
+fn inline_callback_constraint_uses_compiler_argument_facts() {
+    let ws = javascript_ws(
+        r#"
+function register(callback) {}
+function namedHandler(value) { return value; }
+function demo() {
+  register(value => sink(value));
+  register(namedHandler);
+  register("value => sink(value)");
+}
+"#,
+    );
+    let mut rule = call_name_rule("javascript.test.inline_callback", "register");
+    rule.language = "javascript".to_string();
+    rule.constraints = RuleConstraint(vec![ConstraintKind::ArgIsInlineCallback {
+        arg_is_inline_callback: 0,
+    }]);
+
+    let matches = match_rule_against_facts(&ws, &rule);
+    assert_eq!(
+        matches.len(),
+        1,
+        "only the Tree-sitter-lowered inline callback may satisfy the constraint: {matches:?}"
     );
 }

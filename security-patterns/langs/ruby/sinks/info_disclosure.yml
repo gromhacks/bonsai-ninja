@@ -23,42 +23,7 @@
   - name: literal logger info negative
     code: "def example(secret_token)\n  logger.info(\"startup ok\")\nend\n"
     expect_no_match: true
-  description: "logger.info(secret/token/password) - secret-shaped data written\
-    \ to application logs. Merged aliases: ruby.log_injection.logger_info_interp."
-  aliases:
-  - ruby.log_injection.logger_info_interp
-- id: ruby.info_disclosure.render_exception_message
-  enabled: false
-  language: ruby
-  tag: information-disclosure
-  severity: high
-  packages:
-  - rails
-  - mustache
-  - actionpack
-  - actionview
-  cwe:
-  - CWE-209
-  - CWE-1336
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: render
-  match_examples:
-  - name: render exception message
-    code: "require \"rails\"\ndef show(exception)\n  render plain: exception.message\n\
-      end\n"
-    expect_match_text:
-    - render
-  description: "Rails render(exception.message/backtrace) - exposes internal\
-    \ exception details in the response. Merged collision aliases: ruby.template.mustache_render,\
-    \ ruby.xss.rails_render_html."
-  aliases:
-  - ruby.template.mustache_render
-  - ruby.xss.rails_render_html
-  disabled_reason:
-    code: over-broad
+  description: "logger.info(secret/token/password) - secret-shaped data written to application logs. Interpolated newline forging requires a separate log-injection constraint."
 - id: ruby.info_disclosure.better_errors_middleware
   enabled: true
   language: ruby

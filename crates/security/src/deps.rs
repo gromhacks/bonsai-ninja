@@ -171,9 +171,9 @@ impl Drop for WorkspaceDependencyPackageSnapshot {
 /// for `language`.
 ///
 /// Per-file imports are still the strongest evidence used by the matcher,
-/// but framework template files often do not contain an import for the
-/// runtime package they execute under (Rails ERB / ActionView is the
-/// canonical case). This language-scoped manifest context lets package gates
+/// but framework-owned source and template files often do not contain an
+/// import for the runtime package they execute under. This language-scoped
+/// manifest context lets package gates
 /// accept those real project dependencies without letting one language's
 /// manifest satisfy another language's package-scoped rules in a monorepo.
 pub(crate) fn workspace_dependency_packages_for_language_in_workspace(

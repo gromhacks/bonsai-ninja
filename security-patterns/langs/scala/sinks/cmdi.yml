@@ -13,6 +13,7 @@
       regex: "\\.!$"
   constraints:
   - receiver_tainted: true
+  - receiver_not_matches_regex: '^(?:Seq|List|Vector|Array)\s*\('
   match_examples:
   - name: tainted receiver command
     code: |
@@ -48,6 +49,7 @@
       regex: "\\.!!$"
   constraints:
   - receiver_tainted: true
+  - receiver_not_matches_regex: '^(?:Seq|List|Vector|Array)\s*\('
   match_examples:
   - name: tainted receiver command
     code: |
@@ -68,7 +70,86 @@
         }
       }
     expect_no_match: true
-  description: "Scala `s.!!` captures stdout - scala.sys.process shell execution."
+  - name: direct argv sequence keeps tainted data out of shell syntax
+    code: |
+      import scala.sys.process._
+      object App {
+        def handle(input: String): Unit = {
+          Seq("/bin/ping", "-c", "1", input).!!
+        }
+      }
+    expect_no_match: true
+  description: "Scala string `s.!!` captures stdout through scala.sys.process shell parsing; direct sequence argv execution remains outside this shell-specific boundary."
+- id: scala.cmdi.argv_shell_wrapper_bang
+  enabled: true
+  language: scala
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: ["scala.sys.process"]
+  imports: ["scala.sys.process", "sys.process"]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "\\.!$"
+  constraints:
+  - receiver_tainted: true
+  - receiver_matches_regex: '^(?:Seq|List|Vector|Array)\s*\(\s*["''](?:/bin/)?(?:sh|bash|zsh)["'']\s*,\s*["'']-c["'']\s*,'
+  match_examples:
+  - name: tainted shell command inside argv wrapper
+    code: |
+      import scala.sys.process._
+      object App {
+        def handle(input: String): Unit = {
+          Seq("sh", "-c", input).!
+        }
+      }
+  - name: direct argv sequence remains data
+    code: |
+      import scala.sys.process._
+      object App {
+        def handle(input: String): Unit = {
+          Seq("/bin/ping", "-c", "1", input).!
+        }
+      }
+    expect_no_match: true
+  description: "Scala argv execution through sh/bash/zsh with `-c` interprets the following tainted value as shell syntax; ordinary direct argv execution remains data-only."
+- id: scala.cmdi.argv_shell_wrapper_bang_bang
+  enabled: true
+  language: scala
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: ["scala.sys.process"]
+  imports: ["scala.sys.process", "sys.process"]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "\\.!!$"
+  constraints:
+  - receiver_tainted: true
+  - receiver_matches_regex: '^(?:Seq|List|Vector|Array)\s*\(\s*["''](?:/bin/)?(?:sh|bash|zsh)["'']\s*,\s*["'']-c["'']\s*,'
+  match_examples:
+  - name: tainted shell command inside captured argv wrapper
+    code: |
+      import scala.sys.process._
+      object App {
+        def handle(input: String): String = {
+          Seq("sh", "-c", input).!!
+        }
+      }
+  - name: direct captured argv sequence remains data
+    code: |
+      import scala.sys.process._
+      object App {
+        def handle(input: String): String = {
+          Seq("/bin/ping", "-c", "1", input).!!
+        }
+      }
+    expect_no_match: true
+  description: "Scala captured argv execution through sh/bash/zsh with `-c` interprets the following tainted value as shell syntax; ordinary direct argv execution remains data-only."
 - id: scala.cmdi.process_apply_string
   enabled: true
   language: scala

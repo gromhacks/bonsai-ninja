@@ -5,12 +5,15 @@ use crate::place::Place;
 use crate::query::ReachabilityIndex;
 use crate::transfer::{
     transfer_function_for, transfer_function_for_with_options,
+    transfer_function_for_with_options_and_compiler_facts,
     transfer_function_for_with_options_and_syntax_facts, TransferOptions,
 };
 use crate::{IdgQueryService, PointKind, WsNodeId};
 use bonsai_common::{FileId, SymbolId};
 use bonsai_index::GlobalIndex;
-use bonsai_lang_api::{CallArg, CallKind, Decl, DeclKind, FlowEvent, ModulePath, Visibility};
+use bonsai_lang_api::{
+    AssignValueKind, CallArg, CallKind, Decl, DeclKind, FieldWrite, FlowEvent, ModulePath, Visibility,
+};
 use std::sync::Arc;
 
 fn span(start: u64, end: u64) -> Span {
@@ -68,9 +71,11 @@ fn storage_normalization_memo_scales_by_bytes_without_capping_analysis() {
 struct MockResolver {
     table: AHashMap<(FuncId, String), Vec<FuncId>>,
     callback_bindings: AHashMap<(FuncId, u32), Vec<FuncId>>,
+    callback_origins: AHashMap<(FuncId, u32, FuncId), Vec<CallbackBindingOrigin>>,
     callable_args: AHashMap<(FuncId, String), Vec<FuncId>>,
     callable_arg_spans: AHashMap<(FuncId, Span), Vec<FuncId>>,
     local_bindings: AHashSet<(FuncId, FuncId)>,
+    imported_bindings: AHashMap<(FuncId, String), String>,
 }
 
 impl MockResolver {
@@ -78,9 +83,11 @@ impl MockResolver {
         Self {
             table: AHashMap::new(),
             callback_bindings: AHashMap::new(),
+            callback_origins: AHashMap::new(),
             callable_args: AHashMap::new(),
             callable_arg_spans: AHashMap::new(),
             local_bindings: AHashSet::new(),
+            imported_bindings: AHashMap::new(),
         }
     }
 
@@ -96,12 +103,30 @@ impl MockResolver {
         self.callback_bindings.insert((host, param_idx), callees);
     }
 
+    fn add_callback_origin(
+        &mut self,
+        host: FuncId,
+        param_idx: u32,
+        callback: FuncId,
+        origin: CallbackBindingOrigin,
+    ) {
+        self.callback_origins
+            .entry((host, param_idx, callback))
+            .or_default()
+            .push(origin);
+    }
+
     fn add_callable_arg(&mut self, caller: FuncId, arg_text: &str, callees: Vec<FuncId>) {
         self.callable_args.insert((caller, arg_text.to_string()), callees);
     }
 
     fn add_callable_arg_span(&mut self, caller: FuncId, arg_span: Span, callees: Vec<FuncId>) {
         self.callable_arg_spans.insert((caller, arg_span), callees);
+    }
+
+    fn add_imported_binding(&mut self, func: FuncId, binding: &str, target: &str) {
+        self.imported_bindings
+            .insert((func, binding.to_string()), target.to_string());
     }
 }
 
@@ -144,6 +169,18 @@ impl CalleeResolver for MockResolver {
             .collect()
     }
 
+    fn callback_binding_origins(
+        &self,
+        host: FuncId,
+        param_idx: u32,
+        callback: FuncId,
+    ) -> Vec<CallbackBindingOrigin> {
+        self.callback_origins
+            .get(&(host, param_idx, callback))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn callable_arg(&self, caller: FuncId, arg_text: &str) -> Vec<ResolvedCallee> {
         self.callable_args
             .get(&(caller, arg_text.to_string()))
@@ -169,6 +206,152 @@ impl CalleeResolver for MockResolver {
             })
             .collect()
     }
+
+    fn callable_is_inline_in_span(&self, caller: FuncId, _arg_span: Span, candidate: FuncId) -> bool {
+        self.local_bindings.contains(&(caller, candidate))
+    }
+
+    fn imported_binding_target(&self, func: FuncId, binding: &str, _at_span: Span) -> Option<String> {
+        self.imported_bindings.get(&(func, binding.to_string())).cloned()
+    }
+}
+
+#[test]
+fn exact_inline_callback_capture_write_reaches_later_call_argument_and_clean_overwrite_kills_it() {
+    let host_func = FuncId::new(1);
+    let callback_func = FuncId::new(2);
+    let invocation_span = span(20, 30);
+    let callback_arg_span = span(31, 60);
+    let callback_write_span = span(70, 78);
+    let sink_span = span(90, 99);
+
+    let host_events = |clean_after_callback: bool| {
+        let mut events = vec![
+            FlowEvent::Assign {
+                span: span(10, 18),
+                target: "term".to_string(),
+                source_name: None,
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: Vec::new(),
+                declares_new_binding: true,
+                value_kind: Some(AssignValueKind::Literal),
+            },
+            FlowEvent::Call {
+                span: invocation_span,
+                name: "items.forEach".to_string(),
+                receiver: Some("items".to_string()),
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Method,
+                args: vec![CallArg {
+                    passing_mode: Default::default(),
+                    span: callback_arg_span,
+                    name: None,
+                    value_text: "callback".to_string(),
+                    place: None,
+                    source_names: Vec::new(),
+                }],
+            },
+        ];
+        if clean_after_callback {
+            events.push(FlowEvent::Assign {
+                span: span(80, 88),
+                target: "term".to_string(),
+                source_name: None,
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: Vec::new(),
+                declares_new_binding: false,
+                value_kind: Some(AssignValueKind::Literal),
+            });
+        }
+        events.push(FlowEvent::Call {
+            span: sink_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(95, 98),
+                name: None,
+                value_text: "prefix + term".to_string(),
+                place: None,
+                source_names: vec!["term".to_string()],
+            }],
+        });
+        events
+    };
+    let options = TransferOptions {
+        callback_invocations: vec![crate::transfer::CallbackInvocationSpec {
+            callee: "items.forEach".to_string(),
+            callback_arg_index: 0,
+            callback_map_field_path: Vec::new(),
+            forwarded_argument_field_path: Vec::new(),
+            forwarded_callback_param_index: None,
+            forwarded_args_from: None,
+            receiver_to_callback_param: Some(0),
+            callback_return_result_offset: 0,
+            resolved_call_sites: vec![invocation_span],
+            resolved_callback_targets: vec![(invocation_span, callback_func)],
+        }],
+        ..TransferOptions::default()
+    };
+    let mut callback = empty_decl(callback_func.raw(), "callback");
+    callback.params = vec!["item".to_string()];
+    callback.flow_events = vec![FlowEvent::Assign {
+        span: callback_write_span,
+        target: "term".to_string(),
+        source_name: Some("item".to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: Some(AssignValueKind::Compound),
+    }];
+
+    let build = |clean_after_callback: bool| {
+        let mut host = empty_decl(host_func.raw(), "host");
+        host.params = vec!["items".to_string()];
+        host.flow_events = host_events(clean_after_callback);
+        let mut resolver = MockResolver::new();
+        resolver.add_callable_arg_span(host_func, callback_arg_span, vec![callback_func]);
+        resolver.add_local_binding(host_func, callback_func);
+        stitch_idg(
+            vec![
+                transfer_function_for_with_options(&host, &options),
+                transfer_function_for(&callback),
+            ],
+            &resolver,
+            &StaticF2S(AHashMap::from([
+                (host_func, SegmentId(0)),
+                (callback_func, SegmentId(0)),
+            ])),
+        )
+    };
+    let reaches_sink = |ws: IdgWorkspace| {
+        let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+        let evidence = service.forward_closure_evidence_within_funcs_with_max_precision(
+            &service.param_nodes_of(host_func),
+            &AHashSet::from([host_func, callback_func]),
+            Some(Precision::Narrowed),
+        );
+        let tainted = service
+            .tainted_call_args_in_reachable_nodes(&evidence.nodes)
+            .clone();
+        tainted
+            .iter()
+            .any(|(func, site, index)| *func == host_func && *site == sink_span && *index == 0)
+    };
+
+    assert!(
+        reaches_sink(build(false)),
+        "the exact collection callback must publish its captured write into a later call argument"
+    );
+    assert!(
+        !reaches_sink(build(true)),
+        "a later clean write must kill the callback-published value before the call argument"
+    );
 }
 
 /// FuncToSegment that maps each FuncId via a precomputed map.
@@ -661,61 +844,6 @@ fn two_funcs_in_same_segment_call_each_other_no_cross_file_edge() {
 }
 
 #[test]
-fn callable_argument_routes_method_receiver_to_callback_without_outer_callee() {
-    let mut host = empty_decl(1, "host");
-    host.params = vec!["items".to_string()];
-    host.flow_events = vec![FlowEvent::Call {
-        span: span(20, 30),
-        name: "items.traverse".to_string(),
-        receiver: Some("items".to_string()),
-        receiver_types: Vec::new(),
-        call_kind: CallKind::Method,
-        args: vec![CallArg {
-            passing_mode: Default::default(),
-            span: span(25, 29),
-            name: None,
-            value_text: "&method(:step)".to_string(),
-            place: Some("&method(:step)".to_string()),
-            source_names: Vec::new(),
-        }],
-    }];
-    let mut callback = empty_decl(2, "step");
-    callback.params = vec!["item".to_string()];
-
-    let mut f2s_map = AHashMap::new();
-    f2s_map.insert(FuncId::new(1), SegmentId(0));
-    f2s_map.insert(FuncId::new(2), SegmentId(0));
-    let f2s = StaticF2S(f2s_map);
-    let mut resolver = MockResolver::new();
-    resolver.add_callable_arg_span(FuncId::new(1), span(25, 29), vec![FuncId::new(2)]);
-
-    let ws = stitch_idg(
-        vec![transfer_function_for(&host), transfer_function_for(&callback)],
-        &resolver,
-        &f2s,
-    );
-    let segment = ws.segment(SegmentId(0)).expect("shared segment");
-
-    assert!(
-        segment.edges.iter().any(|edge| {
-            let Some(from) = segment.nodes.get(edge.from) else {
-                return false;
-            };
-            let Some(to) = segment.nodes.get(edge.to) else {
-                return false;
-            };
-            from.func == FuncId::new(1)
-                && to.func == FuncId::new(2)
-                && call_arg_idx(segment, edge.from) == Some(u32::MAX)
-                && param_idx(segment, edge.to) == Some(0)
-                && edge.meta.kind == IdgEdgeKind::InterCallArg
-        }),
-        "AST-resolved callable arguments must route the collection receiver to the callback parameter without resolving the outer library method: {:#?}",
-        segment.edges
-    );
-}
-
-#[test]
 fn same_named_value_argument_is_not_invented_as_a_callback() {
     let mut host = empty_decl(1, "host");
     host.params = vec!["payload".to_string(), "text".to_string()];
@@ -771,6 +899,265 @@ fn same_named_value_argument_is_not_invented_as_a_callback() {
         }),
         "ordinary values need AST/type evidence before they can invoke a same-named declaration: {:#?}",
         ws.cross_file().edges
+    );
+}
+
+#[test]
+fn rule_compiled_callback_return_reaches_only_the_declared_tuple_result() {
+    let host_func = FuncId::new(1);
+    let callback_func = FuncId::new(2);
+    let invocation_span = span(20, 25);
+    let callback_arg_span = span(26, 50);
+    let assignment_span = span(10, 52);
+    let sink_span = span(70, 78);
+
+    let mut host = empty_decl(host_func.raw(), "host");
+    host.flow_events = vec![
+        FlowEvent::Assign {
+            span: assignment_span,
+            target: "ok".to_string(),
+            source_name: None,
+            source_call: Some("runtime_call".to_string()),
+            source_call_args: vec!["callback".to_string()],
+            source_names: vec![format!(
+                "{}0",
+                bonsai_lang_api::kit::SYNTHETIC_TUPLE_RESULT_PREFIX
+            )],
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::CallResult),
+        },
+        FlowEvent::Assign {
+            span: assignment_span,
+            target: "value".to_string(),
+            source_name: None,
+            source_call: Some("runtime_call".to_string()),
+            source_call_args: vec!["callback".to_string()],
+            source_names: vec![format!(
+                "{}1",
+                bonsai_lang_api::kit::SYNTHETIC_TUPLE_RESULT_PREFIX
+            )],
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: invocation_span,
+            name: "runtime_call".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: callback_arg_span,
+                name: None,
+                value_text: "callback".to_string(),
+                place: None,
+                source_names: Vec::new(),
+            }],
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(75, 76),
+                name: None,
+                value_text: "value".to_string(),
+                place: Some("value".to_string()),
+                source_names: vec!["value".to_string()],
+            }],
+        },
+    ];
+    let options = TransferOptions {
+        callback_invocations: vec![crate::transfer::CallbackInvocationSpec {
+            callee: "runtime_call".to_string(),
+            callback_arg_index: 0,
+            callback_map_field_path: Vec::new(),
+            forwarded_argument_field_path: Vec::new(),
+            forwarded_callback_param_index: None,
+            forwarded_args_from: None,
+            receiver_to_callback_param: None,
+            callback_return_result_offset: 1,
+            resolved_call_sites: vec![invocation_span],
+            resolved_callback_targets: Vec::new(),
+        }],
+        ..TransferOptions::default()
+    };
+
+    let mut callback = empty_decl(callback_func.raw(), "callback");
+    callback.params = vec!["source".to_string()];
+    callback.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
+        span: callback_arg_span,
+        value_name: Some("source".to_string()),
+        value_text: Some("source".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("source"),
+    }];
+
+    let mut resolver = MockResolver::new();
+    resolver.add_callable_arg_span(host_func, callback_arg_span, vec![callback_func]);
+    let ws = stitch_idg(
+        vec![
+            transfer_function_for_with_options(&host, &options),
+            transfer_function_for(&callback),
+        ],
+        &resolver,
+        &StaticF2S(AHashMap::from([
+            (host_func, SegmentId(0)),
+            (callback_func, SegmentId(0)),
+        ])),
+    );
+    let segment = ws.segment(SegmentId(0)).expect("shared segment");
+    let storage = |node: NodeId| {
+        node_place(segment, node)
+            .and_then(|place| place_storage_name(segment, place))
+            .unwrap_or_default()
+    };
+    assert!(segment.edges.iter().any(|edge| {
+        edge.meta.kind == IdgEdgeKind::InterReturn
+            && matches!(node_place(segment, edge.from), Some(Place::Return))
+            && storage(edge.to) == format!("value.{}1", bonsai_lang_api::kit::SYNTHETIC_TUPLE_RESULT_PREFIX)
+    }));
+    assert!(!segment.edges.iter().any(|edge| {
+        edge.meta.kind == IdgEdgeKind::InterReturn
+            && storage(edge.to) == format!("ok.{}0", bonsai_lang_api::kit::SYNTHETIC_TUPLE_RESULT_PREFIX)
+    }));
+
+    let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+    let seed = service.param_nodes_of(callback_func);
+    let evidence = service.forward_closure_evidence_within_funcs_with_max_precision(
+        &seed,
+        &AHashSet::from([host_func, callback_func]),
+        Some(Precision::Narrowed),
+    );
+    assert!(
+        service
+            .tainted_call_args_in_reachable_nodes(&evidence.nodes)
+            .iter()
+            .any(|(func, site, index)| *func == host_func && *site == sink_span && *index == 0),
+        "the callback return must reach the sink through tuple result one"
+    );
+    assert!(evidence.cross_calls.iter().any(|edge| {
+        edge.caller == callback_func
+            && edge.callee == host_func
+            && edge.call_span == invocation_span
+            && edge.relation == crate::CrossCallRelation::Return
+    }));
+}
+
+#[test]
+fn rule_compiled_direct_callback_return_preserves_aggregate_fields() {
+    let host_func = FuncId::new(1);
+    let callback_func = FuncId::new(2);
+    let invocation_span = span(20, 25);
+    let callback_arg_span = span(26, 50);
+    let assignment_span = span(10, 52);
+    let sink_span = span(70, 78);
+
+    let mut host = empty_decl(host_func.raw(), "host");
+    host.flow_events = vec![
+        FlowEvent::Assign {
+            span: assignment_span,
+            target: "value".to_string(),
+            source_name: None,
+            source_call: Some("runtime_call".to_string()),
+            source_call_args: vec!["callback".to_string()],
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: invocation_span,
+            name: "runtime_call".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: callback_arg_span,
+                name: None,
+                value_text: "callback".to_string(),
+                place: None,
+                source_names: Vec::new(),
+            }],
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(75, 76),
+                name: None,
+                value_text: "value.cmd".to_string(),
+                place: Some("value.cmd".to_string()),
+                source_names: vec!["value.cmd".to_string()],
+            }],
+        },
+    ];
+    let options = TransferOptions {
+        callback_invocations: vec![crate::transfer::CallbackInvocationSpec {
+            callee: "runtime_call".to_string(),
+            callback_arg_index: 0,
+            callback_map_field_path: Vec::new(),
+            forwarded_argument_field_path: Vec::new(),
+            forwarded_callback_param_index: None,
+            forwarded_args_from: None,
+            receiver_to_callback_param: None,
+            callback_return_result_offset: 0,
+            resolved_call_sites: vec![invocation_span],
+            resolved_callback_targets: Vec::new(),
+        }],
+        ..TransferOptions::default()
+    };
+
+    let mut callback = empty_decl(callback_func.raw(), "callback");
+    callback.params = vec!["source".to_string()];
+    callback.flow_events = vec![FlowEvent::Return {
+        value_kind: Some(AssignValueKind::Compound),
+        span: callback_arg_span,
+        value_name: None,
+        value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow {
+            aggregate_fields: vec![bonsai_lang_api::ExpressionField {
+                name: "cmd".to_string(),
+                value_span: Some(callback_arg_span),
+                value: bonsai_lang_api::ExpressionFlow::from_place("source"),
+            }],
+            ..Default::default()
+        },
+    }];
+
+    let mut resolver = MockResolver::new();
+    resolver.add_callable_arg_span(host_func, callback_arg_span, vec![callback_func]);
+    let ws = stitch_idg(
+        vec![
+            transfer_function_for_with_options(&host, &options),
+            transfer_function_for(&callback),
+        ],
+        &resolver,
+        &StaticF2S(AHashMap::from([
+            (host_func, SegmentId(0)),
+            (callback_func, SegmentId(0)),
+        ])),
+    );
+    let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+    let seed = service.param_nodes_of(callback_func);
+    let evidence = service.forward_closure_evidence_within_funcs_with_max_precision(
+        &seed,
+        &AHashSet::from([host_func, callback_func]),
+        Some(Precision::Narrowed),
+    );
+    assert!(
+        service
+            .tainted_call_args_in_reachable_nodes(&evidence.nodes)
+            .iter()
+            .any(|(func, site, index)| *func == host_func && *site == sink_span && *index == 0),
+        "the callback's exact returned cmd field must reach the assigned host result"
     );
 }
 
@@ -1036,6 +1423,66 @@ fn receiver_only_policy_stitches_syntax_classified_method_receiver_to_result() {
             Some(Place::CallArg { idx: u32::MAX, .. })
         ) && matches!(node_place(segment, edge.to), Some(Place::CallRet { .. }))
     }));
+}
+
+#[test]
+fn tainted_method_receiver_does_not_taint_literal_explicit_argument() {
+    let call_span = span(30, 42);
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["client".to_string()];
+    caller.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(20, 60),
+            target: "_".to_string(),
+            source_name: None,
+            source_call: Some("client.send".to_string()),
+            source_call_args: vec!["\"fixed request\"".to_string()],
+            source_names: vec!["client".to_string(), "payload".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: call_span,
+            name: "client.send".to_string(),
+            receiver: Some("client".to_string()),
+            receiver_types: vec!["Client".to_string()],
+            call_kind: CallKind::Method,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(43, 58),
+                name: Some("payload".to_string()),
+                value_text: "\"fixed request\"".to_string(),
+                place: None,
+                source_names: Vec::new(),
+            }],
+        },
+    ];
+
+    let options = TransferOptions::compiler_semantics(vec!["swift".to_string()]);
+    let ws = stitch_idg(
+        vec![transfer_function_for_with_options(&caller, &options)],
+        &MockResolver::new(),
+        &StaticF2S(AHashMap::from([(FuncId::new(1), SegmentId(0))])),
+    );
+    let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+    let closure = service.forward_closure_with_max_precision(
+        &service.param_nodes_of(FuncId::new(1)),
+        Some(Precision::Narrowed),
+    );
+    let tainted_call_inputs = service.tainted_call_args_in_reachable_nodes(&closure);
+
+    assert!(
+        tainted_call_inputs.iter().any(|(func, site, index)| {
+            *func == FuncId::new(1) && *site == call_span && *index == u32::MAX
+        }),
+        "the receiver parameter must reach the compiler's receiver slot: {tainted_call_inputs:#?}"
+    );
+    assert!(
+        tainted_call_inputs
+            .iter()
+            .all(|(func, site, index)| { *func != FuncId::new(1) || *site != call_span || *index != 0 }),
+        "a tainted receiver must not taint an independent literal argument: {tainted_call_inputs:#?}"
+    );
 }
 
 #[test]
@@ -1479,6 +1926,893 @@ fn field_argument_forwarding_preserves_matching_field_path() {
         forwards_cmd_field,
         "expected worklist field forwarding from caller box.cmd to callee arg.cmd: {:?}",
         ws.cross_file().edges
+    );
+}
+
+#[test]
+fn aggregate_call_argument_projects_only_matching_fields_into_resolved_formal() {
+    let call_span = span(20, 40);
+    let sink_span = span(70, 85);
+    let argument_span = span(28, 39);
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["payload".to_string(), "harmless".to_string()];
+    caller.flow_events = vec![FlowEvent::Call {
+        span: call_span,
+        name: "consume".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: argument_span,
+            name: None,
+            value_text: "aggregate".to_string(),
+            place: None,
+            source_names: vec!["payload".to_string(), "harmless".to_string()],
+        }],
+    }];
+    let argument_fact = bonsai_lang_api::CallArgumentValueFact {
+        call_span,
+        argument_index: 0,
+        argument_span,
+        direct_call_span: None,
+        value_kind: None,
+        inline_callback_params: Vec::new(),
+        inline_callback_span: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
+        value_flow: bonsai_lang_api::ExpressionFlow {
+            aggregate_fields: vec![
+                bonsai_lang_api::ExpressionField {
+                    name: "target".to_string(),
+                    value_span: Some(span(29, 32)),
+                    value: bonsai_lang_api::ExpressionFlow::from_place("payload"),
+                },
+                bonsai_lang_api::ExpressionField {
+                    name: "sibling".to_string(),
+                    value_span: Some(span(33, 38)),
+                    value: bonsai_lang_api::ExpressionFlow::from_place("harmless"),
+                },
+            ],
+            ..Default::default()
+        },
+        static_value: None,
+        exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
+    };
+
+    let mut consume = empty_decl(2, "consume");
+    consume.params = vec!["envelope".to_string()];
+    consume.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(55, 65),
+            target: "selected".to_string(),
+            source_name: Some("envelope.target".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["envelope.target".to_string()],
+            declares_new_binding: true,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Destructure),
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(75, 82),
+                name: None,
+                value_text: "selected".to_string(),
+                place: Some("selected".to_string()),
+                source_names: vec!["selected".to_string()],
+            }],
+        },
+    ];
+
+    let mut resolver = MockResolver::new();
+    resolver.add(FuncId::new(1), "consume", vec![FuncId::new(2)]);
+    let caller_output = transfer_function_for_with_options_and_compiler_facts(
+        &caller,
+        &TransferOptions::default(),
+        &[],
+        &[],
+        &[argument_fact],
+        &[],
+    );
+    let consume_output = transfer_function_for(&consume);
+    let ws = stitch_idg_with_field_forwarding_mode(
+        vec![caller_output.clone(), consume_output.clone()],
+        &resolver,
+        &StaticF2S(AHashMap::from([
+            (FuncId::new(1), SegmentId(0)),
+            (FuncId::new(2), SegmentId(1)),
+        ])),
+        true,
+        true,
+    );
+    let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+    let reaches_sink = |name: &str| {
+        let seeds = service.read_or_write_nodes_for_names(FuncId::new(1), &[name.to_string()]);
+        service
+            .forward_closure(&seeds)
+            .iter()
+            .any(|node| service.call_arg_identity(*node) == Some((FuncId::new(2), sink_span, 0)))
+    };
+    assert!(
+        reaches_sink("payload"),
+        "the exact aggregate target field must project into envelope.target"
+    );
+    assert!(
+        !reaches_sink("harmless"),
+        "a sibling aggregate field must not collapse into envelope.target"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("aggregate-argument.factstore");
+    let persisted = stitch_idg_from_spooled_segment_batches(
+        vec![vec![
+            (SegmentId(0), vec![caller_output]),
+            (SegmentId(1), vec![consume_output]),
+        ]],
+        2,
+        &resolver,
+        SpooledStitchOptions {
+            spool_path: &path,
+            include_field_argument_forwarding: true,
+            symbolic_field_forwarding: true,
+            symbolic_funcs: None,
+            capture_funcs: None,
+        },
+    )
+    .expect("spooled aggregate-argument stitch");
+    persisted
+        .save_into_disk(&path, 0xA66E_6A7E)
+        .expect("persist aggregate-argument graph");
+    let spooled = IdgWorkspace::load_from_disk(&path, 0xA66E_6A7E)
+        .expect("load aggregate-argument graph")
+        .expect("aggregate-argument graph exists");
+    let spooled_service = IdgQueryService::new(Arc::new(spooled), Arc::new(GlobalIndex::new()));
+    let spooled_reaches_sink = |name: &str| {
+        let seeds = spooled_service.read_or_write_nodes_for_names(FuncId::new(1), &[name.to_string()]);
+        spooled_service
+            .forward_closure(&seeds)
+            .iter()
+            .any(|node| spooled_service.call_arg_identity(*node) == Some((FuncId::new(2), sink_span, 0)))
+    };
+    assert!(
+        spooled_reaches_sink("payload"),
+        "spooled replay must project the exact aggregate target field through the formal destructure"
+    );
+    assert!(
+        !spooled_reaches_sink("harmless"),
+        "spooled replay must keep a sibling aggregate field out of the selected formal projection"
+    );
+}
+
+#[test]
+fn spooled_static_callback_map_forwards_the_exact_argument_field() {
+    let host_func = FuncId::new(1);
+    let callback_func = FuncId::new(2);
+    let assignment_span = span(20, 30);
+    // The adapter-owned call identity may be the callee token rather than the
+    // enclosing invocation. Its argument is evaluated after that token.
+    let call_span = span(40, 47);
+    let argument_span = span(48, 80);
+    let sink_span = span(85, 95);
+
+    let mut host = empty_decl(host_func.raw(), "host");
+    host.params = vec!["input".to_string()];
+    host.flow_events = vec![
+        FlowEvent::Assign {
+            span: assignment_span,
+            target: "variables".to_string(),
+            source_name: Some("input".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["input".to_string()],
+            declares_new_binding: true,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: call_span,
+            name: "graphql".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: argument_span,
+                name: None,
+                value_text: "options".to_string(),
+                place: None,
+                source_names: vec!["root".to_string(), "variables".to_string()],
+            }],
+        },
+    ];
+    let argument_values = [bonsai_lang_api::CallArgumentValueFact {
+        call_span,
+        argument_index: 0,
+        argument_span,
+        direct_call_span: None,
+        value_kind: Some(AssignValueKind::Compound),
+        inline_callback_params: Vec::new(),
+        inline_callback_span: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
+        value_flow: bonsai_lang_api::ExpressionFlow {
+            aggregate_fields: vec![
+                bonsai_lang_api::ExpressionField {
+                    name: "rootValue".to_string(),
+                    value_span: Some(span(52, 56)),
+                    value: bonsai_lang_api::ExpressionFlow::from_place("root"),
+                },
+                bonsai_lang_api::ExpressionField {
+                    name: "variableValues".to_string(),
+                    value_span: Some(span(60, 69)),
+                    value: bonsai_lang_api::ExpressionFlow::from_place("variables"),
+                },
+            ],
+            ..Default::default()
+        },
+        static_value: None,
+        exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
+    }];
+    let options = TransferOptions {
+        callback_invocations: vec![crate::transfer::CallbackInvocationSpec {
+            callee: "graphql".to_string(),
+            callback_arg_index: 0,
+            callback_map_field_path: vec!["rootValue".to_string()],
+            forwarded_argument_field_path: vec!["variableValues".to_string()],
+            forwarded_callback_param_index: Some(1),
+            forwarded_args_from: None,
+            receiver_to_callback_param: None,
+            callback_return_result_offset: 0,
+            resolved_call_sites: vec![call_span],
+            resolved_callback_targets: vec![(call_span, callback_func)],
+        }],
+        ..TransferOptions::default()
+    };
+
+    let mut callback = empty_decl(callback_func.raw(), "products");
+    callback.params = vec!["parent".to_string(), "args".to_string()];
+    callback.flow_events = vec![FlowEvent::Call {
+        span: sink_span,
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(90, 94),
+            name: None,
+            value_text: "args".to_string(),
+            place: Some("args".to_string()),
+            source_names: vec!["args".to_string()],
+        }],
+    }];
+
+    let host_output = transfer_function_for_with_options_and_compiler_facts(
+        &host,
+        &options,
+        &[],
+        &[],
+        &argument_values,
+        &[],
+    );
+    let callback_output = transfer_function_for(&callback);
+    let resolver = MockResolver::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("static-callback-map.factstore");
+    let persisted = stitch_idg_from_spooled_segment_batches(
+        vec![vec![
+            (SegmentId(0), vec![host_output]),
+            (SegmentId(1), vec![callback_output]),
+        ]],
+        2,
+        &resolver,
+        SpooledStitchOptions {
+            spool_path: &path,
+            include_field_argument_forwarding: true,
+            symbolic_field_forwarding: false,
+            symbolic_funcs: None,
+            capture_funcs: Some(&AHashSet::new()),
+        },
+    )
+    .expect("spooled static callback-map stitch");
+    persisted
+        .save_into_disk(&path, 0xCA11_BA4C)
+        .expect("persist static callback-map graph");
+    let persisted = IdgWorkspace::load_from_disk(&path, 0xCA11_BA4C)
+        .expect("load static callback-map graph")
+        .expect("static callback-map graph exists");
+    let service = IdgQueryService::new(Arc::new(persisted), Arc::new(GlobalIndex::new()));
+    let seeds = service.read_or_write_nodes_for_names(host_func, &["input".to_string()]);
+    assert!(!seeds.is_empty(), "host input must exist in the compiler graph");
+    let reached = service.forward_closure(&seeds);
+    assert!(
+        reached.iter().any(|node| {
+            service.call_arg_identity(*node) == Some((callback_func, sink_span, 0))
+        }),
+        "spooled replay must retain the exact temporary.variableValues producer and forward it into resolver args"
+    );
+}
+
+#[test]
+fn imported_module_field_state_uses_exact_target_identity_across_resolved_call() {
+    let source_span = span(5, 14);
+    let call_span = span(30, 45);
+    let sink_span = span(70, 90);
+    let mut caller = empty_decl(1, "caller");
+    caller.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(2, 14),
+            target: "carrier".to_string(),
+            source_name: None,
+            source_call: Some("runtime.input".to_string()),
+            source_call_args: Vec::new(),
+            source_names: vec!["runtime".to_string()],
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: source_span,
+            name: "runtime.input".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        },
+        FlowEvent::Assign {
+            span: span(15, 25),
+            target: "local_module.target".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["carrier".to_string(), "carrier.value".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: call_span,
+            name: "downstream".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        },
+    ];
+    let mut downstream = empty_decl(2, "downstream");
+    downstream.flow_events = vec![FlowEvent::Call {
+        span: sink_span,
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(78, 88),
+            name: None,
+            value_text: "other_alias.target".to_string(),
+            place: Some("other_alias.target".to_string()),
+            source_names: vec!["other_alias.target".to_string()],
+        }],
+    }];
+
+    let build = |callee_target: &str| {
+        let mut resolver = MockResolver::new();
+        resolver.add(FuncId::new(1), "downstream", vec![FuncId::new(2)]);
+        resolver.add_imported_binding(FuncId::new(1), "local_module", "workspace.shared");
+        resolver.add_imported_binding(FuncId::new(2), "other_alias", callee_target);
+        stitch_idg(
+            vec![transfer_function_for(&caller), transfer_function_for(&downstream)],
+            &resolver,
+            &StaticF2S(AHashMap::from([
+                (FuncId::new(1), SegmentId(0)),
+                (FuncId::new(2), SegmentId(1)),
+            ])),
+        )
+    };
+    let closure_result = |ws: IdgWorkspace| {
+        let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+        let seeds = service.source_seed_nodes_at_span(FuncId::new(1), source_span);
+        assert!(
+            !seeds.is_empty(),
+            "the exact source-call span must resolve to IDG seed nodes"
+        );
+        let reaches_sink = service
+            .forward_closure(&seeds)
+            .iter()
+            .any(|node| service.call_arg_identity(*node) == Some((FuncId::new(2), sink_span, 0)));
+        let evidence = service.forward_closure_evidence_with_max_precision(&seeds, Some(Precision::Narrowed));
+        let target_nodes = service.nodes_at_span(FuncId::new(2), sink_span);
+        let allowed_funcs = AHashSet::from([FuncId::new(1), FuncId::new(2)]);
+        let relevance = service.target_relevance_within_funcs_with_max_precision(
+            &target_nodes,
+            None,
+            &allowed_funcs,
+            Some(Precision::Narrowed),
+        );
+        let seeds_are_relevant = relevance.admits_any(&seeds);
+        let relevant = service.forward_closure_evidence_within_funcs_and_relevance_with_max_precision(
+            &seeds,
+            &allowed_funcs,
+            &relevance,
+            Some(Precision::Narrowed),
+        );
+        let relevant_reaches_sink = relevant
+            .nodes
+            .iter()
+            .any(|node| service.call_arg_identity(*node) == Some((FuncId::new(2), sink_span, 0)));
+        (
+            reaches_sink,
+            evidence.cross_calls,
+            seeds_are_relevant,
+            relevant_reaches_sink,
+        )
+    };
+    let (resident_reaches_sink, resident_cross_calls, resident_relevant, resident_relevant_reaches_sink) =
+        closure_result(build("workspace.shared"));
+    assert!(
+        resident_reaches_sink,
+        "different local aliases of the same exact import target must share projected state"
+    );
+    assert!(
+        resident_cross_calls.iter().any(|edge| {
+            edge.caller == FuncId::new(1)
+                && edge.callee == FuncId::new(2)
+                && edge.call_span == call_span
+                && edge.relation == crate::service::CrossCallRelation::SharedStateCall
+                && edge.relation.is_renderable_call()
+        }),
+        "shared projected state at an exact call must retain renderable, non-positional lineage: {resident_cross_calls:?}"
+    );
+    assert!(
+        resident_relevant && resident_relevant_reaches_sink,
+        "backward target demand and the scoped forward closure must consume the shared-state edge"
+    );
+    let (
+        wrong_target_reaches_sink,
+        wrong_target_cross_calls,
+        _wrong_target_relevant,
+        wrong_target_relevant_reaches_sink,
+    ) = closure_result(build("workspace.unrelated"));
+    assert!(
+        !wrong_target_reaches_sink,
+        "same-spelled fields on different imported targets must remain disjoint"
+    );
+    assert!(
+        wrong_target_cross_calls
+            .iter()
+            .all(|edge| edge.relation != crate::service::CrossCallRelation::SharedStateCall),
+        "a different imported target must not emit shared field-state lineage"
+    );
+    assert!(
+        !wrong_target_relevant_reaches_sink,
+        "target-scoped closure must not reach a same-spelled field from another imported target"
+    );
+
+    let build_spooled = |callee_target: &str| {
+        let mut resolver = MockResolver::new();
+        resolver.add(FuncId::new(1), "downstream", vec![FuncId::new(2)]);
+        resolver.add_imported_binding(FuncId::new(1), "local_module", "workspace.shared");
+        resolver.add_imported_binding(FuncId::new(2), "other_alias", callee_target);
+        let caller_output = transfer_function_for(&caller);
+        let downstream_output = transfer_function_for(&downstream);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imported-state.factstore");
+        let persisted = stitch_idg_from_spooled_segment_batches(
+            vec![vec![
+                (SegmentId(0), vec![caller_output]),
+                (SegmentId(1), vec![downstream_output]),
+            ]],
+            2,
+            &resolver,
+            SpooledStitchOptions {
+                spool_path: &path,
+                include_field_argument_forwarding: true,
+                symbolic_field_forwarding: false,
+                symbolic_funcs: None,
+                capture_funcs: None,
+            },
+        )
+        .expect("spooled imported-state stitch");
+        persisted
+            .save_into_disk(&path, 0x1A90_27ED)
+            .expect("persist imported-state graph");
+        IdgWorkspace::load_from_disk(&path, 0x1A90_27ED)
+            .expect("load imported-state graph")
+            .expect("imported-state graph exists")
+    };
+    let (spooled_reaches_sink, spooled_cross_calls, spooled_relevant, spooled_relevant_reaches_sink) =
+        closure_result(build_spooled("workspace.shared"));
+    assert!(
+        spooled_reaches_sink,
+        "spooled typed replay must retain exact shared imported-field state"
+    );
+    assert!(
+        spooled_cross_calls.iter().any(|edge| {
+            edge.caller == FuncId::new(1)
+                && edge.callee == FuncId::new(2)
+                && edge.call_span == call_span
+                && edge.relation == crate::service::CrossCallRelation::SharedStateCall
+        }),
+        "spooled replay must retain the same typed field-state lineage as resident stitching"
+    );
+    assert!(
+        spooled_relevant && spooled_relevant_reaches_sink,
+        "spooled backward demand and scoped closure must consume the persisted shared-state edge"
+    );
+    let (
+        spooled_collision_reaches_sink,
+        spooled_collision_cross_calls,
+        _spooled_collision_relevant,
+        spooled_collision_relevant_reaches_sink,
+    ) = closure_result(build_spooled("workspace.unrelated"));
+    assert!(
+        !spooled_collision_reaches_sink,
+        "spooled typed replay must keep different import targets disjoint"
+    );
+    assert!(
+        spooled_collision_cross_calls
+            .iter()
+            .all(|edge| edge.relation != crate::service::CrossCallRelation::SharedStateCall),
+        "spooled replay must not invent shared state for another import target"
+    );
+    assert!(
+        !spooled_collision_relevant_reaches_sink,
+        "spooled target-scoped closure must reject another imported target"
+    );
+}
+
+#[test]
+fn imported_shared_field_state_rejects_siblings_post_call_writes_and_ambiguous_callees() {
+    let call_span = span(30, 45);
+    let sink_span = span(70, 90);
+    let downstream = |symbol: u32| {
+        let mut decl = empty_decl(symbol, "downstream");
+        decl.flow_events = vec![FlowEvent::Call {
+            span: sink_span,
+            name: "consume".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(78, 88),
+                name: None,
+                value_text: "reader_alias.target".to_string(),
+                place: Some("reader_alias.target".to_string()),
+                source_names: vec!["reader_alias.target".to_string()],
+            }],
+        }];
+        decl
+    };
+    let build = |write_span: Span, field: &str, callees: Vec<FuncId>| {
+        let mut caller = empty_decl(1, "caller");
+        caller.params = vec!["payload".to_string()];
+        caller.flow_events = vec![
+            FlowEvent::Call {
+                span: call_span,
+                name: "dispatch".to_string(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Function,
+                args: Vec::new(),
+            },
+            FlowEvent::Assign {
+                span: write_span,
+                target: format!("writer_alias.{field}"),
+                source_name: Some("payload".to_string()),
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: Vec::new(),
+                declares_new_binding: false,
+                value_kind: None,
+            },
+        ];
+        caller.flow_events.sort_by_key(|event| event.span().start);
+
+        let mut resolver = MockResolver::new();
+        resolver.add(FuncId::new(1), "dispatch", callees);
+        resolver.add_imported_binding(FuncId::new(1), "writer_alias", "workspace.shared");
+        resolver.add_imported_binding(FuncId::new(2), "reader_alias", "workspace.shared");
+        resolver.add_imported_binding(FuncId::new(3), "reader_alias", "workspace.shared");
+        stitch_idg(
+            vec![
+                transfer_function_for(&caller),
+                transfer_function_for(&downstream(2)),
+                transfer_function_for(&downstream(3)),
+            ],
+            &resolver,
+            &StaticF2S(AHashMap::from([
+                (FuncId::new(1), SegmentId(0)),
+                (FuncId::new(2), SegmentId(1)),
+                (FuncId::new(3), SegmentId(2)),
+            ])),
+        )
+    };
+    let closure_result = |ws: IdgWorkspace| {
+        let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+        let seeds = service.read_or_write_nodes_for_names(FuncId::new(1), &["payload".to_string()]);
+        let evidence = service.forward_closure_evidence_with_max_precision(&seeds, Some(Precision::Narrowed));
+        let reaches_sink = evidence
+            .nodes
+            .iter()
+            .any(|node| service.call_arg_identity(*node) == Some((FuncId::new(2), sink_span, 0)));
+        (reaches_sink, evidence.cross_calls)
+    };
+
+    let (sibling_reaches, sibling_calls) =
+        closure_result(build(span(15, 25), "sibling", vec![FuncId::new(2)]));
+    assert!(
+        !sibling_reaches,
+        "a sibling projected field must remain disconnected"
+    );
+    assert!(
+        sibling_calls
+            .iter()
+            .all(|edge| edge.relation != crate::service::CrossCallRelation::SharedStateCall),
+        "a sibling field must not emit shared-state lineage"
+    );
+
+    let (post_call_reaches, post_call_calls) =
+        closure_result(build(span(50, 60), "target", vec![FuncId::new(2)]));
+    assert!(
+        !post_call_reaches,
+        "a write after the call must not flow backward"
+    );
+    assert!(
+        post_call_calls
+            .iter()
+            .all(|edge| edge.relation != crate::service::CrossCallRelation::SharedStateCall),
+        "a post-call write must not emit shared-state lineage"
+    );
+
+    let (ambiguous_reaches, ambiguous_calls) = closure_result(build(
+        span(15, 25),
+        "target",
+        vec![FuncId::new(2), FuncId::new(3)],
+    ));
+    assert!(
+        !ambiguous_reaches,
+        "shared state must fail closed when a call has more than one resolved target"
+    );
+    assert!(
+        ambiguous_calls
+            .iter()
+            .all(|edge| edge.relation != crate::service::CrossCallRelation::SharedStateCall),
+        "ambiguous call targets must not emit shared-state lineage"
+    );
+}
+
+#[test]
+fn imported_module_field_state_preserves_projected_rhs_flow_across_resolved_call() {
+    let call_span = span(40, 55);
+    let sink_span = span(80, 100);
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["payload".to_string()];
+    caller.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(10, 20),
+            target: "request.value".to_string(),
+            source_name: Some("payload".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
+        FlowEvent::Assign {
+            span: span(22, 35),
+            target: "local_module.target".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["request".to_string(), "request.value".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: call_span,
+            name: "downstream".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        },
+    ];
+    let mut downstream = empty_decl(2, "downstream");
+    downstream.flow_events = vec![FlowEvent::Call {
+        span: sink_span,
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(88, 98),
+            name: None,
+            value_text: "other_alias.target".to_string(),
+            place: Some("other_alias.target".to_string()),
+            source_names: vec!["other_alias.target".to_string()],
+        }],
+    }];
+
+    let build = |callee_target: &str| {
+        let mut resolver = MockResolver::new();
+        resolver.add(FuncId::new(1), "downstream", vec![FuncId::new(2)]);
+        resolver.add_imported_binding(FuncId::new(1), "local_module", "workspace.shared");
+        resolver.add_imported_binding(FuncId::new(2), "other_alias", callee_target);
+        stitch_idg(
+            vec![transfer_function_for(&caller), transfer_function_for(&downstream)],
+            &resolver,
+            &StaticF2S(AHashMap::from([
+                (FuncId::new(1), SegmentId(0)),
+                (FuncId::new(2), SegmentId(1)),
+            ])),
+        )
+    };
+    let reaches_sink = |ws: IdgWorkspace| {
+        let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+        let seeds = service.read_or_write_nodes_for_names(FuncId::new(1), &["payload".to_string()]);
+        service
+            .forward_closure(&seeds)
+            .iter()
+            .any(|node| service.call_arg_identity(*node) == Some((FuncId::new(2), sink_span, 0)))
+    };
+    assert!(
+        reaches_sink(build("workspace.shared")),
+        "an exact projected RHS must reach the same imported module field across the resolved call"
+    );
+    assert!(
+        !reaches_sink(build("workspace.unrelated")),
+        "an exact projected RHS must not cross into the same field on another imported module"
+    );
+}
+
+#[test]
+fn spooled_higher_order_environment_uses_compact_projected_places() {
+    let registration_span = span(30, 45);
+    let invocation_span = span(60, 68);
+    let sink_span = span(80, 95);
+    let mut entry = empty_decl(1, "entry");
+    entry.params = vec!["payload".to_string()];
+    entry.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(15, 25),
+            target: "thunk.payload".to_string(),
+            source_name: Some("payload".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: registration_span,
+            name: "apply".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(36, 42),
+                name: None,
+                value_text: "thunk".to_string(),
+                place: Some("thunk".to_string()),
+                source_names: vec!["thunk".to_string()],
+            }],
+        },
+    ];
+    let mut apply = empty_decl(2, "apply");
+    apply.params = vec!["callback".to_string()];
+    apply.flow_events = vec![FlowEvent::Call {
+        span: invocation_span,
+        name: "callback".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: Vec::new(),
+    }];
+    let mut callback = empty_decl(3, "callback_body");
+    callback.params = vec!["payload".to_string()];
+    callback.flow_events = vec![FlowEvent::Call {
+        span: sink_span,
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(86, 93),
+            name: None,
+            value_text: "payload".to_string(),
+            place: Some("payload".to_string()),
+            source_names: vec!["payload".to_string()],
+        }],
+    }];
+
+    let build = |binding: &str, fingerprint: u64| {
+        let mut resolver = MockResolver::new();
+        resolver.add(FuncId::new(1), "apply", vec![FuncId::new(2)]);
+        resolver.add_callback_binding(FuncId::new(2), 0, vec![FuncId::new(3)]);
+        resolver.add_callback_origin(
+            FuncId::new(2),
+            0,
+            FuncId::new(3),
+            CallbackBindingOrigin {
+                caller: FuncId::new(1),
+                call_site: registration_span,
+                binding: Some(binding.to_string()),
+            },
+        );
+        let batches = vec![vec![
+            (
+                SegmentId(0),
+                vec![transfer_function_for(&entry), transfer_function_for(&callback)],
+            ),
+            (SegmentId(1), vec![transfer_function_for(&apply)]),
+        ]];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("higher-order-environment.factstore");
+        let persisted = stitch_idg_from_spooled_segment_batches(
+            batches,
+            3,
+            &resolver,
+            SpooledStitchOptions {
+                spool_path: &path,
+                include_field_argument_forwarding: true,
+                symbolic_field_forwarding: false,
+                symbolic_funcs: None,
+                capture_funcs: Some(&AHashSet::from_iter([FuncId::new(3)])),
+            },
+        )
+        .expect("spooled higher-order stitch");
+        persisted
+            .save_into_disk(&path, fingerprint)
+            .expect("persist higher-order graph");
+        IdgWorkspace::load_from_disk(&path, fingerprint)
+            .expect("load higher-order graph")
+            .expect("higher-order graph exists")
+    };
+    let closure_result = |ws: IdgWorkspace| {
+        let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+        let seeds = service.read_or_write_nodes_for_names(FuncId::new(1), &["payload".to_string()]);
+        let reaches_sink = service
+            .forward_closure(&seeds)
+            .iter()
+            .any(|node| service.call_arg_identity(*node) == Some((FuncId::new(3), sink_span, 0)));
+        let evidence = service.forward_closure_evidence_with_max_precision(&seeds, Some(Precision::Narrowed));
+        (reaches_sink, evidence.cross_calls)
+    };
+    let (positive_reaches_sink, positive_cross_calls) = closure_result(build("thunk", 0xC411_BA6E));
+    assert!(
+        positive_reaches_sink,
+        "spooled replay must retain caller field state for a resolved higher-order callback"
+    );
+    assert!(
+        positive_cross_calls.iter().any(|edge| {
+            edge.caller == FuncId::new(1)
+                && edge.callee == FuncId::new(3)
+                && edge.relation == crate::service::CrossCallRelation::Capture
+        }),
+        "the exact scalar capture boundary must remain renderable after projected state is spooled"
+    );
+    let (collision_reaches_sink, collision_cross_calls) = closure_result(build("ordinary", 0xC011_1510));
+    assert!(
+        !collision_reaches_sink,
+        "a callback origin without the exact projected binding must remain disconnected"
+    );
+    assert!(
+        collision_cross_calls.iter().all(|edge| {
+            edge.caller != FuncId::new(1)
+                || edge.callee != FuncId::new(3)
+                || edge.relation != crate::service::CrossCallRelation::Capture
+        }),
+        "the same-spelled callback without exact projected state must not invent capture lineage"
     );
 }
 
@@ -1976,6 +3310,7 @@ fn syntactic_field_universe_composes_resolved_receiver_selector_demand() {
             actual_arg: "repo.data".to_string(),
             param_name: "self".to_string(),
             call_span: span(30, 45),
+            argument_value_span: None,
             precision: Precision::Exact,
             call_kind: bonsai_callgraph::EdgeKind::Direct,
             arg_idx: u32::MAX,
@@ -1986,6 +3321,77 @@ fn syntactic_field_universe_composes_resolved_receiver_selector_demand() {
     assert!(
         universe.contains("data.cmd"),
         "receiver `repo.data` plus the resolved accessor read `self.cmd` proves the finite suffix `data.cmd`"
+    );
+}
+
+#[test]
+fn syntactic_field_universe_composes_nested_aggregate_return_call_paths_once() {
+    let mut inner = empty_decl(2, "inner");
+    inner.params = vec!["seed".to_string()];
+    inner.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(10, 20),
+            target: "data.Cmd".to_string(),
+            source_name: Some("seed".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["seed".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::Compound),
+        },
+        FlowEvent::Return {
+            value_kind: Some(AssignValueKind::Compound),
+            span: span(30, 55),
+            value_name: None,
+            value_text: None,
+            value_flow: bonsai_lang_api::ExpressionFlow {
+                aggregate_fields: vec![bonsai_lang_api::ExpressionField {
+                    name: "data".to_string(),
+                    value_span: Some(span(45, 49)),
+                    value: bonsai_lang_api::ExpressionFlow::from_place("data"),
+                }],
+                ..Default::default()
+            },
+        },
+    ];
+    let ws = stitch_idg(
+        vec![transfer_function_for(&inner)],
+        &MockResolver::new(),
+        &StaticF2S(AHashMap::from([(FuncId::new(2), SegmentId(0))])),
+    );
+    let requested = AHashSet::from([FieldPlaceKey {
+        seg_id: SegmentId(0),
+        func: FuncId::new(2),
+        base: crate::transfer::RETURN_FIELD_BASE.to_string(),
+        writes: true,
+    }]);
+    let mut index = FieldPlaceIndex::from_workspace_for_keys(&ws, &requested);
+    let mut universe = index.take_syntactic_field_universe();
+    assert!(universe.contains("data.Cmd"));
+    assert!(!universe.contains("Repository.data.Cmd"));
+
+    universe.record_nested_return_projection_demands(
+        &index,
+        &[Arc::new(ReturnFieldStitch {
+            caller: FuncId::new(3),
+            caller_seg: SegmentId(1),
+            callee: FuncId::new(2),
+            callee_seg: SegmentId(0),
+            source_base: crate::transfer::RETURN_FIELD_BASE.to_string(),
+            target_base: format!("{}.Repository", crate::transfer::RETURN_FIELD_BASE),
+            call_span: span(60, 70),
+            write_span: span(55, 75),
+            precision: Precision::Exact,
+            call_kind: bonsai_callgraph::EdgeKind::Direct,
+        })],
+    );
+    assert!(
+        universe.contains("Repository.data.Cmd"),
+        "the aggregate AST prefix and exact returned descendant must compose into one finite demand"
+    );
+    assert!(
+        !universe.contains("Repository.Repository.data.Cmd"),
+        "one nested return site must not feed its own synthesized prefix back into the field language"
     );
 }
 
@@ -2797,6 +4203,258 @@ fn method_without_receiver_field_consumers_does_not_synthesize_receiver_field_fo
 }
 
 #[test]
+fn resolved_method_receiver_field_writes_return_to_the_calling_object() {
+    let capture_span = span(20, 35);
+    let sink_span = span(50, 65);
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["input".to_string()];
+    caller.flow_events = vec![
+        FlowEvent::Call {
+            span: capture_span,
+            name: "obj.capture".to_string(),
+            receiver: Some("obj".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(30, 34),
+                name: None,
+                value_text: "input".to_string(),
+                place: Some("input".to_string()),
+                source_names: vec!["input".to_string()],
+            }],
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(55, 64),
+                name: None,
+                value_text: "obj.query".to_string(),
+                place: Some("obj.query".to_string()),
+                source_names: vec!["obj.query".to_string()],
+            }],
+        },
+    ];
+
+    let mut capture = empty_decl(2, "capture");
+    capture.kind = DeclKind::Method;
+    capture.params = vec!["input".to_string()];
+    capture.implicit_receiver_names = vec!["this".to_string()];
+    capture.receiver_field_writes = vec![FieldWrite {
+        span: span(80, 92),
+        target: "this.query".to_string(),
+        source_param_indices: vec![0],
+    }];
+    capture.flow_events = vec![FlowEvent::Assign {
+        span: span(80, 92),
+        target: "this.query".to_string(),
+        source_name: Some("input".to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: None,
+    }];
+
+    let f2s = StaticF2S(AHashMap::from([
+        (FuncId::new(1), SegmentId(0)),
+        (FuncId::new(2), SegmentId(1)),
+    ]));
+    let mut resolver = MockResolver::new();
+    resolver.add(FuncId::new(1), "obj.capture", vec![FuncId::new(2)]);
+    let compiler_options = TransferOptions::compiler_semantics(Vec::new());
+    let ws = stitch_idg(
+        vec![
+            transfer_function_for_with_options(&caller, &compiler_options),
+            transfer_function_for_with_options(&capture, &compiler_options),
+        ],
+        &resolver,
+        &f2s,
+    );
+    let caller_segment = ws.segment(SegmentId(0)).expect("caller segment");
+    let capture_segment = ws.segment(SegmentId(1)).expect("capture segment");
+
+    assert!(
+        ws.cross_file().edges.iter().any(|edge| {
+            edge.edge.meta.kind == IdgEdgeKind::InterFieldReturn
+                && place_storage_name(
+                    capture_segment,
+                    node_place(capture_segment, edge.edge.from).expect("capture write"),
+                )
+                .as_deref()
+                    == Some("this.query")
+                && place_storage_name(
+                    caller_segment,
+                    node_place(caller_segment, edge.edge.to).expect("caller write"),
+                )
+                .as_deref()
+                    == Some("obj.query")
+        }),
+        "resolved method field mutation must write back to the exact caller receiver: {:?}",
+        ws.cross_file().edges
+    );
+}
+
+#[test]
+fn compiler_semantics_chain_receiver_write_back_through_accessor_return() {
+    let capture_span = span(20, 35);
+    let accessor_span = span(40, 52);
+    let sink_span = span(60, 75);
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["input".to_string(), "safe".to_string()];
+    caller.flow_events = vec![
+        FlowEvent::Call {
+            span: capture_span,
+            name: "obj.capture".to_string(),
+            receiver: Some("obj".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: vec![
+                CallArg {
+                    passing_mode: Default::default(),
+                    span: span(28, 30),
+                    name: None,
+                    value_text: "input".to_string(),
+                    place: Some("input".to_string()),
+                    source_names: vec!["input".to_string()],
+                },
+                CallArg {
+                    passing_mode: Default::default(),
+                    span: span(31, 34),
+                    name: None,
+                    value_text: "safe".to_string(),
+                    place: Some("safe".to_string()),
+                    source_names: vec!["safe".to_string()],
+                },
+            ],
+        },
+        FlowEvent::Assign {
+            span: span(38, 54),
+            target: "selected".to_string(),
+            source_name: None,
+            source_call: Some("obj.resource".to_string()),
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: accessor_span,
+            name: "obj.resource".to_string(),
+            receiver: Some("obj".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(67, 73),
+                name: None,
+                value_text: "selected".to_string(),
+                place: Some("selected".to_string()),
+                source_names: vec!["selected".to_string()],
+            }],
+        },
+    ];
+
+    let mut capture = empty_decl(2, "capture");
+    capture.kind = DeclKind::Method;
+    capture.params = vec!["input".to_string(), "safe".to_string()];
+    capture.implicit_receiver_names = vec!["this".to_string()];
+    capture.receiver_field_writes = vec![
+        FieldWrite {
+            span: span(80, 90),
+            target: "this.query".to_string(),
+            source_param_indices: vec![0],
+        },
+        FieldWrite {
+            span: span(91, 100),
+            target: "this.other".to_string(),
+            source_param_indices: vec![1],
+        },
+    ];
+    capture.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(80, 90),
+            target: "this.query".to_string(),
+            source_name: Some("input".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
+        FlowEvent::Assign {
+            span: span(91, 100),
+            target: "this.other".to_string(),
+            source_name: Some("safe".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
+    ];
+
+    let mut accessor = empty_decl(3, "resource");
+    accessor.kind = DeclKind::Method;
+    accessor.implicit_receiver_names = vec!["this".to_string()];
+    accessor.receiver_state_sources = vec!["this.query.resource".to_string()];
+    accessor.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
+        span: span(110, 120),
+        value_name: Some("this.query.resource".to_string()),
+        value_text: Some("this.query.resource".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("this.query.resource"),
+    }];
+
+    let compiler_options = TransferOptions::compiler_semantics(Vec::new());
+    let mut resolver = MockResolver::new();
+    resolver.add(FuncId::new(1), "obj.capture", vec![FuncId::new(2)]);
+    resolver.add(FuncId::new(1), "obj.resource", vec![FuncId::new(3)]);
+    let ws = stitch_idg(
+        vec![
+            transfer_function_for_with_options(&caller, &compiler_options),
+            transfer_function_for_with_options(&capture, &compiler_options),
+            transfer_function_for_with_options(&accessor, &compiler_options),
+        ],
+        &resolver,
+        &StaticF2S(AHashMap::from([
+            (FuncId::new(1), SegmentId(0)),
+            (FuncId::new(2), SegmentId(1)),
+            (FuncId::new(3), SegmentId(2)),
+        ])),
+    );
+    let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+    let reaches_sink = |name: &str| {
+        let seeds = service.read_or_write_nodes_for_names(FuncId::new(1), &[name.to_string()]);
+        service
+            .forward_closure(&seeds)
+            .iter()
+            .any(|node| service.call_arg_identity(*node) == Some((FuncId::new(1), sink_span, 0)))
+    };
+    assert!(
+        reaches_sink("input"),
+        "the exact receiver field write must flow through the zero-argument accessor return"
+    );
+    assert!(
+        !reaches_sink("safe"),
+        "a sibling receiver field must not flow through the accessor return"
+    );
+}
+
+#[test]
 fn parameterless_receiver_accessor_forwards_the_exact_object_field() {
     let mut caller = empty_decl(1, "caller");
     caller.params = vec!["src".to_string()];
@@ -2839,9 +4497,13 @@ fn parameterless_receiver_accessor_forwards_the_exact_object_field() {
     ]));
     let mut resolver = MockResolver::new();
     resolver.add(FuncId::new(1), "cmd", vec![FuncId::new(2)]);
+    let compiler_options = TransferOptions::compiler_semantics(Vec::new());
 
     let ws = stitch_idg(
-        vec![transfer_function_for(&caller), transfer_function_for(&getter)],
+        vec![
+            transfer_function_for_with_options(&caller, &compiler_options),
+            transfer_function_for_with_options(&getter, &compiler_options),
+        ],
         &resolver,
         &f2s,
     );

@@ -76,31 +76,6 @@
   description: "Backticks / qx// - Perl quote-like operator. Always runs via\
     \ /bin/sh -c; tainted interpolation is direct shell injection. No package gate\
     \ possible."
-- id: perl.cmdi.open_pipe
-  aliases:
-  - perl.path.open_concat
-  enabled: false
-  language: perl
-  tag: command-injection
-  severity: critical
-  category: process-exec
-  cwe:
-  - CWE-78
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      name: open
-  match_examples:
-  - name: perl.cmdi.open_pipe example
-    code: "sub example {\n  my ($input, $url, $id, $payload, $request) = @_;\n  open(\"\
-      |whoami\")\n}\n"
-  description: "open() with a leading or trailing `|` - Perl builtin pipe-open\
-    \ form (`open(FH,\"|cmd\")` or `open(FH,\"cmd|\")`); spawns a shell. Tainted mode/filename\
-    \ string = RCE. Pipe-shape regex narrows to actual pipe usage; bare-name is correct\
-    \ because `open` is a Perl global. Also covers merged aliases: perl.path.open_concat."
-  disabled_reason:
-    code: over-broad
 - id: perl.cmdi.ipc_open2
   enabled: true
   language: perl

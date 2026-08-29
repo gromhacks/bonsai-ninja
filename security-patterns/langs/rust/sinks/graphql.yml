@@ -34,33 +34,36 @@
   tag: graphql-injection
   severity: high
   packages: [async_graphql]
+  imports: [async_graphql]
   cwe: [CWE-943]
   match:
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
-      base_name_in: [schema]
+      receiver_type_in: [async_graphql.Schema]
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: tainted async graphql request
     code: |
-      use async_graphql;
-      use async_graphql;
-      use async_graphql::dummy;
-      fn example(schema: Schema, query: String) {
+      use async_graphql::Schema as ExternalSchema;
+      fn example(schema: ExternalSchema, query: String) {
           schema.execute(query);
       }
   - name: literal async graphql request negative
     code: |
-      use async_graphql;
-      use async_graphql;
-      use async_graphql::dummy;
-      fn example(schema: Schema) {
+      use async_graphql::Schema as ExternalSchema;
+      fn example(schema: ExternalSchema) {
           schema.execute("{ viewer { id } }");
       }
     expect_no_match: true
+  - name: local Schema with same method is not async-graphql
+    code: |
+      use async_graphql::Schema as ExternalSchema;
+      struct Schema;
+      fn example(schema: Schema, query: String) {
+          schema.execute(query);
+      }
+    expect_no_match: true
   description: "async-graphql Schema::execute(request/query) - request-provided GraphQL operation and variables enter resolver execution."
-  imports:
-  - async_graphql

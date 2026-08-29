@@ -1,3 +1,45 @@
 # Swift IPC / cross-process sources belong here. No source is enabled until
 # the adapter can distinguish distributed notifications from the in-process
 # NotificationCenter surface.
+
+- id: swift.source.cf_distributed_notification_callback
+  enabled: true
+  language: swift
+  trust: ipc
+  tag: ipc-input
+  payload_types: [event]
+  packages: [CoreFoundation]
+  imports: [CoreFoundation]
+  match:
+    kind: call
+    callee:
+      name: CFNotificationCenterAddObserver
+  constraints:
+  - top_level: true
+  - arg_count: 6
+  - arg_is_inline_callback: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 2
+      source_param_indices: [2, 3, 4]
+  match_examples:
+  - name: Core Foundation distributed notification callback
+    code: |
+      import CoreFoundation
+      func observe(_ center: CFNotificationCenter, _ observer: UnsafeRawPointer) {
+        CFNotificationCenterAddObserver(center, observer, { center, observer, name, object, userInfo in
+          sink(name)
+          sink(object)
+          sink(userInfo)
+        }, nil, nil, .deliverImmediately)
+      }
+    expect_match_text: [CFNotificationCenterAddObserver]
+  - name: notification post is outbound IPC
+    code: |
+      import CoreFoundation
+      func post(_ center: CFNotificationCenter) {
+        CFNotificationCenterPostNotification(center, CFNotificationName("local" as CFString), nil, nil, true)
+      }
+    expect_no_match: true
+  description: "CFNotificationCenterAddObserver callback parameters name, object, and userInfo are delivered from another process when registered on the distributed center; callback metadata before them remains clean."

@@ -18,7 +18,6 @@
     code: |
       <?php
       use league\oauth2client;
-      use league\oauth2client;
       use league\oauth2-client;
       function example($input, $url, $id, $payload, $request) {
         Provider::getAuthorizationUrl($input);

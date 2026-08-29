@@ -41,6 +41,20 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {attribute: [fs, canonicalize]}
+      base_canonicalizer: {attribute: [fs, canonicalize]}
+      path_constructor: {name: join}
+      path_constructor_base_from_receiver: true
+      containment_check: {name: starts_with}
+      containment_check_is_segment_aware: true
+      static_base_factories:
+      - {attribute: [PathBuf, from]}
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: []
   match_examples:
   - name: tainted fs read path
     code: |
@@ -192,48 +206,6 @@
       }
     expect_no_match: true
   description: "File::create with tainted path - attacker-controlled paths create / overwrite arbitrary files."
-- id: rust.path.tokio_fs_read
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: path-traversal
-  severity: high
-  packages: [tokio]
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      attribute: [tokio, fs, read]
-  description: "Disabled - suffix-matches against rust.path.fs_read (`[fs, read]`). Leaving both enabled double-fires on every tokio::fs::read call."
-- id: rust.path.tokio_fs_read_to_string
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: path-traversal
-  severity: high
-  packages: [tokio]
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      attribute: [tokio, fs, read_to_string]
-  description: "Disabled - suffix-matches against rust.path.fs_read_to_string. The std rule already catches tokio::fs::read_to_string via suffix."
-- id: rust.path.tokio_fs_write
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: path-traversal
-  severity: high
-  packages: [tokio]
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      attribute: [tokio, fs, write]
-  description: "Disabled - suffix-matches against rust.path.fs_write. The std rule already catches tokio::fs::write via suffix."
 - id: rust.path.fs_rename
   enabled: true
   language: rust

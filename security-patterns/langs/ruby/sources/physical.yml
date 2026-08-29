@@ -1,0 +1,33 @@
+# Ruby physical-device sources.
+- id: ruby.source.serialport_read
+  enabled: true
+  language: ruby
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  payload_types: [binary, text]
+  packages: [serialport]
+  imports: [serialport]
+  match:
+    kind: call
+    callee:
+      name: read
+  constraints:
+  - receiver_type_in: [SerialPort]
+  - max_args: 1
+  match_examples:
+  - name: SerialPort physical input
+    code: |
+      require "serialport"
+      port = SerialPort.new("/dev/ttyUSB0", 115200)
+      bytes = port.read(128)
+    expect_match_text: [port.read]
+  - name: ordinary object read is not serial input
+    code: |
+      require "serialport"
+      class MemoryBuffer
+        def read(count); "local"; end
+      end
+      bytes = MemoryBuffer.new.read(128)
+    expect_no_match: true
+  description: "SerialPort#read returns bytes received from an attached serial device on a compiler-typed SerialPort receiver."

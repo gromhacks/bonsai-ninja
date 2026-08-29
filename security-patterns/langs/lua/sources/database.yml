@@ -1,0 +1,35 @@
+# Lua database-result sources. Rules require compiler-derived receiver types so
+# application methods with the same spelling remain ordinary local calls.
+- id: lua.database.resty_mysql_query_result
+  enabled: true
+  language: lua
+  trust: database
+  tag: db-input
+  category: db-input
+  payload_types: [db-row]
+  packages: [lua-resty-mysql, resty.mysql]
+  imports: [resty.mysql]
+  match:
+    kind: call
+    callee:
+      name: query
+  constraints:
+  - receiver_type_in: [RestyMysqlClient]
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: lua-resty-mysql result rows
+    code: |
+      local mysql = require("resty.mysql")
+      local db = mysql:new()
+      local rows, err = db:query("SELECT display_name FROM users")
+      sink(rows[1].display_name)
+    expect_match_text: [db.query]
+  - name: application query method is not database input
+    code: |
+      local mysql = require("resty.mysql")
+      local builder = LocalBuilder()
+      local rows = builder:query("users")
+      sink(rows)
+    expect_no_match: true
+  description: "lua-resty-mysql MySQL:query returns rows read from persistent database state on a compiler-typed connection receiver."

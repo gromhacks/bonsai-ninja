@@ -10,13 +10,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.xpath$
-      base_name_in:
-      - doc
-      - document
-      - node
-      - xml
-      - html
-      - nokogiri
+      receiver_type_in: [NokogiriNode]
   constraints:
   - arg_tainted:
       index: 0
@@ -36,6 +30,14 @@
       def handle
         doc = Nokogiri::XML("<root></root>")
         doc.xpath("//safe")
+      end
+    expect_no_match: true
+  - name: unrelated xpath method is not Nokogiri
+    code: |
+      require "nokogiri"
+      def handle(expr)
+        arbitrary_node = LocalDocument.new
+        arbitrary_node.xpath(expr)
       end
     expect_no_match: true
   description: "Nokogiri document `xpath` query with user-controlled expression."

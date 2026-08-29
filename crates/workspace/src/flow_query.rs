@@ -370,8 +370,8 @@ impl Workspace {
             return None;
         }
         let service = self.callgraph_query_service()?;
-        let graph = match service.materialize_reaching_with_direct_callees(target_funcs, max_precision) {
-            Ok(graph) => graph,
+        let funcs = match service.reaching_functions_with_direct_callees(target_funcs, max_precision) {
+            Ok(funcs) => funcs,
             Err(error) => {
                 bonsai_diagnostics::debug_log!(
                     "compiler-cache",
@@ -381,12 +381,6 @@ impl Workspace {
                 return None;
             }
         };
-        let mut funcs: AHashSet<FuncId> = graph.nodes().iter().map(|node| node.func).collect();
-        for edge in &graph.inner().edges {
-            funcs.insert(edge.from);
-            funcs.insert(edge.to);
-        }
-        funcs.extend(target_funcs.iter().copied());
         Some(funcs)
     }
 

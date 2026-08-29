@@ -1,0 +1,289 @@
+# External-library factory return types. These rules only supply compiler type
+# evidence for receiver-constrained rules and never emit findings.
+- id: ruby.typing.openssl_ssl_context
+  enabled: true
+  language: ruby
+  packages: [openssl]
+  imports: [openssl, OpenSSL]
+  returns_type: "OpenSSL::SSL::SSLContext"
+  match:
+    kind: new
+    callee:
+      attribute: ["OpenSSL::SSL::SSLContext", new]
+      binding_origin: imported
+  match_examples:
+  - name: OpenSSL SSL context constructor
+    code: |
+      require "openssl"
+      context = OpenSSL::SSL::SSLContext.new
+  - name: same terminal local context constructor negative
+    code: |
+      require "openssl"
+      module Local
+        class SSLContext; end
+      end
+      context = Local::SSLContext.new
+    expect_no_match: true
+  - name: lexically nearer OpenSSL constant is not the imported package
+    code: |
+      require "openssl"
+      module Application
+        module OpenSSL
+          module SSL
+            class SSLContext; end
+          end
+        end
+        context = OpenSSL::SSL::SSLContext.new
+      end
+    expect_no_match: true
+  description: "OpenSSL::SSL::SSLContext.new returns an exact TLS-context receiver. Typing-only; never a finding."
+
+- id: ruby.typing.active_record_connection
+  enabled: true
+  language: ruby
+  packages: [activerecord]
+  imports: [activerecord]
+  returns_type: ActiveRecordConnection
+  match:
+    kind: call
+    callee:
+      attribute: ["ActiveRecord::Base", connection]
+      binding_origin: imported
+  match_examples:
+  - name: ActiveRecord connection factory
+    code: |
+      require "activerecord"
+      arbitrary_handle = ActiveRecord::Base.connection
+    expect_match_text: ["ActiveRecord::Base.connection"]
+  - name: unrelated connection factory is not ActiveRecord
+    code: |
+      require "activerecord"
+      module ActiveRecord
+        class Base
+          def self.connection = Object.new
+        end
+      end
+      arbitrary_handle = ActiveRecord::Base.connection
+    expect_no_match: true
+  description: "ActiveRecord::Base.connection returns a database connection receiver. Typing-only."
+
+- id: ruby.typing.sqlite3_database
+  enabled: true
+  language: ruby
+  packages: [sqlite3]
+  imports: [sqlite3]
+  returns_type: Sqlite3Database
+  match:
+    kind: new
+    callee:
+      attribute: ["SQLite3::Database", new]
+      binding_origin: imported
+  match_examples:
+  - name: SQLite3 database constructor
+    code: |
+      require "sqlite3"
+      arbitrary_handle = SQLite3::Database.new("app.db")
+    expect_match_text: ["SQLite3::Database.new"]
+  - name: lexically shadowed SQLite3 database is not the imported provider
+    code: |
+      require "sqlite3"
+      module Application
+        module SQLite3
+          class Database; end
+        end
+        arbitrary_handle = SQLite3::Database.new("app.db")
+      end
+    expect_no_match: true
+  description: "SQLite3::Database.new returns an exact sqlite3 database receiver. Typing-only; local constants with the same terminal names remain excluded."
+
+- id: ruby.typing.mysql2_client
+  enabled: true
+  language: ruby
+  packages: [mysql2]
+  imports: [mysql2]
+  returns_type: Mysql2Client
+  match:
+    kind: new
+    callee:
+      attribute: ["Mysql2::Client", new]
+      binding_origin: imported
+  match_examples:
+  - name: Mysql2 client constructor
+    code: |
+      require "mysql2"
+      arbitrary_handle = Mysql2::Client.new
+    expect_match_text: ["Mysql2::Client.new"]
+  - name: unrelated client constructor is not Mysql2
+    code: |
+      require "mysql2"
+      module Mysql2
+        class Client; end
+      end
+      arbitrary_handle = Mysql2::Client.new
+    expect_no_match: true
+  description: "Mysql2::Client.new returns a MySQL client receiver. Typing-only."
+
+- id: ruby.typing.openai_client
+  enabled: true
+  language: ruby
+  packages: [ruby-openai]
+  imports: [ruby-openai]
+  returns_type: OpenAIClient
+  match:
+    kind: new
+    callee:
+      attribute: ["OpenAI::Client", new]
+      binding_origin: imported
+  match_examples:
+  - name: OpenAI client constructor
+    code: |
+      require "ruby-openai"
+      arbitrary_handle = OpenAI::Client.new
+    expect_match_text: ["OpenAI::Client.new"]
+  - name: unrelated client constructor is not OpenAI
+    code: |
+      require "ruby-openai"
+      module OpenAI
+        class Client; end
+      end
+      arbitrary_handle = OpenAI::Client.new
+    expect_no_match: true
+  description: "OpenAI::Client.new returns a ruby-openai client receiver. Typing-only."
+
+- id: ruby.typing.anthropic_client
+  enabled: true
+  language: ruby
+  packages: [anthropic]
+  imports: [anthropic]
+  returns_type: AnthropicClient
+  match:
+    kind: new
+    callee:
+      attribute: ["Anthropic::Client", new]
+      binding_origin: imported
+  match_examples:
+  - name: Anthropic client constructor
+    code: |
+      require "anthropic"
+      arbitrary_handle = Anthropic::Client.new
+    expect_match_text: ["Anthropic::Client.new"]
+  - name: unrelated client constructor is not Anthropic
+    code: |
+      require "anthropic"
+      module Anthropic
+        class Client; end
+      end
+      arbitrary_handle = Anthropic::Client.new
+    expect_no_match: true
+  description: "Anthropic::Client.new returns an Anthropic client receiver. Typing-only."
+
+- id: ruby.typing.bedrock_runtime_client
+  enabled: true
+  language: ruby
+  packages: [aws-sdk-bedrockruntime]
+  imports: [aws-sdk-bedrockruntime]
+  returns_type: BedrockRuntimeClient
+  match:
+    kind: new
+    callee:
+      attribute: ["Aws::BedrockRuntime::Client", new]
+      binding_origin: imported
+  match_examples:
+  - name: Bedrock Runtime client constructor
+    code: |
+      require "aws-sdk-bedrockruntime"
+      arbitrary_handle = Aws::BedrockRuntime::Client.new
+    expect_match_text: ["Aws::BedrockRuntime::Client.new"]
+  - name: unrelated client constructor is not Bedrock
+    code: |
+      require "aws-sdk-bedrockruntime"
+      module Aws
+        module BedrockRuntime
+          class Client; end
+        end
+      end
+      arbitrary_handle = Aws::BedrockRuntime::Client.new
+    expect_no_match: true
+  description: "Aws::BedrockRuntime::Client.new returns a Bedrock Runtime client receiver. Typing-only."
+
+- id: ruby.typing.nokogiri_xml_node
+  enabled: true
+  language: ruby
+  packages: [nokogiri]
+  imports: [nokogiri]
+  returns_type: NokogiriNode
+  match:
+    kind: call
+    callee:
+      attribute: [Nokogiri, XML]
+      binding_origin: imported
+  match_examples:
+  - name: Nokogiri XML document factory
+    code: |
+      require "nokogiri"
+      arbitrary_node = Nokogiri::XML("<root/>")
+    expect_match_text: ["Nokogiri.XML"]
+  - name: unrelated XML factory is not Nokogiri
+    code: |
+      require "nokogiri"
+      module Nokogiri
+        def self.XML(value) = value
+      end
+      arbitrary_node = Nokogiri::XML("<root/>")
+    expect_no_match: true
+  description: "Nokogiri::XML returns a parsed node/document receiver. Typing-only."
+
+- id: ruby.typing.nokogiri_html_node
+  enabled: true
+  language: ruby
+  packages: [nokogiri]
+  imports: [nokogiri]
+  returns_type: NokogiriNode
+  match:
+    kind: call
+    callee:
+      attribute: [Nokogiri, HTML]
+      binding_origin: imported
+  match_examples:
+  - name: Nokogiri HTML document factory
+    code: |
+      require "nokogiri"
+      arbitrary_node = Nokogiri::HTML("<html></html>")
+    expect_match_text: ["Nokogiri.HTML"]
+  - name: unrelated HTML factory is not Nokogiri
+    code: |
+      require "nokogiri"
+      module Nokogiri
+        def self.HTML(value) = value
+      end
+      arbitrary_node = Nokogiri::HTML("<html></html>")
+    expect_no_match: true
+  description: "Nokogiri::HTML returns a parsed node/document receiver. Typing-only."
+
+- id: ruby.typing.serialport_new
+  enabled: true
+  language: ruby
+  packages: [serialport]
+  imports: [serialport]
+  returns_type: SerialPort
+  match:
+    kind: new
+    callee:
+      attribute: [SerialPort, new]
+      binding_origin: imported
+  match_examples:
+  - name: SerialPort constructor return type
+    code: |
+      require "serialport"
+      port = SerialPort.new("/dev/ttyUSB0", 115200)
+      port.read(128)
+    expect_match_text: [SerialPort.new]
+  - name: unrelated serial constructor is not typed
+    code: |
+      require "serialport"
+      class SerialPort
+        def self.new(path, speed = nil); Object.new; end
+      end
+      port = SerialPort.new("local")
+    expect_no_match: true
+  description: "serialport SerialPort.new returns a SerialPort receiver. Typing-only; never a finding."

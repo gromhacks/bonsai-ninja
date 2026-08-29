@@ -13,7 +13,7 @@ fn imports_for(source: &str) -> Vec<bonsai_lang_api::ImportSpec> {
 
 #[test]
 fn namespace_use_emits_implicit_local_binding_from_ast() {
-    let imports = imports_for("<?php use App\\Middle; use App\\Leaf as L;");
+    let imports = imports_for("<?php use App\\Middle; use App\\Leaf as L; use Slim\\Factory\\AppFactory;");
 
     assert!(imports
         .iter()
@@ -21,6 +21,9 @@ fn namespace_use_emits_implicit_local_binding_from_ast() {
     assert!(imports
         .iter()
         .any(|import| import.module == "App\\Leaf" && import.alias.as_deref() == Some("L")));
+    assert!(imports.iter().any(|import| {
+        import.module == "Slim\\Factory\\AppFactory" && import.alias.as_deref() == Some("AppFactory")
+    }));
 }
 
 #[test]

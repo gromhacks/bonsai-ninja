@@ -8,6 +8,7 @@
     kind: call
     callee:
       attribute: [Factory, new]
+      binding_origin: imported
   match_examples:
   - name: sxd xpath constructor returns Factory
     code: |
@@ -16,5 +17,106 @@
           let factory = Factory::new();
           let _ = factory.build("//safe");
       }
-    expect_match_text: [Factory::new]
+    expect_match_text: ["Factory::new"]
+  - name: local Factory constructor is not sxd-xpath
+    code: |
+      use sxd_xpath::Factory as XPathFactory;
+      struct Factory;
+      impl Factory { fn new() -> Self { Self } }
+      fn example() { let factory = Factory::new(); consume(factory); }
+    expect_no_match: true
   description: "`sxd_xpath::Factory::new()` returns `Factory`; typing-only metadata lets receiver-typed XPath rules resolve local bindings without hardcoded API knowledge in the engine."
+
+- id: rust.typing.std_process_command
+  enabled: true
+  language: rust
+  packages: [std]
+  imports: ["std::process::Command"]
+  returns_type: StdProcessCommand
+  match:
+    kind: call
+    callee:
+      attribute: [Command, new]
+      binding_origin: imported
+  match_examples:
+  - name: imported std process constructor returns command builder
+    code: |
+      use std::process::Command;
+      fn example() {
+          let mut command = Command::new("echo");
+          command.arg("safe");
+      }
+    expect_match_text: ["Command::new"]
+  - name: locally shadowed Command constructor is not std process
+    code: |
+      use std::process::Command as StdCommand;
+      struct Command;
+      impl Command { fn new(_: &str) -> Self { Self } }
+      fn example() { let command = Command::new("echo"); consume(command); }
+    expect_no_match: true
+  description: "An imported `std::process::Command::new` call returns a process-command builder. The provider and return type remain rule data; shared typing only consumes the exact imported call identity."
+
+- id: rust.typing.std_process_command_arg_state
+  enabled: true
+  language: rust
+  packages: [std]
+  imports: ["std::process::Command"]
+  match:
+    kind: call
+    callee:
+      name: arg
+  constraints:
+  - receiver_type_in: [StdProcessCommand]
+  taint_semantics:
+    taint_receiver_from_args: true
+  match_examples:
+  - name: std process builder stores an argument in receiver state
+    code: |
+      use std::process::Command;
+      fn example(input: &str) {
+          let mut command = Command::new("echo");
+          command.arg(input);
+      }
+    expect_match_text: [command.arg]
+  - name: unrelated typed receiver arg method is not std process state
+    code: |
+      use std::process::Command as StdCommand;
+      struct Builder;
+      impl Builder { fn arg(&mut self, _: &str) {} }
+      fn example(input: &str) {
+          let mut command: Builder = Builder;
+          command.arg(input);
+      }
+    expect_no_match: true
+  description: "`Command::arg` stores its value in an exactly typed std-process receiver. This typing-only mutation summary is compiled to exact call spans and never emits a finding."
+
+- id: rust.typing.quick_xml_reader_from_str
+  enabled: true
+  language: rust
+  packages: [quick-xml]
+  imports: [quick_xml]
+  returns_type: QuickXmlReader
+  match:
+    kind: call
+    callee:
+      attribute: [Reader, from_str]
+      binding_origin: imported
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: imported quick-xml reader retains input provenance
+    code: |
+      use quick_xml::Reader;
+      fn parse(input: &str) {
+          let reader = Reader::from_str(input);
+          consume(reader);
+      }
+    expect_match_text: [Reader::from_str]
+  - name: local Reader factory is not quick-xml
+    code: |
+      use quick_xml::Reader as QuickXmlReader;
+      struct Reader;
+      impl Reader { fn from_str(_: &str) -> Self { Self } }
+      fn parse(input: &str) { consume(Reader::from_str(input)); }
+    expect_no_match: true
+  description: "Imported `quick_xml::Reader::from_str` returns a reader whose value state comes from its input. The package identity, return type, and transfer semantics stay in rule data."

@@ -1,0 +1,62 @@
+- id: scala.typing.play_action_request_callback
+  enabled: true
+  language: scala
+  packages: [play.api, com.typesafe.play]
+  imports: [play.api.mvc]
+  manifests: [build.sbt]
+  callback_arg_index: 0
+  callback_param_types:
+  - [play.api.mvc.Request, Request]
+  match:
+    kind: call
+    callee:
+      name: Action
+      binding_origin: imported
+  match_examples:
+  - name: Play Action request callback
+    code: |
+      import play.api.mvc._
+      object Routes {
+        val action = Action { request => request.getQueryString("q") }
+      }
+    expect_match_text: [Action]
+  - name: local Action callable is not the Play callback contract
+    code: |
+      import play.api.mvc._
+      object Action { def apply(callback: String => String): String = callback("") }
+      object Routes { val action = Action { value => value } }
+    expect_no_match: true
+  description: "Play Action supplies a Request to its inline callback. Typing-only compiler model; it never emits a finding."
+
+- id: scala.typing.play_action_async_request_callback
+  enabled: true
+  language: scala
+  packages: [play.api, com.typesafe.play]
+  imports: [play.api.mvc]
+  manifests: [build.sbt]
+  callback_arg_index: 0
+  callback_param_types:
+  - [play.api.mvc.Request, Request]
+  match:
+    kind: call
+    callee:
+      attribute: [Action, async]
+      binding_origin: imported
+  match_examples:
+  - name: Play asynchronous Action request callback
+    code: |
+      import play.api.mvc._
+      object Routes {
+        val action = Action.async { inbound => service(inbound) }
+        def service(value: Any) = scala.concurrent.Future.successful(value.toString)
+      }
+    expect_match_text: [Action.async]
+  - name: local asynchronous Action callable does not receive Play typing
+    code: |
+      import play.api.mvc._
+      object Action {
+        def async(callback: String => String): String = callback("")
+      }
+      object Routes { val action = Action.async { value => value } }
+    expect_no_match: true
+  description: "Imported Play Action.async supplies a Request to its inline callback. Typing-only compiler model; it never emits a finding."

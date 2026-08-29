@@ -11,8 +11,9 @@ fn ws_path() -> PathBuf {
     // Tests run with the crate dir as CWD; the repo-root examples live two
     // levels up.
     let mut p = std::env::current_dir().expect("cwd");
-    p.push("../../examples/python/micro");
-    p.canonicalize().expect("examples/python/micro not found")
+    p.push("../../test-fixtures/languages/python/micro");
+    p.canonicalize()
+        .expect("test-fixtures/languages/python/micro not found")
 }
 
 fn bin_path() -> PathBuf {
@@ -477,9 +478,22 @@ fn inspect_to_filter_returns_only_bounded_matching_callable_units() {
     if require_binary_built().is_none() {
         return;
     }
-    let mut ws = std::env::current_dir().expect("cwd");
-    ws.push("../../examples/python");
-    let ws = ws.canonicalize().expect("examples/python not found");
+    let ws = tempdir_for_test("inspect-bounded-to-filter");
+    std::fs::write(
+        ws.join("models.py"),
+        r#"import pickle
+
+def load_model(data):
+    return pickle.loads(data)
+
+def load_from_pickle(data):
+    return pickle.loads(data)
+
+def predict(data):
+    return load_model(data)
+"#,
+    )
+    .expect("write bounded-filter fixture");
 
     let out = run(&[
         "inspect",
@@ -498,6 +512,7 @@ fn inspect_to_filter_returns_only_bounded_matching_callable_units() {
         !out.contains("predict →") && !out.contains("predict ->"),
         "a filtered inspect row must not recursively expand upstream paths:\n{out}"
     );
+    let _ = std::fs::remove_dir_all(ws);
 }
 
 #[test]
@@ -830,7 +845,7 @@ fn inspect_call_hit_owns_one_bounded_containing_callable_unit() {
         p.push("../..");
         p.canonicalize().expect("repo root")
     };
-    let ws = repo_root.join("examples/kotlin/micro");
+    let ws = repo_root.join("test-fixtures/languages/kotlin/micro");
     let out = run(&["inspect", ws.to_str().unwrap(), "--query", "exec", "--graph-flow"]);
     assert!(
         out.contains("FLOW 2") && out.contains("runAdminCommand"),

@@ -1,0 +1,148 @@
+# Non-finding Dart core-library summaries. Receiver constraints are compiler
+# facts; same-spelled methods on application classes do not acquire these
+# transfer semantics. Return typing uses exact call identities so later calls
+# in a flattened selector chain can consume the prior result safely.
+- id: dart.typing.list_add_all_mutates_receiver
+  enabled: true
+  language: dart
+  match:
+    kind: call
+    callee: {name: addAll}
+  constraints:
+  - receiver_type_in: [List]
+  taint_semantics:
+    taint_receiver_from_args: true
+  match_examples:
+  - name: Dart List addAll stores iterable elements in the list
+    code: |
+      void collect(String input) {
+        final values = <String>[]..addAll([input]);
+      }
+    expect_match_text: [values.addAll]
+  - name: same-spelled application method is not Dart List
+    code: 'class Bag { void addAll(Object x) {} } void collect(Bag bag, Object x) { bag.addAll(x); }'
+    expect_no_match: true
+  description: "Dart List.addAll stores argument elements in compiler-typed receiver state. Typing-only transfer summary; never a finding."
+
+- id: dart.typing.iterable_map_result
+  enabled: true
+  language: dart
+  returns_type: Iterable
+  match:
+    kind: call
+    callee: {name: map}
+  constraints:
+  - receiver_type_in: [Iterable, List, Set]
+  taint_semantics: {call_result_passthrough_receiver: true}
+  match_examples:
+  - name: Dart Iterable map derives its result from receiver elements
+    code: 'Iterable<String> transform(List<String> values) => values.map((value) => value.trim());'
+    expect_match_text: [values.map]
+  - name: unrelated map method is not an Iterable transfer
+    code: 'class Mapper { Object map(Object f) => f; } Object transform(Mapper m, Object f) => m.map(f);'
+    expect_no_match: true
+  description: "Dart Iterable.map returns an iterable derived from receiver elements. Typing-only transfer summary; never a finding."
+
+- id: dart.typing.iterable_where_result
+  enabled: true
+  language: dart
+  returns_type: Iterable
+  match:
+    kind: call
+    callee: {name: where}
+  constraints:
+  - receiver_type_in: [Iterable, List, Set]
+  taint_semantics: {call_result_passthrough_receiver: true}
+  match_examples:
+  - name: Dart Iterable where preserves selected receiver elements
+    code: 'Iterable<String> select(List<String> values) => values.where((value) => value.isNotEmpty);'
+    expect_match_text: [values.where]
+  description: "Dart Iterable.where preserves selected receiver elements. Typing-only transfer summary; never a finding."
+
+- id: dart.typing.iterable_fold_result
+  enabled: true
+  language: dart
+  match:
+    kind: call
+    callee: {name: fold}
+  constraints:
+  - receiver_type_in: [Iterable, List, Set]
+  taint_semantics: {call_result_passthrough_receiver: true}
+  match_examples:
+  - name: Dart Iterable fold derives its result from receiver elements
+    code: "String join(List<String> values) => values.fold<String>('', (a, b) => '$a$b');"
+    expect_match_text: [values.fold]
+  description: "Dart Iterable.fold reduces receiver elements into its result. Typing-only transfer summary; never a finding."
+
+- id: dart.typing.string_trim
+  enabled: true
+  language: dart
+  returns_type: String
+  match: {kind: call, callee: {name: trim}}
+  constraints:
+  - receiver_type_in: [String]
+  taint_semantics: {call_result_passthrough_receiver: true}
+  match_examples:
+  - name: Dart String trim preserves value provenance
+    code: 'String normalize(String input) => input.trim();'
+    expect_match_text: [input.trim]
+  - name: same-spelled application method is not Dart String
+    code: 'class Token { Token trim() => this; } Token normalize(Token input) => input.trim();'
+    expect_no_match: true
+  description: "Dart String.trim returns a String derived from the receiver. Typing-only transfer summary; never a finding."
+
+- id: dart.typing.string_trim_left
+  enabled: true
+  language: dart
+  returns_type: String
+  match: {kind: call, callee: {name: trimLeft}}
+  constraints:
+  - receiver_type_in: [String]
+  taint_semantics: {call_result_passthrough_receiver: true}
+  match_examples:
+  - name: Dart String trimLeft preserves value provenance
+    code: 'String normalize(String input) => input.trimLeft();'
+    expect_match_text: [input.trimLeft]
+  description: "Dart String.trimLeft returns a String derived from the receiver. Typing-only transfer summary; never a finding."
+
+- id: dart.typing.string_trim_right
+  enabled: true
+  language: dart
+  returns_type: String
+  match: {kind: call, callee: {name: trimRight}}
+  constraints:
+  - receiver_type_in: [String]
+  taint_semantics: {call_result_passthrough_receiver: true}
+  match_examples:
+  - name: Dart String trimRight preserves value provenance
+    code: 'String normalize(String input) => input.trimRight();'
+    expect_match_text: [input.trimRight]
+  description: "Dart String.trimRight returns a String derived from the receiver. Typing-only transfer summary; never a finding."
+
+- id: dart.typing.string_to_lower_case
+  enabled: true
+  language: dart
+  returns_type: String
+  match: {kind: call, callee: {name: toLowerCase}}
+  constraints:
+  - receiver_type_in: [String]
+  taint_semantics: {call_result_passthrough_receiver: true}
+  match_examples:
+  - name: chained Dart String normalization preserves value provenance
+    code: 'String normalize(String input) => input.trim().toLowerCase();'
+    expect_match_text: [input.trim().toLowerCase]
+  description: "Dart String.toLowerCase returns a String derived from the receiver. Typing-only transfer summary; never a finding."
+
+- id: dart.typing.string_to_upper_case
+  enabled: true
+  language: dart
+  returns_type: String
+  match: {kind: call, callee: {name: toUpperCase}}
+  constraints:
+  - receiver_type_in: [String]
+  taint_semantics: {call_result_passthrough_receiver: true}
+  match_examples:
+  - name: Dart String toUpperCase preserves value provenance
+    code: 'String normalize(String input) => input.toUpperCase();'
+    expect_match_text: [input.toUpperCase]
+  description: "Dart String.toUpperCase returns a String derived from the receiver. Typing-only transfer summary; never a finding."

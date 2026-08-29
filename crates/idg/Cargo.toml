@@ -20,6 +20,7 @@ path = "src/lib.rs"
 ahash.workspace = true
 bonsai_callgraph.workspace = true
 bonsai_common.workspace = true
+bonsai_cfg.workspace = true
 bonsai_diagnostics.workspace = true
 bonsai_factstore.workspace = true
 bonsai_hash.workspace = true

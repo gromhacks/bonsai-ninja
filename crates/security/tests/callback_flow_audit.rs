@@ -24,7 +24,10 @@ fn repo_root() -> PathBuf {
 }
 
 fn fixture_root(lang: &str) -> Option<PathBuf> {
-    let p = repo_root().join("examples").join(lang).join("callback_flow");
+    let p = repo_root()
+        .join("test-fixtures/languages")
+        .join(lang)
+        .join("callback_flow");
     if !p.is_dir() {
         return None;
     }
@@ -299,6 +302,146 @@ fn node_source_callback_inline_function_reaches_sink() {
         matching,
         "fs.readFile must deliver its rule-declared data parameter into an inline callback: {:#?}",
         report.findings
+    );
+}
+
+#[test]
+fn kotlin_trailing_route_lambda_source_reaches_enclosing_cross_file_call() {
+    let dir = std::env::temp_dir().join("bonsai_kotlin_route_lambda_source_audit");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("Routes.kt"),
+        r#"import io.ktor.server.application.*
+import io.ktor.server.routing.*
+
+fun orderRoutes(repo: OrderRepo) {
+    route("/orders") {
+        get {
+            val query = call.request.queryParameters["q"] ?: ""
+            repo.listOrders(query)
+        }
+    }
+}
+"#,
+    )
+    .expect("write routes");
+    std::fs::write(
+        dir.join("OrderRepo.kt"),
+        r#"import java.sql.Connection
+
+class OrderRepo(private val connection: Connection) {
+    fun listOrders(query: String) {
+        connection.createStatement().executeQuery("SELECT * FROM orders WHERE name = '$query'")
+    }
+}
+"#,
+    )
+    .expect("write repository");
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack");
+    let ws = bonsai_workspace::Workspace::index(&dir, registry).expect("index");
+    let sources =
+        bonsai_security::source_inventory(&ws, &pack, bonsai_security::SecurityInventoryOptions::default())
+            .expect("source inventory");
+    assert!(
+        sources
+            .iter()
+            .any(|source| source.rule_id == "kotlin.source.ktor_request_query_parameters"),
+        "Ktor queryParameters source did not match: {sources:#?}"
+    );
+    let sinks =
+        bonsai_security::sink_inventory(&ws, &pack, bonsai_security::SecurityInventoryOptions::default())
+            .expect("sink inventory");
+    assert!(
+        sinks
+            .iter()
+            .any(|sink| sink.rule_id == "kotlin.sqli.connection_createstatement_execute"),
+        "JDBC sink did not match: {sinks:#?}"
+    );
+    let report = bonsai_security::run_taint_analysis(&ws, &pack, Default::default()).expect("taint");
+    let matching = report.findings.iter().any(|finding| {
+        finding.finding.source.rule_id == "kotlin.source.ktor_request_query_parameters"
+            && finding.finding.sink.rule_id == "kotlin.sqli.connection_createstatement_execute"
+            && finding
+                .finding
+                .chain_display
+                .iter()
+                .any(|name| name.starts_with("<lambda@"))
+            && finding
+                .finding
+                .chain_display
+                .iter()
+                .any(|name| name == "listOrders")
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        matching,
+        "a source inside a trailing route lambda must retain the callback's exact cross-file edges; \
+         sources={sources:#?}; sinks={sinks:#?}; findings={:#?}",
+        report.findings,
+    );
+}
+
+#[test]
+fn java_route_callback_source_reaches_enclosing_cross_file_call() {
+    let dir = std::env::temp_dir().join("bonsai_java_route_callback_source_audit");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("Routes.java"),
+        r#"import io.vertx.ext.web.Router;
+
+class Routes {
+    void register(Router router, CommandService service) {
+        router.get("/run").handler(ctx -> {
+            String command = ctx.request().getParam("cmd");
+            service.run(command);
+        });
+    }
+}
+"#,
+    )
+    .expect("write routes");
+    std::fs::write(
+        dir.join("CommandService.java"),
+        r#"class CommandService {
+    void run(String command) throws Exception {
+        Runtime.getRuntime().exec(command);
+    }
+}
+"#,
+    )
+    .expect("write service");
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack");
+    let ws = bonsai_workspace::Workspace::index(&dir, registry).expect("index");
+    let sources =
+        bonsai_security::source_inventory(&ws, &pack, bonsai_security::SecurityInventoryOptions::default())
+            .expect("source inventory");
+    assert!(
+        sources
+            .iter()
+            .any(|source| source.rule_id == "java.source.vertx_routingcontext_request_getparam"),
+        "Vert.x callback receiver source did not match: {sources:#?}"
+    );
+    let report = bonsai_security::run_taint_analysis(&ws, &pack, Default::default()).expect("taint");
+    let matching = report.findings.iter().any(|finding| {
+        finding.finding.source.rule_id == "java.source.vertx_routingcontext_request_getparam"
+            && finding.finding.sink.rule_id == "java.cmdi.runtime_exec"
+            && finding
+                .finding
+                .chain_display
+                .iter()
+                .any(|name| name.starts_with("<lambda@"))
+            && finding.finding.chain_display.iter().any(|name| name == "run")
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        matching,
+        "a source inside a Java route callback must retain the callback's exact cross-file edge; \
+         sources={sources:#?}; findings={:#?}",
+        report.findings,
     );
 }
 

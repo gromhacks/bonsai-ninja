@@ -16,7 +16,6 @@
   - name: declared shape
     code: |
       import AWSCore // aws-sdk-swift
-      import AWSCore // aws-sdk-swift
       func test(input: String) { let amount = 1; sendMessage(input) }
   - name: literal send message negative
     code: |
@@ -27,17 +26,3 @@
 
   imports:
   - AWSCore
-- id: swift.queue.publish
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: queue-injection
-  severity: high
-  packages: [AWSClientRuntime]
-  cwe: [CWE-20]
-  match:
-    kind: call
-    callee:
-      name: publish
-  description: "Disabled - cloud publish is real queue fanout, but bare `publish` is too generic across Swift clients and app code."

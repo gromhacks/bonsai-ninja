@@ -1,22 +1,17 @@
 //! Cross-language closure capture (spec §Phase-3).
 //!
-//! Verifies that closure bodies see enclosing-scope variables. The
-//! kit's `is_closure_arg` inlines lambda / closure bodies into the
-//! enclosing function's flow events, so the engine's per-function
-//! `last_writer` map naturally extends across the closure boundary.
-//! This test validates the inlining holds for every language with
-//! syntactic closures.
+//! Verifies that closure bodies see enclosing-scope variables while retaining
+//! their own callable identity. Passing a closure is a callable-value fact,
+//! not proof that the enclosing function executes the closure body.
 
-use bonsai_lang_api::{Decl, FlowEvent, LanguageAdapter};
-use bonsai_workspace::Workspace;
+use bonsai_lang_api::{FlowEvent, LanguageAdapter};
 use std::sync::Arc;
 
 struct Case {
     lang: &'static str,
     fixture_path: &'static str,
     fixture_source: &'static str,
-    /// The outer function whose flow events are inspected. Closure
-    /// body events should appear inlined under this decl.
+    /// The lexical owner that creates and passes the closure.
     function_name: &'static str,
     /// A bare identifier the closure body reads. We assert at least
     /// one event under the function references this name.
@@ -27,18 +22,6 @@ fn adapter_for_lang(lang: &str) -> Option<Arc<dyn LanguageAdapter>> {
     bonsai_adapters::all_adapters()
         .into_iter()
         .find(|a| a.language_id().as_str() == lang)
-}
-
-fn find_decl(ws: &Workspace, name: &str) -> Option<Decl> {
-    let global = ws.db().global_index();
-    for file in global.all_files() {
-        for decl in global.decls_in(file) {
-            if decl.name == name {
-                return Some(decl.clone());
-            }
-        }
-    }
-    None
 }
 
 /// True when the flow-event tree contains a reference to `name` via
@@ -105,6 +88,35 @@ fn matches_name(event: &FlowEvent, name: &str) -> bool {
         }
         _ => false,
     }
+}
+
+fn contains_call(events: &[FlowEvent], expected: &str) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Call { name, .. } => {
+            name == expected
+                || name.ends_with(&format!(".{expected}"))
+                || name.ends_with(&format!("::{expected}"))
+        }
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => contains_call(then_events, expected) || contains_call(else_events, expected),
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            contains_call(body, expected)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            contains_call(body, expected)
+                || contains_call(catch_events, expected)
+                || contains_call(finally_events, expected)
+        }
+        _ => false,
+    })
 }
 
 fn cases() -> Vec<Case> {
@@ -208,7 +220,7 @@ func sink(_ a: String, _ b: Int) {}
 }
 
 #[test]
-fn closure_capture_inlined_across_languages() {
+fn closure_capture_retains_callable_ownership_across_languages() {
     let mut failures: Vec<String> = Vec::new();
     for case in cases() {
         let Some(adapter) = adapter_for_lang(case.lang) else {
@@ -216,23 +228,94 @@ fn closure_capture_inlined_across_languages() {
             continue;
         };
         let ws = bonsai_testkit::workspace_with(vec![adapter], &[(case.fixture_path, case.fixture_source)]);
-        let Some(decl) = find_decl(&ws, case.function_name) else {
+        let global = ws.db().global_index();
+        let Some(outer) = global
+            .all_files()
+            .flat_map(|file| global.decls_in(file))
+            .find(|decl| decl.name == case.function_name)
+            .cloned()
+        else {
             failures.push(format!(
                 "{}: function `{}` not found",
                 case.lang, case.function_name
             ));
             continue;
         };
-        if !references_name(&decl.flow_events, case.captured_name) {
+        if contains_call(&outer.flow_events, "sink") {
             failures.push(format!(
-                "{}: enclosing function `{}` does not surface closure-captured name `{}`",
-                case.lang, case.function_name, case.captured_name
+                "{}: closure sink leaked into enclosing function `{}`",
+                case.lang, case.function_name
+            ));
+            continue;
+        }
+
+        let outer_region = outer.body_span.unwrap_or(outer.span);
+        let nested = global
+            .all_files()
+            .flat_map(|file| global.decls_in(file))
+            .filter(|decl| decl.symbol != outer.symbol)
+            .filter(|decl| {
+                decl.span.file == outer_region.file
+                    && decl.span.start >= outer_region.start
+                    && decl.span.end <= outer_region.end
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let closure = nested
+            .iter()
+            .find(|decl| {
+                contains_call(&decl.flow_events, "sink")
+                    && references_name(&decl.flow_events, case.captured_name)
+            })
+            .cloned();
+        let Some(closure) = closure else {
+            let inventory = nested
+                .iter()
+                .map(|decl| {
+                    format!(
+                        "{}(sink={}, capture={})",
+                        decl.name,
+                        contains_call(&decl.flow_events, "sink"),
+                        references_name(&decl.flow_events, case.captured_name)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            failures.push(format!(
+                "{}: no nested callable owns both sink and captured `{}` facts; nested=[{}]",
+                case.lang, case.captured_name, inventory
+            ));
+            continue;
+        };
+
+        let outer_func = bonsai_common::FuncId::new(outer.symbol.raw());
+        let closure_func = bonsai_common::FuncId::new(closure.symbol.raw());
+        let graph = ws.cached_resolved_call_graph();
+        if !graph
+            .callable_arguments()
+            .any(|argument| argument.caller == outer_func && argument.target == closure_func)
+        {
+            let argument_facts = global
+                .file_index(outer.span.file)
+                .map(|index| format!("{:#?}", index.call_argument_values))
+                .unwrap_or_else(|| "<missing file index>".to_string());
+            failures.push(format!(
+                "{}: outer -> closure callable-value relation is missing; closure_span={:?}; relations={:#?}; argument_facts={argument_facts}",
+                case.lang,
+                closure.span,
+                graph.callable_argument_records()
+            ));
+        }
+        if graph.callees_of(outer_func).any(|edge| edge.to == closure_func) {
+            failures.push(format!(
+                "{}: passing the closure manufactured an execution edge from `{}`",
+                case.lang, case.function_name
             ));
         }
     }
     assert!(
         failures.is_empty(),
-        "closure capture gaps ({} total):\n{}",
+        "closure ownership/capture gaps ({} total):\n{}",
         failures.len(),
         failures.join("\n")
     );

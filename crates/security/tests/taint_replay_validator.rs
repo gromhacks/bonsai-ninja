@@ -36,6 +36,32 @@ fn taint_miss_ids(report: &bonsai_security::PackValidationReport) -> Vec<String>
         .collect()
 }
 
+fn validate_checked_in_rules(rule_ids: &[&str]) -> bonsai_security::PackValidationReport {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../security-patterns");
+    let mut pack = load_rulepack(&root).expect("checked-in rulepack loads");
+    let languages = rule_ids
+        .iter()
+        .filter_map(|id| id.split('.').next())
+        .collect::<std::collections::BTreeSet<_>>();
+    pack.packs
+        .retain(|language, _| languages.contains(language.as_str()));
+    for language_pack in pack.packs.values_mut() {
+        language_pack.sources.clear();
+        language_pack.sanitizers.clear();
+        language_pack
+            .sinks
+            .retain(|rule| rule_ids.contains(&rule.id.as_str()));
+    }
+    validate_pack(
+        &pack,
+        &PackInventoryOptions {
+            taint_replay_examples: true,
+            ..PackInventoryOptions::default()
+        },
+        bonsai_adapters::all_languages_registry(),
+    )
+}
+
 /// `arg_tainted` rule whose positive example flows a function parameter
 /// (an inferred source) into the sink. Both a `--validate` schema pass
 /// and the deep taint replay must accept it.
@@ -160,6 +186,39 @@ const PYTHON_PROJECTED_WRITE_FIRES: &str = r#"- id: python.test.response_header_
   description: An exact projected response-header write retains its tainted RHS.
 "#;
 
+const SWIFT_TYPING_TRANSFER: &str = r#"- id: swift.typing.test_process_arguments
+  enabled: true
+  language: swift
+  packages: [Foundation]
+  imports: [Foundation]
+  match:
+    kind: write
+    target:
+      name: arguments
+      receiver_type_in: [Process]
+  constraints:
+  - arg_tainted: {index: 0}
+  taint_semantics:
+    taint_receiver_from_args: true
+  match_examples:
+  - name: exact typed receiver write
+    code: |
+      import Foundation
+      func configure(_ process: Process, input: String) {
+          process.arguments = ["-c", input]
+      }
+    expect_match_text: [process.arguments]
+  - name: local binding does not establish receiver state
+    code: |
+      import Foundation
+      func configure(input: String) {
+          let arguments = [input]
+          consume(arguments)
+      }
+    expect_no_match: true
+  description: Non-finding compiler transfer model for Process receiver state.
+"#;
+
 #[test]
 fn taint_replay_accepts_firing_example() {
     let tmp = TempDir::new("replay-fires");
@@ -216,6 +275,27 @@ fn taint_replay_accepts_exact_projected_write() {
 }
 
 #[test]
+fn taint_replay_validates_nonfinding_typing_endpoint_without_demanding_a_finding() {
+    let tmp = TempDir::new("replay-swift-typing-transfer");
+    write(
+        &tmp.path().join("langs/swift/typing/receiver_state.yml"),
+        SWIFT_TYPING_TRANSFER,
+    );
+    let report = validate(tmp.path(), true);
+    assert!(
+        !report.issues.iter().any(|issue| {
+            issue.rule_id.as_deref() == Some("swift.typing.test_process_arguments")
+                && matches!(
+                    issue.code,
+                    "match-example-taint-miss" | "match-example-owner-miss"
+                )
+        }),
+        "a typing-only transfer must prove its compiler endpoint without being treated as a finding: {:#?}",
+        report.issues
+    );
+}
+
+#[test]
 fn default_validate_skips_taint_examples() {
     // Without the opt-in, the broken example must NOT surface as a
     // taint-miss — the default path stays fast and static-only.
@@ -225,6 +305,24 @@ fn default_validate_skips_taint_examples() {
     assert!(
         taint_miss_ids(&report).is_empty(),
         "default validate must not run taint replay: {:#?}",
+        report.issues
+    );
+}
+
+#[test]
+fn checked_in_dynamic_receiver_examples_replay_through_exact_taint() {
+    let ids = [
+        "objc.cmdi.nstask_setters",
+        "objc.path.data_with_contents_of_file",
+        "objc.xss.wkwebview_loadhtml_concat",
+        "php.xss.psr7_response_body_write",
+        "python.sqli.connection_execute",
+    ];
+    let report = validate_checked_in_rules(&ids);
+    let misses = taint_miss_ids(&report);
+    assert!(
+        misses.is_empty(),
+        "checked-in dynamic receiver examples must replay through exact compiler/IDG facts; misses: {misses:?}\nissues: {:#?}",
         report.issues
     );
 }

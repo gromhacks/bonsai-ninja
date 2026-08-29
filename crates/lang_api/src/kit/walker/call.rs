@@ -1,9 +1,8 @@
 use super::super::{
-    argument_value_node, build_call_event, call_argument_containers, call_event_value_source_names,
-    call_receiver_node, emit_inline_closure_param_bindings,
-    emit_inline_closure_param_bindings_from_yield_call, emit_invoked_lambda_param_bindings,
-    immediately_invoked_lambda_callee, is_closure_arg, is_comprehension_kind, walk_call_argument_expressions,
-    walk_lambda_body, walk_method_chain_receivers, FlowEvent, Node, SyntaxSpecialForm,
+    argument_value_node, build_call_event, call_argument_containers, call_receiver_node,
+    emit_invoked_lambda_param_bindings, immediately_invoked_lambda_callee, is_closure_arg,
+    is_comprehension_kind, walk_call_argument_expressions, walk_lambda_body, walk_method_chain_receivers,
+    FlowEvent, Node, SyntaxSpecialForm,
 };
 use super::{walk_into, LoweringContext};
 
@@ -25,20 +24,24 @@ pub(super) fn lower_call(node: Node<'_>, context: LoweringContext<'_>, out: &mut
             walk_lambda_body(lambda, file, src, handler, class_names, out);
             return true;
         }
-        if let Some(event) = call_event.clone() {
-            out.push(event);
+        // Evaluate a method receiver/callee before its arguments, matching the
+        // source-language evaluator. Nested calls in a fluent receiver chain
+        // therefore precede both argument calls and this outer Call event.
+        let receiver_node = call_receiver_node(&node, src, handler).or_else(|| {
+            handler
+                .call_callee_field_names
+                .iter()
+                .find_map(|field| node.child_by_field_name(field))
+        });
+        if let Some(recv) = receiver_node {
+            walk_method_chain_receivers(recv, file, src, handler, class_names, out);
         }
-        let closure_source_names = call_event
-            .as_ref()
-            .map(call_event_value_source_names)
-            .unwrap_or_default();
-        // Also descend into nested calls inside arguments. For lambda
-        // arguments (`xs.forEach { x -> body }`, `xs.map(x => body)`,
-        // `[...].forEach(x => body)`), inline the closure body into
-        // the OUTER flow — higher-order-function calls execute the
-        // closure as part of the caller's behavior, so their calls
-        // are flow-relevant and shouldn't be lost to the usual
-        // is_lambda short-circuit.
+
+        // Descend into evaluated argument expressions, but never execute a
+        // callable merely because it is passed as a value. Direct callback
+        // expressions are lowered as their own declarations; execution is
+        // established later by a workspace callee invoking its formal or by
+        // an exact rule-declared external callback boundary.
         // Objective-C message sends carry their arguments as direct
         // children interleaved with `method:` keyword selectors, not in an
         // `arguments` container — so `call_argument_containers` finds none
@@ -67,7 +70,6 @@ pub(super) fn lower_call(node: Node<'_>, context: LoweringContext<'_>, out: &mut
             }
         }
         let arg_containers = call_argument_containers(node, handler);
-        let mut walked_closures = std::collections::HashSet::new();
         for container in arg_containers {
             // `any(f(t) for t in xs)` / `list(g(t) for t in xs)`: python
             // exposes the bare generator_expression DIRECTLY as the call's
@@ -115,77 +117,16 @@ pub(super) fn lower_call(node: Node<'_>, context: LoweringContext<'_>, out: &mut
                     None
                 };
                 if let Some(closure) = closure_node {
-                    walked_closures.insert(arg.id());
-                    walked_closures.insert(closure.id());
-                    emit_inline_closure_param_bindings(
-                        closure,
-                        file,
-                        src,
-                        handler,
-                        &closure_source_names,
-                        out,
-                    );
-                    // Inline the lambda body so its calls belong to
-                    // the enclosing function. Walks via a helper that
-                    // bypasses the is_lambda short-circuit.
-                    walk_lambda_body(closure, file, src, handler, class_names, out);
+                    let _ = closure;
                 } else {
                     walk_into(arg, file, src, handler, class_names, out, false);
                 }
             }
         }
-        // Some grammars attach the trailing-closure block as a direct
-        // sibling of the call (Ruby `xs.each { |x| ... }` — the `block`
-        // is a top-level child of the call, not inside any arguments
-        // container). Kotlin and Swift place the closure one level under an
-        // adapter-declared call suffix. Scan only those exact direct/wrapper
-        // roles and inline their bodies too.
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            let closures = if is_closure_arg(child.kind(), handler) {
-                vec![child]
-            } else if handler.call_argument_wrapper_kinds.contains(&child.kind()) {
-                let mut wrapper_cursor = child.walk();
-                child
-                    .named_children(&mut wrapper_cursor)
-                    .filter(|nested| is_closure_arg(nested.kind(), handler))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            for closure in closures {
-                if handler.has_special_form(SyntaxSpecialForm::DirectDoBlockBody)
-                    && handler.lambda_body_kinds.contains(&closure.kind())
-                {
-                    continue;
-                }
-                if !walked_closures.insert(closure.id()) {
-                    continue;
-                }
-                if handler
-                    .inline_closure_yield_extractor
-                    .is_some_and(|extract| extract(node, closure, src))
-                {
-                    emit_inline_closure_param_bindings_from_yield_call(
-                        closure,
-                        file,
-                        src,
-                        handler,
-                        call_event.as_ref(),
-                        out,
-                    );
-                } else {
-                    emit_inline_closure_param_bindings(
-                        closure,
-                        file,
-                        src,
-                        handler,
-                        &closure_source_names,
-                        out,
-                    );
-                }
-                walk_lambda_body(closure, file, src, handler, class_names, out);
-            }
+        // Receiver and argument expressions have now been evaluated. Emit the
+        // invocation itself; callback bodies remain separate callable scopes.
+        if let Some(event) = call_event.clone() {
+            out.push(event);
         }
         // Elixir-specific: control-flow constructs (`case`, `cond`,
         // `if`, `with`, `try`, `receive`, `for`) are all parsed as
@@ -206,25 +147,6 @@ pub(super) fn lower_call(node: Node<'_>, context: LoweringContext<'_>, out: &mut
                     walk_into(child, file, src, handler, class_names, out, false);
                 }
             }
-        }
-        // Method-chain receivers. Rust / Swift / Kotlin / JS / TS
-        // parse `a.b().c().d()` as a nested call_expression chain
-        // where each step's `function` field wraps the previous step
-        // as its receiver. Without descending into the function /
-        // callee field, only the outermost call emits an event and
-        // the inner calls' structured args are lost. Walk through
-        // field-access wrappers (`field_expression`,
-        // `member_expression`, navigation_expression, etc.) to
-        // reach any nested call_expression and emit a proper event
-        // per inner call.
-        let receiver_node = call_receiver_node(&node, src, handler).or_else(|| {
-            handler
-                .call_callee_field_names
-                .iter()
-                .find_map(|field| node.child_by_field_name(field))
-        });
-        if let Some(recv) = receiver_node {
-            walk_method_chain_receivers(recv, file, src, handler, class_names, out);
         }
         return true;
     }

@@ -87,32 +87,6 @@
     expect_no_match: true
   description: "lxml.etree.fromstring."
 
-- id: python.xxe.lxml_xmlparser
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: xxe
-  category: source-independent
-  severity: high
-  packages: [lxml]
-  imports: [lxml, lxml.etree]
-  cwe: [CWE-611]
-  match:
-    kind: new
-    callee:
-      attribute: [etree, XMLParser]
-  match_examples:
-  - name: xxe lxml xmlparser
-    code: |
-      from lxml import etree
-      class XMLParser:
-          pass
-
-      def example(user_input):
-          return etree.XMLParser(user_input)
-  description: "Disabled - constructing an lxml XMLParser is not an XML-consumption boundary. The flow-aware etree.parse/fromstring rules model tainted input and exact hardened parser options without reporting safe or unused parser objects."
-
 - id: python.xxe.etree_fromstring
   enabled: true
   language: python
@@ -521,21 +495,6 @@
     expect_no_match: true
   description: "xmltodict.parse - built on expat; can fetch entities."
 
-- id: python.xxe.bs4_xml
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: xxe
-  severity: medium
-  packages: [bs4]
-  cwe: [CWE-611]
-  match:
-    kind: new
-    callee:
-      name: BeautifulSoup
-  description: "Disabled - BeautifulSoup with 'xml' parser delegates to lxml; lxml rule covers."
-
 - id: python.xxe.suds_client
   enabled: true
   language: python
@@ -570,18 +529,3 @@
           return client.Client('safe')
     expect_no_match: true
   description: "suds Client - SOAP/XML-RPC, vulnerable to XXE. Constructor takes a WSDL URL as first arg; `min_args: 1` rejects unrelated 0-arg `client.Client()` decoys."
-
-- id: python.xxe.zeep_client
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: xxe
-  severity: medium
-  packages: [zeep]
-  cwe: [CWE-611]
-  match:
-    kind: new
-    callee:
-      attribute: [zeep, Client]
-  description: "Disabled - zeep uses defusedxml by default."

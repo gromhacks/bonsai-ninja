@@ -1,15 +1,100 @@
 # Non-finding ECMAScript library summaries. Receiver types come from adapter
 # CST facts (`const xs = []` -> `xs: Array`), so these do not match unrelated
 # user-defined methods that merely share a standard-library method name.
+- id: javascript.typing.graphql_root_value_callback_map
+  enabled: true
+  language: javascript
+  packages: [graphql]
+  imports: [graphql]
+  taint_semantics:
+    callback_invocation:
+      callback_arg_index: 0
+      callback_map_field_path: [rootValue]
+      forwarded_argument_field_path: [variableValues]
+      forwarded_callback_param_index: 0
+      callback_return_result_offset: 0
+  match:
+    kind: call
+    callee:
+      name: graphql
+      binding_origin: imported
+  match_examples:
+  - name: GraphQL invokes a static root resolver map with variable values
+    code: |
+      const { graphql } = require("graphql");
+      const root = { products: ({ filter }) => findProducts(filter) };
+      graphql({ schema, source: query, rootValue: root, variableValues: variables });
+    expect_match_text: [graphql]
+  - name: locally shadowed graphql helper is not the package runtime
+    code: |
+      const { graphql: packageGraphql } = require("graphql");
+      void packageGraphql;
+      function graphql(options) { return options; }
+      graphql({ rootValue: root, variableValues: variables });
+    expect_no_match: true
+  description: "The imported GraphQL runtime invokes compiler-proven callbacks in the exact rootValue map and forwards variableValues into each resolver parameter. Field and provider roles live in rule data; IDG construction receives only matched spans and resolved callable identities."
+
+- id: javascript.typing.foreach_callback_invocation
+  enabled: true
+  language: javascript
+  taint_semantics:
+    callback_invocation:
+      callback_arg_index: 0
+      receiver_to_callback_param: 0
+      callback_return_result_offset: 0
+  match:
+    kind: call
+    callee:
+      name: forEach
+  constraints:
+  - arg_is_inline_callback: 0
+  match_examples:
+  - name: inline collection callback
+    code: 'function visit(input) { input.split("&").forEach(function (part) { consume(part); }); }'
+    expect_match_text: ['input.split("&").forEach']
+  - name: non-callback argument
+    code: 'function visit(collection, value) { collection.forEach(value); }'
+    expect_no_match: true
+  description: "ECMAScript forEach invokes inline callback argument zero with values from the receiver. The matcher proves the callback AST and exact call span; typing-only transfer semantics carry the receiver value into callback parameter zero."
+
+- id: javascript.typing.promise_executor_invocation
+  enabled: true
+  language: javascript
+  taint_semantics:
+    callback_invocation:
+      callback_arg_index: 0
+      callback_return_result_offset: 0
+  match:
+    kind: call
+    callee:
+      name: Promise
+      binding_origin: runtime-global
+  constraints:
+  - arg_is_inline_callback: 0
+  match_examples:
+  - name: native Promise invokes its inline executor
+    code: 'function load(input) { return new Promise((resolve) => resolve(transform(input))); }'
+    expect_match_text: [Promise]
+  - name: locally shadowed Promise is not the native runtime
+    code: |
+      function demo(input) {
+        const Promise = function(callback) { return callback; };
+        return new Promise((resolve) => resolve(input));
+      }
+    expect_no_match: true
+  description: "The native Promise constructor invokes inline executor argument zero synchronously. Typing-only callback semantics expose compiler-proven lexical capture without assigning security meaning to the runtime in shared analysis."
+
 - id: javascript.typing.readline_interface
   enabled: true
   language: javascript
   packages: [readline]
+  imports: [readline, "node:readline", "readline/promises", "node:readline/promises"]
   returns_type: Interface
   match:
     kind: call
     callee:
-      name: createInterface
+      attribute: [readline, createInterface]
+      binding_origin: imported
   match_examples:
   - name: readline factory returns Interface
     code: |
@@ -17,6 +102,13 @@
       const rl = readline.createInterface({ input: process.stdin });
       rl.question("name?", answer => sink(answer));
     expect_match_text: [readline.createInterface]
+  - name: local createInterface method is not Node readline
+    code: |
+      const standard = require("readline");
+      void standard.createInterface;
+      const readline = { createInterface() { return {}; } };
+      readline.createInterface();
+    expect_no_match: true
   description: "readline.createInterface(...) returns an Interface; typing-only factory evidence for receiver-scoped input rules."
 
 - id: javascript.typing.array_push_mutation
@@ -57,3 +149,60 @@
       }
     expect_match_text: [values.reduce]
   description: "A JavaScript reduce-style external call may return data derived from its receiver. Conservative typing-only transfer summary; never a finding."
+
+- id: javascript.typing.mongodb_client_db
+  enabled: true
+  language: javascript
+  packages: [mongodb]
+  returns_type: Db
+  match:
+    kind: call
+    callee:
+      name: db
+  constraints:
+  - receiver_type_in: [MongoClient]
+  - max_args: 1
+  match_examples:
+  - name: MongoClient db factory
+    code: |
+      const { MongoClient } = require("mongodb");
+      const client = new MongoClient("mongodb://localhost");
+      const database = client.db("app");
+    expect_match_text: [client.db]
+  - name: application db method is not MongoDB typing evidence
+    code: |
+      require("mongodb");
+      class Registry { db(name) { return name; } }
+      const registry = new Registry();
+      registry.db("app");
+    expect_no_match: true
+  description: "MongoClient.db([name]) returns a MongoDB Db; typing-only factory evidence for receiver-scoped database-result rules."
+
+- id: javascript.typing.mongodb_db_collection
+  enabled: true
+  language: javascript
+  packages: [mongodb]
+  returns_type: Collection
+  match:
+    kind: call
+    callee:
+      name: collection
+  constraints:
+  - receiver_type_in: [Db]
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: MongoDB Db collection factory
+    code: |
+      const { Db } = require("mongodb");
+      const database = new Db();
+      const users = database.collection("users");
+    expect_match_text: [database.collection]
+  - name: application collection method is not MongoDB typing evidence
+    code: |
+      require("mongodb");
+      class Registry { collection(name) { return name; } }
+      const registry = new Registry();
+      registry.collection("users");
+    expect_no_match: true
+  description: "MongoDB Db.collection(name[, options]) returns a Collection; typing-only factory evidence for document-result sources."

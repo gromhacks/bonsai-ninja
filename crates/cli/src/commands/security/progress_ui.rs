@@ -306,12 +306,12 @@ mod tests {
     fn scope_notes_render_static_evidence_as_accuracy_contract() {
         let rendered = render_progress_note(
             "scope",
-            "taint-analysis source_matches=3 endpoint_files=8 source_languages=1 static_evidence=exact+narrowed",
+            "taint-analysis source_matches=3 endpoint_files=8 source_languages=1 static_evidence=compiler-proven",
         );
 
         assert_eq!(
             rendered,
-            "taint analysis scope: 3 source matches · 8 endpoint files · 1 source language · static evidence exact + narrowed"
+            "taint analysis scope: 3 source matches · 8 endpoint files · 1 source language · static evidence compiler-proven"
         );
         assert!(!rendered.contains("max_precision"));
     }

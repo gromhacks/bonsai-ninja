@@ -17,9 +17,6 @@
   - name: tainted upload path
     code: |
       import 'package:http/http.dart';
-      import 'package:http/http.dart';
-      import 'package:http/http.dart';
-      import 'package:http/http.dart';
       import 'package:http/http.dart' as http;
       void test(String input) { MultipartFile.fromPath("avatar", input); }
   - name: literal upload path negative
@@ -48,9 +45,6 @@
   match_examples:
   - name: tainted upload filename
     code: |
-      import 'package:http/http.dart';
-      import 'package:http/http.dart';
-      import 'package:http/http.dart';
       import 'package:http/http.dart';
       import 'package:http/http.dart' as http;
       void test(String input, List<int> bytes) { MultipartFile.fromBytes("avatar", bytes, filename: input); }
@@ -81,10 +75,6 @@
   - name: tainted dio upload path
     code: |
       import 'package:dio/dio.dart';
-      import 'package:dio/dio.dart';
-      import 'package:dio/dio.dart';
-      import 'package:dio/dio.dart';
-      import 'package:dio/dio.dart';
       void test(String input) { MultipartFile.fromFile(input); }
   - name: literal dio upload path negative
     code: |
@@ -95,17 +85,3 @@
 
   imports:
   - dio/dio.dart
-- id: dart.upload.file_picker_pickfiles
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: file-upload
-  severity: medium
-  packages: [file_picker]
-  cwe: [CWE-434]
-  match:
-    kind: call
-    callee:
-      attribute: [FilePicker, platform]
-  description: "Disabled - FilePicker is user-initiated; flag only if result.path flows to server upload."

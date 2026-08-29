@@ -1,4 +1,47 @@
 # Lua insecure-deserialization sinks.
+- id: lua.deser.load_return_expression
+  enabled: true
+  language: lua
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502, CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^load$"
+  constraints:
+  - top_level: true
+  - arg_tainted:
+      index: 0
+  - arg_string_composition_starts_with:
+      index: 0
+      value: "return "
+  match_examples:
+  - name: tainted serialized Lua expression is compiled
+    code: |
+      function restore(input)
+        return load("return " .. input)
+      end
+  - name: ordinary dynamic chunk remains code injection rather than deserialization
+    code: |
+      function execute(input)
+        return load(input)
+      end
+    expect_no_match: true
+  - name: static expression is not tainted deserialization
+    code: |
+      function restore()
+        return load("return { role = 'reader' }")
+      end
+    expect_no_match: true
+  - name: receiver method named load is not the Lua builtin
+    code: |
+      function restore(loader, input)
+        return loader:load("return " .. input)
+      end
+    expect_no_match: true
+  description: "load(\"return \" .. tainted_value) compiles attacker-controlled serialized Lua expression syntax. The exact compiler-lowered prefix shape receives the specialized CWE-502 attribution; ordinary dynamic chunks remain covered by lua.eval.load."
+
 - id: lua.deser.lua_marshal_load
   enabled: true
   language: lua
@@ -148,46 +191,3 @@
       end
     expect_no_match: true
   description: "serpent.load(src, {safe=false}) - evaluates serialised tables via load(); unsafe mode is RCE."
-
-- id: lua.deser.loadstring
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: lua
-  tag: insecure-deserialization
-  severity: critical
-  cwe: [CWE-94, CWE-502]
-  match:
-    kind: call
-    callee:
-      name: loadstring
-  description: "Disabled - canonical rule is lua.eval.loadstring; tracked in eval.yml as code-injection."
-
-- id: lua.deser.load_bytecode
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: lua
-  tag: insecure-deserialization
-  severity: critical
-  cwe: [CWE-94, CWE-502]
-  match:
-    kind: call
-    callee:
-      name: load
-  description: "Disabled - canonical rule is lua.eval.load; tracked in eval.yml as code-injection."
-
-- id: lua.deser.cjson_decode
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: lua
-  tag: insecure-deserialization
-  severity: low
-  packages: [cjson]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [cjson, decode]
-  description: "Disabled - cjson.decode emits typed Lua tables/primitives only; not a deserialisation gadget surface."

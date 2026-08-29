@@ -14,7 +14,7 @@
     kind: read
     target:
       name: Value
-      receiver_type_in: [ConsumerMessage, Message]
+      receiver_type_in: [ConsumerMessage, sarama.ConsumerMessage, Message, kafka.Message]
   match_examples:
   - name: sarama kafka consumer message
     code: |
@@ -88,7 +88,7 @@
     kind: read
     target:
       name: Data
-      receiver_type_in: [Msg]
+      receiver_type_in: [Msg, nats.Msg]
   match_examples:
   - name: nats message data
     code: |

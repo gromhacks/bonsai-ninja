@@ -14,8 +14,6 @@
   - name: generated direct match
     code: |
       #include <linux/gpio.h>
-      #include <linux/gpio.h>
-      #include <linux/gpio.h> /* linux-gpio */
       #include <linux/gpio.h> /* linux-gpio */
       void example(void) {
         char *arg = "tainted";
@@ -64,8 +62,6 @@
   - name: generated direct match
     code: |
       #include <linux/i2c-dev.h>
-      #include <linux/i2c-dev.h>
-      #include <linux/i2c-dev.h> /* linux-i2c */
       #include <linux/i2c-dev.h> /* linux-i2c */
       void example(void) {
         char *arg = "tainted";
@@ -92,8 +88,6 @@
   - name: generated direct match
     code: |
       #include <linux/i2c-dev.h>
-      #include <linux/i2c-dev.h>
-      #include <linux/i2c-dev.h> /* linux-i2c */
       #include <linux/i2c-dev.h> /* linux-i2c */
       void example(void) {
         char *arg = "tainted";
@@ -120,8 +114,6 @@
   - name: generated direct match
     code: |
       #include <linux/i2c-dev.h>
-      #include <linux/i2c-dev.h>
-      #include <linux/i2c-dev.h> /* linux-i2c */
       #include <linux/i2c-dev.h> /* linux-i2c */
       void example(void) {
         char *arg = "tainted";
@@ -306,8 +298,6 @@
   - name: generated direct match
     code: |
       #include <Arduino.h>
-      #include <Arduino.h>
-      #include <Arduino.h> /* arduino */
       #include <Arduino.h> /* arduino */
       void example(void) {
         char *arg = "tainted";

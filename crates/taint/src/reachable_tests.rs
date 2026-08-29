@@ -75,6 +75,7 @@ fn sentinel_argument_uses_ast_receiver_but_return_does_not() {
     let summary = CallEventSummary {
         name: "persist".to_string(),
         call_kind: bonsai_lang_api::CallKind::Method,
+        args_name: Vec::new(),
         args_value_text: Vec::new(),
         args_span: Vec::new(),
         args_place: Vec::new(),
@@ -110,6 +111,7 @@ fn sentinel_argument_uses_ast_receiver_but_return_does_not() {
     edge.relation = bonsai_idg::CrossCallRelation::Argument;
     edge.param_idx = u32::MAX;
     let explicit_arg_summary = CallEventSummary {
+        args_name: vec![None],
         args_value_text: vec!["payload".to_string()],
         args_span: vec![Span::new(FileId::new(0), 15, 18)],
         args_place: vec![Some("payload".to_string())],
@@ -119,6 +121,48 @@ fn sentinel_argument_uses_ast_receiver_but_return_does_not() {
     assert!(
         tainted_args_for_cross_call_edge(&edge, None, Some(&explicit_arg_summary)).is_empty(),
         "an unknown symbolic slot must not be mislabeled as receiver taint"
+    );
+}
+
+#[test]
+fn shared_state_call_establishes_lineage_without_claiming_a_tainted_argument() {
+    let source = FuncId::new(1);
+    let downstream = FuncId::new(2);
+    let call_span = Span::new(FileId::new(0), 10, 20);
+    let edges = vec![
+        bonsai_idg::CrossCallEdge {
+            caller: source,
+            callee: downstream,
+            call_span,
+            arg_idx: u32::MAX,
+            param_idx: u32::MAX,
+            precision: Precision::Narrowed,
+            call_kind: bonsai_callgraph::EdgeKind::Direct,
+            relation: bonsai_idg::CrossCallRelation::SharedStateCall,
+        },
+        bonsai_idg::CrossCallEdge {
+            caller: downstream,
+            callee: source,
+            call_span,
+            arg_idx: u32::MAX,
+            param_idx: u32::MAX,
+            precision: Precision::Narrowed,
+            call_kind: bonsai_callgraph::EdgeKind::Direct,
+            relation: bonsai_idg::CrossCallRelation::Return,
+        },
+    ];
+    let global = bonsai_index::GlobalIndex::new();
+    let db = empty_db();
+    let compiled = materialize_call_records(source, &edges, &global, &db, None);
+
+    assert_eq!(compiled.records.len(), 2);
+    assert!(compiled.records[0].tainted_args.is_empty());
+    assert_eq!(compiled.records[0].parent_trace_id, None);
+    assert_eq!(compiled.first_inflow.get(&downstream), Some(&1));
+    assert_eq!(
+        compiled.records[1].parent_trace_id,
+        Some(1),
+        "the exact shared-state call must parent downstream return and sink evidence"
     );
 }
 
@@ -771,6 +815,88 @@ fn anchored_call_return_seed_does_not_include_same_name_reads_or_writes() {
 }
 
 #[test]
+fn anchored_read_source_seeds_only_the_exact_nested_storage_read() {
+    let func = FuncId::new(91);
+    let outer_call = Span::new(FileId::new(0), 10, 60);
+    let source_span = Span::new(FileId::new(0), 30, 38);
+    let sibling_span = Span::new(FileId::new(0), 42, 46);
+    let mut segment = IdgSegment::new();
+    let source_name = segment.strings.intern("req.body");
+    let sibling_name = segment.strings.intern("safe");
+    let result_name = segment.strings.intern("result");
+    let source_read = segment.intern_place(Place::Read {
+        name: source_name,
+        path: Vec::new().into(),
+    });
+    let sibling_read = segment.intern_place(Place::Read {
+        name: sibling_name,
+        path: Vec::new().into(),
+    });
+    let source_arg = segment.intern_place(Place::CallArg {
+        site: CallSiteId(outer_call),
+        idx: 0,
+    });
+    let sibling_arg = segment.intern_place(Place::CallArg {
+        site: CallSiteId(outer_call),
+        idx: 1,
+    });
+    let outer_ret = segment.intern_place(Place::CallRet {
+        site: CallSiteId(outer_call),
+    });
+    let outer_write = segment.intern_place(Place::write(result_name, outer_call));
+    let source_read_node = segment.intern_node(func, source_read);
+    let sibling_read_node = segment.intern_node(func, sibling_read);
+    let source_arg_node = segment.intern_node(func, source_arg);
+    let sibling_arg_node = segment.intern_node(func, sibling_arg);
+    let outer_ret_node = segment.intern_node(func, outer_ret);
+    let outer_write_node = segment.intern_node(func, outer_write);
+    let source_meta = bonsai_idg::EdgeMeta {
+        precision: Precision::Exact,
+        kind: bonsai_idg::IdgEdgeKind::IntraRead,
+        call_kind: bonsai_callgraph::EdgeKind::Direct,
+        via_span: source_span,
+    };
+    let sibling_meta = bonsai_idg::EdgeMeta {
+        via_span: sibling_span,
+        ..source_meta
+    };
+    segment.add_edge(IdgEdge::new(source_read_node, source_arg_node, source_meta));
+    segment.add_edge(IdgEdge::new(sibling_read_node, sibling_arg_node, sibling_meta));
+    segment.add_edge(IdgEdge::intra_assign(
+        outer_ret_node,
+        outer_write_node,
+        outer_call,
+    ));
+    segment.record_func(func);
+    let service = service_from_segment(segment);
+    let db = empty_db();
+    let seeds = TokenSet::from_iter(["req.body".to_string()]);
+
+    let nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::read_rule_match(func, &seeds, Some(source_span), &[]),
+        db.global_index().as_ref(),
+        &service,
+    );
+    let points = nodes
+        .iter()
+        .filter_map(|node| service.resolve_point(*node))
+        .collect::<Vec<_>>();
+
+    assert_eq!(points.len(), 1, "nested read source widened: {points:?}");
+    assert_eq!(points[0].kind, bonsai_idg::PointKind::CallArg);
+
+    let unnamed = compose_idg_seed_nodes(
+        IdgSeedRequest::read_rule_match(func, &TokenSet::default(), Some(source_span), &[]),
+        db.global_index().as_ref(),
+        &service,
+    );
+    assert_eq!(
+        unnamed, nodes,
+        "an exact read-rule anchor remains a complete seed identity when the matcher has no narrower rendered place"
+    );
+}
+
+#[test]
 fn anchored_aggregate_call_return_seeds_ast_materialized_result_descendants() {
     let func = FuncId::new(10);
     let anchor = Span {
@@ -957,6 +1083,7 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
         character_substitutions: Vec::new(),
         character_constraints: Vec::new(),
         guarded_value_filters: Vec::new(),
+        predicate_returns: Vec::new(),
         same_origin_path_constraints: Vec::new(),
         dynamic_key_filters: Vec::new(),
         string_compositions: Vec::new(),
@@ -1016,7 +1143,9 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
             callee: "removingPercentEncoding".to_string(),
             receiver_type: None,
             input_arg_indices: Vec::new(),
+            input_arg_start_index: None,
             input_receiver: true,
+            resolved_call_sites: Vec::new(),
         }],
         &global,
         &service,
@@ -1036,7 +1165,9 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
             callee: r"regex:^[A-Za-z_$][A-Za-z0-9_$\.]*PercentEncoding$".to_string(),
             receiver_type: None,
             input_arg_indices: Vec::new(),
+            input_arg_start_index: None,
             input_receiver: true,
+            resolved_call_sites: Vec::new(),
         }],
         &global,
         &service,
@@ -1088,6 +1219,7 @@ fn rulepack_declared_arg_result_passthrough_accepts_descendant_container_input()
         character_substitutions: Vec::new(),
         character_constraints: Vec::new(),
         guarded_value_filters: Vec::new(),
+        predicate_returns: Vec::new(),
         same_origin_path_constraints: Vec::new(),
         dynamic_key_filters: Vec::new(),
         string_compositions: Vec::new(),
@@ -1176,7 +1308,9 @@ fn rulepack_declared_arg_result_passthrough_accepts_descendant_container_input()
             callee: "reduce".to_string(),
             receiver_type: None,
             input_arg_indices: vec![1],
+            input_arg_start_index: None,
             input_receiver: false,
+            resolved_call_sites: Vec::new(),
         }],
         &global,
         &service,
@@ -1219,6 +1353,7 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
     let call_summary = CallEventSummary {
         call_kind: bonsai_lang_api::CallKind::Function,
         name: ":os.cmd".to_string(),
+        args_name: vec![None],
         args_value_text: vec!["String.to_charlist(cmd)".to_string()],
         args_span: vec![outer_arg_span],
         args_place: vec![None],
@@ -1231,7 +1366,9 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
         callee: "String.to_charlist".to_string(),
         receiver_type: None,
         input_arg_indices: vec![0],
+        input_arg_start_index: None,
         input_receiver: false,
+        resolved_call_sites: Vec::new(),
     }];
     let compiled = compile_call_result_passthroughs(&passthroughs);
     let mut call_summary_cache = call_summary_cache_for(
@@ -1241,6 +1378,7 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
             CallEventSummary {
                 name: "String.to_charlist".to_string(),
                 call_kind: bonsai_lang_api::CallKind::Function,
+                args_name: vec![None],
                 args_value_text: vec!["cmd".to_string()],
                 args_span: vec![Span::new(FileId::new(0), 13, 16)],
                 args_place: vec![Some("cmd".to_string())],
@@ -1283,6 +1421,7 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
     let call_summary = CallEventSummary {
         call_kind: bonsai_lang_api::CallKind::Function,
         name: "sink".to_string(),
+        args_name: vec![None],
         args_value_text: vec!["clean_return(cmd)".to_string()],
         args_span: vec![outer_arg_span],
         args_place: vec![None],
@@ -1298,6 +1437,7 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
             CallEventSummary {
                 name: "clean_return".to_string(),
                 call_kind: bonsai_lang_api::CallKind::Function,
+                args_name: vec![None],
                 args_value_text: vec!["cmd".to_string()],
                 args_span: vec![Span::new(FileId::new(0), 15, 18)],
                 args_place: vec![Some("cmd".to_string())],
@@ -1352,6 +1492,7 @@ fn nested_call_cleanliness_follows_exact_call_return_closure_membership() {
     let call_summary = CallEventSummary {
         call_kind: bonsai_lang_api::CallKind::Function,
         name: "sink".to_string(),
+        args_name: vec![None],
         args_value_text: vec!["helper(cmd)".to_string()],
         args_span: vec![outer_arg_span],
         args_place: vec![None],
@@ -1367,6 +1508,7 @@ fn nested_call_cleanliness_follows_exact_call_return_closure_membership() {
             CallEventSummary {
                 name: "helper".to_string(),
                 call_kind: bonsai_lang_api::CallKind::Function,
+                args_name: vec![None],
                 args_value_text: vec!["cmd".to_string()],
                 args_span: vec![Span::new(FileId::new(0), 12, 15)],
                 args_place: vec![None],
@@ -1426,6 +1568,7 @@ fn clean_nested_call_does_not_prune_independent_compound_operand() {
     let call_summary = CallEventSummary {
         call_kind: bonsai_lang_api::CallKind::Function,
         name: "sink".to_string(),
+        args_name: vec![None],
         args_value_text: vec!["PurePath(\"/srv\") / user_input".to_string()],
         args_span: vec![outer_arg_span],
         args_place: vec![None],
@@ -1441,6 +1584,7 @@ fn clean_nested_call_does_not_prune_independent_compound_operand() {
             CallEventSummary {
                 name: "PurePath".to_string(),
                 call_kind: bonsai_lang_api::CallKind::Function,
+                args_name: vec![None],
                 args_value_text: vec!["\"/srv\"".to_string()],
                 args_span: vec![Span::new(FileId::new(0), 19, 25)],
                 args_place: vec![None],
@@ -1478,6 +1622,7 @@ fn ast_lowered_nested_projection_place_is_not_pruned_as_unknown_return() {
     let call_summary = CallEventSummary {
         call_kind: bonsai_lang_api::CallKind::Function,
         name: "sink_cmd".to_string(),
+        args_name: vec![None],
         args_value_text: vec!["maps:get(cmd, C)".to_string()],
         args_span: vec![Span::new(FileId::new(0), 0, 20)],
         args_place: vec![Some("C.cmd".to_string())],
@@ -1514,6 +1659,7 @@ fn semantic_argument_covering_its_call_is_not_treated_as_a_nested_return() {
     let call_summary = CallEventSummary {
         call_kind: bonsai_lang_api::CallKind::Function,
         name: "semantic_call".to_string(),
+        args_name: vec![None],
         args_value_text: vec!["interpolated value".to_string()],
         args_span: vec![call_span],
         args_place: vec![None],
@@ -1546,12 +1692,7 @@ fn semantic_argument_covering_its_call_is_not_treated_as_a_nested_return() {
 }
 
 #[test]
-fn collect_tainted_writes_requires_structured_carrier_match() {
-    // Tainted local is the short name `id`. Neither structured AST carrier
-    // reads it; rendered fallback argument text must not manufacture a read.
-    let mut tainted_names = AHashSet::default();
-    tainted_names.insert("id".to_string());
-
+fn collect_tainted_writes_requires_exact_reachable_write_identity() {
     let events = vec![FlowEvent::Assign {
         span: span(),
         target: "row".to_string(),
@@ -1566,22 +1707,18 @@ fn collect_tainted_writes_requires_structured_carrier_match() {
     let mut out: Vec<crate::idg_api::TaintedCall> = Vec::new();
     let mut writes = Vec::new();
     collect_write_event_summaries(&events, &mut writes);
-    collect_tainted_writes(&writes, FuncId::new(0), &tainted_names, None, &mut out);
+    collect_tainted_writes(&writes, FuncId::new(0), &AHashSet::default(), None, &mut out);
     assert!(
         out.is_empty(),
-        "rendered text and substrings (`id` in `uuid`/`valid`/`hidden`) must not fabricate a Write row; got {out:#?}"
+        "RHS spellings alone must not fabricate a Write row; got {out:#?}"
     );
 }
 
 #[test]
 fn collect_tainted_writes_keeps_whole_identifier_and_dotted_member() {
-    // Positive guard: the structured member carrier `data.cmd` includes
-    // the tainted terminal component `cmd`.
-    let mut tainted_names = AHashSet::default();
-    tainted_names.insert("cmd".to_string());
-
+    let write_span = span();
     let events = vec![FlowEvent::Assign {
-        span: span(),
+        span: write_span,
         target: "out".to_string(),
         source_name: Some("data.cmd".to_string()),
         source_call: None,
@@ -1594,7 +1731,8 @@ fn collect_tainted_writes_keeps_whole_identifier_and_dotted_member() {
     let mut out: Vec<crate::idg_api::TaintedCall> = Vec::new();
     let mut writes = Vec::new();
     collect_write_event_summaries(&events, &mut writes);
-    collect_tainted_writes(&writes, FuncId::new(0), &tainted_names, None, &mut out);
+    let reachable = AHashSet::from_iter([(write_span, "out".to_string())]);
+    collect_tainted_writes(&writes, FuncId::new(0), &reachable, None, &mut out);
     assert_eq!(
         out.len(),
         1,
@@ -1604,4 +1742,39 @@ fn collect_tainted_writes_keeps_whole_identifier_and_dotted_member() {
     assert_eq!(out[0].name, "out");
     assert_eq!(out[0].tainted_args.len(), 1);
     assert_eq!(out[0].tainted_args[0].value_text, "data.cmd");
+}
+
+#[test]
+fn collect_tainted_writes_distinguishes_overwrites_of_the_same_place() {
+    let tainted_span = Span::new(FileId::new(0), 10, 20);
+    let clean_span = Span::new(FileId::new(0), 30, 40);
+    let events = vec![
+        FlowEvent::Assign {
+            span: tainted_span,
+            target: "value".to_string(),
+            source_name: Some("input".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["input".to_string()],
+            declares_new_binding: true,
+            value_kind: None,
+        },
+        FlowEvent::Assign {
+            span: clean_span,
+            target: "value".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Literal),
+        },
+    ];
+    let mut writes = Vec::new();
+    collect_write_event_summaries(&events, &mut writes);
+    let reachable = AHashSet::from_iter([(tainted_span, "value".to_string())]);
+    let mut out = Vec::new();
+    collect_tainted_writes(&writes, FuncId::new(0), &reachable, None, &mut out);
+    assert_eq!(out.len(), 1, "only the exact reachable writer may be emitted");
+    assert_eq!(out[0].call_span, tainted_span);
 }

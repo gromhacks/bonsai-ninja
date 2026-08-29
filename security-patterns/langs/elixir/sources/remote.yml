@@ -9,43 +9,48 @@
   tag: http-input
   payload_types: [query, json]
   frameworks: [phoenix]
-  packages: [phoenix]
-  manifests: [mix.exs]
   match:
     kind: param
     target:
-      name: params
       param_index_in: [1]
       param_count_in: [2]
+      in_owner_base: [use_arg_controller]
   match_examples:
-  - name: declared shape
+  - name: named Phoenix controller params
     code: |
-      alias Phoenix
       defmodule App do
+        use Web, :controller
         def show(conn, params) do
           params
         end
       end
-  description: "Second parameter named params on a Phoenix controller action(conn, params) - merged route, query, and body input."
-
-  imports:
-  - Phoenix
-- id: elixir.phoenix.conn_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: elixir
-  trust: remote
-  tag: http-input
-  payload_types: [json, query]
-  frameworks: [phoenix, plug]
-  packages: [plug]
-  match:
-    kind: param
-    target:
-      name: conn
-  description: "Disabled - whole Plug.Conn taints too broadly without field-sensitive conn access tracking; params/read_body/header accessors stay enabled."
-
+  - name: destructured Phoenix controller params
+    code: |
+      defmodule App do
+        use Web, :controller
+        def show(conn, %{"id" => id}) do
+          id
+        end
+      end
+  - name: controller callback with a different arity is not a Phoenix action boundary
+    code: |
+      defmodule App do
+        use Web, :controller
+        def show(conn, params, context) do
+          {conn, params, context}
+        end
+      end
+    expect_no_match: true
+  - name: same callback shape outside a controller owner is not Phoenix params
+    code: |
+      defmodule Worker do
+        use Jobs, :worker
+        def show(conn, params) do
+          {conn, params}
+        end
+      end
+    expect_no_match: true
+  description: "Second parameter on an Elixir module that explicitly declares the `use _, :controller` role - merged route, query, and body input. The adapter supplies only the parsed owner-role fact; Phoenix meaning remains rule data."
 - id: elixir.plug.conn_params_read
   enabled: true
   language: elixir
@@ -77,33 +82,6 @@
 # shape rule above so the param-shape match (which the elixir adapter
 # emits for function parameters) provides cross-fn coverage of the
 # `conn.params["body"]` access pattern via the parameter identifier.
-- id: elixir.source.plug_conn_params
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: elixir
-  trust: remote
-  tag: http-input
-  payload_types: [query, json]
-  frameworks: [plug]
-  packages: [plug]
-  match:
-    kind: param
-    target:
-      name: conn
-  match_examples:
-  - name: declared shape
-    code: |
-      alias Plug
-      defmodule App do
-        def handle(conn) do
-          conn
-        end
-      end
-  description: "Disabled - whole Plug.Conn taint is field-insensitive and over-taints safe config/control fields such as rewrite tuples. Re-enable only when the adapter can seed params/query/body/header field reads precisely."
-
-  imports:
-  - Plug
 - id: elixir.plug.query_params_read
   enabled: true
   language: elixir
@@ -212,71 +190,6 @@
   imports:
   - Plug
 
-- id: elixir.plug.fetch_query_params
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: elixir.plug.query_params_read
-  language: elixir
-  trust: remote
-  tag: http-input
-  payload_types: [query]
-  frameworks: [plug]
-  packages: [plug]
-  match:
-    kind: call
-    callee:
-      attribute: [Plug, Conn, fetch_query_params]
-  description: "Subsumed by elixir.plug.query_params_read: fetch_query_params/2 only populates conn.query_params, which is now seeded precisely as a `conn.query_params` read source. The whole-conn return taint this rule needed would over-taint unrelated conn fields."
-
-  imports:
-  - Plug
-- id: elixir.plug.fetch_cookies
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: elixir.plug.cookies_read
-  language: elixir
-  trust: remote
-  tag: http-input
-  payload_types: [cookie]
-  frameworks: [plug]
-  packages: [plug]
-  match:
-    kind: call
-    callee:
-      attribute: [Plug, Conn, fetch_cookies]
-  description: "Subsumed by elixir.plug.cookies_read: fetch_cookies/2 only populates conn.cookies/req_cookies, now seeded precisely as a `conn.cookies` read source. Whole-conn return taint would over-taint unrelated conn fields."
-
-  imports:
-  - Plug
-- id: elixir.plug.fetch_session
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
-  language: elixir
-  trust: remote
-  tag: http-input
-  payload_types: [cookie]
-  frameworks: [plug]
-  packages: [plug]
-  match:
-    kind: call
-    callee:
-      attribute: [Plug, Conn, fetch_session]
-  match_examples:
-  - name: declared shape
-    code: |
-      alias Plug
-      defmodule App do
-        def test(input) do
-          Plug.Conn.fetch_session(input)
-        end
-      end
-  description: "Disabled - this returns a Plug.Conn with request-derived session fields, but field-insensitive return taint over-taints unrelated conn fields. Re-enable when session field reads can be seeded precisely."
-
-  imports:
-  - Plug
 - id: elixir.plug.get_session
   enabled: true
   language: elixir
@@ -304,6 +217,13 @@
       alias Plug
       defmodule App do
         def store(conn), do: Plug.Conn.put_session(conn, "role", "local")
+      end
+    expect_no_match: true
+  - name: Plug session population is not the session value boundary
+    code: |
+      alias Plug
+      defmodule App do
+        def load(conn), do: Plug.Conn.fetch_session(conn)
       end
     expect_no_match: true
   description: "Plug.Conn.get_session/2 - application session state loaded through the configured cookie/store; a service/session boundary rather than raw request input."
@@ -352,85 +272,6 @@
       end
   description: "Plug.Conn.get_req_header/2 - attacker-controlled request header values."
 
-- id: elixir.plug.conn_query_decode
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: elixir
-  trust: remote
-  tag: http-input
-  payload_types: [query]
-  frameworks: [plug]
-  packages: [plug]
-  match:
-    kind: call
-    callee:
-      attribute: [Plug, Conn, Query, decode]
-  match_examples:
-  - name: plug query decode
-    code: |
-      alias Plug
-      defmodule App do
-        def test(input) do
-          Plug.Conn.Query.decode(input)
-        end
-      end
-  description: "Disabled - Plug.Conn.Query.decode/1 parses any supplied string. It preserves existing provenance but does not prove an HTTP origin."
-  imports:
-  - Plug
-
-- id: elixir.uri_decode_query
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: elixir
-  trust: remote
-  tag: http-input
-  payload_types: [query]
-  match:
-    kind: call
-    callee:
-      attribute: [URI, decode_query]
-  match_examples:
-  - name: uri decode query
-    code: |
-      defmodule App do
-        def test(input) do
-          URI.decode_query(input)
-        end
-      end
-  - name: uri encode_query negative
-    code: |
-      defmodule App do
-        def test(input) do
-          URI.encode_query(input)
-        end
-      end
-    expect_no_match: true
-  description: "Disabled - URI.decode_query/1,2 parses arbitrary strings, including constants and trusted configuration. It is a passthrough transform, not an origin."
-
-- id: elixir.uri_query_decoder
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: elixir
-  trust: remote
-  tag: http-input
-  payload_types: [query]
-  match:
-    kind: call
-    callee:
-      attribute: [URI, query_decoder]
-  match_examples:
-  - name: uri query decoder
-    code: |
-      defmodule App do
-        def test(input) do
-          URI.query_decoder(input)
-        end
-      end
-  description: "Disabled - URI.query_decoder/1,2 lazily transforms the value supplied by its caller and must retain, not invent, provenance."
-
 - id: elixir.phoenix.channel_handle_in
   enabled: true
   language: elixir
@@ -455,6 +296,15 @@
           payload
         end
       end
+  - name: payload outside handle_in is not a Phoenix channel boundary
+    code: |
+      alias Phoenix
+      defmodule App do
+        def dispatch(event, payload, socket) do
+          {event, payload, socket}
+        end
+      end
+    expect_no_match: true
   description: "Second parameter of Phoenix.Channel handle_in/3 - client message payload proven by callback name, arity, and position."
 
   imports:
@@ -629,3 +479,73 @@
     expect_no_match: true
   description: "Exact Plug.Conn accessors that return peer, URL, or multipart request data."
   imports: [Plug]
+
+- id: elixir.phoenix.socket_connect_params
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [query, json]
+  frameworks: [phoenix]
+  packages: [phoenix]
+  match:
+    kind: param
+    target:
+      regex: '^[a-z_][A-Za-z0-9_]*$'
+      in_method: [connect]
+      param_index_in: [0]
+      param_count_in: [3]
+  match_examples:
+  - name: phoenix socket connect params
+    code: |
+      alias Phoenix.Socket
+      defmodule UserSocket do
+        use Phoenix.Socket
+        def connect(params, socket, connect_info), do: {:ok, socket}
+      end
+    expect_match_text: [params]
+  - name: different callback name is not socket input
+    code: |
+      alias Phoenix.Socket
+      defmodule UserSocket do
+        use Phoenix.Socket
+        def normalize(params, socket, connect_info), do: {params, socket, connect_info}
+      end
+    expect_no_match: true
+  description: "First parameter of Phoenix.Socket connect/3 - client connection parameters supplied during the socket handshake."
+  imports: [Phoenix.Socket]
+
+- id: elixir.phoenix.channel_join_payload
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [phoenix]
+  packages: [phoenix]
+  match:
+    kind: param
+    target:
+      regex: '^[a-z_][A-Za-z0-9_]*$'
+      in_method: [join]
+      param_index_in: [1]
+      param_count_in: [3]
+  match_examples:
+  - name: phoenix channel join payload
+    code: |
+      alias Phoenix.Channel
+      defmodule RoomChannel do
+        use Phoenix.Channel
+        def join(topic, payload, socket), do: {:ok, socket}
+      end
+    expect_match_text: [payload]
+  - name: helper with different arity is not channel input
+    code: |
+      alias Phoenix.Channel
+      defmodule RoomChannel do
+        use Phoenix.Channel
+        def join(payload, socket), do: {payload, socket}
+      end
+    expect_no_match: true
+  description: "Second parameter of Phoenix.Channel join/3 - client-supplied channel join payload."
+  imports: [Phoenix.Channel]

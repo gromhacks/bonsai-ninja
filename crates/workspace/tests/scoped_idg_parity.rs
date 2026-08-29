@@ -3,31 +3,35 @@ use bonsai_lang_api::LanguageRegistry;
 use bonsai_lang_java::JavaAdapter;
 use bonsai_taint::{compose_idg_seed_nodes, IdgSeedRequest, TokenSet};
 use bonsai_workspace::Workspace;
-use std::sync::Arc;
+use std::{fs, path::PathBuf, sync::Arc};
 
-fn java_mega_workspace() -> Workspace {
+fn java_language_gauntlet_workspace() -> Workspace {
     let registry = Arc::new(LanguageRegistry::new());
     registry.register(Arc::new(JavaAdapter::new()));
     let workspace = Workspace::new(registry);
-    for (path, source) in [
-        (
-            "/java-mega/App.java",
-            include_str!("../../../examples/java/mega_flow/App.java"),
-        ),
-        (
-            "/java-mega/Executor.java",
-            include_str!("../../../examples/java/mega_flow/Executor.java"),
-        ),
-        (
-            "/java-mega/Pipeline.java",
-            include_str!("../../../examples/java/mega_flow/Pipeline.java"),
-        ),
-        (
-            "/java-mega/Storage.java",
-            include_str!("../../../examples/java/mega_flow/Storage.java"),
-        ),
-    ] {
-        workspace.vfs().write(path, Arc::<str>::from(source));
+    let root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/java/language_gauntlet/src/main/java");
+    let mut pending = vec![root.clone()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in
+            fs::read_dir(&directory).unwrap_or_else(|error| panic!("read {}: {error}", directory.display()))
+        {
+            let path = entry.expect("Java gauntlet directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "java") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    for path in files {
+        let relative = path.strip_prefix(&root).expect("Java gauntlet relative path");
+        let virtual_path = PathBuf::from("/java-language-gauntlet").join(relative);
+        let source =
+            fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        workspace.vfs().write(virtual_path, Arc::<str>::from(source));
     }
     workspace
 }
@@ -120,7 +124,7 @@ fn call_identifier_span(workspace: &Workspace, call_span: Span, identifier: &str
 
 #[test]
 fn file_function_scoped_idg_matches_complete_java_record_flow() {
-    let workspace = java_mega_workspace();
+    let workspace = java_language_gauntlet_workspace();
     let global = workspace.compiler_linkage_index();
     let call_graph = bonsai_taint::build_resolved_call_graph_snapshot(workspace.db());
     let files: Vec<FileId> = global.all_files().collect();
@@ -150,7 +154,7 @@ fn file_function_scoped_idg_matches_complete_java_record_flow() {
                 .decl_of(*symbol)
                 .and_then(|decl| decl.parent)
                 .and_then(|parent| global.decl_of(parent))
-                .is_some_and(|parent| parent.qualified_name.as_deref() == Some("mega.App.Envelope"))
+                .is_some_and(|parent| parent.qualified_name.as_deref() == Some("gauntlet.domain.Envelope"))
         })
         .map(|symbol| FuncId::new(symbol.raw()))
         .expect("record cmd accessor");
@@ -164,7 +168,7 @@ fn file_function_scoped_idg_matches_complete_java_record_flow() {
     );
     let source_span = call_identifier_span(
         &workspace,
-        call_span(&workspace, global.as_ref(), handle, "req.getParameter"),
+        call_span(&workspace, global.as_ref(), handle, "request.getParameter"),
         "getParameter",
     );
     let sink_span = call_identifier_span(
@@ -174,35 +178,22 @@ fn file_function_scoped_idg_matches_complete_java_record_flow() {
     );
     let mut names = TokenSet::default();
     names.insert("raw".to_string());
-    names.insert("req.getParameter".to_string());
+    names.insert("request.getParameter".to_string());
     let seeds = compose_idg_seed_nodes(
         IdgSeedRequest::rule_match(handle, &names, Some(source_span), &[]),
         global.as_ref(),
         scoped.as_ref(),
     );
     let sink_nodes = scoped.nodes_at_span(execute, sink_span);
-    let corridor_names = [
-        "AuditedRepository",
-        "BaseRepository",
-        "Envelope",
-        "Repository",
-        "cmd",
-        "execute",
-        "handle",
-        "makeJoiner",
-        "orchestrate",
-        "persist",
-        "run",
-    ];
     let allowed = funcs
         .iter()
         .copied()
         .filter(|func| {
             global.decl_of(SymbolId::new(func.raw())).is_some_and(|decl| {
-                corridor_names.contains(&decl.name.as_str())
+                decl.name != "cleanTwin"
                     && !matches!(
                         decl.qualified_name.as_deref(),
-                        Some("mega.Storage.BaseRepository.run")
+                        Some("gauntlet.storage.BaseRepository.run")
                     )
             })
         })

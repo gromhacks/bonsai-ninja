@@ -1,13 +1,187 @@
 # External-library constructor return types. These compile into receiver type
 # facts and never produce findings.
+- id: swift.typing.foundation_process
+  enabled: true
+  language: swift
+  packages: [Foundation]
+  imports: [Foundation]
+  returns_type: Process
+  match:
+    kind: call
+    callee:
+      name: Process
+      binding_origin: imported
+  match_examples:
+  - name: Foundation Process constructor returns Process
+    code: |
+      import Foundation
+      func example(input: String) {
+          let process = Process()
+          process.arguments = [input]
+      }
+    expect_match_text: [Process]
+  - name: local Process shadows Foundation member
+    code: |
+      import Foundation
+      struct Process { var arguments: [String] = [] }
+      func example(input: String) {
+          var process = Process()
+          process.arguments = [input]
+      }
+    expect_no_match: true
+  description: "Foundation.Process() returns Process; compiler import and local-shadow facts type the assigned receiver. Typing-only — never a finding."
+
+- id: swift.typing.foundation_xml_parser
+  enabled: true
+  language: swift
+  packages: [Foundation]
+  imports: [Foundation]
+  returns_type: XMLParser
+  match:
+    kind: call
+    callee:
+      name: XMLParser
+      binding_origin: imported
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: Foundation XMLParser constructor returns XMLParser
+    code: |
+      import Foundation
+      func example(input: Data) {
+          let parser = XMLParser(data: input)
+          parser.shouldResolveExternalEntities = true
+      }
+    expect_match_text: [XMLParser]
+  - name: local XMLParser shadows Foundation member
+    code: |
+      import Foundation
+      struct XMLParser { init(data: Data) {} }
+      func example(input: Data) {
+          let parser = XMLParser(data: input)
+          _ = parser
+      }
+    expect_no_match: true
+  description: "Foundation.XMLParser(data:) returns XMLParser; compiler import and local-shadow facts type the assigned receiver without treating every same-spelled constructor as Foundation. Typing-only — never a finding."
+
+- id: swift.typing.foundation_nskeyedunarchiver
+  enabled: true
+  language: swift
+  packages: [Foundation]
+  imports: [Foundation]
+  returns_type: NSKeyedUnarchiver
+  match:
+    kind: call
+    callee:
+      name: NSKeyedUnarchiver
+      binding_origin: imported
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: Foundation keyed unarchiver preserves archive bytes
+    code: |
+      import Foundation
+      func example(input: Data) {
+          let unarchiver = NSKeyedUnarchiver(forReadingFrom: input)
+          consume(unarchiver)
+      }
+    expect_match_text: [NSKeyedUnarchiver]
+  - name: local keyed unarchiver shadows Foundation member
+    code: |
+      import Foundation
+      struct NSKeyedUnarchiver { init(forReadingFrom: Data) {} }
+      func example(input: Data) {
+          let unarchiver = NSKeyedUnarchiver(forReadingFrom: input)
+          consume(unarchiver)
+      }
+    expect_no_match: true
+  description: "Foundation.NSKeyedUnarchiver construction preserves attacker influence from archive bytes and produces a typed receiver; imported-binding and local-shadow facts keep the transfer library-specific. Typing-only — never a finding."
+
+- id: swift.typing.foundation_url_value
+  enabled: true
+  language: swift
+  packages: [Foundation]
+  imports: [Foundation]
+  returns_type: URL
+  match:
+    kind: call
+    callee:
+      name: URL
+      binding_origin: imported
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: Foundation URL preserves its input value
+    code: |
+      import Foundation
+      func example(input: String) {
+          let parsed = URL(string: input)
+          consume(parsed)
+      }
+    expect_match_text: [URL]
+  - name: local URL constructor is not Foundation URL
+    code: |
+      import Foundation
+      struct URL { init(string: String) {} }
+      func example(input: String) {
+          let parsed = URL(string: input)
+          consume(parsed)
+      }
+    expect_no_match: true
+  description: "Foundation.URL construction preserves attacker influence from the input representation while producing a typed URL receiver. The exact imported constructor and local-shadow check keep same-spelled application types out. Typing-only — never a finding."
+
+- id: swift.typing.foundation_data_value
+  enabled: true
+  language: swift
+  packages: [Foundation, Vapor]
+  imports: [Foundation, Vapor]
+  returns_type: Data
+  match:
+    kind: call
+    callee:
+      name: Data
+      binding_origin: imported
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: Foundation Data preserves bytes from its input value
+    code: |
+      import Foundation
+      func example(input: [UInt8]) {
+          let bytes = Data(input)
+          consume(bytes)
+      }
+    expect_match_text: [Data]
+  - name: Vapor-visible Data preserves request-buffer bytes
+    code: |
+      import Vapor
+      func example(input: ByteBuffer) {
+          let bytes = Data(buffer: input)
+          consume(bytes)
+      }
+    expect_match_text: [Data]
+  - name: local Data constructor is not Foundation Data
+    code: |
+      import Foundation
+      struct Data { init(_ value: String) {} }
+      func example(input: String) {
+          let bytes = Data(input)
+          consume(bytes)
+      }
+    expect_no_match: true
+  description: "Foundation.Data construction preserves bytes from its input value and returns a typed Data receiver. Module evidence and local-shadow checks make this a rule-owned library transfer rather than a language-wide constructor guess. Typing-only — never a finding."
+
 - id: swift.typing.sqlite_statement
   enabled: true
   language: swift
+  packages: [SQLite.swift]
+  imports: [SQLite]
   returns_type: Statement
   match:
     kind: call
     callee:
       attribute: [SQLite, Statement]
+      binding_origin: imported
   match_examples:
   - name: SQLite.swift constructor returns Statement
     code: |
@@ -18,4 +192,13 @@
           statement.bind(input)
       }
     expect_match_text: [Statement]
+  - name: local Statement constructor is not SQLite.swift
+    code: |
+      import SQLite
+      struct Statement {}
+      func example(input: String) {
+          let statement = Statement()
+          statement.bind(input)
+      }
+    expect_no_match: true
   description: "`SQLite.Statement(...)` returns `Statement`; imported member aliases are resolved through compiler import facts so bind rules do not depend on local variable names. Typing-only — never a finding."

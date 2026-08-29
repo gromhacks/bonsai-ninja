@@ -2,23 +2,42 @@
 # often JSON-decoded (Sidekiq/ActiveJob) - deserialization-adjacent.
 # trust: service - upstream producer.
 - id: ruby.source.sidekiq_perform_args
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: ruby
   tag: queue-input
   trust: service
-  packages: [sidekiq, activejob]
+  payload_types: [event, json, text, binary]
+  packages: [sidekiq]
   match:
     kind: param
     target:
-      name: perform
-  description: "Disabled - `perform` is the worker method name, not the job-argument parameter identifier."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_method: [perform]
+      in_class: ["Sidekiq::Job", "Sidekiq::Worker"]
+  match_examples:
+  - name: Sidekiq job arguments
+    code: |
+      require "sidekiq"
+      class ImportJob
+        include Sidekiq::Job
+        def perform(payload, tenant)
+          payload
+        end
+      end
+    expect_match_text: [payload, tenant]
+  - name: similarly named application method is not a queue boundary
+    code: |
+      require "sidekiq"
+      class LocalRunner
+        def perform(payload)
+          payload
+        end
+      end
+    expect_no_match: true
+  description: "Arguments of `perform` on a class that exactly includes Sidekiq::Job or its legacy Sidekiq::Worker module. Compiler mixin ancestry establishes the worker boundary without guessing from class, method-parameter, or file names."
 
 - id: ruby.source.activejob_perform_args
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: ruby
   tag: queue-input
   trust: service
@@ -28,7 +47,7 @@
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
       in_method: [perform]
-      in_class: [ActiveJob::Base]
+      in_class: ["ActiveJob::Base"]
   match_examples:
   - name: Active Job perform argument
     code: |
@@ -61,12 +80,10 @@
         end
       end
     expect_no_match: true
-  description: "Disabled pending transitive framework-ancestry proof. The exact boundary is an argument of `perform` on an ActiveJob::Base descendant; package presence plus a locally named ApplicationJob/Base is not sufficient."
+  description: "Arguments of `perform` on an exact ActiveJob::Base descendant. The compiler supplies transitive, qualified superclass ancestry, so a locally named ApplicationJob does not satisfy the boundary."
 
 - id: ruby.source.shoryuken_perform_body_param
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: ruby
   tag: queue-input
   trust: service
@@ -76,6 +93,7 @@
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
       in_method: [perform]
+      in_class: ["Shoryuken::Worker"]
       param_index_in: [1]
       param_count_in: [2]
   match_examples:
@@ -99,7 +117,16 @@
         end
       end
     expect_no_match: true
-  description: "Disabled pending class/module provenance: Shoryuken's standard two-argument worker contract delivers the SQS body as `perform(sqs_message, body)`, but package presence plus an arbitrary two-argument `perform` method cannot prove that its class includes Shoryuken::Worker. This replaces the former fictitious `message.body(input)` carrier without creating a new false source."
+  - name: unrelated two-argument perform method is not a Shoryuken boundary
+    code: |
+      require "shoryuken"
+      class LocalWorker
+        def perform(message, body)
+          body
+        end
+      end
+    expect_no_match: true
+  description: "Parameter one of the exact two-argument `perform(message, body)` contract on a class that includes Shoryuken::Worker. The compiler records parsed include/prepend module ancestry rather than guessing from the worker or parameter spelling."
 
 - id: ruby.source.delayed_job_payload
   enabled: true
@@ -152,20 +179,6 @@
       end
     expect_no_match: true
   description: "Karafka consumer message.payload - Kafka record body."
-
-- id: ruby.source.resque_perform_args
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: queue-input
-  trust: service
-  packages: [resque]
-  match:
-    kind: param
-    target:
-      name: perform
-  description: "Disabled - Resque worker .perform args carry attacker-influenced JSON; bare `param name: perform` overmatches helper methods. Enable only with class-context narrowing."
 
 - id: ruby.source.sneakers_deserialize
   enabled: true

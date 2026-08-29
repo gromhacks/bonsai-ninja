@@ -491,16 +491,37 @@ that corrupts local nested-type resolution and makes a syntax occurrence look
 like external dependency evidence. Fully qualified calls remain provable from
 their exact call identity plus rulepack-declared package semantics.
 
+Adapters also declare their local module-resolution syntax. For example,
+Python permits an unqualified `from storage import X` to resolve a sibling
+`storage.py`, while JavaScript requires `./storage`. Shared package planning
+uses that capability to form exact connected components; it must not apply one
+language's import-search behavior to another. Dependency-manifest evidence,
+connected-component import evidence, and exact in-file imports remain distinct
+facts so an unrelated sibling import cannot satisfy a package gate.
+
 ## Testing contract
 
 Each adapter ships fixtures in its `tests/` directory and at minimum:
 
-- A smoke test (parse + `decl_index` per file, asserts non-empty).
-- A traced test (`run_traced(fn_name)`) for at least one representative
-  function.
+- Exactly one shared `run_language_suite!` invocation. It validates clean and
+  deterministic parsing/lowering, serialized compiler spans, declaration and
+  parameter invariants, imports, CFG integrity, trace integrity, and warm
+  compiler-object replay without a second adapter lowering.
+- A complete `additional_grammar_node_kinds` inventory for every CST kind
+  consumed by adapter-specific lowering outside `GrammarHandler`. The shared
+  suite validates the combined inventory against the exact grammar variant
+  selected for each representative path. Override `grammar_handler_for_path`
+  when a shared lowering field itself is representation-specific, and override
+  `additional_grammar_node_kinds_for_path` when a multi-grammar adapter has
+  genuinely variant-only nodes; do not make the common contract accept kinds
+  another variant cannot emit. A Tree-sitter rename is then a test failure
+  rather than a silent loss of compiler facts.
+- A traced fixture (`trace_from = fn_name`) for at least one representative
+  function. A presence-only smoke fixture is not sufficient.
 - Per-construct fixtures for every `LanguageCapabilities` field the
   adapter claims `Exact` or `Partial` for.
 
-The cross-language regression matrix
-(`crates/taint/tests/over_taint_matrix.rs`) adds invariants that must
-hold for every supported language; new adapters should appear there.
+The [compiler conformance suite](compiler-conformance.mdx) additionally checks
+multi-arm and multi-catch path separation, loop phase order, malformed syntax,
+direct IDG semantics, and scale-sensitive architecture. A new adapter must be
+classified in every all-language table; silent skips are rejected.

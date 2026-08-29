@@ -1,0 +1,98 @@
+- id: scala.typing.document_builder_factory_new_instance
+  enabled: true
+  language: scala
+  imports: [javax.xml.parsers]
+  returns_type: DocumentBuilderFactory
+  match:
+    kind: call
+    callee:
+      attribute: [DocumentBuilderFactory, newInstance]
+      binding_origin: imported
+  match_examples:
+  - name: imported document builder factory
+    code: |
+      import javax.xml.parsers._
+      object Xml { val factory = DocumentBuilderFactory.newInstance() }
+    expect_match_text: [DocumentBuilderFactory.newInstance]
+  - name: local document builder factory is not javax XML
+    code: |
+      import javax.xml.parsers.{DocumentBuilderFactory => JavaDocumentBuilderFactory}
+      object DocumentBuilderFactory { def newInstance() = new LocalFactory }
+      class LocalFactory
+      object Xml { val factory = DocumentBuilderFactory.newInstance() }
+    expect_no_match: true
+  description: "Imported javax.xml.parsers.DocumentBuilderFactory.newInstance returns DocumentBuilderFactory; typing-only metadata."
+
+- id: scala.typing.document_builder_factory_new_document_builder
+  enabled: true
+  language: scala
+  imports: [javax.xml.parsers]
+  returns_type: DocumentBuilder
+  match:
+    kind: call
+    callee:
+      name: newDocumentBuilder
+      receiver_type_in: [DocumentBuilderFactory]
+  match_examples:
+  - name: typed factory creates document builder
+    code: |
+      import javax.xml.parsers._
+      object Xml { def builder(factory: DocumentBuilderFactory) = factory.newDocumentBuilder() }
+    expect_match_text: [factory.newDocumentBuilder]
+  - name: unrelated builder factory does not receive XML typing
+    code: |
+      import javax.xml.parsers._
+      class LocalFactory { def newDocumentBuilder() = new LocalBuilder }
+      class LocalBuilder
+      object Xml { def builder(factory: LocalFactory) = factory.newDocumentBuilder() }
+    expect_no_match: true
+  description: "A compiler-typed DocumentBuilderFactory.newDocumentBuilder call returns DocumentBuilder; typing-only metadata."
+
+- id: scala.typing.java_sql_driver_manager_get_connection
+  enabled: true
+  language: scala
+  imports: [java.sql]
+  returns_type: Connection
+  match:
+    kind: call
+    callee:
+      attribute: [DriverManager, getConnection]
+      binding_origin: imported
+  match_examples:
+  - name: imported JDBC driver manager returns Connection
+    code: |
+      import java.sql.DriverManager
+      object Db { val connection = DriverManager.getConnection("jdbc:sqlite:test.db") }
+    expect_match_text: [DriverManager.getConnection]
+  - name: local driver manager does not receive JDBC typing
+    code: |
+      object DriverManager { def getConnection(url: String) = new LocalConnection }
+      class LocalConnection
+      object Db { val connection = DriverManager.getConnection("local") }
+    expect_no_match: true
+  description: "Imported java.sql.DriverManager.getConnection returns Connection; typing-only metadata supports exact receiver inference."
+
+- id: scala.typing.jdbc_connection_create_statement
+  enabled: true
+  language: scala
+  imports: [java.sql]
+  returns_type: Statement
+  match:
+    kind: call
+    callee:
+      name: createStatement
+      receiver_type_in: [Connection]
+  match_examples:
+  - name: typed JDBC connection creates statement
+    code: |
+      import java.sql._
+      object Db { def statement(connection: Connection) = connection.createStatement() }
+    expect_match_text: [connection.createStatement]
+  - name: unrelated createStatement method is not JDBC
+    code: |
+      import java.sql._
+      class LocalConnection { def createStatement() = new LocalStatement }
+      class LocalStatement
+      object Db { def statement(connection: LocalConnection) = connection.createStatement() }
+    expect_no_match: true
+  description: "A compiler-typed java.sql.Connection.createStatement call returns Statement; typing-only metadata."

@@ -1,20 +1,4 @@
 # C++ cloud / serverless sources.
-- id: cpp.cloud.aws_lambda_request_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  trust: service
-  tag: cloud-event
-  payload_types: [event, json]
-  frameworks: [aws-lambda]
-  packages: [aws-lambda-cpp]
-  match:
-    kind: param
-    target:
-      name: request
-  description: "Disabled - bare `request` is too broad outside Lambda-only audits; use the more specific invocationRequest rule below when available."
-
 - id: cpp.cloud.aws_lambda_invocation_request
   enabled: true
   language: cpp
@@ -27,7 +11,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [invocation_request, aws::lambda_runtime::invocation_request]
+      param_type_in: [invocation_request, "aws::lambda_runtime::invocation_request"]
   match_examples:
   - name: typed lambda invocation request
     code: |

@@ -9,8 +9,17 @@
   match:
     kind: call
     callee:
-      attribute: [cursor, execute]
+      name: execute
   constraints:
+  - receiver_type_in:
+    - DBAPI.Cursor
+    - sqlite3.Cursor
+    - psycopg2.extensions.cursor
+    - psycopg.Cursor
+    - mysql.connector.cursor.MySQLCursor
+    - pymysql.cursors.Cursor
+    - pyodbc.Cursor
+    - oracledb.Cursor
   - arg_tainted:
       index: 0
   analysis_semantics:
@@ -20,17 +29,28 @@
     character_constraint:
       required_excluded_characters: ["'"]
       required_enclosing_literal_delimiter: "'"
+      accepted_untyped_source_payload_types: [query, path, header, cookie, form, json, text, url, hostname, ip]
   match_examples:
   - name: sqli cursor execute
     code: |
       import sqlite3
       def example(user_input):
+          cursor = sqlite3.connect("app.db").cursor()
           return cursor.execute(user_input)
   - name: cursor execute literal negative
     code: |
       import sqlite3
       def example(user_input):
+          cursor = sqlite3.connect("app.db").cursor()
           return cursor.execute('safe')
+    expect_no_match: true
+  - name: unrelated execute method is not a DB-API cursor
+    code: |
+      import sqlite3
+      class Runner:
+          def execute(self, value): return value
+      def example(runner: Runner, user_input):
+          return runner.execute(user_input)
     expect_no_match: true
   description: "DB-API cursor.execute - flag string-built SQL. Package gate names the canonical DB-API drivers (sqlite3 stdlib + popular wheels) so the rule is constrained to files that actually load one."
 
@@ -44,8 +64,17 @@
   match:
     kind: call
     callee:
-      attribute: [cursor, executemany]
+      name: executemany
   constraints:
+  - receiver_type_in:
+    - DBAPI.Cursor
+    - sqlite3.Cursor
+    - psycopg2.extensions.cursor
+    - psycopg.Cursor
+    - mysql.connector.cursor.MySQLCursor
+    - pymysql.cursors.Cursor
+    - pyodbc.Cursor
+    - oracledb.Cursor
   - arg_tainted:
       index: 0
   match_examples:
@@ -53,11 +82,13 @@
     code: |
       import sqlite3
       def example(user_input):
+          cursor = sqlite3.connect("app.db").cursor()
           return cursor.executemany(user_input)
   - name: cursor executemany literal negative
     code: |
       import sqlite3
       def example(user_input):
+          cursor = sqlite3.connect("app.db").cursor()
           return cursor.executemany('safe')
     expect_no_match: true
   description: "DB-API cursor.executemany. Gated on the canonical DB-API driver imports."
@@ -72,8 +103,17 @@
   match:
     kind: call
     callee:
-      attribute: [cursor, executescript]
+      name: executescript
   constraints:
+  - receiver_type_in:
+    - DBAPI.Cursor
+    - sqlite3.Cursor
+    - psycopg2.extensions.cursor
+    - psycopg.Cursor
+    - mysql.connector.cursor.MySQLCursor
+    - pymysql.cursors.Cursor
+    - pyodbc.Cursor
+    - oracledb.Cursor
   - arg_tainted:
       index: 0
   match_examples:
@@ -81,135 +121,16 @@
     code: |
       import sqlite3
       def example(user_input):
+          cursor = sqlite3.connect("app.db").cursor()
           return cursor.executescript(user_input)
   - name: cursor executescript literal negative
     code: |
       import sqlite3
       def example(user_input):
+          cursor = sqlite3.connect("app.db").cursor()
           return cursor.executescript('safe')
     expect_no_match: true
   description: "sqlite3 cursor.executescript - multi-statement. sqlite3-only DB-API extension."
-
-- id: python.sqli.cursor_execute_abbrev
-  enabled: true
-  language: python
-  tag: sql-injection
-  severity: critical
-  cwe: [CWE-89]
-  packages: [sqlite3, psycopg2, mysql.connector, pymysql, pyodbc, oracledb]
-  match:
-    kind: call
-    callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.execute$"
-      base_name_in: [cur, crsr, csr, dbcur, db_cursor, cur1]
-  constraints:
-  - arg_tainted:
-      index: 0
-  analysis_semantics:
-    parameterized_query:
-      query_arg_index: 0
-      bindings_arg_index: 1
-    character_constraint:
-      required_excluded_characters: ["'"]
-      required_enclosing_literal_delimiter: "'"
-  match_examples:
-  - name: abbreviated cursor execute
-    code: |
-      import sqlite3
-      def example(user_input):
-          cur = sqlite3.connect("x").cursor()
-          return cur.execute(user_input)
-    expect_match_text: [cur.execute]
-  - name: abbreviated cursor execute literal negative
-    code: |
-      import sqlite3
-      def example():
-          cur = sqlite3.connect("x").cursor()
-          return cur.execute("SELECT 1")
-    expect_no_match: true
-  - name: unrelated receiver negative
-    code: |
-      import sqlite3
-      def example(client, user_input):
-          return client.execute(user_input)
-    expect_no_match: true
-  description: "DB-API cursor.execute on abbreviated cursor variable names (cur/crsr/csr/...) - companion to cursor_execute, which matches the literal `cursor` receiver and inline `.cursor().execute` chains. base_name_in keeps it precise + package-gated."
-
-- id: python.sqli.cursor_executemany_abbrev
-  enabled: true
-  language: python
-  tag: sql-injection
-  severity: critical
-  cwe: [CWE-89]
-  packages: [sqlite3, psycopg2, mysql.connector, pymysql, pyodbc, oracledb]
-  match:
-    kind: call
-    callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.executemany$"
-      base_name_in: [cur, crsr, csr, dbcur, db_cursor, cur1]
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: abbreviated cursor executemany
-    code: |
-      import sqlite3
-      def example(user_input):
-          cur = sqlite3.connect("x").cursor()
-          return cur.executemany(user_input)
-    expect_match_text: [cur.executemany]
-  - name: abbreviated cursor executemany literal negative
-    code: |
-      import sqlite3
-      def example():
-          cur = sqlite3.connect("x").cursor()
-          return cur.executemany("SELECT 1")
-    expect_no_match: true
-  - name: unrelated receiver negative
-    code: |
-      import sqlite3
-      def example(client, user_input):
-          return client.executemany(user_input)
-    expect_no_match: true
-  description: "DB-API cursor.executemany on abbreviated cursor variable names - companion to cursor_executemany."
-
-- id: python.sqli.cursor_executescript_abbrev
-  enabled: true
-  language: python
-  tag: sql-injection
-  severity: critical
-  cwe: [CWE-89]
-  packages: [sqlite3]
-  match:
-    kind: call
-    callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.executescript$"
-      base_name_in: [cur, crsr, csr, dbcur, db_cursor, cur1]
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: abbreviated cursor executescript
-    code: |
-      import sqlite3
-      def example(user_input):
-          cur = sqlite3.connect("x").cursor()
-          return cur.executescript(user_input)
-    expect_match_text: [cur.executescript]
-  - name: abbreviated cursor executescript literal negative
-    code: |
-      import sqlite3
-      def example():
-          cur = sqlite3.connect("x").cursor()
-          return cur.executescript("SELECT 1")
-    expect_no_match: true
-  - name: unrelated receiver negative
-    code: |
-      import sqlite3
-      def example(client, user_input):
-          return client.executescript(user_input)
-    expect_no_match: true
-  description: "sqlite3 cursor.executescript on abbreviated cursor variable names - companion to cursor_executescript."
 
 - id: python.sqli.connection_execute
   enabled: true
@@ -221,8 +142,9 @@
   match:
     kind: call
     callee:
-      attribute: [Connection, execute]
+      name: execute
   constraints:
+  - receiver_type_in: [DBAPI.Connection, sqlite3.Connection, asyncpg.Connection, aiosqlite.Connection]
   - arg_tainted:
       index: 0
   match_examples:
@@ -252,42 +174,6 @@
     expect_no_match: true
   description: "Connection.execute - sqlite3/asyncpg/aiosqlite typed connection receivers. DB-API exempt from SQL-keyword arg shape (per PATTERN_GUIDE: `cursor.execute(query_var)` is canonical)."
 
-- id: python.sqli.named_connection_execute
-  enabled: true
-  language: python
-  tag: sql-injection
-  severity: critical
-  cwe: [CWE-89]
-  packages: [sqlite3, aiosqlite, asyncpg]
-  match:
-    kind: call
-    callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.execute$"
-      base_name_in: [conn, con, db, database, connection]
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: sqlite named connection execute
-    code: |
-      import sqlite3
-      def example(conn, user_input):
-          return conn.execute(user_input)
-    expect_match_text: [conn.execute]
-  - name: sqlite named connection execute literal negative
-    code: |
-      import sqlite3
-      def example(conn, user_input):
-          return conn.execute("SELECT 1")
-    expect_no_match: true
-  - name: unrelated receiver negative
-    code: |
-      import sqlite3
-      def example(client, user_input):
-          return client.execute(user_input)
-    expect_no_match: true
-  description: "Untyped DB connection.execute on conventional connection variable names. This covers sqlite3.connect(...) assignments where the adapter has no receiver type while avoiding broad `.execute(...)` matches."
-
 - id: python.sqli.psycopg2_cursor_execute
   enabled: true
   language: python
@@ -309,6 +195,7 @@
     character_constraint:
       required_excluded_characters: ["'"]
       required_enclosing_literal_delimiter: "'"
+      accepted_untyped_source_payload_types: [query, path, header, cookie, form, json, text, url, hostname, ip]
   match_examples:
   - name: sqli psycopg2 cursor execute
     code: |
@@ -333,39 +220,6 @@
           return Cursor.execute('safe')
     expect_no_match: true
   description: "psycopg2/psycopg/aiopg Cursor.execute - placeholders parameterise; string-built SQL does not."
-
-- id: python.sqli.asyncpg_connection_execute
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.sqli.connection_execute
-  language: python
-  tag: sql-injection
-  severity: critical
-  packages: [asyncpg]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      attribute: [Connection, execute]
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: sqli asyncpg connection execute
-    code: |
-      import asyncpg
-      async def example(conn: asyncpg.Connection, user_input):
-          return await conn.execute(user_input)
-    expect_match_text: [conn.execute]
-  - name: asyncpg connection execute literal negative
-    code: |
-      import asyncpg
-
-      async def example(conn: asyncpg.Connection):
-          return await conn.execute('safe')
-    expect_no_match: true
-  description: "asyncpg Connection.execute(string) - the `$1` placeholders are the sanitizer, not the executor. DB-API exempt from SQL-keyword arg shape; `min_args: 1` rejects 0-arg decoys."
 
 - id: python.sqli.asyncpg_connection_fetch
   enabled: true
@@ -546,38 +400,6 @@
     expect_no_match: true
   description: "asyncpg variable receiver .fetchval(sql) - package-gated receiver-agnostic rule for dynamically typed connection variables."
 
-- id: python.sqli.asyncpg_conn_execute
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: sql-injection
-  severity: critical
-  packages: [asyncpg]
-  imports: [asyncpg]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.execute$"
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: asyncpg variable connection execute
-    code: |
-      import asyncpg
-      async def example(conn, user_input):
-          return await conn.execute(user_input)
-    expect_match_text: [conn.execute]
-  - name: asyncpg variable connection execute literal negative
-    code: |
-      import asyncpg
-      async def example(conn):
-          return await conn.execute('select 1')
-    expect_no_match: true
-  description: "Disabled until Python can prove this variable receiver came from asyncpg.Connection without relying on local receiver names. Typed receivers are covered by python.sqli.asyncpg_connection_execute."
-
 - id: python.sqli.aiopg_sa_connection_execute
   enabled: true
   language: python
@@ -698,38 +520,6 @@
     expect_no_match: true
   description: "SQLAlchemy Engine.execute - raw SQL string."
 
-- id: python.sqli.sqlalchemy_engine_execute_variable
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: sql-injection
-  severity: high
-  packages: [sqlalchemy]
-  imports: [sqlalchemy]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.execute$"
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: sqlalchemy engine variable execute
-    code: |
-      import sqlalchemy
-      def example(engine, user_input):
-          return engine.execute(user_input)
-    expect_match_text: [engine.execute]
-  - name: sqlalchemy engine variable execute literal negative
-    code: |
-      import sqlalchemy
-      def example(engine):
-          return engine.execute('select 1')
-    expect_no_match: true
-  description: "Disabled until Python can prove this variable receiver came from sqlalchemy.Engine without relying on local receiver names. Typed Engine receivers are covered by python.sqli.sqlalchemy_engine_execute."
-
 - id: python.sqli.sqlalchemy_session_execute
   enabled: true
   language: python
@@ -788,22 +578,6 @@
     expect_no_match: true
   description: "Django Manager.raw(SQL)."
 
-- id: python.sqli.django_execute
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.sqli.cursor_execute
-  language: python
-  tag: sql-injection
-  severity: critical
-  packages: [django]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      attribute: [connection, cursor]
-  description: "Disabled - connection.cursor() is setup, not a sink; the injection point is the downstream cursor.execute(string). Covered by python.sqli.cursor_execute."
-
 - id: python.sqli.django_extra
   enabled: true
   language: python
@@ -816,62 +590,38 @@
     callee:
       name: extra
   constraints:
+  - receiver_type_in: [QuerySet]
   - arg_tainted:
       index: 0
   match_examples:
   - name: sqli django extra
     code: |
-      import django
-      def example(user_input):
-          return QuerySet.extra(user_input)
-    expect_match_text: [QuerySet.extra]
+      from django.db.models.query import QuerySet
+      def example(qs: QuerySet, user_input):
+          return qs.extra(user_input)
+    expect_match_text: [qs.extra]
   - name: django extra order by variable
     code: |
-      import django
-      def example(qs, user_input):
+      from django.db import models
+      class Product(models.Model):
+          name = models.TextField()
+      def example(user_input):
+          qs = Product.objects.filter(active=True)
           order_by = [user_input]
           return qs.extra(order_by=order_by)
     expect_match_text: [qs.extra]
-  - name: django extra literal negative
+  - name: unrelated extra method remains negative in django project
     code: |
       import django
-      def example(qs):
-          return qs.extra(where=["is_active = true"])
+      class LocalBuilder:
+          def extra(self, **kwargs):
+              return kwargs
+      def example(qs: LocalBuilder, user_input):
+          return qs.extra(order_by=[user_input])
     expect_no_match: true
-  description: "Django QuerySet.extra(where=.../select=.../tables=.../order_by=...). Taint reachability determines whether a caller-controlled value reaches the API. Merged aliases: python.sqli.django_queryset_extra_order_by."
+  description: "Django QuerySet.extra(where=.../select=.../tables=.../order_by=...). Compiler/rulepack return typing proves the QuerySet receiver; taint reachability determines whether caller-controlled data reaches the raw-query escape hatch. Merged aliases: python.sqli.django_queryset_extra_order_by."
   aliases:
   - python.sqli.django_queryset_extra_order_by
-
-- id: python.sqli.django_queryset_extra_order_by
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.sqli.django_extra
-  language: python
-  tag: sql-injection
-  severity: high
-  packages: [django]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      name: extra
-  description: "Disabled duplicate - same `extra(...)` adapter fact as python.sqli.django_extra; keep the broader Django QuerySet.extra sink as canonical."
-
-- id: python.sqli.django_filter_lookup
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: sql-injection
-  severity: medium
-  packages: [django]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      attribute: [objects, filter]
-  description: "Disabled - Django ORM filter is parameterised."
 
 - id: python.sqli.peewee_execute_sql
   enabled: true
@@ -1169,43 +919,3 @@
           return Database.execute('safe')
     expect_no_match: true
   description: "databases.Database.execute (Encode async DB driver)."
-
-- id: python.sqli.graphene_resolver_db_execute
-  enabled: true
-  language: python
-  tag: sql-injection
-  severity: high
-  packages: [graphene, ariadne]
-  imports: [graphene, ariadne]
-  cwe: [CWE-943, CWE-89]
-  analysis_semantics:
-    sink_terminal_priority: 100
-  match:
-    kind: call
-    callee:
-      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.execute$"
-      base_name_in: [engine, engine_mod, db, database, conn, connection]
-  constraints:
-  - arg_tainted:
-      index: 0
-  - arg_matches_regex:
-      index: 0
-      regex: "(?i)\\b(select|insert|update|delete|from|where)\\b"
-  - arg_not_matches_regex:
-      index: 0
-      regex: "(\\?|%s|:[A-Za-z_][A-Za-z0-9_]*|\\$[0-9]+)"
-  match_examples:
-  - name: graphene resolver tainted sql execute
-    code: |
-      import graphene
-      def example(engine_mod, user_input):
-          sql = "SELECT id FROM products WHERE name = '" + user_input + "'"
-          return engine_mod.execute(sql)
-    expect_match_text: [engine_mod.execute]
-  - name: graphene resolver parameterized execute negative
-    code: |
-      import graphene
-      def example(engine_mod, user_input):
-          return engine_mod.execute("SELECT id FROM products WHERE name = %s", (user_input,))
-    expect_no_match: true
-  description: "Graphene/Ariadne resolver-tainted SQL passed to a project DB execute wrapper without bind placeholders."

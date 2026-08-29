@@ -12,18 +12,28 @@
   constraints:
   - arg_tainted:
       index: 0
+  - arg_matches_regex:
+      index: 2
+      regex: '\bLIBXML_(?:NOENT|DTDLOAD)\b'
   match_examples:
     - name: php.xxe.simplexml_load_string example
       code: |
         <?php
         function example($input, $url, $id, $payload, $request) {
-          simplexml_load_string($input);
+          simplexml_load_string($input, SimpleXMLElement::class, LIBXML_NOENT | LIBXML_DTDLOAD);
         }
     - name: arg tainted literal negative
       code: |
         <?php
         function example($input, $url, $id, $payload, $request) {
           simplexml_load_string("<root/>");
+        }
+      expect_no_match: true
+    - name: nonet without entity substitution is not an XXE configuration
+      code: |
+        <?php
+        function example($input) {
+          simplexml_load_string($input, SimpleXMLElement::class, LIBXML_NONET | LIBXML_NOERROR);
         }
       expect_no_match: true
   description: "simplexml_load_string - flag if LIBXML_NOENT or LIBXML_DTDLOAD set."
@@ -115,20 +125,6 @@
       expect_no_match: true
   description: "DOMDocument::loadXML."
 
-- id: php.xxe.domdocument_loadhtml
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: xxe
-  severity: low
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [DOMDocument, loadHTML]
-  description: "Disabled - HTML loader doesn't honor DTDs."
-
 - id: php.xxe.xmlreader_open
   enabled: true
   language: php
@@ -186,21 +182,6 @@
         }
       expect_no_match: true
   description: "XMLReader::xml."
-
-- id: php.xxe.xml_parser_create
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: xxe
-  category: source-independent
-  severity: medium
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      name: xml_parser_create
-  description: "Disabled - xml_parser_create only constructs an expat parser and DTD processing is not enabled by default; php.xxe.xml_parse models the untrusted XML data path."
 
 - id: php.xxe.xml_parse
   enabled: true

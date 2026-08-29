@@ -5,7 +5,7 @@
 //! module would credit a bare receiver-agnostic source here. That defeated
 //! per-file package gating — a `request.headers` framework source fired in a
 //! module that imported a *different* framework (see the committed
-//! `benchmark_gap_regressions::typescript_*_requires_matching_package_evidence`
+//! `security_flow_capability_regressions::typescript_*_requires_matching_package_evidence`
 //! invariants) — violating the standing "do NOT loosen the matcher package
 //! gate" directive. It was reverted.
 //!

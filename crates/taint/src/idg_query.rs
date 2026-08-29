@@ -25,6 +25,7 @@ pub enum IdgTaintSeed<'a> {
         output_arg_names: &'a [String],
         callback_only: bool,
         output_only: bool,
+        match_kind: crate::reachable::IdgRuleMatchKind,
     },
     Precomposed(&'a [bonsai_idg::WsNodeId]),
 }
@@ -52,6 +53,29 @@ impl<'a> IdgTaintSource<'a> {
                 output_arg_names,
                 callback_only: false,
                 output_only: false,
+                match_kind: crate::reachable::IdgRuleMatchKind::General,
+            },
+        }
+    }
+
+    /// A matcher-proven storage read. The source is the exact read endpoint,
+    /// not any enclosing call result or assignment that overlaps its span.
+    #[must_use]
+    pub const fn read_rule_match(
+        func: FuncId,
+        tokens: &'a TokenSet,
+        source_anchor: Option<bonsai_common::Span>,
+        output_arg_names: &'a [String],
+    ) -> Self {
+        Self {
+            func,
+            tokens,
+            seed: IdgTaintSeed::RuleMatch {
+                source_anchor,
+                output_arg_names,
+                callback_only: false,
+                output_only: false,
+                match_kind: crate::reachable::IdgRuleMatchKind::Read,
             },
         }
     }
@@ -74,6 +98,7 @@ impl<'a> IdgTaintSource<'a> {
                 output_arg_names,
                 callback_only: false,
                 output_only: true,
+                match_kind: crate::reachable::IdgRuleMatchKind::General,
             },
         }
     }
@@ -94,6 +119,7 @@ impl<'a> IdgTaintSource<'a> {
                 output_arg_names: &[],
                 callback_only: true,
                 output_only: false,
+                match_kind: crate::reachable::IdgRuleMatchKind::General,
             },
         }
     }

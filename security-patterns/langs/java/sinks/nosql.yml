@@ -43,10 +43,9 @@
         }
       }
     expect_no_match: true
-  description: "MongoCollection.find - flag tainted Bson filter. Merged collision aliases: java.nosql.mongo_find_local_document, java.nosql.spring_mongo_template_find, java.ldap.spring_ldap_template_find."
+  description: "MongoCollection.find - flag tainted Bson filter."
   aliases:
   - java.nosql.mongo_find_local_document
-  - java.ldap.spring_ldap_template_find
 - id: java.nosql.spring_mongo_template_find
   enabled: true
   language: java
@@ -456,24 +455,6 @@
       }
     expect_no_match: true
   description: "new Document(callerMap) - MongoDB selector built from a caller-controlled map can carry operators such as $ne or $where."
-- id: java.nosql.cassandra_session_execute
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: cql-injection
-  severity: high
-  packages:
-  - com.datastax.driver.core
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Session
-      - execute
-  description: "Disabled - [Session, execute] clashes with jOOQ/WebSocket/Hibernate Session; use datastax CqlSession rule below."
 - id: java.nosql.elasticsearch_search
   enabled: true
   language: java

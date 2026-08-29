@@ -190,17 +190,22 @@ fn matrix() -> Vec<TaintRow> {
     ]
 }
 
-/// Path to the `examples/` directory, relative to the crate's
+/// Path to the focused language fixtures, relative to the crate's
 /// `CARGO_MANIFEST_DIR`.
-fn examples_root() -> std::path::PathBuf {
+fn fixtures_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().unwrap().parent().unwrap().join("examples")
+    manifest
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("test-fixtures/languages")
 }
 
 /// Open a workspace under `examples/<subdir>/` with every language
 /// adapter registered.
 fn open_fixture(subdir: &str) -> AnalyzerDb {
-    let dir = examples_root().join(subdir);
+    let dir = fixtures_root().join(subdir);
     let vfs = Arc::new(Vfs::new());
     // Recursively ingest all files under the fixture.
     ingest_dir(&vfs, &dir, &dir);
@@ -256,17 +261,21 @@ fn ingest_dir(vfs: &Arc<Vfs>, root: &std::path::Path, dir: &std::path::Path) {
     }
 }
 
-/// Look up the first `FuncId` matching `name` with Function / Method /
-/// Constructor kind. Panics if not found — the tests assume the
-/// canonical names exist in every micro fixture.
+/// Look up the executable definition matching `name`. Header/interface
+/// prototypes are real compiler declarations, but starting an IDG closure at
+/// whichever symbol happened to be ingested first makes this matrix depend on
+/// filesystem iteration order. Every micro fixture promises a body-bearing
+/// implementation, so fail if that contract is not met.
 fn func_id(db: &AnalyzerDb, name: &str) -> bonsai_common::FuncId {
     let global = db.global_index();
-    let mut matches = bonsai_resolve::resolve_callable(&global, name);
-    assert!(
-        !matches.is_empty(),
-        "expected `{name}` decl in fixture, none found",
-    );
-    matches.remove(0)
+    bonsai_resolve::resolve_callable(&global, name)
+        .into_iter()
+        .find(|func| {
+            global
+                .decl_of(bonsai_common::SymbolId::new(func.raw()))
+                .is_some_and(|decl| decl.body_span.is_some() || !decl.flow_events.is_empty())
+        })
+        .unwrap_or_else(|| panic!("expected executable `{name}` definition in fixture"))
 }
 
 fn seed_from_row(row: &TaintRow) -> TokenSet {
@@ -338,8 +347,10 @@ fn taint_config_for_lang(lang: &str) -> InterTaintConfig {
         config.output_arg_flows.push(bonsai_taint::OutputArgFlow {
             callee: "sprintf".to_string(),
             output_arg_index: 0,
+            input_receiver: false,
             value_start_arg_index: Some(1),
             value_arg_indices: Vec::new(),
+            resolved_call_sites: Vec::new(),
         });
     }
     config
@@ -428,12 +439,24 @@ fn interproc_propagates_mid_to_sink_for_every_language() {
         // The sink should appear as a callee in at least one
         // propagation record somewhere downstream of mid.
         let propagated = result.call_records.iter().any(|record| record.callee == sink);
+        let observed = result
+            .call_records
+            .iter()
+            .map(|record| {
+                let decl = db
+                    .global_index()
+                    .decl_of(bonsai_common::SymbolId::new(record.callee.raw()))
+                    .map(|decl| (decl.name.clone(), decl.qualified_name.clone()));
+                (record.callee, decl)
+            })
+            .collect::<Vec<_>>();
         assert!(
             propagated,
-            "{}: interprocedural pass must produce a propagation record targeting `{}`; got {} records",
+            "{}: interprocedural pass must produce a propagation record targeting `{}`; got {} records: {:?}",
             row.lang,
             row.sink,
             result.call_records.len(),
+            observed,
         );
     }
 }

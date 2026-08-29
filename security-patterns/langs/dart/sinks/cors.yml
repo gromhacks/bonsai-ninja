@@ -17,9 +17,6 @@
   - name: wildcard origin header
     code: |
       import 'package:shelf_cors_headers/shelf_cors_headers.dart';
-      import 'package:shelf_cors_headers/shelf_cors_headers.dart';
-      import 'package:shelf_cors_headers/shelf_cors_headers.dart';
-      import 'package:shelf_cors_headers/shelf_cors_headers.dart';
       import 'package:shelf_cors_headers/shelf_cors_headers.dart'; // shelf_cors_headers
       void test() { corsHeaders({"Access-Control-Allow-Origin": "*"}); }
     expect_match_text: [corsHeaders]

@@ -5,7 +5,6 @@
   severity: medium
   cwe:
   - CWE-200
-  - CWE-117
   match:
     kind: call
     callee:
@@ -27,9 +26,7 @@
         console.log(username);
       }
     expect_no_match: true
-  description: "console.log(secret/token/password) - secret-shaped data written to process logs or captured stdout. Merged aliases: javascript.log_injection.console_newline."
-  aliases:
-  - javascript.log_injection.console_newline
+  description: "console.log(secret/token/password) - secret-shaped data written to process logs or captured stdout."
 - id: javascript.info_disclosure.response_send_error_stack
   enabled: true
   language: javascript

@@ -7,10 +7,13 @@
   language: kotlin
   imports: [java.io]
   returns_type: File
+  taint_semantics:
+    call_result_passthrough_args_from: 0
   match:
     kind: new
     callee:
       attribute: [java, io, File]
+      binding_origin: imported
   match_examples:
   - name: imported java File constructor returns File
     code: |
@@ -20,7 +23,43 @@
         file.readText()
       }
     expect_match_text: [File]
+  - name: local File function shadows imported Java type
+    code: |
+      import java.io.File as JavaFile
+      class LocalFile { fun readText() = "local" }
+      fun File(path: String): LocalFile = LocalFile()
+      fun example(path: String) = File(path).readText()
+    expect_no_match: true
   description: "An imported java.io.File(...) constructor returns File; typing-only metadata resolves Kotlin File extension calls without capitalization or API knowledge in the adapter."
+
+- id: kotlin.typing.java_io_file_canonical_file
+  enabled: true
+  language: kotlin
+  imports: [java.io]
+  returns_type: File
+  match:
+    kind: read
+    target:
+      name: canonicalFile
+      receiver_type_in: [File]
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: canonical file preserves the selected path value
+    code: |
+      import java.io.File
+      fun canonical(path: String): File {
+        val file = File(path)
+        return file.canonicalFile
+      }
+    expect_match_text: [file.canonicalFile]
+  - name: unrelated canonicalFile property stays untyped
+    code: |
+      import java.io.File as JavaFile
+      class LocalPath(val canonicalFile: LocalPath)
+      fun canonical(path: LocalPath) = path.canonicalFile
+    expect_no_match: true
+  description: "java.io.File.canonicalFile returns the canonicalized form of the same path value. The matcher compiles the exact typed property-access span; the IDG consumes only that span and generic receiver-to-result semantics."
 
 - id: kotlin.typing.java_lang_processbuilder_constructor
   enabled: true
@@ -58,6 +97,7 @@
     kind: new
     callee:
       attribute: [MimeMessage]
+      binding_origin: imported
   match_examples:
   - name: imported MIME message constructor
     code: |
@@ -70,6 +110,7 @@
     expect_match_text: [MimeMessage]
   - name: unrelated local MimeMessage function
     code: |
+      import javax.mail.internet.MimeMessage as JavaMimeMessage
       class LocalMessage { fun setSubject(value: String) {} }
       fun MimeMessage(value: String): LocalMessage = LocalMessage()
       fun example() {
@@ -78,3 +119,161 @@
       }
     expect_no_match: true
   description: "An explicitly imported javax/jakarta MimeMessage(...) constructor returns MimeMessage; typing-only metadata resolves later instance calls without placing provider names in the Kotlin adapter."
+
+- id: kotlin.typing.java_io_object_input_stream_constructor
+  enabled: true
+  language: kotlin
+  imports: [java.io]
+  returns_type: ObjectInputStream
+  match:
+    kind: new
+    callee:
+      attribute: [java, io, ObjectInputStream]
+      binding_origin: imported
+  match_examples:
+  - name: imported object input stream constructor
+    code: |
+      import java.io.ByteArrayInputStream
+      import java.io.ObjectInputStream
+      fun open(data: ByteArray) {
+        val stream = ObjectInputStream(ByteArrayInputStream(data))
+        stream.readObject()
+      }
+    expect_match_text: [ObjectInputStream]
+  - name: local same-spelled function shadows the imported constructor
+    code: |
+      import java.io.ObjectInputStream as JavaObjectInputStream
+      class LocalStream { fun readObject(): Any = Any() }
+      fun ObjectInputStream(value: Any): LocalStream = LocalStream()
+      fun open(data: ByteArray) {
+        val stream = ObjectInputStream(data)
+        stream.readObject()
+      }
+    expect_no_match: true
+  description: "An explicitly imported java.io.ObjectInputStream constructor returns ObjectInputStream for receiver-state flow."
+
+- id: kotlin.typing.java_net_url_constructor
+  enabled: true
+  language: kotlin
+  imports: [java.net]
+  returns_type: URL
+  match:
+    kind: new
+    callee:
+      attribute: [java, net, URL]
+      binding_origin: imported
+  match_examples:
+  - name: imported URL constructor
+    code: |
+      import java.net.URL
+      fun open(value: String) = URL(value).openConnection()
+    expect_match_text: [URL]
+  - name: local URL function shadows the imported constructor
+    code: |
+      import java.net.URL as JavaUrl
+      class LocalUrl { fun openConnection(): Any = Any() }
+      fun URL(value: String): LocalUrl = LocalUrl()
+      fun open(value: String) = URL(value).openConnection()
+    expect_no_match: true
+  description: "An explicitly imported java.net.URL constructor returns URL for exact receiver-state flow."
+
+- id: kotlin.typing.document_builder_factory_new_instance
+  enabled: true
+  language: kotlin
+  imports: [javax.xml.parsers]
+  returns_type: DocumentBuilderFactory
+  match:
+    kind: call
+    callee:
+      attribute: [DocumentBuilderFactory, newInstance]
+      binding_origin: imported
+  match_examples:
+  - name: document builder factory return type
+    code: |
+      import javax.xml.parsers.DocumentBuilderFactory
+      fun factory() = DocumentBuilderFactory.newInstance()
+    expect_match_text: [DocumentBuilderFactory.newInstance]
+  - name: local factory is not javax XML
+    code: |
+      import javax.xml.parsers.DocumentBuilderFactory as JavaDocumentBuilderFactory
+      object DocumentBuilderFactory { fun newInstance() = LocalFactory() }
+      class LocalFactory
+      fun factory() = DocumentBuilderFactory.newInstance()
+    expect_no_match: true
+  description: "DocumentBuilderFactory.newInstance returns the exact factory receiver type used by later configuration and builder calls."
+
+- id: kotlin.typing.document_builder_factory_new_document_builder
+  enabled: true
+  language: kotlin
+  imports: [javax.xml.parsers]
+  returns_type: DocumentBuilder
+  match:
+    kind: call
+    callee:
+      name: newDocumentBuilder
+      receiver_type_in: [DocumentBuilderFactory]
+  match_examples:
+  - name: document builder factory creates a typed builder
+    code: |
+      import javax.xml.parsers.DocumentBuilderFactory
+      fun builder(): Any {
+        val factory = DocumentBuilderFactory.newInstance()
+        return factory.newDocumentBuilder()
+      }
+    expect_match_text: [factory.newDocumentBuilder]
+  - name: local newDocumentBuilder receiver is not javax XML
+    code: |
+      import javax.xml.parsers.DocumentBuilderFactory
+      class LocalFactory { fun newDocumentBuilder(): Any = Any() }
+      fun builder(factory: LocalFactory) = factory.newDocumentBuilder()
+    expect_no_match: true
+  description: "DocumentBuilderFactory.newDocumentBuilder returns DocumentBuilder for exact chained and assigned receiver matching."
+
+- id: kotlin.typing.java_sql_driver_manager_get_connection
+  enabled: true
+  language: kotlin
+  imports: [java.sql]
+  returns_type: Connection
+  match:
+    kind: call
+    callee:
+      attribute: [DriverManager, getConnection]
+      binding_origin: imported
+  match_examples:
+  - name: imported JDBC driver manager returns Connection
+    code: |
+      import java.sql.DriverManager
+      fun connection(url: String) = DriverManager.getConnection(url)
+    expect_match_text: [DriverManager.getConnection]
+  - name: local driver manager does not receive JDBC typing
+    code: |
+      object DriverManager { fun getConnection(url: String) = LocalConnection() }
+      class LocalConnection
+      fun connection(url: String) = DriverManager.getConnection(url)
+    expect_no_match: true
+  description: "Imported java.sql.DriverManager.getConnection returns Connection; typing-only metadata supports exact receiver inference."
+
+- id: kotlin.typing.java_sql_connection_create_statement
+  enabled: true
+  language: kotlin
+  imports: [java.sql]
+  returns_type: Statement
+  match:
+    kind: call
+    callee:
+      name: createStatement
+      receiver_type_in: [Connection]
+  match_examples:
+  - name: compiler-typed JDBC connection creates Statement
+    code: |
+      import java.sql.Connection
+      fun statement(connection: Connection) = connection.createStatement()
+    expect_match_text: [connection.createStatement]
+  - name: unrelated createStatement method is not JDBC
+    code: |
+      import java.sql.DriverManager
+      class LocalConnection { fun createStatement() = LocalStatement() }
+      class LocalStatement
+      fun statement(connection: LocalConnection) = connection.createStatement()
+    expect_no_match: true
+  description: "A compiler-typed java.sql.Connection.createStatement call returns Statement; typing-only metadata supports later JDBC sink matching."

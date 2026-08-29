@@ -1,19 +1,18 @@
 //! Exact source-to-sink semantic graph planning and execution.
 
 use super::{
-    call_result_passthroughs_from_rulepack_for_languages,
-    clean_output_overwrites_from_rulepack_for_languages, compiled_receiver_state_propagations_for_languages,
+    clean_output_overwrites_from_rulepack_for_languages,
+    clean_receiver_overwrites_from_rulepack_for_languages, compiled_transfer_sites_for_languages,
     compose_idg_seed_nodes, find_call_event_at, finish_taint_cache_write_through, func_id_for_match,
     idg_call_result_passthrough_specs, idg_transfer_options_from_rulepack_shapes, mpsc,
-    output_arg_flows_from_rulepack_for_languages, output_arg_names_for_match, rule_match_kind_is_param,
-    seed_idg_service_for_rulepack_for_files, source_anchor_for_rule_match,
-    source_callback_args_from_rulepack_for_languages, source_output_args_from_rulepack_for_languages,
-    source_rule_is_callback_only, source_rule_is_output_only, source_seed_set, span_contains, spans_overlap,
-    spans_share_enclosing_loop, symbolic_field_languages, taint_cache, AHashMap, AHashSet, AnalysisProgress,
-    Arc, CleanOverwritePolicy, DeclKind, Duration, FileId, FindingWithChain, FlowEvent, FuncId, GlobalIndex,
-    IdgSeedRequest, InterTaintCaches, InterTaintConfig, MatchKind, MatchOrigin, OnceLock, Precision,
-    ResolutionCoverage, RuleMatch, Rulepack, ScopedIdgSeedRequest, SourceMatchDedupeKey,
-    SourceMatchDedupeValue, Span, SymbolId, TokenSet, Workspace,
+    output_arg_names_for_match, rule_match_kind_is_param, seed_idg_service_for_rulepack_for_files,
+    source_anchor_for_rule_match, source_callback_args_from_rulepack_for_languages,
+    source_output_args_from_rulepack_for_languages, source_rule_is_callback_only, source_rule_is_output_only,
+    source_seed_set, span_contains, spans_overlap, spans_share_enclosing_loop, symbolic_field_languages,
+    taint_cache, AHashMap, AHashSet, AnalysisProgress, Arc, CleanOverwritePolicy, DeclKind, Duration, FileId,
+    FindingWithChain, FlowEvent, FuncId, GlobalIndex, GuardProfile, IdgSeedRequest, InterTaintCaches,
+    InterTaintConfig, MatchKind, MatchOrigin, OnceLock, Precision, ResolutionCoverage, RuleMatch, Rulepack,
+    ScopedIdgSeedRequest, SourceMatchDedupeKey, SourceMatchDedupeValue, Span, SymbolId, TokenSet, Workspace,
 };
 
 /// Build chain-aware findings: source rule matches → propagated taint
@@ -111,6 +110,7 @@ pub(super) struct SourceWorkItem<'a> {
     pub(super) output_arg_names: Vec<String>,
     pub(super) callback_only: bool,
     pub(super) output_only: bool,
+    pub(super) match_kind: bonsai_taint::IdgRuleMatchKind,
 }
 
 struct SourceWorkPlan<'a> {
@@ -210,6 +210,12 @@ fn plan_source_work<'a>(
             let output_arg_names = output_arg_names_for_match(pack, source.source, source_decl);
             let callback_only = source_rule_is_callback_only(pack, source.source);
             let output_only = source_rule_is_output_only(pack, source.source);
+            let match_kind = pack
+                .find_rule_by_id(&source.source.rule_id)
+                .filter(|rule| rule.match_spec.kind == MatchKind::Read)
+                .map_or(bonsai_taint::IdgRuleMatchKind::General, |_| {
+                    bonsai_taint::IdgRuleMatchKind::Read
+                });
             if seeds.is_empty() && anchor.is_none() {
                 continue;
             }
@@ -223,6 +229,7 @@ fn plan_source_work<'a>(
                     output_arg_names,
                     callback_only,
                     output_only,
+                    match_kind,
                 },
             ));
         }
@@ -288,8 +295,10 @@ where
 {
     let mut fingerprint_options = idg_transfer_options_from_rulepack_shapes(
         &request.config.clean_output_overwrites,
+        &request.config.clean_receiver_overwrites,
         &request.config.source_output_args,
         &request.config.source_callback_args,
+        &request.config.callback_invocations,
         &request.config.output_arg_flows,
         &request.config.receiver_state_propagations,
     );
@@ -323,7 +332,11 @@ where
                 ws: request.ws,
                 pack: request.pack,
                 languages: request.transfer_languages,
+                output_arg_flows: &request.config.output_arg_flows,
+                call_result_passthroughs: &request.config.call_result_passthroughs,
+                callback_invocations: &request.config.callback_invocations,
                 receiver_state_propagations: &request.config.receiver_state_propagations,
+                clean_receiver_overwrites: &request.config.clean_receiver_overwrites,
                 source_output_args: &request.config.source_output_args,
                 source_callback_args: &request.config.source_callback_args,
                 included_files: request.files,
@@ -389,6 +402,7 @@ struct ReachableTaintScopeRequest<'a, 'source> {
     source_work: &'a [SourceWorkItem<'source>],
     source_groups: &'a AHashMap<FuncId, Vec<usize>>,
     sink_by_func: &'a AHashMap<FuncId, Vec<&'source RuleMatch>>,
+    config: &'a InterTaintConfig,
     max_precision: Option<Precision>,
 }
 
@@ -399,6 +413,7 @@ struct ReachableTaintScope {
     source_groups: Vec<(FuncId, Vec<usize>)>,
     scheduling_total: u64,
     call_graph: bonsai_workspace::SourceReachableCallGraph,
+    static_provenance_call_graph: Arc<bonsai_callgraph::ResolvedCallGraph>,
     resolution: ResolutionCoverage,
 }
 
@@ -411,6 +426,35 @@ where
 {
     let mut source_funcs: Vec<FuncId> = request.source_groups.keys().copied().collect();
     source_funcs.sort_by_key(|func| func.raw());
+    let source_func_set: AHashSet<FuncId> = source_funcs.iter().copied().collect();
+    let mut callback_targets: AHashMap<FuncId, AHashSet<FuncId>> = AHashMap::new();
+    let mut configured_callback_hosts = Vec::new();
+    let mut graph_roots = source_funcs.clone();
+    for invocation in &request.config.callback_invocations {
+        for &(callback, host) in &invocation.callback_hosts {
+            // A matched external callback is part of the semantic graph even
+            // when the source originates in its enclosing host. It remains a
+            // separate root only for graph materialization; the IDG admits
+            // value flow solely through the exact rule-matched invocation
+            // edge, so unrelated callbacks cannot become reachable.
+            graph_roots.push(callback);
+            graph_roots.push(host);
+            configured_callback_hosts.push((callback, host));
+            if source_func_set.contains(&host) {
+                // The source can reach an exact rule-declared inline
+                // callback from its enclosing host even when the external
+                // runtime method has no first-party callgraph edge.
+                callback_targets.entry(host).or_default().insert(callback);
+            }
+            if source_func_set.contains(&callback) {
+                callback_targets.entry(callback).or_default().insert(host);
+            }
+        }
+    }
+    configured_callback_hosts.sort_unstable_by_key(|(callback, host)| (callback.raw(), host.raw()));
+    configured_callback_hosts.dedup();
+    graph_roots.sort_unstable_by_key(|func| func.raw());
+    graph_roots.dedup();
     let mut sink_func_list: Vec<FuncId> = request.sink_by_func.keys().copied().collect();
     sink_func_list.sort_by_key(|func| func.raw());
 
@@ -427,7 +471,7 @@ where
         std::thread::scope(|scope| {
             let ws = request.ws;
             let max_precision = request.max_precision;
-            let source_funcs = &source_funcs;
+            let source_funcs = &graph_roots;
             let sink_func_list = &sink_func_list;
             let worker = scope.spawn(move || {
                 ws.source_reachable_resolved_call_graph_with_progress(
@@ -448,17 +492,92 @@ where
             }
         })
     };
+    // A source commonly reaches a rule-declared callback host through one or
+    // more first-party calls (route -> service -> Promise/Jdbi callback). The
+    // callback is not a first-party call edge, so join its exact compiler
+    // identity to every source whose resolved callgraph corridor reaches the
+    // host. This is a semantic graph closure over proven FuncIds and edges;
+    // API identity remains entirely in the matched typing rule.
+    for source in &source_funcs {
+        for &(callback, host) in &configured_callback_hosts {
+            if *source == callback {
+                callback_targets.entry(*source).or_default().insert(host);
+                continue;
+            }
+            let host_is_reachable = *source == host
+                || callgraph_source_sink_corridor(
+                    *source,
+                    &AHashSet::from([host]),
+                    request.global,
+                    call_graph.graph.as_ref(),
+                    request.max_precision,
+                )
+                .is_some();
+            if host_is_reachable {
+                // The callback body and the runtime-invocation host are both
+                // semantic dependencies. The callback carries the invoked
+                // body; the host carries the exact rule-matched call whose
+                // transfer semantics establishes that invocation. Omitting
+                // the host left the matcher-approved call span outside the
+                // scoped IDG whenever the source reached the host through an
+                // earlier first-party hop.
+                let targets = callback_targets.entry(*source).or_default();
+                targets.insert(host);
+                targets.insert(callback);
+            }
+        }
+    }
     // The source-reachable compiler graph starts with every source function,
     // so its exact indirect edges already include every configured callback
     // that can participate in a source-to-sink corridor. Derive callback
     // identity from that scoped graph instead of materializing the complete
     // workspace callgraph beside the linkage table.
-    let callback_targets = configured_source_callback_targets_by_source(
+    let source_delivery_targets = configured_source_callback_targets_by_source(
         request.ws,
         request.source_work,
         request.pack,
         call_graph.graph.as_ref(),
     );
+    for (source, targets) in source_delivery_targets {
+        callback_targets.entry(source).or_default().extend(targets);
+    }
+    // A canonical-path guard whose base originates at a formal parameter is
+    // sound only when every exact caller supplies a compiler-proven static
+    // value. The source-reachable graph intentionally contains downstream
+    // edges only, so prepare the direct incoming neighborhood for just the
+    // sink functions whose rule semantics can ask that question. This runs
+    // on the serial planning thread; finding workers never reopen a lazy
+    // workspace graph or fall back to callee-name matching.
+    let mut static_provenance_funcs = request
+        .sink_by_func
+        .iter()
+        .filter_map(|(func, sinks)| {
+            sinks
+                .iter()
+                .any(|sink| {
+                    request
+                        .pack
+                        .find_rule_by_id(&sink.rule_id)
+                        .and_then(|rule| rule.analysis_semantics.as_ref())
+                        .is_some_and(|semantics| {
+                            (semantics.guard_profile == Some(GuardProfile::RelativePathContainment)
+                                && semantics.relative_path_containment_guard.is_some())
+                                || (semantics.guard_profile == Some(GuardProfile::PathConsumerContainment)
+                                    && semantics.path_consumer_containment_guard.is_some())
+                        })
+                })
+                .then_some(*func)
+        })
+        .collect::<Vec<_>>();
+    static_provenance_funcs.sort_unstable_by_key(|func| func.raw());
+    static_provenance_funcs.dedup();
+    let static_provenance_call_graph = if static_provenance_funcs.is_empty() {
+        Arc::new(bonsai_callgraph::ResolvedCallGraph::default())
+    } else {
+        request
+            .ws
+            .resolved_call_graph_direct_neighborhood(&static_provenance_funcs, request.max_precision)
+    };
     bonsai_diagnostics::debug_log!(
         "security-phase",
         "semantic graph scope source_funcs={} sink_funcs={} reached_sinks={} funcs={} files={}",
@@ -503,6 +622,7 @@ where
         source_groups,
         scheduling_total,
         call_graph,
+        static_provenance_call_graph,
         resolution,
     }
 }
@@ -762,8 +882,22 @@ where
         .chain(request.sanitizers)
         .map(|rule_match| rule_match.language.clone())
         .collect();
+    let compiled_transfers = compiled_transfer_sites_for_languages(
+        ws,
+        pack,
+        &languages,
+        request.rulepack_typing,
+        None,
+        &mut on_file_done,
+    );
     let config = InterTaintConfig {
         clean_output_overwrites: clean_output_overwrites_from_rulepack_for_languages(pack, &languages),
+        clean_receiver_overwrites: clean_receiver_overwrites_from_rulepack_for_languages(
+            ws,
+            pack,
+            &languages,
+            request.sanitizers,
+        ),
         source_output_args: source_output_args_from_rulepack_for_languages(
             ws,
             pack,
@@ -776,16 +910,10 @@ where
             &languages,
             request.source_hits,
         ),
-        call_result_passthroughs: call_result_passthroughs_from_rulepack_for_languages(pack, &languages),
-        output_arg_flows: output_arg_flows_from_rulepack_for_languages(pack, &languages),
-        receiver_state_propagations: compiled_receiver_state_propagations_for_languages(
-            ws,
-            pack,
-            &languages,
-            request.rulepack_typing,
-            None,
-            &mut on_file_done,
-        ),
+        call_result_passthroughs: compiled_transfers.call_result_passthroughs,
+        callback_invocations: compiled_transfers.callback_invocations,
+        output_arg_flows: compiled_transfers.output_arg_flows,
+        receiver_state_propagations: compiled_transfers.receiver_state_propagations,
         max_edge_precision: request.max_precision,
     };
     TransferPlan { languages, config }
@@ -798,6 +926,7 @@ pub(super) struct SourceGroupExecutor<'a> {
     pub(super) pack: &'a Rulepack,
     pub(super) config: &'a InterTaintConfig,
     pub(super) chain_call_graph: &'a Arc<bonsai_callgraph::ResolvedCallGraph>,
+    pub(super) static_provenance_call_graph: &'a Arc<bonsai_callgraph::ResolvedCallGraph>,
     pub(super) workspace_taint_index: &'a bonsai_workspace::taint_index::TaintGraphIndex,
     pub(super) taint_caches: &'a InterTaintCaches,
     pub(super) sink_by_func: &'a AHashMap<FuncId, Vec<&'a RuleMatch>>,
@@ -1053,6 +1182,7 @@ where
         source_groups: source_groups_sorted,
         scheduling_total,
         call_graph: reachable_call_graph,
+        static_provenance_call_graph,
         resolution,
     } = compile_reachable_taint_scope(
         ReachableTaintScopeRequest {
@@ -1062,6 +1192,7 @@ where
             source_work: &source_work,
             source_groups: &source_groups,
             sink_by_func: &sink_by_func,
+            config: &config,
             max_precision: config.max_edge_precision,
         },
         on_progress,
@@ -1234,6 +1365,7 @@ where
         pack,
         config: &config,
         chain_call_graph: &chain_call_graph,
+        static_provenance_call_graph: &static_provenance_call_graph,
         workspace_taint_index,
         taint_caches,
         sink_by_func: &sink_by_func,
@@ -1361,21 +1493,53 @@ fn configured_source_callback_targets_by_source(
             let Some(arg) = args.get(shape.callback_arg_index) else {
                 continue;
             };
-            // The callgraph already resolves callable literals/references
-            // from the parsed argument node. Containment by the exact
-            // argument span is the compiler proof that this indirect edge is
-            // the configured callback, so no callback spelling is parsed.
-            for edge in call_graph.callees_of(src_func_id) {
-                if edge.kind != bonsai_callgraph::EdgeKind::Indirect
-                    || !edge.precision.is_semantic()
-                    || edge.span.file != arg.span.file
-                    || edge.span.start < arg.span.start
-                    || edge.span.end > arg.span.end
-                    || edge.to == src_func_id
-                {
-                    continue;
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "source callback relation scan source={} function={} argument={:?} callable_relations={:?}",
+                src.rule_id,
+                src_func_id.raw(),
+                arg.span,
+                call_graph
+                    .callable_argument_records()
+                    .iter()
+                    .filter(|relation| relation.caller == src_func_id)
+                    .collect::<Vec<_>>()
+            );
+            // Passing a callable is a compiler-proven value relation, not an
+            // execution edge.  The source rule supplies the external API's
+            // callback-delivery semantics; the callgraph supplies only the
+            // exact callable declaration contained by this AST argument.
+            // Joining those two facts keeps external-library meaning in the
+            // rulepack without parsing or guessing a callback spelling here.
+            let contained = call_graph
+                .callable_argument_records()
+                .iter()
+                .filter(|relation| {
+                    relation.caller == src_func_id
+                        && relation.target != src_func_id
+                        && relation.span.file == arg.span.file
+                        && relation.span.start >= arg.span.start
+                        && relation.span.end <= arg.span.end
+                })
+                .map(|relation| relation.target)
+                .collect::<Vec<_>>();
+            if contained.is_empty() {
+                // Scala partial functions and similar grammar shapes may
+                // retain a transparent argument-list wrapper around the sole
+                // callback value. The callgraph relation is still exact; use
+                // it only when no more specific contained relation exists.
+                for relation in call_graph.callable_argument_records() {
+                    if relation.caller == src_func_id
+                        && relation.target != src_func_id
+                        && relation.span.file == arg.span.file
+                        && relation.span.start <= arg.span.start
+                        && relation.span.end >= arg.span.end
+                    {
+                        out.entry(src_func_id).or_default().insert(relation.target);
+                    }
                 }
-                out.entry(src_func_id).or_default().insert(edge.to);
+            } else {
+                out.entry(src_func_id).or_default().extend(contained);
             }
         }
     }
@@ -1400,23 +1564,42 @@ fn merge_configured_source_callback_corridors(
         let mut sorted_targets: Vec<FuncId> = targets.iter().copied().collect();
         sorted_targets.sort_by_key(|func| func.raw());
         let mut source_corridor = SourceSinkCorridor::default();
-        for callback_func in sorted_targets {
-            let Some(mut callback_corridor) = callgraph_source_sink_corridor(
+        for &callback_func in &sorted_targets {
+            if let Some(mut callback_corridor) = callgraph_source_sink_corridor(
                 callback_func,
                 sink_func_set,
                 global,
                 call_graph,
                 max_precision,
-            ) else {
+            ) {
+                callback_corridor.lineage_funcs.insert(source_func);
+                callback_corridor.lineage_funcs.insert(callback_func);
+                source_corridor.extend(callback_corridor);
                 continue;
-            };
-            callback_corridor.lineage_funcs.insert(source_func);
-            callback_corridor.lineage_funcs.insert(callback_func);
-            source_corridor.extend(callback_corridor);
+            }
+
+            // When both the source and sink live in the enclosing host, the
+            // ordinary callgraph corridor is already complete but omits an
+            // externally-invoked inline callback because that callback is a
+            // semantic dependency rather than a first-party call edge. Keep
+            // its exact compiler identity in that corridor so IDG transfer
+            // can publish captured writes back to the host.
+            if let Some(mut host_corridor) =
+                callgraph_source_sink_corridor(source_func, sink_func_set, global, call_graph, max_precision)
+            {
+                host_corridor.lineage_funcs.insert(callback_func);
+                source_corridor.extend(host_corridor);
+            }
         }
         if source_corridor.terminal_sinks.is_empty() {
             continue;
         }
+        // Every target in this set is an exact compiler/rule-derived
+        // dependency for this source. A callback corridor may reach the sink
+        // while its external invocation host has no ordinary callgraph edge
+        // to that callback. Retain both so the scoped IDG contains the
+        // matcher-approved invocation span that creates the semantic edge.
+        source_corridor.lineage_funcs.extend(sorted_targets);
         extend_corridor_with_summary_dependency_support(
             &mut source_corridor,
             global,
@@ -1571,9 +1754,10 @@ fn sink_target_nodes_for_funcs(
                 *unresolved_rules.entry(sink.rule_id.clone()).or_default() += 1;
                 if unresolved_samples.len() < 12 {
                     unresolved_samples.push(format!(
-                        "{} func={} {}:{}:{} text={}",
+                        "{} func={} span={:?} {}:{}:{} text={}",
                         sink.rule_id,
                         sink_func.raw(),
+                        sink.span,
                         sink.file,
                         sink.line,
                         sink.column,
@@ -1617,30 +1801,34 @@ fn source_index_is_target_relevant(
     let src = source_item.source;
     let source_func = source_item.source_func;
     let seeds = &source_item.seeds;
-    let seed_nodes = compose_idg_seed_nodes(
-        if source_item.output_only {
-            IdgSeedRequest::output_rule_match(
-                source_func,
-                seeds,
-                source_item.anchor,
-                &source_item.output_arg_names,
-            )
-        } else if source_item.callback_only {
-            source_item.anchor.map_or_else(
-                || IdgSeedRequest::rule_match(source_func, seeds, None, &[]),
-                |anchor| IdgSeedRequest::callback_rule_match(source_func, seeds, anchor),
-            )
-        } else {
-            IdgSeedRequest::rule_match(
-                source_func,
-                seeds,
-                source_item.anchor,
-                &source_item.output_arg_names,
-            )
-        },
-        global,
-        idg,
-    );
+    let seed_request = if source_item.output_only {
+        IdgSeedRequest::output_rule_match(
+            source_func,
+            seeds,
+            source_item.anchor,
+            &source_item.output_arg_names,
+        )
+    } else if source_item.callback_only {
+        source_item.anchor.map_or_else(
+            || IdgSeedRequest::rule_match(source_func, seeds, None, &[]),
+            |anchor| IdgSeedRequest::callback_rule_match(source_func, seeds, anchor),
+        )
+    } else if source_item.match_kind == bonsai_taint::IdgRuleMatchKind::Read {
+        IdgSeedRequest::read_rule_match(
+            source_func,
+            seeds,
+            source_item.anchor,
+            &source_item.output_arg_names,
+        )
+    } else {
+        IdgSeedRequest::rule_match(
+            source_func,
+            seeds,
+            source_item.anchor,
+            &source_item.output_arg_names,
+        )
+    };
+    let seed_nodes = compose_idg_seed_nodes(seed_request, global, idg);
     if seed_nodes.is_empty() {
         bonsai_diagnostics::debug_log!(
             "security-taint",
@@ -1976,7 +2164,8 @@ pub(super) fn effective_source_seed_key(
     global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<String> {
-    let (names, anchor, output_arg_names, callback_only, output_only) = seed_request.cache_key_parts();
+    let (names, anchor, output_arg_names, callback_only, output_only, match_kind) =
+        seed_request.cache_key_parts();
     let seed_nodes = compose_idg_seed_nodes(seed_request, global, idg);
     if !seed_nodes.is_empty() {
         let node_ids = seed_nodes
@@ -1986,7 +2175,11 @@ pub(super) fn effective_source_seed_key(
             .join(",");
         return vec![format!("__idg_seed_nodes@{node_ids}")];
     }
-    sorted_seed_key_with_anchor(names, anchor, output_arg_names, callback_only, output_only)
+    let mut key = sorted_seed_key_with_anchor(names, anchor, output_arg_names, callback_only, output_only);
+    if match_kind == bonsai_taint::IdgRuleMatchKind::Read {
+        key.push("__read_match".to_string());
+    }
+    key
 }
 
 pub(super) fn sorted_seed_key_with_anchor(

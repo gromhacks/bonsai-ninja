@@ -1,26 +1,50 @@
-# Ruby TLS misconfiguration.
-# NOTE: `kind: write` rules here match assignment TARGET names only - the
-# assigned RHS value is not checked by the current engine (writes don't carry
-# args). So these rules fire on ANY assignment to a matching target name.
-# We keep the names specific enough that the noise is tolerable.
+# Ruby TLS misconfiguration. Write rules consume the compiler-lowered right-hand
+# value as synthetic argument zero so the pack can distinguish secure settings.
 - id: ruby.tls.verify_none
   enabled: true
   language: ruby
   tag: weak-tls
   category: source-independent
   severity: high
+  packages: [openssl]
+  imports: [openssl, OpenSSL]
   cwe: [CWE-295]
   match:
     kind: write
     target:
-      name: verify_mode
+      regex: '^[^\.\s]+\.verify_mode$'
+      receiver_type_in: ["OpenSSL::SSL::SSLContext"]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:OpenSSL::SSL::)?VERIFY_NONE$'
   match_examples:
-  - name: ruby.tls.verify_none example
+  - name: OpenSSL peer verification disabled
     code: |
+      require "openssl"
       def example(input, url, id, payload, request, params)
-        verify_mode = false
+        context = OpenSSL::SSL::SSLContext.new
+        context.verify_mode = OpenSSL::SSL::VERIFY_NONE
       end
-  description: "verify_mode = OpenSSL::SSL::VERIFY_NONE - disables peer verification."
+  - name: OpenSSL peer verification required negative
+    code: |
+      require "openssl"
+      def example
+        context = OpenSSL::SSL::SSLContext.new
+        context.verify_mode = OpenSSL::SSL::VERIFY_PEER
+      end
+    expect_no_match: true
+  - name: same verify mode field on a local type negative
+    code: |
+      require "openssl"
+      class LocalContext
+        attr_accessor :verify_mode
+      end
+      def example(context)
+        context.verify_mode = OpenSSL::SSL::VERIFY_NONE
+      end
+    expect_no_match: true
+  description: "OpenSSL::SSL::SSLContext `verify_mode = VERIFY_NONE` disables peer verification; compiler receiver identity and exact constant value reject local fields and verified modes."
 
 - id: ruby.tls.httparty_verify_ssl
   enabled: true
@@ -28,54 +52,89 @@
   tag: weak-tls
   category: source-independent
   severity: high
-  packages: [httparty, rest-client]
+  packages: [httparty]
+  imports: [httparty, HTTParty]
   cwe: [CWE-295]
   match:
-    kind: write
-    target:
-      name: verify_ssl
+    kind: call
+    callee:
+      regex: '^HTTParty\.(?:get|post|put|patch|delete|head|options)$'
+      binding_origin: imported
+  constraints:
+  - keyword_arg_equals: {name: verify, value: "false"}
   match_examples:
-  - name: ruby.tls.httparty_verify_ssl example
+  - name: HTTParty request disables certificate verification
     code: |
       require "httparty"
-      def example(input, url, id, payload, request, params)
-        verify_ssl = false
+      def example(url)
+        HTTParty.get(url, verify: false)
       end
-  description: "verify_ssl = false - covers HTTParty and RestClient (same `write target name: verify_ssl` shape)."
+  - name: HTTParty verification enabled negative
+    code: |
+      require "httparty"
+      def example(url)
+        HTTParty.get(url, verify: true)
+      end
+    expect_no_match: true
+  - name: lexically nearer HTTParty constant is not the imported package
+    code: |
+      require "httparty"
+      module Application
+        module HTTParty
+          def self.get(url, options); end
+        end
+        def self.fetch(url)
+          HTTParty.get(url, verify: false)
+        end
+      end
+    expect_no_match: true
+  description: "An exact HTTParty request with compiler-decoded `verify: false` disables peer verification; import identity and named-argument facts reject local helpers and secure options."
 
 - id: ruby.tls.rest_client_verify_ssl
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: ruby
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [rest-client]
+  imports: [rest-client, RestClient]
   cwe: [CWE-295]
   match:
-    kind: write
-    target:
-      name: verify_ssl
-  description: "Disabled - merged into ruby.tls.httparty_verify_ssl (same `write target name: verify_ssl` shape)."
+    kind: call
+    callee:
+      attribute: ["RestClient::Request", execute]
+      binding_origin: imported
+  constraints:
+  - keyword_arg_equals: {name: verify_ssl, value: "false"}
+  match_examples:
+  - name: RestClient request disables peer verification
+    code: |
+      require "rest-client"
+      RestClient::Request.execute(method: :get, url: "https://example.test", verify_ssl: false)
+  - name: RestClient request retains peer verification negative
+    code: |
+      require "rest-client"
+      RestClient::Request.execute(method: :get, url: "https://example.test", verify_ssl: true)
+    expect_no_match: true
+  - name: lexically nearer RestClient constant is not the imported package
+    code: |
+      require "rest-client"
+      module Application
+        module RestClient
+          class Request
+            def self.execute(options); end
+          end
+        end
+        def self.fetch
+          RestClient::Request.execute(verify_ssl: false)
+        end
+      end
+    expect_no_match: true
+  description: "RestClient::Request.execute with an exact compiler-decoded `verify_ssl: false` option disables peer verification; imported callable identity and named-argument facts reject local executors and secure values."
 
 # Faraday pattern is `faraday.ssl.verify = false` or `ssl: { verify: false }`.
 # Bare `verify =` would match any method / DSL that assigns a field called
 # verify. Disabled by default because it's too common a name.
-- id: ruby.tls.faraday_ssl_verify_false
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: weak-tls
-  severity: high
-  packages: [faraday]
-  cwe: [CWE-295]
-  match:
-    kind: write
-    target:
-      name: verify
-  description: "Disabled - bare `verify =` is ambiguous; Faraday-specific verify: hash is better flagged by LLM review."
-
 - id: ruby.tls.typhoeus_ssl_verifypeer
   enabled: true
   language: ruby
@@ -83,16 +142,39 @@
   category: source-independent
   severity: high
   packages: [typhoeus]
+  imports: [typhoeus, Typhoeus]
   cwe: [CWE-295]
   match:
-    kind: write
-    target:
-      name: ssl_verifypeer
+    kind: call
+    callee:
+      regex: '^(?:Typhoeus\.(?:get|post|put|patch|delete|head)|Typhoeus::Request\.new)$'
+      binding_origin: imported
+  constraints:
+  - keyword_arg_equals: {name: ssl_verifypeer, value: "false"}
   match_examples:
-  - name: ruby.tls.typhoeus_ssl_verifypeer example
+  - name: Typhoeus request disables peer verification
     code: |
       require "typhoeus"
-      def example(input, url, id, payload, request, params)
-        ssl_verifypeer = false
+      def example(url)
+        Typhoeus.get(url, ssl_verifypeer: false)
       end
-  description: "Typhoeus ssl_verifypeer = false."
+  - name: Typhoeus peer verification enabled negative
+    code: |
+      require "typhoeus"
+      def example(url)
+        Typhoeus.get(url, ssl_verifypeer: true)
+      end
+    expect_no_match: true
+  - name: lexically nearer Typhoeus constant is not the imported package
+    code: |
+      require "typhoeus"
+      module Application
+        module Typhoeus
+          def self.get(url, options); end
+        end
+        def self.fetch(url)
+          Typhoeus.get(url, ssl_verifypeer: false)
+        end
+      end
+    expect_no_match: true
+  description: "Typhoeus request construction with an exact compiler-decoded `ssl_verifypeer: false` option disables peer verification; imported callable identity and named-argument facts reject local helpers and secure values."

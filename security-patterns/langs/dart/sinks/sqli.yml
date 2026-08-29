@@ -17,10 +17,6 @@
   - name: tainted sqflite raw query
     code: |
       import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
       void test(String input) { rawQuery(input); }
   - name: literal sqflite raw query negative
     code: |
@@ -48,10 +44,6 @@
   match_examples:
   - name: tainted sqflite raw insert
     code: |
-      import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
       import 'package:sqflite/sqflite.dart';
       void test(String input) { rawInsert(input); }
   - name: literal sqflite raw insert negative
@@ -81,10 +73,6 @@
   - name: tainted sqflite raw update
     code: |
       import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
       void test(String input) { rawUpdate(input); }
   - name: literal sqflite raw update negative
     code: |
@@ -113,10 +101,6 @@
   - name: tainted sqflite raw delete
     code: |
       import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
-      import 'package:sqflite/sqflite.dart';
       void test(String input) { rawDelete(input); }
   - name: literal sqflite raw delete negative
     code: |
@@ -127,21 +111,6 @@
 
   imports:
   - sqflite/sqflite.dart
-- id: dart.sqli.sqlite3_execute
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: dart.sqli.postgres_execute
-  language: dart
-  tag: sql-injection
-  severity: high
-  packages: [sqlite3]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
-  description: "Subsumed by dart.sqli.postgres_execute - same receiver-agnostic regex covers all Dart SQL driver `Connection.execute` shapes."
 - id: dart.sqli.drift_custom_statement
   enabled: true
   language: dart
@@ -159,10 +128,6 @@
   match_examples:
   - name: tainted drift custom statement
     code: |
-      import 'package:drift/drift.dart';
-      import 'package:drift/drift.dart';
-      import 'package:drift/drift.dart';
-      import 'package:drift/drift.dart';
       import 'package:drift/drift.dart';
       void test(String input) { customStatement(input); }
   - name: literal drift custom statement negative
@@ -192,10 +157,6 @@
   - name: tainted drift custom select
     code: |
       import 'package:drift/drift.dart';
-      import 'package:drift/drift.dart';
-      import 'package:drift/drift.dart';
-      import 'package:drift/drift.dart';
-      import 'package:drift/drift.dart';
       void test(String input) { customSelect(input); }
   - name: literal drift custom select negative
     code: |
@@ -216,16 +177,8 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
-      base_name_in:
-      - connection
-      - conn
-      - db
-      - database
-      - session
-      - ctx
-      - c
-      - stmt
+      name: execute
+      receiver_type_in: [Connection, PostgreSQLConnection, Database, MySQLConnection, MySqlConnection]
   constraints:
   - arg_tainted:
       index: 0
@@ -233,11 +186,17 @@
   - name: tainted postgres execute
     code: |
       import 'package:postgres/postgres.dart';
-      void test(String input) { connection.execute(input); }
+      void test(Connection connection, String input) { connection.execute(input); }
   - name: literal postgres execute negative
     code: |
       import 'package:postgres/postgres.dart';
-      void test(String input) { connection.execute("SELECT * FROM users WHERE id = @id", parameters: {"id": input}); }
+      void test(Connection connection, String input) { connection.execute("SELECT * FROM users WHERE id = @id", parameters: {"id": input}); }
+    expect_no_match: true
+  - name: unrelated local execute method is not a database driver
+    code: |
+      import 'package:postgres/postgres.dart';
+      class LocalConnection { dynamic execute(String value) => value; }
+      void test(LocalConnection connection, String input) { connection.execute(input); }
     expect_no_match: true
   description: "Dart driver Connection.execute (postgres / sqlite3 / mysql_client) with tainted SQL string - driver runs concatenated SQL. Use parameterised statements / placeholders. Subsumes dart.sqli.sqlite3_execute and dart.sqli.mysql_client_execute."
   aliases:
@@ -256,15 +215,8 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.query$
-      base_name_in:
-      - connection
-      - conn
-      - db
-      - database
-      - session
-      - ctx
-      - c
+      name: query
+      receiver_type_in: [Connection, PostgreSQLConnection, Database, MySQLConnection, MySqlConnection]
   constraints:
   - arg_tainted:
       index: 0
@@ -272,11 +224,17 @@
   - name: tainted postgres query
     code: |
       import 'package:postgres/postgres.dart';
-      void test(String input) { connection.query(input); }
+      void test(PostgreSQLConnection connection, String input) { connection.query(input); }
   - name: literal postgres query negative
     code: |
       import 'package:postgres/postgres.dart';
-      void test(String input) { connection.query("SELECT * FROM users WHERE id = @id", substitutionValues: {"id": input}); }
+      void test(PostgreSQLConnection connection, String input) { connection.query("SELECT * FROM users WHERE id = @id", substitutionValues: {"id": input}); }
+    expect_no_match: true
+  - name: unrelated local query method is not a database driver
+    code: |
+      import 'package:postgres/postgres.dart';
+      class LocalConnection { dynamic query(String value) => value; }
+      void test(LocalConnection connection, String input) { connection.query(input); }
     expect_no_match: true
   description: "Dart driver Connection.query (postgres / mysql1) with tainted SQL string. Subsumes dart.sqli.mysql1_query."
   aliases:
@@ -302,10 +260,6 @@
   - name: tainted postgres mapped results query
     code: |
       import 'package:postgres/postgres.dart';
-      import 'package:postgres/postgres.dart';
-      import 'package:postgres/postgres.dart';
-      import 'package:postgres/postgres.dart';
-      import 'package:postgres/postgres.dart';
       void test(String input) { mappedResultsQuery(input); }
   - name: literal postgres mapped results query negative
     code: |
@@ -316,35 +270,3 @@
 
   imports:
   - postgres/postgres.dart
-- id: dart.sqli.mysql_client_execute
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: dart.sqli.postgres_execute
-  language: dart
-  tag: sql-injection
-  severity: high
-  packages: [mysql_client]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
-  description: "Subsumed by dart.sqli.postgres_execute - same receiver-agnostic regex and canonical package gate cover `mysql_client`, `postgres`, and `sqlite3` Connection.execute shapes."
-- id: dart.sqli.mysql1_query
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: dart.sqli.postgres_query
-  language: dart
-  tag: sql-injection
-  severity: high
-  packages: [mysql1]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.query$
-  description: "Subsumed by dart.sqli.postgres_query - same receiver-agnostic regex covers `mysql1` and `postgres` Connection.query shapes."
-  imports:
-  - mysql1/mysql1.dart

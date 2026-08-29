@@ -79,7 +79,9 @@ fn collect_contextual_var_edits(error: Node<'_>, source: &[u8], edits: &mut Vec<
     while let Some(node) = stack.pop() {
         if node.kind() == "type_identifier" && source.get(node.start_byte()..node.end_byte()) == Some(b"var")
         {
-            edits.push(ParseRecoveryEdit::uppercase_ascii(node.start_byte()));
+            edits.push(ParseRecoveryEdit::uppercase_damaged_descendant_ascii(
+                node.start_byte(),
+            ));
         }
         let mut cursor = node.walk();
         stack.extend(node.named_children(&mut cursor));
@@ -149,7 +151,12 @@ fn qualified_switch_record_pattern_edit(error: Node<'_>, source: &[u8]) -> Optio
     if object.end_byte() >= name.start_byte() || source.get(object.end_byte()) != Some(&b'.') {
         return None;
     }
-    Some(ParseRecoveryEdit::new(invocation.start_byte(), name.start_byte()))
+    Some(ParseRecoveryEdit::mask_damaged_descendant_prefix(
+        invocation.start_byte(),
+        name.start_byte(),
+        invocation.start_byte(),
+        invocation.end_byte(),
+    ))
 }
 
 fn qualifier_edit(record_type: Node<'_>, source: &[u8]) -> Option<ParseRecoveryEdit> {
@@ -159,9 +166,11 @@ fn qualifier_edit(record_type: Node<'_>, source: &[u8]) -> Option<ParseRecoveryE
     {
         return None;
     }
-    Some(ParseRecoveryEdit::new(
+    Some(ParseRecoveryEdit::mask_damaged_descendant_prefix(
         record_type.start_byte(),
         terminal.start_byte(),
+        record_type.start_byte(),
+        record_type.end_byte(),
     ))
 }
 

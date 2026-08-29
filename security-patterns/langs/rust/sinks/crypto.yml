@@ -14,7 +14,6 @@
   - name: generated direct match
     code: |
       use md_5;
-      use md_5;
       use md_5::dummy;
       fn example() {
           let target = "tainted";
@@ -39,7 +38,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      use sha_1;
       use sha_1;
       use sha_1::dummy;
       fn example() {
@@ -71,7 +69,7 @@
           let query = "user";
           Md2::new(target);
       }
-    expect_match_text: [Md2::new]
+    expect_match_text: ["Md2::new"]
   description: "RustCrypto md2::Md2::new - MD2 is obsolete and collision-broken; use SHA-256 or stronger."
 - id: rust.crypto.md4_new
   enabled: true
@@ -94,52 +92,8 @@
           let query = "user";
           Md4::new(target);
       }
-    expect_match_text: [Md4::new]
+    expect_match_text: ["Md4::new"]
   description: "RustCrypto md4::Md4::new - MD4 is obsolete and collision-broken; use SHA-256 or stronger."
-- id: rust.crypto.rand_thread
-  enabled: true
-  language: rust
-  tag: weak-randomness
-  category: source-independent
-  severity: medium
-  packages: [rand]
-  cwe: [CWE-330]
-  match:
-    kind: call
-    callee:
-      attribute: [rand, thread_rng]
-  match_examples:
-  - name: generated direct match
-    code: |
-      use rand::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          rand::thread_rng(target);
-      }
-  description: "rand::thread_rng - ChaCha12-seeded-from-OS; safe for MOST uses but not guaranteed for secrets (changes without semver bump). For tokens / keys / nonces, use OsRng or ChaCha20Rng seeded from OsRng."
-- id: rust.crypto.rand_random
-  enabled: true
-  language: rust
-  tag: weak-randomness
-  category: source-independent
-  severity: medium
-  packages: [rand]
-  cwe: [CWE-330]
-  match:
-    kind: call
-    callee:
-      attribute: [rand, random]
-  match_examples:
-  - name: generated direct match
-    code: |
-      use rand::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          rand::random(target);
-      }
-  description: "rand::random - thin wrapper around thread_rng; same caveat (not a CSPRNG guarantee). Use OsRng for security-sensitive values."
 - id: rust.crypto.openssl_des_cbc
   enabled: true
   language: rust

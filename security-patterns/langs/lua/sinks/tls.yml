@@ -5,20 +5,91 @@
   tag: weak-tls
   category: source-independent
   severity: high
-  packages: [openresty]
+  packages: [lua-resty-http, resty.http]
+  imports: [resty.http]
   cwe: [CWE-295]
   match:
-    kind: write
-    target:
-      name: ssl_verify
+    kind: call
+    callee:
+      name: connect
+      receiver_type_in: [RestyHttpClient]
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 0
+      required_fields:
+      - path: [ssl_verify]
+        value: {kind: boolean, value: false}
   match_examples:
-  - name: lua.tls.proxy_ssl_verify_off example
+  - name: lua-resty-http connect disables verification
     code: |
-      local _openresty = require("openresty")
-      function example(input, url, id, payload, request, params, user)
-        ssl_verify = false
+      local http = require("resty.http")
+      function example(host)
+        local arbitrary_client = http.new()
+        return arbitrary_client:connect({ scheme = "https", host = host, ssl_verify = false })
       end
-  description: "ssl_verify = false in proxy/subrequest config - disables peer cert validation (MITM)."
+  - name: lua-resty-http connect keeps verification enabled
+    code: |
+      local http = require("resty.http")
+      function example(host)
+        local arbitrary_client = http.new()
+        return arbitrary_client:connect({ scheme = "https", host = host, ssl_verify = true })
+      end
+    expect_no_match: true
+  - name: unrelated connect method is not lua-resty-http
+    code: |
+      local http = require("resty.http")
+      function example(host)
+        local arbitrary_client = LocalClient.new()
+        return arbitrary_client:connect({ scheme = "https", host = host, ssl_verify = false })
+      end
+    expect_no_match: true
+  description: "lua-resty-http Client:connect with exact `ssl_verify = false` options disables peer-certificate validation; compiler receiver typing and aggregate values reject unrelated clients and secure settings."
+
+- id: lua.tls.resty_http_request_uri_verify_false
+  enabled: true
+  language: lua
+  tag: weak-tls
+  category: source-independent
+  severity: high
+  packages: [lua-resty-http, resty.http]
+  imports: [resty.http]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: request_uri
+      receiver_type_in: [RestyHttpClient]
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 1
+      required_fields:
+      - path: [ssl_verify]
+        value: {kind: boolean, value: false}
+  match_examples:
+  - name: lua-resty-http request_uri disables verification
+    code: |
+      local http = require("resty.http")
+      function example(url)
+        local arbitrary_client = http.new()
+        return arbitrary_client:request_uri(url, { ssl_verify = false })
+      end
+  - name: lua-resty-http request_uri keeps verification enabled
+    code: |
+      local http = require("resty.http")
+      function example(url)
+        local arbitrary_client = http.new()
+        return arbitrary_client:request_uri(url, { ssl_verify = true })
+      end
+    expect_no_match: true
+  - name: unrelated request_uri method is not lua-resty-http
+    code: |
+      local http = require("resty.http")
+      function example(url)
+        local arbitrary_client = LocalClient.new()
+        return arbitrary_client:request_uri(url, { ssl_verify = false })
+      end
+    expect_no_match: true
+  description: "lua-resty-http Client:request_uri with exact `ssl_verify = false` options disables peer-certificate validation; the URL and every unrelated option remain independent compiler facts."
 
 - id: lua.tls.luasec_verify_none
   enabled: true
@@ -27,31 +98,39 @@
   category: source-independent
   severity: high
   packages: [luasec]
-  cwe: [CWE-295]
-  match:
-    kind: write
-    target:
-      name: verify
-  match_examples:
-  - name: lua.tls.luasec_verify_none example
-    code: |
-      local _luasec = require("luasec")
-      function example(input, url, id, payload, request, params, user)
-        verify = false
-      end
-  description: "luasec ssl params verify = 'none' - skips certificate validation."
-
-- id: lua.tls.http_request_verify_false
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: lua
-  tag: weak-tls
-  severity: high
-  packages: [lua-requests]
+  imports: [ssl]
   cwe: [CWE-295]
   match:
     kind: call
     callee:
-      attribute: [requests, get]
-  description: "Disabled - lua-requests get{verify=false}; off by default because lua-requests already has the SSRF rule."
+      attribute: [ssl, wrap]
+      binding_origin: imported
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 1
+      required_fields:
+      - path: [verify]
+        value: {kind: string, value: none}
+  match_examples:
+  - name: LuaSec wrap disables verification
+    code: |
+      local ssl = require("ssl")
+      function example(socket)
+        return ssl.wrap(socket, { mode = "client", verify = "none" })
+      end
+  - name: LuaSec wrap requires peer verification
+    code: |
+      local ssl = require("ssl")
+      function example(socket)
+        return ssl.wrap(socket, { mode = "client", verify = "peer" })
+      end
+    expect_no_match: true
+  - name: local ssl table is not LuaSec
+    code: |
+      local imported_ssl = require("ssl")
+      local ssl = LocalSsl
+      function example(socket)
+        return ssl.wrap(socket, { mode = "client", verify = "none" })
+      end
+    expect_no_match: true
+  description: "LuaSec ssl.wrap with exact `verify = 'none'` parameters skips peer-certificate validation; imported callable identity and aggregate values reject local wrappers and secure modes."

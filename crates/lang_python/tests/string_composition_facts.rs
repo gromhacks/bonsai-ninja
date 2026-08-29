@@ -22,6 +22,7 @@ def rebuild(parsed):
 "#,
     );
     assert_eq!(index.string_compositions.len(), 1, "{index:#?}");
+    assert_eq!(index.string_compositions[0].dynamic_anchor_span, None);
     assert_eq!(
         index.string_compositions[0].parts,
         vec![
@@ -34,6 +35,39 @@ def rebuild(parsed):
             StringCompositionPart::PlaceOrLiteral {
                 place: "parsed.path".to_string(),
                 fallback: "/".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn adjacent_literals_inside_parenthesized_concatenation_are_one_static_part() {
+    let source = r#"
+def query(term):
+    sql = ("SELECT id FROM products "
+           "WHERE name = '" + term + "'")
+    return sql
+"#;
+    let index = python_index(source);
+    assert_eq!(index.string_compositions.len(), 1, "{index:#?}");
+    let anchor = index.string_compositions[0]
+        .dynamic_anchor_span
+        .expect("the one dynamic operand must retain its exact compiler span");
+    assert_eq!(
+        source.get(anchor.start as usize..anchor.end as usize),
+        Some("term")
+    );
+    assert_eq!(
+        index.string_compositions[0].parts,
+        vec![
+            StringCompositionPart::Literal {
+                value: "SELECT id FROM products WHERE name = '".to_string(),
+            },
+            StringCompositionPart::Place {
+                place: "term".to_string(),
+            },
+            StringCompositionPart::Literal {
+                value: "'".to_string(),
             },
         ]
     );

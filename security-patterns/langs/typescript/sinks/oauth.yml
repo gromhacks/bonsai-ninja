@@ -70,18 +70,3 @@
       }
     expect_no_match: true
   description: "openid-client client.callback(redirect_uri, tainted_params) - attacker-controlled callback parameters bypass state/nonce binding when not validated against a server-bound expectedState."
-
-- id: typescript.oauth.nextauth_redirect_callback
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: typescript
-  tag: oauth
-  severity: medium
-  packages: [next-auth]
-  cwe: [CWE-601]
-  match:
-    kind: call
-    callee:
-      attribute: [redirect, callback]
-  description: "Disabled - NextAuth redirect callback shape needs same-origin check; flag with constraint when adapter exposes URL host comparison fact."

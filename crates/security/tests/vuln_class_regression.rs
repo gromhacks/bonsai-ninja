@@ -679,16 +679,16 @@ class App {
 fn sqli_java_azure_httptrigger_request_body_reports() {
     let src = r#"
 import com.microsoft.azure.functions.annotation.HttpTrigger;
+import com.microsoft.azure.functions.HttpRequestMessage;
 import java.sql.Statement;
 
 class App {
-  void run(@HttpTrigger(name = "req") Request req, Statement stmt) throws Exception {
+  void run(@HttpTrigger(name = "req") HttpRequestMessage<String> req, Statement stmt) throws Exception {
     String body = req.getBody();
     String q = "SELECT * FROM users WHERE name='" + body + "'";
     stmt.executeQuery(q);
   }
 }
-class Request { String getBody() { return ""; } }
 "#;
     let outcome = analyse_with_options(&ws_for_language("App.java", src), TaintAnalysisOptions::default());
     assert_tag_reported(&outcome, "sql-injection", "Java Azure @HttpTrigger request body");
@@ -698,16 +698,16 @@ class Request { String getBody() { return ""; } }
 fn sqli_kotlin_azure_httptrigger_request_body_reports() {
     let src = r#"
 import com.microsoft.azure.functions.annotation.HttpTrigger
+import com.microsoft.azure.functions.HttpRequestMessage
 import java.sql.Statement
 
 class App {
-  fun run(@HttpTrigger(name = "req") req: Request, stmt: Statement) {
+  fun run(@HttpTrigger(name = "req") req: HttpRequestMessage<String>, stmt: Statement) {
     val body = req.getBody()
     val q = "SELECT * FROM users WHERE name='" + body + "'"
     stmt.executeQuery(q)
   }
 }
-class Request { fun getBody(): String = "" }
 "#;
     let outcome = analyse_with_options(&ws_for_language("App.kt", src), TaintAnalysisOptions::default());
     assert_tag_reported(

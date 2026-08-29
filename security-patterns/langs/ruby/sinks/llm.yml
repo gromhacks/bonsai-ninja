@@ -9,10 +9,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.chat$
-      base_name_in:
-      - client
-      - openai
-      - c
+      receiver_type_in: [OpenAIClient]
   constraints:
   - arg_tainted:
       index: 0
@@ -20,15 +17,25 @@
   - name: openai client chat
     code: |
       require "ruby-openai"
-      def example(client, input)
-        client.chat(parameters: input)
+      def example(input)
+        arbitrary_handle = OpenAI::Client.new
+        arbitrary_handle.chat(parameters: input)
       end
-    expect_match_text: [client.chat]
+    expect_match_text: [arbitrary_handle.chat]
   - name: ruby.llm.openai_client_chat literal negative
     code: |
       require "ruby-openai"
-      def example(client, input)
-        client.chat(parameters: {messages: [{role: "user", content: "hello"}]})
+      def example(input)
+        arbitrary_handle = OpenAI::Client.new
+        arbitrary_handle.chat(parameters: {messages: [{role: "user", content: "hello"}]})
+      end
+    expect_no_match: true
+  - name: unrelated chat method is not OpenAI
+    code: |
+      require "ruby-openai"
+      def example(input)
+        arbitrary_handle = LocalClient.new
+        arbitrary_handle.chat(parameters: input)
       end
     expect_no_match: true
   description: "OpenAI client.chat(parameters:) - tainted prompt/tool content reaches an LLM instruction surface."
@@ -44,10 +51,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.messages$
-      base_name_in:
-      - client
-      - anthropic
-      - c
+      receiver_type_in: [AnthropicClient]
   constraints:
   - arg_tainted:
       index: 0
@@ -55,15 +59,25 @@
   - name: anthropic messages
     code: |
       require "anthropic"
-      def example(client, input)
-        client.messages(parameters: input)
+      def example(input)
+        arbitrary_handle = Anthropic::Client.new
+        arbitrary_handle.messages(parameters: input)
       end
-    expect_match_text: [client.messages]
+    expect_match_text: [arbitrary_handle.messages]
   - name: ruby.llm.anthropic_messages literal negative
     code: |
       require "anthropic"
-      def example(client, input)
-        client.messages(parameters: {messages: [{role: "user", content: "hello"}]})
+      def example(input)
+        arbitrary_handle = Anthropic::Client.new
+        arbitrary_handle.messages(parameters: {messages: [{role: "user", content: "hello"}]})
+      end
+    expect_no_match: true
+  - name: unrelated messages method is not Anthropic
+    code: |
+      require "anthropic"
+      def example(input)
+        arbitrary_handle = LocalClient.new
+        arbitrary_handle.messages(parameters: input)
       end
     expect_no_match: true
   description: "Anthropic client.messages(parameters:) - tainted prompt content can steer model output or tool calls."
@@ -79,11 +93,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.invoke_model$
-      base_name_in:
-      - bedrock
-      - client
-      - c
-      - runtime
+      receiver_type_in: [BedrockRuntimeClient]
   constraints:
   - arg_tainted:
       index: 0
@@ -91,15 +101,25 @@
   - name: bedrock invoke model
     code: |
       require "aws-sdk-bedrockruntime"
-      def example(bedrock, input)
-        bedrock.invoke_model(body: input)
+      def example(input)
+        arbitrary_handle = Aws::BedrockRuntime::Client.new
+        arbitrary_handle.invoke_model(body: input)
       end
-    expect_match_text: [bedrock.invoke_model]
+    expect_match_text: [arbitrary_handle.invoke_model]
   - name: ruby.llm.bedrock_invoke_model literal negative
     code: |
       require "aws-sdk-bedrockruntime"
-      def example(bedrock, input)
-        bedrock.invoke_model(body: "{\"prompt\":\"hello\"}")
+      def example(input)
+        arbitrary_handle = Aws::BedrockRuntime::Client.new
+        arbitrary_handle.invoke_model(body: "{\"prompt\":\"hello\"}")
+      end
+    expect_no_match: true
+  - name: unrelated invoke_model method is not Bedrock
+    code: |
+      require "aws-sdk-bedrockruntime"
+      def example(input)
+        arbitrary_handle = LocalClient.new
+        arbitrary_handle.invoke_model(body: input)
       end
     expect_no_match: true
   description: "bedrock.invoke_model(body:) - tainted model body reaches a foundation-model execution surface."

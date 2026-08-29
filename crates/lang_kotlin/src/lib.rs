@@ -1,18 +1,23 @@
 //! Kotlin language adapter.
-use bonsai_common::{FileId, Span};
+mod parse_recovery;
+
+use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
-    collect_modifier_visibility, decl_index_with_handler, extract_imports_via,
+    collect_modifier_visibility, decl_index_from_tree_with_handler, extract_imports_via,
     kit::{
         collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
         named_child_call_args_with_handler, node_text, package_module_segments_with_workspace_prefix,
         parse_with, span_of, walk_flow_events,
     },
-    AdapterContext, AdapterError, AssignmentNodeSemantics, CallKind, CallTargetExtraction, Decl, DeclIndex,
-    DeclKind, ExpressionPlaceExtraction, FieldWrite, FlowEvent, GrammarHandler, ImplicitMemberReadCall,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModifierVocabulary, PatternBindingSite, ReceiverFieldInitializer, TypeAliasBinding, Visibility,
-    EMPTY_HANDLER,
+    AdapterContext, AdapterError, AssignmentNodeSemantics, BranchConditionFact, BranchConditionPolarity,
+    CallKind, CallTargetExtraction, ConditionEquality, ConditionExpressionFact, ConditionOperandFact, Decl,
+    DeclIndex, DeclKind, ExpressionPlaceExtraction, FieldWrite, FileSnapshot, FlowEvent, GrammarHandler,
+    ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, ModifierVocabulary, ParseRecoveryEdit, PatternBindingSite, ReceiverFieldInitializer,
+    StaticScalarValue, StringCompositionFact, StringCompositionPart, SyntaxTree, TypeAliasBinding, Vfs,
+    Visibility, EMPTY_HANDLER,
 };
+use parse_recovery::kotlin_parse_recovery_edits;
 use tree_sitter::{Language, Node, Tree};
 
 fn kotlin_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
@@ -75,7 +80,10 @@ fn kotlin_call_receiver<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'tr
 /// or security meaning here.
 fn kotlin_expression_places(node: Node<'_>, src: &[u8]) -> ExpressionPlaceExtraction {
     fn collect(node: Node<'_>, src: &[u8], parts: &mut Vec<String>) -> bool {
-        if node.kind() == "simple_identifier" {
+        if matches!(
+            node.kind(),
+            "simple_identifier" | "this_expression" | "super_expression"
+        ) {
             let name = node_text(&node, src).trim();
             if name.is_empty() {
                 return false;
@@ -125,6 +133,27 @@ fn kotlin_expression_places(node: Node<'_>, src: &[u8]) -> ExpressionPlaceExtrac
         places: vec![parts.join(".")],
         consumed_node_ids: vec![node.id()],
     }
+}
+
+/// Recover the complete addressable place from Kotlin's assignment-only
+/// `directly_assignable_expression` wrapper. The ordinary expression decoder
+/// already understands the wrapper's exact navigation children; exposing the
+/// same fact through the assignment-scoped capability prevents a write such
+/// as `this.cmd = token` from collapsing to the terminal `cmd` binding.
+fn kotlin_assignment_place(node: Node<'_>, src: &[u8]) -> Option<String> {
+    (node.kind() == "directly_assignable_expression")
+        .then(|| kotlin_expression_places(node, src).places.into_iter().next())
+        .flatten()
+}
+
+/// Kotlin member selection is a property read when it is evaluated as a
+/// value, even though the source language omits call punctuation for the
+/// accessor. Preserve that dual identity in typed IR: the exact storage
+/// projection remains available, and a locally resolved custom getter may
+/// independently contribute its return value.
+fn kotlin_expression_value_kind(node: Node<'_>, src: &[u8]) -> Option<bonsai_lang_api::AssignValueKind> {
+    kotlin_terminal_property_accessor(node, FileId::INVALID, src)
+        .map(|_| bonsai_lang_api::AssignValueKind::PropertyRead)
 }
 
 /// Kotlin uses `property_declaration` and `variable_declaration` for both
@@ -209,6 +238,68 @@ fn kotlin_pattern_bindings(node: Node<'_>) -> Vec<PatternBindingSite<'_>> {
 
 pub const LANG_ID: LanguageId = LanguageId::new("kotlin");
 const PACK_NAME: &str = "kotlin";
+
+// Kotlin-only CST spellings inspected outside the shared `GrammarHandler`.
+// Conformance validates this inventory against the loaded grammar so custom
+// compiler facts cannot rot invisibly when Tree-sitter changes a node name.
+const ADDITIONAL_GRAMMAR_NODE_KINDS: &[(&str, &str)] = &[
+    ("adapter_postprocessor", "="),
+    ("adapter_postprocessor", "annotation"),
+    ("adapter_postprocessor", "anonymous_initializer"),
+    ("adapter_postprocessor", "as_expression"),
+    ("adapter_postprocessor", "call_expression"),
+    ("adapter_postprocessor", "catch_block"),
+    ("adapter_postprocessor", "boolean_literal"),
+    ("adapter_postprocessor", "character_literal"),
+    ("adapter_postprocessor", "class_body"),
+    ("adapter_postprocessor", "class_declaration"),
+    ("adapter_postprocessor", "class_modifier"),
+    ("adapter_postprocessor", "control_structure_body"),
+    ("adapter_postprocessor", "class_parameter"),
+    ("adapter_postprocessor", "constructor_delegation_call"),
+    ("adapter_postprocessor", "constructor_invocation"),
+    ("adapter_postprocessor", "delegation_specifier"),
+    ("adapter_postprocessor", "directly_assignable_expression"),
+    ("adapter_postprocessor", "enum"),
+    ("adapter_postprocessor", "for_statement"),
+    ("adapter_postprocessor", "function_body"),
+    ("adapter_postprocessor", "function_declaration"),
+    ("adapter_postprocessor", "getter"),
+    ("adapter_postprocessor", "identifier"),
+    ("adapter_postprocessor", "import_header"),
+    ("adapter_postprocessor", "infix_expression"),
+    ("adapter_postprocessor", "integer_literal"),
+    ("adapter_postprocessor", "interface"),
+    ("adapter_postprocessor", "jump_expression"),
+    ("adapter_postprocessor", "lambda_literal"),
+    ("adapter_postprocessor", "modifiers"),
+    ("adapter_postprocessor", "navigation_expression"),
+    ("adapter_postprocessor", "navigation_suffix"),
+    ("adapter_postprocessor", "nullable_type"),
+    ("adapter_postprocessor", "null_literal"),
+    ("adapter_postprocessor", "object_declaration"),
+    ("adapter_postprocessor", "object_literal"),
+    ("adapter_postprocessor", "package_header"),
+    ("adapter_postprocessor", "parameter"),
+    ("adapter_postprocessor", "primary_constructor"),
+    ("adapter_postprocessor", "property_declaration"),
+    ("adapter_postprocessor", "property_delegate"),
+    ("adapter_postprocessor", "real_literal"),
+    ("adapter_postprocessor", "secondary_constructor"),
+    ("adapter_postprocessor", "setter"),
+    ("adapter_postprocessor", "simple_identifier"),
+    ("adapter_postprocessor", "statements"),
+    ("adapter_postprocessor", "string_literal"),
+    ("adapter_postprocessor", "type_identifier"),
+    ("adapter_postprocessor", "user_type"),
+    ("adapter_postprocessor", "value_argument"),
+    ("adapter_postprocessor", "value_arguments"),
+    ("adapter_postprocessor", "variable_declaration"),
+    ("adapter_postprocessor", "visibility_modifier"),
+    ("adapter_postprocessor", "when_expression"),
+    ("adapter_postprocessor", "when_entry"),
+    ("adapter_postprocessor", "when_subject"),
+];
 const MODULE_SOURCE_ROOTS: &[&[&str]] = &[
     &["src", "main", "kotlin"],
     &["src", "test", "kotlin"],
@@ -315,22 +406,26 @@ fn kotlin_named_argument<'tree>(node: Node<'tree>, src: &[u8]) -> Option<(String
 // into a single Field decl and accessor body events disappear
 // (audit task #131).
 const HANDLER: GrammarHandler = GrammarHandler {
-    expression_value_kind_extractor: None,
+    expression_value_kind_extractor: Some(kotlin_expression_value_kind),
     // Names are owned by the bundled Tree-sitter Kotlin grammar.  Keeping
     // this inventory adapter-local lets shared lowering classify values
     // without knowing Kotlin token kinds.
     literal_value_kinds: &["integer_literal", "real_literal", "null_literal"],
     literal_value_spellings: &["null", "true", "false"],
-    string_literal_kinds: &["string_literal", "multiline_string_literal", "character_literal"],
+    // The current grammar represents both ordinary and triple-quoted strings
+    // as `string_literal`; there is no separate multiline node kind.
+    string_literal_kinds: &["string_literal", "character_literal"],
     comment_kinds: &["line_comment", "multiline_comment"],
     doc_comment_prefixes: &["/**"],
     decorator_kinds: &["annotation"],
-    parameter_container_kinds: &[
-        "function_value_parameters",
-        "lambda_parameters",
-        "lambda_function_type_parameters",
-    ],
-    parameter_kinds: &["parameter", "lambda_parameter"],
+    parameter_container_kinds: &["function_value_parameters", "lambda_parameters"],
+    // Named lambda bindings are `variable_declaration` children of
+    // `lambda_parameters` in the bundled grammar.
+    parameter_kinds: &["parameter", "variable_declaration"],
+    // A destructured lambda parameter is one parsed
+    // `multi_variable_declaration`; every nested variable declaration is a
+    // binding, while the wrapper itself is not a parameter identity.
+    destructured_parameter_kinds: &["multi_variable_declaration"],
     parameter_modifier_kinds: &["modifiers", "parameter_modifiers"],
     parameter_annotation_kinds: &["annotation"],
     parameter_annotation_name_extractor: Some(kotlin_parameter_annotation_name),
@@ -344,7 +439,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     aggregate_pattern_kinds: &["destructuring_declaration", "multi_variable_declaration"],
     positional_aggregate_kinds: &["collection_literal"],
     spread_kinds: &["spread_expression"],
-    spread_value_field_names: &["expression"],
+    spread_value_field_names: &[],
     transparent_call_wrapper_kinds: &["navigation_expression", "parenthesized_expression"],
     assignment_target_wrapper_kinds: &[
         "variable_declaration",
@@ -364,7 +459,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // syntax into ordinary method bodies.
     call_kinds: &["call_expression", "constructor_invocation"],
     constructor_call_kinds: &["constructor_invocation"],
-    constructor_type_field_names: &["type"],
+    constructor_type_field_names: &[],
     call_argument_container_kinds: &["value_arguments"],
     call_argument_wrapper_kinds: &["call_suffix"],
     call_callee_is_first_named_child: true,
@@ -372,9 +467,24 @@ const HANDLER: GrammarHandler = GrammarHandler {
     call_receiver_extractor: Some(kotlin_call_receiver),
     argument_wrapper_kinds: &["value_argument"],
     named_argument_extractor: Some(kotlin_named_argument),
-    transparent_expression_wrapper_kinds: &["expression", "parenthesized_expression"],
-    lambda_body_field_names: &["body"],
-    lambda_body_kinds: &["lambda_literal", "anonymous_function"],
+    // `annotated_lambda` is the grammar wrapper around a trailing
+    // `lambda_literal`; it does not introduce a second callable scope.
+    // A trailing lambda without ordinary value arguments is wrapped in a
+    // same-span `call_suffix`. The shared transparent-wrapper contract peels
+    // it only when it has exactly one named child, so `f(x) { ... }` keeps
+    // its argument container while `f { ... }` exposes the exact callback.
+    transparent_expression_wrapper_kinds: &["parenthesized_expression", "annotated_lambda", "call_suffix"],
+    // `annotated_lambda` is the call-argument wrapper; the nested
+    // `lambda_literal` remains the sole callable declaration. Keeping these
+    // roles separate lets call lowering retain the exact argument span
+    // without manufacturing a second callable owner.
+    inline_closure_kinds: &["annotated_lambda"],
+    lambda_body_field_names: &[],
+    // Kotlin trailing lambdas are exact direct chains:
+    // `annotated_lambda -> lambda_literal -> statements`. Declaring both
+    // wrapper and executable body lets shared extraction peel the wrapper
+    // without treating lambda parameters as returned values.
+    lambda_body_kinds: &["lambda_literal", "anonymous_function", "statements"],
     syntax_event_extractor: Some(extract_kotlin_syntax_event),
     argument_passing_mode_extractor: None,
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
@@ -384,26 +494,33 @@ const HANDLER: GrammarHandler = GrammarHandler {
     callable_reference_kinds: &["callable_reference"],
     member_expression_kinds: &["navigation_expression"],
     subscript_expression_kinds: &["indexing_expression", "indexing_suffix"],
-    member_base_field_names: &["expression", "receiver"],
-    member_name_field_names: &["navigation_suffix", "name"],
-    subscript_base_field_names: &["expression", "receiver"],
-    subscript_index_field_names: &["index", "indices"],
-    class_kinds: &["class_declaration", "object_declaration", "interface_declaration"],
+    member_base_field_names: &["receiver"],
+    member_name_field_names: &[],
+    subscript_base_field_names: &["receiver"],
+    subscript_index_field_names: &[],
+    // Kotlin interfaces share `class_declaration` with classes. The adapter
+    // refines their DeclKind from the exact `interface` grammar token below.
+    class_kinds: &["class_declaration", "object_declaration"],
     class_decl_kinds: &[
         ("class_declaration", DeclKind::Class),
         ("object_declaration", DeclKind::Class),
-        ("interface_declaration", DeclKind::Interface),
     ],
     method_kinds: &["getter", "setter"],
-    method_context_kinds: &["class_declaration", "object_declaration", "interface_declaration"],
+    method_context_kinds: &["class_declaration", "object_declaration"],
     if_kinds: &["if_expression", "when_expression"],
     branch_then_field_names: &["consequence"],
     branch_else_field_names: &["alternative"],
-    branch_condition_field_names: &["condition", "subject"],
+    branch_condition_field_names: &["condition"],
+    condition_group_kinds: &["parenthesized_expression"],
+    condition_all_operators: &["&&"],
+    condition_any_operators: &["||"],
+    condition_not_operators: &["!"],
     branch_condition_kinds: &["when_subject"],
-    loop_body_field_names: &["body"],
+    loop_body_field_names: &[],
     loop_body_kinds: &["control_structure_body", "statements"],
     branch_arm_kinds: &["control_structure_body", "statements", "when_entry"],
+    exclusive_branch_arm_kinds: &["when_entry"],
+    fallthrough_branch_arm_kinds: &[],
     for_kinds: &[],
     foreach_kinds: &["for_statement"],
     foreach_binding_extractor: Some(kotlin_foreach_binding),
@@ -411,15 +528,21 @@ const HANDLER: GrammarHandler = GrammarHandler {
     do_kinds: &["do_while_statement"],
     assignment_kinds: &["assignment", "property_declaration", "variable_declaration"],
     assignment_semantics_extractor: Some(kotlin_assignment_semantics),
+    assignment_place_extractor: Some(kotlin_assignment_place),
     compound_assignment_operators: &["+=", "-=", "*=", "/=", "%="],
     type_only_declaration_kinds: &[],
-    return_kinds: &["return_expression"],
-    throw_kinds: &["throw_expression"],
-    lambda_kinds: &["anonymous_function", "lambda_literal", "annotated_lambda"],
+    // Return/throw/break/continue share `jump_expression` and are lowered by
+    // `extract_kotlin_syntax_event`, which inspects the exact keyword token.
+    return_kinds: &[],
+    throw_kinds: &[],
+    // `annotated_lambda` is a transparent grammar wrapper around the same
+    // `lambda_literal`, not a second callable declaration.
+    lambda_kinds: &["anonymous_function", "lambda_literal"],
     implicit_lambda_parameter_name: Some("it"),
     try_kinds: &["try_expression"],
-    try_body_field_names: &["body"],
+    try_body_field_names: &[],
     catch_kinds: &["catch_block"],
+    exclusive_catch_arm_kinds: &["catch_block"],
     finally_kinds: &["finally_block"],
     implicit_receiver_names: &["this", "super"],
     ..EMPTY_HANDLER
@@ -467,6 +590,14 @@ impl LanguageAdapter for KotlinAdapter {
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
     }
+    fn parse_recovery_edits(
+        &self,
+        snapshot: &FileSnapshot,
+        _vfs: &Vfs,
+        tree: &SyntaxTree,
+    ) -> Vec<ParseRecoveryEdit> {
+        kotlin_parse_recovery_edits(snapshot, tree)
+    }
     fn capabilities(&self) -> LanguageCapabilities {
         // Exceptions: the adapter populates `Throw::thrown_type` from
         // `throw IOException(...)` and `Try::catch_types` from
@@ -501,28 +632,46 @@ impl LanguageAdapter for KotlinAdapter {
             ..LanguageCapabilities::partial_baseline()
         }
     }
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        Some(&HANDLER)
+    }
+    fn additional_grammar_node_kinds(&self) -> &'static [(&'static str, &'static str)] {
+        ADDITIONAL_GRAMMAR_NODE_KINDS
+    }
+
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
-        let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
-        // Parse once and thread the snapshot + tree through every
-        // post-process step (object synthesis, package detection,
-        // visibility / type-alias / class-base enrichment, exception
-        // types). The kit caches per-file parses on the snapshot, but
-        // calling `parse_with` four separate times re-walks bookkeeping
-        // we can avoid by hoisting.
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+        // Parse once and thread the exact snapshot + tree through shared
+        // declaration lowering and every Kotlin post-process pass.
+        let parsed = parse_with(PACK_NAME, file, ctx);
+        let mut idx = parsed.as_ref().map_or_else(
+            || DeclIndex {
+                file,
+                ..Default::default()
+            },
+            |(snapshot, tree)| {
+                decl_index_from_tree_with_handler(file, snapshot.text.as_bytes(), tree, &HANDLER)
+            },
+        );
+        if let Some((snapshot, tree)) = parsed.as_ref() {
             let src = snapshot.text.as_bytes();
+            populate_kotlin_condition_expressions(&mut idx.branch_conditions, tree, file, src);
+            populate_kotlin_predicate_call_conditions(&mut idx.branch_conditions, tree, file, src);
+            // `class` and `interface` intentionally share one named grammar
+            // node. Refine the generic class declaration before constructor
+            // synthesis so interfaces cannot acquire synthetic constructors.
+            refine_kotlin_class_decl_kinds(&mut idx, file, tree);
             // Phase-6 return-type extraction: `fun f(): T {}` populates
             // `Decl.return_type` for `apply_assign_call_result_types`.
-            bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
+            bonsai_lang_api::populate_decl_return_types(&mut idx, tree, src, &HANDLER);
             // Kotlin's `object Foo { fun bar() { ... } }` parses as
             // `infix_expression` (with `object` as the operator) in
             // tree-sitter-kotlin, so the kit's class-kind detection
             // doesn't see a class node. Synthesize a class decl for
             // each such pattern and re-parent the contained methods so
             // `Foo.bar(...)` dispatches correctly.
-            synthesize_kotlin_object_decls(&mut idx, file, &tree, src);
-            synthesize_kotlin_constructor_decls(&mut idx, file, &tree, src);
-            synthesize_kotlin_property_getter_decls(&mut idx, file, &tree, src);
+            synthesize_kotlin_object_decls(&mut idx, file, tree, src);
+            synthesize_kotlin_constructor_decls(&mut idx, file, tree, src);
+            synthesize_kotlin_property_getter_decls(&mut idx, file, tree, src);
             qualify_kotlin_receiver_field_getters(&mut idx);
             // Module path from `package com.foo.bar` declaration; falls
             // back to file-stem when absent.
@@ -548,7 +697,7 @@ impl LanguageAdapter for KotlinAdapter {
                 .flat_map(|decl| std::iter::once(decl.name.clone()).chain(decl.qualified_name.clone()))
                 .map(|name| kotlin_call_tail(&name).to_string())
                 .collect::<std::collections::HashSet<_>>();
-            let aliases_by_span = collect_kotlin_type_aliases(&tree, file, src, &declared_type_names);
+            let aliases_by_span = collect_kotlin_type_aliases(tree, file, src, &declared_type_names);
             for decl in &mut idx.defs {
                 if let Some(aliases) = aliases_by_span.get(&decl.span) {
                     decl.type_aliases = aliases.clone();
@@ -556,7 +705,7 @@ impl LanguageAdapter for KotlinAdapter {
                 classify_kotlin_constructor_calls(&mut decl.flow_events, &decl.type_aliases);
             }
             let class_aliases_by_span =
-                collect_kotlin_class_type_aliases(&tree, file, src, &declared_type_names);
+                collect_kotlin_class_type_aliases(tree, file, src, &declared_type_names);
             let class_spans_by_symbol: std::collections::HashMap<_, _> = idx
                 .defs
                 .iter()
@@ -584,7 +733,7 @@ impl LanguageAdapter for KotlinAdapter {
             // → ["WebSocketHandler", "Mixin"]. Kotlin lists every
             // parent (super-class call + interface types) as
             // `delegation_specifier` siblings of the class name.
-            let bases_by_span = collect_kotlin_class_bases(&tree, file, src);
+            let bases_by_span = collect_kotlin_class_bases(tree, file, src);
             for decl in &mut idx.defs {
                 if !is_class_like(decl.kind) {
                     continue;
@@ -600,8 +749,36 @@ impl LanguageAdapter for KotlinAdapter {
             // any flow_events mutation so this final enrichment is
             // the authoritative type fact.
             for decl in &mut idx.defs {
-                populate_kotlin_exception_types(&mut decl.flow_events, &tree, src);
+                populate_kotlin_exception_types(&mut decl.flow_events, tree, src);
             }
+            let finite_selections = collect_kotlin_finite_literal_selections(&idx, tree, file);
+            idx.finite_literal_selections.extend(finite_selections);
+            bonsai_lang_api::kit::sort_dedup_finite_literal_selections(&mut idx.finite_literal_selections);
+            idx.character_constraints
+                .extend(collect_kotlin_provider_bound_character_constraints(
+                    &idx.defs, tree, file, src,
+                ));
+            bonsai_lang_api::kit::populate_call_argument_static_values(
+                &mut idx,
+                tree,
+                file,
+                src,
+                &HANDLER,
+                kotlin_static_scalar,
+            );
+            populate_kotlin_immutable_binding_owners(&mut idx, tree, file, src);
+            bonsai_lang_api::kit::populate_assignment_inline_callback_static_returns(
+                &mut idx,
+                tree,
+                src,
+                &HANDLER,
+                kotlin_static_scalar,
+            );
+            idx.string_compositions
+                .extend(collect_kotlin_string_compositions(&idx, tree, file, src));
+            idx.string_compositions
+                .sort_by_key(|fact| (fact.container_span.start, fact.container_span.end));
+            idx.string_compositions.dedup();
         } else {
             // Parse failed; still run the file-stem fallback so the
             // semantic-identity pass doesn't leave decls without
@@ -610,7 +787,15 @@ impl LanguageAdapter for KotlinAdapter {
         }
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            synthesize_kotlin_data_copy_fields(&mut decl.flow_events, &decl.type_aliases);
+        }
+        for decl in &mut idx.defs {
+            synthesize_kotlin_data_copy_fields(
+                &mut decl.flow_events,
+                &decl.type_aliases,
+                parsed
+                    .as_ref()
+                    .map(|(snapshot, tree)| (tree.as_ref(), file, snapshot.text.as_bytes())),
+            );
         }
         qualify_kotlin_implicit_member_reads(&mut idx);
         bonsai_lang_api::kit::qualify_bare_hierarchy_member_calls(&mut idx);
@@ -631,11 +816,706 @@ impl LanguageAdapter for KotlinAdapter {
     }
 }
 
+/// Attach Kotlin's compiler-owned `val` immutability and lexical owner to the
+/// corresponding assignment fact.
+///
+/// The shared assignment lowerer deliberately cannot interpret a language's
+/// mutable-binding syntax.  Kotlin's `property_declaration` does, however,
+/// distinguish `val` from `var` exactly.  Recording the containing class is
+/// important for instance-initializer facts: the synthesized constructor spans
+/// the class, so span containment alone would otherwise misclassify a class
+/// field as constructor-local and hide it from sibling methods.
+fn populate_kotlin_immutable_binding_owners(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    let class_symbols = index
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| (decl.span, decl.symbol))
+        .collect::<Vec<_>>();
+    for declaration in collect_kinds(tree, &["property_declaration"]) {
+        let is_immutable = declaration
+            .named_children(&mut declaration.walk())
+            .any(|child| child.kind() == "binding_pattern_kind" && node_text(&child, src).trim() == "val");
+        if !is_immutable {
+            continue;
+        }
+        let assignment_span = span_of(file, &declaration);
+        let owner = kotlin_class_owner_of_property(declaration, file, &class_symbols);
+        for fact in index
+            .assignment_values
+            .iter_mut()
+            .filter(|fact| fact.assignment_span == assignment_span)
+        {
+            fact.target_is_immutable = true;
+            fact.target_owner = owner;
+        }
+    }
+}
+
+fn kotlin_class_owner_of_property(
+    declaration: Node<'_>,
+    file: FileId,
+    class_symbols: &[(Span, SymbolId)],
+) -> Option<SymbolId> {
+    let mut current = declaration.parent();
+    while let Some(node) = current {
+        match node.kind() {
+            // A property declared inside executable syntax is local even when
+            // that callable is nested in a class.
+            "function_declaration" | "secondary_constructor" | "lambda_literal" => return None,
+            "class_declaration" | "object_declaration" => {
+                let span = span_of(file, &node);
+                return class_symbols
+                    .iter()
+                    .find_map(|(candidate, symbol)| (*candidate == span).then_some(*symbol));
+            }
+            _ => current = node.parent(),
+        }
+    }
+    None
+}
+
+/// Replace the shared boolean-shell facts with Kotlin's exact comparison
+/// operands. The adapter owns the grammar/operator mapping; consumers receive
+/// language-neutral equality and boolean structure without reparsing text.
+fn populate_kotlin_condition_expressions(
+    facts: &mut [bonsai_lang_api::BranchConditionFact],
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) {
+    for branch in collect_kinds(tree, &["if_expression"]) {
+        let branch_span = span_of(file, &branch);
+        let Some(condition) = branch.child_by_field_name("condition") else {
+            continue;
+        };
+        let Some(fact) = facts.iter_mut().find(|fact| fact.branch_span == branch_span) else {
+            continue;
+        };
+        fact.expression = Some(lower_kotlin_condition_expression(condition, file, src));
+    }
+}
+
+/// Preserve boolean expressions passed to ordinary calls as compiler facts.
+///
+/// Kotlin uses library precondition calls as control boundaries. The adapter
+/// does not assign continuation or security meaning to any callee: it merely
+/// lowers each parsed argument predicate under the exact call-target span.
+/// Rule semantics may later select a particular runtime contract.
+fn populate_kotlin_predicate_call_conditions(
+    facts: &mut Vec<BranchConditionFact>,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) {
+    let structured_condition_spans = facts.iter().map(|fact| fact.condition_span).collect::<Vec<_>>();
+    for call in collect_kinds(tree, &["call_expression"]) {
+        let call_span = span_of(file, &call);
+        // Calls nested inside `if`/`when` conditions already belong to that
+        // structured boolean expression. Publishing a second synthetic
+        // precondition boundary for the inner call changes its control owner
+        // and can double-count negation. Standalone call contracts such as
+        // `require(predicate)` remain represented for rule-selected meaning.
+        if structured_condition_spans.iter().any(|condition| {
+            condition.file == call_span.file
+                && call_span.start >= condition.start
+                && call_span.end <= condition.end
+        }) {
+            continue;
+        }
+        let Some(target) = kotlin_call_target(call, src).map(|target| target.node) else {
+            continue;
+        };
+        let Some(call_suffix) = first_named_child_of_kind(&call, "call_suffix") else {
+            continue;
+        };
+        let Some(arguments) = first_named_child_of_kind(&call_suffix, "value_arguments") else {
+            continue;
+        };
+        let mut cursor = arguments.walk();
+        for argument in arguments.named_children(&mut cursor) {
+            let Some(value) = argument.named_child(0) else {
+                continue;
+            };
+            let expression = lower_kotlin_condition_expression(value, file, src);
+            let polarity = if matches!(expression, ConditionExpressionFact::Not { .. }) {
+                BranchConditionPolarity::Negated
+            } else {
+                BranchConditionPolarity::Positive
+            };
+            facts.push(BranchConditionFact {
+                branch_span: span_of(file, &target),
+                condition_span: span_of(file, &value),
+                polarity,
+                membership: None,
+                expression: Some(expression),
+            });
+        }
+    }
+    facts.sort_by_key(|fact| {
+        (
+            fact.branch_span.file.raw(),
+            fact.branch_span.start,
+            fact.branch_span.end,
+            fact.condition_span.start,
+            fact.condition_span.end,
+        )
+    });
+    facts.dedup();
+}
+
+fn lower_kotlin_condition_expression(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionExpressionFact {
+    if node.kind() == "parenthesized_expression" {
+        if let Some(inner) = node.named_child(0) {
+            return lower_kotlin_condition_expression(inner, file, src);
+        }
+    }
+
+    let span = span_of(file, &node);
+    if node.kind() == "prefix_expression" {
+        if let Some(operand) = node.named_child(0) {
+            let operator = src
+                .get(node.start_byte()..operand.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(str::trim);
+            if operator == Some("!") {
+                return ConditionExpressionFact::Not {
+                    span,
+                    operand: Box::new(lower_kotlin_condition_expression(operand, file, src)),
+                };
+            }
+        }
+    }
+
+    if let (Some(left), Some(right)) = (node.named_child(0), node.named_child(1)) {
+        let operator = src
+            .get(left.end_byte()..right.start_byte())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(str::trim);
+        match operator {
+            Some("||") => {
+                return merge_kotlin_condition_junction(
+                    span,
+                    lower_kotlin_condition_expression(left, file, src),
+                    lower_kotlin_condition_expression(right, file, src),
+                    false,
+                );
+            }
+            Some("&&") => {
+                return merge_kotlin_condition_junction(
+                    span,
+                    lower_kotlin_condition_expression(left, file, src),
+                    lower_kotlin_condition_expression(right, file, src),
+                    true,
+                );
+            }
+            Some("==" | "!=") => {
+                return ConditionExpressionFact::Equality {
+                    span,
+                    relation: if operator == Some("==") {
+                        ConditionEquality::Equal
+                    } else {
+                        ConditionEquality::NotEqual
+                    },
+                    left: kotlin_condition_operand(left, file, src),
+                    right: kotlin_condition_operand(right, file, src),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    ConditionExpressionFact::Atom { span }
+}
+
+fn merge_kotlin_condition_junction(
+    span: Span,
+    left: ConditionExpressionFact,
+    right: ConditionExpressionFact,
+    all: bool,
+) -> ConditionExpressionFact {
+    let mut operands = Vec::new();
+    let mut push = |operand: ConditionExpressionFact| match (all, operand) {
+        (true, ConditionExpressionFact::All { operands: nested, .. })
+        | (false, ConditionExpressionFact::Any { operands: nested, .. }) => operands.extend(nested),
+        (_, operand) => operands.push(operand),
+    };
+    push(left);
+    push(right);
+    if all {
+        ConditionExpressionFact::All { span, operands }
+    } else {
+        ConditionExpressionFact::Any { span, operands }
+    }
+}
+
+fn kotlin_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
+    ConditionOperandFact {
+        span: span_of(file, &node),
+        direct_call_span: (node.kind() == "call_expression").then(|| span_of(file, &node)),
+        value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER),
+        static_string: kotlin_static_string_literal(node, src),
+        static_value: kotlin_static_scalar(node, src),
+    }
+}
+
+fn kotlin_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
+    match node.kind() {
+        "null_literal" => Some(StaticScalarValue::Null),
+        "boolean_literal" => match node_text(&node, src).trim() {
+            "true" => Some(StaticScalarValue::Boolean(true)),
+            "false" => Some(StaticScalarValue::Boolean(false)),
+            _ => None,
+        },
+        "string_literal" => kotlin_static_string_literal(node, src).map(StaticScalarValue::String),
+        _ => None,
+    }
+}
+
+fn collect_kotlin_string_compositions(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<StringCompositionFact> {
+    let root = tree.root_node();
+    index
+        .assignment_values
+        .iter()
+        .filter_map(|assignment| {
+            let value = kotlin_node_for_exact_span(root, assignment.value_span)?;
+            if value.kind() != "string_literal" {
+                return None;
+            }
+            let parts = lower_kotlin_string_template(value, file, src)?;
+            (parts.len() > 1).then(|| StringCompositionFact {
+                container_span: assignment.assignment_span,
+                value_span: assignment.value_span,
+                target: assignment.target.clone(),
+                dynamic_anchor_span: None,
+                parts,
+            })
+        })
+        .collect()
+}
+
+fn lower_kotlin_string_template(
+    literal: Node<'_>,
+    file: FileId,
+    src: &[u8],
+) -> Option<Vec<StringCompositionPart>> {
+    let mut parts = Vec::new();
+    let mut cursor = literal.walk();
+    for child in literal.named_children(&mut cursor) {
+        match child.kind() {
+            "string_content" => {
+                let value = node_text(&child, src);
+                // Escape decoding is intentionally conservative: a frontend
+                // fact is emitted only when the exact literal fragment needs
+                // no source-level reinterpretation.
+                if value.contains('\\') || value.contains('$') {
+                    return None;
+                }
+                if !value.is_empty() {
+                    parts.push(StringCompositionPart::Literal {
+                        value: value.to_string(),
+                    });
+                }
+            }
+            "interpolated_identifier" => {
+                let place = node_text(&child, src).trim().strip_prefix('$')?.trim();
+                if place.is_empty() {
+                    return None;
+                }
+                parts.push(StringCompositionPart::Place {
+                    place: place.to_string(),
+                });
+            }
+            "interpolated_expression" => {
+                let expression = child.named_child(0)?;
+                parts.push(lower_kotlin_interpolated_expression(expression, file, src)?);
+            }
+            "interpolation_expression_start" | "interpolation_expression_end" => {}
+            _ => return None,
+        }
+    }
+    Some(parts)
+}
+
+fn lower_kotlin_interpolated_expression(
+    expression: Node<'_>,
+    _file: FileId,
+    src: &[u8],
+) -> Option<StringCompositionPart> {
+    if expression.kind() == "elvis_expression" {
+        let place = kotlin_exact_place(expression.named_child(0)?, src)?;
+        let fallback = kotlin_static_string_literal(expression.named_child(1)?, src)?;
+        return Some(StringCompositionPart::PlaceOrLiteral { place, fallback });
+    }
+    kotlin_exact_place(expression, src).map(|place| StringCompositionPart::Place { place })
+}
+
+fn kotlin_exact_place(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() == "simple_identifier" {
+        let value = node_text(&node, src).trim();
+        return (!value.is_empty()).then(|| value.to_string());
+    }
+    kotlin_expression_places(node, src).places.into_iter().next()
+}
+
+fn kotlin_node_for_exact_span(root: Node<'_>, span: Span) -> Option<Node<'_>> {
+    let start = usize::try_from(span.start).ok()?;
+    let end = usize::try_from(span.end).ok()?;
+    let mut node = root.descendant_for_byte_range(start, end)?;
+    loop {
+        if node.start_byte() == start && node.end_byte() == end {
+            return Some(node);
+        }
+        node = node.parent()?;
+    }
+}
+
+fn kotlin_terminal_property_accessor(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+) -> Option<(String, Option<String>, Span)> {
+    if node.kind() != "navigation_expression" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+    let suffixes = children.get(1..)?;
+    if suffixes.is_empty() || suffixes.iter().any(|suffix| suffix.kind() != "navigation_suffix") {
+        return None;
+    }
+    first_named_child_of_kind(suffixes.last()?, "simple_identifier")?;
+    let accessor = node_text(&node, src).trim();
+    if accessor.is_empty() {
+        return None;
+    }
+    // The terminal suffix's receiver is the exact parsed prefix. With one
+    // suffix this is the first child (and may itself be a constructor call);
+    // with a longer navigation chain the range ends at the prior suffix.
+    let first = *children.first()?;
+    let receiver_end = if suffixes.len() == 1 {
+        first.end_byte()
+    } else {
+        suffixes.get(suffixes.len().saturating_sub(2))?.end_byte()
+    };
+    let receiver_span = Span::new(
+        file,
+        u64::try_from(first.start_byte()).ok()?,
+        u64::try_from(receiver_end).ok()?,
+    );
+    let receiver = std::str::from_utf8(src.get(first.start_byte()..receiver_end)?)
+        .ok()?
+        .trim();
+    let receiver = (!receiver.is_empty()).then(|| receiver.to_string());
+    Some((accessor.to_string(), receiver, receiver_span))
+}
+
+/// Lower Kotlin `when` expressions whose every branch produces a compiler
+/// literal. The selected key can remain attacker-controlled, but it never
+/// becomes part of the selected value. This is a generic value-shape fact;
+/// security consumers decide whether a finite selection is relevant.
+fn collect_kotlin_finite_literal_selections(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+) -> Vec<bonsai_lang_api::FiniteLiteralSelectionFact> {
+    let mut facts = Vec::new();
+    for selection in collect_kinds(tree, &["when_expression"]) {
+        if !kotlin_when_outputs_are_literals(selection) {
+            continue;
+        }
+        let selection_span = span_of(file, &selection);
+        if let Some(fact) = bonsai_lang_api::kit::finite_literal_selection_fact_for_span(
+            index,
+            tree,
+            selection_span,
+            |value| value.id() == selection.id(),
+        ) {
+            facts.push(fact);
+            continue;
+        }
+        if kotlin_when_is_complete_expression_body(selection) {
+            facts.push(bonsai_lang_api::FiniteLiteralSelectionFact {
+                selection_span,
+                assignment_span: None,
+                target: None,
+                call_span: None,
+                argument_index: None,
+            });
+        }
+    }
+    facts
+}
+
+fn kotlin_when_outputs_are_literals(selection: Node<'_>) -> bool {
+    let mut cursor = selection.walk();
+    let entries = selection
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "when_entry")
+        .collect::<Vec<_>>();
+    !entries.is_empty()
+        && entries.into_iter().all(|entry| {
+            let mut entry_cursor = entry.walk();
+            let bodies = entry
+                .named_children(&mut entry_cursor)
+                .filter(|child| child.kind() == "control_structure_body")
+                .collect::<Vec<_>>();
+            let [body] = bodies.as_slice() else {
+                return false;
+            };
+            let mut body_cursor = body.walk();
+            let values = body.named_children(&mut body_cursor).collect::<Vec<_>>();
+            let [value] = values.as_slice() else {
+                return false;
+            };
+            matches!(
+                value.kind(),
+                "string_literal"
+                    | "integer_literal"
+                    | "real_literal"
+                    | "boolean_literal"
+                    | "null_literal"
+                    | "character_literal"
+            )
+        })
+}
+
+fn kotlin_when_is_complete_expression_body(selection: Node<'_>) -> bool {
+    let Some(body) = selection
+        .parent()
+        .filter(|parent| parent.kind() == "function_body")
+    else {
+        return false;
+    };
+    let mut cursor = body.walk();
+    let children = body.named_children(&mut cursor).collect::<Vec<_>>();
+    children.len() == 1 && children[0].id() == selection.id()
+}
+
+/// Lower expression-bodied helpers whose return is a complete chain of one
+/// parsed operation with exact one-character mapping arguments, rooted at one
+/// input parameter. The operation identity is retained as provider-bound IR;
+/// the adapter does not decide whether that operation performs replacement or
+/// has any security meaning.
+fn collect_kotlin_provider_bound_character_constraints(
+    defs: &[Decl],
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<bonsai_lang_api::CharacterConstraintFact> {
+    let mut facts = Vec::new();
+    for function in collect_kinds(tree, &["function_declaration"]) {
+        let function_span = span_of(file, &function);
+        let Some(decl) = defs.iter().find(|decl| decl.span == function_span) else {
+            continue;
+        };
+        let Some(body) = first_named_child_of_kind(&function, "function_body") else {
+            continue;
+        };
+        let mut body_cursor = body.walk();
+        let values = body.named_children(&mut body_cursor).collect::<Vec<_>>();
+        let [expression] = values.as_slice() else {
+            continue;
+        };
+        let Some((input_param_index, operation_call, mappings)) =
+            kotlin_inline_static_string_mapping_chain(*expression, &decl.params, src)
+        else {
+            continue;
+        };
+        facts.push(bonsai_lang_api::CharacterConstraintFact {
+            function_span: decl.span,
+            transform_span: span_of(file, &body),
+            input_place: decl.params[input_param_index].clone(),
+            input_param_index: Some(input_param_index),
+            proof: bonsai_lang_api::CharacterConstraintProof::ExactRuntimeSemantics,
+            output: bonsai_lang_api::CharacterConstraintOutput::Return,
+            domain: bonsai_lang_api::CharacterConstraintDomain::ProviderBound {
+                factory_call: String::new(),
+                operation_call,
+                domain: Box::new(bonsai_lang_api::CharacterConstraintDomain::SubstitutesExact { mappings }),
+            },
+        });
+    }
+    facts.sort_by_key(|fact| (fact.function_span.start, fact.transform_span.start));
+    facts.dedup();
+    facts
+}
+
+fn kotlin_inline_static_string_mapping_chain(
+    expression: Node<'_>,
+    params: &[String],
+    src: &[u8],
+) -> Option<(usize, String, Vec<bonsai_lang_api::StaticStringMapEntry>)> {
+    let mut current = expression;
+    let mut mappings = Vec::new();
+    let mut operation_call: Option<String> = None;
+    loop {
+        if current.kind() != "call_expression" {
+            break;
+        }
+        let target = current.named_child(0)?;
+        if target.kind() != "navigation_expression" {
+            break;
+        }
+        let mut target_cursor = target.walk();
+        let target_children = target.named_children(&mut target_cursor).collect::<Vec<_>>();
+        let [receiver, suffix] = target_children.as_slice() else {
+            return None;
+        };
+        if suffix.kind() != "navigation_suffix" {
+            return None;
+        }
+        let method = first_named_child_of_kind(suffix, "simple_identifier")?;
+        let method = node_text(&method, src).trim();
+        if method.is_empty() {
+            return None;
+        }
+        match operation_call.as_deref() {
+            Some(operation) if operation != method => return None,
+            Some(_) => {}
+            None => operation_call = Some(method.to_string()),
+        }
+        let call_suffix = current
+            .named_children(&mut current.walk())
+            .find(|child| child.kind() == "call_suffix")?;
+        let arguments = first_named_child_of_kind(&call_suffix, "value_arguments")?;
+        let args = arguments
+            .named_children(&mut arguments.walk())
+            .filter(|child| child.kind() == "value_argument")
+            .collect::<Vec<_>>();
+        let [pattern, replacement] = args.as_slice() else {
+            return None;
+        };
+        let pattern = pattern.named_child(0)?;
+        let replacement = replacement.named_child(0)?;
+        let input = kotlin_static_string_literal(pattern, src)?;
+        let output = kotlin_static_string_literal(replacement, src)?;
+        if input.chars().count() != 1
+            || mappings
+                .iter()
+                .any(|entry: &bonsai_lang_api::StaticStringMapEntry| {
+                    entry.key == input && entry.value != output
+                })
+        {
+            return None;
+        }
+        if !mappings
+            .iter()
+            .any(|entry: &bonsai_lang_api::StaticStringMapEntry| entry.key == input)
+        {
+            mappings.push(bonsai_lang_api::StaticStringMapEntry {
+                key: input,
+                value: output,
+            });
+        }
+        current = *receiver;
+    }
+    if mappings.is_empty() || current.kind() != "simple_identifier" {
+        return None;
+    }
+    let input = node_text(&current, src).trim();
+    let input_param_index = params.iter().position(|param| param == input)?;
+    mappings.sort_by(|left, right| left.key.cmp(&right.key));
+    Some((input_param_index, operation_call?, mappings))
+}
+
+fn kotlin_static_string_literal(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() != "string_literal" {
+        return None;
+    }
+    let raw = node_text(&node, src);
+    if raw.starts_with("\"\"\"") {
+        return None;
+    }
+    let inner = raw.strip_prefix('"')?.strip_suffix('"')?;
+    let mut input = inner.chars().peekable();
+    let mut decoded = String::with_capacity(inner.len());
+    while let Some(character) = input.next() {
+        if character == '$' {
+            return None;
+        }
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        match input.next()? {
+            'b' => decoded.push('\u{0008}'),
+            't' => decoded.push('\t'),
+            'n' => decoded.push('\n'),
+            'f' => decoded.push('\u{000c}'),
+            'r' => decoded.push('\r'),
+            '"' => decoded.push('"'),
+            '\'' => decoded.push('\''),
+            '\\' => decoded.push('\\'),
+            '$' => decoded.push('$'),
+            'u' => {
+                let mut value = 0_u32;
+                for _ in 0..4 {
+                    value = value.checked_mul(16)? + input.next()?.to_digit(16)?;
+                }
+                decoded.push(char::from_u32(value)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(decoded)
+}
+
+/// Refine Kotlin's shared `class_declaration` node using its exact anonymous
+/// declaration token. This is syntax classification owned by the adapter; it
+/// deliberately carries no framework or API vocabulary.
+fn refine_kotlin_class_decl_kinds(idx: &mut DeclIndex, file: FileId, tree: &Tree) {
+    let mut refined = std::collections::HashMap::new();
+    for node in collect_kinds(tree, &["class_declaration"]) {
+        let kind = if kotlin_declaration_has_token(node, "interface") {
+            DeclKind::Interface
+        } else if kotlin_declaration_has_token(node, "enum") {
+            DeclKind::Enum
+        } else {
+            DeclKind::Class
+        };
+        refined.insert(span_of(file, &node), kind);
+    }
+    for decl in &mut idx.defs {
+        if let Some(kind) = refined.get(&decl.span).copied() {
+            decl.kind = kind;
+        }
+    }
+}
+
+fn kotlin_declaration_has_token(node: Node<'_>, token: &str) -> bool {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            if child.kind() == token {
+                return true;
+            }
+            // Declaration-kind keywords can be direct children or live below
+            // the grammar's modifier wrappers. Do not descend into the class
+            // body, where an unrelated nested declaration could collide.
+            if matches!(child.kind(), "modifiers" | "class_modifier") {
+                stack.push(child);
+            }
+        }
+    }
+    false
+}
+
 /// Lower Kotlin data-class `copy(field = value, ...)` results into exact
 /// field writes on the enclosing assignment target. `copy` is a
 /// compiler-generated data-class operation; receiver type evidence and named
 /// arguments come from tree-sitter facts, and the IDG remains API agnostic.
-fn synthesize_kotlin_data_copy_fields(events: &mut Vec<FlowEvent>, type_aliases: &[TypeAliasBinding]) {
+fn synthesize_kotlin_data_copy_fields(
+    events: &mut Vec<FlowEvent>,
+    type_aliases: &[TypeAliasBinding],
+    syntax: Option<(&Tree, FileId, &[u8])>,
+) {
     for event in events.iter_mut() {
         match event {
             FlowEvent::Branch {
@@ -643,11 +1523,11 @@ fn synthesize_kotlin_data_copy_fields(events: &mut Vec<FlowEvent>, type_aliases:
                 else_events,
                 ..
             } => {
-                synthesize_kotlin_data_copy_fields(then_events, type_aliases);
-                synthesize_kotlin_data_copy_fields(else_events, type_aliases);
+                synthesize_kotlin_data_copy_fields(then_events, type_aliases, syntax);
+                synthesize_kotlin_data_copy_fields(else_events, type_aliases, syntax);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                synthesize_kotlin_data_copy_fields(body, type_aliases);
+                synthesize_kotlin_data_copy_fields(body, type_aliases, syntax);
             }
             FlowEvent::Try {
                 body,
@@ -655,9 +1535,9 @@ fn synthesize_kotlin_data_copy_fields(events: &mut Vec<FlowEvent>, type_aliases:
                 finally_events,
                 ..
             } => {
-                synthesize_kotlin_data_copy_fields(body, type_aliases);
-                synthesize_kotlin_data_copy_fields(catch_events, type_aliases);
-                synthesize_kotlin_data_copy_fields(finally_events, type_aliases);
+                synthesize_kotlin_data_copy_fields(body, type_aliases, syntax);
+                synthesize_kotlin_data_copy_fields(catch_events, type_aliases, syntax);
+                synthesize_kotlin_data_copy_fields(finally_events, type_aliases, syntax);
             }
             _ => {}
         }
@@ -709,6 +1589,21 @@ fn synthesize_kotlin_data_copy_fields(events: &mut Vec<FlowEvent>, type_aliases:
                 });
             }
         }
+        if let Some((tree, file, src)) = syntax {
+            fields.extend(kotlin_nested_data_copy_fields(
+                tree,
+                file,
+                src,
+                *span,
+                type_aliases,
+            ));
+        }
+        fields.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.value_span.cmp(&right.value_span))
+        });
+        fields.dedup();
         if !fields.is_empty() {
             additions.push((
                 index + 1,
@@ -727,6 +1622,78 @@ fn synthesize_kotlin_data_copy_fields(events: &mut Vec<FlowEvent>, type_aliases:
     for (index, event) in additions.into_iter().rev() {
         events.insert(index, event);
     }
+}
+
+/// Collect data-class `copy` named arguments nested inside an assignment RHS.
+/// Lambda bodies retain their own declaration ownership; this adapter fact
+/// describes only the resulting aggregate fields of the enclosing expression.
+fn kotlin_nested_data_copy_fields(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+    assignment_span: Span,
+    type_aliases: &[TypeAliasBinding],
+) -> Vec<bonsai_lang_api::ExpressionField> {
+    let Some(assignment) = kotlin_node_for_exact_span(tree.root_node(), assignment_span) else {
+        return Vec::new();
+    };
+    let mut fields = Vec::new();
+    let mut stack = vec![assignment];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "call_expression" {
+            let Some(target) = kotlin_call_target(node, src) else {
+                continue;
+            };
+            let receiver =
+                kotlin_call_receiver(node, src).and_then(|receiver| kotlin_exact_place(receiver, src));
+            let receiver_root = receiver
+                .as_deref()
+                .and_then(|receiver| receiver.split('.').next())
+                .unwrap_or("")
+                .trim();
+            let receiver_is_typed = !receiver_root.is_empty()
+                && type_aliases
+                    .iter()
+                    .any(|alias| alias.name == receiver_root && !alias.type_name.is_empty());
+            if receiver_is_typed && kotlin_call_tail(&target.full_text) == "copy" {
+                let arguments = first_named_child_of_kind(&node, "call_suffix")
+                    .and_then(|suffix| first_named_child_of_kind(&suffix, "value_arguments"));
+                if let Some(arguments) = arguments {
+                    let mut cursor = arguments.walk();
+                    for argument in arguments.named_children(&mut cursor) {
+                        let Some((argument_name, _)) = kotlin_named_argument(argument, src) else {
+                            continue;
+                        };
+                        let Some(arg) = bonsai_lang_api::kit::call_arg_from_node_with_handler(
+                            argument,
+                            file,
+                            src,
+                            Some(argument_name),
+                            &HANDLER,
+                        ) else {
+                            continue;
+                        };
+                        let Some(name) = arg.name.filter(|name| !name.is_empty()) else {
+                            continue;
+                        };
+                        let value = arg.place.as_ref().map_or_else(
+                            || bonsai_lang_api::ExpressionFlow::from_source_names(arg.source_names),
+                            bonsai_lang_api::ExpressionFlow::from_place,
+                        );
+                        fields.push(bonsai_lang_api::ExpressionField {
+                            name,
+                            value_span: Some(arg.span),
+                            value,
+                        });
+                    }
+                }
+                continue;
+            }
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    fields
 }
 
 /// Reclassify Kotlin call expressions as constructors when the surrounding
@@ -946,11 +1913,9 @@ fn populate_kotlin_exception_types(
                 if thrown_type.is_some() {
                     continue;
                 }
-                if let Some(node) = bonsai_lang_api::kit::node_at_span(
-                    tree.root_node(),
-                    *span,
-                    &["jump_expression", "throw_expression", "throw_statement"],
-                ) {
+                if let Some(node) =
+                    bonsai_lang_api::kit::node_at_span(tree.root_node(), *span, &["jump_expression"])
+                {
                     if let Some(name) = kotlin_thrown_type_for_node(node, src) {
                         *thrown_type = Some(name);
                     }
@@ -962,15 +1927,24 @@ fn populate_kotlin_exception_types(
                 catch_events,
                 finally_events,
                 catch_types,
+                catch_arms,
                 ..
             } => {
-                if catch_types.is_empty() {
-                    if let Some(node) = bonsai_lang_api::kit::node_at_span(
-                        tree.root_node(),
-                        *span,
-                        &["try_expression", "try_statement"],
-                    ) {
+                if let Some(node) = bonsai_lang_api::kit::node_at_span(
+                    tree.root_node(),
+                    *span,
+                    &["try_expression", "try_statement"],
+                ) {
+                    if catch_types.is_empty() {
                         *catch_types = collect_kotlin_catch_types(node, src);
+                    }
+                    for arm in catch_arms {
+                        if let Some(block) =
+                            bonsai_lang_api::kit::node_at_span(tree.root_node(), arm.span, &["catch_block"])
+                        {
+                            arm.parameter = bonsai_lang_api::kit::extract_catch_arm_param(&block, src);
+                            arm.types = kotlin_catch_block_types(block, src);
+                        }
                     }
                 }
                 populate_kotlin_exception_types(body, tree, src);
@@ -1028,45 +2002,54 @@ fn collect_kotlin_catch_types(try_node: tree_sitter::Node<'_>, src: &[u8]) -> Ve
         if child.kind() != "catch_block" {
             continue;
         }
-        // Kotlin catch_block layout (tree-sitter-kotlin):
-        //   catch_block
-        //     simple_identifier   <- param name (skip)
-        //     user_type           <- the catch type wrapper
-        //       type_identifier   <- canonical name
-        //     statements          <- catch body (skip)
-        // We pick out the *type wrappers* (`user_type` / `type_reference`)
-        // and read their type_identifier descendant; never read a top-level
-        // `simple_identifier` directly because that's the param name.
-        let mut catch_cursor = child.walk();
-        for sub in child.named_children(&mut catch_cursor) {
-            if matches!(sub.kind(), "user_type" | "type_reference") {
-                // Find the inner `type_identifier` descendant; for nested
-                // generics we want the leftmost type name.
-                let mut found: Option<String> = None;
-                let mut wrapper_cursor = sub.walk();
-                let mut work_stack: Vec<tree_sitter::Node<'_>> =
-                    sub.named_children(&mut wrapper_cursor).collect();
-                while let Some(node) = work_stack.pop() {
-                    if node.kind() == "type_identifier" {
-                        found = Some(bonsai_lang_api::kit::canonical_simple_type_name(node_text(
-                            &node, src,
-                        )));
-                        break;
-                    }
-                    let mut inner_cursor = node.walk();
-                    for inner_child in node.named_children(&mut inner_cursor) {
-                        work_stack.push(inner_child);
-                    }
+        for name in kotlin_catch_block_types(child, src) {
+            if !catch_types.iter().any(|existing| existing == &name) {
+                catch_types.push(name);
+            }
+        }
+    }
+    catch_types
+}
+
+fn kotlin_catch_block_types(child: tree_sitter::Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut catch_types = Vec::new();
+    // Kotlin catch_block layout (tree-sitter-kotlin):
+    //   catch_block
+    //     simple_identifier   <- param name (skip)
+    //     user_type           <- the catch type wrapper
+    //       type_identifier   <- canonical name
+    //     statements          <- catch body (skip)
+    // We pick out the *type wrappers* (`user_type` / `type_reference`)
+    // and read their type_identifier descendant; never read a top-level
+    // `simple_identifier` directly because that's the param name.
+    let mut catch_cursor = child.walk();
+    for sub in child.named_children(&mut catch_cursor) {
+        if sub.kind() == "user_type" {
+            // Find the inner `type_identifier` descendant; for nested
+            // generics we want the leftmost type name.
+            let mut found: Option<String> = None;
+            let mut wrapper_cursor = sub.walk();
+            let mut work_stack: Vec<tree_sitter::Node<'_>> =
+                sub.named_children(&mut wrapper_cursor).collect();
+            while let Some(node) = work_stack.pop() {
+                if node.kind() == "type_identifier" {
+                    found = Some(bonsai_lang_api::kit::canonical_simple_type_name(node_text(
+                        &node, src,
+                    )));
+                    break;
                 }
-                // Fallback to the wrapper's text — covers grammar
-                // shapes that don't have a `type_identifier` descendant
-                // (e.g. some `nullable_type` wrappers).
-                let name = found.unwrap_or_else(|| {
-                    bonsai_lang_api::kit::canonical_simple_type_name(node_text(&sub, src))
-                });
-                if !name.is_empty() && !catch_types.iter().any(|existing| existing == &name) {
-                    catch_types.push(name);
+                let mut inner_cursor = node.walk();
+                for inner_child in node.named_children(&mut inner_cursor) {
+                    work_stack.push(inner_child);
                 }
+            }
+            // Fallback to the wrapper's text — covers grammar
+            // shapes that don't have a `type_identifier` descendant
+            // (e.g. some `nullable_type` wrappers).
+            let name = found
+                .unwrap_or_else(|| bonsai_lang_api::kit::canonical_simple_type_name(node_text(&sub, src)));
+            if !name.is_empty() && !catch_types.iter().any(|existing| existing == &name) {
+                catch_types.push(name);
             }
         }
     }
@@ -1083,7 +2066,7 @@ fn extract_kotlin_package(root: tree_sitter::Node<'_>, src: &[u8]) -> Option<Vec
         }
         let mut header_cursor = child.walk();
         for header_child in child.children(&mut header_cursor) {
-            if matches!(header_child.kind(), "identifier" | "qualified_identifier") {
+            if header_child.kind() == "identifier" {
                 let text = node_text(&header_child, src);
                 let segments: Vec<String> = text
                     .split('.')
@@ -1122,10 +2105,7 @@ fn collect_kotlin_type_aliases(
             if node != fn_node
                 && matches!(
                     node.kind(),
-                    "function_declaration"
-                        | "class_declaration"
-                        | "object_declaration"
-                        | "interface_declaration"
+                    "function_declaration" | "class_declaration" | "object_declaration"
                 )
             {
                 continue;
@@ -1357,9 +2337,7 @@ fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: 
             next = next.saturating_add(1);
         }
         for secondary in secondary_constructors {
-            let body = first_named_child_of_kind(&secondary, "statements")
-                .or_else(|| first_named_child_of_kind(&secondary, "block"))
-                .unwrap_or(secondary);
+            let body = first_named_child_of_kind(&secondary, "statements").unwrap_or(secondary);
             let (mut flow_events, delegates_to_super) =
                 kotlin_secondary_constructor_delegation_events(secondary, file, src, class_name);
             if primary.is_none() && delegates_to_super {
@@ -1996,8 +2974,8 @@ fn kotlin_param_alias(
     if name.is_empty() {
         return None;
     }
-    let type_short = if let Some(type_node) = type_node {
-        canonical_short_type(node_text(&type_node, src))?
+    let declared_type = if let Some(type_node) = type_node {
+        canonical_declared_type(node_text(&type_node, src))?
     } else {
         // Type-inferred property (`val x = Y()`): the CST uses the same call
         // shape for functions and constructors, so bind only when `Y` is an
@@ -2009,12 +2987,12 @@ fn kotlin_param_alias(
         kotlin_property_cast_type(node, src)
             .or_else(|| kotlin_property_constructor_type(node, src, declared_type_names))?
     };
-    if name == type_short {
+    if name == declared_type {
         return None;
     }
     Some(TypeAliasBinding {
         name,
-        type_name: type_short,
+        type_name: declared_type,
     })
 }
 
@@ -2034,7 +3012,7 @@ fn kotlin_property_cast_type(node: Node<'_>, src: &[u8]) -> Option<String> {
             let mut inner = child.walk();
             for operand in child.named_children(&mut inner) {
                 if matches!(operand.kind(), "user_type" | "type_identifier" | "nullable_type") {
-                    return canonical_short_type(node_text(&operand, src));
+                    return canonical_declared_type(node_text(&operand, src));
                 }
             }
         }
@@ -2106,6 +3084,33 @@ fn canonical_short_type(raw: &str) -> Option<String> {
     Some(short.to_string())
 }
 
+/// Preserve the complete source-qualified identity of an explicit Kotlin
+/// type while removing only syntax that does not participate in identity.
+/// Import expansion is a later compiler step: retaining `Alias.Nested` here
+/// lets it prove the exact external type, whereas collapsing eagerly to
+/// `Nested` would make unrelated providers indistinguishable.
+fn canonical_declared_type(raw: &str) -> Option<String> {
+    let no_generics = raw.split('<').next().unwrap_or(raw);
+    let no_arrays = no_generics.split('[').next().unwrap_or(no_generics);
+    let candidate = no_arrays.trim().trim_end_matches('?').trim();
+    let mut segments = candidate.split('.');
+    let valid_segment = |segment: &str| {
+        !segment.is_empty()
+            && segment
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+            && segment
+                .chars()
+                .all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+    };
+    let first = segments.next()?;
+    if !valid_segment(first) || !segments.all(valid_segment) {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
 /// True for decl kinds that can carry a `bases` list. Shared with the
 /// post-processing loop that copies `bases_by_span` onto matching decls.
 fn is_class_like(kind: DeclKind) -> bool {
@@ -2115,8 +3120,8 @@ fn is_class_like(kind: DeclKind) -> bool {
     )
 }
 
-/// Walk Kotlin `class_declaration` / `object_declaration` /
-/// `interface_declaration` nodes and collect bare base type names.
+/// Walk Kotlin `class_declaration` / `object_declaration` nodes and collect
+/// bare base type names. Interfaces use `class_declaration` too.
 /// Kotlin grammar shape (verified via tree-sitter `to_sexp`):
 ///
 ///   `class Echo : WebSocketHandler(), Mixin { ... }` →
@@ -2134,7 +3139,7 @@ fn collect_kotlin_class_bases(
     src: &[u8],
 ) -> Vec<(bonsai_common::Span, Vec<String>)> {
     let mut bases_table = Vec::new();
-    let class_kinds = &["class_declaration", "object_declaration", "interface_declaration"];
+    let class_kinds = &["class_declaration", "object_declaration"];
     for class_node in collect_kinds(tree, class_kinds) {
         let mut bases: Vec<String> = Vec::new();
         let mut class_cursor = class_node.walk();

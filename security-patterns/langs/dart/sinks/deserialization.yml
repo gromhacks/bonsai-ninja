@@ -10,48 +10,6 @@
 #   - protobuf generic message parsing where the schema is derived
 #     from tainted input.
 
-- id: dart.deser.json_decode
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: insecure-deserialization
-  severity: low
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: jsonDecode
-  description: "Disabled - jsonDecode without a reviver is type-bounded. Enable when the codebase passes `reviver:` and the reviver is attacker-influenceable."
-
-- id: dart.deser.json_decode_reviver
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: insecure-deserialization
-  severity: medium
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: jsonDecode
-  description: "Disabled - jsonDecode(json, reviver:) with a reviver can dispatch into arbitrary code paths, but the bonsai engine doesn't yet model `keyword_arg_present` narrowing. Enable manually after reviewer confirms `reviver:` is passed."
-
-- id: dart.deser.json_utf8_decoder
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: insecure-deserialization
-  severity: low
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [JsonUtf8Decoder, convert]
-  description: "Disabled - JsonUtf8Decoder is type-bounded; listed so auditors can trace UTF-8 JSON ingestion paths."
-
 - id: dart.deser.yaml_load
   enabled: true
   language: dart
@@ -69,9 +27,6 @@
   match_examples:
   - name: tainted yaml document
     code: |
-      import 'package:yaml/yaml.dart';
-      import 'package:yaml/yaml.dart';
-      import 'package:yaml/yaml.dart';
       import 'package:yaml/yaml.dart';
       import 'package:yaml/yaml.dart'; // yaml
       void test(String input) { loadYaml(input); }
@@ -102,9 +57,6 @@
   - name: tainted yaml stream
     code: |
       import 'package:yaml/yaml.dart';
-      import 'package:yaml/yaml.dart';
-      import 'package:yaml/yaml.dart';
-      import 'package:yaml/yaml.dart';
       import 'package:yaml/yaml.dart'; // yaml
       void test(String input) { loadYamlStream(input); }
   - name: literal yaml stream negative
@@ -116,37 +68,6 @@
 
   imports:
   - yaml/yaml.dart
-- id: dart.deser.yaml_load_safe
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: insecure-deserialization
-  severity: low
-  packages: [yaml]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: loadYamlNode
-  description: "Disabled - loadYamlNode returns the AST rather than materialising arbitrary types; listed so auditors can trace YAML ingestion paths."
-
-- id: dart.deser.yaml_load_safe_edge
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: dart.deser.yaml_load
-  language: dart
-  tag: insecure-deserialization
-  severity: low
-  packages: [yaml_edge]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: loadYaml
-  description: "Disabled - yaml_edge mirrors the stdlib yaml package; covered by dart.deser.yaml_load."
-
 - id: dart.deser.protobuf_message_merge
   enabled: true
   language: dart
@@ -164,10 +85,6 @@
   match_examples:
   - name: tainted protobuf bytes
     code: |
-      import 'package:protobuf/protobuf.dart';
-      import 'package:protobuf/protobuf.dart';
-      import 'package:protobuf/protobuf.dart';
-      import 'package:protobuf/protobuf.dart';
       import 'package:protobuf/protobuf.dart';
       void test(List<int> input) { GeneratedMessage.mergeFromBuffer(input); }
   - name: literal protobuf bytes negative
@@ -230,9 +147,6 @@
   - name: tainted msgpack bytes
     code: |
       import 'package:msgpack_dart/msgpack_dart.dart';
-      import 'package:msgpack_dart/msgpack_dart.dart';
-      import 'package:msgpack_dart/msgpack_dart.dart';
-      import 'package:msgpack_dart/msgpack_dart.dart';
       import 'package:msgpack_dart/msgpack_dart.dart'; // msgpack_dart
       void test(List<int> input) { Deserializer.decode(input); }
   - name: literal msgpack bytes negative
@@ -261,9 +175,6 @@
   match_examples:
   - name: tainted bson bytes
     code: |
-      import 'package:bson/bson.dart';
-      import 'package:bson/bson.dart';
-      import 'package:bson/bson.dart';
       import 'package:bson/bson.dart';
       import 'package:bson/bson.dart'; // bson
       void test(List<int> input) { BSON.deserialize(input); }

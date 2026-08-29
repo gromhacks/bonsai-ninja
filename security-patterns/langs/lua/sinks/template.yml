@@ -212,16 +212,3 @@
 # Templating engine autoescape disabled (T302). Config-shape
 # sinks: when the developer explicitly turns off the engine's
 # default HTML autoescape, every subsequent render is XSS-prone.
-- id: lua.template.openresty_template_no_escape
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: lua
-  tag: xss
-  severity: high
-  cwe: [CWE-79]
-  match:
-    kind: call
-    callee:
-      attribute: [template, render]
-  description: "OpenResty lua-resty-template render - values are not autoescaped by default; reviewer must verify caller escapes (this rule is informational, paired with sanitizer rules)."

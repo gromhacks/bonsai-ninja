@@ -106,6 +106,177 @@ fn cfg_not_empty_for_main() {
     assert!(!cfg.blocks.is_empty());
 }
 
+fn collect_return_texts(events: &[FlowEvent], out: &mut Vec<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Return { value_text, .. } => {
+                if let Some(value) = value_text {
+                    out.push(value.clone());
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_return_texts(then_events, out);
+                collect_return_texts(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_return_texts(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_return_texts(body, out);
+                collect_return_texts(catch_events, out);
+                collect_return_texts(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn assigned_match_arm_values_do_not_terminate_the_enclosing_function() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[(
+            "src/lib.rs",
+            r#"
+enum Kind { Run, Eval }
+fn route(kind: Kind, input: String) {
+    let routed = match kind {
+        Kind::Run => format!("{}", input),
+        Kind::Eval => input.trim().to_string(),
+    };
+    sink(routed);
+}
+"#,
+        )],
+    );
+    let file = ws.vfs().all_files()[0];
+    let index = ws.db().decl_index(file).unwrap();
+    let route = index.defs.iter().find(|decl| decl.name == "route").unwrap();
+    let mut returns = Vec::new();
+    collect_return_texts(&route.flow_events, &mut returns);
+
+    assert!(
+        returns.is_empty(),
+        "assigned match-arm values are assignment inputs, not function returns: {returns:?}"
+    );
+    assert!(route
+        .flow_events
+        .iter()
+        .any(|event| matches!(event, FlowEvent::Call { name, .. } if name == "sink")));
+}
+
+#[test]
+fn callable_tail_match_retains_implicit_arm_returns() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[(
+            "src/lib.rs",
+            r#"
+enum Kind { Run, Eval }
+fn route(kind: Kind, input: String) -> String {
+    match kind {
+        Kind::Run => format!("{}", input),
+        Kind::Eval => input.trim().to_string(),
+    }
+}
+"#,
+        )],
+    );
+    let file = ws.vfs().all_files()[0];
+    let index = ws.db().decl_index(file).unwrap();
+    let route = index.defs.iter().find(|decl| decl.name == "route").unwrap();
+    let mut returns = Vec::new();
+    collect_return_texts(&route.flow_events, &mut returns);
+
+    assert!(
+        returns.iter().any(|value| value.contains("format!")),
+        "{returns:?}"
+    );
+    assert!(
+        returns.iter().any(|value| value.contains("to_string")),
+        "{returns:?}"
+    );
+}
+
+#[test]
+fn explicit_return_inside_assigned_match_remains_abrupt() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[(
+            "src/lib.rs",
+            r#"
+enum Kind { Run, Eval }
+fn route(kind: Kind, input: String) -> String {
+    let routed = match kind {
+        Kind::Run => return input,
+        Kind::Eval => input.trim().to_string(),
+    };
+    sink(routed)
+}
+"#,
+        )],
+    );
+    let file = ws.vfs().all_files()[0];
+    let index = ws.db().decl_index(file).unwrap();
+    let route = index.defs.iter().find(|decl| decl.name == "route").unwrap();
+    let mut returns = Vec::new();
+    collect_return_texts(&route.flow_events, &mut returns);
+
+    assert!(returns.iter().any(|value| value == "input"), "{returns:?}");
+    assert!(
+        !returns.iter().any(|value| value.contains("to_string")),
+        "the continuing assignment arm must not become a function return: {returns:?}"
+    );
+}
+
+#[test]
+fn nested_struct_initializer_method_retains_call_fact_and_receiver() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[(
+            "src/lib.rs",
+            r#"
+struct Envelope { cmd: String }
+fn build(routed: String) -> Envelope {
+    let valid: Envelope = (|| Envelope { cmd: routed.clone() })();
+    valid
+}
+"#,
+        )],
+    );
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).unwrap();
+    let build = idx.defs.iter().find(|decl| decl.name == "build").unwrap();
+
+    assert!(build.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Call {
+            name,
+            receiver: Some(receiver),
+            call_kind: CallKind::Method,
+            ..
+        } if name == "routed.clone" && receiver == "routed"
+    )));
+    assert!(build.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign {
+            target,
+            source_names,
+            ..
+        } if target == "valid.cmd"
+            && source_names.iter().any(|source| source == "routed")
+    )));
+}
+
 #[test]
 fn format_macro_named_capture_becomes_call_arg_source_name() {
     let ws = workspace_with(
@@ -131,6 +302,23 @@ sink(format!("ping {cmd}"));
         }
     }
     assert!(found, "format! named capture should be adapter-emitted operand");
+    let source = ws.vfs().snapshot(file).unwrap();
+    let format_argument = idx
+        .call_argument_values
+        .iter()
+        .find(|fact| {
+            let start = usize::try_from(fact.argument_span.start).unwrap();
+            let end = usize::try_from(fact.argument_span.end).unwrap();
+            source
+                .text
+                .get(start..end)
+                .is_some_and(|text| text.starts_with("format!("))
+        })
+        .expect("format! argument value fact");
+    assert_eq!(
+        format_argument.direct_call_span, None,
+        "compiler-expanded format values must use their exact operand flow, not an unresolved call-return edge"
+    );
 }
 
 #[test]
@@ -196,7 +384,7 @@ fn spawn<F>() {
                 receiver_types,
                 call_kind,
                 ..
-            } if name == "core::mem::size_of::<F>" => Some((receiver, receiver_types, call_kind)),
+            } if name == "core::mem::size_of" => Some((receiver, receiver_types, call_kind)),
             _ => None,
         })
         .expect("size_of call");
@@ -204,6 +392,17 @@ fn spawn<F>() {
     assert_eq!(call.0, &None);
     assert!(call.1.is_empty());
     assert_eq!(*call.2, CallKind::Function);
+
+    let parsed = ws.db().parse(file).expect("parse Rust turbofish fixture");
+    let source = parsed.source_text().as_bytes();
+    let generic = collect_kinds(&parsed.tree, &["generic_function"])
+        .into_iter()
+        .find(|node| node_text(node, source).contains("size_of::<F>"))
+        .expect("generic-function CST retains the turbofish");
+    let type_arguments = generic
+        .child_by_field_name("type_arguments")
+        .expect("generic-function retains its exact type arguments");
+    assert_eq!(node_text(&type_arguments, source), "<F>");
 }
 
 #[test]
@@ -668,4 +867,145 @@ fn run(request: Request) {
     });
 
     assert!(receiver_types.is_some_and(Vec::is_empty));
+}
+
+#[test]
+fn explicit_local_type_retains_nested_nominal_identities() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[(
+            "src/jobs.rs",
+            r#"
+trait Work {}
+
+fn decode(value: String) {
+    let task: Box<dyn Work> = make(value);
+    consume(task);
+}
+"#,
+        )],
+    );
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).unwrap();
+    let decode = idx.defs.iter().find(|decl| decl.name == "decode").unwrap();
+
+    assert!(decode
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "task" && alias.type_name == "Box"));
+    assert!(decode
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "task" && alias.type_name == "Work"));
+    assert!(
+        !decode
+            .type_aliases
+            .iter()
+            .any(|alias| alias.name == "task" && alias.type_name == "String"),
+        "initializer/argument type syntax must not be mistaken for the local's declared type"
+    );
+}
+
+#[test]
+fn trait_impl_is_an_exact_declaration_base_for_typed_dispatch() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[(
+            "src/gateway.rs",
+            r#"
+trait Gateway { fn get(&self, value: &str); }
+struct DirectGateway;
+impl Gateway for DirectGateway {
+    fn get(&self, value: &str) { consume(value); }
+}
+
+fn route(gateway: &dyn Gateway, value: &str) {
+    gateway.get(value);
+}
+"#,
+        )],
+    );
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).unwrap();
+
+    let implementation = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "DirectGateway")
+        .expect("concrete trait implementation declaration");
+    assert_eq!(implementation.bases, ["Gateway"]);
+
+    let route = idx.defs.iter().find(|decl| decl.name == "route").unwrap();
+    let receiver_types = route.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Call {
+            name, receiver_types, ..
+        } if name == "gateway.get" => Some(receiver_types),
+        _ => None,
+    });
+    assert!(receiver_types.is_some_and(|types| types.iter().any(|ty| ty == "Gateway")));
+}
+
+#[test]
+fn qualified_parameter_type_identity_is_not_reduced_to_its_tail() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[(
+            "src/query.rs",
+            r#"
+fn run(client: provider::Client, input: String) {
+    client.execute(input);
+}
+"#,
+        )],
+    );
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).unwrap();
+    let run = idx.defs.iter().find(|decl| decl.name == "run").unwrap();
+
+    assert!(run
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "client" && alias.type_name == "provider.Client"));
+    let receiver_types = run.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Call {
+            name, receiver_types, ..
+        } if name == "client.execute" => Some(receiver_types),
+        _ => None,
+    });
+    assert!(receiver_types.is_some_and(|types| types.iter().any(|ty| ty == "provider.Client")));
+}
+
+#[test]
+fn imported_parameter_type_retains_provider_identity_and_local_collision() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[(
+            "src/query.rs",
+            r#"
+use provider::Client as ExternalClient;
+struct Client;
+
+fn external(client: ExternalClient, input: String) {
+    client.execute(input);
+}
+
+fn local(client: Client, input: String) {
+    client.execute(input);
+}
+"#,
+        )],
+    );
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).unwrap();
+    let external = idx.defs.iter().find(|decl| decl.name == "external").unwrap();
+    let local = idx.defs.iter().find(|decl| decl.name == "local").unwrap();
+
+    assert!(external
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "client" && alias.type_name == "provider.Client"));
+    assert!(!local
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "client" && alias.type_name == "provider.Client"));
 }

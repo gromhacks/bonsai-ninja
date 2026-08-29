@@ -179,88 +179,6 @@
   description: 'URL.openConnection() on a receiver constructed from tainted URL text performs the outbound request. Receiver-taint and semantic URL type evidence keep unrelated openConnection methods quiet. Merged collision aliases: java.ssrf.httpurlconnection_openconnection.'
   aliases:
   - java.ssrf.httpurlconnection_openconnection
-- id: java.ssrf.httpurlconnection_connect
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: ssrf
-  severity: high
-  packages:
-  - java.net
-  - org.jsoup
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: connect
-  match_examples:
-  - name: httpurlconnection connect
-    code: |
-      import java.net.*;
-      class App {
-        void handle(HttpURLConnection conn) throws Exception {
-          conn.connect();
-        }
-      }
-      class HttpURLConnection {
-        void connect(Object... args) {}
-      }
-    expect_match_text:
-    - conn.connect
-  description: "Disabled - HttpURLConnection.connect() dispatches receiver URL state, not a taintable call argument. Merged collision aliases: java.ssrf.jsoup_connect."
-  aliases:
-  - java.ssrf.jsoup_connect
-- id: java.ssrf.httpurlconnection_getinputstream
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: ssrf
-  severity: high
-  packages:
-  - java.net
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: getInputStream
-  match_examples:
-  - name: httpurlconnection get input stream
-    code: |
-      import java.net.*;
-      class App {
-        void handle(HttpURLConnection conn) throws Exception {
-          conn.getInputStream();
-        }
-      }
-      class HttpURLConnection {
-        Object getInputStream(Object... args) { return null; }
-      }
-    expect_match_text:
-    - conn.getInputStream
-  description: "Disabled - HttpURLConnection.getInputStream() dispatches receiver URL state, not a taintable call argument."
-- id: java.ssrf.urlconnection_openstream
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: ssrf
-  severity: high
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - URL
-      - openStream
-  match_examples:
-  - name: generated shape example
-    code: "class App {\n  void handle(String input) throws Exception {\n    URL.openStream(input);\n  }\n}\n"
-  description: "Disabled - URL.openStream() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
 - id: java.ssrf.jdk_httpclient_send
   enabled: true
   language: java
@@ -550,39 +468,6 @@
       }
     expect_no_match: true
   description: Spring RestTemplate.exchange.
-- id: java.ssrf.resttemplate_exchange_local
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: java.ssrf.resttemplate_exchange
-  language: java
-  tag: ssrf
-  severity: high
-  packages:
-  - org.springframework.web.client
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: exchange
-  match_examples:
-  - name: local rest template exchange
-    code: |
-      import org.springframework.web.client.*;
-      class App {
-        Object handle(RestTemplate restTemplate, String url) {
-          return restTemplate.exchange(url);
-        }
-      }
-      class RestTemplate {
-        Object exchange(Object... args) { return null; }
-      }
-    expect_match_text:
-    - restTemplate.exchange
-  description: "Spring RestTemplate.exchange(url, ...) on a local RestTemplate variable - server-side request to attacker-controlled URL."
-  imports:
-  - org
 - id: java.ssrf.webclient_uri
   enabled: true
   language: java
@@ -647,11 +532,8 @@
   match:
     kind: call
     callee:
-      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.get\(\)\.uri$'
+      attribute: [get, uri]
   constraints:
-  - receiver_type_in:
-    - WebClient
-    - org.springframework.web.reactive.function.client.WebClient
   - arg_tainted:
       index: 0
   analysis_semantics: *java_https_allowlist_reconstruction
@@ -664,13 +546,6 @@
           return client.get().uri(input);
         }
       }
-      class WebClient {
-        Request get() { return new Request(); }
-      }
-      class Request {
-        Request uri(Object... args) { return this; }
-        Object retrieve() { return null; }
-      }
     expect_match_text: [client.get().uri]
   - name: webclient get uri fluent literal negative
     code: |
@@ -680,112 +555,17 @@
           return client.get().uri("https://example.test/");
         }
       }
-      class WebClient {
-        Request get() { return new Request(); }
-      }
-      class Request {
-        Request uri(Object... args) { return this; }
-        Object retrieve() { return null; }
+    expect_no_match: true
+  - name: a different fluent request operation is not a URI sink
+    code: |
+      import org.springframework.web.reactive.function.client.*;
+      class App {
+        Object handle(WebClient client, String input) {
+          return client.get().attribute("target", input);
+        }
       }
     expect_no_match: true
   description: "Spring WebClient.get().uri(tainted) fluent request target - SSRF."
-- id: java.ssrf.webclient_get_uri_fluent_untyped
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: ssrf
-  severity: high
-  packages:
-  - org.springframework.web.reactive.function.client
-  imports:
-  - org.springframework.web.reactive.function.client
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.get\(\)\.uri$'
-  match_examples:
-  - name: webclient get uri fluent literal negative
-    code: |
-      import org.springframework.web.reactive.function.client.*;
-      class App {
-        Object handle(WebClient client) {
-          return client.get().uri("https://example.test/");
-        }
-      }
-      class WebClient {
-        Request get() { return new Request(); }
-      }
-      class Request {
-        Request uri(Object... args) { return this; }
-        Object retrieve() { return null; }
-      }
-    expect_no_match: true
-  description: "Spring WebClient.get().uri(tainted) fluent request target where the intermediate request-spec receiver is untyped."
-- id: java.ssrf.webclient_uri_local
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: ssrf
-  severity: high
-  packages:
-  - org.springframework.web.reactive.function.client
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: uri
-  match_examples:
-  - name: local webclient uri
-    code: |
-      import org.springframework.web.reactive.function.client.*;
-      class App {
-        Object handle(WebClient webClient, String url) {
-          return webClient.uri(url);
-        }
-      }
-      class WebClient {
-        Object uri(Object... args) { return null; }
-      }
-    expect_match_text:
-    - webClient.uri
-  description: "Spring WebClient.uri(url) on a local request spec - reactive server-side request target controlled by attacker input."
-  imports:
-  - org
-- id: java.ssrf.webclient_retrieve
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: ssrf
-  severity: high
-  packages:
-  - org.springframework.web.reactive.function.client
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: retrieve
-  match_examples:
-  - name: webclient retrieve request
-    code: |
-      import org.springframework.web.reactive.function.client.*;
-      class App {
-        Object handle(RequestSpec requestSpec) {
-          return requestSpec.retrieve();
-        }
-      }
-      class RequestSpec {
-        Object retrieve(Object... args) { return null; }
-      }
-    expect_match_text:
-    - requestSpec.retrieve
-  description: "Disabled - WebClient retrieve() dispatches URI held in receiver state; WebClient.uri(tainted) carries the tainted argument."
 - id: java.ssrf.play_wsclient_url
   enabled: true
   language: java
@@ -996,33 +776,3 @@
       }
     expect_no_match: true
   description: "java.net.http.HttpRequest.newBuilder(tainted URI) - constructs a request for a caller-controlled target."
-- id: java.ssrf.httpurlconnection_getresponsecode
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: ssrf
-  severity: high
-  packages:
-  - java.net
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: getResponseCode
-  match_examples:
-  - name: httpurlconnection response code
-    code: |
-      import java.net.*;
-      class App {
-        int handle(HttpURLConnection connection) throws Exception {
-          return connection.getResponseCode();
-        }
-      }
-      class HttpURLConnection {
-        int getResponseCode(Object... args) { return 200; }
-      }
-    expect_match_text:
-    - connection.getResponseCode
-  description: "Disabled - HttpURLConnection.getResponseCode() dispatches receiver URL state, not a taintable call argument."

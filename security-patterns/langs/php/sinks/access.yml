@@ -20,7 +20,6 @@
     code: |
       <?php
       use aws\awssdkphp;
-      use aws\awssdkphp;
       use aws\aws-sdk-php;
       function example($input, $url, $id, $payload, $request) {
         getObject($input);
@@ -60,7 +59,6 @@
     code: |
       <?php
       use aws\awssdkphp;
-      use aws\awssdkphp;
       use aws\aws-sdk-php;
       function example($input, $url, $id, $payload, $request) {
         putObject($input);
@@ -98,7 +96,6 @@
   - name: php.access.aws_get_secret_value example
     code: |
       <?php
-      use aws\awssdkphp;
       use aws\awssdkphp;
       use aws\aws-sdk-php;
       function example($input, $url, $id, $payload, $request) {
@@ -138,7 +135,6 @@
     code: |
       <?php
       use google\cloudsecretmanager;
-      use google\cloudsecretmanager;
       use google\cloud-secret-manager;
       function example($input, $url, $id, $payload, $request) {
         accessSecretVersion($input);
@@ -174,7 +170,6 @@
   - name: php.access.wordpress_ajax_action example
     code: |
       <?php
-      use wordpress;
       use wordpress;
       function example($input, $url, $id, $payload, $request) {
         add_action('wp_ajax_nopriv_export_report', 'export_report');

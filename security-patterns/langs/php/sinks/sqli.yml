@@ -31,7 +31,8 @@
   match:
     kind: call
     callee:
-      regex: '^\$?(conn|mysqli|db|database|link)\.query$'
+      regex: '^\$?[A-Za-z_][A-Za-z0-9_]*\.query$'
+      receiver_type_in: [mysqli]
   constraints:
   - arg_tainted:
       index: 0
@@ -40,19 +41,28 @@
     code: |
       <?php
       function example($input) {
-        $conn = new mysqli("localhost", "root", "", "auth");
-        $conn->query($input);
+        $connection = new mysqli("localhost", "root", "", "auth");
+        $connection->query($input);
       }
-    expect_match_text: [$conn.query]
+    expect_match_text: [$connection.query]
   - name: local mysqli connection query literal negative
     code: |
       <?php
       function example() {
-        $conn = new mysqli("localhost", "root", "", "auth");
-        $conn->query("SELECT 1");
+        $database_handle = new mysqli("localhost", "root", "", "auth");
+        $database_handle->query("SELECT 1");
       }
     expect_no_match: true
-  description: "Local mysqli-style connection query(sql). The receiver-name gate keeps this on common database handle variables while covering adapter-visible `$conn->query(...)` calls that are not typed as `mysqli::query`."
+  - name: unrelated query method is not mysqli
+    code: |
+      <?php
+      final class SearchIndex { public function query(string $value) {} }
+      function example($input) {
+        $connection = new SearchIndex();
+        $connection->query($input);
+      }
+    expect_no_match: true
+  description: "mysqli instance query(sql) proven by the compiler's exact constructor-result receiver type; arbitrary local variable spellings work and unrelated query methods stay excluded."
 - id: php.sqli.mysqli_real_query
   enabled: true
   language: php
@@ -143,22 +153,6 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  PDO::query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
     expect_no_match: true
   description: 'PDO::query() with tainted SQL - raw string becomes the prepared statement; SQL injection regardless of the driver. PHP built-in PDO class has no canonical ecosystem package, so strict `[''PDO'', ''query'']` match only.'
-- id: php.sqli.pdo_prepare_concat
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: sql-injection
-  severity: medium
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - PDO
-      - prepare
-  description: Disabled - prepare() is safe when bound; flag only on tainted string.
 - id: php.sqli.mysql_query
   enabled: true
   language: php
@@ -308,7 +302,6 @@
     code: |
       <?php
       use doctrine\dbal;
-      use doctrine\dbal;
       function example($input, $url, $id, $payload, $request) {
         Connection::executeQuery("SELECT * FROM users WHERE id = " . $id);
       }
@@ -346,7 +339,6 @@
   - name: php.sqli.doctrine_dbal_execute_statement example
     code: |
       <?php
-      use doctrine\dbal;
       use doctrine\dbal;
       function example($input, $url, $id, $payload, $request) {
         Connection::executeStatement("SELECT * FROM users WHERE id = " . $id);
@@ -386,7 +378,6 @@
     code: |
       <?php
       use doctrine\orm;
-      use doctrine\orm;
       function example($input, $url, $id, $payload, $request) {
         EntityManager::createQuery("SELECT * FROM users WHERE id = " . $id);
       }
@@ -424,7 +415,6 @@
   - name: php.sqli.doctrine_orm_native_query example
     code: |
       <?php
-      use doctrine\orm;
       use doctrine\orm;
       function example($input, $url, $id, $payload, $request) {
         EntityManager::createNativeQuery("SELECT * FROM users WHERE id = " . $id);
@@ -464,7 +454,6 @@
     code: |
       <?php
       use illuminate\database;
-      use illuminate\database;
       function example($input, $url, $id, $payload, $request) {
         DB::raw("SELECT * FROM users WHERE id = " . $id);
       }
@@ -502,7 +491,6 @@
   - name: php.sqli.eloquent_db_select example
     code: |
       <?php
-      use illuminate\database;
       use illuminate\database;
       function example($input, $url, $id, $payload, $request) {
         DB::select("SELECT * FROM users WHERE id = " . $id);
@@ -542,7 +530,6 @@
     code: |
       <?php
       use illuminate\database;
-      use illuminate\database;
       function example($input, $url, $id, $payload, $request) {
         DB::statement("SELECT * FROM users WHERE id = " . $id);
       }
@@ -581,7 +568,6 @@
     code: |
       <?php
       use illuminate\database;
-      use illuminate\database;
       function example($input, $url, $id, $payload, $request) {
         DB::unprepared("SELECT * FROM users WHERE id = " . $id);
       }
@@ -618,7 +604,6 @@
     code: |
       <?php
       use illuminate\database;
-      use illuminate\database;
       function example($input, $url, $id, $payload, $request) {
         whereRaw($input);
       }
@@ -654,7 +639,6 @@
   - name: php.sqli.eloquent_order_by_raw example
     code: |
       <?php
-      use illuminate\database;
       use illuminate\database;
       function example($input, $url, $id, $payload, $request) {
         orderByRaw($input);
@@ -694,7 +678,6 @@
     code: |
       <?php
       use codeigniter4\framework;
-      use codeigniter4\framework;
       function example($input, $url, $id, $payload, $request) {
         $db->query("SELECT * FROM users WHERE id = " . $id);
       }
@@ -732,7 +715,6 @@
   - name: php.sqli.cakephp_execute example
     code: |
       <?php
-      use cakephp\cakephp;
       use cakephp\cakephp;
       function example($input, $url, $id, $payload, $request) {
         Connection::execute("SELECT * FROM users WHERE id = " . $id);
@@ -772,7 +754,6 @@
     code: |
       <?php
       use wordpress;
-      use wordpress;
       function example($input, $url, $id, $payload, $request) {
         $wpdb->get_results("SELECT * FROM users WHERE id = " . $id);
       }
@@ -808,7 +789,6 @@
     code: |
       <?php
       use wordpress;
-      use wordpress;
       function example($input, $url, $id, $payload, $request) {
         $wpdb->query("SELECT * FROM users WHERE id = " . $id);
       }
@@ -843,7 +823,6 @@
   - name: php.sqli.doctrine_dbal_query example
     code: |
       <?php
-      use doctrine\dbal;
       use doctrine\dbal;
       function example($input, $url, $id, $payload, $request) {
         Connection::query("SELECT * FROM users WHERE id = " . $id);
@@ -883,7 +862,6 @@
     code: |
       <?php
       use yiisoft\yii2;
-      use yiisoft\yii2;
       function example($input, $url, $id, $payload, $request) {
         CDbCommand::setText("SELECT * FROM users WHERE id = " . $id);
       }
@@ -921,7 +899,6 @@
   - name: php.sqli.zend_db_query example
     code: |
       <?php
-      use zendframework\zenddb;
       use zendframework\zenddb;
       use zendframework\zend-db;
       function example($input, $url, $id, $payload, $request) {

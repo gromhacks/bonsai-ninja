@@ -1,19 +1,4 @@
 # JavaScript cloud-event sources whose producer is a service or broker.
-- id: javascript.cloud.aws_lambda_event
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  trust: service
-  tag: cloud-event
-  payload_types: [event, json]
-  frameworks: [aws-lambda]
-  packages: ["aws-sdk", "@aws-sdk/client-lambda", "aws-lambda"]
-  match:
-    kind: param
-    target: { name: event }
-  description: "Disabled - JavaScript Lambda handlers are registered outside source, so a bare `event` parameter plus an SDK dependency does not prove an invocation boundary."
-
 - id: javascript.cloud.aws_lambda_event_records
   enabled: true
   language: javascript

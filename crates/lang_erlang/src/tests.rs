@@ -89,10 +89,16 @@ fn fun_ref_assignment_emits_clean_callable_alias() {
         value_span: bonsai_common::Span::new(FileId::new(0), value_start, span.end),
         call_sites: Vec::new(),
         value_flow: Default::default(),
+        static_value: None,
         exact_callable_return: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
         exact_static_call_args: None,
         direct_call_name: None,
+        direct_call_span: None,
         direct_call_receiver: None,
+        direct_call_receiver_span: None,
+        direct_call_receiver_flow: None,
     }];
     let assignment_values = bonsai_lang_api::AssignmentValueIndex::new(&facts);
 
@@ -273,10 +279,16 @@ fn list_comprehension_assignment_exposes_generator_sources() {
         value_span: bonsai_common::Span::new(FileId::new(0), value_start, span.end),
         call_sites: Vec::new(),
         value_flow: Default::default(),
+        static_value: None,
         exact_callable_return: None,
+        inline_callback_static_return: None,
+        inline_callback_fields: Vec::new(),
         exact_static_call_args: None,
         direct_call_name: None,
+        direct_call_span: None,
         direct_call_receiver: None,
+        direct_call_receiver_span: None,
+        direct_call_receiver_flow: None,
     }];
     let assignment_values = AssignmentValueIndex::new(&facts);
 

@@ -154,6 +154,9 @@ pub(super) struct FindingBuildContext<'a> {
     /// Guard attribution runs inside Rayon workers and must never reopen the
     /// workspace-wide lazy callgraph cache from that parallel phase.
     pub(super) call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
+    /// Exact direct callers for guard proofs whose safety depends on every
+    /// call-site argument. Prepared once on the serial planning thread.
+    pub(super) static_provenance_call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
     /// Spans of every call site the engine recorded as carrying
     /// tainted argument flow on this source's graph. A sanitizer
     /// only credits the finding when its match span overlaps one
@@ -177,7 +180,8 @@ pub(super) fn make_finding(
     context: FindingBuildContext<'_>,
 ) -> Option<Finding> {
     let skr = pack.find_rule_by_id(&snk.rule_id)?;
-    let attributed_sink = callback_extension_attribution_match(context.ws, context.global.as_ref(), snk, skr)
+    let attributed_sink = caller_composition_attribution_match(&context, snk, skr)
+        .or_else(|| callback_extension_attribution_match(context.ws, context.global.as_ref(), snk, skr))
         .or_else(|| {
             configured_receiver_factory_attribution_match(context.ws, context.global.as_ref(), snk, skr)
         });
@@ -208,7 +212,12 @@ pub(super) fn make_finding(
 
     let mut sanitizers_seen: Vec<FindingMatch> = Vec::new();
     let mut taint_transforms_seen: Vec<FindingMatch> = Vec::new();
-    let mut seen_keys: AHashSet<(String, u32, u32)> = AHashSet::new();
+    // A taint-preserving transform and a credit-bearing sanitizer may share
+    // one compiler call span (for example String(...).replace(...)). They
+    // are different evidence classes and must not suppress one another just
+    // because their rendered locations coincide.
+    let mut seen_sanitizer_keys: AHashSet<(String, u32, u32)> = AHashSet::new();
+    let mut seen_transform_keys: AHashSet<(String, u32, u32)> = AHashSet::new();
     // Walk the actual `FuncId`s from the taint lineage (not their names) so
     // sanitizers in unrelated same-named functions can't cross-
     // bridge. This intentionally uses the pre-display-rewrite
@@ -225,6 +234,12 @@ pub(super) fn make_finding(
         snk,
         &context.sink_tainted_args,
     ));
+    sanitizer_candidate_funcs.extend(predicate_helper_functions_before_sink(
+        context.ws,
+        context.call_graph,
+        context.sink_func,
+        snk,
+    ));
     sanitizer_candidate_funcs.sort_by_key(|function| function.raw());
     sanitizer_candidate_funcs.dedup();
     bonsai_diagnostics::debug_log!(
@@ -239,6 +254,20 @@ pub(super) fn make_finding(
         };
         for sanitizer_match in sanitizer_hits {
             let sanitizer_rule = pack.find_rule_by_id(&sanitizer_match.rule_id);
+            if sanitizer_rule.is_some_and(|rule| {
+                rule.taint_semantics
+                    .as_ref()
+                    .and_then(|semantics| semantics.finite_literal_map_selector.as_ref())
+                    .is_some()
+                    && !finite_literal_map_selector_call_is_proven(
+                        context.ws,
+                        hop_func,
+                        sanitizer_match,
+                        rule,
+                    )
+            }) {
+                continue;
+            }
             let nested_in_tainted_sink_arg =
                 sanitizer_is_nested_in_tainted_sink_arg(
                     context.ws,
@@ -285,6 +314,8 @@ pub(super) fn make_finding(
                     || sanitizer_guard_feeds_sink_arg(
                         &SanitizerGuardContext {
                             ws: context.ws,
+                            call_graph: context.call_graph,
+                            sink_func: context.sink_func,
                             sink_tainted_args: &context.sink_tainted_args,
                         },
                         pack,
@@ -337,14 +368,14 @@ pub(super) fn make_finding(
                 sanitizer_match.line,
                 sanitizer_match.column,
             );
-            if seen_keys.insert(dedup_key) {
-                if let Some(rule) = sanitizer_rule {
-                    let matched = FindingMatch::from_rule_match(sanitizer_match, rule);
-                    if rule_is_taint_preserving_transform(rule, &pack.metadata) {
+            if let Some(rule) = sanitizer_rule {
+                let matched = FindingMatch::from_rule_match(sanitizer_match, rule);
+                if rule_is_taint_preserving_transform(rule, &pack.metadata) {
+                    if seen_transform_keys.insert(dedup_key) {
                         taint_transforms_seen.push(matched);
-                    } else {
-                        sanitizers_seen.push(matched);
                     }
+                } else if seen_sanitizer_keys.insert(dedup_key) {
+                    sanitizers_seen.push(matched);
                 }
             }
         }
@@ -352,12 +383,14 @@ pub(super) fn make_finding(
     if let Some(selection) = finite_literal_selection_sanitizer(
         context.ws,
         context.global.as_ref(),
+        context.call_graph,
+        context.sink_func,
         snk,
         skr,
         &context.sink_tainted_args,
     ) {
         let dedup_key = (selection.file.clone(), selection.line, selection.column);
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(selection);
         }
     }
@@ -369,7 +402,7 @@ pub(super) fn make_finding(
         &context.sink_tainted_args,
     ) {
         let dedup_key = (type_guard.file.clone(), type_guard.line, type_guard.column);
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(type_guard);
         }
     }
@@ -381,7 +414,7 @@ pub(super) fn make_finding(
             parameterized_query.line,
             parameterized_query.column,
         );
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(parameterized_query);
         }
     }
@@ -393,15 +426,21 @@ pub(super) fn make_finding(
         &context.sink_tainted_args,
     ) {
         let dedup_key = (path_guard.file.clone(), path_guard.line, path_guard.column);
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(path_guard);
         }
     }
-    if let Some(path_guard) =
-        path_consumer_containment_guard_sanitizer(context.ws, context.call_graph, context.sink_func, snk, skr)
-    {
+    if let Some(path_guard) = path_consumer_containment_guard_sanitizer(
+        context.ws,
+        context.global.as_ref(),
+        context.call_graph,
+        context.static_provenance_call_graph,
+        context.sink_func,
+        snk,
+        skr,
+    ) {
         let dedup_key = (path_guard.file.clone(), path_guard.line, path_guard.column);
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(path_guard);
         }
     }
@@ -411,7 +450,7 @@ pub(super) fn make_finding(
             factory_guard.line,
             factory_guard.column,
         );
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(factory_guard);
         }
     }
@@ -423,13 +462,15 @@ pub(super) fn make_finding(
             configuration_guard.line,
             configuration_guard.column,
         );
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(configuration_guard);
         }
     }
-    if let Some(escape) = character_escape_sanitizer(context.ws, context.sink_func, snk, skr) {
+    if let Some(escape) =
+        character_escape_sanitizer(context.ws, context.call_graph, context.sink_func, snk, skr)
+    {
         let dedup_key = (escape.file.clone(), escape.line, escape.column);
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(escape);
         }
     }
@@ -437,6 +478,7 @@ pub(super) fn make_finding(
         ws: context.ws,
         call_graph: context.call_graph,
         source: src,
+        source_rule,
         source_func: context.source_func,
         sink: snk,
         sink_rule: skr,
@@ -447,38 +489,43 @@ pub(super) fn make_finding(
     };
     if let Some(constraint) = character_constraint_sanitizer(&compiler_guard_context) {
         let dedup_key = (constraint.file.clone(), constraint.line, constraint.column);
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(constraint);
         }
     }
     if let Some(constraint) = same_origin_path_constraint_sanitizer(&compiler_guard_context) {
         let dedup_key = (constraint.file.clone(), constraint.line, constraint.column);
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(constraint);
         }
     }
     if let Some(path_guard) = relative_path_containment_guard_sanitizer(
         context.ws,
-        context.call_graph,
+        context.global.as_ref(),
+        context.static_provenance_call_graph,
         context.sink_func,
         snk,
         skr,
         &context.sink_tainted_args,
     ) {
         let dedup_key = (path_guard.file.clone(), path_guard.line, path_guard.column);
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(path_guard);
         }
     }
-    if let Some(configured_factory_guard) =
-        configured_argument_factory_guard_sanitizer(context.ws, context.sink_func, snk, skr)
-    {
+    if let Some(configured_factory_guard) = configured_argument_factory_guard_sanitizer(
+        context.ws,
+        context.call_graph,
+        context.sink_func,
+        snk,
+        skr,
+    ) {
         let dedup_key = (
             configured_factory_guard.file.clone(),
             configured_factory_guard.line,
             configured_factory_guard.column,
         );
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(configured_factory_guard);
         }
     }
@@ -490,8 +537,20 @@ pub(super) fn make_finding(
             configured_receiver_guard.line,
             configured_receiver_guard.column,
         );
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(configured_receiver_guard);
+        }
+    }
+    if let Some(callback_receiver_guard) =
+        receiver_callback_configuration_guard_sanitizer(context.ws, context.sink_func, snk, skr)
+    {
+        let dedup_key = (
+            callback_receiver_guard.file.clone(),
+            callback_receiver_guard.line,
+            callback_receiver_guard.column,
+        );
+        if seen_sanitizer_keys.insert(dedup_key) {
+            sanitizers_seen.push(callback_receiver_guard);
         }
     }
     if let Some(configured_call_guard) = configured_call_argument_guard_sanitizer(
@@ -506,13 +565,15 @@ pub(super) fn make_finding(
             configured_call_guard.line,
             configured_call_guard.column,
         );
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(configured_call_guard);
         }
     }
-    if let Some(ssrf_guard) = url_network_guard_sanitizer(context.ws, context.sink_func, snk, skr) {
+    if let Some(ssrf_guard) =
+        url_network_guard_sanitizer(context.ws, context.call_graph, context.sink_func, snk, skr)
+    {
         let dedup_key = (ssrf_guard.file.clone(), ssrf_guard.line, ssrf_guard.column);
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(ssrf_guard);
         }
     }
@@ -529,7 +590,7 @@ pub(super) fn make_finding(
             reconstruction_guard.line,
             reconstruction_guard.column,
         );
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(reconstruction_guard);
         }
     }
@@ -539,7 +600,7 @@ pub(super) fn make_finding(
             compiler_guard.line,
             compiler_guard.column,
         );
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(compiler_guard);
         }
     }
@@ -552,7 +613,7 @@ pub(super) fn make_finding(
         &context.sink_tainted_args,
     ) {
         let dedup_key = (eq_guard.file.clone(), eq_guard.line, eq_guard.column);
-        if seen_keys.insert(dedup_key) {
+        if seen_sanitizer_keys.insert(dedup_key) {
             sanitizers_seen.push(eq_guard);
         }
     }
@@ -613,9 +674,172 @@ pub(super) fn make_finding(
     })
 }
 
+/// Reattribute a parameterized-query sink through a first-party wrapper to
+/// the exact caller-side string composition that made its query parameter
+/// unsafe.
+///
+/// This changes presentation only. The real library sink and IDG endpoint
+/// remain unchanged. The proof requires an exact resolved caller edge on the
+/// selected taint path, a sink argument that is one formal of the wrapper,
+/// the corresponding caller argument to be one local place, and that place's
+/// latest compiler assignment to be a complete literal-plus-place string
+/// composition. No SQL tokens, API names, or language ids are interpreted
+/// here; the rule's `parameterized_query` roles opt the sink into this
+/// attribution.
+fn caller_composition_attribution_match(
+    context: &FindingBuildContext<'_>,
+    sink: &RuleMatch,
+    sink_rule: &Rule,
+) -> Option<RuleMatch> {
+    let query_index = sink_rule
+        .analysis_semantics
+        .as_ref()?
+        .parameterized_query
+        .as_ref()?
+        .query_arg_index;
+    let sink_argument = context
+        .sink_tainted_args
+        .iter()
+        .find(|argument| argument.index == query_index)?;
+    let sink_place = sink_argument.place.as_deref()?.trim();
+    let sink_decl = context.ws.exact_decl(SymbolId::new(context.sink_func.raw()))?;
+    let parameter_index = sink_decl
+        .params
+        .iter()
+        .position(|parameter| parameter.trim() == sink_place)?;
+
+    for edge in context.call_graph.callers_of(context.sink_func) {
+        let Some(caller) = context.ws.exact_decl(SymbolId::new(edge.from.raw())) else {
+            continue;
+        };
+        let (edge_file, edge_line, _) = resolve_span_location(context.ws, edge.span);
+        let on_selected_path = context.taint_path.iter().any(|step| {
+            step.caller == caller.name
+                && step.callee == sink_decl.name
+                && step.line == edge_line
+                && (step.file == edge_file
+                    || edge_file.ends_with(&step.file)
+                    || step.file.ends_with(&edge_file))
+                && step
+                    .tainted_args
+                    .iter()
+                    .any(|argument| argument.index == parameter_index)
+        });
+        if !on_selected_path {
+            continue;
+        }
+        let Some(FlowEvent::Call { args, .. }) = find_call_event_at(&caller.flow_events, edge.span) else {
+            continue;
+        };
+        let Some(caller_argument) = args.get(parameter_index) else {
+            continue;
+        };
+        let Some(caller_place) = caller_argument.place.as_deref().map(str::trim) else {
+            continue;
+        };
+        if caller_place.is_empty() {
+            continue;
+        }
+        let Some(file_index) = context
+            .ws
+            .db()
+            .decl_index_remapped_to_headers(context.global, edge.span.file)
+        else {
+            continue;
+        };
+        let Some(composition) = file_index
+            .string_compositions
+            .iter()
+            .filter(|composition| {
+                composition.target.as_deref() == Some(caller_place)
+                    && composition.container_span.start < edge.span.start
+            })
+            .max_by_key(|composition| composition.container_span.start)
+        else {
+            continue;
+        };
+        let Some(latest_assignment) = file_index
+            .assignment_values
+            .iter()
+            .filter(|assignment| {
+                assignment.target.as_deref() == Some(caller_place)
+                    && assignment.assignment_span.start < edge.span.start
+            })
+            .max_by_key(|assignment| assignment.assignment_span.start)
+        else {
+            continue;
+        };
+        if latest_assignment.assignment_span.file != composition.container_span.file
+            || latest_assignment.assignment_span.start > composition.container_span.start
+            || latest_assignment.assignment_span.end < composition.container_span.end
+        {
+            continue;
+        }
+        let has_literal = composition
+            .parts
+            .iter()
+            .any(|part| matches!(part, bonsai_lang_api::StringCompositionPart::Literal { .. }));
+        let mut dynamic_places = composition
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                bonsai_lang_api::StringCompositionPart::Place { place }
+                | bonsai_lang_api::StringCompositionPart::PlaceOrLiteral { place, .. } => {
+                    Some(place.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        dynamic_places.sort_unstable();
+        dynamic_places.dedup();
+        let [dynamic_place] = dynamic_places.as_slice() else {
+            continue;
+        };
+        if !has_literal {
+            continue;
+        }
+        if !latest_assignment
+            .value_flow
+            .source_names
+            .iter()
+            .any(|source| source == *dynamic_place)
+        {
+            continue;
+        }
+        let attribution_span = composition
+            .dynamic_anchor_span
+            .unwrap_or(composition.container_span);
+        let (file, line, column) = resolve_span_location(context.ws, attribution_span);
+        let text = context
+            .ws
+            .vfs()
+            .snapshot(composition.value_span.file)
+            .ok()
+            .and_then(|snapshot| {
+                snapshot
+                    .text
+                    .get(composition.value_span.start as usize..composition.value_span.end as usize)
+                    .map(str::trim)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| caller_place.to_string());
+        let mut attributed = sink.clone();
+        attributed.file = file;
+        attributed.line = line;
+        attributed.column = column;
+        attributed.span = attribution_span;
+        attributed.match_text = text;
+        attributed.enclosing_fn = Some(caller.name.clone());
+        return Some(attributed);
+    }
+    None
+}
+
 fn rule_is_taint_preserving_transform(rule: &Rule, metadata: &RulepackMetadata) -> bool {
     let has_passthrough_semantics = rule.taint_semantics.as_ref().is_some_and(|semantics| {
-        !semantics.call_result_passthrough_args.is_empty() || semantics.call_result_passthrough_receiver
+        !semantics.call_result_passthrough_args.is_empty()
+            || semantics.call_result_passthrough_args_from.is_some()
+            || semantics.call_result_passthrough_receiver
     });
     has_passthrough_semantics
         && rule

@@ -114,18 +114,3 @@
           return FileField.save('safe')
     expect_no_match: true
   description: "aiohttp multipart FileField.save - flag when destination path is derived from the client-supplied filename."
-
-- id: python.upload.shutil_copyfileobj_upload
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: python
-  tag: file-upload
-  severity: medium
-  imports: [shutil]
-  cwe: [CWE-434]
-  match:
-    kind: call
-    callee:
-      attribute: [shutil, copyfileobj]
-  description: "Disabled - shutil.copyfileobj is generic; flag only when the destination path is tainted."

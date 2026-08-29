@@ -80,21 +80,6 @@
       }
     expect_no_match: true
   description: "strcat(dst, tainted_src) - unbounded concat; source length controls overflow."
-- id: cpp.memory.strncat
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: cpp
-  tag: memory-safety
-  severity: high
-  cwe:
-  - CWE-193
-  - CWE-120
-  match:
-    kind: call
-    callee:
-      name: strncat
-  description: "Disabled - strncat requires capacity/arithmetic context: n must be remaining destination capacity, not total buffer size."
 - id: cpp.memory.wcscpy
   enabled: true
   language: cpp
@@ -296,73 +281,6 @@
     code: "void *alloca(unsigned long size);\nint main(int argc, char **argv) {\n  alloca(64);\n  return argc;\n}\n"
     expect_no_match: true
   description: "alloca(n) with tainted n - stack exhaustion / stack clash."
-- id: cpp.memory.std_string_assign
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: memory-safety
-  severity: medium
-  cwe:
-  - CWE-120
-  match:
-    kind: call
-    callee:
-      attribute:
-      - string
-      - assign
-  description: "Disabled - std::string::assign(buf, n) with tainted n reads past\
-    \ source buffer; flag only with source-length analysis."
-- id: cpp.memory.std_vector_resize_tainted
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: memory-safety
-  severity: medium
-  cwe:
-  - CWE-770
-  - CWE-789
-  match:
-    kind: call
-    callee:
-      attribute:
-      - vector
-      - resize
-  description: "Disabled - std::vector::resize(n) with tainted n; potential allocation\
-    \ DoS; flag with bound analysis."
-- id: cpp.memory.std_fill_n_tainted
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: memory-safety
-  severity: medium
-  cwe:
-  - CWE-120
-  match:
-    kind: call
-    callee:
-      attribute:
-      - std
-      - fill_n
-  description: "Disabled - std::fill_n(dst, n, v) with tainted n; flag with dst-bound\
-    \ analysis."
-- id: cpp.memory.reinterpret_cast
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: memory-safety
-  severity: medium
-  cwe:
-  - CWE-704
-  match:
-    kind: call
-    callee:
-      name: reinterpret_cast
-  description: "Disabled - reinterpret_cast is often legitimate (network byte-order,\
-    \ POD serialization)."
 - id: cpp.memory.malloc_tainted_size
   enabled: true
   language: cpp
@@ -456,24 +374,3 @@
     code: "void *realloc(void *ptr, unsigned long size);\nint main(int argc, char **argv) {\n  realloc(argv, 64);\n  return argc;\n}\n"
     expect_no_match: true
   description: "realloc(ptr, n) with tainted size - overflow path same as malloc."
-- id: cpp.memory.delete_use_after
-  enabled: false
-  language: cpp
-  tag: memory-safety
-  severity: critical
-  cwe:
-  - CWE-416
-  - CWE-415
-  match:
-    kind: call
-    callee:
-      name: delete
-  match_examples:
-  - name: generated direct match
-    code: "void example() {\n  int *ptr = new int;\n  delete ptr;\n}\n"
-  description: "C++ `delete p` audit hint - sink fires on the free site; UAF\
-    \ correlation requires the engine to flag a later dereference of the same pointer\
-    \ (CWE-416). Also covers double-free shapes (CWE-415) when the same pointer reaches\
-    \ two delete sites."
-  disabled_reason:
-    code: over-broad

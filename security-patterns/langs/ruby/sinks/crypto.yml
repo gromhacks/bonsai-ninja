@@ -72,51 +72,51 @@
   severity: high
   cwe:
   - CWE-327
+  packages: [openssl]
+  imports: [openssl]
   match:
     kind: call
     callee:
       attribute:
+      - OpenSSL
       - Cipher
       - new
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)^(?:"|\x27)(?:des(?:-[a-z0-9-]+)?|des-ede3(?:-[a-z0-9-]+)?|rc2(?:-[a-z0-9-]+)?|rc4|bf(?:-[a-z0-9-]+)?|blowfish(?:-[a-z0-9-]+)?|[a-z0-9-]+-ecb)(?:"|\x27)$'
   match_examples:
-  - name: ruby.crypto.openssl_cipher_des example
-    code: "def example(input, url, id, payload, request, params)\n  Cipher.new(\"DES\")\nend\n"
-  description: "OpenSSL::Cipher.new('DES') - broken cipher. Merged aliases: ruby.crypto.openssl_cipher_des_cbc, ruby.crypto.openssl_cipher_rc4,\
-    \ ruby.crypto.openssl_cipher_bf, ruby.crypto.openssl_cipher_aes128_ecb, ruby.crypto.openssl_cipher_aes256_ecb."
+  - name: OpenSSL weak cipher
+    code: |
+      require "openssl"
+      def example
+        OpenSSL::Cipher.new("DES-CBC")
+      end
+  - name: OpenSSL authenticated cipher negative
+    code: |
+      require "openssl"
+      def example
+        OpenSSL::Cipher.new("AES-256-GCM")
+      end
+    expect_no_match: true
+  - name: application Cipher constructor collision negative
+    code: |
+      module OpenSSL
+        class Cipher
+          def self.new(name) = name
+        end
+      end
+      def example
+        OpenSSL::Cipher.new("DES-CBC")
+      end
+    expect_no_match: true
+  description: "OpenSSL::Cipher.new with an exact weak cipher or ECB algorithm is insecure; authenticated/non-ECB algorithms and workspace-local providers stay quiet. Merged aliases: ruby.crypto.openssl_cipher_des_cbc, ruby.crypto.openssl_cipher_rc4, ruby.crypto.openssl_cipher_bf, ruby.crypto.openssl_cipher_aes128_ecb, ruby.crypto.openssl_cipher_aes256_ecb."
   aliases:
   - ruby.crypto.openssl_cipher_des_cbc
   - ruby.crypto.openssl_cipher_rc4
   - ruby.crypto.openssl_cipher_bf
   - ruby.crypto.openssl_cipher_aes128_ecb
   - ruby.crypto.openssl_cipher_aes256_ecb
-- id: ruby.crypto.kernel_rand
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: weak-randomness
-  severity: medium
-  cwe:
-  - CWE-338
-  match:
-    kind: call
-    callee:
-      name: rand
-  description: "Disabled - Kernel#rand only matters for security-sensitive ID/token gen and fires on every rand() call."
-- id: ruby.crypto.kernel_srand
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: weak-randomness
-  severity: medium
-  cwe:
-  - CWE-338
-  match:
-    kind: call
-    callee:
-      name: srand
-  description: "Disabled - srand seeding the insecure PRNG."
 - id: ruby.crypto.bcrypt_low_cost
   enabled: true
   language: ruby
@@ -146,7 +146,7 @@
       def hash(password)
         BCrypt::Password.create(password, cost: 4)
       end
-    expect_match_text: [BCrypt::Password.create]
+    expect_match_text: ["BCrypt::Password.create"]
   - name: bcrypt default cost negative
     code: |
       require "bcrypt"

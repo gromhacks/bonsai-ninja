@@ -19,3 +19,31 @@
       }
     expect_match_text: [values.addObject]
   description: "NSMutableArray addObject: stores its value argument in receiver state. Typing-only transfer summary; never a finding."
+
+- id: objc.typing.nstask_arguments_write_mutation
+  enabled: true
+  language: objc
+  match:
+    kind: write
+    target:
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.arguments$'
+      receiver_type_in: [NSTask]
+  taint_semantics:
+    taint_receiver_from_args: true
+  match_examples:
+  - name: typed task arguments become receiver state
+    code: |
+      void configure(NSTask *task, NSString *input) {
+          task.arguments = @[input];
+      }
+    expect_match_text: [task.arguments]
+  - name: unrelated arguments property is not task state
+    code: |
+      @interface Options : NSObject
+      @property NSArray *arguments;
+      @end
+      void configure(Options *options, NSString *input) {
+          options.arguments = @[input];
+      }
+    expect_no_match: true
+  description: "A typed NSTask arguments property write stores the exact assigned value in receiver state. Typing-only transfer summary; never a finding."

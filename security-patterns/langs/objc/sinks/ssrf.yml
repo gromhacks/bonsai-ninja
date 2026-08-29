@@ -187,3 +187,52 @@
       }
     expect_no_match: true
   description: "WKWebView -loadFileURL:allowingReadAccessToURL: - file:// load with tainted path can read arbitrary sandbox files when allowingReadAccessToURL is broad. Constrained to webview receivers."
+
+- id: objc.ssrf.nsdata_contents_of_url
+  enabled: true
+  language: objc
+  tag: ssrf
+  severity: high
+  packages: [Foundation]
+  cwe: [CWE-918]
+  analysis_semantics:
+    url_network_guard:
+      root:
+        kind: sink-argument-parsed-value
+        argument_index: 0
+      parser: {attribute: [NSURL, URLWithString]}
+      scheme:
+        component: {field: scheme}
+        comparison_predicate: {name: isEqualToString}
+        allowed_values: [https]
+      host_allowlist:
+        component: {field: host}
+        membership_predicate: {name: containsObject}
+        static_collection_factories:
+        - {attribute: [NSSet, setWithObjects]}
+  match:
+    kind: call
+    callee:
+      attribute: [NSData, dataWithContentsOfURL]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: foundation blocking fetch with tainted URL
+    code: |
+      #import <Foundation/Foundation.h>
+      void fetch(NSURL *input) { [NSData dataWithContentsOfURL:input]; }
+    expect_match_text: [NSData.dataWithContentsOfURL]
+  - name: foundation blocking fetch with literal URL negative
+    code: |
+      #import <Foundation/Foundation.h>
+      void fetch(void) { [NSData dataWithContentsOfURL:[NSURL URLWithString:@"https://safe.example/status"]]; }
+    expect_no_match: true
+  - name: local NSData collision negative
+    code: |
+      @interface NSData
+      + (id)dataWithContentsOfURL:(id)value;
+      @end
+      void fetch(id input) { [NSData dataWithContentsOfURL:input]; }
+    expect_no_match: true
+  description: "Foundation NSData dataWithContentsOfURL: performs a blocking outbound fetch to the supplied URL."

@@ -1,58 +1,4 @@
 # Rust open-redirect (actix-web / axum / rocket / warp).
-- id: rust.open_redirect.actix_web_response_found
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: open-redirect
-  severity: high
-  packages: [actix_web]
-  cwe: [CWE-601]
-  match:
-    kind: call
-    callee:
-      attribute: [HttpResponse, Found]
-  match_examples:
-  - name: generated direct match
-    code: |
-      use actix_web;
-      use actix_web;
-      use actix_web::dummy;
-      fn example(target: String) {
-          let query = "user";
-          HttpResponse::Found(target);
-      }
-  description: "Disabled - HttpResponse::Found() only selects a status; the tainted Location value is added by a later header call, so this requires builder-state tracking."
-
-  imports:
-  - actix_web
-- id: rust.open_redirect.actix_web_response_temporaryredirect
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: open-redirect
-  severity: high
-  packages: [actix_web]
-  cwe: [CWE-601]
-  match:
-    kind: call
-    callee:
-      attribute: [HttpResponse, TemporaryRedirect]
-  match_examples:
-  - name: generated direct match
-    code: |
-      use actix_web;
-      use actix_web;
-      use actix_web::dummy;
-      fn example(target: String) {
-          let query = "user";
-          HttpResponse::TemporaryRedirect(target);
-      }
-  description: "Disabled - HttpResponse::TemporaryRedirect() only selects a status; the tainted Location value is added by a later header call, so this requires builder-state tracking."
-
-  imports:
-  - actix_web
 - id: rust.open_redirect.axum_redirect_to
   enabled: true
   language: rust
@@ -143,21 +89,6 @@
       }
     expect_no_match: true
   description: "axum Redirect::permanent(tainted) - 308 redirect to attacker URL."
-
-- id: rust.open_redirect.rocket_redirect_to
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: open-redirect
-  severity: high
-  packages: [rocket]
-  cwe: [CWE-601]
-  match:
-    kind: call
-    callee:
-      attribute: [Redirect, to]
-  description: "Disabled - merged into rust.open_redirect.axum_redirect_to (same `[Redirect, to]` suffix covers both crates)."
 
 - id: rust.open_redirect.warp_redirect
   enabled: true

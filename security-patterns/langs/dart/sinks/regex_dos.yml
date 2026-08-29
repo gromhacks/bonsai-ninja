@@ -3,7 +3,7 @@
   language: dart
   tag: redos
   severity: medium
-  packages: [dart:core]
+  packages: ["dart:core"]
   cwe: [CWE-1333]
   match:
     kind: call
@@ -15,9 +15,6 @@
   match_examples:
   - name: tainted regexp pattern
     code: |
-      import 'package:dart_core/dart_core.dart';
-      import 'package:dart_core/dart_core.dart';
-      import 'package:dart_core/dart_core.dart';
       import 'package:dart_core/dart_core.dart';
       void test(String input) { RegExp(input); }
   - name: literal regexp pattern negative

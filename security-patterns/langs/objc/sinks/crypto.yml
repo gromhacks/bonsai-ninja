@@ -117,17 +117,3 @@
         }
       expect_no_match: true
   description: "CommonCrypto CCCryptorCreate / CCCryptorCreateWithMode with weak algs (DES/3DES/RC4/RC2) or ECB mode (kCCModeECB). AES/CBC calls are quiet."
-
-- id: objc.crypto.arc4random_uniform
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: objc
-  tag: weak-randomness
-  severity: low
-  cwe: [CWE-330]
-  match:
-    kind: call
-    callee:
-      name: arc4random
-  description: "Disabled - arc4random on Darwin is a CSPRNG; not a vulnerability by itself."

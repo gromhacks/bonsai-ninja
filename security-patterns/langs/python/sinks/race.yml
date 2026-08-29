@@ -1,20 +1,3 @@
-- id: python.race.os_path_exists_then_open
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: race
-  category: source-independent
-  severity: medium
-  cwe: [CWE-367]
-  match:
-    kind: call
-    callee:
-      attribute: [os, path, exists]
-  description: "TOCTOU: os.path.exists check then open - race window. Disabled by default."
-
-# TOCTOU check sites - pair with subsequent open/chmod use-sites
-# in source order to identify the race window.
 - id: python.toctou.os_access
   enabled: true
   language: python

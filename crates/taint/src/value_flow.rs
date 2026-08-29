@@ -4,7 +4,7 @@
 //! without selecting a second engine mode or changing propagation semantics.
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{FuncId, Precision, Span, SymbolId};
+use bonsai_common::{FuncId, Precision, Span};
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::DeclKind;
 use serde::{Deserialize, Serialize};
@@ -247,9 +247,13 @@ pub fn value_flow_for_function_with_caches(
     config: &InterTaintConfig,
     caches: &InterTaintCaches,
 ) -> ValueFlowGraph {
-    let global = db.global_index();
+    // The configured IDG owns the canonical compact linkage generation for
+    // this query. Stream the one selected callable body against those stable
+    // headers instead of building the workspace-wide body index beside it.
+    let idg = crate::idg_build::idg_service_for_inter_config(db, config);
+    let global = idg.global_linkage_index();
     // No decl for this id → empty graph (e.g. caller asked about a stale FuncId).
-    let Some(decl) = global.decl_of(SymbolId::new(entry_func.raw())).cloned() else {
+    let Some(decl) = crate::reachable::exact_decl_for_func(db, global.as_ref(), entry_func) else {
         return ValueFlowGraph::new();
     };
     // Only callable decls (functions / methods / constructors) carry

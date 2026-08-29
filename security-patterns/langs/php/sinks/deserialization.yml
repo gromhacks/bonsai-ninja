@@ -61,34 +61,6 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  new Phar('archive.phar');\n}\n"
     expect_no_match: true
   description: new Phar(tainted path).
-- id: php.deser.file_exists_phar
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: insecure-deserialization
-  severity: high
-  cwe:
-  - CWE-502
-  match:
-    kind: call
-    callee:
-      name: file_exists
-  description: Disabled - file_exists is ubiquitous; phar:// variant needs arg-string-prefix constraint not expressible in schema.
-- id: php.deser.file_get_contents_phar
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: insecure-deserialization
-  severity: high
-  cwe:
-  - CWE-502
-  match:
-    kind: call
-    callee:
-      name: file_get_contents
-  description: Disabled - file_get_contents ubiquitous; phar:// needs path-prefix constraint. Already covered as SSRF/path sink.
 - id: php.deser.igbinary_unserialize
   enabled: true
   language: php
@@ -133,7 +105,6 @@
     code: |
       <?php
       use symfony\yaml;
-      use symfony\yaml;
       function example($input, $url, $id, $payload, $request) {
         Yaml::parse($input, $input, flags: Yaml::PARSE_OBJECT);
       }
@@ -172,7 +143,6 @@
     code: |
       <?php
       use symfony\yaml;
-      use symfony\yaml;
       function example($input, $url, $id, $payload, $request) {
         Yaml::parseFile($input);
       }
@@ -188,42 +158,6 @@
   imports:
   - symfony\yaml
   - symfony
-- id: php.deser.symfony_serializer_decode
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: insecure-deserialization
-  severity: medium
-  packages:
-  - symfony/serializer
-  cwe:
-  - CWE-502
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Serializer
-      - deserialize
-  description: Disabled - Symfony Serializer with PhpSerializer encoder only.
-- id: php.deser.jms_serializer
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: insecure-deserialization
-  severity: medium
-  packages:
-  - jms/serializer
-  cwe:
-  - CWE-502
-  match:
-    kind: call
-    callee:
-      attribute:
-      - SerializerBuilder
-      - build
-  description: Disabled - JMS Serializer with type metadata can be abused.
 - id: php.deser.wddx_deserialize
   enabled: true
   language: php

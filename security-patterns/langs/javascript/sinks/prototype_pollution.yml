@@ -1,19 +1,3 @@
-- id: javascript.proto.object_assign_user
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: prototype-pollution
-  severity: high
-  cwe: [CWE-1321]
-  match:
-    kind: call
-    callee:
-      attribute: [Object, assign]
-  description: "Disabled - Object.assign is only prototype-pollution relevant when merging untrusted keys into a sensitive target."
-
-# Prototype-pollution sinks. Object-merge / set-by-path APIs
-# that honor `__proto__` / `constructor` / `prototype` keys.
 - id: javascript.proto_pollution.object_assign_request_body
   enabled: true
   language: javascript
@@ -48,21 +32,6 @@
     expect_no_match: true
   description: "Object.assign(target, source) - shallow merge can still pollute when a tainted source object carries special keys. JS Object global has no canonical ecosystem package, so strict `['Object', 'assign']` match only."
 
-- id: javascript.proto_pollution.lodash_merge
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.proto_pollution.lodash_namespace_merge_variants
-  language: javascript
-  tag: prototype-pollution
-  severity: high
-  packages: [lodash]
-  cwe: [CWE-1321]
-  match:
-    kind: call
-    callee:
-      attribute: [_, merge]
-  description: "Disabled - `_.merge` is covered by `javascript.proto_pollution.lodash_namespace_merge_variants` whose regex `^[A-Za-z_$][A-Za-z0-9_$]*\\.(merge|defaultsDeep)$|^merge$` already includes the `_.merge` shape and any local namespace alias."
 - id: javascript.proto_pollution.lodash_set
   enabled: true
   language: javascript
@@ -341,22 +310,6 @@
       }
     expect_no_match: true
   description: "recursive-deep-merge(target, attacker_obj) - recursive merge APIs can honor `__proto__` / `constructor.prototype` keys and pollute Object.prototype."
-
-- id: javascript.proto_pollution.recursive_deep_merge_method
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.proto_pollution.lodash_namespace_merge_variants
-  language: javascript
-  tag: prototype-pollution
-  severity: high
-  packages: [recursive-deep-merge]
-  cwe: [CWE-1321]
-  match:
-    kind: call
-    callee:
-      attribute: [recursiveDeepMerge, merge]
-  description: "Disabled - `recursiveDeepMerge.merge` is covered by `javascript.proto_pollution.lodash_namespace_merge_variants` whose receiver-agnostic regex matches any `<ident>.merge`."
 
 - id: javascript.proto_pollution.deepmerge_package
   enabled: true

@@ -92,8 +92,9 @@
   match:
     kind: call
     callee:
-      regex: ^(client|httpClient|hc|http\.DefaultClient)\.Get$
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Get$'
   constraints:
+  - receiver_type_in: [http.Client, Client]
   - arg_tainted:
       index: 0
   match_examples:
@@ -109,15 +110,6 @@
       }
     expect_match_text:
     - client.Get
-  - name: net http default client get
-    code: |
-      package main
-      import "net/http"
-      func fetch(r *http.Request, url string) {
-        _, _ = http.DefaultClient.Get(url)
-      }
-    expect_match_text:
-    - http.DefaultClient.Get
   - name: net http short client get
     code: |
       package main
@@ -135,7 +127,17 @@
         _, _ = client.Get("https://example.test/health")
       }
     expect_no_match: true
-  description: "(*http.Client).Get(tainted URL), including http.DefaultClient.Get - method form of net/http SSRF."
+  - name: local get method collision negative
+    code: |
+      package main
+      import "net/http"
+      type localClient struct{}
+      func (localClient) Get(string) {}
+      func fetch(_ *http.Client, client localClient, target string) {
+        client.Get(target)
+      }
+    expect_no_match: true
+  description: "(*http.Client).Get(tainted URL) - method form of net/http SSRF. The package-level DefaultClient surface is modeled by its exact static-chain rule."
 - id: go.ssrf.http_client_post
   enabled: true
   language: go
@@ -148,8 +150,9 @@
   match:
     kind: call
     callee:
-      regex: ^(client|httpClient|hc|http\.DefaultClient)\.Post$
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Post$'
   constraints:
+  - receiver_type_in: [http.Client, Client]
   - arg_tainted:
       index: 0
   match_examples:
@@ -184,8 +187,9 @@
   match:
     kind: call
     callee:
-      regex: ^(client|httpClient|hc|http\.DefaultClient)\.Head$
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Head$'
   constraints:
+  - receiver_type_in: [http.Client, Client]
   - arg_tainted:
       index: 0
   match_examples:
@@ -193,17 +197,17 @@
     code: |
       package main
       import "net/http"
-      func fetch(r *http.Request, url string) {
-        _, _ = http.DefaultClient.Head(url)
+      func fetch(r *http.Request, client *http.Client, url string) {
+        _, _ = client.Head(url)
       }
     expect_match_text:
-    - http.DefaultClient.Head
+    - client.Head
   - name: literal http client head url negative
     code: |
       package main
       import "net/http"
-      func fetch() {
-        _, _ = http.DefaultClient.Head("https://example.test/health")
+      func fetch(client *http.Client) {
+        _, _ = client.Head("https://example.test/health")
       }
     expect_no_match: true
   description: "(*http.Client).Head(tainted URL) - server-side HEAD to attacker-chosen URL."
@@ -219,8 +223,9 @@
   match:
     kind: call
     callee:
-      regex: ^(client|httpClient|hc|http\.DefaultClient)\.PostForm$
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.PostForm$'
   constraints:
+  - receiver_type_in: [http.Client, Client]
   - arg_tainted:
       index: 0
   match_examples:
@@ -243,6 +248,48 @@
       }
     expect_no_match: true
   description: "(*http.Client).PostForm(tainted URL, form) - server-side form POST to attacker-chosen URL."
+- id: go.ssrf.http_default_client_url_request
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: '^http\.DefaultClient\.(Get|Post|Head|PostForm)$'
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: default client get tainted URL
+    code: |
+      package main
+      import "net/http"
+      func fetch(target string) {
+        _, _ = http.DefaultClient.Get(target)
+      }
+    expect_match_text: [http.DefaultClient.Get]
+  - name: default client post tainted URL
+    code: |
+      package main
+      import "net/http"
+      func fetch(target string) {
+        _, _ = http.DefaultClient.Post(target, "application/json", nil)
+      }
+    expect_match_text: [http.DefaultClient.Post]
+  - name: default client literal URL negative
+    code: |
+      package main
+      import "net/http"
+      func fetch() {
+        _, _ = http.DefaultClient.Get("https://example.test/health")
+      }
+    expect_no_match: true
+  description: "net/http DefaultClient URL helper methods fetch argument-zero URLs through the process-global client. The exact package-field chain needs no local variable-name guess."
 - id: go.ssrf.http_post
   enabled: true
   language: go
@@ -446,8 +493,9 @@
   match:
     kind: call
     callee:
-      regex: ^(client|httpClient|hc|http\.DefaultClient)\.Do$
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Do$'
   constraints:
+  - receiver_type_in: [http.Client, Client]
   - arg_tainted:
       index: 0
   match_examples:
@@ -469,6 +517,41 @@
       }
     expect_no_match: true
   description: "*http.Client.Do(req) - when req.URL came from user input this fetches attacker-chosen URL."
+- id: go.ssrf.http_default_client_do
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute: [http, DefaultClient, Do]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: default client executes tainted request
+    code: |
+      package main
+      import "net/http"
+      func fetch(request *http.Request) {
+        _, _ = http.DefaultClient.Do(request)
+      }
+    expect_match_text: [http.DefaultClient.Do]
+  - name: default client executes literal URL request negative
+    code: |
+      package main
+      import "net/http"
+      func fetch() {
+        request, _ := http.NewRequest("GET", "https://example.test/health", nil)
+        _, _ = http.DefaultClient.Do(request)
+      }
+    expect_no_match: true
+  description: "net/http DefaultClient.Do executes a request whose URL may have been constructed from attacker-controlled input."
 - id: go.ssrf.net_dial
   enabled: true
   language: go
@@ -584,27 +667,6 @@
       }
     expect_no_match: true
   description: imroc/req.Get(tainted URL).
-- id: go.ssrf.fasthttp_do
-  enabled: false
-  language: go
-  tag: ssrf
-  severity: high
-  packages:
-  - github.com/valyala/fasthttp
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - fasthttp
-      - Do
-  match_examples:
-  - name: generated direct match
-    code: "import \"github.com/valyala/fasthttp\"\npackage main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  fasthttp.Do(target)\n}\n"
-  description: "fasthttp.Do(req, resp) - tainted URL on req = SSRF."
-  disabled_reason:
-    code: over-broad
 - id: go.ssrf.net_dialtcp
   enabled: true
   language: go

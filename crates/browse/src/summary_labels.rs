@@ -79,11 +79,48 @@ impl<'ws> SummaryAnnotator<'ws> {
     /// Returns the same space-joined
     /// `F:<16-hex>` format as `labels_for`.
     pub fn labels_for_symbol(&self, symbol_name: &str) -> String {
-        let Some(func) = self.ws.lookup_function(symbol_name) else {
+        let global = self.ws.compiler_header_index();
+        // CONTEXTLESS_LOOKUP_JUSTIFICATION: this is display annotation, not
+        // semantic dispatch. The imported compiler spelling is matched
+        // exactly against declaration names, and every executable overload
+        // is retained. Declaration-only prototypes are used only when no
+        // executable definition exists, so split header/implementation
+        // languages do not lose their summary merely because the bare name
+        // is intentionally ambiguous to the resolver.
+        let mut candidates = global
+            .find_by_name(symbol_name)
+            .iter()
+            .filter_map(|symbol| {
+                let decl = global.decl_of(*symbol)?;
+                (decl.name == symbol_name
+                    && matches!(
+                        decl.kind,
+                        bonsai_lang_api::DeclKind::Function
+                            | bonsai_lang_api::DeclKind::Method
+                            | bonsai_lang_api::DeclKind::Constructor
+                    ))
+                .then_some((FuncId::new(symbol.raw()), decl.body_span.is_some()))
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
             return String::new();
-        };
-        let id = self.ws.flow_ids().id_for_func(func, self.ws.db(), self.ws.vfs());
-        id.to_string()
+        }
+        let has_executable = candidates.iter().any(|(_, executable)| *executable);
+        if has_executable {
+            candidates.retain(|(_, executable)| *executable);
+        }
+        let mut ids = candidates
+            .into_iter()
+            .map(|(func, _)| {
+                self.ws
+                    .flow_ids()
+                    .id_for_func(func, self.ws.db(), self.ws.vfs())
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids.join(" ")
     }
 
     /// Linear scan through the file's function ranges. Ranges are
@@ -157,5 +194,32 @@ impl<'ws> SummaryAnnotator<'ws> {
         // first, so a nested function or method beats a wider scope.
         ranges.sort_by_key(|range| range.width);
         ranges
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SummaryAnnotator;
+
+    #[test]
+    fn symbol_labels_prefer_executable_definition_over_same_named_prototype() {
+        let ws = bonsai_workspace::Workspace::new(bonsai_adapters::all_languages_registry());
+        ws.vfs().write(
+            "Service.h",
+            "@interface Service\n- (id)loadValue:(id)value;\n@end\n",
+        );
+        ws.vfs().write(
+            "Service.m",
+            "#import \"Service.h\"\n@implementation Service\n- (id)loadValue:(id)value { return value; }\n@end\n",
+        );
+
+        let labels = SummaryAnnotator::new(&ws).labels_for_symbol("loadValue");
+        let ids = labels.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(
+            ids.len(),
+            1,
+            "a prototype and its definition describe one executable summary: {labels}"
+        );
+        assert!(ids[0].starts_with("F:") && ids[0].len() == 18);
     }
 }

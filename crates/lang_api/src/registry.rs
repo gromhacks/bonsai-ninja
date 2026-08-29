@@ -43,6 +43,14 @@ impl LanguageRegistry {
     /// declared file extension.
     pub fn register(&self, adapter: AdapterArc) {
         let mut inner = self.inner.write();
+        let language_id = adapter.language_id();
+        // Re-registration replaces the adapter contract completely. Remove
+        // its prior extension claims before publishing the new set so lookup
+        // cannot depend on registry history.
+        for candidates in inner.by_ext.values_mut() {
+            candidates.retain(|candidate| candidate.language_id() != language_id);
+        }
+        inner.by_ext.retain(|_, candidates| !candidates.is_empty());
         // Preserve every adapter for ambiguous compiler extensions (`.h` is
         // valid C or C++). Registration order is the deterministic tie-breaker
         // used when both grammars parse a file equally well.
@@ -55,7 +63,7 @@ impl LanguageRegistry {
                 candidates.push(adapter.clone());
             }
         }
-        inner.by_id.insert(adapter.language_id(), adapter);
+        inner.by_id.insert(language_id, adapter);
     }
 
     /// Look up an adapter by file extension. Case-insensitive.

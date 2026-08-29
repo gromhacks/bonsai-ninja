@@ -1,13 +1,11 @@
 # C header injection (microhttpd / mongoose / civetweb).
 - id: c.header.mhd_add_response_header
-  aliases:
-  - c.open_redirect.mhd_redirect_header
   enabled: true
   language: c
   tag: header-injection
   severity: high
   packages: [libmicrohttpd]
-  cwe: [CWE-113, CWE-601]
+  cwe: [CWE-113]
   match:
     kind: call
     callee:
@@ -29,7 +27,7 @@
         MHD_add_response_header("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "MHD_add_response_header(response, name, tainted). Also covers merged aliases: c.open_redirect.mhd_redirect_header."
+  description: "MHD_add_response_header(response, name, tainted) - attacker-controlled response header value."
 
 - id: c.header.mhd_add_response_header_name
   enabled: true
@@ -204,18 +202,3 @@
       }
     expect_no_match: true
   description: "mg_send_header(conn, name, value) - tainted header names can corrupt response headers."
-
-- id: c.header.mongoose_printf_header
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  tag: header-injection
-  severity: medium
-  packages: [mongoose]
-  cwe: [CWE-113]
-  match:
-    kind: call
-    callee:
-      name: mg_printf
-  description: "Disabled - generic mg_printf; flag when format string emits headers."

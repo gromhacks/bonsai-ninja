@@ -82,3 +82,33 @@ fn positional_variable_argument_retains_its_addressable_place() {
 
     assert_eq!(argument.place.as_deref(), Some("$value"));
 }
+
+#[test]
+fn named_argument_uses_the_grammar_argument_wrapper_and_exact_value_place() {
+    use bonsai_lang_api::FlowEvent;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_php::PhpAdapter::new())],
+        &[(
+            "calls.php",
+            "<?php function forward($value) { consume(payload: $value); }",
+        )],
+    );
+    let global = workspace.db().global_index();
+    let declaration = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "forward")
+        .expect("forward declaration");
+    let argument = declaration
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { name, args, .. } if name == "consume" => args.first(),
+            _ => None,
+        })
+        .expect("named consume argument");
+
+    assert_eq!(argument.name.as_deref(), Some("payload"));
+    assert_eq!(argument.place.as_deref(), Some("$value"));
+}

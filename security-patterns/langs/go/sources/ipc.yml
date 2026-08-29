@@ -10,6 +10,7 @@
     callee:
       regex: "\\.StdoutPipe$"
   constraints:
+  - receiver_type_in: [exec.Cmd]
   - max_args: 0
   match_examples:
   - name: exec command stdout pipe
@@ -21,7 +22,15 @@
         _, _ = cmd.StdoutPipe()
       }
     expect_match_text: [cmd.StdoutPipe]
-  description: "exec.Cmd.StdoutPipe() - subprocess stdout; receiver-agnostic method regex gated to os/exec and zero arguments."
+  - name: same stdout pipe method on local receiver negative
+    code: |
+      package main
+      import "os/exec"
+      type localCommand struct{}
+      func (localCommand) StdoutPipe() (any, error) { return nil, nil }
+      func example(cmd localCommand) { _, _ = cmd.StdoutPipe() }
+    expect_no_match: true
+  description: "exec.Cmd.StdoutPipe() - subprocess stdout; exact rulepack return typing and the compiler-proven receiver exclude same-named local methods."
 
 - id: go.ipc.cmd_stderrpipe
   enabled: true
@@ -34,6 +43,7 @@
     callee:
       regex: "\\.StderrPipe$"
   constraints:
+  - receiver_type_in: [exec.Cmd]
   - max_args: 0
   match_examples:
   - name: exec command stderr pipe
@@ -45,7 +55,15 @@
         _, _ = cmd.StderrPipe()
       }
     expect_match_text: [cmd.StderrPipe]
-  description: "exec.Cmd.StderrPipe() - subprocess stderr; receiver-agnostic method regex gated to os/exec and zero arguments."
+  - name: same stderr pipe method on local receiver negative
+    code: |
+      package main
+      import "os/exec"
+      type localCommand struct{}
+      func (localCommand) StderrPipe() (any, error) { return nil, nil }
+      func example(cmd localCommand) { _, _ = cmd.StderrPipe() }
+    expect_no_match: true
+  description: "exec.Cmd.StderrPipe() - subprocess stderr; exact rulepack return typing and the compiler-proven receiver exclude same-named local methods."
 
 - id: go.ipc.cmd_output
   enabled: true

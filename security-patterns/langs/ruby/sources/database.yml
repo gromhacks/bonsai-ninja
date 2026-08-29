@@ -19,7 +19,7 @@
       def rows
         ActiveRecord::Base.connection.select_all("SELECT name FROM users")
       end
-    expect_match_text: [ActiveRecord::Base.connection.select_all]
+    expect_match_text: ["ActiveRecord::Base.connection.select_all"]
   - name: Active Record connection handle alone is not row data
     code: |
       require "active_record"

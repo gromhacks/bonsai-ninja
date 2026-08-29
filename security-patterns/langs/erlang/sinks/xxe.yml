@@ -12,6 +12,13 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    configured_call_argument_guard:
+      configuration_argument_index: 1
+      guarded_value_argument_indices: [0]
+      required_fields:
+      - path: [allow_entities]
+        value: {kind: string, value: "false"}
   match_examples:
   - name: declared shape
     code: |
@@ -41,6 +48,13 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    configured_call_argument_guard:
+      configuration_argument_index: 1
+      guarded_value_argument_indices: [0]
+      required_fields:
+      - path: [allow_entities]
+        value: {kind: string, value: "false"}
   match_examples:
   - name: declared shape
     code: |

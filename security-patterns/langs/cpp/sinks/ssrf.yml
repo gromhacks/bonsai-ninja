@@ -1,14 +1,29 @@
 - id: cpp.ssrf.curl_easy_setopt_url
-  aliases:
-  - cpp.tls.curl_ssl_verifypeer_off
-  - cpp.tls.curl_ssl_verifyhost_off
   enabled: true
   language: cpp
   tag: ssrf
   severity: high
   cwe:
   - CWE-918
-  - CWE-295
+  analysis_semantics:
+    compiler_guard:
+      capability: terminal-predicate.compound-static-allowlist
+      required_evidence:
+      - guarded-argument:2=predicate-argument:0
+      - predicate-complete:true
+      - finite-static-string-membership:true
+      - prefix-call:rfind
+      - prefix-value:string:https://
+      - prefix-position:number:0
+      - prefix-remainder-call:substr
+      - membership-call:count
+      - membership-token-boundary:true
+      - membership-subject-derived-from-prefix:true
+      - related-call:curl_easy_setopt:argument:0=guarded-argument:0
+      - related-call:curl_easy_setopt:argument:1=place:CURLOPT_FOLLOWLOCATION
+      - related-call:curl_easy_setopt:argument:2=number:0
+      sanitizer_tag: ssrf
+      category: finite-host-allowlist-and-no-redirect
   match:
     kind: call
     callee:
@@ -28,7 +43,7 @@
         curl_easy_setopt("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "curl_easy_setopt(CURLOPT_URL, tainted) - outbound request to attacker host. Also covers merged aliases: cpp.tls.curl_ssl_verifypeer_off, cpp.tls.curl_ssl_verifyhost_off."
+  description: "curl_easy_setopt(CURLOPT_URL, tainted) - outbound request to an attacker-controlled host."
 - id: cpp.ssrf.curlpp_options_url
   enabled: true
   language: cpp
@@ -81,7 +96,6 @@
   - name: tainted cpp-httplib get path
     code: |
       #include <httplib.h>
-      #include <httplib.h>
       void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
@@ -119,7 +133,6 @@
   match_examples:
   - name: tainted cpp-httplib post path
     code: |
-      #include <httplib.h>
       #include <httplib.h>
       void example(const char *arg) {
         const char *fmt = arg;
@@ -159,7 +172,6 @@
   - name: tainted cpp-httplib put path
     code: |
       #include <httplib.h>
-      #include <httplib.h>
       void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
@@ -197,7 +209,6 @@
   match_examples:
   - name: tainted cpp-httplib delete path
     code: |
-      #include <httplib.h>
       #include <httplib.h>
       void example(const char *arg) {
         const char *fmt = arg;
@@ -277,22 +288,6 @@
       }
     expect_no_match: true
   description: "Poco::Net::HTTPClientSession(host, port) - tainted host."
-- id: cpp.ssrf.poco_uri
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: cpp
-  tag: ssrf
-  severity: medium
-  packages:
-  - Poco
-  cwe:
-  - CWE-918
-  match:
-    kind: new
-    callee:
-      name: URI
-  description: "Disabled - Poco::URI is often used for parsing (not requesting); flag only when passed to HTTPClientSession."
 - id: cpp.ssrf.poco_httprequest
   enabled: true
   language: cpp
@@ -353,93 +348,3 @@
       }
     expect_no_match: true
   description: Poco::Net::HTTPRequest(method, uri) - tainted methods can influence outbound request semantics.
-- id: cpp.ssrf.qt_qnetworkaccessmanager_get
-  enabled: false
-  language: cpp
-  tag: ssrf
-  severity: high
-  packages:
-  - Qt
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - QNetworkAccessManager
-      - get
-  match_examples:
-  - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QNetworkAccessManager::get(arg);\n}\n"
-  description: Qt QNetworkAccessManager::get(QNetworkRequest(tainted_url)).
-  imports:
-  - QtCore
-  - QtCore/Qt
-  disabled_reason:
-    code: over-broad
-- id: cpp.ssrf.qt_qnetworkaccessmanager_post
-  enabled: false
-  language: cpp
-  tag: ssrf
-  severity: high
-  packages:
-  - Qt
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - QNetworkAccessManager
-      - post
-  match_examples:
-  - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QNetworkAccessManager::post(arg);\n}\n"
-  description: Qt QNetworkAccessManager::post.
-  imports:
-  - QtCore
-  - QtCore/Qt
-  disabled_reason:
-    code: over-broad
-- id: cpp.ssrf.qt_qnetworkaccessmanager_put
-  enabled: false
-  language: cpp
-  tag: ssrf
-  severity: high
-  packages:
-  - Qt
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - QNetworkAccessManager
-      - put
-  match_examples:
-  - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QNetworkAccessManager::put(arg);\n}\n"
-  description: Qt QNetworkAccessManager::put.
-  imports:
-  - QtCore
-  - QtCore/Qt
-  disabled_reason:
-    code: over-broad
-- id: cpp.ssrf.boost_beast_request
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: cpp
-  tag: ssrf
-  severity: medium
-  packages:
-  - boost.beast
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - http
-      - async_write
-  description: "Disabled - Boost.Beast http::async_write is generic; flag only when target/host fields are tainted."

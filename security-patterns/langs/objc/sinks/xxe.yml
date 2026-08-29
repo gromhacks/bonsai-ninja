@@ -109,16 +109,25 @@
     kind: write
     target:
       regex: "^[^\\.\\s]+\\.shouldResolveExternalEntities$"
+      receiver_type_in: [NSXMLParser]
+  constraints:
+  - arg_equals: {index: 0, value: "YES"}
   match_examples:
-  - name: nsxmlparser external entities member write
+  - name: NSXMLParser external entity resolution enabled
     code: |
-      void test(id input) { id target = input; int amount = 1; parser.shouldResolveExternalEntities = input; }
+      #import <Foundation/Foundation.h>
+      void configure(NSXMLParser *parser) { parser.shouldResolveExternalEntities = YES; }
     expect_match_text: [parser.shouldResolveExternalEntities]
-  - name: local shouldResolveExternalEntities variable negative
+  - name: NSXMLParser external entity resolution disabled negative
     code: |
-      void test(id input) { id shouldResolveExternalEntities = input; }
+      #import <Foundation/Foundation.h>
+      void configure(NSXMLParser *parser) { parser.shouldResolveExternalEntities = NO; }
     expect_no_match: true
-  description: "NSXMLParser.shouldResolveExternalEntities = YES - explicitly enables external entity resolution (XXE)."
+  - name: local shouldResolveExternalEntities collision negative
+    code: |
+      void test(void) { BOOL shouldResolveExternalEntities = YES; }
+    expect_no_match: true
+  description: "`NSXMLParser.shouldResolveExternalEntities = YES` enables external entity resolution; exact member and scalar-value constraints reject disabled settings and local-name collisions."
 
 - id: objc.xxe.nsxmldocument_initwithxmlstring
   enabled: true
@@ -129,17 +138,34 @@
   match:
     kind: call
     callee:
-      attribute: [NSXMLDocument, initWithXMLString]
+      regex: '^NSXMLDocument(?:\.alloc)?\.initWithXMLString:options:error:$'
   constraints:
   - arg_tainted:
       index: 0
+  - arg_not_matches_regex:
+      index: 1
+      regex: "(?:NSXMLNodeLoadExternalEntitiesNever|NSXMLNodeOptionsNone)"
   match_examples:
   - name: declared shape
     code: |
-      void test(id input) { id target = input; int amount = 1; [NSXMLDocument initWithXMLString:input]; }
+      #import <Foundation/Foundation.h>
+      void test(NSString *input, NSError **error) {
+        [[[NSXMLDocument alloc] initWithXMLString:input options:NSXMLDocumentTidyXML error:error] self];
+      }
+    expect_match_text: ["NSXMLDocument.alloc.initWithXMLString:options:error:"]
   - name: literal xml string negative
     code: |
-      void test(void) { [NSXMLDocument initWithXMLString:@"<root/>"]; }
+      #import <Foundation/Foundation.h>
+      void test(NSError **error) {
+        [[NSXMLDocument alloc] initWithXMLString:@"<root/>" options:NSXMLDocumentTidyXML error:error];
+      }
+    expect_no_match: true
+  - name: external entities explicitly disabled negative
+    code: |
+      #import <Foundation/Foundation.h>
+      void test(NSString *input, NSError **error) {
+        [[NSXMLDocument alloc] initWithXMLString:input options:NSXMLNodeLoadExternalEntitiesNever error:error];
+      }
     expect_no_match: true
   description: "NSXMLDocument -initWithXMLString:options: - parses tainted XML; if options include NSXMLNodeLoadExternalEntitiesAlways allows XXE."
 

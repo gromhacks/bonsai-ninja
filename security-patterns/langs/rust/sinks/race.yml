@@ -28,16 +28,3 @@
 # Disabled until the matcher can prove the receiver type is a mutex-like
 # guard. Matching repeated bare `.lock()` calls over-reports stdout,
 # parser caches, page-cache state, and other ordinary lock sites.
-- id: rust.race.mutex_double_lock
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: rust
-  tag: race
-  severity: high
-  cwe: [CWE-362, CWE-833]
-  match:
-    kind: call
-    callee:
-      name: lock
-  description: "Disabled - even with receiver_type_in: [Mutex] the `same_receiver_call_count_at_least: 2` constraint does not discriminate a double-lock from a single lock (verified: fires on both), so this over-fires. Needs a working same-receiver call-count fact or control-flow-ordered lock-state tracking."

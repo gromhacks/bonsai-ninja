@@ -1,5 +1,58 @@
 # Non-finding Go framework return types. These rules enrich compiler receiver
 # and value facts; they never emit findings.
+- id: go.typing.os_exec_command
+  enabled: true
+  language: go
+  packages: [os/exec]
+  imports: [os/exec]
+  returns_type: exec.Cmd
+  match: { kind: call, callee: { attribute: [exec, Command], binding_origin: imported } }
+  match_examples:
+  - name: os exec command factory
+    code: |
+      package main
+      import "os/exec"
+      func run() { cmd := exec.Command("id"); _, _ = cmd.StdoutPipe() }
+    expect_match_text: [exec.Command]
+  - name: local exec-shaped value is not os exec
+    code: |
+      package main
+      import stdexec "os/exec"
+      var _ = stdexec.Command
+      type localExec struct{}
+      func (localExec) Command(string) string { return "safe" }
+      func run(exec localExec) { _ = exec.Command("id") }
+    expect_no_match: true
+  description: "os/exec.Command returns *exec.Cmd; provider identity remains rulepack data."
+
+- id: go.typing.os_exec_command_context
+  enabled: true
+  language: go
+  packages: [os/exec]
+  imports: [os/exec]
+  returns_type: exec.Cmd
+  match: { kind: call, callee: { attribute: [exec, CommandContext], binding_origin: imported } }
+  match_examples:
+  - name: os exec command context factory
+    code: |
+      package main
+      import (
+        "context"
+        "os/exec"
+      )
+      func run() { cmd := exec.CommandContext(context.Background(), "id"); _, _ = cmd.StderrPipe() }
+    expect_match_text: [exec.CommandContext]
+  - name: local exec-shaped context factory is not os exec
+    code: |
+      package main
+      import stdexec "os/exec"
+      var _ = stdexec.CommandContext
+      type localExec struct{}
+      func (localExec) CommandContext(any, string) string { return "safe" }
+      func run(exec localExec, ctx any) { _ = exec.CommandContext(ctx, "id") }
+    expect_no_match: true
+  description: "os/exec.CommandContext returns *exec.Cmd; provider identity remains rulepack data."
+
 - id: go.typing.http_context_param_string
   enabled: true
   language: go
@@ -12,7 +65,7 @@
   match:
     kind: call
     callee:
-      regex: '\.Param$'
+      name: Param
   constraints:
   - receiver_type_in: [Context, Ctx]
   match_examples:
@@ -26,3 +79,178 @@
       }
     expect_match_text: [c.Param]
   description: "Go framework path-parameter accessors return a typed string. Typing-only; never a finding."
+
+- id: go.typing.logrus_new_logger
+  enabled: true
+  language: go
+  packages: [github.com/sirupsen/logrus]
+  imports: [github.com/sirupsen/logrus]
+  returns_type: logrus.Logger
+  match:
+    kind: call
+    callee:
+      attribute: [logrus, New]
+      binding_origin: imported
+  match_examples:
+  - name: logrus New returns a logger
+    code: |
+      package main
+      import "github.com/sirupsen/logrus"
+      func audit() { arbitrary := logrus.New(); arbitrary.Info("ready") }
+    expect_match_text: [logrus.New]
+  - name: local logrus-shaped factory is not the imported provider
+    code: |
+      package main
+      import standard "github.com/sirupsen/logrus"
+      var _ = standard.New
+      type factory struct{}
+      func (factory) New() string { return "safe" }
+      func audit(logrus factory) { _ = logrus.New() }
+    expect_no_match: true
+  description: "logrus.New returns a logrus.Logger; typing-only receiver evidence for logging rules."
+
+- id: go.typing.zap_new_logger
+  enabled: true
+  language: go
+  packages: [go.uber.org/zap]
+  imports: [go.uber.org/zap]
+  returns_type: zap.Logger
+  match:
+    kind: call
+    callee:
+      attribute: [zap, New]
+      binding_origin: imported
+  match_examples:
+  - name: zap New returns a logger
+    code: |
+      package main
+      import "go.uber.org/zap"
+      func audit() { arbitrary := zap.New(nil); arbitrary.Info("ready") }
+    expect_match_text: [zap.New]
+  - name: local zap-shaped factory is not the imported provider
+    code: |
+      package main
+      import standard "go.uber.org/zap"
+      var _ = standard.New
+      type factory struct{}
+      func (factory) New() string { return "safe" }
+      func audit(zap factory) { _ = zap.New() }
+    expect_no_match: true
+  description: "zap.New returns zap.Logger; typing-only receiver evidence for logging rules."
+
+- id: go.typing.zap_new_nop_logger
+  enabled: true
+  language: go
+  packages: [go.uber.org/zap]
+  imports: [go.uber.org/zap]
+  returns_type: zap.Logger
+  match:
+    kind: call
+    callee:
+      attribute: [zap, NewNop]
+      binding_origin: imported
+  match_examples:
+  - name: zap NewNop returns a logger
+    code: |
+      package main
+      import "go.uber.org/zap"
+      func audit() { arbitrary := zap.NewNop(); arbitrary.Info("ready") }
+    expect_match_text: [zap.NewNop]
+  - name: local NewNop is not the imported provider
+    code: |
+      package main
+      import standard "go.uber.org/zap"
+      var _ = standard.NewNop
+      type factory struct{}
+      func (factory) NewNop() string { return "safe" }
+      func audit(zap factory) { _ = zap.NewNop() }
+    expect_no_match: true
+  description: "zap.NewNop returns zap.Logger; typing-only receiver evidence for logging rules."
+
+- id: go.typing.zap_new_development_logger
+  enabled: true
+  language: go
+  packages: [go.uber.org/zap]
+  imports: [go.uber.org/zap]
+  returns_type: zap.Logger
+  match:
+    kind: call
+    callee:
+      attribute: [zap, NewDevelopment]
+      binding_origin: imported
+  match_examples:
+  - name: zap NewDevelopment returns a logger
+    code: |
+      package main
+      import "go.uber.org/zap"
+      func audit() { arbitrary, _ := zap.NewDevelopment(); arbitrary.Info("ready") }
+    expect_match_text: [zap.NewDevelopment]
+  - name: local NewDevelopment is not the imported provider
+    code: |
+      package main
+      import standard "go.uber.org/zap"
+      var _ = standard.NewDevelopment
+      type factory struct{}
+      func (factory) NewDevelopment() string { return "safe" }
+      func audit(zap factory) { _ = zap.NewDevelopment() }
+    expect_no_match: true
+  description: "zap.NewDevelopment returns zap.Logger; typing-only receiver evidence for logging rules."
+
+- id: go.typing.zap_new_production_logger
+  enabled: true
+  language: go
+  packages: [go.uber.org/zap]
+  imports: [go.uber.org/zap]
+  returns_type: zap.Logger
+  match:
+    kind: call
+    callee:
+      attribute: [zap, NewProduction]
+      binding_origin: imported
+  match_examples:
+  - name: zap NewProduction returns a logger
+    code: |
+      package main
+      import "go.uber.org/zap"
+      func audit() { arbitrary, _ := zap.NewProduction(); arbitrary.Info("ready") }
+    expect_match_text: [zap.NewProduction]
+  - name: local NewProduction is not the imported provider
+    code: |
+      package main
+      import standard "go.uber.org/zap"
+      var _ = standard.NewProduction
+      type factory struct{}
+      func (factory) NewProduction() string { return "safe" }
+      func audit(zap factory) { _ = zap.NewProduction() }
+    expect_no_match: true
+  description: "zap.NewProduction returns zap.Logger; typing-only receiver evidence for logging rules."
+
+- id: go.typing.zap_sugared_logger
+  enabled: true
+  language: go
+  packages: [go.uber.org/zap]
+  imports: [go.uber.org/zap]
+  returns_type: zap.SugaredLogger
+  match:
+    kind: call
+    callee:
+      name: Sugar
+  constraints:
+  - receiver_type_in: [zap.Logger]
+  match_examples:
+  - name: zap Logger Sugar returns a SugaredLogger
+    code: |
+      package main
+      import "go.uber.org/zap"
+      func audit() { base := zap.NewNop(); arbitrary := base.Sugar(); arbitrary.Info("ready") }
+    expect_match_text: [base.Sugar]
+  - name: unrelated Sugar method does not gain zap type
+    code: |
+      package main
+      import standard "go.uber.org/zap"
+      var _ = standard.NewNop
+      type recipe struct{}
+      func (recipe) Sugar() string { return "safe" }
+      func audit(value recipe) { _ = value.Sugar() }
+    expect_no_match: true
+  description: "zap.Logger.Sugar returns zap.SugaredLogger; typing-only receiver evidence for logging rules."

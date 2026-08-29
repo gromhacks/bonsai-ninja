@@ -70,22 +70,6 @@
       }
     expect_no_match: true
   description: "Slick sqlu\"\" update interpolator - same splice caveat."
-- id: scala.sqli.doobie_sql_interpolator
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: scala
-  tag: sql-injection
-  severity: high
-  packages:
-  - org.tpolecat.doobie
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      regex: ^sql"
-  description: "Disabled - merged into scala.sqli.slick_sql_interpolator (same `^sql\"` regex)."
 - id: scala.sqli.doobie_fr_interpolator
   enabled: true
   language: scala
@@ -191,44 +175,6 @@
       }
     expect_no_match: true
   description: "Anorm SQL(tainted) - SQL.on(...) binds placeholders; flag dynamic SQL strings."
-- id: scala.sqli.jdbc_statement_execute
-  enabled: true
-  language: scala
-  tag: sql-injection
-  severity: high
-  packages: [java.sql]
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Statement
-      - execute
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: generated shape example
-    code: |
-      import java.sql._
-      // uses java.sql
-      object App {
-        def handle(input: String): Unit = {
-          Statement.execute(input)
-        }
-      }
-  - name: arg tainted literal negative
-    code: |
-      import java.sql._
-      // uses java.sql
-      object App {
-        def handle(input: String): Unit = {
-          Statement.execute("safe")
-        }
-      }
-    expect_no_match: true
-  description: "java.sql.Statement.execute(sql) - no parameter binding."
 - id: scala.sqli.jdbc_statement_execute_variable
   enabled: true
   language: scala
@@ -241,7 +187,8 @@
   match:
     kind: call
     callee:
-      regex: "^[a-z_$][A-Za-z0-9_$]*\\.(execute|executeQuery|executeUpdate)$"
+      regex: "^(?:.+\\.)?(?:execute|executeQuery|executeUpdate)$"
+      receiver_type_in: [Statement]
   constraints:
   - arg_tainted:
       index: 0
@@ -264,53 +211,17 @@
         }
       }
     expect_no_match: true
-  description: "java.sql.Statement variable execute/executeQuery/executeUpdate with tainted SQL."
-- id: scala.sqli.jdbc_statement_execute_query
-  enabled: true
-  language: scala
-  tag: sql-injection
-  severity: high
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Statement
-      - executeQuery
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: generated shape example
-    code: "object App {\n  def handle(input: String): Unit = {\n    Statement.executeQuery(input)\n  }\n}\n"
-  - name: arg tainted literal negative
-    code: "object App {\n  def handle(input: String): Unit = {\n    Statement.executeQuery(\"safe\")\n  }\n}\n"
+  - name: local execute query receiver is not JDBC
+    code: |
+      import java.sql._
+      class LocalStatement { def executeQuery(value: String): Unit = () }
+      object App {
+        def handle(stmt: LocalStatement, input: String): Unit = {
+          stmt.executeQuery(input)
+        }
+      }
     expect_no_match: true
-  description: "java.sql.Statement.executeQuery(sql) - no parameter binding."
-- id: scala.sqli.jdbc_statement_execute_update
-  enabled: true
-  language: scala
-  tag: sql-injection
-  severity: high
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Statement
-      - executeUpdate
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: generated shape example
-    code: "object App {\n  def handle(input: String): Unit = {\n    Statement.executeUpdate(input)\n  }\n}\n"
-  - name: arg tainted literal negative
-    code: "object App {\n  def handle(input: String): Unit = {\n    Statement.executeUpdate(\"safe\")\n  }\n}\n"
-    expect_no_match: true
-  description: "java.sql.Statement.executeUpdate(sql) - no parameter binding."
+  description: "Compiler-typed java.sql.Statement execute/executeQuery/executeUpdate with tainted SQL. One receiver-typed rule covers the real instance API without duplicate static-call aliases."
 - id: scala.sqli.jdbc_statement_addbatch
   enabled: true
   language: scala
@@ -349,22 +260,6 @@
       }
     expect_no_match: true
   description: "java.sql.Statement.addBatch(sql) accumulates raw SQL on the receiver; the tainted batch executes later via executeBatch(). Mirrors java.sqli.statement_executebatch."
-- id: scala.sqli.scalikejdbc_sql_interpolator
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: scala
-  tag: sql-injection
-  severity: high
-  packages:
-  - scalikejdbc
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      regex: ^sql"
-  description: "Disabled - merged into scala.sqli.slick_sql_interpolator (same `^sql\"` regex)."
 - id: scala.sqli.scalikejdbc_sqls
   enabled: true
   language: scala

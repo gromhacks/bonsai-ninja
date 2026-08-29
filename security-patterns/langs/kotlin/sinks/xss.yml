@@ -1,19 +1,3 @@
-- id: kotlin.xss.response_writer_write
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: xss
-  severity: high
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - response
-      - getWriter
-  description: "Disabled - getWriter() only returns a writer object; flag concrete PrintWriter.write/println/print sinks instead."
 - id: kotlin.xss.printwriter_write
   enabled: true
   language: kotlin
@@ -194,22 +178,6 @@
       }
     expect_no_match: true
   description: ServletOutputStream.print(tainted).
-- id: kotlin.xss.jsp_out_println
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: kotlin
-  tag: xss
-  severity: high
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - out
-      - println
-  description: "Disabled - `out.println` matches any `out` variable; enable with JSP-scope constraint."
 - id: kotlin.xss.spring_responseentity_body_html_concat
   enabled: true
   language: kotlin
@@ -493,76 +461,6 @@
       }
     expect_no_match: true
   description: "kotlinx.html unsafe { raw(tainted) } - bypasses HTML escaping."
-- id: kotlin.xss.spring_modelandview_addobject
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: xss
-  severity: medium
-  packages:
-  - org.springframework.web.servlet
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - ModelAndView
-      - addObject
-  description: "Disabled - Spring ModelAndView; flag with template-engine analysis."
-- id: kotlin.xss.thymeleaf_unescaped
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: xss
-  severity: high
-  packages:
-  - thymeleaf
-  cwe:
-  - CWE-79
-  match:
-    kind: write
-    target:
-      name: th:utext
-  description: "Disabled - th:utext (unescaped text) attr write; surface via template scanner."
-- id: kotlin.xss.struts_textparser
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: xss
-  severity: medium
-  packages:
-  - struts2
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - TextParseUtil
-      - translateVariables
-  description: "Disabled - Struts2 TextParseUtil; flag with OGNL scope."
-- id: kotlin.xss.gwt_html_settext
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: kotlin
-  tag: xss
-  severity: medium
-  packages:
-  - com.google.gwt
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - HTML
-      - setHTML
-  description: "Disabled - GWT HTML.setHTML; flag with constraint."
 - id: kotlin.xss.android_webview_loadurl
   enabled: true
   language: kotlin
@@ -750,3 +648,85 @@
       }
     expect_no_match: true
   description: "WebView.evaluateJavascript(tainted script, callback) - executes arbitrary JS in the WebView origin."
+
+- id: kotlin.xss.ktor_respond_text_html
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages: [io.ktor]
+  imports: [io.ktor.server.response]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      name: respondText
+  constraints:
+  - receiver_type_in:
+    - ApplicationCall
+    - io.ktor.server.application.ApplicationCall
+  - arg_tainted:
+      index: 0
+  - any_arg_matches_regex: '(?i)(?:ContentType\.)?(?:Text\.)?Html|text/html'
+  match_examples:
+  - name: Ktor HTML response with tainted body
+    code: |
+      import io.ktor.http.*
+      import io.ktor.server.response.*
+      suspend fun render(call: ApplicationCall, value: String) {
+        call.respondText("<html>$value</html>", ContentType.Text.Html)
+      }
+    expect_match_text: [call.respondText]
+  - name: Ktor HTML response with literal body
+    code: |
+      import io.ktor.http.*
+      import io.ktor.server.response.*
+      suspend fun render(call: ApplicationCall, value: String) {
+        call.respondText("<html>safe</html>", ContentType.Text.Html)
+      }
+    expect_no_match: true
+  - name: local respondText method is not Ktor
+    code: |
+      import io.ktor.http.*
+      import io.ktor.server.response.*
+      class LocalCall { fun respondText(value: String, kind: Any) {} }
+      fun render(call: LocalCall, value: String) {
+        call.respondText("<html>$value</html>", ContentType.Text.Html)
+      }
+    expect_no_match: true
+  description: "Ktor respondText with a tainted body and an explicit HTML content type emits attacker-controlled markup."
+
+- id: kotlin.xss.raw_html_return
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  cwe: [CWE-79]
+  match:
+    kind: return
+    target:
+      regex: '(?is)<\s*(?:!doctype|html|body|script|div|span|p|a|img|svg|iframe|h[1-6]|ul|ol|li|table|form|input|textarea|button|br|hr)\b'
+  analysis_semantics:
+    character_constraint:
+      required_mappings:
+      - {input: "&", output: "&amp;"}
+      - {input: "<", output: "&lt;"}
+      - {input: ">", output: "&gt;"}
+      - {input: '"', output: "&quot;"}
+      - {input: "'", output: "&#39;"}
+      accepted_providers:
+      - operation: {name: replace}
+  match_examples:
+  - name: interpolated HTML return
+    code: |
+      fun render(value: String): String {
+        return "<html><body>$value</body></html>"
+      }
+    expect_match_text: ['"<html><body>$value</body></html>"']
+  - name: literal HTML return is not tainted
+    code: |
+      fun render(): String {
+        return "<html><body>safe</body></html>"
+      }
+    expect_no_match: true
+  description: "Direct return of raw HTML markup; taint reachability is required for attacker-controlled content in the returned expression."

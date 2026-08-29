@@ -33,7 +33,7 @@ pub(super) fn extract_match_binding_assigns(
     for site in extract(*node) {
         for target in binding_targets_from_pattern_node(&site.pattern, src, handler) {
             if let Some(assign) =
-                pattern_binding_assign(file, &site.span_node, &target, site.source, src, handler)
+                pattern_binding_assign(file, &site.pattern, &target, site.source, src, handler)
             {
                 out.push(assign);
             }
@@ -82,13 +82,13 @@ fn projected_pattern_binding_assign(
         return None;
     }
     Some(FlowEvent::Assign {
-        span: span_of(file, &site.span_node),
+        span: span_of(file, &site.target),
         target,
         source_name,
         source_call: None,
         source_call_args: Vec::new(),
         source_names,
-        declares_new_binding: false,
+        declares_new_binding: true,
         value_kind: Some(crate::AssignValueKind::Destructure),
     })
 }
@@ -293,7 +293,7 @@ pub fn pattern_binding_assign(
         source_call: None,
         source_call_args: Vec::new(),
         source_names,
-        declares_new_binding: false,
+        declares_new_binding: true,
         value_kind: None,
     })
 }
@@ -318,6 +318,7 @@ pub fn dedup_assign_events(events: Vec<FlowEvent>) -> Vec<FlowEvent> {
     for event in events {
         let duplicate = match &event {
             FlowEvent::Assign {
+                span,
                 target,
                 source_name,
                 source_names,
@@ -326,11 +327,13 @@ pub fn dedup_assign_events(events: Vec<FlowEvent>) -> Vec<FlowEvent> {
                 matches!(
                     seen,
                     FlowEvent::Assign {
+                        span: seen_span,
                         target: seen_target,
                         source_name: seen_source_name,
                         source_names: seen_source_names,
                         ..
-                    } if same_identifier_name(seen_target, target)
+                    } if seen_span == span
+                        && same_identifier_name(seen_target, target)
                         && seen_source_name == source_name
                         && seen_source_names == source_names
                 )
@@ -393,31 +396,51 @@ pub(super) fn extract_foreach_binding_assigns(
         .foreach_binding_extractor
         .and_then(|extract| extract(*node))
     {
-        let targets = binding_targets_from_pattern_node(&binding, src, handler);
-        if !targets.is_empty() {
-            let (source_name, source_names, source_call, source_call_args) =
-                foreach_binding_source_facts(iterable, src, handler);
-            let value_kind = Some(if source_call.is_some() {
-                crate::AssignValueKind::CallResult
-            } else {
-                crate::AssignValueKind::Compound
-            });
-            return targets
-                .into_iter()
-                .map(|target| FlowEvent::Assign {
-                    span: span_of(file, node),
-                    target,
-                    source_name: source_name.clone(),
-                    source_call: source_call.clone(),
-                    source_call_args: source_call_args.clone(),
-                    source_names: source_names.clone(),
-                    declares_new_binding: false,
-                    value_kind,
-                })
-                .collect();
-        }
+        return foreach_binding_assigns_from_nodes(file, *node, binding, iterable, src, handler);
     }
     Vec::new()
+}
+
+/// Lower one grammar-proven iteration binding into assignment facts.
+///
+/// Most loop grammars expose one binding per loop node and use
+/// [`GrammarHandler::foreach_binding_extractor`] through
+/// the internal `extract_foreach_binding_assigns` dispatcher. Grammars with an ordered sequence of
+/// generator clauses can call this helper for each clause while preserving
+/// the clause's runtime order. The helper interprets only the adapter-supplied
+/// binding/value nodes; it carries no language or API vocabulary.
+pub fn foreach_binding_assigns_from_nodes(
+    file: FileId,
+    owner: Node<'_>,
+    binding: Node<'_>,
+    iterable: Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<FlowEvent> {
+    let targets = binding_targets_from_pattern_node(&binding, src, handler);
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let (source_name, source_names, source_call, source_call_args) =
+        foreach_binding_source_facts(iterable, src, handler);
+    let value_kind = Some(if source_call.is_some() {
+        crate::AssignValueKind::CallResult
+    } else {
+        crate::AssignValueKind::Compound
+    });
+    targets
+        .into_iter()
+        .map(|target| FlowEvent::Assign {
+            span: span_of(file, &owner),
+            target,
+            source_name: source_name.clone(),
+            source_call: source_call.clone(),
+            source_call_args: source_call_args.clone(),
+            source_names: source_names.clone(),
+            declares_new_binding: false,
+            value_kind,
+        })
+        .collect()
 }
 
 fn foreach_binding_source_facts(
@@ -426,7 +449,19 @@ fn foreach_binding_source_facts(
     handler: &GrammarHandler,
 ) -> (Option<String>, Vec<String>, Option<String>, Vec<String>) {
     if let Some((source_call, source_call_args)) = extract_direct_call_info(&iterable, src, handler) {
-        return (None, Vec::new(), source_call, source_call_args);
+        // A generator binding depends on the complete call expression, not
+        // only its positional arguments. Preserve the compiler-extracted
+        // receiver/value operands as well as the direct call identity so
+        // `value <- request.read("key")` carries `request` into `value`.
+        // Use the same grammar-directed receiver projection as ordinary call
+        // lowering; a whole-expression operand walk would also admit the
+        // member tail (`read`) as a false value dependency.
+        let source_names = source_call
+            .as_deref()
+            .and_then(call_receiver_from_name)
+            .into_iter()
+            .collect();
+        return (None, source_names, source_call, source_call_args);
     }
     let source_name = argument_place(&iterable, src, handler);
     let mut source_names = extract_rhs_expr_operands(&iterable, src, handler);

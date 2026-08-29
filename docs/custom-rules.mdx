@@ -5,7 +5,7 @@ description: "Use workspace-local rules, understand precedence, and disable ship
 
 # Custom Rules
 
-Workspace-local rules live under `<workspace>/.bonsai/rules/` and use the same layout as the shipped pack.
+Workspace-local rules live under `<workspace>/.bonsai/rules/` and use the same layout as the shipped pack. The shipped pack itself contains only executable rules; disabling is an explicit overlay policy, not a way to park speculative bundled patterns.
 
 ```text
 .bonsai/rules/
@@ -118,11 +118,12 @@ provider-positive case and a same-spelled local-function negative.
 
 The same boundary applies to `taint_receiver_from_args` rules. When a library
 receiver type exists only in typing YAML, bonsai-ninja compiles the complete
-rule match to exact AST call spans before constructing the IDG. Import and
-shadowing constraints therefore remain effective during propagation, while
-the shared taint engine receives no API-name inventory. Add a negative example
-for an unimported or locally shadowed same-spelled call whenever the model
-could otherwise be ambiguous.
+rule match to exact AST call or property-write spans before constructing the
+IDG. Import, receiver-type, and shadowing constraints therefore remain
+effective during propagation, while the shared taint engine receives no
+API-name inventory. Add a negative example for an unimported, differently
+typed, or locally shadowed same-spelled operation whenever the model could
+otherwise be ambiguous.
 
 ## Add External Callback Parameter Types
 
@@ -157,6 +158,30 @@ For a callback passed at a known call argument:
   description: "The route callback receives the framework Request type."
 ```
 
+When the callback is stored in a statically named configuration field, keep
+the call argument index and add the exact field path:
+
+```yaml
+- id: mycompany.typing_server_callback
+  enabled: true
+  language: javascript
+  imports: [mycompany-server]
+  callback_arg_index: 0
+  callback_field_path: [onrequest]
+  callback_param_types:
+    - [Server]
+    - [ServerRequest]
+  match:
+    kind: call
+    callee: {attribute: [server, listen]}
+  description: "The exact onrequest field receives server and request values."
+```
+
+`callback_field_path` is matched against compiler-lowered aggregate fields;
+it is not a text search. Dynamic keys, spreads, duplicate field paths, a
+different field name, or a callback outside the selected call argument fail
+closed and contribute no parameter types.
+
 For an explicitly typed functional-interface binding, use typing-only
 `match.kind: type` and omit `callback_arg_index`:
 
@@ -186,4 +211,5 @@ For an explicitly typed functional-interface binding, use typing-only
 `callback_param_types` follows callback parameter order. Each inner list is
 the exact qualified/short alias set for one parameter. The loader rejects
 these fields outside `typing/`, rejects missing call argument indices, and
-rejects `kind: type` without a callback signature.
+rejects `kind: type` without a callback signature. `callback_field_path` is
+valid only for `kind: call` callback typing with a declared argument index.

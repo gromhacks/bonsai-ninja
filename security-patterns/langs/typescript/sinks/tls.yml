@@ -1,23 +1,4 @@
 # TypeScript TLS misconfiguration sinks.
-- id: typescript.tls.disable_verify_reject_unauthorized
-  enabled: true
-  language: typescript
-  tag: weak-tls
-  category: source-independent
-  severity: high
-  cwe: [CWE-295]
-  match:
-    kind: write
-    target:
-      name: rejectUnauthorized
-  match_examples:
-  - name: disable verify reject unauthorized
-    code: |
-      function demo(input, req, obj) {
-        rejectUnauthorized = input; return rejectUnauthorized;
-      }
-  description: "rejectUnauthorized: false - disables TLS certificate validation."
-
 - id: typescript.tls.node_tls_reject_unauth_env
   enabled: true
   language: typescript
@@ -28,14 +9,35 @@
   match:
     kind: write
     target:
-      name: NODE_TLS_REJECT_UNAUTHORIZED
+      attribute: [process, env, NODE_TLS_REJECT_UNAUTHORIZED]
+      binding_origin: runtime-global
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:"0"|''0''|0)$'
   match_examples:
   - name: node tls reject unauth env
     code: |
-      function demo(input, req, obj) {
-        NODE_TLS_REJECT_UNAUTHORIZED = input; return NODE_TLS_REJECT_UNAUTHORIZED;
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+  - name: ordinary similarly named variable negative
+    code: |
+      function configure(value: string) {
+        let NODE_TLS_REJECT_UNAUTHORIZED = value;
+        NODE_TLS_REJECT_UNAUTHORIZED = value;
       }
-  description: "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0' - disables TLS verification globally."
+    expect_no_match: true
+  - name: enabled node tls verification negative
+    code: |
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = "1";
+    expect_no_match: true
+  - name: locally shadowed process object negative
+    code: |
+      interface LocalProcess { env: Record<string, string>; }
+      function configure(process: LocalProcess) {
+        process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+      }
+    expect_no_match: true
+  description: "`process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'` disables TLS verification globally; compiler-proven runtime ownership and exact value constraints reject local shadows and enabled settings."
 
 - id: typescript.tls.https_agent_insecure
   enabled: true
@@ -43,18 +45,42 @@
   tag: weak-tls
   category: source-independent
   severity: high
+  packages: [https]
+  imports: [https, "node:https"]
   cwe: [CWE-295]
   match:
     kind: new
     callee:
-      attribute: [https, Agent]
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.Agent$'
+      binding_origin: imported
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 0
+      required_fields:
+      - path: [rejectUnauthorized]
+        value: {kind: boolean, value: false}
   match_examples:
   - name: https agent insecure
     code: |
-      function demo(input, req, obj) {
-        return new https.Agent(input);
+      import * as https from "https";
+      function makeAgent() {
+        return new https.Agent({ rejectUnauthorized: false });
       }
-  description: "new https.Agent({ rejectUnauthorized: false }) - disables cert validation per-agent."
+  - name: https agent default options negative
+    code: |
+      import * as https from "https";
+      function makeAgent() {
+        return new https.Agent({ keepAlive: true });
+      }
+    expect_no_match: true
+  - name: local https object is not the imported runtime module
+    code: |
+      import * as runtimeHttps from "https";
+      void runtimeHttps.Agent;
+      const https = { Agent: class Agent { constructor(options: object) {} } };
+      new https.Agent({ rejectUnauthorized: false });
+    expect_no_match: true
+  description: "`new https.Agent({ rejectUnauthorized: false })` disables certificate validation per agent; exact package and option constraints keep local constructors and default options quiet."
 
 - id: typescript.tls.request_strict_ssl_false
   enabled: true
@@ -63,19 +89,214 @@
   category: source-independent
   severity: high
   packages: [request]
+  imports: [request]
   cwe: [CWE-295]
   match:
-    kind: write
-    target:
-      name: strictSSL
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*(?:\.(?:get|post|put|patch|delete|head))?$'
+      binding_origin: imported
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 0
+      required_fields:
+      - path: [strictSSL]
+        value: {kind: boolean, value: false}
   match_examples:
-  - name: request strict ssl false
+  - name: request call disables TLS verification
     code: |
-      const _u = require("request");
-      function demo(input, req, obj) {
-        strictSSL = input; return strictSSL;
+      const request = require("request");
+      function fetch(url: string) {
+        return request({ url, strictSSL: false });
       }
-  description: "request strictSSL: false - disables TLS verification."
+  - name: request call enables TLS verification negative
+    code: |
+      const request = require("request");
+      function fetch(url: string) {
+        return request({ url, strictSSL: true });
+      }
+    expect_no_match: true
+  - name: aliased typed request provider disables TLS verification
+    code: |
+      import sendRequest = require("request");
+      sendRequest({ uri: "https://service.invalid", strictSSL: false });
+    expect_match_text: [sendRequest]
+  - name: local request function is not the imported package
+    code: |
+      import externalRequest = require("request");
+      void externalRequest.get;
+      function request(options: object) { return options; }
+      request({ strictSSL: false });
+    expect_no_match: true
+  - name: unused options property is not a request sink negative
+    code: |
+      const request = require("request");
+      function configure(options: any) {
+        options.strictSSL = false;
+        return options;
+      }
+    expect_no_match: true
+  description: "A request package call whose exact compiler-decoded options contain `strictSSL: false` disables certificate validation; unused objects and secure calls stay quiet."
+
+- id: typescript.tls.request_strict_ssl_false_second_options
+  enabled: true
+  language: typescript
+  tag: weak-tls
+  category: source-independent
+  severity: high
+  packages: [request]
+  imports: [request]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*(?:\.(?:get|post|put|patch|delete|head))?$'
+      binding_origin: imported
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 1
+      required_fields:
+      - path: [strictSSL]
+        value: {kind: boolean, value: false}
+  match_examples:
+  - name: typed request URL overload disables TLS verification
+    code: |
+      const request = require("request");
+      function fetch(url: string) {
+        return request.get(url, { strictSSL: false });
+      }
+  - name: typed request URL overload retains TLS verification negative
+    code: |
+      const request = require("request");
+      function fetch(url: string) {
+        return request.get(url, { strictSSL: true });
+      }
+    expect_no_match: true
+  - name: local request object is not the imported package
+    code: |
+      import externalRequest = require("request");
+      void externalRequest.get;
+      const request = { get(url: string, options: object) { return options; } };
+      request.get("https://service.invalid", { strictSSL: false });
+    expect_no_match: true
+  description: "The request package URL overload disables certificate validation only when its second, compiler-decoded options aggregate sets `strictSSL: false`."
+
+- id: typescript.tls.tls_connect_reject_unauth
+  enabled: true
+  language: typescript
+  tag: weak-tls
+  category: source-independent
+  severity: high
+  packages: [tls]
+  imports: [tls, "node:tls"]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.connect$'
+      binding_origin: imported
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 0
+      required_fields:
+      - path: [rejectUnauthorized]
+        value: {kind: boolean, value: false}
+  match_examples:
+  - name: typed TLS options disable certificate verification
+    code: |
+      import * as tls from "tls";
+      tls.connect({ host: "service.invalid", port: 443, rejectUnauthorized: false });
+  - name: typed TLS options retain certificate verification
+    code: |
+      import * as tls from "tls";
+      tls.connect({ host: "service.invalid", port: 443, rejectUnauthorized: true });
+    expect_no_match: true
+  - name: local typed tls object is not the imported runtime module
+    code: |
+      import * as runtimeTls from "tls";
+      void runtimeTls.connect;
+      const tls = { connect(options: object) { return options; } };
+      tls.connect({ rejectUnauthorized: false });
+    expect_no_match: true
+  description: "The imported TLS options overload disables certificate validation only when its exact options aggregate sets `rejectUnauthorized: false`."
+
+- id: typescript.tls.tls_connect_reject_unauth_second_options
+  enabled: true
+  language: typescript
+  tag: weak-tls
+  category: source-independent
+  severity: high
+  packages: [tls]
+  imports: [tls, "node:tls"]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.connect$'
+      binding_origin: imported
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 1
+      required_fields:
+      - path: [rejectUnauthorized]
+        value: {kind: boolean, value: false}
+  match_examples:
+  - name: typed TLS port overload disables certificate verification
+    code: |
+      import * as tls from "tls";
+      tls.connect(443, { host: "service.invalid", rejectUnauthorized: false });
+  - name: typed TLS port overload retains certificate verification
+    code: |
+      import * as tls from "tls";
+      tls.connect(443, { host: "service.invalid", rejectUnauthorized: true });
+    expect_no_match: true
+  - name: local typed port overload is not the imported runtime module
+    code: |
+      import * as runtimeTls from "tls";
+      void runtimeTls.connect;
+      const tls = { connect(port: number, options: object) { return options; } };
+      tls.connect(443, { rejectUnauthorized: false });
+    expect_no_match: true
+  description: "The imported TLS port overload disables certificate validation only when its exact second options aggregate sets `rejectUnauthorized: false`."
+
+- id: typescript.tls.tls_connect_reject_unauth_third_options
+  enabled: true
+  language: typescript
+  tag: weak-tls
+  category: source-independent
+  severity: high
+  packages: [tls]
+  imports: [tls, "node:tls"]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.connect$'
+      binding_origin: imported
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 2
+      required_fields:
+      - path: [rejectUnauthorized]
+        value: {kind: boolean, value: false}
+  match_examples:
+  - name: typed TLS port and host overload disables certificate verification
+    code: |
+      import * as tls from "tls";
+      tls.connect(443, "service.invalid", { rejectUnauthorized: false });
+  - name: typed TLS port and host overload retains certificate verification
+    code: |
+      import * as tls from "tls";
+      tls.connect(443, "service.invalid", { rejectUnauthorized: true });
+    expect_no_match: true
+  - name: local typed three-argument overload is not the imported runtime module
+    code: |
+      import * as runtimeTls from "tls";
+      void runtimeTls.connect;
+      const tls = { connect(port: number, host: string, options: object) { return options; } };
+      tls.connect(443, "service.invalid", { rejectUnauthorized: false });
+    expect_no_match: true
+  description: "The imported TLS port-and-host overload disables certificate validation only when its exact third options aggregate sets `rejectUnauthorized: false`."
 
 - id: typescript.tls.grpc_create_insecure
   enabled: true
@@ -106,31 +327,90 @@
     expect_match_text: [credentials.createInsecure]
   description: "gRPC credentials.createInsecure() creates an unencrypted client/server channel."
 
-- id: typescript.tls.got_rejectunauthorized
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: typescript.tls.https_request_reject_unauth
+  enabled: true
   language: typescript
   tag: weak-tls
+  category: source-independent
   severity: high
-  packages: [got]
+  packages: [https]
+  imports: [https, "node:https"]
   cwe: [CWE-295]
   match:
-    kind: write
-    target:
-      name: rejectUnauthorized
-  description: "Disabled - overlaps with reject_unauthorized_false; kept for doc."
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.request$'
+      binding_origin: imported
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 0
+      required_fields:
+      - path: [rejectUnauthorized]
+        value: {kind: boolean, value: false}
+  match_examples:
+  - name: typed https request explicitly disables certificate verification
+    code: |
+      import * as https from "https";
+      function fetch(host: string) {
+        return https.request({ host, rejectUnauthorized: false });
+      }
+    expect_match_text: [https.request]
+  - name: typed https request keeps certificate verification enabled
+    code: |
+      import * as https from "https";
+      function fetch(host: string) {
+        return https.request({ host, rejectUnauthorized: true });
+      }
+    expect_no_match: true
+  - name: aliased typed HTTPS provider disables certificate verification
+    code: |
+      import * as secureTransport from "node:https";
+      secureTransport.request({ hostname: "service.invalid", rejectUnauthorized: false });
+    expect_match_text: [secureTransport.request]
+  - name: local https request helper is not the imported runtime module
+    code: |
+      import * as runtimeHttps from "https";
+      void runtimeHttps.request;
+      const https = { request(options: object) { return options; } };
+      https.request({ rejectUnauthorized: false });
+    expect_no_match: true
+  description: "https.request({rejectUnauthorized: false}) disables TLS certificate verification."
 
-- id: typescript.tls.fetch_insecure_http_parser
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: typescript.tls.https_request_reject_unauth_second_options
+  enabled: true
   language: typescript
   tag: weak-tls
-  severity: low
+  category: source-independent
+  severity: high
+  packages: [https]
+  imports: [https, "node:https"]
   cwe: [CWE-295]
   match:
-    kind: write
-    target:
-      name: insecureHTTPParser
-  description: "Disabled - insecureHTTPParser is request-smuggling laxity, not TLS."
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.request$'
+      binding_origin: imported
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 1
+      required_fields:
+      - path: [rejectUnauthorized]
+        value: {kind: boolean, value: false}
+  match_examples:
+  - name: typed HTTPS URL overload disables certificate verification
+    code: |
+      import * as https from "https";
+      https.request("https://service.invalid", { rejectUnauthorized: false });
+  - name: typed HTTPS URL overload retains certificate verification
+    code: |
+      import * as https from "https";
+      https.request("https://service.invalid", { rejectUnauthorized: true });
+    expect_no_match: true
+  - name: local typed request overload is not the imported HTTPS module
+    code: |
+      import * as runtimeHttps from "https";
+      void runtimeHttps.request;
+      const https = { request(url: string, options: object) { return options; } };
+      https.request("https://service.invalid", { rejectUnauthorized: false });
+    expect_no_match: true
+  description: "The imported HTTPS URL overload disables certificate validation only when its exact second options aggregate sets `rejectUnauthorized: false`."

@@ -1,5 +1,5 @@
 use super::*;
-use bonsai_common::FileId;
+use bonsai_common::{FileId, SymbolId};
 use bonsai_lang_api::{Decl, FlowEvent, ModulePath, Visibility};
 
 fn span(file: FileId, start: u64, end: u64) -> Span {
@@ -372,6 +372,7 @@ fn try_catch_links_thrown_value_to_catch_binding() {
             finally_events: Vec::new(),
             catch_param: Some("e".to_string()),
             catch_types: Vec::new(),
+            catch_arms: Vec::new(),
         }],
     );
     let (graph, _) = build_intra_entry_graph(FuncId::new(1), &decl);

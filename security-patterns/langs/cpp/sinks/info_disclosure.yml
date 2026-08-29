@@ -24,7 +24,7 @@
         const char *query = arg;
         spdlog::error("api_key={}", arg);
       }
-    expect_match_text: [spdlog::error]
+    expect_match_text: ["spdlog::error"]
   - name: spdlog ordinary error negative
     code: |
       #include <spdlog/spdlog.h>
@@ -59,7 +59,7 @@
         const char *query = arg;
         fmt::print("secret={}", arg);
       }
-    expect_match_text: [fmt::print]
+    expect_match_text: ["fmt::print"]
   - name: fmt print ordinary value negative
     code: |
       #include <fmt.h>

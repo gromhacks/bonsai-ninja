@@ -3,7 +3,7 @@
 //!
 //! These checks do not replace the behavioral suites they reference.
 //! They make the current audit goal concrete: if a future edit deletes
-//! command, SDK, benchmark-gap, or rulepack-configurability coverage,
+//! command, SDK, security-flow, or rulepack-configurability coverage,
 //! this suite fails even before the more expensive behavioral tests run.
 
 use std::collections::BTreeSet;
@@ -117,7 +117,7 @@ fn all_language_matrices_name_every_supported_language() {
         );
         assert!(
             security_pipeline.contains(&quoted),
-            "security pipeline mega-flow matrix is missing {lang}"
+            "security pipeline language-gauntlet matrix is missing {lang}"
         );
         assert!(
             taint_applicability.contains(&quoted),
@@ -170,9 +170,9 @@ fn flow_taint_cli_command_surfaces_have_per_language_behavioral_coverage() {
             "micro_security_flows_min_findings",
             "micro_security_sarif_shape",
             "micro_tree_json_shape",
-            "mega_flow_security_flows_produces_finding",
-            "mega_flow_source_analysis_uses_semantic_paths",
-            "mega_flow_export_has_interproc_edges",
+            "language_gauntlet_security_flows_produces_finding",
+            "language_gauntlet_source_analysis_uses_semantic_paths",
+            "language_gauntlet_export_has_interproc_edges",
         ],
     );
 
@@ -402,7 +402,7 @@ fn public_security_accuracy_contract_is_semantic_only() {
         &[
             "PUBLIC_SEMANTIC_MAX_PRECISION",
             "one accuracy contract",
-            "semantic_precision_only",
+            "finding_precision_within",
             "precision.is_proven_static_evidence()",
         ],
     );
@@ -412,9 +412,9 @@ fn public_security_accuracy_contract_is_semantic_only() {
         "semantic precision option tests",
         &semantic_tests,
         &[
-            "taint_options_default_to_semantic_precision",
-            "taint_options_clamp_broad_precision_to_semantic",
+            "taint_analysis_has_one_public_semantic_contract",
             "PUBLIC_SEMANTIC_MAX_PRECISION",
+            "Precision::OverApproximate > PUBLIC_SEMANTIC_MAX_PRECISION",
         ],
     );
 
@@ -442,10 +442,10 @@ fn public_security_accuracy_contract_is_semantic_only() {
 }
 
 #[test]
-fn benchmark_gap_regressions_cover_reported_taint_failure_families() {
-    let gaps = read("crates/cli/tests/benchmark_gap_regressions.rs");
+fn security_flow_regressions_cover_compiler_capability_families() {
+    let gaps = read("crates/cli/tests/security_flow_capability_regressions.rs");
     assert_contains_all(
-        "benchmark gap regressions",
+        "security flow capability regressions",
         &gaps,
         &[
             "go_cross_file_nethttp_query_reaches_service_path_sink",
@@ -453,7 +453,7 @@ fn benchmark_gap_regressions_cover_reported_taint_failure_families() {
             "javascript_commonjs_route_source_reaches_service_sink",
             "javascript_graphql_args_arbitrary_field_reaches_cross_file_sql_sink",
             "typescript_graphql_args_arbitrary_field_reaches_cross_file_sql_sink",
-            "python_graphql_args_reach_untyped_connection_execute_sql_sink",
+            "python_graphql_args_reach_factory_typed_connection_execute_sql_sink",
             "go_graphql_resolveparams_args_reach_cross_file_sql_querycontext",
             "java_graphql_datafetching_argument_reaches_cross_file_sink",
             "java_jaxrs_queryparam_flows_to_runtime_exec",
@@ -533,7 +533,7 @@ fn semantic_engine_suites_cover_positive_negative_and_wrong_flow_guards() {
     let wrong_flow_guard_text = [
         "crates/security/tests/no_fp_audit.rs",
         "crates/security/tests/security_pipeline_regressions.rs",
-        "crates/cli/tests/benchmark_gap_regressions.rs",
+        "crates/cli/tests/security_flow_capability_regressions.rs",
         "crates/taint/tests/over_taint_per_language.rs",
     ]
     .into_iter()

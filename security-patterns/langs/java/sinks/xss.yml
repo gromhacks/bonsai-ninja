@@ -412,6 +412,16 @@
       - {input: ">", output: "&gt;"}
       - {input: '"', output: "&quot;"}
       - {input: "'", output: "&#39;"}
+    character_constraint:
+      required_mappings:
+      - {input: "&", output: "&amp;"}
+      - {input: "<", output: "&lt;"}
+      - {input: ">", output: "&gt;"}
+      - {input: '"', output: "&quot;"}
+      - {input: "'", output: "&#39;"}
+      accepted_providers:
+      - operation:
+          regex: '^(?:(?:java[.]lang[.])?String[.]replace#(?:character-literal|single-character-string|regex-meta-character-string))(?:[|](?:java[.]lang[.])?String[.]replace#(?:character-literal|single-character-string|regex-meta-character-string))*$'
   match_examples:
   - name: raw html return with tainted expression
     code: |
@@ -637,122 +647,6 @@
       }
     expect_no_match: true
   description: "Wicket Label.setEscapeModelStrings(false) on a label whose model carries tainted text disables HTML escaping and renders that model verbatim."
-- id: java.xss.printwriter_write
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - PrintWriter
-      - write
-  description: "Disabled - only matches static qualified form; ServletResponse covers web flow via getWriter().write."
-- id: java.xss.printwriter_println
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - PrintWriter
-      - println
-  description: "Disabled - see printwriter_write; use response_writer_println."
-- id: java.xss.printwriter_print
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - PrintWriter
-      - print
-  description: "Disabled - see printwriter_write; use response_writer_print."
-- id: java.xss.jsp_out_println
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - out
-      - println
-  description: "Disabled - `out.println` matches every logger or PrintStream variable named `out`; too broad."
-- id: java.xss.spring_modelandview_addobject
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: xss
-  severity: medium
-  packages:
-  - org.springframework.web.servlet
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - ModelAndView
-      - addObject
-  description: "Disabled - Spring ModelAndView values are escaped by default templates; flag with template-engine analysis."
-- id: java.xss.thymeleaf_unescaped
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: xss
-  severity: high
-  packages:
-  - thymeleaf
-  cwe:
-  - CWE-79
-  match:
-    kind: write
-    target:
-      name: th:utext
-  description: "Disabled - th:utext attr write; surface via template scanner, not call-match."
-- id: java.xss.struts_textparser
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: xss
-  severity: medium
-  packages:
-  - struts2
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - TextParseUtil
-      - translateVariables
-  description: "Disabled - Struts2 TextParseUtil; flag with OGNL scope."
 - id: java.xss.gwt_html_settext
   enabled: true
   language: java

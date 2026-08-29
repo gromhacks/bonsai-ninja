@@ -18,7 +18,10 @@ struct DeclDedupKey {
     name: String,
     qualified_name: Option<String>,
     module_path: bonsai_lang_api::ModulePath,
-    span: bonsai_common::Span,
+    /// The identifier is the stable syntax anchor. Declaration wrappers can
+    /// legitimately begin earlier or later after a same-width parser recovery
+    /// masks preprocessing metadata; including the outer span would assign
+    /// two identities to the same compiler declaration.
     name_span: bonsai_common::Span,
     body_span: Option<bonsai_common::Span>,
 }
@@ -61,6 +64,13 @@ pub struct CallLinkageFact {
     pub receiver: Option<Box<str>>,
     pub call_kind: CallKind,
     pub arg_spans: Box<[Span]>,
+    /// Exact adapter-normalized storage place for each argument, when the
+    /// complete argument expression is addressable. Higher-order call
+    /// stitching uses this compact compiler fact to bind a caller-local
+    /// callable value to a callee formal without retaining or reparsing the
+    /// function body.
+    #[serde(default)]
+    pub arg_places: Box<[Option<Box<str>>]>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_writeback_arg: bool,
 }
@@ -89,7 +99,6 @@ impl From<&Decl> for DeclDedupKey {
             name: decl.name.clone(),
             qualified_name: decl.qualified_name.clone(),
             module_path: decl.module_path.clone(),
-            span: decl.span,
             name_span: decl.name_span,
             body_span: decl.body_span,
         }
@@ -193,6 +202,16 @@ impl ReceiverAncestry {
     /// Apply cross-file base types to one exact file-local compiler object.
     pub fn apply_to_decl_index(&self, index: &mut DeclIndex) {
         for decl in &mut index.defs {
+            if matches!(
+                decl.kind,
+                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
+            ) {
+                let direct_bases = decl.bases.clone();
+                for base in direct_bases {
+                    push_type_and_bases(&mut decl.bases, &base, &self.by_type, &mut AHashSet::new());
+                }
+                dedup_strings(&mut decl.bases);
+            }
             enrich_receiver_types_in_events(&mut decl.flow_events, &self.by_type);
         }
         index.compact_storage();
@@ -377,9 +396,10 @@ impl GlobalIndex {
     /// lookups by file return global ids.
     pub fn insert(&mut self, mut index: DeclIndex) {
         bonsai_lang_api::apply_local_closure_captures(&mut index);
-        bonsai_lang_api::apply_call_receiver_types(&mut index);
         bonsai_lang_api::apply_expression_value_kinds(&mut index);
         bonsai_lang_api::apply_assign_call_result_types(&mut index);
+        bonsai_lang_api::apply_assignment_type_aliases(&mut index);
+        bonsai_lang_api::apply_call_receiver_types(&mut index);
         self.insert_preprocessed(index);
     }
 
@@ -1262,6 +1282,11 @@ fn collect_function_linkage_facts(
                     arg_spans: args
                         .iter()
                         .map(|arg| arg.span)
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                    arg_places: args
+                        .iter()
+                        .map(|arg| arg.place.as_deref().map(Box::<str>::from))
                         .collect::<Vec<_>>()
                         .into_boxed_slice(),
                     has_writeback_arg: args

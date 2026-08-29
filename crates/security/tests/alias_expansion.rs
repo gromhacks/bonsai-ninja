@@ -45,11 +45,25 @@ fn run_sinks(workspace: &Path, rules: &Path) -> Option<String> {
         .arg(workspace)
         .args(["sinks", "--all", "--rules-dir"])
         .arg(rules)
+        // Each CLI fixture owns its analysis cache. This keeps the test
+        // hermetic on sandboxed hosts and prevents concurrent fixtures from
+        // sharing a canonical-workspace binding.
+        .env("BONSAI_WORKSPACE_DIR", workspace.join(".bonsai-test-cache"))
         .env("COLUMNS", "200")
         .env("NO_COLOR", "1")
         .output()
         .ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if out.status.success() {
+        Some(stdout.into_owned())
+    } else {
+        Some(format!(
+            "command failed with {}\nstdout:\n{}\nstderr:\n{}",
+            out.status,
+            stdout,
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
 }
 
 /// Build a minimal pack with just one sink rule that matches the

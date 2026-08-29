@@ -88,6 +88,21 @@
   - net/http
   cwe:
   - CWE-918
+  analysis_semantics:
+    compiler_guard:
+      capability: terminal-predicate.compound-static-allowlist
+      required_evidence:
+      - guarded-argument:0=predicate-component:host
+      - predicate-complete:true
+      - finite-static-string-membership:true
+      - parser-call:URI.parse
+      - type-predicate-call:is_a?
+      - type-predicate-value:place:URI::HTTPS
+      - membership-call:include?
+      - membership-component:host
+      - guarded-named-argument:2:use_ssl=boolean:true
+      sanitizer_tag: ssrf
+      category: finite-host-allowlist-and-secure-transport
   match:
     kind: call
     callee:
@@ -106,23 +121,6 @@
       \  Net::HTTP.start(\"example.com\")\nend\n"
     expect_no_match: true
   description: Net::HTTP.start.
-- id: ruby.ssrf.openuri_open
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: ssrf
-  severity: high
-  packages:
-  - open-uri
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: open
-  description: "Disabled - duplicates ruby.cmdi.kernel_open_pipe on name: open;\
-    \ use ruby.ssrf.uri_open (URI.open) which is the modern shape."
 - id: ruby.ssrf.faraday_get
   enabled: true
   language: ruby

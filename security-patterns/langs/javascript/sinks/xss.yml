@@ -40,20 +40,6 @@
     code: "function demo(input) {\n  const outerHTML = input; return outerHTML;\n}\n"
     expect_no_match: true
   description: "Element.outerHTML = tainted - DOM XSS."
-- id: javascript.xss.insertadjacenthtml
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: xss
-  severity: high
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: insertAdjacentHTML
-  description: "Disabled - bare `insertAdjacentHTML` is DOM-specific but the name alone is ubiquitous; enable with receiver narrowing (Element)."
 - id: javascript.xss.document_write
   enabled: true
   language: javascript
@@ -116,13 +102,21 @@
     target:
       regex: (?is)^\s*(?:`|'|").*(<!doctype|<html\b|<[a-z][a-z0-9:-]*\b[^>]*>)
   analysis_semantics:
-    character_escape:
+    character_constraint:
       required_mappings:
       - {input: "&", output: "&amp;"}
       - {input: "<", output: "&lt;"}
       - {input: ">", output: "&gt;"}
       - {input: '"', output: "&quot;"}
       - {input: "'", output: "&#39;"}
+      accepted_providers:
+      - operation: {regex: '^replace$'}
+      - factory: {name: String}
+        operation: {regex: '^String\.replace$'}
+      - factory: {name: map}
+        operation: {regex: '^map\.join$'}
+      - factory: {regex: '^charCodeAt\.toString\.padStart$'}
+        operation: {regex: '^(?:replace|String\.replace)$'}
   match_examples:
   - name: raw html template return
     code: "function page(q) {\n  return `<!doctype html><h1>${q}</h1>`;\n}\n"
@@ -187,22 +181,6 @@
     code: "const _u = require(\"react\");\nfunction demo(input) {\n  const dangerouslySetInnerHTML = input; return dangerouslySetInnerHTML;\n}\n"
     expect_no_match: true
   description: "React dangerouslySetInnerHTML={{__html: tainted}} renders raw HTML - explicit XSS escape hatch."
-- id: javascript.xss.vue_v_html
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: xss
-  severity: high
-  packages:
-  - vue
-  cwe:
-  - CWE-79
-  match:
-    kind: write
-    target:
-      name: v-html
-  description: "Disabled - `v-html` is a template directive, not a JS assignment; requires a template-parser to detect, not tree-sitter JS."
 - id: javascript.xss.angular_bypass_security_html
   enabled: true
   language: javascript
@@ -404,98 +382,6 @@
     code: "const _u = require(\"jquery\");\nfunction demo() {\n  return $(\"#target\").html(\"<p>safe</p>\");\n}\n"
     expect_no_match: true
   description: $(...).html(tainted) - jQuery HTML insertion with a constrained $() receiver pattern.
-- id: javascript.xss.jquery_html
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: xss
-  severity: high
-  packages:
-  - jquery
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: html
-  description: "Disabled - bare `.html(tainted)` on any object is too ubiquitous; jQuery-specific form requires receiver narrowing."
-- id: javascript.xss.jquery_append
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: xss
-  severity: high
-  packages:
-  - jquery
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: append
-  description: "Disabled - `.append()` is also common on arrays/streams/Buffers; enable with jQuery receiver narrowing."
-- id: javascript.xss.jquery_prepend
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: xss
-  severity: high
-  packages:
-  - jquery
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: prepend
-  description: "Disabled - ubiquitous method name; enable with jQuery receiver narrowing."
-- id: javascript.xss.jquery_after
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: xss
-  severity: high
-  packages:
-  - jquery
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: after
-  description: "Disabled - `.after()` is ubiquitous (also sinon, lodash); enable with jQuery receiver narrowing."
-- id: javascript.xss.location_href_assign
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: write
-    target:
-      name: href
-  description: "Disabled - bare `.href = ...` is too broad; enable only when the assignment is on `location`/`anchor` with a javascript:-URI constraint."
-- id: javascript.xss.script_src_assign
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: write
-    target:
-      name: src
-  description: "Disabled - bare `.src = ...` fires on every img/video/audio/iframe assignment; enable with element-type constraint."
 - id: javascript.xss.iframe_srcdoc
   enabled: true
   language: javascript
@@ -540,22 +426,6 @@
   constraints:
   - arg_tainted:
       index: 0
-- id: javascript.xss.dom_parser_parsefromstring
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - DOMParser
-      - parseFromString
-  description: "Disabled - DOMParser parses but doesn't auto-render; XSS only materialises when the result is attached; flag downstream."
 - id: javascript.xss.koa_ctx_body_html
   enabled: true
   language: javascript

@@ -10,8 +10,7 @@
 # `@CookieParam`, Azure `@HttpTrigger`). The shared adapter kit now emits
 # common member-read facts and parameter annotation metadata, so the Ktor,
 # Spring, and JAX-RS rules below are enabled where their shapes are precise.
-# Remaining gaps are receiver-type precision and framework-specific
-# annotation shapes that are not surfaced yet. The current Kotlin adapter:
+# The current Kotlin adapter:
 #
 #   1. Emits common `read` facts and parameter annotations.
 #   2. Does NOT consistently carry static receiver-type information for local
@@ -24,12 +23,9 @@
 #   > If a source-visible value flow is missing, fix adapter extraction or
 #   > the semantic graph. Do not encode the missing edge in YAML.
 #
-# Tracking task: propagate declared receiver types on local variables and add
-# any missing framework-specific annotation shapes. Once shipped, flip the
-# remaining `enabled: false` typed rules below to true and re-run the audit.
-#
-# Below this header: enabled annotation/read sources and package/import-scoped
-# callable-shape sources that work today.
+# The bundled pack contains only executable rules. New framework shapes belong
+# here only after their required compiler facts and collision-negative examples
+# exist.
 
 - id: kotlin.source.gcloud_function_handle
   enabled: true
@@ -99,25 +95,33 @@
   category: http-input
   payload_types: [json, text]
   packages: ["com.microsoft.azure.functions"]
+  imports: [com.microsoft.azure.functions.HttpRequestMessage]
   match:
     kind: call
     callee: { name: getBody }
   constraints:
-  - receiver_type_in: [Request, HttpRequestMessage, com.microsoft.azure.functions.HttpRequestMessage]
+  - receiver_type_in: [HttpRequestMessage, com.microsoft.azure.functions.HttpRequestMessage]
   match_examples:
   - name: azure http trigger request body
     code: |
-      import com.microsoft.azure.functions.annotation.HttpTrigger
+      import com.microsoft.azure.functions.HttpRequestMessage
       class App {
-        fun run(@HttpTrigger(name = "req") req: Request) { req.getBody() }
+        fun run(req: HttpRequestMessage<String>) { req.getBody() }
       }
-      class Request { fun getBody(): String = "" }
     expect_match_text: [req.getBody]
   - name: unrelated getbody negative
     code: |
-      import com.microsoft.azure.functions.annotation.HttpTrigger
+      import com.microsoft.azure.functions.HttpRequestMessage
       class App { fun run(req: Widget) { req.getBody() } }
       class Widget { fun getBody(): String = "" }
+    expect_no_match: true
+  - name: local request type is not the Azure request contract
+    code: |
+      import com.microsoft.azure.functions.ExecutionContext
+      class HttpRequestMessage<T> { fun getBody(): T? = null }
+      class App {
+        fun run(req: HttpRequestMessage<String>, context: ExecutionContext) { req.getBody() }
+      }
     expect_no_match: true
   description: "Azure Functions request getBody() - remote HTTP request body supplied by the caller."
 
@@ -141,6 +145,11 @@
         fun handle(@RequestParam value: String) {
         }
       }
+  - name: request param identifier is not an annotation
+    code: |
+      import org.springframework.web.*
+      class App { fun handle(RequestParam: String) {} }
+    expect_no_match: true
   description: "Spring @RequestParam annotated parameter - query/form value bound from the HTTP request."
 
   imports:
@@ -165,6 +174,11 @@
         fun handle(@RequestBody value: String) {
         }
       }
+  - name: request body identifier is not an annotation
+    code: |
+      import org.springframework.web.*
+      class App { fun handle(RequestBody: String) {} }
+    expect_no_match: true
   description: "Spring @RequestBody annotated parameter - request body payload bound to the handler."
 
   imports:
@@ -189,6 +203,11 @@
         fun handle(@RequestPart value: String) {
         }
       }
+  - name: request part identifier is not an annotation
+    code: |
+      import org.springframework.web.*
+      class App { fun handle(RequestPart: String) {} }
+    expect_no_match: true
   description: "Spring @RequestPart annotated parameter - multipart part supplied by the client."
 
   imports:
@@ -213,6 +232,11 @@
         fun handle(@PathVariable value: String) {
         }
       }
+  - name: path variable identifier is not an annotation
+    code: |
+      import org.springframework.web.*
+      class App { fun handle(PathVariable: String) {} }
+    expect_no_match: true
   description: "Spring @PathVariable annotated parameter - URL path segment supplied by the client."
 
   imports:
@@ -237,6 +261,11 @@
         fun handle(@RequestHeader value: String) {
         }
       }
+  - name: request header identifier is not an annotation
+    code: |
+      import org.springframework.web.*
+      class App { fun handle(RequestHeader: String) {} }
+    expect_no_match: true
   description: "Spring @RequestHeader annotated parameter - client-supplied HTTP header."
 
   imports:
@@ -261,6 +290,11 @@
         fun handle(@CookieValue value: String) {
         }
       }
+  - name: cookie value identifier is not an annotation
+    code: |
+      import org.springframework.web.*
+      class App { fun handle(CookieValue: String) {} }
+    expect_no_match: true
   description: "Spring @CookieValue annotated parameter - client-supplied cookie value."
 
   imports:
@@ -284,6 +318,11 @@
         fun handle(@MatrixVariable value: String) {
         }
       }
+  - name: matrix variable identifier is not an annotation
+    code: |
+      import org.springframework.web.*
+      class App { fun handle(MatrixVariable: String) {} }
+    expect_no_match: true
   description: "Spring @MatrixVariable annotated parameter - matrix URI variable supplied by the client."
 
   imports:
@@ -307,25 +346,15 @@
         fun handle(@ModelAttribute value: String) {
         }
       }
+  - name: model attribute identifier is not an annotation
+    code: |
+      import org.springframework.web.*
+      class App { fun handle(ModelAttribute: String) {} }
+    expect_no_match: true
   description: "Spring @ModelAttribute annotated parameter - request values bound onto a model object."
 
   imports:
   - org.springframework.web
-- id: kotlin.source.spring_multipart_getname
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  trust: remote
-  tag: http-input
-  category: http-input
-  packages: [org.springframework.web]
-  match:
-    kind: call
-    callee:
-      attribute: [MultipartFile, getName]
-  description: "Disabled - `getName` is too broad as a receiver-agnostic callable; enable a typed MultipartFile receiver rule once adapters surface receiver-type facts."
-
 - id: kotlin.source.jaxrs_query_param
   enabled: true
   language: kotlin
@@ -346,6 +375,11 @@
         fun handle(@QueryParam value: String) {
         }
       }
+  - name: query param identifier is not an annotation
+    code: |
+      import javax.ws.rs.*
+      class App { fun handle(QueryParam: String) {} }
+    expect_no_match: true
   description: "JAX-RS @QueryParam annotated parameter - query value bound from the HTTP request."
 
 - id: kotlin.source.jaxrs_path_param
@@ -368,6 +402,11 @@
         fun handle(@PathParam value: String) {
         }
       }
+  - name: path param identifier is not an annotation
+    code: |
+      import javax.ws.rs.*
+      class App { fun handle(PathParam: String) {} }
+    expect_no_match: true
   description: "JAX-RS @PathParam annotated parameter - path value bound from the HTTP request."
 
 - id: kotlin.source.jaxrs_header_param
@@ -390,6 +429,11 @@
         fun handle(@HeaderParam value: String) {
         }
       }
+  - name: header param identifier is not an annotation
+    code: |
+      import javax.ws.rs.*
+      class App { fun handle(HeaderParam: String) {} }
+    expect_no_match: true
   description: "JAX-RS @HeaderParam annotated parameter - client-supplied HTTP header."
 
 - id: kotlin.source.jaxrs_form_param
@@ -412,6 +456,11 @@
         fun handle(@FormParam value: String) {
         }
       }
+  - name: form param identifier is not an annotation
+    code: |
+      import javax.ws.rs.*
+      class App { fun handle(FormParam: String) {} }
+    expect_no_match: true
   description: "JAX-RS @FormParam annotated parameter - form value bound from the HTTP request."
 
 - id: kotlin.source.jaxrs_cookie_param
@@ -434,6 +483,11 @@
         fun handle(@CookieParam value: String) {
         }
       }
+  - name: cookie param identifier is not an annotation
+    code: |
+      import javax.ws.rs.*
+      class App { fun handle(CookieParam: String) {} }
+    expect_no_match: true
   description: "JAX-RS @CookieParam annotated parameter - client-supplied cookie value."
 
 - id: kotlin.source.jaxrs_matrix_param
@@ -904,6 +958,11 @@
         fun getAttribute(vararg args: Any?): Any? = null
       }
     expect_match_text: [session.getAttribute]
+  - name: same getter on a local session type
+    code: |
+      class LocalSession { fun getAttribute(key: String): Any? = null }
+      class App { fun handle(session: LocalSession) = session.getAttribute("user") }
+    expect_no_match: true
   description: "HttpSession.getAttribute(name) - session data may originate from earlier remote requests and should be treated as untrusted when it reaches sensitive sinks."
 
 - id: kotlin.source.servlet_part_getsubmittedfilename
@@ -1191,20 +1250,6 @@
       }
   description: "Ktor PartData.originalFileName property read - client-supplied upload filename."
 
-- id: kotlin.source.android_getintent_getdata
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  trust: remote
-  tag: http-input
-  category: http-input
-  match:
-    kind: call
-    callee:
-      attribute: [Intent, getData]
-  description: "Disabled - `getData` is too broad as a receiver-agnostic callable; enable a typed Intent receiver rule once adapters surface receiver-type facts."
-
 - id: kotlin.source.android_getintent_getparcelableextra
   enabled: true
   language: kotlin
@@ -1214,7 +1259,7 @@
   match:
     kind: call
     callee:
-      regex: "\\.getParcelableExtra$"
+      attribute: [Intent, getParcelableExtra]
   constraints:
   - min_args: 1
   match_examples:
@@ -1230,6 +1275,12 @@
         fun getParcelableExtra(vararg args: Any?): Any? = null
       }
     expect_match_text: [intent.getParcelableExtra]
+  - name: same getter on a local intent-shaped type
+    code: |
+      import android.*
+      class LocalIntent { fun getParcelableExtra(key: String): Any? = null }
+      class App { fun handle(intent: LocalIntent) = intent.getParcelableExtra("item") }
+    expect_no_match: true
   description: "Android Intent.getParcelableExtra(...) - package-scoped IPC extra read from a local intent receiver."
 
 - id: kotlin.source.android_getintent_getserializableextra
@@ -1241,7 +1292,7 @@
   match:
     kind: call
     callee:
-      regex: "\\.getSerializableExtra$"
+      attribute: [Intent, getSerializableExtra]
   constraints:
   - min_args: 1
   match_examples:
@@ -1257,6 +1308,12 @@
         fun getSerializableExtra(vararg args: Any?): Any? = null
       }
     expect_match_text: [intent.getSerializableExtra]
+  - name: same getter on a local intent-shaped type
+    code: |
+      import android.*
+      class LocalIntent { fun getSerializableExtra(key: String): Any? = null }
+      class App { fun handle(intent: LocalIntent) = intent.getSerializableExtra("item") }
+    expect_no_match: true
   description: "Android Intent.getSerializableExtra(...) - package-scoped cross-app Serializable extra read."
 
 - id: kotlin.source.android_getintent_getbooleanextra
@@ -1268,7 +1325,7 @@
   match:
     kind: call
     callee:
-      regex: "\\.getBooleanExtra$"
+      attribute: [Intent, getBooleanExtra]
   constraints:
   - min_args: 1
   match_examples:
@@ -1284,6 +1341,12 @@
         fun getBooleanExtra(vararg args: Any?): Boolean = false
       }
     expect_match_text: [intent.getBooleanExtra]
+  - name: same getter on a local intent-shaped type
+    code: |
+      import android.*
+      class LocalIntent { fun getBooleanExtra(key: String, fallback: Boolean) = fallback }
+      class App { fun handle(intent: LocalIntent) = intent.getBooleanExtra("enabled", false) }
+    expect_no_match: true
   description: "Android Intent.getBooleanExtra(...) - package-scoped cross-app boolean extra read."
 
 - id: kotlin.source.android_getintent_getintextra
@@ -1295,7 +1358,7 @@
   match:
     kind: call
     callee:
-      regex: "\\.getIntExtra$"
+      attribute: [Intent, getIntExtra]
   constraints:
   - min_args: 1
   match_examples:
@@ -1311,6 +1374,12 @@
         fun getIntExtra(vararg args: Any?): Int = 0
       }
     expect_match_text: [intent.getIntExtra]
+  - name: same getter on a local intent-shaped type
+    code: |
+      import android.*
+      class LocalIntent { fun getIntExtra(key: String, fallback: Int) = fallback }
+      class App { fun handle(intent: LocalIntent) = intent.getIntExtra("count", 0) }
+    expect_no_match: true
   description: "Android Intent.getIntExtra(...) - package-scoped cross-app integer extra read."
 
 - id: kotlin.source.android_getintent_getdatastring
@@ -1323,7 +1392,7 @@
   match:
     kind: call
     callee:
-      regex: "\\.getDataString$"
+      attribute: [Intent, getDataString]
   constraints:
   - max_args: 0
   match_examples:
@@ -1339,42 +1408,13 @@
         fun getDataString(): String = ""
       }
     expect_match_text: [intent.getDataString]
-  description: "Android Intent.getDataString() - package-scoped cross-app URI string read."
-
-- id: kotlin.source.android_uri_getqueryparameter
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: kotlin
-  trust: remote
-  tag: ipc-input
-  payload_types: [query]
-  match:
-    kind: call
-    callee:
-      attribute: [Uri, getQueryParameter]
-  constraints:
-  - min_args: 1
-  match_examples:
-  - name: generated shape example
+  - name: same getter on a local intent-shaped type
     code: |
-      class App {
-        fun handle(input: String) {
-          Uri.getQueryParameter(input)
-        }
-      }
-  - name: no-arg query parameter negative
-    code: |
-      class App {
-        fun handle(uri: Uri) {
-          uri.getQueryParameter()
-        }
-      }
-      class Uri {
-        fun getQueryParameter(vararg args: Any?): String = ""
-      }
+      import android.*
+      class LocalIntent { fun getDataString(): String = "fixed" }
+      class App { fun handle(intent: LocalIntent) = intent.getDataString() }
     expect_no_match: true
-  description: "Disabled - android.net.Uri may be constructed from a trusted literal or local configuration. Re-enable when generic receiver-origin facts can prove the Uri came from an Intent or another declared boundary."
+  description: "Android Intent.getDataString() - package-scoped cross-app URI string read."
 
 - id: kotlin.source.ktor_call_principal
   enabled: true
@@ -1430,34 +1470,181 @@
 
   imports:
   - org.apache.kafka.clients.consumer
-- id: kotlin.source.coroutine_channel_receive
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: kotlin.source.javalin_context_value
+  enabled: true
   language: kotlin
-  trust: service
-  tag: queue-input
-  category: queue-input
-  packages: ["org.jetbrains.kotlinx:kotlinx-coroutines-core"]
+  trust: remote
+  tag: http-input
+  payload_types: [query, form, path, header]
+  frameworks: [javalin]
+  packages: [io.javalin]
   match:
     kind: call
     callee:
-      attribute: [Channel, receive]
-  description: "Disabled - Kotlin coroutine Channel.receive is process-local in most uses; only a remote source when the producer side is a network socket bridge. Adapter cannot distinguish today."
+      regex: '(^|[.])(queryParam|formParam|pathParam|header)$'
+  constraints:
+  - receiver_type_in: [Context, io.javalin.http.Context]
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: javalin query parameter
+    code: |
+      import io.javalin.http.Context
+      fun handle(ctx: Context) { val q = ctx.queryParam("q") }
+    expect_match_text: [ctx.queryParam]
+  - name: local context helper is not request input
+    code: |
+      import io.javalin.http.Context
+      class LocalContext { fun queryParam(name: String) = name }
+      fun helper(ctx: LocalContext) { val q = ctx.queryParam("q") }
+    expect_no_match: true
+  description: "Javalin Context query/form/path/header accessors return client-supplied request values."
 
-- id: kotlin.source.grpc_oncall_request
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: kotlin.source.javalin_context_body
+  enabled: true
   language: kotlin
   trust: remote
-  tag: rpc-input
-  packages: ["io.grpc"]
+  tag: http-input
+  payload_types: [text, json]
+  frameworks: [javalin]
+  packages: [io.javalin]
   match:
-    kind: param
-    target:
-      name: request
-  description: "Disabled - gRPC service-impl methods take a `request` param, but bare-name `request` overmatches Spring/Ktor handlers and ordinary helpers; needs annotation/receiver-type signal the adapter does not yet surface."
+    kind: call
+    callee:
+      name: body
+  constraints:
+  - receiver_type_in: [Context, io.javalin.http.Context]
+  - max_args: 0
+  match_examples:
+  - name: javalin request body
+    code: |
+      import io.javalin.http.Context
+      fun handle(ctx: Context) { val body = ctx.body() }
+    expect_match_text: [ctx.body]
+  - name: local document body is not request input
+    code: |
+      import io.javalin.http.Context
+      class Document { fun body() = "local" }
+      fun helper(doc: Document) { val body = doc.body() }
+    expect_no_match: true
+  description: "Javalin Context.body() returns the remote HTTP request entity."
+
+- id: kotlin.source.http4k_request_value
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  payload_types: [query, form, header, text]
+  frameworks: [http4k]
+  packages: [org.http4k]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(query|form|header|bodyString)$'
+  constraints:
+  - receiver_type_in: [Request, org.http4k.core.Request]
+  - max_args: 1
+  match_examples:
+  - name: http4k query parameter
+    code: |
+      import org.http4k.core.Request
+      fun handle(request: Request) { val q = request.query("q") }
+    expect_match_text: [request.query]
+  - name: local request helper is not http input
+    code: |
+      import org.http4k.core.Request
+      class LocalRequest { fun query(name: String) = name }
+      fun helper(request: LocalRequest) { val q = request.query("q") }
+    expect_no_match: true
+  description: "http4k Request query/form/header/bodyString accessors project values from an inbound request."
+
+- id: kotlin.source.vertx_request_param
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  payload_types: [query, form]
+  frameworks: [vertx]
+  packages: [io.vertx]
+  match:
+    kind: call
+    callee:
+      name: getParam
+  constraints:
+  - receiver_type_in: [HttpServerRequest, io.vertx.core.http.HttpServerRequest]
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: vertx server request parameter
+    code: |
+      import io.vertx.core.http.HttpServerRequest
+      fun handle(request: HttpServerRequest) { val q = request.getParam("q") }
+    expect_match_text: [request.getParam]
+  - name: local parameter map is not request input
+    code: |
+      import io.vertx.core.http.HttpServerRequest
+      class Params { fun getParam(name: String) = name }
+      fun helper(params: Params) { val q = params.getParam("q") }
+    expect_no_match: true
+  description: "Vert.x HttpServerRequest.getParam(name) returns a query/form request value."
+
+- id: kotlin.source.vertx_routing_context_body
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  payload_types: [binary, text, json]
+  frameworks: [vertx]
+  packages: [io.vertx]
+  match:
+    kind: call
+    callee:
+      name: body
+  constraints:
+  - receiver_type_in: [RoutingContext, io.vertx.ext.web.RoutingContext]
+  - max_args: 0
+  match_examples:
+  - name: vertx routing context body
+    code: |
+      import io.vertx.ext.web.RoutingContext
+      fun handle(ctx: RoutingContext) { val body = ctx.body() }
+    expect_match_text: [ctx.body]
+  - name: local body method is not request input
+    code: |
+      import io.vertx.ext.web.RoutingContext
+      class Document { fun body() = "local" }
+      fun helper(doc: Document) { val body = doc.body() }
+    expect_no_match: true
+  description: "Vert.x RoutingContext.body() returns buffered bytes supplied by the HTTP client."
+
+- id: kotlin.source.spark_request_value
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  payload_types: [query, path, header, text]
+  frameworks: [spark-java]
+  packages: [spark-core, spark]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(queryParams|params|headers|body)$'
+  constraints:
+  - receiver_type_in: [Request, spark.Request]
+  - max_args: 1
+  match_examples:
+  - name: spark request query parameter
+    code: |
+      import spark.Request
+      fun handle(request: Request) { val q = request.queryParams("q") }
+    expect_match_text: [request.queryParams]
+  - name: local request query helper is not input
+    code: |
+      import spark.Request
+      class LocalRequest { fun queryParams(name: String) = name }
+      fun helper(request: LocalRequest) { val q = request.queryParams("q") }
+    expect_no_match: true
+  description: "Spark Java Request query/path/header/body accessors return client-supplied request data."
 
 - id: kotlin.source.graphql_datafetching_environment_getargument
   enabled: true
@@ -1485,6 +1672,12 @@
         fun getArgument(vararg args: Any?): Any? = null
       }
     expect_match_text: [env.getArgument]
+  - name: same getter on a local environment type
+    code: |
+      import com.graphqljava.graphqljava.*
+      class LocalEnvironment { fun getArgument(name: String): Any? = null }
+      class App { fun handle(env: LocalEnvironment) = env.getArgument("id") }
+    expect_no_match: true
   description: "graphql-java DataFetchingEnvironment.getArgument(name) - resolver argument supplied by the GraphQL caller."
 
   imports:
@@ -1516,6 +1709,12 @@
         fun getArguments(vararg args: Any?): Any? = null
       }
     expect_match_text: [environment.getArguments]
+  - name: same getter on a local environment type
+    code: |
+      import com.graphqljava.graphqljava.*
+      class LocalEnvironment { fun getArguments(): Map<String, Any?> = emptyMap() }
+      class App { fun handle(env: LocalEnvironment) = env.getArguments() }
+    expect_no_match: true
   description: "graphql-java DataFetchingEnvironment.getArguments() - map of caller-controlled resolver arguments."
 
   imports:
@@ -1672,4 +1871,10 @@
         fun getPayloadAsText(vararg args: Any?): String = ""
       }
     expect_match_text: [message.getPayloadAsText]
+  - name: same payload method on a local message type
+    code: |
+      import org.springframework.web.socket.*
+      class LocalMessage { fun getPayloadAsText(): String = "fixed" }
+      class App { fun handle(message: LocalMessage) = message.getPayloadAsText() }
+    expect_no_match: true
   description: "Spring WebSocketMessage.getPayloadAsText() - text frame payload supplied by the websocket peer."

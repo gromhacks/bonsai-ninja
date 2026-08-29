@@ -11,15 +11,25 @@
     kind: call
     callee:
       name: ssl_opts
+  constraints:
+  - keyword_arg_equals: {name: SSL_verify_mode, value: "0"}
   match_examples:
-  - name: perl.tls.lwp_ssl_verify_none example
+  - name: LWP TLS peer verification disabled
     code: |
       use LWP::UserAgent;
       sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        ssl_opts($input)
+        my $ua = LWP::UserAgent->new;
+        $ua->ssl_opts(verify_hostname => 0, SSL_verify_mode => 0);
       }
-  description: "LWP::UserAgent $ua->ssl_opts(verify_hostname => 0, SSL_verify_mode => 0)."
+  - name: LWP TLS peer verification required negative
+    code: |
+      use LWP::UserAgent;
+      sub example {
+        my $ua = LWP::UserAgent->new;
+        $ua->ssl_opts(verify_hostname => 1, SSL_verify_mode => 1);
+      }
+    expect_no_match: true
+  description: "LWP::UserAgent `$ua->ssl_opts(..., SSL_verify_mode => 0)` disables peer verification; the exact named scalar argument rejects verified configurations."
 
 - id: perl.tls.mojo_useragent_insecure
   enabled: true
@@ -33,15 +43,25 @@
     kind: call
     callee:
       name: insecure
+  constraints:
+  - arg_equals: {index: 0, value: "1"}
   match_examples:
-  - name: perl.tls.mojo_useragent_insecure example
+  - name: Mojo user agent insecure mode enabled
     code: |
       use Mojo::UserAgent;
       sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        insecure($input)
+        my $ua = Mojo::UserAgent->new;
+        $ua->insecure(1);
       }
-  description: "Mojo::UserAgent $ua->insecure(1) or insecure => 1 in new."
+  - name: Mojo user agent insecure mode disabled negative
+    code: |
+      use Mojo::UserAgent;
+      sub example {
+        my $ua = Mojo::UserAgent->new;
+        $ua->insecure(0);
+      }
+    expect_no_match: true
+  description: "Mojo::UserAgent `$ua->insecure(1)` disables certificate verification; the exact scalar argument rejects secure mode."
 
 - id: perl.tls.io_socket_ssl_verify_none
   enabled: true
@@ -55,15 +75,23 @@
     kind: call
     callee:
       attribute: ["IO::Socket::SSL", "new"]
+  constraints:
+  - keyword_arg_equals: {name: SSL_verify_mode, value: "0"}
   match_examples:
-  - name: perl.tls.io_socket_ssl_verify_none example
+  - name: IO Socket SSL peer verification disabled
     code: |
       use IO::Socket::SSL;
       sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        IO::Socket::SSL->new($input, $input, SSL_verify_mode => 0)
+        IO::Socket::SSL->new(PeerHost => 'service.example', SSL_verify_mode => 0);
       }
-  description: "IO::Socket::SSL->new(SSL_verify_mode => 0) - disable cert verify."
+  - name: IO Socket SSL peer verification required negative
+    code: |
+      use IO::Socket::SSL;
+      sub example {
+        IO::Socket::SSL->new(PeerHost => 'service.example', SSL_verify_mode => 1);
+      }
+    expect_no_match: true
+  description: "`IO::Socket::SSL->new(..., SSL_verify_mode => 0)` disables peer verification; the exact named scalar argument rejects verified configurations."
 
 - id: perl.tls.http_tiny_verify_ssl_off
   enabled: true
@@ -77,12 +105,20 @@
     kind: call
     callee:
       attribute: ["HTTP::Tiny", "new"]
+  constraints:
+  - keyword_arg_equals: {name: verify_SSL, value: "0"}
   match_examples:
-  - name: perl.tls.http_tiny_verify_ssl_off example
+  - name: HTTP Tiny peer verification disabled
     code: |
       use HTTP::Tiny;
       sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        HTTP::Tiny->new($input, $input, verify_SSL => 0)
+        HTTP::Tiny->new(verify_SSL => 0);
       }
-  description: "HTTP::Tiny->new(verify_SSL => 0)."
+  - name: HTTP Tiny peer verification enabled negative
+    code: |
+      use HTTP::Tiny;
+      sub example {
+        HTTP::Tiny->new(verify_SSL => 1);
+      }
+    expect_no_match: true
+  description: "`HTTP::Tiny->new(verify_SSL => 0)` disables peer verification; the exact named scalar argument rejects the secure setting."

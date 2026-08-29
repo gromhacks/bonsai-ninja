@@ -77,29 +77,3 @@
 
   imports:
   - org.apache.commons.fileupload
-- id: kotlin.upload.nio_files_copy
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: file-upload
-  severity: high
-  packages: [java.nio.file]
-  cwe: [CWE-434]
-  match:
-    kind: call
-    callee:
-      attribute: [Files, copy]
-  match_examples:
-  - name: generated shape example
-    code: |
-      import java.nio.file.*
-      class App {
-        fun handle(input: String) {
-          Files.copy(input)
-        }
-      }
-    expect_match_text: [Files.copy]
-  description: "Disabled duplicate - same matcher as canonical kotlin.path.files_copy; enable a project-local file-upload rule when multipart-specific receiver facts are available."
-  imports:
-  - java

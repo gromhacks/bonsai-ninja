@@ -1,20 +1,3 @@
-- id: python.celery.delay_dynamic
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: queue-injection
-  severity: medium
-  cwe: [CWE-94, CWE-915]
-  owasp: [A03-2021]
-  frameworks: [celery]
-  packages: [celery]
-  match:
-    kind: call
-    callee:
-      name: delay
-  description: "Disabled - flag with dynamic-task-name analysis."
-
 - id: python.queue.boto3_send_message
   enabled: true
   language: python
@@ -103,17 +86,3 @@
 
   imports:
   - azureservicebus
-- id: python.queue.gcp_pubsub_publish
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: queue-injection
-  severity: high
-  packages: [google.cloud.pubsub_v1]
-  cwe: [CWE-20]
-  match:
-    kind: call
-    callee:
-      name: publish
-  description: "Disabled - Pub/Sub Topic.publish and many non-queue APIs share the bare `publish` name; enable only in Pub/Sub-focused audits."

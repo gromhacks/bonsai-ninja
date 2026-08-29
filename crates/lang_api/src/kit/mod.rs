@@ -45,13 +45,13 @@ mod walker;
 mod tests;
 
 pub use bindings::{
-    binding_targets_from_pattern_node, dedup_assign_events, pattern_binding_assign,
-    pattern_binding_sites_from_arms,
+    binding_targets_from_pattern_node, dedup_assign_events, foreach_binding_assigns_from_nodes,
+    pattern_binding_assign, pattern_binding_sites_from_arms,
 };
 use bindings::{
     extract_comprehension_for_clause_assigns, extract_foreach_binding_assigns, extract_match_binding_assigns,
 };
-pub use branch_conditions::extract_branch_condition_facts;
+pub use branch_conditions::{extract_branch_condition_facts, lower_boolean_condition_expression};
 pub use call_results::normalize_call_result_assignment_sources;
 pub use comments::extract_comments;
 use comments::is_comment_node_kind;
@@ -64,20 +64,69 @@ pub use identifiers::{
     first_identifier_descendant, first_identifier_like_child, first_named_child, first_named_child_of_kind,
     looks_like_bare_identifier, looks_like_identifier,
 };
-pub use param_extraction::extract_param_annotations;
+pub use param_extraction::{extract_param_annotations, extract_param_names};
 pub use receiver_writes::{
     collect_assign_targets, collect_receiver_field_initializers, collect_receiver_field_writes,
     collect_receiver_state_sources, insert_flow_field_assignments, qualify_implicit_member_assign_targets,
     qualify_implicit_member_reads_in_index, qualify_receiver_field_expression_flows,
     rewrite_implicit_member_reads, FlowFieldAssignInsertion, ImplicitMemberReadCall,
 };
-pub use return_extraction::{extract_catch_param, extract_return_value_text, extract_throw_value_name};
+pub use return_extraction::{
+    extract_catch_arm_param, extract_catch_param, extract_return_value_text, extract_throw_value_name,
+};
 #[cfg(test)]
 pub use return_extraction::{extract_return_value_flow, extract_return_value_name, extract_yield_value_flow};
 use return_extraction::{
     extract_return_value_flow_with_handler, extract_return_value_kind_with_handler,
     extract_return_value_name_with_handler, extract_yield_value_flow_with_handler,
 };
+
+/// Remove adapter-proven local-control `break` events from a structured event
+/// tree while retaining source order inside each arm.
+///
+/// Some grammars use the same syntax node for a loop break and a switch/match
+/// arm terminator.  Adapters resolve that target from exact Tree-sitter
+/// ancestry and pass only the spans whose nearest breakable construct is
+/// already represented as an exclusive [`FlowEvent::Branch`].  The shared
+/// lowering remains language-neutral: it neither interprets syntax kinds nor
+/// guesses the target of a break.
+pub fn lower_adapter_local_breaks<S: std::hash::BuildHasher>(
+    events: &mut Vec<FlowEvent>,
+    local_break_spans: &std::collections::HashSet<Span, S>,
+) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                lower_adapter_local_breaks(then_events, local_break_spans);
+                lower_adapter_local_breaks(else_events, local_break_spans);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                lower_adapter_local_breaks(body, local_break_spans);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                lower_adapter_local_breaks(body, local_break_spans);
+                lower_adapter_local_breaks(catch_events, local_break_spans);
+                lower_adapter_local_breaks(finally_events, local_break_spans);
+            }
+            _ => {}
+        }
+    }
+    if let Some(position) = events
+        .iter()
+        .position(|event| matches!(event, FlowEvent::Break { span, .. } if local_break_spans.contains(span)))
+    {
+        events.truncate(position);
+    }
+}
 pub use runtime_types::extract_runtime_type_narrowing_facts;
 
 pub(crate) use direct_calls::extract_direct_call_info;
@@ -85,7 +134,7 @@ use direct_calls::{
     first_call_descendant, next_named_sibling_within, parameter_list_is_variadic, qualified_method_name_node,
     transparent_direct_call_child,
 };
-use param_extraction::{extract_param_names, parameter_container};
+use param_extraction::parameter_container;
 use pseudo_call::pseudo_call_event;
 use qualified::{assignment_place, qualified_assign_target, type_only_declaration_without_initializer};
 pub(crate) use receiver_writes::argument_place;
@@ -95,7 +144,7 @@ use walker::walk_into;
 use crate::{AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, LoopKind};
 use bonsai_common::{FileId, Span};
 use bonsai_vfs::FileSnapshot;
-use std::sync::Arc;
+use std::{cmp::Reverse, collections::BinaryHeap, sync::Arc};
 use tree_sitter::{Language, Node, Tree};
 
 /// Internal carrier name for language-level rest/varargs values that
@@ -219,6 +268,243 @@ pub fn normalize_variadic_builtin_flow(
         }
         events.push(event);
     }
+}
+
+/// Canonicalize evaluator order after adapter-specific post-processing.
+///
+/// Some grammars expose a nested invocation through a second syntax pass
+/// (Dart selectors and Elixir local-call repair are representative). The
+/// adapter can therefore append the inner call after the outer call even
+/// though both facts have exact AST spans. Reorder only compiler-proven
+/// expression dependencies: a call inside another call's argument, or inside
+/// an assignment/return expression, evaluates first. Unrelated statements
+/// retain adapter order.
+pub fn normalize_decl_event_evaluation_order(index: &mut DeclIndex) {
+    for decl in &mut index.defs {
+        normalize_event_sequence_evaluation_order(&mut decl.flow_events, false);
+    }
+}
+
+fn normalize_event_sequence_evaluation_order(events: &mut Vec<FlowEvent>, loop_body_phase_order: bool) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_event_sequence_evaluation_order(then_events, false);
+                normalize_event_sequence_evaluation_order(else_events, false);
+            }
+            FlowEvent::Loop { body, .. } => {
+                // Loop lowerers deliberately append update facts after the
+                // body even though their source spans live in the header.
+                // Preserve that compiler-owned runtime phase order.
+                normalize_event_sequence_evaluation_order(body, true);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_event_sequence_evaluation_order(body, false);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_event_sequence_evaluation_order(body, false);
+                normalize_event_sequence_evaluation_order(catch_events, false);
+                normalize_event_sequence_evaluation_order(finally_events, false);
+            }
+            _ => {}
+        }
+    }
+
+    if events.len() < 2 {
+        return;
+    }
+
+    // Stable topological ordering over compiler-proven evaluation
+    // dependencies. The previous repeated `Vec::remove`/`insert` walk was
+    // cubic in dense expressions and could oscillate forever when a
+    // self-assignment's enclosing span was mistaken for a prerequisite of
+    // its own RHS call. Build the exact relation once, then always select the
+    // earliest original event whose prerequisites are satisfied.
+    let event_count = events.len();
+    let mut indegree = vec![0usize; event_count];
+    let mut successors = vec![Vec::<usize>::new(); event_count];
+    for candidate in 0..event_count {
+        for consumer in 0..event_count {
+            if candidate != consumer
+                && event_must_evaluate_before(
+                    &events[candidate],
+                    &events[consumer],
+                    candidate < consumer,
+                    loop_body_phase_order,
+                )
+            {
+                successors[candidate].push(consumer);
+                indegree[consumer] += 1;
+            }
+        }
+    }
+    let mut ready = BinaryHeap::new();
+    for (index, degree) in indegree.iter().enumerate() {
+        if *degree == 0 {
+            ready.push(Reverse(index));
+        }
+    }
+    let mut order = Vec::with_capacity(event_count);
+    while let Some(Reverse(index)) = ready.pop() {
+        order.push(index);
+        for successor in successors[index].iter().copied() {
+            indegree[successor] -= 1;
+            if indegree[successor] == 0 {
+                ready.push(Reverse(successor));
+            }
+        }
+    }
+    debug_assert_eq!(
+        order.len(),
+        event_count,
+        "compiler event dependencies must be acyclic"
+    );
+    // A release build must never hang or discard facts if an adapter violates
+    // the invariant. Preserve the remaining compiler-emitted order while the
+    // debug/test gate above exposes the defect.
+    if order.len() != event_count {
+        let mut emitted = vec![false; event_count];
+        for index in &order {
+            emitted[*index] = true;
+        }
+        order.extend((0..event_count).filter(|index| !emitted[*index]));
+    }
+    let mut original = std::mem::take(events).into_iter().map(Some).collect::<Vec<_>>();
+    events.extend(order.into_iter().filter_map(|index| original[index].take()));
+}
+
+fn event_must_evaluate_before(
+    candidate: &FlowEvent,
+    consumer: &FlowEvent,
+    candidate_precedes_consumer: bool,
+    loop_body_phase_order: bool,
+) -> bool {
+    if let FlowEvent::Assign {
+        span: candidate_span,
+        target,
+        ..
+    } = candidate
+    {
+        let consumer_span = flow_event_span(consumer);
+        // A write is available to a later lexical use, or when the assignment
+        // expression itself is nested inside the consumer. The inverse
+        // containment is deliberately excluded: in `x = f(x)`, `f(x)` reads
+        // the old `x` and must execute before the enclosing assignment write.
+        // Outside a loop-body phase, source order repairs facts appended by a
+        // secondary syntax pass. Inside a lowered loop body, runtime phase
+        // order wins: a C-style `for` update is textually in the header but is
+        // deliberately appended after the body. AST containment remains exact
+        // in both contexts and may reorder a nested expression fact.
+        let precedes_in_source = !loop_body_phase_order
+            && candidate_span.file == consumer_span.file
+            && candidate_span.end <= consumer_span.start;
+        let spans_are_disjoint =
+            candidate_span.end <= consumer_span.start || consumer_span.end <= candidate_span.start;
+        let precedes_in_lowered_loop_order = loop_body_phase_order
+            && candidate_precedes_consumer
+            && candidate_span.file == consumer_span.file
+            && spans_are_disjoint;
+        let is_nested_in_consumer = span_strictly_contains(consumer_span, *candidate_span);
+        if (precedes_in_source || precedes_in_lowered_loop_order || is_nested_in_consumer)
+            && flow_event_reads_name(consumer, target)
+        {
+            return true;
+        }
+    }
+    let FlowEvent::Call {
+        span: candidate_span, ..
+    } = candidate
+    else {
+        return false;
+    };
+    match consumer {
+        FlowEvent::Call { span, args, .. } => {
+            args.iter()
+                .any(|argument| span_strictly_contains(argument.span, *candidate_span))
+                || span_strictly_contains(*span, *candidate_span)
+        }
+        FlowEvent::Assign {
+            span,
+            source_call,
+            value_kind,
+            ..
+        } => {
+            (source_call.is_some() || value_kind.is_some()) && span_strictly_contains(*span, *candidate_span)
+        }
+        FlowEvent::AggregateAssign { span, .. }
+        | FlowEvent::Return { span, .. }
+        | FlowEvent::Throw { span, .. }
+        | FlowEvent::Yield { span, .. }
+        | FlowEvent::Await { span, .. } => span_strictly_contains(*span, *candidate_span),
+        _ => false,
+    }
+}
+
+fn flow_event_reads_name(event: &FlowEvent, name: &str) -> bool {
+    match event {
+        FlowEvent::Call { receiver, args, .. } => {
+            receiver.as_deref() == Some(name)
+                || args.iter().any(|argument| {
+                    argument.place.as_deref() == Some(name)
+                        || argument.source_names.iter().any(|source| source == name)
+                })
+        }
+        FlowEvent::Assign {
+            source_name,
+            source_names,
+            source_call_args,
+            ..
+        } => {
+            source_name.as_deref() == Some(name)
+                || source_names.iter().any(|source| source == name)
+                || source_call_args.iter().any(|source| source == name)
+        }
+        FlowEvent::AggregateAssign { value_flow, .. }
+        | FlowEvent::Return { value_flow, .. }
+        | FlowEvent::Yield { value_flow, .. } => {
+            value_flow.place.as_deref() == Some(name)
+                || value_flow.source_names.iter().any(|source| source == name)
+        }
+        FlowEvent::Throw { value_name, .. } => value_name.as_deref() == Some(name),
+        FlowEvent::Await { value_name, .. } => value_name.as_deref() == Some(name),
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            then_events.iter().any(|event| flow_event_reads_name(event, name))
+                || else_events.iter().any(|event| flow_event_reads_name(event, name))
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            body.iter().any(|event| flow_event_reads_name(event, name))
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => [body, catch_events, finally_events]
+            .into_iter()
+            .flatten()
+            .any(|event| flow_event_reads_name(event, name)),
+        FlowEvent::Break { .. } | FlowEvent::Continue { .. } | FlowEvent::Lifecycle { .. } => false,
+    }
+}
+
+fn span_strictly_contains(outer: Span, inner: Span) -> bool {
+    outer.file == inner.file
+        && outer.start <= inner.start
+        && inner.end <= outer.end
+        && (outer.start != inner.start || outer.end != inner.end)
 }
 
 fn adapter_builtin_matches(name: &str, declared_names: &[&str]) -> bool {
@@ -499,22 +785,25 @@ pub fn split_match_arms_in_branch_events(
     for event in events.iter_mut() {
         match event {
             FlowEvent::Branch {
+                span,
                 then_events,
                 else_events,
                 ..
             } => {
-                // Recurse first so nested matches peel from the inside out.
-                split_match_arms_in_branch_events(then_events, arm_spans);
-                split_match_arms_in_branch_events(else_events, arm_spans);
                 // Look for the arm-set this Branch's `then_events` covers.
                 // A flat Branch from a match expression contains every
                 // arm's events; a normal `if` only spans one source region.
                 let matched_arm_set = arm_spans
                     .iter()
-                    .find(|candidate| then_events_cover_arm_set(then_events, candidate));
+                    .find(|candidate| branch_covers_arm_set(*span, then_events, candidate));
                 if let Some(arms) = matched_arm_set {
                     *then_events = peel_match_arms(std::mem::take(then_events), arms);
                 }
+                // Recurse after peeling. Before the rewrite, an outer branch
+                // that merely contains a nested match has no direct event in
+                // the nested arm spans and cannot claim the inner arm set.
+                split_match_arms_in_branch_events(then_events, arm_spans);
+                split_match_arms_in_branch_events(else_events, arm_spans);
             }
             // Other containers may host a match expression — keep walking.
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
@@ -535,17 +824,37 @@ pub fn split_match_arms_in_branch_events(
     }
 }
 
-/// True iff `then_events` contains at least one event from EACH of the
-/// given arm-body spans. That's the heuristic for "this Branch is the
-/// flat collapse of a multi-arm match." A single-arm match (or an `if`)
-/// has nothing to peel.
-fn then_events_cover_arm_set(then_events: &[crate::FlowEvent], arm_spans: &[bonsai_common::Span]) -> bool {
+/// Split one already-identified flat alternative region into mutually
+/// exclusive branches using adapter-provided arm-body spans. This supports
+/// grammar-specific control forms lowered by adapter callbacks (Elixir
+/// rescue clauses are the canonical example).
+pub fn split_flat_alternative_events(events: &mut Vec<crate::FlowEvent>, arm_spans: &[bonsai_common::Span]) {
+    if arm_spans.len() >= 2
+        && arm_spans
+            .iter()
+            .any(|arm_span| then_events_contain_span(events, arm_span))
+    {
+        *events = peel_match_arms(std::mem::take(events), arm_spans);
+    }
+}
+
+/// True when the branch owns the complete arm set and its flat body contains
+/// direct events from at least one arm. Empty arms are semantically real and
+/// must not prevent the split (for example `_ -> :ok`).
+fn branch_covers_arm_set(
+    branch_span: bonsai_common::Span,
+    then_events: &[crate::FlowEvent],
+    arm_spans: &[bonsai_common::Span],
+) -> bool {
     if arm_spans.len() < 2 {
         return false;
     }
     arm_spans
         .iter()
-        .all(|arm_span| then_events_contain_span(then_events, arm_span))
+        .all(|arm_span| span_contains(branch_span, *arm_span))
+        && arm_spans
+            .iter()
+            .any(|arm_span| then_events_contain_span(then_events, arm_span))
 }
 
 /// Does any event in `events` have a span that falls inside `arm_span`?
@@ -616,21 +925,51 @@ fn flow_event_span(event: &crate::FlowEvent) -> bonsai_common::Span {
     event.span()
 }
 
+/// One-file, one-pass index of the exact Tree-sitter node kinds requested by
+/// an adapter's post-processing pipeline.
+///
+/// Adapters with several compiler projections should build this once from
+/// their declared syntax inventory and filter the retained nodes for each
+/// projection. This keeps source order exact while avoiding a complete CST
+/// walk per derived fact family. The index is phase-local and borrows the
+/// owning tree, so it cannot outlive or duplicate the frontend snapshot.
+#[derive(Debug)]
+pub struct SyntaxKindIndex<'tree> {
+    nodes: Vec<Node<'tree>>,
+}
+
+impl<'tree> SyntaxKindIndex<'tree> {
+    #[must_use]
+    pub fn new(tree: &'tree Tree, wanted: &[&str]) -> Self {
+        let wanted = wanted.iter().copied().collect::<std::collections::HashSet<_>>();
+        let mut nodes = Vec::new();
+        let mut cursor = tree.walk();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if wanted.contains(node.kind()) {
+                nodes.push(node);
+            }
+            let mut children = node.children(&mut cursor).collect::<Vec<_>>();
+            children.reverse();
+            stack.extend(children);
+        }
+        Self { nodes }
+    }
+
+    /// Return matching nodes in exact source preorder.
+    #[must_use]
+    pub fn collect(&self, wanted: &[&str]) -> Vec<Node<'tree>> {
+        self.nodes
+            .iter()
+            .copied()
+            .filter(|node| wanted.iter().any(|kind| *kind == node.kind()))
+            .collect()
+    }
+}
+
 /// Walk a tree in pre-order, collecting every node whose kind is in `want`.
 pub fn collect_kinds<'a>(tree: &'a Tree, want: &[&str]) -> Vec<Node<'a>> {
-    let mut out = Vec::new();
-    let mut cursor = tree.walk();
-    let root = tree.root_node();
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if want.iter().any(|k| *k == node.kind()) {
-            out.push(node);
-        }
-        for child in node.children(&mut cursor) {
-            stack.push(child);
-        }
-    }
-    out
+    SyntaxKindIndex::new(tree, want).nodes
 }
 
 pub fn c_family_preproc_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<crate::ImportSpec> {
@@ -963,6 +1302,224 @@ pub fn sort_dedup_finite_literal_selections(facts: &mut Vec<crate::FiniteLiteral
     facts.dedup();
 }
 
+/// Prove that every value-returning path through one compiler-lowered
+/// callable returns a literal, and return one representative return span.
+///
+/// This consumes only structured [`FlowEvent`] control/value facts. Language
+/// adapters remain responsible for classifying literal expressions in their
+/// grammar; security consumers remain responsible for assigning meaning to
+/// the resulting finite-value boundary. Unknown control flow, loops, and
+/// exception regions fail closed rather than inventing exhaustiveness.
+#[must_use]
+pub fn complete_finite_literal_return_span(events: &[crate::FlowEvent]) -> Option<Span> {
+    fn every_return_is_literal(events: &[crate::FlowEvent], representative: &mut Option<Span>) -> bool {
+        for event in events {
+            match event {
+                crate::FlowEvent::Return {
+                    span,
+                    value_kind: Some(crate::AssignValueKind::Literal),
+                    ..
+                } => {
+                    representative.get_or_insert(*span);
+                }
+                crate::FlowEvent::Return { .. } => return false,
+                crate::FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    if !every_return_is_literal(then_events, representative)
+                        || !every_return_is_literal(else_events, representative)
+                    {
+                        return false;
+                    }
+                }
+                crate::FlowEvent::Loop { body, .. }
+                | crate::FlowEvent::Defer { body, .. }
+                | crate::FlowEvent::Using { body, .. } => {
+                    if !every_return_is_literal(body, representative) {
+                        return false;
+                    }
+                }
+                crate::FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    if !every_return_is_literal(body, representative)
+                        || !every_return_is_literal(catch_events, representative)
+                        || !every_return_is_literal(finally_events, representative)
+                    {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    fn event_terminates(event: &crate::FlowEvent) -> bool {
+        match event {
+            crate::FlowEvent::Return {
+                value_kind: Some(crate::AssignValueKind::Literal),
+                ..
+            }
+            | crate::FlowEvent::Throw { .. } => true,
+            crate::FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                !then_events.is_empty()
+                    && !else_events.is_empty()
+                    && sequence_terminates(then_events)
+                    && sequence_terminates(else_events)
+            }
+            _ => false,
+        }
+    }
+
+    fn sequence_terminates(events: &[crate::FlowEvent]) -> bool {
+        events.iter().any(event_terminates)
+    }
+
+    let mut representative = None;
+    (every_return_is_literal(events, &mut representative)
+        && representative.is_some()
+        && sequence_terminates(events))
+    .then_some(representative?)
+}
+
+/// Prove that every value-returning path through one compiler-lowered
+/// callable returns either a grammar-classified literal or one of the exact
+/// finite-selection spans supplied by the owning language frontend.
+///
+/// This is the finite-selection counterpart to
+/// [`complete_finite_literal_return_span`].  It deliberately consumes spans,
+/// not rendered expressions or API names: adapters prove the selection
+/// syntax, while this shared helper proves path completeness.  Unknown
+/// returns, fallthrough-only bodies, loops as the sole terminator, and
+/// exception regions without a later proven terminator fail closed.
+#[must_use]
+pub fn complete_finite_selection_return_span(
+    events: &[crate::FlowEvent],
+    selection_spans: &[Span],
+) -> Option<Span> {
+    fn selection_in_return(return_span: Span, selection_spans: &[Span]) -> Option<Span> {
+        selection_spans
+            .iter()
+            .copied()
+            .filter(|selection| {
+                selection.file == return_span.file
+                    && return_span.start <= selection.start
+                    && selection.end <= return_span.end
+            })
+            .min_by_key(|selection| (selection.start, selection.end))
+    }
+
+    fn every_return_is_finite(
+        events: &[crate::FlowEvent],
+        selection_spans: &[Span],
+        representative: &mut Option<Span>,
+    ) -> bool {
+        for event in events {
+            match event {
+                crate::FlowEvent::Return {
+                    value_kind: Some(crate::AssignValueKind::Literal),
+                    ..
+                } => {}
+                crate::FlowEvent::Return { span, .. } => {
+                    let Some(selection) = selection_in_return(*span, selection_spans) else {
+                        return false;
+                    };
+                    representative.get_or_insert(selection);
+                }
+                crate::FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    if !every_return_is_finite(then_events, selection_spans, representative)
+                        || !every_return_is_finite(else_events, selection_spans, representative)
+                    {
+                        return false;
+                    }
+                }
+                crate::FlowEvent::Loop { body, .. }
+                | crate::FlowEvent::Defer { body, .. }
+                | crate::FlowEvent::Using { body, .. } => {
+                    if !every_return_is_finite(body, selection_spans, representative) {
+                        return false;
+                    }
+                }
+                crate::FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    if !every_return_is_finite(body, selection_spans, representative)
+                        || !every_return_is_finite(catch_events, selection_spans, representative)
+                        || !every_return_is_finite(finally_events, selection_spans, representative)
+                    {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    fn event_terminates(event: &crate::FlowEvent, selection_spans: &[Span]) -> bool {
+        match event {
+            crate::FlowEvent::Return {
+                value_kind: Some(crate::AssignValueKind::Literal),
+                ..
+            }
+            | crate::FlowEvent::Throw { .. } => true,
+            crate::FlowEvent::Return { span, .. } => selection_in_return(*span, selection_spans).is_some(),
+            crate::FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                !then_events.is_empty()
+                    && !else_events.is_empty()
+                    && sequence_terminates(then_events, selection_spans)
+                    && sequence_terminates(else_events, selection_spans)
+            }
+            _ => false,
+        }
+    }
+
+    fn sequence_terminates(events: &[crate::FlowEvent], selection_spans: &[Span]) -> bool {
+        events
+            .iter()
+            .any(|event| event_terminates(event, selection_spans))
+    }
+
+    let mut representative = None;
+    if !every_return_is_finite(events, selection_spans, &mut representative)
+        || !sequence_terminates(events, selection_spans)
+    {
+        return None;
+    }
+    // Some adapters emit one fact for a compiler-proven function whose every
+    // return is already a literal. In that shape no non-literal return needs
+    // a selection span, so the recursive proof above has nothing to install
+    // as its representative. The non-empty adapter fact remains the exact
+    // proof anchor; dynamic returns and fallthrough have already failed.
+    representative.or_else(|| {
+        selection_spans
+            .iter()
+            .copied()
+            .min_by_key(|span| (span.file.raw(), span.start, span.end))
+    })
+}
+
 /// Return the final identifier-shaped segment of the outer type constructor.
 ///
 /// The input is already an adapter-classified type node. This helper is
@@ -1160,7 +1717,7 @@ pub type BranchAliasExtractor = for<'tree> fn(Node<'tree>) -> Option<(Node<'tree
 /// self-parameter syntax from another language.
 pub type ReceiverPresenceExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> bool;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct GrammarHandler {
     // === Decl shapes ===
     /// Function-like declarations. The walker creates one `Decl` per
@@ -1216,11 +1773,35 @@ pub struct GrammarHandler {
     pub branch_condition_field_names: &'static [&'static str],
     /// Exact direct-child wrappers for an unfielded branch discriminant.
     pub branch_condition_kinds: &'static [&'static str],
+    /// Whether this grammar defines the first named child of a branch node
+    /// as its condition when no Tree-sitter field is assigned.
+    pub branch_condition_is_first_named_child: bool,
+    /// Transparent grouping nodes used while lowering typed boolean
+    /// evaluator facts.
+    pub condition_group_kinds: &'static [&'static str],
+    /// Adapter-owned conjunction operator spellings.
+    pub condition_all_operators: &'static [&'static str],
+    /// Adapter-owned disjunction operator spellings.
+    pub condition_any_operators: &'static [&'static str],
+    /// Adapter-owned logical-negation operator spellings.
+    pub condition_not_operators: &'static [&'static str],
+    /// Named operator wrapper kinds that prove logical negation when the
+    /// grammar exposes the operator as a named child beside its operand.
+    pub condition_not_operator_kinds: &'static [&'static str],
     /// Optional exact branch alias/value decomposition.
     pub branch_alias_extractor: Option<BranchAliasExtractor>,
     /// Parsed statement/block wrappers that may form one branch arm when the
     /// grammar exposes repeated arm fields.
     pub branch_arm_kinds: &'static [&'static str],
+    /// Exact grammar nodes that each own one mutually exclusive switch,
+    /// match, case, or when arm. Shared lowering searches only beneath an
+    /// adapter-declared branch node and never carries a cross-language case
+    /// inventory.
+    pub exclusive_branch_arm_kinds: &'static [&'static str],
+    /// Arm kinds whose runtime semantics allow control to continue into the
+    /// following sibling absent an explicit terminator. Keeping this per arm
+    /// distinguishes Java's colon groups from non-fallthrough arrow rules.
+    pub fallthrough_branch_arm_kinds: &'static [&'static str],
     /// Additional alternative/else/elseif clause nodes beyond the first
     /// `alternative`/`else` field returned by Tree-sitter.
     pub additional_alternative_kinds: &'static [&'static str],
@@ -1240,6 +1821,14 @@ pub struct GrammarHandler {
     pub loop_body_field_names: &'static [&'static str],
     /// Exact unfielded loop-body wrapper kinds.
     pub loop_body_kinds: &'static [&'static str],
+    /// Optional direct-child wrapper that owns a loop's header clauses.
+    /// Dart and Go expose their initializer/condition/update fields on a
+    /// `for_loop_parts`/`for_clause` child instead of the loop node itself.
+    pub loop_header_container_kinds: &'static [&'static str],
+    /// Ordered Tree-sitter fields whose values execute after each completed
+    /// body iteration. This is adapter-owned grammar metadata: shared
+    /// lowering uses it only to preserve runtime phase order.
+    pub loop_update_field_names: &'static [&'static str],
 
     // === Call / assignment / return / lambda shapes ===
     pub call_kinds: &'static [&'static str],
@@ -1494,6 +2083,10 @@ pub struct GrammarHandler {
     // === Try / catch / finally shapes ===
     pub try_kinds: &'static [&'static str],
     pub catch_kinds: &'static [&'static str],
+    /// Exact grammar nodes that each own one mutually exclusive exception
+    /// handler arm. Some grammars expose these directly as catch clauses;
+    /// others wrap typed clauses inside one catch/rescue container.
+    pub exclusive_catch_arm_kinds: &'static [&'static str],
     pub finally_kinds: &'static [&'static str],
     /// Exact unfielded block kinds that may represent try/catch bodies.
     pub try_fallback_body_kinds: &'static [&'static str],
@@ -1663,8 +2256,16 @@ pub const EMPTY_HANDLER: GrammarHandler = GrammarHandler {
     branch_else_field_names: &[],
     branch_condition_field_names: &[],
     branch_condition_kinds: &[],
+    branch_condition_is_first_named_child: false,
+    condition_group_kinds: &[],
+    condition_all_operators: &[],
+    condition_any_operators: &[],
+    condition_not_operators: &[],
+    condition_not_operator_kinds: &[],
     branch_alias_extractor: None,
     branch_arm_kinds: &[],
+    exclusive_branch_arm_kinds: &[],
+    fallthrough_branch_arm_kinds: &[],
     additional_alternative_kinds: &[],
     for_kinds: &[],
     foreach_kinds: &[],
@@ -1674,6 +2275,8 @@ pub const EMPTY_HANDLER: GrammarHandler = GrammarHandler {
     loop_kinds: &[],
     loop_body_field_names: &[],
     loop_body_kinds: &[],
+    loop_header_container_kinds: &[],
+    loop_update_field_names: &[],
     call_kinds: &[],
     constructor_call_kinds: &[],
     nested_call_component_kinds: &[],
@@ -1775,6 +2378,7 @@ pub const EMPTY_HANDLER: GrammarHandler = GrammarHandler {
     lambda_body_kinds: &[],
     try_kinds: &[],
     catch_kinds: &[],
+    exclusive_catch_arm_kinds: &[],
     finally_kinds: &[],
     try_fallback_body_kinds: &[],
     catch_body_follows_marker: false,
@@ -1948,6 +2552,12 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
     branch_else_field_names: &["alternative", "else"],
     branch_condition_field_names: &["condition", "subject", "value", "discriminant"],
     branch_condition_kinds: &[],
+    branch_condition_is_first_named_child: false,
+    condition_group_kinds: &["parenthesized_expression", "parenthesized_expression_list"],
+    condition_all_operators: &["&&", "and", "andalso"],
+    condition_any_operators: &["||", "or", "orelse"],
+    condition_not_operators: &["!", "not"],
+    condition_not_operator_kinds: &[],
     branch_alias_extractor: None,
     branch_arm_kinds: &[
         "statement",
@@ -1958,6 +2568,8 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "compound_statement",
         "expression_statement",
     ],
+    exclusive_branch_arm_kinds: &[],
+    fallthrough_branch_arm_kinds: &[],
     additional_alternative_kinds: &["elif_clause", "else_clause", "elseif_statement", "else_statement"],
     for_kinds: &[
         "for_statement",
@@ -1988,6 +2600,8 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
     loop_kinds: &["loop_expression"],
     loop_body_field_names: &["body", "consequence"],
     loop_body_kinds: &["block", "compound_statement", "statement", "expression_statement"],
+    loop_header_container_kinds: &["for_clause", "for_loop_parts"],
+    loop_update_field_names: &["update", "increment", "iterator"],
     call_kinds: COMMON_CALL_KINDS,
     constructor_call_kinds: &[
         "new_expression",
@@ -2454,6 +3068,7 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "rescue",
         "rescue_clause",
     ],
+    exclusive_catch_arm_kinds: &[],
     finally_kinds: &[
         "finally_clause",
         "finally",
@@ -2589,6 +3204,180 @@ pub const COMMON_CALL_KINDS: &[&str] = &[
 ];
 
 impl GrammarHandler {
+    /// Enumerate every Tree-sitter node/token kind declared by this adapter.
+    ///
+    /// Field names, API/operator spellings, semantic names, and source-text
+    /// prefixes are deliberately excluded. The conformance harness compares
+    /// this inventory with the adapter's real grammar symbols so a typo or a
+    /// dependency grammar rename cannot silently disable one lowering path.
+    #[must_use]
+    pub fn declared_node_kinds(&self) -> Vec<(&'static str, &'static str)> {
+        let mut out = Vec::new();
+        macro_rules! kinds {
+            ($field:ident) => {
+                out.extend(
+                    self.$field
+                        .iter()
+                        .copied()
+                        .map(|kind| (stringify!($field), kind)),
+                );
+            };
+        }
+
+        kinds!(fn_kinds);
+        kinds!(class_kinds);
+        out.extend(
+            self.class_decl_kinds
+                .iter()
+                .map(|(kind, _)| ("class_decl_kinds", *kind)),
+        );
+        kinds!(method_kinds);
+        kinds!(method_context_kinds);
+        kinds!(method_owner_barrier_kinds);
+        kinds!(constructor_method_kinds);
+        kinds!(if_kinds);
+        kinds!(branch_condition_kinds);
+        kinds!(condition_group_kinds);
+        kinds!(condition_not_operator_kinds);
+        kinds!(branch_arm_kinds);
+        kinds!(exclusive_branch_arm_kinds);
+        kinds!(fallthrough_branch_arm_kinds);
+        kinds!(additional_alternative_kinds);
+        kinds!(for_kinds);
+        kinds!(foreach_kinds);
+        kinds!(while_kinds);
+        kinds!(do_kinds);
+        kinds!(loop_kinds);
+        kinds!(loop_body_kinds);
+        kinds!(loop_header_container_kinds);
+        kinds!(call_kinds);
+        kinds!(constructor_call_kinds);
+        kinds!(nested_call_component_kinds);
+        kinds!(call_argument_container_kinds);
+        kinds!(call_argument_wrapper_kinds);
+        kinds!(argument_wrapper_kinds);
+        kinds!(transparent_expression_wrapper_kinds);
+        kinds!(literal_value_kinds);
+        kinds!(string_literal_kinds);
+        kinds!(comment_kinds);
+        kinds!(doc_comment_kinds);
+        kinds!(decorator_kinds);
+        kinds!(parameter_container_kinds);
+        kinds!(parameter_kinds);
+        kinds!(parameter_modifier_kinds);
+        kinds!(parameter_annotation_kinds);
+        kinds!(keyword_parameter_kinds);
+        kinds!(parameter_selector_kinds);
+        kinds!(implicit_parameter_kinds);
+        kinds!(self_parameter_kinds);
+        kinds!(last_identifier_parameter_kinds);
+        kinds!(binding_identifier_kinds);
+        kinds!(non_binding_pattern_kinds);
+        kinds!(binding_lhs_pattern_kinds);
+        kinds!(pattern_head_value_kinds);
+        kinds!(multi_segment_value_pattern_kinds);
+        kinds!(variadic_parameter_kinds);
+        kinds!(destructured_parameter_kinds);
+        kinds!(identifier_kinds);
+        kinds!(aggregate_pattern_kinds);
+        kinds!(comprehension_kinds);
+        kinds!(comprehension_binding_clause_kinds);
+        kinds!(named_aggregate_kinds);
+        kinds!(positional_aggregate_kinds);
+        kinds!(aggregate_pair_kinds);
+        kinds!(two_child_aggregate_pair_kinds);
+        kinds!(static_field_name_kinds);
+        kinds!(shorthand_field_kinds);
+        kinds!(spread_kinds);
+        kinds!(aggregate_syntax_only_kinds);
+        kinds!(multi_child_aggregate_pattern_kinds);
+        kinds!(lambda_value_container_kinds);
+        kinds!(transparent_call_wrapper_kinds);
+        kinds!(single_expression_group_kinds);
+        kinds!(assignment_target_wrapper_kinds);
+        kinds!(assignment_kinds);
+        kinds!(compound_assignment_kinds);
+        kinds!(type_only_declaration_kinds);
+        kinds!(positional_aggregate_assignment_kinds);
+        kinds!(positional_aggregate_value_kinds);
+        kinds!(return_kinds);
+        kinds!(throw_kinds);
+        kinds!(lambda_kinds);
+        kinds!(inline_closure_kinds);
+        kinds!(lambda_body_kinds);
+        kinds!(try_kinds);
+        kinds!(catch_kinds);
+        kinds!(exclusive_catch_arm_kinds);
+        kinds!(finally_kinds);
+        kinds!(try_fallback_body_kinds);
+        kinds!(break_kinds);
+        kinds!(continue_kinds);
+        kinds!(yield_kinds);
+        kinds!(await_kinds);
+        kinds!(defer_kinds);
+        kinds!(using_kinds);
+        kinds!(runtime_type_guard_operators);
+        kinds!(runtime_typeof_operators);
+        kinds!(runtime_type_equality_operators);
+        kinds!(runtime_type_wrapper_kinds);
+        kinds!(value_free_expression_kinds);
+        kinds!(value_free_unary_operators);
+        kinds!(call_ref_kinds);
+        kinds!(member_expression_kinds);
+        kinds!(subscript_expression_kinds);
+        kinds!(sigil_variable_kinds);
+        kinds!(global_variable_kinds);
+        kinds!(callable_reference_kinds);
+        out
+    }
+
+    /// Enumerate every Tree-sitter child-field name consumed by this adapter.
+    /// The conformance harness validates this inventory against the active
+    /// grammar so a stale field spelling cannot silently disable lowering
+    /// after a parser dependency update.
+    #[must_use]
+    pub fn declared_field_names(&self) -> Vec<(&'static str, &'static str)> {
+        let mut out = Vec::new();
+        macro_rules! fields {
+            ($field:ident) => {
+                out.extend(
+                    self.$field
+                        .iter()
+                        .copied()
+                        .map(|name| (stringify!($field), name)),
+                );
+            };
+        }
+        fields!(branch_then_field_names);
+        fields!(branch_else_field_names);
+        fields!(branch_condition_field_names);
+        fields!(loop_body_field_names);
+        fields!(loop_update_field_names);
+        fields!(call_callee_field_names);
+        fields!(call_receiver_field_names);
+        fields!(call_member_field_names);
+        fields!(constructor_type_field_names);
+        fields!(call_argument_field_names);
+        fields!(argument_name_field_names);
+        fields!(argument_value_field_names);
+        fields!(writeback_operand_field_names);
+        fields!(binding_pattern_field_names);
+        fields!(non_binding_pattern_field_names);
+        fields!(aggregate_key_field_names);
+        fields!(aggregate_value_field_names);
+        fields!(spread_value_field_names);
+        fields!(lambda_body_field_names);
+        fields!(control_label_field_names);
+        fields!(yield_value_field_names);
+        fields!(using_body_field_names);
+        fields!(try_body_field_names);
+        fields!(member_base_field_names);
+        fields!(member_name_field_names);
+        fields!(subscript_base_field_names);
+        fields!(subscript_index_field_names);
+        out
+    }
+
     fn is_fn(&self, k: &str) -> bool {
         self.fn_kinds.contains(&k)
     }
@@ -3134,6 +3923,18 @@ fn implicit_return_expression_node<'tree>(
     body: &Node<'tree>,
     handler: &GrammarHandler,
 ) -> Option<Node<'tree>> {
+    if handler.single_expression_group_kinds.contains(&body.kind()) {
+        let mut cursor = body.walk();
+        let mut children = body
+            .named_children(&mut cursor)
+            .filter(|child| !child.kind().contains("comment"));
+        let expression = children.next()?;
+        if children.next().is_some() {
+            return None;
+        }
+        return implicit_return_expression_node(&expression, handler)
+            .or_else(|| body_has_implicit_return(&expression, handler).then_some(expression));
+    }
     if body_has_implicit_return(body, handler) {
         return Some(*body);
     }
@@ -3404,11 +4205,79 @@ fn lower_local_closure_captures(defs: &mut [crate::Decl]) {
                 defs[plan.lambda_index].params.push(capture.clone());
             }
         }
+        inject_local_closure_capture_environment(
+            &mut defs[plan.caller_index].flow_events,
+            &plan.binding_name,
+            defs[plan.lambda_index].span,
+            &plan.captures,
+        );
         inject_local_closure_capture_args(
             &mut defs[plan.caller_index].flow_events,
             &plan.binding_name,
             &plan.captures,
         );
+    }
+}
+
+/// Materialize the environment stored in a local callable value as exact
+/// projected fields. Direct invocations still receive the hidden captures as
+/// ordinary appended arguments below. When the callable is instead passed
+/// through a higher-order formal, field-sensitive IDG stitching preserves the
+/// same environment without collapsing sibling captures into one scalar.
+fn inject_local_closure_capture_environment(
+    events: &mut Vec<FlowEvent>,
+    binding: &str,
+    callable_span: Span,
+    captures: &[String],
+) {
+    let mut index = 0usize;
+    while index < events.len() {
+        match &mut events[index] {
+            FlowEvent::Assign {
+                span,
+                target,
+                value_kind: Some(crate::AssignValueKind::CallableReference),
+                ..
+            } if target == binding && span_contains(*span, callable_span) => {
+                let assignment_span = *span;
+                let projected = captures.iter().map(|capture| FlowEvent::Assign {
+                    span: assignment_span,
+                    target: format!("{binding}.{capture}"),
+                    source_name: Some(capture.clone()),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: Vec::new(),
+                    declares_new_binding: false,
+                    value_kind: None,
+                });
+                let count = captures.len();
+                events.splice((index + 1)..=index, projected);
+                index = index.saturating_add(count);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                inject_local_closure_capture_environment(then_events, binding, callable_span, captures);
+                inject_local_closure_capture_environment(else_events, binding, callable_span, captures);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                inject_local_closure_capture_environment(body, binding, callable_span, captures);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                inject_local_closure_capture_environment(body, binding, callable_span, captures);
+                inject_local_closure_capture_environment(catch_events, binding, callable_span, captures);
+                inject_local_closure_capture_environment(finally_events, binding, callable_span, captures);
+            }
+            _ => {}
+        }
+        index = index.saturating_add(1);
     }
 }
 
@@ -3823,6 +4692,41 @@ fn build_call_event(
         }
     }
 
+    // Some grammars attach a trailing closure directly to the call or one
+    // level below an adapter-declared call wrapper instead of placing it in
+    // the ordinary argument container. The walker already executes those
+    // exact closure bodies; retain the same CST relationship in the Call
+    // argument list so compiler headers, callback ownership constraints, and
+    // IDG callback stitches all agree on its positional argument. This is
+    // driven entirely by each adapter's lambda/wrapper inventory.
+    if !handler.has_special_form(SyntaxSpecialForm::DirectCallArguments) {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            let closures = if is_closure_arg(child.kind(), handler) {
+                vec![child]
+            } else if handler.call_argument_wrapper_kinds.contains(&child.kind()) {
+                let mut wrapper_cursor = child.walk();
+                child
+                    .named_children(&mut wrapper_cursor)
+                    .filter(|nested| is_closure_arg(nested.kind(), handler))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            for closure in closures {
+                let closure_span = span_of(file, &closure);
+                if args.iter().any(|argument| argument.span == closure_span) {
+                    continue;
+                }
+                if let Some(argument) =
+                    call_arg_from_nodes_with_handler(closure, closure, file, src, None, handler)
+                {
+                    args.push(argument);
+                }
+            }
+        }
+    }
+
     // Objective-C: `message_expression` has no arguments container —
     // args are direct children of the message, interleaved with
     // additional `method:` keyword selector parts. The grammar gives
@@ -4005,12 +4909,16 @@ pub fn call_arg_from_nodes_with_handler(
     if is_comment_node_kind(handler, argument.kind()) || is_comment_node_kind(handler, value.kind()) {
         return None;
     }
+    let semantic_value = unwrap_transparent_expression(value, handler);
+    let is_callable_value = is_closure_arg(value.kind(), handler) || handler.is_lambda(semantic_value.kind());
     let value_text = normalize_call_name_whitespace(node_text(&value, src));
     if value_text.is_empty() {
         return None;
     }
     let passing_mode = argument_passing_mode(argument, value, handler);
-    let place = if matches!(passing_mode, crate::ArgumentPassingMode::WriteBack) {
+    let place = if is_callable_value {
+        None
+    } else if matches!(passing_mode, crate::ArgumentPassingMode::WriteBack) {
         writeback_argument_place(argument, value, src, handler)
     } else {
         argument_place(&value, src, handler)
@@ -4027,7 +4935,15 @@ pub fn call_arg_from_nodes_with_handler(
         name,
         value_text,
         place,
-        source_names: extract_rhs_expr_operands(&value, src, handler),
+        // Captures belong to the callback environment and are consumed only
+        // when that callable executes. Treating names read in the callback
+        // body as ordinary scalar operands of the registration call lets a
+        // host parameter inherit values it never receives.
+        source_names: if is_callable_value {
+            Vec::new()
+        } else {
+            extract_rhs_expr_operands(&value, src, handler)
+        },
     })
 }
 
@@ -4857,8 +5773,16 @@ pub const fn with_fn_kinds_and_implicit_receivers(
         branch_else_field_names: GENERIC_HANDLER.branch_else_field_names,
         branch_condition_field_names: GENERIC_HANDLER.branch_condition_field_names,
         branch_condition_kinds: GENERIC_HANDLER.branch_condition_kinds,
+        branch_condition_is_first_named_child: GENERIC_HANDLER.branch_condition_is_first_named_child,
+        condition_group_kinds: GENERIC_HANDLER.condition_group_kinds,
+        condition_all_operators: GENERIC_HANDLER.condition_all_operators,
+        condition_any_operators: GENERIC_HANDLER.condition_any_operators,
+        condition_not_operators: GENERIC_HANDLER.condition_not_operators,
+        condition_not_operator_kinds: GENERIC_HANDLER.condition_not_operator_kinds,
         branch_alias_extractor: GENERIC_HANDLER.branch_alias_extractor,
         branch_arm_kinds: GENERIC_HANDLER.branch_arm_kinds,
+        exclusive_branch_arm_kinds: GENERIC_HANDLER.exclusive_branch_arm_kinds,
+        fallthrough_branch_arm_kinds: GENERIC_HANDLER.fallthrough_branch_arm_kinds,
         additional_alternative_kinds: GENERIC_HANDLER.additional_alternative_kinds,
         for_kinds: GENERIC_HANDLER.for_kinds,
         foreach_kinds: GENERIC_HANDLER.foreach_kinds,
@@ -4868,6 +5792,8 @@ pub const fn with_fn_kinds_and_implicit_receivers(
         loop_kinds: GENERIC_HANDLER.loop_kinds,
         loop_body_field_names: GENERIC_HANDLER.loop_body_field_names,
         loop_body_kinds: GENERIC_HANDLER.loop_body_kinds,
+        loop_header_container_kinds: GENERIC_HANDLER.loop_header_container_kinds,
+        loop_update_field_names: GENERIC_HANDLER.loop_update_field_names,
         call_kinds: GENERIC_HANDLER.call_kinds,
         constructor_call_kinds: GENERIC_HANDLER.constructor_call_kinds,
         nested_call_component_kinds: GENERIC_HANDLER.nested_call_component_kinds,
@@ -4969,6 +5895,7 @@ pub const fn with_fn_kinds_and_implicit_receivers(
         lambda_body_kinds: GENERIC_HANDLER.lambda_body_kinds,
         try_kinds: GENERIC_HANDLER.try_kinds,
         catch_kinds: GENERIC_HANDLER.catch_kinds,
+        exclusive_catch_arm_kinds: GENERIC_HANDLER.exclusive_catch_arm_kinds,
         finally_kinds: GENERIC_HANDLER.finally_kinds,
         try_fallback_body_kinds: GENERIC_HANDLER.try_fallback_body_kinds,
         catch_body_follows_marker: GENERIC_HANDLER.catch_body_follows_marker,
@@ -5047,7 +5974,19 @@ where
             ..Default::default()
         };
     };
-    let imports = parse(&tree, snapshot.text.as_bytes(), file);
+    import_index_from_tree(&tree, snapshot.text.as_bytes(), file, parse)
+}
+
+/// Lower an already-owned syntax tree into an import index without reparsing.
+/// Adapters that need extra import-side compiler facts use this after one
+/// `parse_with` acquisition so the ordinary parser callback and the extra
+/// facts observe the exact same source snapshot and CST.
+#[must_use]
+pub fn import_index_from_tree<F>(tree: &Tree, src: &[u8], file: FileId, parse: F) -> crate::ImportIndex
+where
+    F: FnOnce(&Tree, &[u8], FileId) -> Vec<crate::ImportSpec>,
+{
+    let imports = parse(tree, src, file);
     crate::ImportIndex { file, imports }
 }
 
@@ -5077,6 +6016,7 @@ pub fn extract_assignment_value_facts(
                 if value_span.start >= span.start
                     && value_span.end <= span.end
                     && value_span.start < value_span.end
+                    && target_span.is_none_or(|target| value_span.start >= target.end)
                 {
                     let direct_call_name = if callable_reference_name(&value, src, handler).is_some() {
                         None
@@ -5092,6 +6032,31 @@ pub fn extract_assignment_value_facts(
                             })
                     };
                     let direct_call_receiver = direct_call_name.as_deref().and_then(call_receiver_from_name);
+                    fn direct_call_node<'tree>(
+                        node: Node<'tree>,
+                        handler: &GrammarHandler,
+                    ) -> Option<Node<'tree>> {
+                        if handler.is_call(node.kind()) {
+                            return Some(node);
+                        }
+                        let child = transparent_direct_call_child(&node, handler)?;
+                        direct_call_node(child, handler)
+                    }
+                    let direct_call_node = direct_call_name
+                        .as_ref()
+                        .and_then(|_| direct_call_node(value, handler));
+                    let direct_call_span = direct_call_node
+                        .and_then(|call| parsed_call_target(&call, src, handler))
+                        .map(|target| span_of(file, &target.node));
+                    let direct_call_receiver_node = direct_call_receiver
+                        .as_ref()
+                        .and(direct_call_node)
+                        .and_then(|call| call_receiver_node(&call, src, handler));
+                    let direct_call_receiver_span =
+                        direct_call_receiver_node.map(|receiver| span_of(file, &receiver));
+                    let direct_call_receiver_flow = direct_call_receiver_node.map(|receiver| {
+                        expression_flow::expression_flow_from_node_with_handler(receiver, file, src, handler)
+                    });
                     let call_sites = if callable_reference_name(&value, src, handler).is_some() {
                         Vec::new()
                     } else {
@@ -5109,10 +6074,16 @@ pub fn extract_assignment_value_facts(
                         value_flow: expression_flow::expression_flow_from_node_with_handler(
                             value, file, src, handler,
                         ),
+                        static_value: None,
                         exact_callable_return: None,
+                        inline_callback_static_return: None,
+                        inline_callback_fields: Vec::new(),
                         exact_static_call_args: None,
                         direct_call_name,
+                        direct_call_span,
                         direct_call_receiver,
+                        direct_call_receiver_span,
+                        direct_call_receiver_flow,
                     });
                 }
             }
@@ -5200,6 +6171,9 @@ pub fn extract_call_argument_value_facts(
         if handler.call_ref_kinds.contains(&node.kind()) {
             return parsed_call_target(&node, src, handler).map(|target| span_of(file, &target.node));
         }
+        if let Some(FlowEvent::Call { span, .. }) = pseudo_call_event(node, file, src, handler) {
+            return Some(span);
+        }
         let child = transparent_direct_call_child(&node, handler)?;
         direct_call_callee_span(child, file, src, handler)
     }
@@ -5277,27 +6251,37 @@ pub fn extract_call_argument_value_facts(
                                 value, file, src, handler,
                             ),
                             direct_call_callee_span(value, file, src, handler),
-                            handler.expression_value_kind(value, src),
+                            handler.expression_value_kind(value, src).or_else(|| {
+                                callable_reference_name(&value, src, handler)
+                                    .map(|_| crate::AssignValueKind::CallableReference)
+                            }),
                             if handler.is_lambda(value.kind()) {
                                 extract_param_names(&value, src, handler)
                             } else {
                                 Vec::new()
                             },
+                            handler.is_lambda(value.kind()).then(|| span_of(file, &value)),
+                            expression_flow::exact_inline_aggregate_callbacks(value, file, src, handler)
+                                .unwrap_or_default(),
                         )
                     })
-                    .max_by_key(|(flow, _, value_kind, callback_params)| {
+                    .max_by_key(|(flow, _, value_kind, callback_params, _, callback_fields)| {
                         (
                             flow.aggregate_fields.len() + flow.tuple_items.len() + flow.spreads.len(),
                             usize::from(!flow.is_empty()),
                             usize::from(value_kind.is_some()),
-                            callback_params.len(),
+                            callback_params.len() + callback_fields.len(),
                         )
                     })
             });
-        if let Some((value_flow, direct_call_span, value_kind, inline_callback_params)) =
-            selected.filter(|(flow, _, value_kind, callback_params)| {
-                !flow.is_empty() || value_kind.is_some() || !callback_params.is_empty()
-            })
+        if let Some((
+            value_flow,
+            direct_call_span,
+            value_kind,
+            inline_callback_params,
+            inline_callback_span,
+            inline_callback_fields,
+        )) = selected
         {
             facts.push(crate::CallArgumentValueFact {
                 call_span,
@@ -5306,6 +6290,9 @@ pub fn extract_call_argument_value_facts(
                 direct_call_span,
                 value_kind,
                 inline_callback_params,
+                inline_callback_span,
+                inline_callback_static_return: None,
+                inline_callback_fields,
                 value_flow,
                 static_value: None,
                 exact_static_aggregate_fields: Vec::new(),
@@ -5323,6 +6310,107 @@ pub fn extract_call_argument_value_facts(
     });
     facts.dedup();
     facts
+}
+
+fn lambda_body_node<'tree>(lambda: Node<'tree>, handler: &GrammarHandler) -> Option<Node<'tree>> {
+    let mut current = lambda;
+    loop {
+        // Prefer an adapter-declared direct body node over a grammar field.
+        // Several grammars reuse `body` for a parameter/receiver fragment on
+        // one lambda production while exposing the executable body as a
+        // stable direct node kind. Both signals are compiler metadata, but
+        // the explicit kind inventory is deterministic across those sibling
+        // productions and never searches below a nested callable.
+        let body = {
+            let mut cursor = current.walk();
+            let body = current
+                .named_children(&mut cursor)
+                .find(|child| handler.lambda_body_kinds.contains(&child.kind()));
+            body
+        }
+        .or_else(|| {
+            handler
+                .lambda_body_field_names
+                .iter()
+                .find_map(|field| current.child_by_field_name(field))
+        })
+        .or_else(|| lambda_expression_body_child(&current))?;
+        if body.id() == current.id() {
+            return None;
+        }
+        // Some grammars wrap a trailing callback in one or more
+        // lambda-shaped syntax nodes before exposing its statement/expression
+        // body (Kotlin `annotated_lambda -> lambda_literal -> statements`).
+        // Follow only adapter-declared lambda nodes; treating the wrapper as
+        // the returned expression loses the actual scalar body, while a
+        // vocabulary-free descendant search could cross a nested callable.
+        if handler.is_lambda(body.kind()) {
+            current = body;
+            continue;
+        }
+        return Some(body);
+    }
+}
+
+fn exact_inline_callback_static_return(
+    value_node: Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+    decode: fn(Node<'_>, &[u8]) -> Option<crate::StaticScalarValue>,
+) -> Option<crate::StaticScalarValue> {
+    if !handler.is_lambda(value_node.kind()) {
+        return None;
+    }
+    let body = lambda_body_node(value_node, handler)?;
+    if let Some(expression) = implicit_return_expression_node(&body, handler) {
+        return decode(expression, src);
+    }
+
+    // A block callback is a complete constant-return proof only when its
+    // sole executable statement is one unconditional explicit return.
+    // Conditional, mixed, nested-callback, and fall-through bodies fail
+    // closed. More elaborate callback CFG summaries may widen this exact
+    // subset later without changing the fact's meaning.
+    let mut cursor = body.walk();
+    let statements = body
+        .named_children(&mut cursor)
+        .filter(|child| !child.kind().contains("comment"))
+        .collect::<Vec<_>>();
+    let [return_node] = statements.as_slice() else {
+        return None;
+    };
+    if !handler.is_return(return_node.kind()) {
+        return None;
+    }
+    let mut cursor = return_node.walk();
+    let values = return_node
+        .named_children(&mut cursor)
+        .filter(|child| !child.kind().contains("comment"))
+        .collect::<Vec<_>>();
+    let [value] = values.as_slice() else {
+        return None;
+    };
+    decode(*value, src)
+}
+
+/// Attach exact scalar-return summaries to inline callbacks assigned as a
+/// complete RHS. The frontend supplies literal decoding; this shared helper
+/// owns only the grammar-neutral assignment-span and lambda-body relationship.
+pub fn populate_assignment_inline_callback_static_returns(
+    index: &mut crate::DeclIndex,
+    tree: &Tree,
+    src: &[u8],
+    handler: &GrammarHandler,
+    decode: fn(Node<'_>, &[u8]) -> Option<crate::StaticScalarValue>,
+) {
+    let root = tree.root_node();
+    for fact in &mut index.assignment_values {
+        let Some(value_node) = node_at_span(root, fact.value_span, &[]) else {
+            continue;
+        };
+        fact.inline_callback_static_return =
+            exact_inline_callback_static_return(value_node, src, handler, decode);
+    }
 }
 
 /// Attach adapter-decoded scalar literals to compiler call-argument facts.
@@ -5394,7 +6482,11 @@ pub fn populate_call_argument_static_values(
     while let Some(node) = stack.pop() {
         if node.is_named() {
             let span = span_of(file, &node);
-            argument_nodes.insert((span.start, span.end), node);
+            // Argument wrappers and their sole value child may occupy the
+            // same byte range. Preserve the first (outermost) node reached
+            // by the root-first walk so aggregate/container structure is not
+            // replaced by a same-span leaf before exact value decoding.
+            argument_nodes.entry((span.start, span.end)).or_insert(node);
         }
         let mut cursor = node.walk();
         stack.extend(node.named_children(&mut cursor));
@@ -5406,12 +6498,15 @@ pub fn populate_call_argument_static_values(
         };
         let value_node = argument_value_node(*argument_node, src, handler);
         let static_value = decode(value_node, src);
+        let inline_callback_static_return =
+            exact_inline_callback_static_return(value_node, src, handler, decode);
         let exact_static_aggregate_fields =
             expression_flow::exact_static_aggregate_fields(value_node, src, handler, decode)
                 .unwrap_or_default();
         let exact_static_sequence_values =
             expression_flow::exact_static_sequence_values(value_node, src, handler, decode);
         if static_value.is_none()
+            && inline_callback_static_return.is_none()
             && exact_static_aggregate_fields.is_empty()
             && exact_static_sequence_values.is_none()
         {
@@ -5423,6 +6518,7 @@ pub fn populate_call_argument_static_values(
             .find(|fact| fact.call_span == call_span && fact.argument_index == argument_index)
         {
             fact.static_value = static_value;
+            fact.inline_callback_static_return = inline_callback_static_return;
             fact.exact_static_aggregate_fields = exact_static_aggregate_fields;
             fact.exact_static_sequence_values = exact_static_sequence_values;
         } else {
@@ -5435,12 +6531,23 @@ pub fn populate_call_argument_static_values(
                 } else {
                     None
                 },
-                value_kind: handler.expression_value_kind(value_node, src),
+                value_kind: handler.expression_value_kind(value_node, src).or_else(|| {
+                    callable_reference_name(&value_node, src, handler)
+                        .map(|_| crate::AssignValueKind::CallableReference)
+                }),
                 inline_callback_params: if handler.is_lambda(value_node.kind()) {
                     extract_param_names(&value_node, src, handler)
                 } else {
                     Vec::new()
                 },
+                inline_callback_span: handler
+                    .is_lambda(value_node.kind())
+                    .then(|| span_of(file, &value_node)),
+                inline_callback_static_return,
+                inline_callback_fields: expression_flow::exact_inline_aggregate_callbacks(
+                    value_node, file, src, handler,
+                )
+                .unwrap_or_default(),
                 value_flow: Default::default(),
                 static_value,
                 exact_static_aggregate_fields,
@@ -5457,6 +6564,73 @@ pub fn populate_call_argument_static_values(
         )
     });
     index.call_argument_values.dedup();
+    populate_assignment_inline_callback_fields(index, tree, file, src, handler);
+    populate_assignment_static_call_arguments(index, tree, file, src, handler, decode);
+}
+
+/// Attach exact callback-map structure to assignment RHS aggregates. This is
+/// intentionally independent of scalar literal decoding: an object whose
+/// leaves are functions usually has no scalar value, but its static field
+/// paths and callback declaration spans are still complete compiler facts.
+fn populate_assignment_inline_callback_fields(
+    index: &mut crate::DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) {
+    let root = tree.root_node();
+    for fact in &mut index.assignment_values {
+        let Some(value) = node_at_span(root, fact.value_span, &[]) else {
+            continue;
+        };
+        fact.inline_callback_fields =
+            expression_flow::exact_inline_aggregate_callbacks(value, file, src, handler).unwrap_or_default();
+    }
+}
+
+/// Attach exact scalar arguments to assignments whose complete RHS is one
+/// direct call. The adapter owns literal decoding; this shared pass owns only
+/// the Tree-sitter assignment/call/argument relationship. If any argument is
+/// dynamic or cannot be decoded, the complete argument vector remains
+/// unknown so downstream state constraints fail closed.
+fn populate_assignment_static_call_arguments(
+    index: &mut crate::DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    decode: fn(Node<'_>, &[u8]) -> Option<crate::StaticScalarValue>,
+) {
+    let root = tree.root_node();
+    for fact in &mut index.assignment_values {
+        let Some(value) = node_at_span(root, fact.value_span, &[]) else {
+            continue;
+        };
+        fact.static_value = decode(value, src);
+        if fact.direct_call_name.is_none() {
+            continue;
+        }
+        let call = if handler.is_call(value.kind()) {
+            value
+        } else {
+            let Some(call) = transparent_direct_call_child(&value, handler) else {
+                continue;
+            };
+            call
+        };
+        let Some(FlowEvent::Call { args, .. }) = build_call_event(call, file, src, handler, &[]) else {
+            continue;
+        };
+        let arguments = args
+            .into_iter()
+            .map(|argument| {
+                let node = node_at_span(root, argument.span, &[])?;
+                decode(argument_value_node(node, src, handler), src)
+            })
+            .collect::<Option<Vec<_>>>();
+        fact.exact_static_call_args = arguments;
+    }
 }
 
 /// Read-only inputs shared by the declaration-lowering passes.
@@ -5475,30 +6649,31 @@ struct CallableLowering<'a> {
 }
 
 /// Lower anonymous callable nodes into the same declaration IR used by named
-/// callables. Call-argument lambdas are intentionally omitted because the
-/// enclosing flow walker already lowers those bodies in place.
+/// callables. Passing a lambda as an argument does not execute it, so every
+/// callback keeps its own compiler scope. Immediate-invocation syntax remains
+/// the sole exception and is lowered by the call walker as execution in the
+/// enclosing evaluator.
 fn lower_lambda_declarations(lowering: &CallableLowering<'_>, defs: &mut Vec<crate::Decl>, next: &mut u32) {
     let lambda_nodes = collect_kinds(lowering.tree, lowering.handler.lambda_kinds);
     for lambda in lambda_nodes {
+        let span = span_of(lowering.file, &lambda);
         // Some adapters promote expression-bodied callables to normal
         // declarations because their grammar exposes enough structure
         // to name and walk them directly. Do not index the same syntax
         // again as a lambda; duplicate FuncIds split call resolution
-        // from matcher attribution for a single semantic function.
-        if lowering.handler.fn_kinds.contains(&lambda.kind()) {
+        // from matcher attribution for a single semantic function. A grammar
+        // may classify anonymous function expressions as both a function and
+        // a lambda kind, however, so syntax vocabulary alone is not proof
+        // that the named-declaration pass actually emitted this node.
+        if defs.iter().any(|decl| {
+            decl.span == span
+                && matches!(
+                    decl.kind,
+                    crate::DeclKind::Function | crate::DeclKind::Method | crate::DeclKind::Constructor
+                )
+        }) {
             continue;
         }
-        // Skip lambdas that are passed directly as call arguments.
-        // `walk_into` inlines those bodies into the enclosing call's
-        // owner via `walk_lambda_body`; emitting a second synthetic
-        // decl for the same source events creates duplicate source
-        // starts and duplicate findings with different chain roots.
-        // Keep non-call-argument lambdas, including local or top-level
-        // assignments, because their bodies are not otherwise inlined.
-        if lambda_is_inlined_call_argument(&lambda, lowering.handler) {
-            continue;
-        }
-        let span = span_of(lowering.file, &lambda);
         let binding_name = binding_name_node(&lambda, lowering.src);
         let name = binding_name.map_or_else(
             || {
@@ -5538,6 +6713,17 @@ fn lower_lambda_declarations(lowering: &CallableLowering<'_>, defs: &mut Vec<cra
                     sc.child_by_field_name("body")
                         .or_else(|| sc.child_by_field_name("right"))
                 })
+            })
+            // Some grammars classify the callable container itself as a
+            // complete body (Scala partial-function `case_block`, Ruby block
+            // callbacks). The adapter opts in through `lambda_body_kinds`;
+            // shared lowering only honors that exact syntax capability.
+            .or_else(|| {
+                lowering
+                    .handler
+                    .lambda_body_kinds
+                    .contains(&lambda.kind())
+                    .then_some(lambda)
             })
             // Expression-bodied lambdas with no wrapper node (Scala
             // `(x) => sink(x)`, Rust `|x| expr`): the body is the last
@@ -5797,6 +6983,29 @@ fn lower_module_declaration(lowering: &CallableLowering<'_>, defs: &mut Vec<crat
         lowering.handler,
         lowering.class_names,
     );
+    let immediately_invoked_lambdas = collect_kinds(lowering.tree, lowering.handler.call_kinds)
+        .into_iter()
+        .filter_map(|call| immediately_invoked_lambda_callee(&call, lowering.handler))
+        .map(|lambda| span_of(lowering.file, &lambda))
+        .collect::<ahash::AHashSet<_>>();
+    // Most grammars nest the body below the callable node, so the root walk's
+    // nested-declaration guard excludes it. Split-signature grammars place a
+    // function body beside its signature; the root walk can then see the body
+    // a second time. Remove events already owned by an exact callable body so
+    // module flow never duplicates function-local execution. An immediately
+    // invoked lambda is different: syntax proves that its body executes in
+    // the enclosing evaluator, so the root walker deliberately inlines it.
+    // Keep those events even though the lambda also has a declaration for
+    // symbol/navigation purposes. Ordinary passed callbacks remain isolated.
+    root_events.retain(|event| {
+        let span = event.span();
+        !defs.iter().any(|decl| {
+            !immediately_invoked_lambdas.contains(&decl.span)
+                && decl.body_span.is_some_and(|body| {
+                    body.file == span.file && body.start <= span.start && span.end <= body.end
+                })
+        })
+    });
     if module_syntax_broken {
         retain_flow_events_outside_errors(
             &mut root_events,
@@ -6059,7 +7268,14 @@ pub fn decl_index_from_tree_with_handler(
         // the name alone.
         let is_variadic = parameter_list_is_variadic(&param_source, handler)
             || params.last().is_some_and(|p| p == SYNTHETIC_VARARGS_PARAM);
-        let param_annotations = extract_param_annotations(&param_source, src, handler);
+        let mut param_annotations = extract_param_annotations(&param_source, src, handler);
+        // C-family `f(void)` has a named `primitive_type` child in the
+        // parameter container but declares zero parameters. Annotation
+        // extraction must remain parallel to the compiler's actual binding
+        // slots, not to arbitrary named syntax children.
+        if params.is_empty() {
+            param_annotations.clear();
+        }
         let receiver_param_index =
             if matches!(decl_kind, crate::DeclKind::Method | crate::DeclKind::Constructor)
                 || has_ancestor_kind(&node, handler.method_context_kinds)
@@ -6098,6 +7314,20 @@ pub fn decl_index_from_tree_with_handler(
             collect_receiver_state_sources(&flow_events, &params, handler.implicit_receiver_names);
 
         let parent_class_span = nearest_class_owner_span(&node, handler).map(|class| span_of(file, &class));
+        // Some grammars split a callable into a signature node followed by a
+        // sibling body (Dart is the canonical example). The semantic
+        // declaration owns both pieces, so its span must enclose the body
+        // rather than ending at the signature boundary.
+        let declaration_span = body_node.map_or_else(
+            || span_of(file, &node),
+            |body| {
+                Span::new(
+                    file,
+                    node.start_byte().min(body.start_byte()) as u64,
+                    node.end_byte().max(body.end_byte()) as u64,
+                )
+            },
+        );
         let symbol = bonsai_common::SymbolId::new(next);
         next += 1;
         if let Some(parent_span) = parent_class_span {
@@ -6109,7 +7339,7 @@ pub fn decl_index_from_tree_with_handler(
             name: name.to_string(),
             qualified_name: None,
             module_path: crate::ModulePath::default(),
-            span: span_of(file, &node),
+            span: declaration_span,
             name_span: span_of(file, &name_node),
             visibility: crate::Visibility::Public,
             parent: None,
@@ -6193,6 +7423,7 @@ pub fn decl_index_from_tree_with_handler(
         character_substitutions: Vec::new(),
         character_constraints: Vec::new(),
         guarded_value_filters: Vec::new(),
+        predicate_returns: Vec::new(),
         same_origin_path_constraints: Vec::new(),
         compiler_guards: Vec::new(),
         dynamic_key_filters: Vec::new(),
@@ -6264,9 +7495,7 @@ fn has_ancestor_kind(node: &Node<'_>, kinds: &[&str]) -> bool {
 }
 
 fn call_receiver_from_name(name: &str) -> Option<String> {
-    let (receiver, _) = name.rsplit_once('.')?;
-    let receiver = receiver.trim();
-    (!receiver.is_empty()).then(|| receiver.to_string())
+    bonsai_common::qualified_name_owner(name.trim()).map(ToString::to_string)
 }
 
 /// Collect every string / char literal in the tree with a rough content
@@ -7216,110 +8445,6 @@ fn emit_invoked_lambda_param_bindings(
     }
 }
 
-fn emit_inline_closure_param_bindings(
-    lambda: Node<'_>,
-    file: FileId,
-    src: &[u8],
-    handler: &GrammarHandler,
-    source_names: &[String],
-    out: &mut Vec<FlowEvent>,
-) {
-    let params = extract_param_names(&lambda, src, handler);
-    let params = if params.is_empty() {
-        let Some(implicit) = handler.implicit_lambda_parameter_name else {
-            return;
-        };
-        vec![implicit.to_string()]
-    } else {
-        params
-    };
-    for param in params {
-        if param.is_empty() {
-            continue;
-        }
-        let mut sources = source_names.to_vec();
-        sources.sort();
-        sources.dedup();
-        if sources.is_empty() {
-            continue;
-        }
-        out.push(FlowEvent::Assign {
-            span: span_of(file, &lambda),
-            target: param,
-            source_name: None,
-            source_call: None,
-            source_call_args: Vec::new(),
-            source_names: sources.clone(),
-            declares_new_binding: false,
-            value_kind: None,
-        });
-    }
-}
-
-fn emit_inline_closure_param_bindings_from_yield_call(
-    lambda: Node<'_>,
-    _file: FileId,
-    src: &[u8],
-    handler: &GrammarHandler,
-    call_event: Option<&FlowEvent>,
-    out: &mut Vec<FlowEvent>,
-) {
-    let Some(FlowEvent::Call {
-        span: call_span,
-        name,
-        args,
-        ..
-    }) = call_event
-    else {
-        return;
-    };
-    let params = extract_param_names(&lambda, src, handler);
-    if params.is_empty() {
-        return;
-    }
-    let source_call_args: Vec<String> = args.iter().map(|arg| arg.value_text.clone()).collect();
-    for param in params {
-        if param.is_empty() {
-            continue;
-        }
-        out.push(FlowEvent::Assign {
-            // This binding is the yielded output of the enclosing call, so
-            // its semantic identity is that AST call site. The block span is
-            // only the lexical scope of the parameter and cannot resolve a
-            // callee in the callgraph.
-            span: *call_span,
-            target: param,
-            source_name: None,
-            source_call: Some(name.clone()),
-            source_call_args: source_call_args.clone(),
-            source_names: Vec::new(),
-            declares_new_binding: false,
-            value_kind: Some(crate::AssignValueKind::YieldResult),
-        });
-    }
-}
-
-fn call_event_value_source_names(event: &FlowEvent) -> Vec<String> {
-    let FlowEvent::Call { receiver, args, .. } = event else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    if let Some(receiver) = receiver.as_deref().and_then(receiver_base_from_text) {
-        push_receiver_base_variants(&mut out, &receiver);
-    }
-    for arg in args {
-        if let Some(place) = arg.place.as_deref() {
-            push_value_text_source_name(&mut out, place);
-        }
-        for source in &arg.source_names {
-            push_value_text_source_name(&mut out, source);
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
 fn push_value_text_source_name(out: &mut Vec<String>, value: &str) {
     let value = value.trim();
     if value.is_empty() {
@@ -7334,10 +8459,10 @@ fn push_value_text_source_name(out: &mut Vec<String>, value: &str) {
     }
 }
 
-/// Walk a lambda-like node's body into `out`. Bypasses the is_lambda
-/// short-circuit so callers can inline closures passed as higher-order
-/// function arguments (e.g. `xs.forEach { x -> body }` — the body's
-/// calls belong to the enclosing function's flow).
+/// Walk a lambda-like node's body into `out`, bypassing the nested-lambda
+/// ownership guard. Callers use this only when syntax proves immediate
+/// execution (an IIFE) or when an adapter-owned control/defer construct uses
+/// a lambda-shaped CST wrapper for the current callable's body.
 ///
 /// Handles wrapper kinds that nest the real body: Kotlin's
 /// `annotated_lambda` wraps a `lambda_literal`; Ruby's `block` /
@@ -7502,36 +8627,6 @@ fn lambda_expression_body_child<'a>(lambda: &Node<'a>) -> Option<Node<'a>> {
         let kind = child.kind();
         !kind.contains("param") && !kind.contains("type") && !kind.ends_with("parameters")
     })
-}
-
-fn lambda_is_inlined_call_argument(node: &Node<'_>, handler: &GrammarHandler) -> bool {
-    // Collection / property-literal containers that hold the lambda as a
-    // VALUE rather than passing it directly as a call argument. A lambda
-    // nested inside one of these — e.g. a config-object route handler
-    // `server.route({ handler: (request) => { ... } })` (Hapi), or a
-    // callback stored in an array literal — is NOT inlined by the
-    // direct-call-argument path (`walk_lambda_body`), so it must keep its
-    // own Pass-2b decl; otherwise its body is never walked and every
-    // source/sink inside it is invisible. Stop the upward scan here and
-    // report "not an inlined argument" so the decl survives.
-    let mut parent = node.parent();
-    while let Some(candidate) = parent {
-        let kind = candidate.kind();
-        if handler.lambda_value_container_kinds.contains(&kind) {
-            return false;
-        }
-        if handler.is_call(kind) {
-            return true;
-        }
-        if handler.fn_kinds.contains(&kind)
-            || handler.class_kinds.contains(&kind)
-            || handler.lambda_kinds.contains(&kind)
-        {
-            return false;
-        }
-        parent = candidate.parent();
-    }
-    false
 }
 
 /// Apply file-path-based qualified_name and module_path to every
@@ -8226,23 +9321,64 @@ fn proven_constructor_result_type_name(
         .first()
         .filter(|type_name| !type_name.trim().is_empty())
         .cloned()
-        .or_else(|| receiver.and_then(proven_constructor_type_name))
+        // A compiler-classified method constructor such as
+        // `External::Nested::Context.new` carries the complete owner in its
+        // parsed receiver. Preserve that identity: shortening it to
+        // `Context` loses the namespace/import evidence needed to distinguish
+        // same-named types from different providers. Call classification, not
+        // the spelling of this receiver, is what proves constructor semantics.
+        .or_else(|| {
+            receiver
+                .map(str::trim)
+                .filter(|owner| !owner.is_empty())
+                .map(str::to_string)
+        })
         .or_else(|| proven_constructor_type_name(callee))
 }
 
 fn resolved_declared_constructor_type(
     callee: &str,
-    declared_types: &ahash::AHashSet<String>,
+    declared_types: &[DeclaredConstructorTypeIdentity],
 ) -> Option<String> {
-    let candidates = callee
-        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-        .filter(|candidate| !candidate.is_empty())
-        .collect::<ahash::AHashSet<_>>();
-    let mut matches = declared_types.iter().filter(|name| {
-        candidates.contains(name.as_str()) || candidates.contains(bonsai_common::short_qualified_tail(name))
+    let callee = callee.trim();
+    if callee.is_empty() {
+        return None;
+    }
+    let exact = declared_types
+        .iter()
+        .filter(|identity| identity.name == callee || identity.qualified_name.as_deref() == Some(callee))
+        .collect::<Vec<_>>();
+    if exact.len() == 1 {
+        let identity = exact[0];
+        return Some(
+            identity
+                .qualified_name
+                .as_ref()
+                .filter(|qualified| qualified.as_str() == callee)
+                .cloned()
+                .unwrap_or_else(|| identity.name.clone()),
+        );
+    }
+    if exact.len() > 1 {
+        return None;
+    }
+
+    let tail = bonsai_common::short_qualified_tail(callee);
+    let mut matches = declared_types.iter().filter(|identity| {
+        identity.name == tail
+            || identity
+                .qualified_name
+                .as_deref()
+                .is_some_and(|qualified| bonsai_common::short_qualified_tail(qualified) == tail)
     });
-    let resolved = matches.next()?.clone();
-    matches.next().is_none().then_some(resolved)
+    let resolved = matches.next()?;
+    matches.next().is_none().then(|| resolved.name.clone())
+}
+
+#[derive(Debug)]
+struct DeclaredConstructorTypeIdentity {
+    name: String,
+    qualified_name: Option<String>,
 }
 
 /// Collect `local -> ConstructedType` aliases from constructor-shaped
@@ -8257,13 +9393,13 @@ pub fn collect_constructor_result_type_aliases(
     events: &[crate::FlowEvent],
     out: &mut Vec<crate::TypeAliasBinding>,
 ) {
-    collect_constructor_result_type_aliases_with_declared_types(events, out, &ahash::AHashSet::new());
+    collect_constructor_result_type_aliases_with_declared_types(events, out, &[]);
 }
 
 fn collect_constructor_result_type_aliases_with_declared_types(
     events: &[crate::FlowEvent],
     out: &mut Vec<crate::TypeAliasBinding>,
-    declared_types: &ahash::AHashSet<String>,
+    declared_types: &[DeclaredConstructorTypeIdentity],
 ) {
     let mut constructor_calls = events
         .iter()
@@ -8276,11 +9412,11 @@ fn collect_constructor_result_type_aliases_with_declared_types(
                 call_kind: CallKind::Constructor,
                 ..
             } => proven_constructor_result_type_name(name, receiver.as_deref(), receiver_types)
-                .map(|type_name| (*span, type_name)),
+                .map(|type_name| (*span, name.clone(), type_name)),
             _ => None,
         })
         .collect::<Vec<_>>();
-    constructor_calls.sort_by_key(|(span, _)| (span.file.raw(), span.start, span.end));
+    constructor_calls.sort_by_key(|(span, _, _)| (span.file.raw(), span.start, span.end));
 
     for event in events {
         match event {
@@ -8293,8 +9429,9 @@ fn collect_constructor_result_type_aliases_with_declared_types(
                 if target.is_empty() {
                     continue;
                 }
-                let type_name = contained_constructor_call_type(&constructor_calls, *span)
-                    .or_else(|| resolved_declared_constructor_type(callee, declared_types));
+                let type_name = resolved_declared_constructor_type(callee, declared_types).or_else(|| {
+                    contained_constructor_call_type_for_callee(&constructor_calls, *span, callee)
+                });
                 if let Some(type_name) = type_name {
                     out.push(crate::TypeAliasBinding {
                         name: target.clone(),
@@ -8315,12 +9452,26 @@ fn collect_constructor_result_type_aliases_with_declared_types(
                 source_call: None,
                 source_name: None,
                 span,
+                value_kind: Some(crate::AssignValueKind::CallResult | crate::AssignValueKind::Compound),
                 ..
             } => {
                 if target.is_empty() {
                     continue;
                 }
-                if let Some(type_name) = contained_constructor_call_type(&constructor_calls, *span) {
+                let type_name = match event {
+                    FlowEvent::Assign {
+                        value_kind: Some(crate::AssignValueKind::CallResult),
+                        ..
+                    } => contained_constructor_call_type(&constructor_calls, *span),
+                    // Some adapters historically lower a constructor RHS as
+                    // `Compound` while still emitting the exact constructor
+                    // call inside the assignment span. Preserve that compiler
+                    // path only when the span contains one unambiguous
+                    // constructor. Conditional/multi-constructor compounds
+                    // remain untyped rather than taking the first candidate.
+                    _ => contained_unique_constructor_call_type(&constructor_calls, *span),
+                };
+                if let Some(type_name) = type_name {
                     out.push(crate::TypeAliasBinding {
                         name: target.clone(),
                         type_name,
@@ -8361,6 +9512,37 @@ fn collect_constructor_result_type_aliases_with_declared_types(
     }
 }
 
+fn contained_constructor_call_type(
+    constructor_calls: &[(Span, String, String)],
+    assign_span: Span,
+) -> Option<String> {
+    let first = constructor_calls.partition_point(|(span, _, _)| {
+        span.file.raw() < assign_span.file.raw()
+            || (span.file == assign_span.file && span.start < assign_span.start)
+    });
+    constructor_calls[first..]
+        .iter()
+        .take_while(|(span, _, _)| span.file == assign_span.file && span.start < assign_span.end)
+        .find(|(span, _, _)| span.end <= assign_span.end)
+        .map(|(_, _, type_name)| type_name.clone())
+}
+
+fn contained_unique_constructor_call_type(
+    constructor_calls: &[(Span, String, String)],
+    assign_span: Span,
+) -> Option<String> {
+    let first = constructor_calls.partition_point(|(span, _, _)| {
+        span.file.raw() < assign_span.file.raw()
+            || (span.file == assign_span.file && span.start < assign_span.start)
+    });
+    let mut contained = constructor_calls[first..]
+        .iter()
+        .take_while(|(span, _, _)| span.file == assign_span.file && span.start < assign_span.end)
+        .filter(|(span, _, _)| span.end <= assign_span.end);
+    let (_, _, type_name) = contained.next()?;
+    contained.next().is_none().then(|| type_name.clone())
+}
+
 /// Find the constructor type for a `new`-expression RHS that the
 /// grammar surfaced as a sibling `Call` event rather than the
 /// assignment's `source_call` (the JS/TS shape). Searches a span-sorted
@@ -8369,19 +9551,27 @@ fn collect_constructor_result_type_aliases_with_declared_types(
 /// `x = new Foo(new Bar())` resolves to `Foo`. Returns `None` when no
 /// contained constructor call exists, so unrelated adjacent statements
 /// (`x = compute(); Helper();`) never mistype `x`.
-fn contained_constructor_call_type(
-    constructor_calls: &[(Span, String)],
+fn contained_constructor_call_type_for_callee(
+    constructor_calls: &[(Span, String, String)],
     assign_span: Span,
+    assigned_callee: &str,
 ) -> Option<String> {
-    let first = constructor_calls.partition_point(|(span, _)| {
+    let expected_tail = proven_constructor_type_name(assigned_callee)?;
+    let first = constructor_calls.partition_point(|(span, _, _)| {
         span.file.raw() < assign_span.file.raw()
             || (span.file == assign_span.file && span.start < assign_span.start)
     });
     constructor_calls[first..]
         .iter()
-        .take_while(|(span, _)| span.file == assign_span.file && span.start < assign_span.end)
-        .find(|(span, _)| span.end <= assign_span.end)
-        .map(|(_, type_name)| type_name.clone())
+        .take_while(|(span, _, _)| span.file == assign_span.file && span.start < assign_span.end)
+        .find(|(span, constructor_name, type_name)| {
+            span.end <= assign_span.end && {
+                proven_constructor_type_name(constructor_name)
+                    .is_some_and(|observed| observed == expected_tail)
+                    || type_name == &expected_tail
+            }
+        })
+        .map(|(_, _, type_name)| type_name.clone())
 }
 
 /// Apply local constructor-result type inference across every decl in
@@ -8405,9 +9595,12 @@ pub fn apply_constructor_result_type_aliases(idx: &mut crate::DeclIndex) {
                 crate::DeclKind::Class | crate::DeclKind::Struct | crate::DeclKind::Enum
             )
         })
-        .flat_map(|decl| std::iter::once(decl.name.clone()).chain(decl.qualified_name.clone()))
-        .filter(|name| !name.is_empty())
-        .collect::<ahash::AHashSet<_>>();
+        .filter(|decl| !decl.name.is_empty())
+        .map(|decl| DeclaredConstructorTypeIdentity {
+            name: decl.name.clone(),
+            qualified_name: decl.qualified_name.clone().filter(|name| !name.is_empty()),
+        })
+        .collect::<Vec<_>>();
     for decl in &mut idx.defs {
         let mut ctor_aliases = Vec::new();
         collect_constructor_result_type_aliases_with_declared_types(
@@ -8484,6 +9677,150 @@ pub fn apply_assign_call_result_types(idx: &mut crate::DeclIndex) {
             if !already {
                 decl.type_aliases.push(binding);
             }
+        }
+    }
+}
+
+/// Propagate compiler-owned local type facts through exact value aliases.
+///
+/// Adapters lower source-language rename syntax to
+/// `FlowEvent::Assign { target, source_name }`.  Once a constructor result or
+/// annotation has typed the source binding, the target denotes the same
+/// runtime value and therefore has the same receiver type.  Keeping this pass
+/// on the language-neutral IR avoids teaching the resolver how any language
+/// spells declarations, sigils, assignment operators, or constructors.
+///
+/// Inference fails closed when a target has any non-alias assignment or when
+/// distinct typed sources can reach it.  Explicit adapter-provided bindings
+/// always win and are never replaced.
+pub fn apply_assignment_type_aliases(idx: &mut crate::DeclIndex) {
+    for decl in &mut idx.defs {
+        apply_assignment_type_aliases_to_decl(decl);
+    }
+}
+
+fn apply_assignment_type_aliases_to_decl(decl: &mut crate::Decl) {
+    let mut alias_edges = Vec::new();
+    let mut non_alias_targets = ahash::AHashSet::new();
+    collect_assignment_type_edges(&decl.flow_events, &mut alias_edges, &mut non_alias_targets);
+    if alias_edges.is_empty() {
+        return;
+    }
+
+    let explicit_names = decl
+        .type_aliases
+        .iter()
+        .map(|binding| binding.name.clone())
+        .collect::<ahash::AHashSet<_>>();
+    let mut types_by_name: ahash::AHashMap<String, ahash::AHashSet<String>> = ahash::AHashMap::new();
+    for binding in &decl.type_aliases {
+        if !binding.name.trim().is_empty() && !binding.type_name.trim().is_empty() {
+            types_by_name
+                .entry(binding.name.clone())
+                .or_default()
+                .insert(binding.type_name.clone());
+        }
+    }
+
+    // This is a finite compiler dataflow fixed point over exact assignment
+    // edges.  It is not workspace/name search: every admitted relation was
+    // emitted by the active language adapter for this declaration.
+    loop {
+        let mut changed = false;
+        for (source, target) in &alias_edges {
+            if explicit_names.contains(target) || non_alias_targets.contains(target) {
+                continue;
+            }
+            let Some(source_types) = types_by_name.get(source).cloned() else {
+                continue;
+            };
+            let target_types = types_by_name.entry(target.clone()).or_default();
+            let before = target_types.len();
+            target_types.extend(source_types);
+            changed |= target_types.len() != before;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut inferred = types_by_name
+        .into_iter()
+        .filter(|(name, types)| {
+            !explicit_names.contains(name) && !non_alias_targets.contains(name) && types.len() == 1
+        })
+        .filter_map(|(name, types)| {
+            let type_name = types.into_iter().next()?;
+            Some(crate::TypeAliasBinding { name, type_name })
+        })
+        .collect::<Vec<_>>();
+    inferred.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.type_name.cmp(&b.type_name)));
+    for binding in inferred {
+        if !decl.type_aliases.contains(&binding) {
+            decl.type_aliases.push(binding);
+        }
+    }
+}
+
+fn collect_assignment_type_edges(
+    events: &[FlowEvent],
+    alias_edges: &mut Vec<(String, String)>,
+    non_alias_targets: &mut ahash::AHashSet<String>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                value_kind,
+                ..
+            } => {
+                if target.trim().is_empty() {
+                    continue;
+                }
+                let exact_alias = (source_call.is_none()
+                    && source_call_args.is_empty()
+                    && source_names.is_empty()
+                    && !matches!(value_kind, Some(crate::AssignValueKind::Literal)))
+                .then(|| {
+                    source_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|source| !source.is_empty())
+                        .filter(|source| *source != target.trim())
+                })
+                .flatten();
+                if let Some(source) = exact_alias {
+                    alias_edges.push((source.to_string(), target.clone()));
+                } else {
+                    non_alias_targets.insert(target.clone());
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_assignment_type_edges(then_events, alias_edges, non_alias_targets);
+                collect_assignment_type_edges(else_events, alias_edges, non_alias_targets);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_assignment_type_edges(body, alias_edges, non_alias_targets);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_assignment_type_edges(body, alias_edges, non_alias_targets);
+                collect_assignment_type_edges(catch_events, alias_edges, non_alias_targets);
+                collect_assignment_type_edges(finally_events, alias_edges, non_alias_targets);
+            }
+            _ => {}
         }
     }
 }
@@ -9082,19 +10419,16 @@ fn push_receiver_type_and_bases_inner(
     if canonical.is_empty() {
         return;
     }
-    let first_canonical_visit = seen.insert(canonical.clone());
-    if first_canonical_visit {
-        if let Some(qualified) = qualified_receiver_type_evidence(&ty, &canonical) {
-            // A qualified compiler type is stronger evidence than its bare
-            // tail. Preserve only the exact adapter-lowered identity here;
-            // the semantic resolver and rule matcher own their constrained
-            // suffix matching. Adding the bare tail to compiler IR would let
-            // an unrelated local type weaken `scheduler.Handle` to `Handle`.
-            push_unique_receiver_type(out, qualified);
-        } else {
-            push_unique_receiver_type(out, canonical.clone());
-        }
+    if let Some(qualified) = qualified_receiver_type_evidence(&ty, &canonical) {
+        // Preserve every distinct compiler identity even when several types
+        // share one terminal name. The terminal key bounds only ancestry
+        // traversal; using it to deduplicate evidence erases the provider
+        // distinction required to reject ambiguous or shadowed receivers.
+        push_unique_receiver_type(out, qualified);
+    } else {
+        push_unique_receiver_type(out, canonical.clone());
     }
+    let first_canonical_visit = seen.insert(canonical.clone());
     if !first_canonical_visit {
         return;
     }
@@ -9107,7 +10441,19 @@ fn push_receiver_type_and_bases_inner(
 }
 
 fn qualified_receiver_type_evidence(raw: &str, canonical: &str) -> Option<String> {
-    let qualified = raw.trim().trim_matches(bonsai_common::is_name_punctuation).trim();
+    // Receiver identity is the outer type constructor. Generic arguments and
+    // array element syntax describe contained values, not additional owner
+    // segments (`std::vector<std::string>` dispatches on `std::vector`).
+    // Strip them before punctuation normalization so a trailing `>` cannot be
+    // mistaken for wrapper punctuation and leave a malformed type identity.
+    let outer = raw
+        .trim()
+        .split_once(['<', '['])
+        .map_or_else(|| raw.trim(), |(head, _)| head);
+    let qualified = outer
+        .trim()
+        .trim_matches(bonsai_common::is_name_punctuation)
+        .trim();
     if qualified.is_empty() || qualified == canonical {
         return None;
     }
@@ -9248,6 +10594,14 @@ pub fn collect_param_type_aliases(
         let mut aliases: Vec<crate::TypeAliasBinding> = Vec::new();
         let mut stack = vec![fn_node];
         while let Some(node) = stack.pop() {
+            if node.id() != fn_node.id() && vocab.fn_kinds.contains(&node.kind()) {
+                // A nested function/lambda owns its own parameter scope. Its
+                // aliases are collected when that callable is visited as a
+                // root; leaking them into the enclosing declaration can
+                // falsely type an unrelated outer binding with the same
+                // spelling.
+                continue;
+            }
             if vocab.param_kinds.contains(&node.kind()) {
                 if let Some(b) = param_alias_from_node(node, src, vocab) {
                     if !aliases.contains(&b) {
@@ -9276,7 +10630,7 @@ fn param_alias_from_node(
         .child_by_field_name(vocab.type_field)
         // Kotlin / Dart / Scala expose the type as an unnamed
         // child of a known kind, not under a `type` field.
-        .or_else(|| first_named_type_descendant(node))?;
+        .or_else(|| first_declared_type_descendant(node))?;
     let name_node = node
         .child_by_field_name(vocab.name_field)
         // C / C++ / Objective-C wrap the binding identifier inside
@@ -9295,7 +10649,7 @@ fn param_alias_from_node(
         .or_else(|| first_param_identifier_descendant_outside(node, type_node))?;
     let name = leaf_identifier_text(name_node, src)?;
     let type_short = canonical_short_type_name(node_text(&type_node, src))?;
-    if name.is_empty() || name == type_short {
+    if name.is_empty() {
         return None;
     }
     Some(crate::TypeAliasBinding {
@@ -9346,9 +10700,36 @@ fn first_param_identifier_descendant_outside<'a>(
     rec(node, ex_start, ex_end)
 }
 
-fn first_named_type_descendant<'a>(node: tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
+fn first_declared_type_descendant<'a>(node: tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
+    for index in 0..node.child_count() {
+        let field_index = u32::try_from(index).ok()?;
+        let field_role = node.field_name_for_child(field_index).unwrap_or_default();
+        // A nested type identifier inside an initializer, default value,
+        // function body, or argument is a value dependency—not the declared
+        // type of the binding being inspected. These are generic CST roles,
+        // shared across grammars; adapters retain ownership of node kinds.
+        if matches!(
+            field_role,
+            "value"
+                | "expression"
+                | "initializer"
+                | "default"
+                | "default_value"
+                | "body"
+                | "argument"
+                | "arguments"
+                | "condition"
+                | "consequence"
+                | "alternative"
+        ) {
+            continue;
+        }
+        let Some(child) = node.child(field_index) else {
+            continue;
+        };
+        if !child.is_named() {
+            continue;
+        }
         if matches!(
             child.kind(),
             "type_identifier"
@@ -9364,7 +10745,7 @@ fn first_named_type_descendant<'a>(node: tree_sitter::Node<'a>) -> Option<tree_s
         ) {
             return Some(child);
         }
-        if let Some(found) = first_named_type_descendant(child) {
+        if let Some(found) = first_declared_type_descendant(child) {
             return Some(found);
         }
     }

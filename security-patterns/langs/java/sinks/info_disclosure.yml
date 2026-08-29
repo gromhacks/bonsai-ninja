@@ -89,40 +89,4 @@
         }
       }
     expect_no_match: true
-  description: 'Logger.error with secret-shaped values persists sensitive data in application logs. Merged aliases: java.log_injection.logger_error_concat.'
-  aliases:
-  - java.log_injection.logger_error_concat
-- id: java.info_disclosure.response_writer_exception
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: information-disclosure
-  severity: high
-  cwe:
-  - CWE-209
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - getWriter
-      - println
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: generated shape example
-    code: "class App {\n  void handle(String input) throws Exception {\n    getWriter.println(\"Exception stack trace: \"\
-      \ + input);\n  }\n}\n"
-    expect_match_text:
-    - getWriter.println
-  - name: literal response writer negative
-    code: |
-      class App {
-        void handle() throws Exception {
-          getWriter.println("Exception stack trace: redacted");
-        }
-      }
-    expect_no_match: true
-  description: "Disabled - response.getWriter().println overlaps the XSS sink and the YAML matcher cannot prove the argument is specifically SQLException/exception state without type-aware constraints."
+  description: 'Logger.error with secret-shaped values persists sensitive data in application logs.'

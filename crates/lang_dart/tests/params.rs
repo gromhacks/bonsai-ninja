@@ -9,6 +9,66 @@ fn db_for(source: &str) -> AnalyzerDb {
     dart_db(vfs)
 }
 
+#[test]
+fn qualified_parameter_types_are_recorded_for_receiver_matching() {
+    let db = db_for(
+        r#"
+import 'package:http/http.dart' as http;
+String consume(http.Response response) => response.body;
+"#,
+    );
+    let index = db.global_index();
+    let consume = index
+        .all_files()
+        .flat_map(|file| index.decls_in(file))
+        .find(|decl| decl.name == "consume")
+        .expect("consume declaration should index");
+
+    assert!(
+        consume
+            .type_aliases
+            .iter()
+            .any(|alias| alias.name == "response" && alias.type_name == "Response"),
+        "qualified Dart parameter type must be available to receiver-typed rules: {:#?}",
+        consume
+    );
+}
+
+#[test]
+fn generated_service_override_retains_class_and_complete_signature_facts() {
+    let db = db_for(
+        r#"
+import 'package:grpc/grpc.dart';
+class GreeterService extends GreeterServiceBase {
+  @override
+  Future<Reply> sayHello(ServiceCall context, HelloRequest payload) async => Reply();
+}
+"#,
+    );
+    let index = db.global_index();
+    let class = index
+        .all_files()
+        .flat_map(|file| index.decls_in(file))
+        .find(|decl| decl.name == "GreeterService")
+        .expect("generated service implementation class");
+    assert_eq!(class.bases, ["GreeterServiceBase"]);
+    let method = index
+        .all_files()
+        .flat_map(|file| index.decls_in(file))
+        .find(|decl| decl.name == "sayHello")
+        .expect("generated service override method");
+    assert_eq!(method.parent, Some(class.symbol));
+    assert_eq!(method.params, ["context", "payload"]);
+    assert!(method
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "context" && alias.type_name == "ServiceCall"));
+    assert!(method
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "payload" && alias.type_name == "HelloRequest"));
+}
+
 fn db_for_files(files: &[(&str, String)]) -> AnalyzerDb {
     let vfs = Arc::new(Vfs::new());
     for (path, source) in files {
@@ -51,7 +111,15 @@ fn switch_variable_pattern_binds_from_the_ast_subject() {
         .find(|decl| decl.name == "entry")
         .expect("entry declaration should index");
 
-    let assignment = entry.flow_events.iter().find(|event| {
+    let arm_events = entry
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Branch { then_events, .. } => Some(then_events.as_slice()),
+            _ => None,
+        })
+        .expect("switch case must lower to an exclusive branch arm");
+    let assignment = arm_events.iter().find(|event| {
         matches!(
             event,
             FlowEvent::Assign { target, source_name: Some(source), .. }
@@ -63,13 +131,11 @@ fn switch_variable_pattern_binds_from_the_ast_subject() {
         "pattern binding must be an ordinary compiler assignment before its case body: {:?}",
         entry.flow_events
     );
-    let assign_index = entry
-        .flow_events
+    let assign_index = arm_events
         .iter()
         .position(|event| matches!(event, FlowEvent::Assign { target, .. } if target == "value"))
         .unwrap();
-    let sink_index = entry
-        .flow_events
+    let sink_index = arm_events
         .iter()
         .position(|event| matches!(event, FlowEvent::Call { name, .. } if name == "sink"))
         .unwrap();
@@ -118,6 +184,100 @@ String handle(String x) {
         assign.3.is_empty(),
         "direct call assignment should not duplicate callee or bare arg carriers in source_names; events: {:?}",
         handle.flow_events
+    );
+}
+
+#[test]
+fn awaited_selector_and_constructor_cascade_preserve_exact_value_identity() {
+    let db = db_for(
+        r#"
+class InputPort {
+  Future<String> load() async => "";
+}
+
+class Carrier {
+  String field = "";
+  String expose() => field;
+}
+
+Future<String> fallback() async => "";
+
+Future<String> assemble(InputPort input, dynamic existing, bool flag) async {
+  final data = await input.load();
+  final carrier = Carrier()..field = data;
+  final unchanged = existing..field = data;
+  final conditional = await (flag ? input.load() : fallback());
+  return carrier.expose();
+}
+"#,
+    );
+    let index = db.global_index();
+    let assemble = index
+        .all_files()
+        .flat_map(|file| index.decls_in(file))
+        .find(|decl| decl.name == "assemble")
+        .expect("assemble declaration should index");
+
+    let assignment = |target: &str| {
+        assemble
+            .flow_events
+            .iter()
+            .find_map(|event| match event {
+                FlowEvent::Assign {
+                    target: observed,
+                    source_name,
+                    source_call,
+                    source_call_args,
+                    source_names,
+                    ..
+                } if observed == target => Some((source_name, source_call, source_call_args, source_names)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {target} assignment: {:#?}", assemble.flow_events))
+    };
+
+    let data = assignment("data");
+    assert_eq!(data.0.as_deref(), None);
+    assert_eq!(data.1.as_deref(), Some("input.load"));
+    assert!(data.2.is_empty());
+
+    let carrier = assignment("carrier");
+    assert_eq!(carrier.0.as_deref(), None);
+    assert_eq!(carrier.1.as_deref(), Some("Carrier"));
+    assert!(carrier.2.is_empty());
+    assert!(carrier.3.is_empty());
+    assert!(
+        assemble
+            .type_aliases
+            .iter()
+            .any(|alias| alias.name == "carrier" && alias.type_name == "Carrier"),
+        "constructor cascade result must keep its declared type: {:#?}",
+        assemble.type_aliases
+    );
+
+    let field_write = assignment("carrier.field");
+    assert_eq!(field_write.0.as_deref(), Some("data"));
+    assert!(
+        assemble.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call { name, receiver_types, .. }
+                if name == "carrier.expose" && receiver_types.iter().any(|ty| ty == "Carrier")
+        )),
+        "the cascade result must retain its exact declared receiver type: {:#?}",
+        assemble.flow_events
+    );
+
+    let unchanged = assignment("unchanged");
+    assert_eq!(
+        unchanged.1.as_deref(),
+        None,
+        "a cascade on an existing value is not construction"
+    );
+    let conditional = assignment("conditional");
+    assert_eq!(
+        conditional.1.as_deref(),
+        None,
+        "a conditional await value has no single value-producing call"
     );
 }
 
@@ -327,6 +487,50 @@ class Envelope {
 }
 
 #[test]
+fn named_constructors_keep_the_exact_member_identity() {
+    let db = db_for(
+        r#"
+class Packet {
+  final String value;
+
+  Packet(this.value);
+  Packet.checked(this.value);
+  factory Packet.copy(Map<String, String> row) => Packet.checked(row['value'] ?? '');
+}
+"#,
+    );
+    let index = db.global_index();
+    let constructors = index
+        .all_files()
+        .flat_map(|file| index.decls_in(file))
+        .filter(|decl| decl.kind == DeclKind::Constructor)
+        .collect::<Vec<_>>();
+
+    let unnamed = constructors
+        .iter()
+        .find(|decl| decl.name == "Packet")
+        .expect("unnamed constructor should retain the type name");
+    assert!(unnamed
+        .qualified_name
+        .as_deref()
+        .is_some_and(|name| name.ends_with(".Packet.Packet")));
+
+    for member in ["checked", "copy"] {
+        let decl = constructors
+            .iter()
+            .find(|decl| decl.name == member)
+            .unwrap_or_else(|| panic!("named constructor {member} should index independently"));
+        assert!(
+            decl.qualified_name
+                .as_deref()
+                .is_some_and(|name| name.ends_with(&format!(".Packet.{member}"))),
+            "named constructor should use lexical owner plus member identity: {:?}",
+            decl.qualified_name
+        );
+    }
+}
+
+#[test]
 fn optional_named_method_parameters_preserve_all_names() {
     let db = db_for(
         r#"
@@ -382,7 +586,7 @@ class Envelope {
 }
 
 #[test]
-fn mega_flow_constructor_field_formals_export_receiver_writes() {
+fn language_gauntlet_constructor_field_formals_export_receiver_writes() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let source = std::fs::read_to_string(
         manifest
@@ -390,9 +594,9 @@ fn mega_flow_constructor_field_formals_export_receiver_writes() {
             .unwrap()
             .parent()
             .unwrap()
-            .join("examples/dart/mega_flow/app.dart"),
+            .join("examples/dart/language_gauntlet/lib/src/domain/envelope.dart"),
     )
-    .expect("mega_flow app.dart fixture should be readable");
+    .expect("language_gauntlet envelope.dart fixture should be readable");
     let db = db_for(&source);
     let index = db.global_index();
     let ctor = index
@@ -414,30 +618,48 @@ fn mega_flow_constructor_field_formals_export_receiver_writes() {
 }
 
 #[test]
-fn mega_flow_directory_constructor_field_formals_export_receiver_writes() {
+fn language_gauntlet_directory_constructor_field_formals_export_receiver_writes() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture = manifest
         .parent()
         .unwrap()
         .parent()
         .unwrap()
-        .join("examples/dart/mega_flow");
+        .join("examples/dart/language_gauntlet");
     let db = db_for_files(&[
         (
-            "app.dart",
-            std::fs::read_to_string(fixture.join("app.dart")).expect("app.dart should be readable"),
+            "bin/app.dart",
+            std::fs::read_to_string(fixture.join("bin/app.dart")).expect("app.dart should be readable"),
         ),
         (
-            "pipeline.dart",
-            std::fs::read_to_string(fixture.join("pipeline.dart")).expect("pipeline.dart should be readable"),
+            "lib/src/http/handler.dart",
+            std::fs::read_to_string(fixture.join("lib/src/http/handler.dart"))
+                .expect("handler.dart should be readable"),
         ),
         (
-            "storage.dart",
-            std::fs::read_to_string(fixture.join("storage.dart")).expect("storage.dart should be readable"),
+            "lib/src/domain/envelope.dart",
+            std::fs::read_to_string(fixture.join("lib/src/domain/envelope.dart"))
+                .expect("envelope.dart should be readable"),
         ),
         (
-            "executor.dart",
-            std::fs::read_to_string(fixture.join("executor.dart")).expect("executor.dart should be readable"),
+            "lib/src/pipeline/pipeline.dart",
+            std::fs::read_to_string(fixture.join("lib/src/pipeline/pipeline.dart"))
+                .expect("pipeline.dart should be readable"),
+        ),
+        (
+            "lib/src/routing/command_router.dart",
+            std::fs::read_to_string(fixture.join("lib/src/routing/command_router.dart"))
+                .expect("command_router.dart should be readable"),
+        ),
+        (
+            "lib/src/storage/storage.dart",
+            std::fs::read_to_string(fixture.join("lib/src/storage/storage.dart"))
+                .expect("storage.dart should be readable"),
+        ),
+        (
+            "lib/src/runtime/executor.dart",
+            std::fs::read_to_string(fixture.join("lib/src/runtime/executor.dart"))
+                .expect("executor.dart should be readable"),
         ),
     ]);
     let index = db.global_index();

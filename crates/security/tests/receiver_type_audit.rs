@@ -24,7 +24,10 @@ fn repo_root() -> PathBuf {
 }
 
 fn fixture_root(lang: &str) -> Option<PathBuf> {
-    let p = repo_root().join("examples").join(lang).join("receiver_type");
+    let p = repo_root()
+        .join("test-fixtures/languages")
+        .join(lang)
+        .join("receiver_type");
     if !p.is_dir() {
         return None;
     }

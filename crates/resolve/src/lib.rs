@@ -11,7 +11,10 @@ use bonsai_lang_api::{
     module_local_binding, AliasTarget, DeclKind, ImportSpec, ModulePath, ModulePathSyntax, Visibility,
     WILDCARD_IMPORT_ALIAS_PREFIX,
 };
-use std::{borrow::Cow, sync::Arc};
+use std::{
+    borrow::Cow,
+    sync::{Arc, Mutex},
+};
 
 /// Caller-side context the resolver consults when narrowing a
 /// candidate set. Built by callgraph / taint / matcher at edge-
@@ -1185,9 +1188,32 @@ pub fn collect_method_candidates_for_class(
 pub struct MethodCandidateCache {
     entries: AHashMap<MethodCandidateCacheKey, Vec<bonsai_common::FuncId>>,
     peer_class_index: Option<Arc<PeerClassIndex>>,
+    interface_descendants: Option<Arc<InterfaceDescendantIndex>>,
 }
 
 pub type PeerClassIndex = AHashMap<(String, ModulePath), Vec<SymbolId>>;
+
+/// Workspace-wide reverse inheritance facts shared by every file resolver.
+///
+/// Building the direct interface/trait implementation index scans the global
+/// declaration table and resolves every declared base. It must therefore be
+/// built once per callgraph, never once per source file. Transitive closures
+/// are exact derivatives of that immutable index and are memoized across
+/// resolver workers.
+#[derive(Debug)]
+pub struct InterfaceDescendantIndex {
+    direct: AHashMap<SymbolId, Vec<SymbolId>>,
+    transitive: Mutex<AHashMap<SymbolId, Vec<SymbolId>>>,
+}
+
+impl InterfaceDescendantIndex {
+    fn new(direct: AHashMap<SymbolId, Vec<SymbolId>>) -> Self {
+        Self {
+            direct,
+            transitive: Mutex::new(AHashMap::new()),
+        }
+    }
+}
 
 impl MethodCandidateCache {
     #[must_use]
@@ -1195,7 +1221,186 @@ impl MethodCandidateCache {
         Self {
             entries: AHashMap::new(),
             peer_class_index: Some(peer_class_index),
+            interface_descendants: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_shared_indexes(
+        peer_class_index: Arc<PeerClassIndex>,
+        interface_descendants: Arc<InterfaceDescendantIndex>,
+    ) -> Self {
+        Self {
+            entries: AHashMap::new(),
+            peer_class_index: Some(peer_class_index),
+            interface_descendants: Some(interface_descendants),
+        }
+    }
+}
+
+/// Return every class that is a declared transitive implementation of one
+/// typed interface/trait. This is class-hierarchy analysis over compiler
+/// declarations, not name fanout: a candidate is admitted only when its
+/// parsed `bases` resolve unambiguously to the requested type identity.
+///
+/// The reverse inheritance index is built lazily once per callgraph resolver
+/// cache and each interface closure is memoized. Concrete-class dispatch is
+/// intentionally unchanged; this expansion exists only for runtime interface
+/// dispatch where the static receiver type cannot identify one implementation.
+pub fn collect_interface_descendants_cached(
+    global: &GlobalIndex,
+    interface_sym: SymbolId,
+    ctx: &ResolveContext<'_>,
+    cache: &mut MethodCandidateCache,
+) -> Vec<SymbolId> {
+    let Some(interface_decl) = global.decl_of(interface_sym) else {
+        return Vec::new();
+    };
+    if !matches!(interface_decl.kind, DeclKind::Interface | DeclKind::Trait) {
+        return Vec::new();
+    }
+    let index = cache
+        .interface_descendants
+        .get_or_insert_with(|| {
+            Arc::new(InterfaceDescendantIndex::new(build_direct_descendant_index(
+                global, ctx,
+            )))
+        })
+        .clone();
+    if let Some(cached) = index
+        .transitive
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&interface_sym)
+        .cloned()
+    {
+        return cached;
+    }
+    let mut seen = AHashSet::new();
+    let mut stack = index.direct.get(&interface_sym).cloned().unwrap_or_default();
+    let mut descendants = Vec::new();
+    while let Some(candidate) = stack.pop() {
+        if !seen.insert(candidate) {
+            continue;
+        }
+        descendants.push(candidate);
+        if let Some(children) = index.direct.get(&candidate) {
+            stack.extend(children.iter().copied());
+        }
+    }
+    descendants.sort_unstable_by_key(|symbol| symbol.raw());
+    index
+        .transitive
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(interface_sym, descendants.clone());
+    descendants
+}
+
+/// Build one immutable reverse-inheritance index for a complete workspace.
+///
+/// Path and module-prefix semantics remain adapter supplied for each child
+/// declaration. The shared resolver only applies those compiler facts while
+/// resolving declared bases; it assigns no language or framework meaning.
+#[must_use]
+pub fn build_shared_interface_descendant_index<P, S>(
+    global: &GlobalIndex,
+    path_for_file: &P,
+    module_syntax_for_file: &S,
+) -> Arc<InterfaceDescendantIndex>
+where
+    P: Fn(FileId) -> Option<String> + Sync,
+    S: Fn(FileId) -> ModulePathSyntax + Sync,
+{
+    use rayon::prelude::*;
+
+    let files = global.all_files().collect::<Vec<_>>();
+    let mut direct = files
+        .par_iter()
+        .map(|&file| {
+            direct_descendant_edges_for_file(global, file, path_for_file, module_syntax_for_file(file))
+        })
+        .reduce(AHashMap::new, merge_direct_descendant_edges);
+    finalize_direct_descendant_index(&mut direct);
+    Arc::new(InterfaceDescendantIndex::new(direct))
+}
+
+fn build_direct_descendant_index(
+    global: &GlobalIndex,
+    caller_ctx: &ResolveContext<'_>,
+) -> AHashMap<SymbolId, Vec<SymbolId>> {
+    let path_for_file = |file| {
+        caller_ctx
+            .file_path_lookup
+            .and_then(|lookup| lookup.path_for(file))
+    };
+    let mut direct = AHashMap::new();
+    for file in global.all_files() {
+        direct = merge_direct_descendant_edges(
+            direct,
+            direct_descendant_edges_for_file(global, file, &path_for_file, caller_ctx.module_path_syntax),
+        );
+    }
+    finalize_direct_descendant_index(&mut direct);
+    direct
+}
+
+fn direct_descendant_edges_for_file<P>(
+    global: &GlobalIndex,
+    file: FileId,
+    path_for_file: &P,
+    module_path_syntax: ModulePathSyntax,
+) -> AHashMap<SymbolId, Vec<SymbolId>>
+where
+    P: Fn(FileId) -> Option<String> + ?Sized,
+{
+    let mut direct = AHashMap::<SymbolId, Vec<SymbolId>>::new();
+    for child in global.decls_in(file) {
+        if !matches!(
+            child.kind,
+            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
+        ) {
+            continue;
+        }
+        let child_ctx = ResolveContext::new(file, &child.module_path)
+            .with_module_path_syntax(module_path_syntax)
+            .with_file_path_lookup(&path_for_file);
+        for base in &child.bases {
+            let base_symbols = resolve_class(global, base, &child_ctx);
+            let Some(first) = base_symbols.first().copied() else {
+                continue;
+            };
+            // A short base spelling that resolves to distinct types is
+            // ambiguous workspace evidence. It cannot establish an
+            // implementation edge; fail closed instead of fanning out.
+            if !base_symbols
+                .iter()
+                .all(|candidate| class_symbols_share_semantic_identity(global, first, *candidate))
+            {
+                continue;
+            }
+            for base_sym in base_symbols {
+                direct.entry(base_sym).or_default().push(child.symbol);
+            }
+        }
+    }
+    direct
+}
+
+fn merge_direct_descendant_edges(
+    mut left: AHashMap<SymbolId, Vec<SymbolId>>,
+    right: AHashMap<SymbolId, Vec<SymbolId>>,
+) -> AHashMap<SymbolId, Vec<SymbolId>> {
+    for (base, mut children) in right {
+        left.entry(base).or_default().append(&mut children);
+    }
+    left
+}
+
+fn finalize_direct_descendant_index(direct: &mut AHashMap<SymbolId, Vec<SymbolId>>) {
+    for children in direct.values_mut() {
+        children.sort_unstable_by_key(|symbol| symbol.raw());
+        children.dedup();
     }
 }
 
@@ -1284,7 +1489,10 @@ fn collect_method_candidates_for_class_cached_inner(
     let mut out = Vec::new();
     let mut local_fallback = Vec::new();
     for decl in global.decls_in(class_file) {
-        if decl.name != method_name {
+        let semantic_name_matches = decl.qualified_name.as_deref().is_some_and(|qualified| {
+            bonsai_common::declaration_qualified_suffix(&decl.name, qualified) == Some(method_name)
+        });
+        if decl.name != method_name && !semantic_name_matches {
             continue;
         }
         if !matches!(
@@ -1384,7 +1592,10 @@ fn collect_method_candidates_for_class_inner(
     let mut matched_local_method = false;
     let mut local_fallback = Vec::new();
     for decl in global.decls_in(class_file) {
-        if decl.name != method_name {
+        let semantic_name_matches = decl.qualified_name.as_deref().is_some_and(|qualified| {
+            bonsai_common::declaration_qualified_suffix(&decl.name, qualified) == Some(method_name)
+        });
+        if decl.name != method_name && !semantic_name_matches {
             continue;
         }
         if !matches!(
@@ -2072,6 +2283,88 @@ pub fn resolve_class(
         }
     }
     out
+}
+
+/// Resolve a receiver type that an adapter proved from declaration syntax.
+///
+/// Ordinary [`resolve_class`] intentionally requires lexical/import
+/// reachability. Some languages expose a type through a transitively imported
+/// header or generated interface while the use site still carries an exact
+/// declared type. In that case, a workspace-wide fallback is compiler-safe
+/// only when every visible candidate with that name has one identical semantic
+/// identity. Ambiguous short names fail closed.
+#[must_use]
+pub fn resolve_declared_receiver_class(
+    global: &GlobalIndex,
+    name: &str,
+    ctx: &ResolveContext<'_>,
+) -> Vec<bonsai_common::SymbolId> {
+    let scoped = resolve_class(global, name, ctx);
+    if !scoped.is_empty() {
+        return declared_receiver_candidates_with_one_identity(global, scoped);
+    }
+
+    let name = strip_module_path_prefix(name, ctx.module_path_syntax);
+    let mut candidates = Vec::new();
+    for lookup in type_lookup_variants(name) {
+        // CONTEXTLESS_LOOKUP_JUSTIFICATION: an adapter-proven declared
+        // receiver type may come from a transitive header/interface. Scoped
+        // resolution already failed above; this fallback is admitted only
+        // when every visible class candidate has one identical semantic type
+        // identity, and otherwise returns no candidates.
+        candidates.extend(global.find_by_name(&lookup).iter().copied().filter(|symbol| {
+            let Some(decl) = global.decl_of(*symbol) else {
+                return false;
+            };
+            let Some(file) = global.declaring_file(*symbol) else {
+                return false;
+            };
+            matches!(
+                decl.kind,
+                DeclKind::Class
+                    | DeclKind::Struct
+                    | DeclKind::Trait
+                    | DeclKind::Interface
+                    | DeclKind::Enum
+                    | DeclKind::Import
+            ) && visibility_allows(decl, file, &decl.module_path, ctx)
+        }));
+    }
+    dedup_symbols(&mut candidates);
+    declared_receiver_candidates_with_one_identity(global, candidates)
+}
+
+fn declared_receiver_candidates_with_one_identity(
+    global: &GlobalIndex,
+    candidates: Vec<bonsai_common::SymbolId>,
+) -> Vec<bonsai_common::SymbolId> {
+    let Some(first_identity) = candidates
+        .first()
+        .and_then(|symbol| global.decl_of(*symbol))
+        .map(declared_type_semantic_identity)
+    else {
+        return Vec::new();
+    };
+    if candidates.iter().all(|symbol| {
+        global
+            .decl_of(*symbol)
+            .is_some_and(|decl| declared_type_semantic_identity(decl) == first_identity)
+    }) {
+        candidates
+    } else {
+        Vec::new()
+    }
+}
+
+fn declared_type_semantic_identity(decl: &bonsai_lang_api::Decl) -> String {
+    decl.qualified_name.as_deref().map_or_else(
+        || {
+            let mut segments = decl.module_path.segments.clone();
+            segments.push(decl.name.clone());
+            segments.join(".")
+        },
+        bonsai_common::normalize_qualified_name,
+    )
 }
 
 fn relative_qualified_type_matches(

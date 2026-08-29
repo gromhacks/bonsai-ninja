@@ -245,8 +245,6 @@
   - name: generated direct match
     code: |
       #include <sol/sol.hpp>
-      #include <sol/sol.hpp>
-      #include <sol/sol.hpp> /* sol2 */
       #include <sol/sol.hpp> /* sol2 */
       void example(const char *arg) {
         const char *fmt = arg;
@@ -282,8 +280,6 @@
   - name: generated direct match
     code: |
       #include <sol/sol.hpp>
-      #include <sol/sol.hpp>
-      #include <sol/sol.hpp> /* sol2 */
       #include <sol/sol.hpp> /* sol2 */
       void example(const char *arg) {
         const char *fmt = arg;
@@ -319,7 +315,6 @@
   - name: generated direct match
     code: |
       #include <Python.h>
-      #include <Python.h>
       void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
@@ -353,7 +348,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      #include <Python.h>
       #include <Python.h>
       void example(const char *arg) {
         const char *fmt = arg;

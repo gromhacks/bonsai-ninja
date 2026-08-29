@@ -69,18 +69,3 @@
       }
     expect_no_match: true
   description: "Service Bus SendMessages - tainted entity path/payload injects arbitrary broker payloads."
-
-- id: go.queue.publish
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: queue-injection
-  severity: high
-  packages: ["cloud.google.com/go/pubsub", "github.com/aws/aws-sdk-go/service/sns", "github.com/aws/aws-sdk-go-v2/service/sns"]
-  cwe: [CWE-20]
-  match:
-    kind: call
-    callee:
-      regex: "\\.Publish$"
-  description: "Disabled - cloud pub/sub publish is real queue fanout, but bare `.Publish` is too generic across Go clients and app code."

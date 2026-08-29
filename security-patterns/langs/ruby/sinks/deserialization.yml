@@ -31,14 +31,12 @@
         YAML.load("---\nname: alice\n")
       end
     expect_no_match: true
-  description: "YAML.load - accepts arbitrary classes; RCE via crafted document. Merged collision aliases: ruby.deser.psych_load, ruby.deser.marshal_load, ruby.deser.oj_load_default, ruby.deser.json_load, ruby.path.kernel_load, ruby.xxe.ox_load."
+  description: "YAML.load - accepts arbitrary classes; RCE via crafted document. Same-family loader spellings remain aliases; Kernel.load and Ox XML parsing are independent APIs."
   aliases:
   - ruby.deser.psych_load
   - ruby.deser.marshal_load
   - ruby.deser.oj_load_default
   - ruby.deser.json_load
-  - ruby.path.kernel_load
-  - ruby.xxe.ox_load
   packages:
   - yaml
   - oj
@@ -194,35 +192,3 @@
       end
     expect_no_match: true
   description: "Oj.object_load - explicit object deserialization."
-- id: ruby.deser.json_create_id
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: ruby
-  tag: insecure-deserialization
-  severity: medium
-  cwe:
-  - CWE-502
-  match:
-    kind: call
-    callee:
-      attribute:
-      - JSON
-      - parse
-  description: "Disabled - JSON.parse is safe unless create_additions: true."
-- id: ruby.deser.cookie_serializer_marshal
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: insecure-deserialization
-  severity: high
-  packages:
-  - rails
-  cwe:
-  - CWE-502
-  match:
-    kind: call
-    callee:
-      name: cookie_serializer
-  description: "Disabled - config check; Rails marshal cookie serializer is dangerous."

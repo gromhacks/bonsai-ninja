@@ -14,12 +14,13 @@
   constraints:
   - arg_tainted:
       index: 0
+  - any_arg_matches_regex: '(?i)(?:\bNOENT\b|\bDTDLOAD\b|[.]noent\b|[.]dtdload\b)'
   match_examples:
-  - name: ruby.xxe.nokogiri_xml example
+  - name: Nokogiri XML with explicit entity expansion
     code: |
       require "nokogiri"
       def example(input, url, id, payload, request, params)
-        Nokogiri.XML(input)
+        Nokogiri.XML(input, nil, nil, Nokogiri::XML::ParseOptions::NOENT)
       end
   - name: ruby.xxe.nokogiri_xml literal negative
     code: |
@@ -28,7 +29,28 @@
         Nokogiri.XML("<root/>")
       end
     expect_no_match: true
-  description: "Nokogiri::XML - flag if NOENT or DTDLOAD set."
+  - name: Nokogiri XML trailing block enables entities and DTD loading
+    code: |
+      require "nokogiri"
+      def example(input)
+        Nokogiri::XML(input) { |config| config.noent.dtdload }
+      end
+    expect_match_text: [Nokogiri.XML]
+  - name: Nokogiri XML trailing block keeps network and entities disabled
+    code: |
+      require "nokogiri"
+      def example(input)
+        Nokogiri::XML(input) { |config| config.nonet }
+      end
+    expect_no_match: true
+  - name: Nokogiri network-disabled configuration is not XXE
+    code: |
+      require "nokogiri"
+      def example(input)
+        Nokogiri.XML(input, nil, nil, Nokogiri::XML::ParseOptions::NONET)
+      end
+    expect_no_match: true
+  description: "Nokogiri::XML on tainted XML is an XXE sink only when an exact argument or compiler-lowered trailing block explicitly enables NOENT or DTDLOAD; safe/default and NONET configurations remain quiet."
 - id: ruby.xxe.nokogiri_xml_document_parse
   enabled: true
   language: ruby
@@ -47,12 +69,13 @@
   constraints:
   - arg_tainted:
       index: 0
+  - any_arg_matches_regex: '(?:NOENT|DTDLOAD)'
   match_examples:
-  - name: ruby.xxe.nokogiri_xml_document_parse example
+  - name: Nokogiri document parse with explicit DTD loading
     code: |
       require "nokogiri"
       def example(input, url, id, payload, request, params)
-        Nokogiri::XML::Document.parse(input)
+        Nokogiri::XML::Document.parse(input, nil, nil, Nokogiri::XML::ParseOptions::DTDLOAD)
       end
   - name: ruby.xxe.nokogiri_xml_document_parse literal negative
     code: |
@@ -61,25 +84,14 @@
         Nokogiri::XML::Document.parse("<root/>")
       end
     expect_no_match: true
-  description: Nokogiri::XML::Document.parse.
-- id: ruby.xxe.nokogiri_html
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: xxe
-  severity: low
-  packages:
-  - nokogiri
-  cwe:
-  - CWE-611
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Nokogiri
-      - HTML
-  description: "Disabled - HTML parser ignores DTDs."
+  - name: Nokogiri document parse with NONET is not XXE
+    code: |
+      require "nokogiri"
+      def example(input)
+        Nokogiri::XML::Document.parse(input, nil, nil, Nokogiri::XML::ParseOptions::NONET)
+      end
+    expect_no_match: true
+  description: "Nokogiri::XML::Document.parse on tainted XML is an XXE sink only when an argument explicitly enables NOENT or DTDLOAD."
 - id: ruby.xxe.libxml_parser_string
   enabled: true
   language: ruby

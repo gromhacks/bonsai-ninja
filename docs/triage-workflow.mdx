@@ -39,7 +39,9 @@ FINDING 1 · command-injection · critical  S:979a7231afe45297
 
 ## Suppression Syntax
 
-Prefer rule fixes over suppressions. When a project needs local policy, disable or replace the rule in `<workspace>/.bonsai/rules/` with the same rule ID.
+Prefer rule fixes over suppressions. When a project needs local policy, disable
+or replace the rule in `<workspace>/.bonsai/rules/` with the same rule ID. Do
+not copy this overlay-only suppression pattern into the bundled pack.
 
 ```yaml
 - id: python.cmdi.os_system

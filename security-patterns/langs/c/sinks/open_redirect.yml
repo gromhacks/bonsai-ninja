@@ -1,44 +1,61 @@
 # C open-redirect.
 - id: c.open_redirect.mg_http_reply_location
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: c
   tag: open-redirect
   severity: high
   packages: [mongoose]
+  imports: [mongoose.h, mongoose]
   cwe: [CWE-601]
   match:
     kind: call
     callee:
       name: mg_http_reply
-  description: "Disabled - open redirect needs header/status-aware constraints for Location responses; c.xss.mongoose_http_reply only covers the tainted response-body surface."
-
-- id: c.open_redirect.nginx_modsec_set_location
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  tag: open-redirect
-  severity: medium
-  packages: [nginx]
-  cwe: [CWE-601]
-  match:
-    kind: call
-    callee:
-      name: ngx_http_send_redirect
-  description: "Disabled - internal nginx API; flag only in module code."
-
-- id: c.open_redirect.printf_location_header
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: c
-  tag: open-redirect
-  severity: low
-  cwe: [CWE-601]
-  match:
-    kind: call
-    callee:
-      name: printf
-  description: "Disabled - generic printf; flag with constraint on Location header emission."
+      binding_origin: runtime-global
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '^3[0-9]{2}$'
+  - arg_matches_regex:
+      index: 2
+      regex: '(?i)Location\s*:\s*%s'
+  - arg_tainted:
+      index: 4
+  match_examples:
+  - name: tainted Mongoose Location redirect target
+    code: |
+      #include <mongoose.h>
+      void redirect(struct mg_connection *connection, char *target) {
+        mg_http_reply(connection, 302, "Location: %s\r\n", "", target);
+      }
+    expect_match_text: [mg_http_reply]
+  - name: literal redirect target negative
+    code: |
+      #include <mongoose.h>
+      void redirect(struct mg_connection *connection) {
+        mg_http_reply(connection, 302, "Location: %s\r\n", "", "/dashboard");
+      }
+    expect_no_match: true
+  - name: non-redirect status negative
+    code: |
+      #include <mongoose.h>
+      void reply(struct mg_connection *connection, char *target) {
+        mg_http_reply(connection, 200, "Location: %s\r\n", "", target);
+      }
+    expect_no_match: true
+  - name: non-Location header negative
+    code: |
+      #include <mongoose.h>
+      void reply(struct mg_connection *connection, char *target) {
+        mg_http_reply(connection, 302, "Content-Type: %s\r\n", "", target);
+      }
+    expect_no_match: true
+  - name: local same-spelled helper collision negative
+    code: |
+      static void mg_http_reply(void *connection, int status, const char *headers,
+                                const char *body, char *target) {}
+      void reply(void *connection, char *target) {
+        mg_http_reply(connection, 302, "Location: %s\r\n", "", target);
+      }
+    expect_no_match: true
+  description: "Mongoose mg_http_reply(connection, 3xx, literal Location format, body, tainted target) emits an attacker-selected redirect destination; status, header role, provider identity, and target position are all compiler/rule constrained."

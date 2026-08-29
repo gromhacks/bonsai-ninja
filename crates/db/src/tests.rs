@@ -386,6 +386,63 @@ fn compiler_object_generation_replays_typed_adapter_ir_without_reparsing() {
 }
 
 #[test]
+fn compiler_object_options_bypass_persistent_load_without_disabling_explicit_publish() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("fixture.py");
+    let vfs = Arc::new(Vfs::new());
+    let file = vfs.write(
+        path.to_string_lossy().into_owned(),
+        "def exact():\n    return 1\n",
+    );
+    let declaration_calls = Arc::new(AtomicUsize::new(0));
+    let import_calls = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(CountingPythonAdapter {
+        declaration_calls: Arc::clone(&declaration_calls),
+        import_calls,
+    }));
+
+    let writer = AnalyzerDb::new(Arc::clone(&vfs), Arc::clone(&registry));
+    writer.set_workspace_root(root.path().to_path_buf());
+    assert_eq!(
+        writer
+            .save_compiler_object_sidecar(root.path())
+            .expect("publish reusable compiler generation"),
+        1
+    );
+    assert_eq!(declaration_calls.load(Ordering::SeqCst), 1);
+
+    let uncached = AnalyzerDb::with_options(
+        vfs,
+        registry,
+        AnalyzerDbOptions {
+            load_compiler_object_sidecar: false,
+            ..AnalyzerDbOptions::default()
+        },
+    );
+    uncached.set_workspace_root(root.path().to_path_buf());
+    assert!(uncached.compiler_file_object_uncached(file).is_some());
+    assert_eq!(
+        declaration_calls.load(Ordering::SeqCst),
+        2,
+        "disabled persistent loading must run the exact adapter again"
+    );
+    assert_eq!(
+        uncached
+            .save_compiler_object_sidecar(root.path())
+            .expect("explicit publication remains available"),
+        1
+    );
+    assert_eq!(
+        declaration_calls.load(Ordering::SeqCst),
+        3,
+        "explicit publication must run the complete exact generation even after an uncached one-file query"
+    );
+}
+
+#[test]
 fn compiler_object_progress_ticks_once_per_completed_source_unit() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -840,6 +897,46 @@ fn global_index_lowering_does_not_hold_the_decl_cache_lock() {
         2,
         "per-file AST lowering must run outside the declaration-cache write lock"
     );
+}
+
+#[test]
+fn ordered_header_scheduler_continues_past_a_slow_first_unit() {
+    let files = (0_u32..8).map(FileId::new).collect::<Vec<_>>();
+    let source_bytes = vec![1_u64; files.len()];
+    let later_started = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let mut published = Vec::new();
+
+    stream_decl_indexes_in_order(
+        &files,
+        &source_bytes,
+        2,
+        {
+            let later_started = Arc::clone(&later_started);
+            move |file| {
+                let (lock, ready) = &*later_started;
+                if file.raw() == 0 {
+                    let started = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let (started, timeout) = ready
+                        .wait_timeout_while(started, std::time::Duration::from_secs(2), |started| !*started)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    assert!(
+                        *started && !timeout.timed_out(),
+                        "header scheduling stopped at a per-worker batch barrier"
+                    );
+                } else if file.raw() == 2 {
+                    *lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+                    ready.notify_all();
+                }
+                Some(DeclIndex {
+                    file,
+                    ..Default::default()
+                })
+            }
+        },
+        |index| published.push(index.expect("header object").file),
+    );
+
+    assert_eq!(published, files, "header publication must stay canonical");
 }
 
 #[test]

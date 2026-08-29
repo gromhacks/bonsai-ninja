@@ -188,7 +188,7 @@
   language: dart
   tag: path-traversal
   severity: high
-  packages: [dart:io]
+  packages: ["dart:io"]
   cwe: [CWE-22]
   match:
     kind: call
@@ -214,7 +214,7 @@
   language: dart
   tag: path-traversal
   severity: high
-  packages: [dart:io]
+  packages: ["dart:io"]
   cwe: [CWE-22]
   match:
     kind: call
@@ -263,7 +263,7 @@
   language: dart
   tag: path-traversal
   severity: medium
-  packages: [dart:io]
+  packages: ["dart:io"]
   cwe: [CWE-22]
   match:
     kind: call
@@ -289,7 +289,7 @@
   language: dart
   tag: path-traversal
   severity: high
-  packages: [dart:io]
+  packages: ["dart:io"]
   cwe: [CWE-22]
   match:
     kind: call
@@ -315,7 +315,7 @@
   language: dart
   tag: path-traversal
   severity: high
-  packages: [dart:io]
+  packages: ["dart:io"]
   cwe: [CWE-22]
   match:
     kind: call
@@ -354,10 +354,6 @@
   - name: tainted archive extraction input
     code: |
       import 'package:archive/archive.dart';
-      import 'package:archive/archive.dart';
-      import 'package:archive/archive.dart';
-      import 'package:archive/archive.dart';
-      import 'package:archive/archive.dart';
       void test(dynamic input) { extractArchiveToDisk(input); }
   - name: literal archive extraction input negative
     code: |
@@ -385,10 +381,6 @@
   match_examples:
   - name: tainted archive file extraction input
     code: |
-      import 'package:archive/archive.dart';
-      import 'package:archive/archive.dart';
-      import 'package:archive/archive.dart';
-      import 'package:archive/archive.dart';
       import 'package:archive/archive.dart';
       void test(dynamic input) { extractFileToDisk(input); }
   - name: literal archive file extraction input negative
@@ -436,6 +428,19 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {attribute: [p, normalize]}
+      base_canonicalizer: {attribute: [p, normalize]}
+      path_constructor: {attribute: [p, join]}
+      containment_check: {attribute: [p, isWithin]}
+      containment_check_candidate_arg_index: 1
+      containment_check_base_arg_index: 0
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      containment_check_is_segment_aware: true
+      boundary_places: []
   match_examples:
   - name: tainted file constructor
     code: |

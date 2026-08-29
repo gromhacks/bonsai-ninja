@@ -42,6 +42,7 @@
   - elixir.xss.phoenix_html_raw_imported
   imports:
   - Phoenix_html
+  - Phoenix
 - id: elixir.xss.phoenix_html_safe_to_iodata
   enabled: true
   language: elixir

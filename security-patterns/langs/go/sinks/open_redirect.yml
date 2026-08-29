@@ -6,21 +6,14 @@
   packages:
   - github.com/gin-gonic/gin
   - github.com/labstack/echo
-  - github.com/gofiber/fiber
-  - github.com/beego/beego
-  - net/http
   cwe:
   - CWE-601
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.Redirect$
-      base_name_in:
-      - c
-      - ctx
-      - ctxt
-      - e
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Redirect$'
   constraints:
+  - receiver_type_in: [gin.Context, echo.Context]
   - arg_tainted:
       index: 1
   match_examples:
@@ -50,7 +43,182 @@
         c.Redirect(302, "/home")
       }
     expect_no_match: true
-  description: "gin/echo Context.Redirect(status, tainted URL) - review for external absolute URLs; relative-path redirects are usually safe. Merged collision aliases: go.open_redirect.framework_redirect, go.open_redirect.http_redirect."
+  - name: local redirect method collision negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      type localContext struct{}
+      func (localContext) Redirect(int, string) {}
+      func redirect(_ *gin.Context, local localContext, target string) {
+        local.Redirect(302, target)
+      }
+    expect_no_match: true
+  description: "gin/echo Context.Redirect(status, tainted URL) - review for external absolute URLs; relative-path redirects are usually safe. Exact receiver typing keeps different framework signatures in their own rules."
   aliases:
   - go.open_redirect.framework_redirect
-  - go.open_redirect.http_redirect
+- id: go.open_redirect.fiber_redirect
+  enabled: true
+  language: go
+  tag: open-redirect
+  severity: high
+  packages:
+  - github.com/gofiber/fiber
+  - github.com/gofiber/fiber/v2
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Redirect$'
+  constraints:
+  - receiver_type_in: [fiber.Ctx]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fiber redirect tainted target
+    code: |
+      package main
+      import "github.com/gofiber/fiber/v2"
+      func redirect(ctx *fiber.Ctx, target string) error {
+        return ctx.Redirect(target, 302)
+      }
+    expect_match_text: [ctx.Redirect]
+  - name: fiber redirect literal target negative
+    code: |
+      package main
+      import "github.com/gofiber/fiber/v2"
+      func redirect(ctx *fiber.Ctx) error {
+        return ctx.Redirect("/home", 302)
+      }
+    expect_no_match: true
+  description: "Fiber Ctx.Redirect(location, status...) accepts the redirect target at argument zero."
+- id: go.open_redirect.beego_controller_redirect
+  enabled: true
+  language: go
+  tag: open-redirect
+  severity: high
+  packages:
+  - github.com/beego/beego/v2/server/web
+  - github.com/astaxie/beego
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Redirect$'
+  constraints:
+  - receiver_type_in: [web.Controller, beego.Controller]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: beego controller redirect tainted target
+    code: |
+      package main
+      import "github.com/beego/beego/v2/server/web"
+      type RedirectController struct { web.Controller }
+      func (c *RedirectController) Get(target string) {
+        c.Redirect(target, 302)
+      }
+    expect_match_text: [c.Redirect]
+  - name: beego controller redirect literal target negative
+    code: |
+      package main
+      import "github.com/beego/beego/v2/server/web"
+      type RedirectController struct { web.Controller }
+      func (c *RedirectController) Get() {
+        c.Redirect("/home", 302)
+      }
+    expect_no_match: true
+  description: "Beego Controller.Redirect(url, code) accepts the redirect target at argument zero; embedded-base identity proves the promoted framework method."
+- id: go.open_redirect.http_redirect
+  enabled: true
+  language: go
+  tag: open-redirect
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute: [http, Redirect]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: net http redirect tainted target
+    code: |
+      package main
+      import "net/http"
+      func redirect(w http.ResponseWriter, r *http.Request, target string) {
+        http.Redirect(w, r, target, http.StatusFound)
+      }
+    expect_match_text: [http.Redirect]
+  - name: net http redirect literal target negative
+    code: |
+      package main
+      import "net/http"
+      func redirect(w http.ResponseWriter, r *http.Request) {
+        http.Redirect(w, r, "/home", http.StatusFound)
+      }
+    expect_no_match: true
+  description: "net/http Redirect(w, r, url, code) accepts the redirect target at argument two."
+- id: go.open_redirect.location_header_set
+  enabled: true
+  language: go
+  tag: open-redirect
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Header\(\)\.Set$'
+  constraints:
+  - receiver_type_in: [http.ResponseWriter, ResponseWriter]
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)^"location"$'
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: response location header receives tainted target
+    code: |
+      package main
+      import "net/http"
+      func redirect(w http.ResponseWriter, target string) {
+        w.Header().Set("Location", target)
+      }
+    expect_match_text: [w.Header().Set]
+  - name: response location header literal target negative
+    code: |
+      package main
+      import "net/http"
+      func redirect(w http.ResponseWriter) {
+        w.Header().Set("Location", "/home")
+      }
+    expect_no_match: true
+  - name: non-location response header negative
+    code: |
+      package main
+      import "net/http"
+      func respond(w http.ResponseWriter, value string) {
+        w.Header().Set("X-Trace", value)
+      }
+    expect_no_match: true
+  - name: local header chain collision negative
+    code: |
+      package main
+      import "net/http"
+      type localHeaders struct{}
+      func (localHeaders) Set(string, string) {}
+      type localWriter struct{}
+      func (localWriter) Header() localHeaders { return localHeaders{} }
+      func redirect(_ http.ResponseWriter, writer localWriter, target string) {
+        writer.Header().Set("Location", target)
+      }
+    expect_no_match: true
+  description: "net/http ResponseWriter Location header receives an attacker-controlled redirect target. Header injection remains a separate finding family because non-Location header values have different semantics."

@@ -1,18 +1,40 @@
 # Erlang XSS sinks (cowboy raw HTML responses + mochiweb).
-- id: erlang.xss.cowboy_html_response
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+- id: erlang.xss.iolist_html_composition
+  enabled: true
   language: erlang
   tag: xss
-  severity: medium
-  packages: [cowboy]
+  severity: high
   cwe: [CWE-79]
   match:
     kind: call
     callee:
-      regex: "^cowboy_req:reply"
-  description: "Disabled - shares regex with open_redirect.cowboy_reply_location; distinguishing XSS vs redirect needs header/body map inspection."
+      name: iolist_to_binary
+  constraints:
+  - arg_tainted:
+      index: 0
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)<(?:html|body|script|h[1-6]|div|span|a)(?:[ >])'
+  match_examples:
+  - name: tainted value composed into HTML iolist
+    code: |
+      -module(render).
+      -export([page/1]).
+      page(Input) -> iolist_to_binary(["<html><body>", Input, "</body></html>"]).
+    expect_match_text: [iolist_to_binary]
+  - name: non HTML binary composition is not an XSS sink
+    code: |
+      -module(render).
+      -export([packet/1]).
+      packet(Input) -> iolist_to_binary([<<1, 2>>, Input]).
+    expect_no_match: true
+  - name: literal HTML composition is not tainted
+    code: |
+      -module(render).
+      -export([page/0]).
+      page() -> iolist_to_binary(["<html><body>ready</body></html>"]).
+    expect_no_match: true
+  description: "iolist_to_binary/1 composing a tainted value into literal HTML markup creates an unescaped response body; non-markup binary packets remain excluded."
 
 - id: erlang.xss.mochiweb_response_write
   enabled: true
@@ -47,12 +69,9 @@
   description: "mochiweb_response:write - writes HTML body unescaped; tainted content reflects as XSS."
 
 # Cowboy binary-concat HTML response: `cowboy_req:reply(Status, #{}, <<"<p>", Q/binary, "</p>">>, Req)`.
-# The disabled erlang.xss.cowboy_html_response above shares regex with
-# open_redirect; this distinct ID requires HTML-tag literals in the
-# args to scope to the XSS shape.
+# The HTML-tag literal constraint distinguishes this response body from other
+# uses of cowboy_req:reply.
 - id: erlang.xss.cowboy_binary_concat
-  aliases:
-  - erlang.info_disclosure.cowboy_reply_error_body
   enabled: true
   language: erlang
   tag: xss
@@ -82,7 +101,7 @@
       test(Req) ->
         cowboy_req:reply(200, #{}, <<"<h1>ok</h1>">>, Req).
     expect_no_match: true
-  description: 'cowboy_req:reply with binary-concat HTML body (`<<"<p>", Q/binary, "</p>">>`) - tainted Q reflects in unescaped HTML. Constraint requires `<<` binary-concat with HTML tag literal to skip non-HTML reply shapes. Also covers merged aliases: erlang.info_disclosure.cowboy_reply_error_body.'
+  description: 'cowboy_req:reply with binary-concat HTML body (`<<"<p>", Q/binary, "</p>">>`) - tainted Q reflects in unescaped HTML. Constraint requires `<<` binary-concat with HTML tag literal to skip non-HTML reply shapes.'
 
 - id: erlang.xss.yaws_out_html
   enabled: true

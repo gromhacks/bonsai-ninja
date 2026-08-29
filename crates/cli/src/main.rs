@@ -229,8 +229,9 @@ macro_rules! cli_print {
 pub(crate) static UI_CELL: std::sync::OnceLock<Ui> = std::sync::OnceLock::new();
 
 /// Global `--no-cache` toggle. Set once at startup from the CLI flag or
-/// `BONSAI_NO_CACHE` env var; read by the inspect `ChainCache`
-/// constructor. Defaults to `false` (caching on).
+/// `BONSAI_NO_CACHE` env var; read by memo-cache constructors and workspace
+/// opening so one exact invocation neither consumes nor publishes reusable
+/// semantic sidecars. Defaults to `false` (caching on).
 pub(crate) static NO_CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Optional process-wide CLI parse timeout override in milliseconds.

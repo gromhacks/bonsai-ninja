@@ -24,32 +24,23 @@ fn repo_root() -> PathBuf {
 }
 
 struct TempTree {
+    _root: tempfile::TempDir,
     path: PathBuf,
 }
 
 impl TempTree {
     fn new(tag: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "bonsai-ws2-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        Self { path }
+        let root = tempfile::Builder::new()
+            .prefix(&format!("bonsai-ws2-{tag}-"))
+            .tempdir()
+            .expect("unique temporary test tree");
+        let path = root.path().to_path_buf();
+        Self { _root: root, path }
     }
     fn write(&self, rel: &str, content: &str) {
         let p = self.path.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, content).unwrap();
-    }
-}
-
-impl Drop for TempTree {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -68,7 +59,6 @@ fn typed_local_findings(lang: &str, ext: &str, method: &str, src: &str) -> usize
   language: {lang}
   tag: command-injection
   severity: high
-  packages: [acme]
   cwe: [CWE-78]
   match:
     kind: call

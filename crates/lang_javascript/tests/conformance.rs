@@ -9,6 +9,349 @@ fn conformance_traced() {
 }
 
 #[test]
+fn default_rest_and_destructured_parameters_follow_current_grammar_shapes() {
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new())],
+        &[(
+            "params.js",
+            r#"
+function variadic(value = source(), ...rest) { return rest; }
+function destructured({ head, ...tail }, [first, ...remaining]) { return head; }
+"#,
+        )],
+    );
+    let file = workspace.db().vfs().all_files()[0];
+    let index = workspace
+        .db()
+        .decl_index(file)
+        .expect("JavaScript compiler index");
+    let variadic = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "variadic")
+        .expect("variadic declaration");
+    assert_eq!(variadic.params, ["value", "rest"]);
+    assert!(variadic.is_variadic);
+
+    let destructured = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "destructured")
+        .expect("destructured declaration");
+    assert_eq!(destructured.params, ["head", "tail", "first", "remaining"]);
+    assert!(
+        !destructured.is_variadic,
+        "rest inside an object/array pattern does not collect overflow arguments"
+    );
+}
+
+#[test]
+fn value_member_reads_are_property_facts_but_method_calls_are_call_results() {
+    use bonsai_lang_api::{AssignValueKind, FlowEvent};
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new())],
+        &[(
+            "values.js",
+            r#"
+function bind(req) {
+  const file = req.files.avatar;
+  const name = file.name;
+  const trimmed = file.name.trim();
+  return trimmed;
+}
+"#,
+        )],
+    );
+    let file = workspace.db().vfs().all_files()[0];
+    let index = workspace
+        .db()
+        .decl_index(file)
+        .expect("JavaScript compiler index");
+    let bind = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "bind")
+        .expect("bind declaration");
+    let kind_for = |target: &str| {
+        bind.flow_events.iter().find_map(|event| match event {
+            FlowEvent::Assign {
+                target: actual,
+                value_kind,
+                ..
+            } if actual == target => *value_kind,
+            _ => None,
+        })
+    };
+    assert_eq!(kind_for("file"), Some(AssignValueKind::PropertyRead));
+    assert_eq!(kind_for("name"), Some(AssignValueKind::PropertyRead));
+    assert_eq!(kind_for("trimmed"), Some(AssignValueKind::CallResult));
+}
+
+#[test]
+fn logical_and_ternary_value_selection_is_exact_but_combining_binary_is_not() {
+    use bonsai_lang_api::{AssignValueKind, FlowEvent};
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new())],
+        &[(
+            "selection.js",
+            r#"
+function bind(req, flag) {
+  const fallback = req.body || {};
+  const nullable = req.body ?? {};
+  const gated = req.body && req.body.payload;
+  const selected = flag ? req.body : {};
+  const combined = req.body + "";
+  return [fallback, nullable, gated, selected, combined];
+}
+"#,
+        )],
+    );
+    let file = workspace.db().vfs().all_files()[0];
+    let index = workspace
+        .db()
+        .decl_index(file)
+        .expect("JavaScript compiler index");
+    let bind = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "bind")
+        .expect("bind declaration");
+    let kind_for = |target: &str| {
+        bind.flow_events.iter().find_map(|event| match event {
+            FlowEvent::Assign {
+                target: actual,
+                value_kind,
+                ..
+            } if actual == target => *value_kind,
+            _ => None,
+        })
+    };
+
+    for target in ["fallback", "nullable", "gated", "selected"] {
+        assert_eq!(
+            kind_for(target),
+            Some(AssignValueKind::WholeValueSelection),
+            "{target} must be classified from its exact selection operator"
+        );
+    }
+    assert_eq!(kind_for("combined"), Some(AssignValueKind::Compound));
+}
+
+#[test]
+fn nested_callback_keeps_parameter_and_free_write_in_its_own_compiler_scope() {
+    use bonsai_lang_api::FlowEvent;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new())],
+        &[(
+            "callback.js",
+            r#"
+function render() {
+  let hash = window.location.hash || "";
+  let output = "";
+  hash.replace(/^#?/, "").split("&").forEach(function (part) {
+    let values = part.split("=");
+    if (values[0] === "display") output = decodeURIComponent(values[1] || "");
+  });
+  sink(output);
+}
+"#,
+        )],
+    );
+    let file = workspace.db().vfs().all_files()[0];
+    let index = workspace
+        .db()
+        .decl_index(file)
+        .expect("JavaScript compiler index");
+    let callback = index
+        .defs
+        .iter()
+        .find(|decl| decl.name.starts_with("<lambda@"))
+        .expect("inline callback declaration");
+    let callback_argument = index
+        .call_argument_values
+        .iter()
+        .find(|fact| !fact.inline_callback_params.is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "missing inline callback argument fact: {:#?}",
+                index.call_argument_values
+            )
+        });
+    assert_eq!(
+        callback_argument.inline_callback_span,
+        Some(callback.span),
+        "the argument-value fact and callable declaration must share one exact compiler span"
+    );
+    assert!(
+        callback.span.start >= callback_argument.argument_span.start
+            && callback.span.end <= callback_argument.argument_span.end,
+        "the compiler callback declaration must be contained by the exact host argument span: callback={:?}, argument={:?}",
+        callback.span,
+        callback_argument.argument_span
+    );
+
+    let for_each_receiver = index
+        .call_receivers
+        .iter()
+        .find(|fact| !fact.value_flow.call_sites.is_empty())
+        .unwrap_or_else(|| panic!("missing compiler receiver fact: {:#?}", index.call_receivers));
+    assert!(
+        !for_each_receiver.value_flow.call_sites.is_empty(),
+        "a call-valued collection receiver must retain its exact nested call dependency: {for_each_receiver:#?}"
+    );
+
+    assert_eq!(callback.params, ["part"]);
+    let mut writes_outer_output = false;
+    bonsai_lang_api::for_each_flow_event(&callback.flow_events, &mut |event| {
+        if matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                declares_new_binding: false,
+                ..
+            } if target == "output"
+        ) {
+            writes_outer_output = true;
+        }
+    });
+    assert!(
+        writes_outer_output,
+        "the adapter must identify assignment to an outer lexical binding as a free write: {:#?}",
+        callback.flow_events
+    );
+
+    let graph = workspace.resolved_call_graph();
+    let render = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "render")
+        .expect("render declaration");
+    assert!(
+        graph.callable_arguments().any(|argument| {
+            argument.caller.raw() == render.symbol.raw()
+                && argument.target.raw() == callback.symbol.raw()
+                && argument.span == callback_argument.argument_span
+        }),
+        "the compiler-resolved inline callable argument must survive in the call graph: {:#?}",
+        graph.callable_argument_records()
+    );
+}
+
+#[test]
+fn nested_callback_local_shadow_is_not_an_outer_capture_write() {
+    use bonsai_lang_api::FlowEvent;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new())],
+        &[(
+            "callback-shadow.js",
+            r#"
+function render(input) {
+  let output = "safe";
+  input.split("&").forEach(function (part) {
+    let output = part;
+    consume(output);
+  });
+  sink(output);
+}
+"#,
+        )],
+    );
+    let file = workspace.db().vfs().all_files()[0];
+    let index = workspace
+        .db()
+        .decl_index(file)
+        .expect("JavaScript compiler index");
+    let callback = index
+        .defs
+        .iter()
+        .find(|decl| decl.name.starts_with("<lambda@"))
+        .expect("inline callback declaration");
+    let mut declares_local_output = false;
+    let mut writes_outer_output = false;
+    bonsai_lang_api::for_each_flow_event(&callback.flow_events, &mut |event| {
+        if let FlowEvent::Assign {
+            target,
+            declares_new_binding,
+            ..
+        } = event
+        {
+            if target == "output" {
+                declares_local_output |= *declares_new_binding;
+                writes_outer_output |= !*declares_new_binding;
+            }
+        }
+    });
+    assert!(
+        declares_local_output,
+        "the callback-local shadow must remain a declaration: {:#?}",
+        callback.flow_events
+    );
+    assert!(
+        !writes_outer_output,
+        "a callback-local shadow must not be emitted as a write to enclosing storage"
+    );
+}
+
+#[test]
+fn commonjs_destructured_constructor_and_local_constructor_keep_exact_identities() {
+    use bonsai_lang_api::FlowEvent;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new())],
+        &[(
+            "database.js",
+            r#"
+const { MongoClient } = require("mongodb");
+class Repository { findOne(value) { return value; } }
+function load() {
+  const client = new MongoClient("mongodb://localhost");
+  const repository = new Repository();
+  return repository.findOne(client);
+}
+"#,
+        )],
+    );
+    let file = workspace.db().vfs().all_files()[0];
+    let imports = workspace
+        .db()
+        .import_index(file)
+        .expect("JavaScript import index");
+    assert!(imports.imports.iter().any(|import| {
+        import.module == "mongodb"
+            && import.alias.as_deref() == Some("MongoClient")
+            && import.original_name.as_deref() == Some("MongoClient")
+    }));
+
+    let index = workspace
+        .db()
+        .decl_index(file)
+        .expect("JavaScript compiler index");
+    let load = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "load")
+        .expect("load declaration");
+    assert!(load
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "client" && alias.type_name == "MongoClient"));
+    assert!(load
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "repository" && alias.type_name == "Repository"));
+    assert!(load.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Call { name, receiver_types, .. }
+            if name == "repository.findOne"
+                && receiver_types.iter().any(|ty| ty == "Repository")
+    )));
+}
+
+#[test]
 fn assigned_object_methods_resolve_implicit_receiver_calls() {
     use bonsai_common::FuncId;
     use bonsai_lang_api::{DeclKind, FlowEvent, LanguageAdapter};
@@ -212,17 +555,33 @@ function incomplete(value) {
     );
     let file = ws.db().vfs().all_files()[0];
     let index = ws.db().decl_index(file).expect("JavaScript declaration index");
-    let [summary] = index.character_substitutions.as_slice() else {
-        panic!(
-            "expected only the global replacement summary: {:#?}",
-            index.character_substitutions
-        );
-    };
-    assert_eq!(summary.exact_mappings.len(), 2);
+    let escape = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "escapeHtml")
+        .expect("escapeHtml declaration");
+    let summary = index
+        .character_constraints
+        .iter()
+        .find_map(|fact| match &fact.domain {
+            bonsai_lang_api::CharacterConstraintDomain::ProviderBound {
+                operation_call,
+                domain,
+                ..
+            } if fact.function_span == escape.span && operation_call == "String.replace" => match domain
+                .as_ref()
+            {
+                bonsai_lang_api::CharacterConstraintDomain::SubstitutesExact { mappings } => Some(mappings),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("global mapping candidate");
+    assert_eq!(summary.len(), 2);
     assert!(summary
-        .exact_mappings
         .iter()
         .any(|entry| entry.key == "<" && entry.value == "&lt;"));
+    assert!(index.character_substitutions.is_empty());
 }
 
 #[test]
@@ -247,18 +606,94 @@ function shadowed(value, CONTROL) {
     );
     let file = ws.db().vfs().all_files()[0];
     let index = ws.db().decl_index(file).expect("JavaScript declaration index");
-    assert_eq!(
-        index.character_substitutions.len(),
-        1,
-        "a parameter shadow must block the outer regex proof: {:#?}",
-        index.character_substitutions
-    );
     let safe = index
         .defs
         .iter()
         .find(|decl| decl.name == "safe")
         .expect("safe function");
-    assert_eq!(index.character_substitutions[0].function_span, safe.span);
+    assert!(
+        index
+            .character_constraints
+            .iter()
+            .all(|fact| fact.function_span == safe.span),
+        "a parameter shadow must block the outer regex proof: {:#?}",
+        index.character_constraints
+    );
+    assert_eq!(index.character_constraints.len(), 2);
+    assert!(index.character_substitutions.is_empty());
+}
+
+#[test]
+fn provider_bound_mapping_candidates_capture_neutral_operation_and_factory_without_semantics() {
+    use bonsai_lang_api::{CharacterConstraintDomain, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "mapping.js",
+            r#"
+function direct(value) {
+  return value.scrub(/&/g, "and").scrub(/</g, "less");
+}
+function converted(value) {
+  return Coerce(value).scrub(/&/g, "and");
+}
+function mixed(value) {
+  return value.scrub(/&/g, "and").other(/</g, "less");
+}
+function Scalar(value) {
+  return value;
+}
+function shadowed(value) {
+  return Scalar(value).scrub(/&/g, "and");
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+    let span = |name: &str| {
+        index
+            .defs
+            .iter()
+            .find(|decl| decl.name == name)
+            .map(|decl| decl.span)
+            .expect("named declaration")
+    };
+    let providers = index
+        .character_constraints
+        .iter()
+        .filter_map(|fact| match &fact.domain {
+            CharacterConstraintDomain::ProviderBound {
+                factory_call,
+                operation_call,
+                domain,
+            } if matches!(
+                domain.as_ref(),
+                CharacterConstraintDomain::SubstitutesExact { .. }
+            ) =>
+            {
+                Some((fact.function_span, factory_call.as_str(), operation_call.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(providers.contains(&(span("direct"), "", "scrub")));
+    assert!(providers.contains(&(span("converted"), "Coerce", "Coerce.scrub")));
+    assert!(
+        !providers
+            .iter()
+            .any(|(function, _, _)| *function == span("mixed")),
+        "mixed operations must fail closed: {providers:#?}"
+    );
+    assert!(
+        !providers
+            .iter()
+            .any(|(function, _, _)| *function == span("shadowed")),
+        "a locally declared factory must fail closed: {providers:#?}"
+    );
+    assert!(index.character_substitutions.is_empty());
 }
 
 #[test]
@@ -294,42 +729,47 @@ function query(value) {
     );
     let file = ws.db().vfs().all_files()[0];
     let index = ws.db().decl_index(file).expect("JavaScript declaration index");
-    let regex = index
-        .character_substitutions
-        .iter()
-        .find(|fact| {
-            index
-                .defs
-                .iter()
-                .any(|decl| decl.name == "regex" && decl.span == fact.function_span)
+    let mappings_for = |name: &str| {
+        let function_span = index
+            .defs
+            .iter()
+            .find(|decl| decl.name == name)
+            .map(|decl| decl.span)
+            .expect("named declaration");
+        index.character_constraints.iter().find_map(|fact| {
+            if fact.function_span != function_span {
+                return None;
+            }
+            match &fact.domain {
+                bonsai_lang_api::CharacterConstraintDomain::ProviderBound { domain, .. } => {
+                    match domain.as_ref() {
+                        bonsai_lang_api::CharacterConstraintDomain::SubstitutesExact { mappings } => {
+                            Some(mappings)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
         })
-        .expect("regex replacement summary");
+    };
+    let regex = mappings_for("regex").expect("regex replacement candidate");
     for character in [
         ".", "*", "+", "?", "^", "$", "{", "}", "(", ")", "|", "[", "]", "\\",
     ] {
         assert!(
             regex
-                .exact_mappings
                 .iter()
                 .any(|entry| entry.key == character && entry.value == format!("\\{character}")),
             "missing exact regex escape for {character:?}: {:#?}",
-            regex.exact_mappings
+            regex
         );
     }
-    let ldap = index
-        .character_substitutions
-        .iter()
-        .find(|fact| {
-            index
-                .defs
-                .iter()
-                .any(|decl| decl.name == "ldap" && decl.span == fact.function_span)
-        })
-        .expect("numeric hex replacement summary");
+    let ldap = mappings_for("ldap").expect("numeric hex replacement candidate");
     assert!(ldap
-        .exact_mappings
         .iter()
         .any(|entry| entry.key == "\0" && entry.value == "\\00"));
+    assert!(index.character_substitutions.is_empty());
     assert!(index.string_compositions.iter().any(|fact| {
         fact.target.as_deref() == Some("rendered")
             && matches!(
@@ -490,6 +930,7 @@ function sanitize(value) {
   }
   return value;
 }
+
 function shallow(value) {
   const out = {};
   for (const [key, item] of Object.entries(value)) {
@@ -517,6 +958,49 @@ function shallow(value) {
     assert_eq!(
         fact.rejected_exact_values,
         ["__proto__", "constructor", "prototype"]
+    );
+}
+
+#[test]
+fn immutable_literal_set_membership_ternary_is_a_finite_selection() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "roles.js",
+            r#"
+const ROLES = new Set(["admin", "viewer", "editor"]);
+function safe(input) {
+  const role = ROLES.has(input) ? input : "viewer";
+  return role;
+}
+function mutable(input) {
+  const roles = new Set(["admin", "viewer"]);
+  roles.add(input);
+  const role = roles.has(input) ? input : "viewer";
+  return role;
+}
+function mismatch(input, other) {
+  const roles = new Set(["admin", "viewer"]);
+  const role = roles.has(input) ? other : "viewer";
+  return role;
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+    assert_eq!(
+        index
+            .finite_literal_selections
+            .iter()
+            .filter_map(|fact| fact.target.as_deref())
+            .collect::<Vec<_>>(),
+        ["role"],
+        "only the immutable exact-subject Set membership may constrain its output: {:#?}",
+        index.finite_literal_selections
     );
 }
 

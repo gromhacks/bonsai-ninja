@@ -1,18 +1,4 @@
 # PHP queue/messaging sources. Laravel queue jobs, Beanstalkd, SQS consumers.
-- id: php.source.laravel_job_handle
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: queue-message
-  trust: service
-  packages: [illuminate/queue]
-  match:
-    kind: call
-    callee:
-      name: handle
-  description: "Disabled - too broad (handle is ubiquitous); enable with ShouldQueue class constraint."
-
 - id: php.source.pheanstalk_reserve
   enabled: true
   language: php
@@ -34,24 +20,21 @@
         $job = $pheanstalk->reserve();
         return $job;
       }
+  - name: unrelated reserve method is not a queue source
+    code: |
+      <?php
+      use Pheanstalk\Pheanstalk;
+      class Inventory {
+        public function reserve() { return "local"; }
+      }
+      function run(Inventory $inventory) {
+        return $inventory->reserve();
+      }
+    expect_no_match: true
   description: "Pheanstalk.reserve() - beanstalkd job payload reserved on a typed Pheanstalk receiver."
 
   imports:
   - Pheanstalk
-
-- id: php.source.pheanstalk_watch
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: queue-message
-  trust: service
-  packages: [pda/pheanstalk]
-  match:
-    kind: call
-    callee:
-      attribute: [Pheanstalk, watch]
-  description: "Disabled - watch selects a tube; reserve is the source."
 
 - id: php.source.amqp_envelope_get_body
   enabled: true
@@ -74,6 +57,17 @@
         $b = $message->getBody();
         return $b;
       }
+  - name: unrelated getBody method is not an AMQP source
+    code: |
+      <?php
+      use PhpAmqpLib\Message\AMQPEnvelope;
+      class Document {
+        public function getBody() { return "local"; }
+      }
+      function handle(Document $document) {
+        return $document->getBody();
+      }
+    expect_no_match: true
   description: "AMQPEnvelope.getBody() - broker-supplied message body read on a typed AMQPEnvelope receiver."
 
   imports:
@@ -100,6 +94,17 @@
         $b = $message->getBody();
         return $b;
       }
+  - name: unrelated getBody method is not an SQS source
+    code: |
+      <?php
+      use Aws\Sqs\Message;
+      class Response {
+        public function getBody() { return "local"; }
+      }
+      function run(Response $response) {
+        return $response->getBody();
+      }
+    expect_no_match: true
   description: "AWS SQS Message.getBody() - broker-supplied body read on a typed Message receiver."
 
   imports:

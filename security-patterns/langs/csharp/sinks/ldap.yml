@@ -45,42 +45,6 @@
     expect_no_match: true
   description: "DirectorySearcher.Filter = tainted."
 
-- id: csharp.ldap.directorysearcher_findall
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: ldap-injection
-  severity: high
-  cwe: [CWE-90]
-  match:
-    kind: call
-    callee:
-      attribute: [DirectorySearcher, FindAll]
-  match_examples:
-  - name: declared shape
-    code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DirectorySearcher.FindAll("(cn=input)"); } }
-  description: "Disabled - DirectorySearcher.FindAll() executes the receiver Filter state; use constructor/Filter assignment sinks until receiver-state tracking exists."
-
-- id: csharp.ldap.directorysearcher_findone
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: ldap-injection
-  severity: high
-  cwe: [CWE-90]
-  match:
-    kind: call
-    callee:
-      attribute: [DirectorySearcher, FindOne]
-  match_examples:
-  - name: declared shape
-    code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DirectorySearcher.FindOne("(cn=input)"); } }
-  description: "Disabled - DirectorySearcher.FindOne() executes the receiver Filter state; use constructor/Filter assignment sinks until receiver-state tracking exists."
-
 - id: csharp.ldap.directoryentry_ctor
   enabled: true
   language: csharp

@@ -221,6 +221,39 @@ def helper(request):
     }
 
     #[test]
+    fn preserves_adapter_emitted_decorator_configuration_identity() {
+        let ws = Workspace::new(python_registry());
+        let file = ws.vfs().write(
+            "tasks.py",
+            r#"
+from celery import shared_task as job
+
+@job(bind=True)
+def process(self, payload):
+    return payload
+"#,
+        );
+        let index = ws.db().decl_index(file).expect("decl index");
+        let process = index
+            .defs
+            .iter()
+            .find(|decl| decl.name == "process")
+            .expect("process decl");
+
+        let decorators = decl_decorator_names(&ws, file, &index, process.span, process.name_span);
+        assert!(
+            decorators.iter().any(|name| name == "job.bind=true"),
+            "{decorators:#?}"
+        );
+        assert!(
+            decorators
+                .iter()
+                .any(|name| name == "celery.shared_task.bind=true"),
+            "{decorators:#?}"
+        );
+    }
+
+    #[test]
     fn attaches_attribute_inside_declaration_span_before_name() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(

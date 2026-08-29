@@ -265,18 +265,81 @@
     expect_match_text: ["crypto:hash_equals_constant_time"]
   description: "Constant-time comparison - defeats MAC/token timing oracles."
 - id: erlang.sanitizer.binary_to_term_safe
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: erlang
   tag: validation
   match:
     kind: call
     callee:
       regex: "^binary_to_term$"
-  description: "Disabled - same `^binary_to_term$` regex as erlang.deser.binary_to_term sink; without list-contains constraint
-    support we cannot distinguish the safe arity-2 [{safe,true}] form from the unsafe form. Defaulting to the sink (flag everywhere)
-    is safer than spuriously sanitizing."
+  constraints:
+  - arg_count: 2
+  - arg_sequence_items_equal:
+      argument_index: 1
+      items:
+      - index: 0
+        accepted_values:
+        - {kind: string, value: safe}
+  match_examples:
+  - name: safe term decoder option
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        binary_to_term(Input, [safe]).
+  - name: unrelated decoder option is not safe
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        binary_to_term(Input, [used]).
+    expect_no_match: true
+  - name: same list on an unrelated call is not safe
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        local_decoder(Input, [safe]).
+    expect_no_match: true
+  description: "binary_to_term/2 with an exact `[safe]` option refuses unsafe term identities and new atoms. The adapter provides only exact parsed sequence values."
+
+- id: erlang.sanitizer.xmerl_entities_disabled
+  enabled: true
+  language: erlang
+  tag: xxe-sanitizer
+  match:
+    kind: call
+    callee:
+      attribute: [xmerl_scan, string]
+  constraints:
+  - arg_count: 2
+  - arg_aggregate_fields_equal:
+      argument_index: 1
+      required_fields:
+      - path: [allow_entities]
+        value: {kind: string, value: 'false'}
+  match_examples:
+  - name: exact entity expansion disable option
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        xmerl_scan:string(Input, [{allow_entities, false}]).
+  - name: enabled entity expansion is not safe
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        xmerl_scan:string(Input, [{allow_entities, true}]).
+    expect_no_match: true
+  - name: same option on an unrelated parser is not safe
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        local_parser:string(Input, [{allow_entities, false}]).
+    expect_no_match: true
+  description: "xmerl_scan:string/2 with exact `{allow_entities, false}` configuration disables entity expansion. Tuple-list structure and scalar values are compiler facts; option meaning remains rule data."
 
 - id: erlang.sanitizer.lists_prefix_same_origin
   enabled: true
@@ -303,32 +366,6 @@
     expect_no_match: true
   description: "lists:prefix(\"/...\", Input) - same-origin redirect/path guard for slash-rooted local paths."
 
-- id: erlang.sanitizer.allowlist_lookup
-  enabled: false
-  language: erlang
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      regex: "^(sets:is_element|ordsets:is_element|maps:is_key|proplists:is_defined)$"
-  constraints:
-  - any_arg_matches_regex: "^(Allowed|Allowlist|Whitelist|SafeValues|SafePaths)$"
-  match_examples:
-  - name: sets allowlist lookup
-    code: |
-      -module(example).
-      -export([test/2]).
-      test(Input, Allowed) ->
-        sets:is_element(Input, Allowed).
-    expect_match_text: ["sets:is_element"]
-  - name: sets allowlist lookup negative constraint boundary
-    code: "-module(example).\n-export([test/2]).\ntest(Input, Allowed) ->\n  sets:is_element().\n"
-    expect_no_match: true
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    sets/ordsets/maps/proplists finite allowlist lookup - validates a tainted value against accepted values or keys."
-
-  disabled_reason:
-    code: over-broad
 - id: erlang.sanitizer.re_run_full_match
   enabled: true
   language: erlang

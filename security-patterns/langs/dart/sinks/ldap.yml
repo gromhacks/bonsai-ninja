@@ -11,14 +11,8 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.search$
-      base_name_in:
-      - connection
-      - conn
-      - ldap
-      - ldapConn
-      - c
-      - client
+      name: search
+      receiver_type_in: [LdapConnection, LDAPConnection]
   constraints:
   - arg_tainted:
       index: 0
@@ -26,46 +20,19 @@
   - name: tainted ldap filter
     code: |
       import 'package:dartdap/dartdap.dart';
-      import 'package:dartdap/dartdap.dart';
-      import 'package:dartdap/dartdap.dart';
-      import 'package:dartdap/dartdap.dart';
-      import 'package:dartdap/dartdap.dart';
-      void test(String input) { connection.search(input); }
+      void test(LdapConnection connection, String input) { connection.search(input); }
   - name: literal ldap filter negative
     code: |
       import 'package:dartdap/dartdap.dart';
-      void test() { connection.search("(cn=safe)"); }
+      void test(LdapConnection connection) { connection.search("(cn=safe)"); }
+    expect_no_match: true
+  - name: unrelated local search method is not LDAP
+    code: |
+      import 'package:dartdap/dartdap.dart';
+      class LocalConnection { dynamic search(String value) => value; }
+      void test(LocalConnection connection, String input) { connection.search(input); }
     expect_no_match: true
   description: "dartdap LdapConnection.search with tainted filter."
 
   imports:
   - dartdap/dartdap.dart
-- id: dart.ldap.dartdap_search_ldap
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: dart.ldap.dartdap_search
-  language: dart
-  tag: ldap-injection
-  severity: high
-  packages: [dartdap, ldap_dart]
-  cwe: [CWE-90]
-  match:
-    kind: call
-    callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.search$
-  description: "Subsumed by dart.ldap.dartdap_search - same receiver-agnostic search shape and canonical package gate cover dartdap and ldap_dart."
-- id: dart.ldap.dartdap_query
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: ldap-injection
-  severity: high
-  packages: [dartdap, ldap_dart]
-  cwe: [CWE-90]
-  match:
-    kind: call
-    callee:
-      attribute: [connection, query]
-  description: "Disabled - `query` overlaps SQL driver query shapes; enable as a semantic LdapConnection receiver rule once Dart receiver-type facts distinguish it from database Connection.query."

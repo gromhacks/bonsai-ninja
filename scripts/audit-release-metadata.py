@@ -72,6 +72,18 @@ def main() -> int:
         if not (ROOT / relative).is_file():
             violations.append(f"missing public repository file: {relative}")
 
+    rulepack_version_path = ROOT / "security-patterns" / "VERSION"
+    if not rulepack_version_path.is_file():
+        violations.append("missing embedded rulepack VERSION marker")
+    elif len(versions) == 1:
+        workspace_version = next(iter(versions))
+        rulepack_version = rulepack_version_path.read_text().strip()
+        if rulepack_version != workspace_version:
+            violations.append(
+                "embedded rulepack VERSION differs from workspace version: "
+                f"{rulepack_version!r} != {workspace_version!r}"
+            )
+
     if violations:
         for violation in violations:
             print(f"release metadata: {violation}")

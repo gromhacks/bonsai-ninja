@@ -60,10 +60,32 @@
     kind: call
     callee:
       name: crypt
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '^(?:"|\x27)[./0-9A-Za-z]{2}(?:"|\x27)$'
   match_examples:
-  - name: php.crypto.crypt_des example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  crypt($input);\n}\n"
-  description: "crypt() - flag DES variant; default depends on salt prefix."
+  - name: classic DES crypt salt
+    code: |
+      <?php
+      function legacy_hash($password) {
+        return crypt($password, "ab");
+      }
+  - name: bcrypt crypt salt negative
+    code: |
+      <?php
+      function modern_hash($password) {
+        return crypt($password, '$2y$12$usesomesillystringforsalt$');
+      }
+    expect_no_match: true
+  - name: dynamic crypt salt negative
+    code: |
+      <?php
+      function configurable_hash($password, $salt) {
+        return crypt($password, $salt);
+      }
+    expect_no_match: true
+  description: "`crypt` with an exact two-character traditional DES salt selects the obsolete DES variant; modern modular salt prefixes and dynamic salts stay quiet."
 - id: php.crypto.mcrypt_encrypt
   enabled: true
   language: php
@@ -92,11 +114,32 @@
     kind: call
     callee:
       name: openssl_encrypt
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '(?i)^(?:"|\x27)(?:des(?:-[a-z0-9-]+)?|des-ede3(?:-[a-z0-9-]+)?|rc2(?:-[a-z0-9-]+)?|rc4|bf(?:-[a-z0-9-]+)?|[a-z0-9-]+-ecb)(?:"|\x27)$'
   match_examples:
-  - name: php.crypto.openssl_encrypt_ecb example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  openssl_encrypt($input, \"AES-128-ECB\");\n\
-      }\n"
-  description: 'openssl_encrypt with AES-128-ECB. Merged aliases: php.crypto.openssl_encrypt_ecb_256.'
+  - name: OpenSSL ECB encryption
+    code: |
+      <?php
+      function encrypt_legacy($input, $key) {
+        return openssl_encrypt($input, "AES-128-ECB", $key);
+      }
+  - name: OpenSSL authenticated encryption negative
+    code: |
+      <?php
+      function encrypt_modern($input, $key, $iv, &$tag) {
+        return openssl_encrypt($input, "AES-256-GCM", $key, 0, $iv, $tag);
+      }
+    expect_no_match: true
+  - name: OpenSSL CBC encryption negative
+    code: |
+      <?php
+      function encrypt_cbc($input, $key, $iv) {
+        return openssl_encrypt($input, "AES-256-CBC", $key, 0, $iv);
+      }
+    expect_no_match: true
+  description: 'openssl_encrypt with an exact weak cipher or ECB algorithm is insecure; authenticated/non-ECB algorithms stay quiet. Merged aliases: php.crypto.openssl_encrypt_ecb_256.'
   aliases:
   - php.crypto.openssl_encrypt_ecb_256
 - id: php.crypto.rand
@@ -148,17 +191,3 @@
   - name: php.crypto.uniqid example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  uniqid($input);\n}\n"
   description: "uniqid() - microsecond-timestamp based; predictable across requests. Use random_bytes for tokens."
-- id: php.crypto.password_hash_md5
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: weak-crypto
-  severity: high
-  cwe:
-  - CWE-916
-  match:
-    kind: call
-    callee:
-      name: password_hash
-  description: "Disabled - password_hash() is OK; flag only weak algo."

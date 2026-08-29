@@ -344,13 +344,11 @@ When the same callee has multiple sink modes:
   cwe: [CWE-78]
   severity: critical
 
-# subprocess.run([cmd, ...]) - argv mode is over-broad without
-# additional constraints (no shell interpolation, list-form invocation)
-- id: python.cmdi.subprocess_run_argv
-  enabled: false
-  disabled_reason:
-    code: over-broad
 ```
+
+Do not add a disabled `subprocess.run([cmd, ...])` placeholder. List-form argv
+does not invoke a shell by default; add a separate enabled rule only when its
+match and constraints prove a dangerous boundary.
 
 When every argument is the same dangerous payload surface, use
 `any_arg_tainted` instead of cloning a rule for every position:

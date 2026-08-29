@@ -22,50 +22,6 @@
     expect_no_match: true
   description: "NSPredicate.predicateWithFormat - Realm/CoreData filter injection."
 
-- id: swift.nosql.nspredicate_init_format
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: nosql-injection
-  severity: high
-  cwe: [CWE-943]
-  match:
-    kind: call
-    callee:
-      name: NSPredicate
-  description: "Disabled - duplicates swift.eval.nspredicate_format (same `NSPredicate(format:)` call site). Kept here for explicit nosql family coverage."
-
-- id: swift.nosql.realm_objects_filter_string
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: swift
-  tag: nosql-injection
-  severity: high
-  packages: [RealmSwift]
-  cwe: [CWE-943]
-  match:
-    kind: call
-    callee:
-      name: filter
-  description: "Disabled - bare `.filter` matches every Swift Array/String filter; needs receiver narrowing to Results<>."
-
-- id: swift.nosql.realm_filter_string
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: swift
-  tag: nosql-injection
-  severity: high
-  packages: [RealmSwift]
-  cwe: [CWE-943]
-  match:
-    kind: call
-    callee:
-      name: filter
-  description: "Disabled - same overbroad `.filter` shape as swift.nosql.realm_objects_filter_string; enable only with receiver narrowing to Realm Results<>."
-
 - id: swift.nosql.coredata_fetch_predicate
   enabled: true
   language: swift
@@ -121,18 +77,3 @@
 
   imports:
   - mongoswiftdriver
-- id: swift.nosql.fmdb_executequery
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: swift.sqli.fmdb_executequery
-  language: swift
-  tag: sql-injection
-  severity: low
-  packages: [fmdb]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      name: executeQuery
-  description: "Disabled - covered by sqli."

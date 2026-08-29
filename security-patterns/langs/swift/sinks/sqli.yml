@@ -146,20 +146,13 @@
   tag: sql-injection
   severity: high
   packages: [GRDB]
+  imports: [GRDB]
   cwe: [CWE-89]
   match:
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
-      base_name_in:
-      - connection
-      - conn
-      - db
-      - database
-      - session
-      - ctx
-      - c
-      - stmt
+      receiver_type_in: [Database]
   constraints:
   - arg_tainted:
       index: 0
@@ -167,11 +160,17 @@
   - name: declared shape
     code: |
       import GRDB
-      func test(input: String) { db.execute(input) }
+      func test(db: Database, input: String) { db.execute(sql: input) }
   - name: literal grdb execute negative
     code: |
       import GRDB
-      func test() { db.execute("SELECT 1") }
+      func test(db: Database) { db.execute(sql: "SELECT 1") }
+    expect_no_match: true
+  - name: local Database is not GRDB
+    code: |
+      import GRDB
+      struct Database {}
+      func test(db: Database, input: String) { db.execute(sql: input) }
     expect_no_match: true
   description: "GRDB Database.execute with raw SQL."
 - id: swift.sqli.sqlite_swift_run
@@ -192,17 +191,74 @@
   - name: declared shape
     code: |
       import SQLite // SQLite.swift
-      import SQLite // SQLite.swift
       func test(input: String) { Connection.run(input) }
   - name: literal sqlite swift run negative
     code: |
-      import SQLite // SQLite.swift
       import SQLite // SQLite.swift
       func test() { Connection.run("SELECT 1") }
     expect_no_match: true
   description: "SQLite.swift Connection.run with raw SQL. Typed-receiver sqli (PATTERN_GUIDE-exempt from SQL-keyword arg shape); `min_args: 1` rejects 0-arg decoys."
   imports:
   - SQLite
+
+- id: swift.sqli.sqlkit_sqlraw
+  enabled: true
+  language: swift
+  tag: sql-injection
+  severity: critical
+  packages: [SQLKit]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee: {name: SQLRaw}
+  constraints:
+  - arg_tainted:
+      index: 0
+  - arg_count: 1
+  match_examples:
+  - name: SQLKit explicitly raw SQL expression
+    code: |
+      import SQLKit
+      func query(input: String) -> SQLRaw { SQLRaw("SELECT * FROM users WHERE name = '" + input + "'") }
+    expect_match_text: [SQLRaw]
+  - name: SQLKit bound value negative
+    code: |
+      import SQLKit
+      func query(input: String) -> SQLBind { SQLBind(input) }
+    expect_no_match: true
+  description: "SQLKit SQLRaw(taintedSQL) embeds attacker-controlled text directly into a SQL expression. SQLQueryString's normal bind interpolation is intentionally not matched because it parameterizes values."
+
+- id: swift.sqli.sqlkit_query_string_dynamic
+  enabled: true
+  language: swift
+  tag: sql-injection
+  severity: critical
+  packages: [SQLKit]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee: {name: SQLQueryString}
+  constraints:
+  - arg_tainted:
+      index: 0
+  - arg_count: 1
+  match_examples:
+  - name: dynamic SQLQueryString construction
+    code: |
+      import SQLKit
+      func query(_ input: String) { _ = SQLQueryString("SELECT * FROM t ORDER BY " + input) }
+    expect_match_text: [SQLQueryString]
+  - name: literal SQLQueryString negative
+    code: |
+      import SQLKit
+      func query() { _ = SQLQueryString("SELECT 1") }
+    expect_no_match: true
+  - name: local SQLQueryString collision negative
+    code: |
+      struct SQLQueryString { init(_ value: String) {} }
+      func query(_ input: String) { _ = SQLQueryString(input) }
+    expect_no_match: true
+  description: "SQLKit SQLQueryString constructed from a tainted runtime string preserves raw SQL text; interpolation through SQLKit's bind-specific syntax remains a separate safe value shape."
 - id: swift.sqli.sqlite_swift_scalar
   enabled: true
   language: swift
@@ -221,11 +277,9 @@
   - name: declared shape
     code: |
       import SQLite // SQLite.swift
-      import SQLite // SQLite.swift
       func test(input: String) { Connection.scalar(input) }
   - name: literal sqlite swift scalar negative
     code: |
-      import SQLite // SQLite.swift
       import SQLite // SQLite.swift
       func test() { Connection.scalar("SELECT 1") }
     expect_no_match: true

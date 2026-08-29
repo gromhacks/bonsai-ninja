@@ -1,15 +1,18 @@
 //! PHP language adapter.
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
-    collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
+    collect_modifier_visibility, collect_param_type_aliases, decl_index_from_tree_with_handler,
+    extract_imports_via,
     kit::{
-        call_arg_from_node_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
-        named_child_call_args_with_handler, node_text, parse_with, span_of,
+        call_arg_from_node_with_handler, collect_kinds, collect_receiver_field_initializers,
+        collect_receiver_field_writes, collect_receiver_state_sources, first_named_child_of_kind,
+        language_from_pack, named_child_call_args_with_handler, node_text, parse_with, span_of,
     },
     AdapterContext, AdapterError, AssignValueKind, AssignmentValueIndex, CallArg, CallKind,
-    CallTargetExtraction, DeclIndex, DeclKind, FieldWrite, FlowEvent, FragmentParseContext, GrammarHandler,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModifierVocabulary, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
+    CallTargetExtraction, CompilerGuardFact, DeclIndex, DeclKind, FieldWrite, FlowEvent,
+    FragmentParseContext, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
+    LanguageCapabilities, LanguageId, ModifierVocabulary, StaticScalarValue, StringCompositionFact,
+    StringCompositionPart, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
 use std::collections::BTreeSet;
 fn php_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
@@ -72,7 +75,7 @@ const PHP_VOCAB: ModifierVocabulary = ModifierVocabulary {
         "trait_declaration",
         "enum_declaration",
     ],
-    modifier_container_kinds: &["visibility_modifier", "modifier"],
+    modifier_container_kinds: &["visibility_modifier"],
     keyword_to_visibility: &[
         ("private", Visibility::Private),
         ("protected", Visibility::Protected),
@@ -100,9 +103,7 @@ fn extract_php_callable_reference(node: Node<'_>, src: &[u8]) -> Option<String> 
         .child_by_field_name("function")
         .or_else(|| node.child_by_field_name("name"))
         .or_else(|| node.child_by_field_name("target"))?;
-    let arguments = node
-        .child_by_field_name("arguments")
-        .or_else(|| node.child_by_field_name("argument_list"))?;
+    let arguments = node.child_by_field_name("arguments")?;
     if arguments.named_child_count() != 1 || arguments.named_child(0)?.kind() != "variadic_placeholder" {
         return None;
     }
@@ -128,8 +129,21 @@ fn php_subscript_parts(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
 }
 
 fn php_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {
-    if node.kind() != "string" {
+    if !matches!(node.kind(), "string" | "encapsed_string") {
         return None;
+    }
+    // A double-quoted PHP literal is represented as `encapsed_string` even
+    // when it contains only a `string_content` child. Reject interpolation,
+    // escape, and every other named child: only a compiler-proven static key
+    // may become a field projection.
+    if node.kind() == "encapsed_string" {
+        let mut cursor = node.walk();
+        if node
+            .named_children(&mut cursor)
+            .any(|child| child.kind() != "string_content")
+        {
+            return None;
+        }
     }
     let text = node_text(&node, src).trim();
     let quote = text.as_bytes().first().copied()?;
@@ -138,6 +152,597 @@ fn php_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {
     }
     let value = text.get(1..text.len().checked_sub(1)?)?;
     (!value.contains('\\')).then(|| value.to_string())
+}
+
+/// Decode scalar syntax owned by PHP into the language-neutral compiler fact.
+///
+/// PHP keywords are case-insensitive, while quoted strings are static only
+/// when the same CST proof used for subscript keys rejects interpolation and
+/// escapes. Integer/float spellings are intentionally not projected into
+/// `StaticScalarValue`: the current wire type models only configuration
+/// booleans, null, and exact strings.
+fn php_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
+    let text = node_text(&node, src).trim();
+    match node.kind() {
+        "boolean" if text.eq_ignore_ascii_case("true") => Some(StaticScalarValue::Boolean(true)),
+        "boolean" if text.eq_ignore_ascii_case("false") => Some(StaticScalarValue::Boolean(false)),
+        "null" if text.eq_ignore_ascii_case("null") => Some(StaticScalarValue::Null),
+        "string" | "encapsed_string" => Some(StaticScalarValue::String(php_static_subscript_key(node, src)?)),
+        _ => None,
+    }
+}
+
+/// Lower PHP's string-concatenation operator into complete ordered compiler
+/// facts. Unsupported operands reject the entire expression; downstream
+/// proofs never infer meaning from a partially lowered concatenation.
+fn php_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<StringCompositionFact> {
+    let mut facts = Vec::new();
+    for assignment in collect_kinds(tree, &["assignment_expression"]) {
+        let (Some(target), Some(value)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        let Some(target) = php_exact_composition_place(target, src) else {
+            continue;
+        };
+        let mut parts = Vec::new();
+        if lower_php_string_composition(value, file, src, &mut parts) && parts.len() > 1 {
+            facts.push(StringCompositionFact {
+                container_span: span_of(file, &assignment),
+                value_span: span_of(file, &value),
+                target: Some(target),
+                dynamic_anchor_span: None,
+                parts,
+            });
+        }
+    }
+    // Call arguments and branch predicates are expression-owned rather than
+    // assignments. Preserve every complete concatenation by its exact CST
+    // span so consumers can join it to CallArgumentValueFact.
+    for value in collect_kinds(tree, &["binary_expression"]) {
+        let mut parts = Vec::new();
+        if lower_php_string_composition(value, file, src, &mut parts) && parts.len() > 1 {
+            let value_span = span_of(file, &value);
+            facts.push(StringCompositionFact {
+                container_span: value_span,
+                value_span,
+                target: None,
+                dynamic_anchor_span: None,
+                parts,
+            });
+        }
+    }
+    facts.sort_by_key(|fact| {
+        (
+            fact.container_span.start,
+            fact.container_span.end,
+            fact.value_span.start,
+            fact.value_span.end,
+        )
+    });
+    facts.dedup();
+    facts
+}
+
+fn lower_php_string_composition(
+    mut node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<StringCompositionPart>,
+) -> bool {
+    while node.kind() == "parenthesized_expression" {
+        let Some(inner) = node.named_child(0) else {
+            return false;
+        };
+        node = inner;
+    }
+    if let Some(StaticScalarValue::String(value)) = php_static_scalar(node, src) {
+        out.push(StringCompositionPart::Literal { value });
+        return true;
+    }
+    if let Some(place) = php_exact_composition_place(node, src) {
+        out.push(StringCompositionPart::Place { place });
+        return true;
+    }
+    if matches!(
+        node.kind(),
+        "function_call_expression"
+            | "member_call_expression"
+            | "nullsafe_member_call_expression"
+            | "scoped_call_expression"
+    ) {
+        out.push(StringCompositionPart::Call {
+            span: span_of(file, &node),
+        });
+        return true;
+    }
+    if node.kind() != "binary_expression" {
+        return false;
+    }
+    let (Some(left), Some(right)) = (
+        node.child_by_field_name("left"),
+        node.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    let operator = src
+        .get(left.end_byte()..right.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim);
+    operator == Some(".")
+        && lower_php_string_composition(left, file, src, out)
+        && lower_php_string_composition(right, file, src, out)
+}
+
+fn php_exact_composition_place(mut node: Node<'_>, src: &[u8]) -> Option<String> {
+    while matches!(node.kind(), "parenthesized_expression" | "argument") {
+        node = node.named_child(0)?;
+    }
+    match node.kind() {
+        "variable_name" => php_reference_name(node, src),
+        "class_constant_access_expression"
+            if node
+                .named_child(0)
+                .is_some_and(|scope| scope.kind() == "relative_scope") =>
+        {
+            // `self::ROOT` / `static::ROOT` name one immutable binding in
+            // the containing class. Keep the declaration spelling as the
+            // compiler place so it joins the class-owned constant fact below;
+            // a qualified external class constant retains its full spelling.
+            let mut cursor = node.walk();
+            let name = node.named_children(&mut cursor).last()?;
+            let place = node_text(&name, src).trim();
+            (!place.is_empty()).then(|| place.to_string())
+        }
+        "class_constant_access_expression" => {
+            let raw = node_text(&node, src);
+            let place = raw
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            (!place.is_empty()).then_some(place)
+        }
+        "member_access_expression" | "nullsafe_member_access_expression" => {
+            let object = php_exact_composition_place(node.child_by_field_name("object")?, src)?;
+            let name = node_text(&node.child_by_field_name("name")?, src).trim();
+            (!name.is_empty()).then(|| format!("{object}.{name}"))
+        }
+        "subscript_expression" => {
+            let (object, key) = php_subscript_parts(node)?;
+            let object = php_exact_composition_place(object, src)?;
+            let key = php_static_subscript_key(key, src)?;
+            Some(format!("{object}.{key}"))
+        }
+        _ => None,
+    }
+}
+
+/// Add exact immutable scalar facts for PHP `const` elements.
+///
+/// Tree-sitter represents class and namespace constants as `const_element`
+/// rather than ordinary assignments, so the shared assignment extractor
+/// cannot infer their value. This adapter-owned pass lowers only a complete
+/// scalar initializer and records the containing class symbol when present.
+fn augment_php_constant_values(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    for element in collect_kinds(tree, &["const_element"]) {
+        let Some(name) = element.named_child(0).filter(|child| child.kind() == "name") else {
+            continue;
+        };
+        let mut cursor = element.walk();
+        let Some(value) = element
+            .named_children(&mut cursor)
+            .last()
+            .filter(|child| child.id() != name.id())
+        else {
+            continue;
+        };
+        let Some(static_value) = php_static_scalar(value, src) else {
+            continue;
+        };
+        let target = node_text(&name, src).trim();
+        if target.is_empty() {
+            continue;
+        }
+        let assignment_span = span_of(file, &element);
+        let target_owner = index
+            .defs
+            .iter()
+            .filter(|decl| {
+                is_class_like(decl.kind)
+                    && decl.span.file == assignment_span.file
+                    && decl.span.start <= assignment_span.start
+                    && assignment_span.end <= decl.span.end
+            })
+            .min_by_key(|decl| decl.span.len())
+            .map(|decl| decl.symbol);
+        index
+            .assignment_values
+            .push(bonsai_lang_api::AssignmentValueFact {
+                assignment_span,
+                target: Some(target.to_string()),
+                target_is_immutable: true,
+                target_owner,
+                target_span: Some(span_of(file, &name)),
+                value_span: span_of(file, &value),
+                call_sites: Vec::new(),
+                value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(
+                    value, file, src, &HANDLER,
+                ),
+                static_value: Some(static_value),
+                exact_callable_return: None,
+                inline_callback_static_return: None,
+                inline_callback_fields: Vec::new(),
+                exact_static_call_args: None,
+                direct_call_name: None,
+                direct_call_span: None,
+                direct_call_receiver: None,
+                direct_call_receiver_span: None,
+                direct_call_receiver_flow: None,
+            });
+    }
+    index.assignment_values.sort_by_key(|fact| {
+        (
+            fact.assignment_span.start,
+            fact.assignment_span.end,
+            fact.target.clone(),
+        )
+    });
+    index.assignment_values.dedup();
+}
+
+const PHP_GUARD_TERMINAL_COMPOUND_STATIC_ALLOWLIST: &str = "terminal-predicate.compound-static-allowlist";
+
+/// Lower a terminal compound predicate and the later calls it guards into
+/// API-neutral compiler evidence. The adapter proves only parsed relations:
+/// one call result is inspected through two static projections, one branch
+/// rejects a non-equal static scalar or a negated call against a finite
+/// static string collection, and a later call consumes the parser input.
+/// Rule data assigns security meaning to every emitted call/component/value.
+fn php_compound_static_allowlist_guards(tree: &Tree, file: FileId, src: &[u8]) -> Vec<CompilerGuardFact> {
+    let static_collections = php_static_string_collections(tree, src);
+    let mut facts = Vec::new();
+    for function in collect_kinds(tree, &["function_definition", "method_declaration"]) {
+        let Some(body) = function.child_by_field_name("body") else {
+            continue;
+        };
+        let calls = collect_kinds_below(
+            body,
+            &[
+                "function_call_expression",
+                "member_call_expression",
+                "nullsafe_member_call_expression",
+                "scoped_call_expression",
+            ],
+        );
+        for branch in collect_kinds_below(body, &["if_statement"]) {
+            let (Some(condition), Some(consequence)) = (
+                branch.child_by_field_name("condition"),
+                branch.child_by_field_name("body"),
+            ) else {
+                continue;
+            };
+            if !php_compound_statement_is_terminal(consequence) {
+                continue;
+            }
+            let Some(predicate) = php_compound_rejection_predicate(condition, src, &static_collections)
+            else {
+                continue;
+            };
+            let Some(parser_assignment) = collect_kinds_below(body, &["assignment_expression"])
+                .into_iter()
+                .filter(|assignment| assignment.end_byte() <= branch.start_byte())
+                .filter_map(|assignment| php_parser_assignment(assignment, src))
+                .filter(|assignment| assignment.output == predicate.parsed_place)
+                .max_by_key(|assignment| assignment.start)
+            else {
+                continue;
+            };
+            for guarded_call in calls
+                .iter()
+                .copied()
+                .filter(|call| call.start_byte() > branch.end_byte())
+            {
+                let guarded_args = php_direct_call_arguments(guarded_call);
+                let guarded_relations = guarded_args
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, argument)| {
+                        php_exact_composition_place(**argument, src).as_deref()
+                            == Some(parser_assignment.input.as_str())
+                    })
+                    .map(|(index, _)| format!("guarded-argument:{index}=predicate-argument:0"))
+                    .collect::<Vec<_>>();
+                if guarded_relations.is_empty() {
+                    continue;
+                }
+                let Some(target) = php_call_target(guarded_call, src) else {
+                    continue;
+                };
+                let mut evidence = vec![
+                    "predicate-complete:true".to_string(),
+                    "finite-static-string-membership:true".to_string(),
+                    format!("parser-call:{}", parser_assignment.call_name),
+                    format!("scheme-component:{}", predicate.scheme_component),
+                    format!("scheme-value:string:{}", predicate.scheme_value),
+                    format!("membership-call:{}", predicate.membership_call),
+                    format!("membership-component:{}", predicate.host_component),
+                ];
+                evidence.extend(predicate.membership_extra_evidence.clone());
+                evidence.extend(guarded_relations);
+                for related in calls
+                    .iter()
+                    .copied()
+                    .filter(|call| call.start_byte() > branch.end_byte() && call.id() != guarded_call.id())
+                {
+                    let Some(related_target) = php_call_target(related, src) else {
+                        continue;
+                    };
+                    for (index, argument) in php_direct_call_arguments(related).iter().enumerate() {
+                        if let Some((guarded_index, _)) =
+                            guarded_args.iter().enumerate().find(|(_, guarded)| {
+                                let guarded = php_exact_composition_place(**guarded, src);
+                                let related = php_exact_composition_place(*argument, src);
+                                guarded.is_some() && guarded == related
+                            })
+                        {
+                            evidence.push(format!(
+                                "related-call:{}:argument:{index}=guarded-argument:{guarded_index}",
+                                related_target.full_text
+                            ));
+                            continue;
+                        }
+                        if let Some(value) = php_compiler_evidence_operand(*argument, src) {
+                            evidence.push(format!(
+                                "related-call:{}:argument:{index}={value}",
+                                related_target.full_text
+                            ));
+                        }
+                    }
+                }
+                evidence.sort();
+                evidence.dedup();
+                facts.push(CompilerGuardFact {
+                    function_span: span_of(file, &function),
+                    guarded_call_span: span_of(file, &target.node),
+                    proof_span: span_of(file, &branch),
+                    capability: PHP_GUARD_TERMINAL_COMPOUND_STATIC_ALLOWLIST.to_string(),
+                    evidence,
+                });
+            }
+        }
+    }
+    facts.sort_by(|left, right| {
+        (
+            left.function_span.start,
+            left.guarded_call_span.start,
+            left.proof_span.start,
+            &left.evidence,
+        )
+            .cmp(&(
+                right.function_span.start,
+                right.guarded_call_span.start,
+                right.proof_span.start,
+                &right.evidence,
+            ))
+    });
+    facts.dedup();
+    facts
+}
+
+#[derive(Clone)]
+struct PhpParserAssignment {
+    start: usize,
+    output: String,
+    input: String,
+    call_name: String,
+}
+
+#[derive(Clone)]
+struct PhpCompoundPredicate {
+    parsed_place: String,
+    scheme_component: String,
+    scheme_value: String,
+    membership_call: String,
+    host_component: String,
+    membership_extra_evidence: Vec<String>,
+}
+
+fn php_parser_assignment(assignment: Node<'_>, src: &[u8]) -> Option<PhpParserAssignment> {
+    let output = php_exact_composition_place(assignment.child_by_field_name("left")?, src)?;
+    let call = assignment.child_by_field_name("right")?;
+    let target = php_call_target(call, src)?;
+    let arguments = php_direct_call_arguments(call);
+    let [argument] = arguments.as_slice() else {
+        return None;
+    };
+    Some(PhpParserAssignment {
+        start: assignment.start_byte(),
+        output,
+        input: php_exact_composition_place(*argument, src)?,
+        call_name: target.full_text,
+    })
+}
+
+fn php_compound_rejection_predicate(
+    mut condition: Node<'_>,
+    src: &[u8],
+    static_collections: &std::collections::HashMap<String, Vec<String>>,
+) -> Option<PhpCompoundPredicate> {
+    while condition.kind() == "parenthesized_expression" {
+        condition = condition.named_child(0)?;
+    }
+    let (left, right) = (
+        condition.child_by_field_name("left")?,
+        condition.child_by_field_name("right")?,
+    );
+    if php_binary_operator(condition, left, right, src)? != "||" {
+        return None;
+    }
+    let scheme_projection = collect_kinds_below(left, &["subscript_expression"])
+        .into_iter()
+        .find_map(|subscript| php_projection_parts(subscript, src));
+    let (parsed_place, scheme_component) = scheme_projection?;
+    let scheme_value = collect_kinds_below(left, &["string", "encapsed_string"])
+        .into_iter()
+        .filter_map(|literal| php_static_subscript_key(literal, src))
+        .find(|value| !value.is_empty() && value != &scheme_component)?;
+
+    if right.kind() != "unary_op_expression" || !node_text(&right, src).trim_start().starts_with('!') {
+        return None;
+    }
+    let membership_call = collect_kinds_below(right, &["function_call_expression"])
+        .into_iter()
+        .next()?;
+    let membership_target = php_call_target(membership_call, src)?;
+    let membership_args = php_direct_call_arguments(membership_call);
+    if membership_args.len() < 2 {
+        return None;
+    }
+    let (membership_base, host_component) =
+        collect_kinds_below(membership_args[0], &["subscript_expression"])
+            .into_iter()
+            .find_map(|subscript| php_projection_parts(subscript, src))?;
+    if membership_base != parsed_place {
+        return None;
+    }
+    let collection = php_exact_composition_place(membership_args[1], src)?;
+    let collection = collection.rsplit("::").next().unwrap_or(&collection);
+    if !static_collections.contains_key(collection) {
+        return None;
+    }
+    let mut membership_extra_evidence = Vec::new();
+    for (index, argument) in membership_args.iter().enumerate().skip(2) {
+        if let Some(value) = php_compiler_evidence_operand(*argument, src) {
+            membership_extra_evidence.push(format!("membership-argument:{index}={value}"));
+        }
+    }
+    Some(PhpCompoundPredicate {
+        parsed_place,
+        scheme_component,
+        scheme_value,
+        membership_call: membership_target.full_text,
+        host_component,
+        membership_extra_evidence,
+    })
+}
+
+fn php_static_string_collections(tree: &Tree, src: &[u8]) -> std::collections::HashMap<String, Vec<String>> {
+    let mut collections = std::collections::HashMap::new();
+    for element in collect_kinds(tree, &["const_element"]) {
+        let Some(name) = element.named_child(0).filter(|node| node.kind() == "name") else {
+            continue;
+        };
+        let mut cursor = element.walk();
+        let Some(array) = element
+            .named_children(&mut cursor)
+            .find(|node| node.kind() == "array_creation_expression")
+        else {
+            continue;
+        };
+        let mut values = Vec::new();
+        let mut array_cursor = array.walk();
+        let mut complete = true;
+        for item in array.named_children(&mut array_cursor) {
+            let Some(value_node) = item.named_child(0) else {
+                complete = false;
+                break;
+            };
+            let Some(value) = php_static_subscript_key(value_node, src) else {
+                complete = false;
+                break;
+            };
+            values.push(value);
+        }
+        if complete && !values.is_empty() {
+            collections.insert(node_text(&name, src).trim().to_string(), values);
+        }
+    }
+    collections
+}
+
+fn php_projection_parts(node: Node<'_>, src: &[u8]) -> Option<(String, String)> {
+    let (base, key) = php_subscript_parts(node)?;
+    Some((
+        php_exact_composition_place(base, src)?,
+        php_static_subscript_key(key, src)?,
+    ))
+}
+
+fn php_compound_statement_is_terminal(statement: Node<'_>) -> bool {
+    if statement.kind() == "return_statement" || statement.kind() == "throw_expression" {
+        return true;
+    }
+    if statement.kind() != "compound_statement" {
+        return false;
+    }
+    let mut cursor = statement.walk();
+    let mut children = statement
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() != "comment");
+    matches!(
+        children.next().map(|child| child.kind()),
+        Some("return_statement" | "throw_expression")
+    ) && children.next().is_none()
+}
+
+fn php_direct_call_arguments(call: Node<'_>) -> Vec<Node<'_>> {
+    let Some(arguments) = call.child_by_field_name("arguments") else {
+        return Vec::new();
+    };
+    let mut cursor = arguments.walk();
+    arguments
+        .named_children(&mut cursor)
+        .filter_map(|argument| {
+            (argument.kind() == "argument")
+                .then(|| argument.named_child(0))
+                .flatten()
+                .or_else(|| (argument.kind() != "argument").then_some(argument))
+        })
+        .collect()
+}
+
+fn php_binary_operator<'a>(
+    _node: Node<'_>,
+    left: Node<'_>,
+    right: Node<'_>,
+    src: &'a [u8],
+) -> Option<&'a str> {
+    src.get(left.end_byte()..right.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim)
+}
+
+fn php_compiler_evidence_operand(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match php_static_scalar(node, src) {
+        Some(StaticScalarValue::String(value)) => Some(format!("string:{value}")),
+        Some(StaticScalarValue::Boolean(value)) => Some(format!("boolean:{value}")),
+        Some(StaticScalarValue::Null) => Some("null".to_string()),
+        Some(StaticScalarValue::Integer(value)) => Some(format!("number:{value}")),
+        None => php_exact_composition_place(node, src)
+            .or_else(|| {
+                matches!(node.kind(), "name" | "qualified_name")
+                    .then(|| node_text(&node, src).trim().to_string())
+            })
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("place:{value}")),
+    }
+}
+
+fn collect_kinds_below<'tree>(node: Node<'tree>, kinds: &[&str]) -> Vec<Node<'tree>> {
+    let mut result = Vec::new();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.id() != node.id() && kinds.contains(&current.kind()) {
+            result.push(current);
+        }
+        let mut cursor = current.walk();
+        let mut children = current.named_children(&mut cursor).collect::<Vec<_>>();
+        children.reverse();
+        stack.extend(children);
+    }
+    result
 }
 
 fn php_reference_name(node: Node<'_>, src: &[u8]) -> Option<String> {
@@ -231,7 +836,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     parameter_annotation_kinds: &["attribute"],
     variadic_parameter_kinds: &["variadic_parameter"],
     binding_identifier_kinds: &["variable_name", "name"],
-    non_binding_pattern_field_names: &["type", "key"],
+    non_binding_pattern_field_names: &["type"],
     binding_name_extractor: Some(php_binding_name),
     identifier_kinds: &["variable_name", "name"],
     aggregate_pattern_kinds: &["list_literal", "array_creation_expression"],
@@ -247,7 +852,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "scoped_call_expression",
         "parenthesized_expression",
     ],
-    assignment_target_wrapper_kinds: &["variable_declaration", "property_element"],
+    assignment_target_wrapper_kinds: &["property_element"],
     assignment_place_extractor: Some(php_assignment_place),
     binding_declaration_keyword_spellings: &["static"],
     fn_kinds: &["function_definition", "method_declaration"],
@@ -266,10 +871,10 @@ const HANDLER: GrammarHandler = GrammarHandler {
     call_target_extractor: Some(php_call_target),
     call_argument_field_names: &["arguments"],
     call_argument_container_kinds: &["arguments"],
-    // tree-sitter-php wraps every positional argument in `argument`; named
-    // arguments use the dedicated `named_argument` shape. Unwrapping both is
-    // required for an addressable `$value` to remain an exact CallArg place.
-    argument_wrapper_kinds: &["argument", "named_argument"],
+    // tree-sitter-php wraps both positional and named arguments in `argument`;
+    // the optional `name` field distinguishes the latter. Unwrap that exact
+    // grammar node so an addressable `$value` remains an exact CallArg place.
+    argument_wrapper_kinds: &["argument"],
     argument_name_field_names: &["name"],
     argument_value_field_names: &["value"],
     lambda_body_field_names: &["body"],
@@ -283,16 +888,12 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "scoped_call_expression",
         "object_creation_expression",
     ],
-    member_expression_kinds: &[
-        "member_access_expression",
-        "member_expression",
-        "nullsafe_member_access_expression",
-    ],
+    member_expression_kinds: &["member_access_expression", "nullsafe_member_access_expression"],
     subscript_expression_kinds: &["subscript_expression"],
     member_base_field_names: &["object"],
     member_name_field_names: &["name"],
     subscript_base_field_names: &["object"],
-    subscript_index_field_names: &["index"],
+    subscript_index_field_names: &[],
     static_subscript_key_extractor: Some(php_static_subscript_key),
     computed_subscript_extractor: Some(php_subscript_parts),
     sigil_variable_kinds: &["variable_name"],
@@ -326,12 +927,19 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "switch_statement",
         "match_expression",
     ],
-    branch_then_field_names: &["consequence", "body"],
+    branch_then_field_names: &["body"],
     branch_else_field_names: &["alternative"],
     branch_condition_field_names: &["condition", "value"],
+    condition_group_kinds: &["parenthesized_expression"],
+    condition_all_operators: &["&&", "and"],
+    condition_any_operators: &["||", "or"],
+    condition_not_operators: &["!"],
     loop_body_field_names: &["body"],
     loop_body_kinds: &["compound_statement", "expression_statement"],
+    loop_update_field_names: &["update"],
     branch_arm_kinds: &["compound_statement", "else_clause", "else_if_clause"],
+    exclusive_branch_arm_kinds: &["case_statement", "default_statement"],
+    fallthrough_branch_arm_kinds: &["case_statement", "default_statement"],
     additional_alternative_kinds: &["else_clause", "else_if_clause"],
     for_kinds: &["for_statement"],
     foreach_kinds: &["foreach_statement"],
@@ -354,6 +962,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     lambda_kinds: &["anonymous_function", "arrow_function"],
     try_kinds: &["try_statement"],
     catch_kinds: &["catch_clause"],
+    exclusive_catch_arm_kinds: &["catch_clause"],
     finally_kinds: &["finally_clause"],
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
@@ -364,6 +973,62 @@ const HANDLER: GrammarHandler = GrammarHandler {
     implicit_receiver_names: &["$this", "this"],
     ..EMPTY_HANDLER
 };
+
+/// PHP-specific compiler passes consume these node kinds outside the shared
+/// grammar-handler walker. Conformance checks each spelling against the
+/// adapter's actual Tree-sitter grammar.
+const ADDITIONAL_GRAMMAR_NODE_KINDS: &[(&str, &str)] = &[
+    ("type alias declaration", "function_definition"),
+    ("type alias declaration", "method_declaration"),
+    ("type alias parameter", "simple_parameter"),
+    ("type alias parameter", "property_promotion_parameter"),
+    ("visibility declaration", "property_declaration"),
+    ("visibility declaration", "class_declaration"),
+    ("visibility declaration", "interface_declaration"),
+    ("visibility declaration", "trait_declaration"),
+    ("visibility declaration", "enum_declaration"),
+    ("visibility modifier", "visibility_modifier"),
+    ("call target", "function_call_expression"),
+    ("call target", "member_call_expression"),
+    ("call target", "nullsafe_member_call_expression"),
+    ("call target", "scoped_call_expression"),
+    ("call target", "object_creation_expression"),
+    ("callable reference", "variadic_placeholder"),
+    ("subscript expression", "subscript_expression"),
+    ("static subscript key", "string"),
+    ("static subscript key", "encapsed_string"),
+    ("static subscript content", "string_content"),
+    ("assignment base", "variable_name"),
+    ("string composition assignment", "assignment_expression"),
+    ("string composition operator", "binary_expression"),
+    ("constant declaration", "const_declaration"),
+    ("constant element", "const_element"),
+    (
+        "string composition class constant",
+        "class_constant_access_expression",
+    ),
+    ("string composition member", "member_access_expression"),
+    ("string composition parenthesis", "parenthesized_expression"),
+    ("aggregate pair", "list_literal"),
+    ("aggregate pair operator", "=>"),
+    ("foreach binding", "foreach_statement"),
+    ("pseudo call", "echo_statement"),
+    ("pseudo call", "unset_statement"),
+    ("namespace import", "namespace_use_clause"),
+    ("namespace import group", "namespace_use_group"),
+    ("namespace import prefix", "namespace_name"),
+    ("namespace import prefix", "qualified_name"),
+    ("include construct", "include_expression"),
+    ("include construct", "include_once_expression"),
+    ("include construct", "require_expression"),
+    ("include construct", "require_once_expression"),
+    ("shell construct", "shell_command_expression"),
+    ("shell interpolation", "member_access_expression"),
+    ("promoted property name", "name"),
+    ("class base", "base_clause"),
+    ("class interface", "class_interface_clause"),
+    ("namespace declaration", "namespace_definition"),
+];
 
 fn extract_php_pseudo_call(
     node: Node<'_>,
@@ -442,13 +1107,43 @@ impl LanguageAdapter for PhpAdapter {
             ..LanguageCapabilities::partial_baseline()
         }
     }
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        Some(&HANDLER)
+    }
+    fn additional_grammar_node_kinds(&self) -> &'static [(&'static str, &'static str)] {
+        ADDITIONAL_GRAMMAR_NODE_KINDS
+    }
+
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
-        let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
-        let parsed = parse_with(PACK_NAME, file, ctx);
-        let source = parsed
-            .as_ref()
-            .map(|(snapshot, _)| snapshot.text.to_string())
-            .unwrap_or_default();
+        let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) else {
+            return DeclIndex {
+                file,
+                ..Default::default()
+            };
+        };
+        let source = snapshot.text.to_string();
+        let src = source.as_bytes();
+        let mut idx = decl_index_from_tree_with_handler(file, src, &tree, &HANDLER);
+        idx.string_compositions = php_string_compositions(&tree, file, src);
+        idx.compiler_guards
+            .extend(php_compound_static_allowlist_guards(&tree, file, src));
+        idx.compiler_guards.sort_by(|left, right| {
+            (
+                left.function_span.start,
+                left.guarded_call_span.start,
+                left.proof_span.start,
+                &left.capability,
+                &left.evidence,
+            )
+                .cmp(&(
+                    right.function_span.start,
+                    right.guarded_call_span.start,
+                    right.proof_span.start,
+                    &right.capability,
+                    &right.evidence,
+                ))
+        });
+        idx.compiler_guards.dedup();
         // Synthesize Call FlowEvents for PHP language constructs the
         // tree-sitter grammar exposes as dedicated expression kinds
         // rather than call_expression nodes:
@@ -457,27 +1152,50 @@ impl LanguageAdapter for PhpAdapter {
         //   - `` `cmd $tainted` `` (shell_command_expression)
         // Without this lowering the shipped php.eval.{include,require}_*
         // and php.cmdi.backtick rules can't match real code.
-        if let Some((_, tree)) = parsed.as_ref() {
-            let synthesized = synthesize_php_construct_events(tree, source.as_bytes(), file);
-            if !synthesized.is_empty() {
-                attach_synthesized_calls_to_decls(&mut idx, synthesized);
-            }
+        let synthesized = synthesize_php_construct_events(&tree, src, file);
+        if !synthesized.is_empty() {
+            attach_synthesized_calls_to_decls(&mut idx, synthesized);
         }
         // Use the `namespace Foo\Bar;` segments as the module path so
         // private symbols cross-link only inside the namespace.
-        let namespace_segments = parsed
-            .as_ref()
-            .and_then(|(snapshot, tree)| extract_php_namespace(tree.root_node(), snapshot.text.as_bytes()));
+        let namespace_segments = extract_php_namespace(tree.root_node(), src);
         if let Some(segments) = namespace_segments {
             bonsai_lang_api::apply_module_path_semantic_identity(&mut idx, segments);
         } else {
             // No `namespace` declaration — fall back to file-stem.
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
         }
-        if let Some((snapshot, tree)) = parsed.as_ref() {
-            let src = snapshot.text.as_bytes();
+        augment_php_constant_values(&mut idx, &tree, file, src);
+        {
             let visibility_by_span = collect_modifier_visibility(tree.root_node(), file, src, &PHP_VOCAB);
-            let aliases_by_span = collect_param_type_aliases(tree, file, src, &PHP_TYPE_ALIASES);
+            let mut aliases_by_span = collect_param_type_aliases(&tree, file, src, &PHP_TYPE_ALIASES);
+            // Parameter type hints use the locally imported alias (`Request
+            // $request`), while rule constraints intentionally name the
+            // declared interface (`ServerRequestInterface`). Preserve the
+            // source spelling and add the compiler-resolved import target so
+            // receiver typing remains exact even when `use ... as ...`
+            // chooses an arbitrary local alias.
+            let import_specs = parse_imports(&tree, src, file);
+            for aliases in aliases_by_span.values_mut() {
+                let mut expanded = Vec::new();
+                for alias in aliases.iter() {
+                    for import in &import_specs {
+                        if import.alias.as_deref() == Some(alias.type_name.as_str())
+                            && import.module != alias.type_name
+                        {
+                            expanded.push(TypeAliasBinding {
+                                name: alias.name.clone(),
+                                type_name: import.module.clone(),
+                            });
+                        }
+                    }
+                }
+                for alias in expanded {
+                    if !aliases.contains(&alias) {
+                        aliases.push(alias);
+                    }
+                }
+            }
             for decl in &mut idx.defs {
                 if let Some(visibility) = visibility_by_span.get(&decl.span).copied() {
                     decl.visibility = visibility;
@@ -490,7 +1208,7 @@ impl LanguageAdapter for PhpAdapter {
             // → ["Base", "I", "J"]. PHP exposes them as separate
             // `base_clause` (single) and `class_interface_clause`
             // (one or more) children of the class node.
-            let bases_by_span = collect_php_class_bases(tree, file, src);
+            let bases_by_span = collect_php_class_bases(&tree, file, src);
             for decl in &mut idx.defs {
                 if !is_class_like(decl.kind) {
                     continue;
@@ -501,7 +1219,7 @@ impl LanguageAdapter for PhpAdapter {
                     decl.bases = bases.clone();
                 }
             }
-            let promoted_writes_by_span = collect_php_property_promotion_writes(tree, file, src);
+            let promoted_writes_by_span = collect_php_property_promotion_writes(&tree, file, src);
             for decl in &mut idx.defs {
                 if !matches!(decl.kind, DeclKind::Constructor) {
                     continue;
@@ -527,6 +1245,23 @@ impl LanguageAdapter for PhpAdapter {
                         target: format!("this.{}", promotion.field_name),
                         source_param_indices: vec![param_idx],
                     });
+                    // Constructor property promotion is a declaration-level
+                    // direct field binding even though PHP has no assignment
+                    // statement in the body. Materialize the exact receiver
+                    // field type here so the shared class-field propagation
+                    // can type `$this->field` calls in sibling methods.
+                    if let Some(type_name) = decl.type_aliases.iter().find_map(|alias| {
+                        (alias.name.trim_start_matches('$') == decl.params[param_idx].trim_start_matches('$'))
+                            .then(|| alias.type_name.clone())
+                    }) {
+                        let field_alias = TypeAliasBinding {
+                            name: format!("this.{}", promotion.field_name),
+                            type_name,
+                        };
+                        if !decl.type_aliases.contains(&field_alias) {
+                            decl.type_aliases.push(field_alias);
+                        }
+                    }
                 }
                 decl.receiver_field_writes.sort_by_key(|write| {
                     (
@@ -548,7 +1283,41 @@ impl LanguageAdapter for PhpAdapter {
                 &invoked_variables,
             );
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
+            decl.receiver_field_writes.extend(collect_receiver_field_writes(
+                &decl.flow_events,
+                &decl.params,
+                None,
+                &["$this", "this"],
+                &[],
+            ));
+            decl.receiver_field_writes.sort_by_key(|write| {
+                (
+                    write.span.start,
+                    write.target.clone(),
+                    write.source_param_indices.clone(),
+                )
+            });
+            decl.receiver_field_writes.dedup();
+            decl.receiver_field_initializers =
+                collect_receiver_field_initializers(&decl.flow_events, &["$this", "this"]);
+            decl.receiver_state_sources =
+                collect_receiver_state_sources(&decl.flow_events, &decl.params, &["$this", "this"]);
         }
+        bonsai_lang_api::kit::populate_call_argument_static_values(
+            &mut idx,
+            &tree,
+            file,
+            src,
+            &HANDLER,
+            php_static_scalar,
+        );
+        bonsai_lang_api::kit::populate_assignment_inline_callback_static_returns(
+            &mut idx,
+            &tree,
+            src,
+            &HANDLER,
+            php_static_scalar,
+        );
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
@@ -1051,8 +1820,8 @@ fn php_param_matches_promoted_property(param: &str, promoted_param: &str, field_
 ///        (class_interface_clause (name) (name))
 ///        body: (declaration_list))
 ///
-/// `interface_declaration` uses its own `interface_base_clause` (just
-/// `extends`). `trait_declaration` has no parent list.
+/// `interface_declaration` uses the same `base_clause` for `extends`.
+/// `trait_declaration` has no parent list.
 fn collect_php_class_bases(
     tree: &Tree,
     file: FileId,
@@ -1076,7 +1845,7 @@ fn collect_php_class_bases(
         let mut cursor = class_node.walk();
         for child in class_node.named_children(&mut cursor) {
             match child.kind() {
-                "base_clause" | "class_interface_clause" | "interface_base_clause" => {
+                "base_clause" | "class_interface_clause" => {
                     let mut clause_cursor = child.walk();
                     for entry in child.named_children(&mut clause_cursor) {
                         // Children of the parent-clause are
@@ -1161,5 +1930,26 @@ mod callable_reference_tests {
         .filter_map(|node| extract_php_callable_reference(node, src.as_bytes()))
         .collect::<Vec<_>>();
         assert_eq!(refs, vec!["system"]);
+    }
+
+    #[test]
+    fn quoted_static_subscript_key_is_decoded_from_php_string_node() {
+        let language = language_from_pack(PACK_NAME).expect("php grammar");
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("set php grammar");
+        let src = "<?php function f() { sink($_SERVER[\"HTTP_HOST\"]); }";
+        let tree = parser.parse(src, None).expect("parse php source");
+        let subscript = collect_kinds(&tree, &["subscript_expression"])
+            .into_iter()
+            .next()
+            .expect("subscript expression");
+        let (_, key) = php_subscript_parts(subscript).expect("ordered PHP subscript operands");
+        assert_eq!(
+            php_static_subscript_key(key, src.as_bytes()),
+            Some("HTTP_HOST".to_string()),
+            "key kind={} sexp={}",
+            key.kind(),
+            key.to_sexp()
+        );
     }
 }

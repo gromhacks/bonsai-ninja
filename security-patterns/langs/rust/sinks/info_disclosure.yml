@@ -22,7 +22,7 @@
           let token = "secret";
           log::error("token={}", token);
       }
-    expect_match_text: [log::error]
+    expect_match_text: ["log::error"]
   - name: rust log ordinary error negative
     code: |
       use log::dummy;
@@ -77,13 +77,12 @@
   - name: rust actix error response
     code: |
       use actix_web;
-      use actix_web;
       use actix_web::dummy;
       fn example() {
           let err = "database stack";
           HttpResponse::InternalServerError(err);
       }
-    expect_match_text: [HttpResponse::InternalServerError]
+    expect_match_text: ["HttpResponse::InternalServerError"]
   description: "actix-web HttpResponse::InternalServerError(error text) - sends exception / stack details to clients."
   imports:
   - actix_web

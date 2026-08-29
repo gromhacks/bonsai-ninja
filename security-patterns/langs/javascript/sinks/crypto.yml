@@ -8,23 +8,46 @@
   - crypto
   imports:
   - crypto
+  - node:crypto
   cwe:
   - CWE-327
   - CWE-328
   match:
     kind: call
     callee:
-      attribute:
-      - crypto
-      - createHash
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.createHash$'
+      binding_origin: imported
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "(?i)^['\"](?:md2|md4|md5|sha1|sha-1)['\"]$"
   match_examples:
   - name: createhash md5
     code: |
-      const _u = require("crypto");
+      const crypto = require("crypto");
       function demo(input, req, obj) {
         return crypto.createHash('md5');
       }
-  description: "crypto.createHash('md5') - broken hash. Merged aliases: javascript.crypto.createhash_sha1."
+  - name: createhash secure digest negative
+    code: |
+      const crypto = require("crypto");
+      function demo() {
+        return crypto.createHash("sha256");
+      }
+    expect_no_match: true
+  - name: aliased Node crypto hash provider
+    code: |
+      const nodeCrypto = require("node:crypto");
+      nodeCrypto.createHash("sha1");
+    expect_match_text: [nodeCrypto.createHash]
+  - name: application createHash collision negative
+    code: |
+      const crypto = { createHash(name) { return name; } };
+      function demo() {
+        return crypto.createHash("md5");
+      }
+    expect_no_match: true
+  description: "Node crypto.createHash with a compiler-decoded weak digest name is insecure; SHA-2/SHA-3 and application-local providers stay quiet. Merged aliases: javascript.crypto.createhash_sha1."
   aliases:
   - javascript.crypto.createhash_sha1
 - id: javascript.crypto.createcipher_des
@@ -35,22 +58,47 @@
   severity: high
   packages:
   - crypto
+  imports:
+  - crypto
+  - node:crypto
   cwe:
   - CWE-327
   match:
     kind: call
     callee:
-      attribute:
-      - crypto
-      - createCipheriv
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.createCipheriv$'
+      binding_origin: imported
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "(?i)^['\"](?:des|des-ede|des-ede3|des3|rc4|rc2|bf|blowfish|[a-z0-9-]*-ecb)['\"]$"
   match_examples:
   - name: createcipher des
     code: |
-      const _u = require("crypto");
+      const crypto = require("crypto");
       function demo(input, req, obj) {
         return crypto.createCipheriv('des');
       }
-  description: "crypto.createCipheriv('des', ...). Merged aliases: javascript.crypto.createcipher_des_ede, javascript.crypto.createcipher_rc4, javascript.crypto.createcipher_aes128_ecb, javascript.crypto.createcipher_aes192_ecb, javascript.crypto.createcipher_aes256_ecb."
+  - name: createcipher authenticated mode negative
+    code: |
+      const crypto = require("crypto");
+      function demo(key, iv) {
+        return crypto.createCipheriv("aes-256-gcm", key, iv);
+      }
+    expect_no_match: true
+  - name: aliased Node crypto cipher provider
+    code: |
+      const nodeCrypto = require("node:crypto");
+      nodeCrypto.createCipheriv("des");
+    expect_match_text: [nodeCrypto.createCipheriv]
+  - name: application createCipheriv collision negative
+    code: |
+      const crypto = { createCipheriv(name) { return name; } };
+      function demo() {
+        return crypto.createCipheriv("des");
+      }
+    expect_no_match: true
+  description: "Node crypto.createCipheriv with an exact weak cipher or ECB algorithm is insecure; authenticated/non-ECB modes and local providers stay quiet. Merged aliases: javascript.crypto.createcipher_des_ede, javascript.crypto.createcipher_rc4, javascript.crypto.createcipher_aes128_ecb, javascript.crypto.createcipher_aes192_ecb, javascript.crypto.createcipher_aes256_ecb."
   aliases:
   - javascript.crypto.createcipher_des_ede
   - javascript.crypto.createcipher_rc4
@@ -124,6 +172,11 @@
       attribute:
       - crypto
       - createDecipheriv
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "(?i)^['\"][a-z0-9-]*-gcm['\"]$"
+  - arg_count: 3
   match_examples:
   - name: gcm decipher missing auth tag length
     code: |
@@ -133,7 +186,21 @@
       }
     expect_match_text:
     - crypto.createDecipheriv
-  description: crypto.createDecipheriv('*-gcm', key, iv) without authTagLength can accept unexpectedly short GCM tags.
+  - name: gcm decipher with explicit auth tag length negative
+    code: |
+      const crypto = require("crypto");
+      function demo(key, iv) {
+        return crypto.createDecipheriv("aes-256-gcm", key, iv, { authTagLength: 16 });
+      }
+    expect_no_match: true
+  - name: non-GCM decipher negative
+    code: |
+      const crypto = require("crypto");
+      function demo(key, iv) {
+        return crypto.createDecipheriv("aes-256-cbc", key, iv);
+      }
+    expect_no_match: true
+  description: "Node crypto.createDecipheriv with a compiler-decoded GCM algorithm and exactly three arguments omits authTagLength; explicit tag-length options and non-GCM modes stay quiet."
 - id: javascript.crypto.cryptojs_md5
   enabled: true
   language: javascript

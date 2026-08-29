@@ -97,21 +97,6 @@
     expect_no_match: true
   description: "cryo.parse - deserialises functions."
 
-- id: typescript.deser.serialize_javascript_deserialize
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: insecure-deserialization
-  severity: medium
-  packages: [serialize-javascript]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: deserialize
-  description: "Disabled - bare `deserialize` name is too broad; serialize-javascript's own deserialization uses eval() internally but the library recommends never deserializing untrusted output."
-
 - id: typescript.deser.yaml_load_unsafe
   enabled: true
   language: typescript
@@ -177,23 +162,6 @@
 # Bare-name `unserialize(blob)` shape: node-serialize is sometimes
 # imported as the default export so the call site is just
 # `unserialize(...)` rather than `serialize.unserialize(...)`.
-- id: typescript.deser.node_serialize
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: typescript.deser.node_serialize_unserialize
-  language: typescript
-  tag: insecure-deserialization
-  severity: critical
-  packages: [node-serialize]
-  imports: [node-serialize]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: unserialize
-  description: "Disabled duplicate - bare `unserialize(...)` and `serialize.unserialize(...)` collapse to the same adapter fact in v1 matching."
-
 - id: typescript.deser.serialize_to_js_deserialize
   enabled: true
   language: typescript

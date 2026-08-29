@@ -114,34 +114,6 @@
       }
     expect_no_match: true
   description: "Client::request(...) - covers reqwest and hyper (same `[Client, request]` attribute chain). Tainted URL = SSRF."
-- id: rust.ssrf.hyper_client_get
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: ssrf
-  severity: high
-  packages: [hyper]
-  cwe: [CWE-918]
-  match:
-    kind: call
-    callee:
-      attribute: [Client, get]
-  description: "Disabled - merged into rust.ssrf.reqwest_client_get (same `[Client, get]` attribute chain)."
-- id: rust.ssrf.hyper_client_request
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: ssrf
-  severity: high
-  packages: [hyper]
-  cwe: [CWE-918]
-  match:
-    kind: call
-    callee:
-      attribute: [Client, request]
-  description: "Disabled - merged into rust.ssrf.reqwest_client_request (same `[Client, request]` attribute chain)."
 - id: rust.ssrf.ureq_get
   enabled: true
   language: rust

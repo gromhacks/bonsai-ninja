@@ -55,7 +55,7 @@
           let query = "user";
           std::env::current_exe(target);
       }
-    expect_match_text: [std::env::current_exe]
+    expect_match_text: ["std::env::current_exe"]
   description: "std::env::current_exe() - executable path is not trustworthy for security decisions."
 - id: rust.cli.std_env_temp_dir
   enabled: true
@@ -75,7 +75,7 @@
           let query = "user";
           std::env::temp_dir(target);
       }
-    expect_match_text: [std::env::temp_dir]
+    expect_match_text: ["std::env::temp_dir"]
   description: "std::env::temp_dir() - shared temporary directories require safe random file creation and containment checks."
 - id: rust.cli.clap_parse
   enabled: true

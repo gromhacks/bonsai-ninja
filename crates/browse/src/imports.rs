@@ -252,6 +252,17 @@ fn push_unique_file(
     }
 }
 
+fn file_has_executable_callable(global: &bonsai_index::GlobalIndex, file: bonsai_common::FileId) -> bool {
+    global.decls_in(file).iter().any(|decl| {
+        matches!(
+            decl.kind,
+            bonsai_lang_api::DeclKind::Function
+                | bonsai_lang_api::DeclKind::Method
+                | bonsai_lang_api::DeclKind::Constructor
+        ) && decl.body_span.is_some()
+    })
+}
+
 /// Resolve `module` against the workspace, then append every
 /// function/method name the resolved file (or sibling source file)
 /// declares to `out`. No-op when the module string doesn't map to
@@ -366,25 +377,11 @@ fn resolve_workspace_module_bindings(
         let Some(path) = resolver.path_by_file.get(&file) else {
             continue;
         };
-        if global.decls_in(file).iter().any(|decl| {
-            matches!(
-                decl.kind,
-                bonsai_lang_api::DeclKind::Function
-                    | bonsai_lang_api::DeclKind::Method
-                    | bonsai_lang_api::DeclKind::Constructor
-            )
-        }) {
+        if file_has_executable_callable(global, file) {
             continue;
         }
         for &other in resolver.files_with_same_stem(path) {
-            if global.decls_in(other).iter().any(|decl| {
-                matches!(
-                    decl.kind,
-                    bonsai_lang_api::DeclKind::Function
-                        | bonsai_lang_api::DeclKind::Method
-                        | bonsai_lang_api::DeclKind::Constructor
-                )
-            }) {
+            if file_has_executable_callable(global, other) {
                 push_unique_file(&mut resolved, &mut seen, other);
             }
         }
@@ -584,4 +581,44 @@ fn import_relevance_key(row: &ImportOut, f: &ImportsFilters<'_>) -> ((u8, usize)
         })
     });
     (module, alias)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{imports, ImportsFilters};
+
+    #[test]
+    fn declaration_only_import_resolves_exact_same_stem_implementation_bindings() {
+        let ws = bonsai_workspace::Workspace::new(bonsai_adapters::all_languages_registry());
+        ws.vfs().write(
+            "Service.h",
+            "@interface Service\n- (id)loadValue:(id)value;\n@end\n",
+        );
+        ws.vfs().write(
+            "Service.m",
+            "#import \"Service.h\"\n@implementation Service\n- (id)loadValue:(id)value { return value; }\n@end\n",
+        );
+        ws.vfs().write(
+            "Main.m",
+            "#import \"Service.h\"\nid run(Service *service, id value) { return [service loadValue:value]; }\n",
+        );
+
+        let rows = imports(
+            &ws,
+            &ImportsFilters {
+                resolve_workspace_bindings: true,
+                ..ImportsFilters::default()
+            },
+        )
+        .expect("Objective-C import inventory");
+        let imported = rows
+            .iter()
+            .find(|row| row.file.ends_with("Main.m") && row.module == "Service.h")
+            .expect("Main.m Service.h import");
+
+        assert!(
+            imported.local_bindings.iter().any(|name| name == "loadValue"),
+            "a declaration-only header must widen to its exact same-stem implementation: {imported:#?}"
+        );
+    }
 }

@@ -23,16 +23,17 @@ pub mod value_flow;
 pub use assignment::{assign_chain_taints, target_is_tainted};
 pub use idg_api::{
     call_site_receives_taint, call_site_receives_taint_with_caches, function_summary, interprocedural_taint,
-    interprocedural_taint_with_caches, CallPropagation, CallResultPassthrough, CleanOutputOverwrite,
-    FunctionSeed, FunctionSummary, InterTaintCaches, InterTaintConfig, InterTaintResult, OutputArgFlow,
-    ParamSideEffect, ReceiverStatePropagation, ReturnAccessPath, ReturnElementTaint, ReturnFieldTaint,
-    SourceCallbackArgs, SourceOutputArgs, TaintedArg, TaintedArgAtCall, TaintedCall, TaintedCallKind,
+    interprocedural_taint_with_caches, CallPropagation, CallResultPassthrough, CallbackInvocation,
+    CleanOutputOverwrite, CleanReceiverOverwrite, FunctionSeed, FunctionSummary, InterTaintCaches,
+    InterTaintConfig, InterTaintResult, OutputArgFlow, ParamSideEffect, ReceiverStatePropagation,
+    ReturnAccessPath, ReturnElementTaint, ReturnFieldTaint, SourceCallbackArgs, SourceOutputArgs, TaintedArg,
+    TaintedArgAtCall, TaintedCall, TaintedCallKind,
 };
 pub use idg_build::{
     build_resolved_call_graph_snapshot, build_resolved_call_graph_snapshot_for_files,
     build_resolved_call_graph_snapshot_with_headers,
-    build_resolved_call_graph_snapshot_with_headers_and_progress, compiler_idg_file_semantics,
-    compiler_idg_service, ensure_idg_service,
+    build_resolved_call_graph_snapshot_with_headers_and_progress, callgraph_alias_projection_callbacks,
+    compiler_idg_file_semantics, compiler_idg_service, ensure_idg_service,
 };
 pub use idg_query::{
     IdgReturnQuery, IdgTaintCallScope, IdgTaintQuery, IdgTaintSeed, IdgTaintSource, IdgTaintTargets,
@@ -50,7 +51,7 @@ pub use reachable::{
     name_reachable_through_file_kinded, name_reachable_through_func_kinded,
     source_seed_reaches_return_from_idg, source_seed_reaches_return_from_idg_query,
     taint_facts_and_graph_for_entry, taint_facts_and_graph_for_entry_with_caches, taint_facts_for_entry,
-    EntryTaintGraph, FactKind, IdgSeedRequest, KindedTokens, TaintedCallEdge, TokenSet,
+    EntryTaintGraph, FactKind, IdgRuleMatchKind, IdgSeedRequest, KindedTokens, TaintedCallEdge, TokenSet,
 };
 pub use value_flow::{
     value_flow_for_function, value_flow_for_function_with_caches, ProvenanceMarker, ProvenanceSet,

@@ -9,13 +9,8 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.find$
-      base_name_in:
-      - collection
-      - coll
-      - col
-      - db
-      - c
+      name: find
+      receiver_type_in: [DbCollection]
   constraints:
   - arg_tainted:
       index: 0
@@ -23,15 +18,17 @@
   - name: tainted mongo selector
     code: |
       import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      void test(dynamic input) { collection.find(input); }
+      void test(DbCollection collection, dynamic input) { collection.find(input); }
   - name: literal mongo selector negative
     code: |
       import 'package:mongo_dart/mongo_dart.dart';
-      void test() { collection.find({"name": "safe"}); }
+      void test(DbCollection collection) { collection.find({"name": "safe"}); }
+    expect_no_match: true
+  - name: unrelated local find method is not mongo dart
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      class LocalCollection { dynamic find(dynamic value) => value; }
+      void test(LocalCollection collection, dynamic input) { collection.find(input); }
     expect_no_match: true
   description: "mongo_dart DbCollection.find(selector)."
 
@@ -47,13 +44,8 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.findOne$
-      base_name_in:
-      - collection
-      - coll
-      - col
-      - db
-      - c
+      name: findOne
+      receiver_type_in: [DbCollection]
   constraints:
   - arg_tainted:
       index: 0
@@ -61,15 +53,17 @@
   - name: tainted mongo find one selector
     code: |
       import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      void test(dynamic input) { collection.findOne(input); }
+      void test(DbCollection collection, dynamic input) { collection.findOne(input); }
   - name: literal mongo find one selector negative
     code: |
       import 'package:mongo_dart/mongo_dart.dart';
-      void test() { collection.findOne({"name": "safe"}); }
+      void test(DbCollection collection) { collection.findOne({"name": "safe"}); }
+    expect_no_match: true
+  - name: unrelated local findOne method is not mongo dart
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      class LocalCollection { dynamic findOne(dynamic value) => value; }
+      void test(LocalCollection collection, dynamic input) { collection.findOne(input); }
     expect_no_match: true
   description: "mongo_dart DbCollection.findOne."
 
@@ -85,13 +79,8 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.aggregate$
-      base_name_in:
-      - collection
-      - coll
-      - col
-      - db
-      - c
+      name: aggregate
+      receiver_type_in: [DbCollection]
   constraints:
   - arg_tainted:
       index: 0
@@ -99,15 +88,17 @@
   - name: tainted mongo aggregate pipeline
     code: |
       import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      void test(dynamic input) { collection.aggregate(input); }
+      void test(DbCollection collection, dynamic input) { collection.aggregate(input); }
   - name: literal mongo aggregate pipeline negative
     code: |
       import 'package:mongo_dart/mongo_dart.dart';
-      void test() { collection.aggregate([{"safe": true}]); }
+      void test(DbCollection collection) { collection.aggregate([{"safe": true}]); }
+    expect_no_match: true
+  - name: unrelated local aggregate method is not mongo dart
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      class LocalCollection { dynamic aggregate(dynamic value) => value; }
+      void test(LocalCollection collection, dynamic input) { collection.aggregate(input); }
     expect_no_match: true
   description: "mongo_dart DbCollection.aggregate."
 
@@ -123,13 +114,8 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.update$
-      base_name_in:
-      - collection
-      - coll
-      - col
-      - db
-      - c
+      name: update
+      receiver_type_in: [DbCollection]
   constraints:
   - arg_tainted:
       index: 0
@@ -137,15 +123,17 @@
   - name: tainted mongo update selector
     code: |
       import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      void test(dynamic input) { collection.update(input, {"safe": true}); }
+      void test(DbCollection collection, dynamic input) { collection.update(input, {"safe": true}); }
   - name: literal mongo update selector negative
     code: |
       import 'package:mongo_dart/mongo_dart.dart';
-      void test() { collection.update({"id": 1}, {"safe": true}); }
+      void test(DbCollection collection) { collection.update({"id": 1}, {"safe": true}); }
+    expect_no_match: true
+  - name: unrelated local update selector method is not mongo dart
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      class LocalCollection { dynamic update(dynamic selector, dynamic value) => value; }
+      void test(LocalCollection collection, dynamic input) { collection.update(input, {"safe": true}); }
     expect_no_match: true
   description: "mongo_dart DbCollection.update(tainted selector, update)."
 
@@ -161,13 +149,8 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.update$
-      base_name_in:
-      - collection
-      - coll
-      - col
-      - db
-      - c
+      name: update
+      receiver_type_in: [DbCollection]
   constraints:
   - arg_tainted:
       index: 1
@@ -175,11 +158,17 @@
   - name: tainted mongo update document
     code: |
       import 'package:mongo_dart/mongo_dart.dart';
-      void test(dynamic input) { collection.update({"id": 1}, input); }
+      void test(DbCollection collection, dynamic input) { collection.update({"id": 1}, input); }
   - name: literal mongo update document negative
     code: |
       import 'package:mongo_dart/mongo_dart.dart';
-      void test() { collection.update({"id": 1}, {"safe": true}); }
+      void test(DbCollection collection) { collection.update({"id": 1}, {"safe": true}); }
+    expect_no_match: true
+  - name: unrelated local update document method is not mongo dart
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      class LocalCollection { dynamic update(dynamic selector, dynamic value) => value; }
+      void test(LocalCollection collection, dynamic input) { collection.update({"id": 1}, input); }
     expect_no_match: true
   description: "mongo_dart DbCollection.update(selector, tainted update) - attacker-controlled update documents can inject operators."
   imports:
@@ -194,13 +183,8 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.remove$
-      base_name_in:
-      - collection
-      - coll
-      - col
-      - db
-      - c
+      name: remove
+      receiver_type_in: [DbCollection]
   constraints:
   - arg_tainted:
       index: 0
@@ -208,15 +192,17 @@
   - name: tainted mongo remove selector
     code: |
       import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      import 'package:mongo_dart/mongo_dart.dart';
-      void test(dynamic input) { collection.remove(input); }
+      void test(DbCollection collection, dynamic input) { collection.remove(input); }
   - name: literal mongo remove selector negative
     code: |
       import 'package:mongo_dart/mongo_dart.dart';
-      void test() { collection.remove({"name": "safe"}); }
+      void test(DbCollection collection) { collection.remove({"name": "safe"}); }
+    expect_no_match: true
+  - name: unrelated local remove method is not mongo dart
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      class LocalCollection { dynamic remove(dynamic value) => value; }
+      void test(LocalCollection collection, dynamic input) { collection.remove(input); }
     expect_no_match: true
   description: "mongo_dart DbCollection.remove with tainted selector."
 
@@ -240,9 +226,6 @@
   - name: tainted redis lua script
     code: |
       import 'package:redis/redis.dart';
-      import 'package:redis/redis.dart';
-      import 'package:redis/redis.dart';
-      import 'package:redis/redis.dart';
       import 'package:redis/redis.dart'; // redis
       void test(String input) { redis.eval(input); }
   - name: literal redis lua script negative
@@ -254,21 +237,6 @@
 
   imports:
   - redis/redis.dart
-- id: dart.nosql.firestore_where_string
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: nosql-injection
-  severity: medium
-  packages: [cloud_firestore]
-  cwe: [CWE-943]
-  match:
-    kind: call
-    callee:
-      attribute: [collection, where]
-  description: "Disabled - Firestore where() is type-bounded; flag with tainted field path."
-
 - id: dart.nosql.realm_query_string
   enabled: true
   language: dart
@@ -286,9 +254,6 @@
   match_examples:
   - name: tainted realm query
     code: |
-      import 'package:realm/realm.dart';
-      import 'package:realm/realm.dart';
-      import 'package:realm/realm.dart';
       import 'package:realm/realm.dart';
       import 'package:realm/realm.dart'; // realm
       void test(String input) { realm.query(input); }

@@ -20,26 +20,26 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const LANGS: &[(&str, &str)] = &[
-    ("c", "mega_flow"),
-    ("cpp", "mega_flow"),
-    ("csharp", "mega_flow"),
-    ("dart", "mega_flow"),
-    ("elixir", "mega_flow"),
-    ("erlang", "mega_flow"),
-    ("go", "mega_flow"),
-    ("java", "mega_flow"),
-    ("javascript", "mega_flow"),
-    ("kotlin", "mega_flow"),
-    ("lua", "mega_flow"),
-    ("objc", "mega_flow"),
-    ("perl", "mega_flow"),
-    ("php", "mega_flow"),
-    ("python", "mega_flow"),
-    ("ruby", "mega_flow"),
-    ("rust", "mega_flow"),
-    ("scala", "mega_flow"),
-    ("swift", "mega_flow"),
-    ("typescript", "mega_flow"),
+    ("c", "language_gauntlet"),
+    ("cpp", "language_gauntlet"),
+    ("csharp", "language_gauntlet"),
+    ("dart", "language_gauntlet"),
+    ("elixir", "language_gauntlet"),
+    ("erlang", "language_gauntlet"),
+    ("go", "language_gauntlet"),
+    ("java", "language_gauntlet"),
+    ("javascript", "language_gauntlet"),
+    ("kotlin", "language_gauntlet"),
+    ("lua", "language_gauntlet"),
+    ("objc", "language_gauntlet"),
+    ("perl", "language_gauntlet"),
+    ("php", "language_gauntlet"),
+    ("python", "language_gauntlet"),
+    ("ruby", "language_gauntlet"),
+    ("rust", "language_gauntlet"),
+    ("scala", "language_gauntlet"),
+    ("swift", "language_gauntlet"),
+    ("typescript", "language_gauntlet"),
 ];
 
 fn repo_root() -> PathBuf {
@@ -63,7 +63,7 @@ fn bin_path() -> Option<PathBuf> {
 
 fn ws(lang: &str, fixture: &str) -> String {
     repo_root()
-        .join("examples")
+        .join("test-fixtures/languages")
         .join(lang)
         .join(fixture)
         .to_string_lossy()

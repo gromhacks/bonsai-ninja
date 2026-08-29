@@ -78,24 +78,6 @@
       }
     expect_no_match: true
   description: "ReactiveMongo BSONCollection.update - tainted filter/modifier."
-- id: scala.nosql.casbah_find
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: scala
-  tag: nosql-injection
-  severity: high
-  packages:
-  - casbah
-  cwe:
-  - CWE-943
-  match:
-    kind: call
-    callee:
-      attribute:
-      - MongoCollection
-      - find
-  description: "Disabled - Casbah is deprecated; canonical rule is scala.nosql.mongo_collection_find (same `[MongoCollection, find]` attribute chain)."
 - id: scala.nosql.mongo_command
   enabled: true
   language: scala

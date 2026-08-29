@@ -180,12 +180,7 @@ pub fn read_file(
     rulepack: Option<&Rulepack>,
     filters: &ReadFileFilters<'_>,
 ) -> anyhow::Result<ReadFileOut> {
-    read_file_with_taint_options(
-        ws,
-        rulepack,
-        filters,
-        semantic_read_file_taint_options(Default::default()),
-    )
+    read_file_with_taint_options(ws, rulepack, filters, Default::default())
 }
 
 fn read_file_with_taint_options(
@@ -238,7 +233,6 @@ fn read_file_with_taint_options(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let taint_options = semantic_read_file_taint_options(taint_options);
     let report = match rulepack {
         Some(pack) => Some(run_taint_analysis(ws, pack, taint_options)?),
         None => None,
@@ -522,10 +516,6 @@ fn make_read_file_locations_portable(ws: &Workspace, out: &mut ReadFileOut) {
         normalize(ws, &mut finding.source);
         normalize(ws, &mut finding.sink);
     }
-}
-
-fn semantic_read_file_taint_options(options: TaintAnalysisOptions) -> TaintAnalysisOptions {
-    options.semantic_precision_only()
 }
 
 fn effective_max_inlined_bodies(max_inlined_bodies: Option<usize>) -> usize {

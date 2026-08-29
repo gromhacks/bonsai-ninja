@@ -11,7 +11,8 @@
   match:
     kind: write
     target:
-      name: InsecureSkipVerify
+      regex: '^[^\.\s]+\.InsecureSkipVerify$'
+      receiver_type_in: [tls.Config, Config]
   constraints:
   - arg_matches_regex:
       index: 0
@@ -22,7 +23,7 @@
       package main
       import "crypto/tls"
 
-      func example() {
+      func example(cfg *tls.Config) {
         cfg.InsecureSkipVerify = true
       }
     expect_match_text: [cfg.InsecureSkipVerify]
@@ -31,11 +32,22 @@
       package main
       import "crypto/tls"
 
-      func example() {
+      func example(cfg *tls.Config) {
         cfg.InsecureSkipVerify = false
       }
     expect_no_match: true
-  description: "tls.Config.InsecureSkipVerify assignment - setting true disables certificate verification (MITM)."
+  - name: same field on a local type negative
+    code: |
+      package main
+      import "crypto/tls"
+
+      type LocalConfig struct { InsecureSkipVerify bool }
+      func example(cfg *LocalConfig) {
+        cfg.InsecureSkipVerify = true
+        _ = tls.VersionTLS13
+      }
+    expect_no_match: true
+  description: "tls.Config.InsecureSkipVerify assignment - setting true disables certificate verification (MITM). Exact compiler receiver identity rejects same-named local fields."
 
 - id: go.tls.minversion_old
   enabled: true
@@ -48,7 +60,8 @@
   match:
     kind: write
     target:
-      name: MinVersion
+      regex: '^[^\.\s]+\.MinVersion$'
+      receiver_type_in: [tls.Config, Config]
   constraints:
   - arg_matches_regex:
       index: 0
@@ -59,7 +72,7 @@
       package main
       import "crypto/tls"
 
-      func example() {
+      func example(cfg *tls.Config) {
         cfg.MinVersion = tls.VersionTLS11
       }
     expect_match_text: [cfg.MinVersion]
@@ -68,41 +81,21 @@
       package main
       import "crypto/tls"
 
-      func example() {
+      func example(cfg *tls.Config) {
         cfg.MinVersion = tls.VersionTLS12
       }
     expect_no_match: true
-  description: "tls.Config.MinVersion - values VersionTLS10 / VersionTLS11 allow deprecated-protocol downgrade."
+  - name: same minimum-version field on a local type negative
+    code: |
+      package main
+      import "crypto/tls"
 
-- id: go.tls.weak_ciphersuites
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: weak-tls
-  severity: medium
-  packages: ["crypto/tls"]
-  cwe: [CWE-326]
-  match:
-    kind: write
-    target:
-      name: CipherSuites
-  description: "Disabled - tls.Config.CipherSuites write; enable when the list contains known-weak suites (RC4, 3DES, CBC with SHA1)."
-
-- id: go.tls.servername_unset
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  tag: weak-tls
-  severity: low
-  packages: ["crypto/tls"]
-  cwe: [CWE-295]
-  match:
-    kind: write
-    target:
-      name: ServerName
-  description: "Disabled - unset ServerName defeats SNI-based hostname verification; enable with a more specific constraint."
+      type LocalConfig struct { MinVersion uint16 }
+      func example(cfg *LocalConfig) {
+        cfg.MinVersion = tls.VersionTLS11
+      }
+    expect_no_match: true
+  description: "tls.Config.MinVersion - values VersionSSL30 / VersionTLS10 / VersionTLS11 allow deprecated-protocol downgrade. Exact compiler receiver identity rejects same-named local fields."
 
 - id: go.tls.grpc_with_insecure
   enabled: true

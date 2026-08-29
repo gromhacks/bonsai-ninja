@@ -24,27 +24,6 @@
         }
       expect_no_match: true
   description: "strcpy(dst, tainted_src) - copies until NUL with no length check; classic stack/heap buffer overflow."
-- id: c.memory.strncpy
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: c
-  tag: memory-safety
-  severity: medium
-  cwe: [CWE-120]
-  match:
-    kind: call
-    callee:
-      name: strncpy
-  match_examples:
-    - name: generated direct match
-      code: |
-        void example(void) {
-          char *arg = "tainted";
-          char *fmt = arg;
-          strncpy(arg);
-        }
-  description: "Disabled - `strncpy` is only a finding when the analyzer can prove missing/manual-terminator misuse. A bare call rule over-reports common bounded-copy patterns that immediately NUL-terminate."
 - id: c.memory.strcat
   enabled: true
   language: c
@@ -71,27 +50,6 @@
         }
       expect_no_match: true
   description: "strcat(dst, tainted_src) - appends until NUL with no bound; overflows dst if remaining space < strlen(src)."
-- id: c.memory.strncat
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: c
-  tag: memory-safety
-  severity: medium
-  cwe: [CWE-120]
-  match:
-    kind: call
-    callee:
-      name: strncat
-  match_examples:
-    - name: generated direct match
-      code: |
-        void example(void) {
-          char *arg = "tainted";
-          char *fmt = arg;
-          strncat(arg);
-        }
-  description: "Disabled - `strncat` needs capacity/arithmetic context to distinguish misuse from bounded remaining-capacity patterns."
 - id: c.memory.gets
   enabled: true
   language: c
@@ -136,6 +94,14 @@
   tag: memory-safety
   severity: high
   cwe: [CWE-120, CWE-125, CWE-787]
+  analysis_semantics:
+    compiler_guard:
+      capability: call-argument.numeric-upper-bound
+      required_evidence:
+        - destination-argument:0
+        - length-argument:2
+      sanitizer_tag: memory-safety
+      category: destination-capacity-upper-bound
   match:
     kind: call
     callee:

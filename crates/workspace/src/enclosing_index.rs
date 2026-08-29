@@ -10,6 +10,7 @@
 use ahash::AHashMap;
 use bonsai_common::FileId;
 use bonsai_index::{GlobalIndex, GlobalIndexIdentity};
+use bonsai_lang_api::{Decl, DeclKind};
 use parking_lot::RwLock;
 use std::cmp::Reverse;
 use std::sync::Arc;
@@ -23,8 +24,15 @@ pub struct EnclosingEntry {
     pub symbol: bonsai_common::SymbolId,
 }
 
+/// Immutable point-query index over compiler declaration spans.
+///
+/// Consumers that already own a file-local compiler body can build this
+/// directly without materializing workspace-global headers. The same
+/// range-maximum implementation backs the cached workspace index below, so
+/// nested declarations that end before an outer call cannot hide their
+/// still-live lexical owner.
 #[derive(Debug)]
-struct EnclosingFileIndex {
+pub struct EnclosingSpanIndex {
     entries: Arc<Vec<EnclosingEntry>>,
     /// Range-maximum tree over entry end offsets. It lets a point lookup skip
     /// completed nested lambdas and find the still-containing outer
@@ -33,7 +41,7 @@ struct EnclosingFileIndex {
     leaf_count: usize,
 }
 
-impl EnclosingFileIndex {
+impl EnclosingSpanIndex {
     fn new(mut entries: Vec<EnclosingEntry>) -> Self {
         // For equal starts, put the narrowest interval last so the rightmost
         // containing lookup returns the innermost compiler declaration.
@@ -53,7 +61,38 @@ impl EnclosingFileIndex {
         }
     }
 
-    fn enclosing(&self, pos: u64) -> Option<EnclosingEntry> {
+    /// Build an index containing only executable compiler declarations.
+    ///
+    /// Security call attribution asks for a callable owner, not the nearest
+    /// local struct/type declaration. Filtering here prevents a local type
+    /// that ends before a call from erasing the surrounding function.
+    #[must_use]
+    pub fn from_callable_decls(decls: &[Decl]) -> Self {
+        Self::new(
+            decls
+                .iter()
+                .filter(|decl| {
+                    matches!(
+                        decl.kind,
+                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                    )
+                })
+                .map(|decl| {
+                    let body = decl.body_span.unwrap_or(decl.span);
+                    EnclosingEntry {
+                        start: body.start,
+                        end: body.end,
+                        name: decl.name.clone(),
+                        symbol: decl.symbol,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// Return the innermost indexed declaration covering `pos`.
+    #[must_use]
+    pub fn enclosing(&self, pos: u64) -> Option<EnclosingEntry> {
         let upper = self.entries.partition_point(|entry| entry.start <= pos);
         let index = self.rightmost_covering(1, 0, self.leaf_count, upper, pos)?;
         self.entries.get(index).cloned()
@@ -82,7 +121,7 @@ impl EnclosingFileIndex {
 #[derive(Default, Debug)]
 struct EnclosingIndexState {
     identity: Option<GlobalIndexIdentity>,
-    files: AHashMap<FileId, Arc<EnclosingFileIndex>>,
+    files: AHashMap<FileId, Arc<EnclosingSpanIndex>>,
 }
 
 #[derive(Default, Debug)]
@@ -113,7 +152,7 @@ impl EnclosingIndex {
         Arc::clone(&self.index_for(headers, file).entries)
     }
 
-    fn index_for(&self, headers: &GlobalIndex, file: FileId) -> Arc<EnclosingFileIndex> {
+    fn index_for(&self, headers: &GlobalIndex, file: FileId) -> Arc<EnclosingSpanIndex> {
         let identity = headers.identity();
         // Drop the read guard's temporary before the write upgrade.
         let cached = {
@@ -136,7 +175,7 @@ impl EnclosingIndex {
         if let Some(existing) = state.files.get(&file).cloned() {
             return existing;
         }
-        let index = Arc::new(EnclosingFileIndex::new(build_entries(headers, file)));
+        let index = Arc::new(EnclosingSpanIndex::new(build_entries(headers, file)));
         state.files.insert(file, Arc::clone(&index));
         index
     }

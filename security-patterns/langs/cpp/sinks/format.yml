@@ -29,13 +29,11 @@
   description: "printf(fmt, ...) with tainted fmt - arbitrary read/write via %n / %s."
 
 - id: cpp.format.fprintf_tainted
-  aliases:
-    - cpp.info_disclosure.fprintf_stderr_secret
   enabled: true
   language: cpp
   tag: format-string
   severity: high
-  cwe: [CWE-134, CWE-200]
+  cwe: [CWE-134]
   match:
     kind: call
     callee:
@@ -56,16 +54,14 @@
         fprintf(stream, "%s", "safe");
       }
     expect_no_match: true
-  description: "fprintf(stream, fmt, ...) with tainted fmt. Also covers merged aliases: cpp.info_disclosure.fprintf_stderr_secret."
+  description: "fprintf(stream, fmt, ...) with a tainted format string."
 
 - id: cpp.format.sprintf_tainted
-  aliases:
-    - cpp.memory.sprintf
   enabled: true
   language: cpp
   tag: format-string
   severity: critical
-  cwe: [CWE-134, CWE-120]
+  cwe: [CWE-134]
   match:
     kind: call
     callee:
@@ -90,7 +86,7 @@
         sprintf(buf, "%s", "safe");
       }
     expect_no_match: true
-  description: "sprintf(buf, fmt, ...) with tainted fmt - format injection + overflow. Also covers merged aliases: cpp.memory.sprintf."
+  description: "sprintf(buf, fmt, ...) with a tainted format string - format-string injection."
 
 - id: cpp.format.snprintf_tainted
   enabled: true

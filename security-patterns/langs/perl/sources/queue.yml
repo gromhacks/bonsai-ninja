@@ -1,30 +1,79 @@
-# Perl queue / message-broker sources.
-- id: perl.source.aws_sqs_message_body
-  enabled: false
-  disabled_reason:
-    code: over-broad
+# Perl message-broker sources. Generic recv/fetch spellings are accepted only
+# on receiver types established by exact rulepack-declared constructors.
+- id: perl.source.rabbitmq_delivery
+  enabled: true
   language: perl
   trust: service
-  tag: queue-input
-  payload_types: [queue-message, text]
-  packages: [Paws]
-  match:
-    kind: read
-    target:
-      attribute: [message, Body]
-  description: "Disabled - SQS message body reads are real queue input, but `message.Body` is too broad without SDK-aware receiver typing."
-
-- id: perl.source.rabbitmq_delivery_body
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: perl
-  trust: service
+  category: message-input
   tag: queue-input
   payload_types: [queue-message, binary]
-  packages: [Net::AMQP::RabbitMQ]
+  packages: ["Net::AMQP::RabbitMQ"]
+  imports: ["Net::AMQP::RabbitMQ"]
   match:
-    kind: read
-    target:
-      attribute: [delivery, body]
-  description: "Disabled - RabbitMQ delivery body is attacker-controlled, but bare `delivery.body` needs receiver typing to avoid over-match."
+    kind: call
+    callee:
+      name: recv
+  constraints:
+  - receiver_type_in: ["Net::AMQP::RabbitMQ"]
+  - max_args: 1
+  match_examples:
+  - name: RabbitMQ received delivery hash
+    code: |
+      use Net::AMQP::RabbitMQ;
+      sub receive_message {
+        my $rabbit = Net::AMQP::RabbitMQ->new();
+        my $delivery = $rabbit->recv(5);
+        return $delivery->{body};
+      }
+    expect_match_text: [rabbit->recv]
+  - name: unrelated recv method is not broker input
+    code: |
+      use Net::AMQP::RabbitMQ;
+      package LocalSocket;
+      sub recv { return { body => 'local' } }
+      package main;
+      sub receive_message {
+        my $socket = LocalSocket->new();
+        return $socket->recv();
+      }
+    expect_no_match: true
+  description: "Net::AMQP::RabbitMQ recv([timeout]) returns a broker-delivered hash containing the message body and delivery metadata on a compiler-typed client."
+
+- id: perl.source.kafka_consumer_fetch
+  enabled: true
+  language: perl
+  trust: service
+  category: message-input
+  tag: queue-input
+  payload_types: [queue-message, binary]
+  packages: ["Kafka::Consumer"]
+  imports: ["Kafka::Consumer"]
+  match:
+    kind: call
+    callee:
+      name: fetch
+  constraints:
+  - receiver_type_in: ["Kafka::Consumer"]
+  - arg_count: 4
+  match_examples:
+  - name: Kafka consumer message batch
+    code: |
+      use Kafka::Consumer;
+      sub receive_messages {
+        my ($connection) = @_;
+        my $consumer = Kafka::Consumer->new(Connection => $connection);
+        return $consumer->fetch('events', 0, 0, 1048576);
+      }
+    expect_match_text: [consumer->fetch]
+  - name: unrelated four-argument fetch is not broker input
+    code: |
+      use Kafka::Consumer;
+      package LocalCache;
+      sub fetch { return [] }
+      package main;
+      sub receive_messages {
+        my $cache = LocalCache->new();
+        return $cache->fetch('events', 0, 0, 1048576);
+      }
+    expect_no_match: true
+  description: "Kafka::Consumer fetch(topic, partition, offset, max_size) returns broker-delivered Kafka::Message objects on a compiler-typed consumer."

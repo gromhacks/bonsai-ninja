@@ -29,22 +29,6 @@
     expect_no_match: true
   description: "os:cmd/1 - runs argument under /bin/sh -c; any tainted substring -> RCE."
 
-- id: erlang.cmdi.os_cmd_2
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: erlang.cmdi.os_cmd
-  language: erlang
-  tag: command-injection
-  severity: critical
-  category: process-exec
-  cwe: [CWE-78]
-  match:
-    kind: call
-    callee:
-      regex: "^os:cmd/2$"
-  description: "Disabled - adapter emits callee without arity; os_cmd above already matches."
-
 - id: erlang.cmdi.erlang_open_port
   enabled: true
   language: erlang

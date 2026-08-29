@@ -1,0 +1,29 @@
+- id: objc.typing.dispatch_sync_callback_invocation
+  enabled: true
+  language: objc
+  taint_semantics:
+    callback_invocation:
+      callback_arg_index: 1
+      callback_return_result_offset: 0
+  match:
+    kind: call
+    callee:
+      name: dispatch_sync
+      binding_origin: runtime-global
+  constraints:
+  - arg_count: 2
+  match_examples:
+  - name: Grand Central Dispatch invokes a named block value
+    code: |
+      void run(dispatch_queue_t queue, void (^work)(void)) {
+        dispatch_sync(queue, work);
+      }
+    expect_match_text: [dispatch_sync]
+  - name: a locally declared same-name function is not the runtime API
+    code: |
+      static void dispatch_sync(void *queue, void *work) {}
+      void run(void *queue, void *work) {
+        dispatch_sync(queue, work);
+      }
+    expect_no_match: true
+  description: "Grand Central Dispatch dispatch_sync invokes block argument one. Typing-only callback semantics join exact first-party block bindings and never give the API security meaning in shared analysis."

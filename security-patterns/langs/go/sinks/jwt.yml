@@ -29,37 +29,6 @@
     expect_no_match: true
   description: "jwt.ParseUnverified - decodes claims without signature verification; covers golang-jwt and legacy dgrijalva jwt-go."
 
-- id: go.jwt.golangjwt_parse
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  tag: jwt
-  severity: medium
-  packages: ["github.com/golang-jwt/jwt"]
-  cwe: [CWE-347]
-  match:
-    kind: call
-    callee:
-      attribute: [jwt, Parse]
-  description: "Disabled - jwt.Parse requires a keyfunc that must reject alg=none and pin the algorithm; enable per-project with nil/loose keyfunc constraint."
-
-- id: go.jwt.dgrijalva_parse_unverified
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: go.jwt.golangjwt_parse_unverified
-  language: go
-  tag: jwt
-  severity: high
-  packages: ["github.com/dgrijalva/jwt-go"]
-  cwe: [CWE-347]
-  match:
-    kind: call
-    callee:
-      attribute: [jwt, ParseUnverified]
-  description: "Disabled duplicate - same jwt.ParseUnverified shape is covered by go.jwt.golangjwt_parse_unverified with both package names."
-
 - id: go.jwt.signing_method_none
   enabled: true
   language: go
@@ -117,30 +86,6 @@
       }
   description: "Reference to jwt.UnsafeAllowNoneSignatureType - enabling alg=none verification accepts forged tokens."
 
-- id: go.jwt.skip_claims_validation
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  tag: jwt
-  severity: high
-  packages: ["github.com/golang-jwt/jwt", "github.com/dgrijalva/jwt-go"]
-  cwe: [CWE-347, CWE-613]
-  match:
-    kind: write
-    target:
-      name: SkipClaimsValidation
-  match_examples:
-  - name: generated direct match
-    code: |
-      import "github.com/golang-jwt/jwt"
-      package main
-
-      func example() {
-        cfg.SkipClaimsValidation = true
-      }
-  description: "Disabled - requires a value constraint that proves Parser.SkipClaimsValidation is assigned true, not merely written."
-
 - id: go.jwt.lestrrat_parse
   enabled: true
   language: go
@@ -170,41 +115,6 @@
     code: "import \"github.com/lestrrat-go/jwx\"\npackage main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  jwt.ParseInsecure(target)\n}\n"
     expect_no_match: true
   description: "jwx jwt.ParseInsecure - parses without signature verification."
-
-- id: go.jwt.gojose_parsesigned
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  tag: jwt
-  severity: medium
-  packages: ["gopkg.in/square/go-jose.v2"]
-  cwe: [CWE-347]
-  match:
-    kind: call
-    callee:
-      attribute: [jose, ParseSigned]
-  description: "Disabled - go-jose ParseSigned is safe when .Verify() is called downstream; enable with a missing-Verify constraint."
-
-# JWT alg-confusion (T400). HMAC verify with an RSA public
-# key - when both HS* and RS* algorithms are allowed in the
-# verifier's algorithm list, an attacker can sign their own
-# token with the public key as the HMAC secret. Detect by
-# matching the algorithm-list shape at the verify call.
-- id: go.jwt.alg_confusion
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: untrusted-token
-  severity: high
-  packages: [github.com/golang-jwt/jwt]
-  cwe: [CWE-345]
-  match:
-    kind: call
-    callee:
-      attribute: [jwt, Parse]
-  description: "golang-jwt Parse callback that returns the wrong key type for the alleged algorithm - classic alg-confusion when verifier doesn't pin to a specific signing method family. (Audit-style - review the keyFunc.)"
 
 - id: go.jwt.golang_jwt_parse_tainted_token
   enabled: true

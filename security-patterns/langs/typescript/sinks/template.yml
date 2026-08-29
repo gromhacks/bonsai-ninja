@@ -73,24 +73,6 @@
   description: "ejs.compile(tainted) - full SSTI-to-RCE in default config. Merged aliases: typescript.template.ejs_compile_template_variable."
   aliases:
   - typescript.template.ejs_compile_template_variable
-- id: typescript.template.ejs_renderfile
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: ssti
-  severity: medium
-  packages:
-  - ejs
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - ejs
-      - renderFile
-  description: "Disabled - renderFile uses a filesystem path; flag as path-traversal, not SSTI."
 - id: typescript.template.handlebars_compile
   enabled: true
   language: typescript
@@ -438,24 +420,6 @@
       }
     expect_no_match: true
   description: "doT.template(tainted) - JS evaluation in template."
-- id: typescript.template.mustache_render
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: ssti
-  severity: low
-  packages:
-  - mustache
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Mustache
-      - render
-  description: "Disabled - Mustache is logic-less; not SSTI-to-RCE."
 - id: typescript.template.lodash_template
   enabled: true
   language: typescript
@@ -489,24 +453,6 @@
       }
     expect_no_match: true
   description: "_.template(tainted) - evaluates JS in template tags (also matches underscore.js with the `_` alias)."
-- id: typescript.template.consolidate_render
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: typescript
-  tag: ssti
-  severity: medium
-  packages:
-  - consolidate
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - consolidate
-      - render
-  description: "Disabled - generic render; flag with engine-specific constraint instead."
 - id: typescript.template.swig_setdefaults_autoescape_off
   enabled: true
   language: typescript

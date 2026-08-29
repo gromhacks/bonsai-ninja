@@ -153,29 +153,6 @@
       }
     expect_no_match: true
   description: "Statement.executeBatch() after tainted SQL was added with addBatch."
-- id: java.sqli.jdbc_create_statement
-  enabled: false
-  language: java
-  tag: sql-injection
-  severity: high
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Connection
-      - createStatement
-  match_examples:
-  - name: generated shape example
-    code: "class App {\n  void handle(String input) throws Exception {\n    Connection.createStatement(input);\n\
-      \  }\n}\n"
-  description: 'JDBC Connection.createStatement returns non-parameterised Statement.
-    JDBC defines `createStatement()` and `createStatement(int, int)`/`createStatement(int,
-    int, int)`; `max_args: 2` keeps the rule on the canonical overloads (no 4+ arg
-    decoy).'
-  disabled_reason:
-    code: over-broad
 - id: java.sqli.jdbc_prepare_call
   enabled: true
   language: java
@@ -464,32 +441,6 @@
     \ - raw SQL string execution."
   imports:
   - org
-- id: java.sqli.hibernate_create_query_local
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: sql-injection
-  severity: high
-  packages:
-  - org.hibernate
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      name: createQuery
-  match_examples:
-  - name: local hibernate create query
-    code: "import org.hibernate.*;\nclass App {\n  Object handle(Session session,\
-      \ String hql) {\n    return session.createQuery(hql);\n  }\n}\nclass Session\
-      \ {\n  Object createQuery(Object... args) { return null; }\n}\n"
-    expect_match_text:
-    - session.createQuery
-  description: "Hibernate Session.createQuery(HQL) on a local Session variable -\
-    \ string-built HQL injection."
-  imports:
-  - org
 - id: java.sqli.hibernate_create_sql_query
   enabled: true
   language: java
@@ -579,36 +530,6 @@
       \ Exception {\n    EntityManager.createNativeQuery(\"select 1\");\n  }\n}\n"
     expect_no_match: true
   description: EntityManager.createNativeQuery with interpolated SQL.
-- id: java.sqli.jpa_create_native_query_local
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: sql-injection
-  severity: critical
-  frameworks:
-  - jpa
-  - hibernate
-  packages:
-  - javax.persistence
-  - jakarta.persistence
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      name: createNativeQuery
-  match_examples:
-  - name: local jpa native query
-    code: "import javax.persistence.*;\nclass App {\n  Object handle(EntityManager\
-      \ em, String sql) {\n    return em.createNativeQuery(sql);\n  }\n}\nclass EntityManager\
-      \ {\n  Object createNativeQuery(Object... args) { return null; }\n}\n"
-    expect_match_text:
-    - em.createNativeQuery
-  description: "JPA EntityManager.createNativeQuery(sql) on a local EntityManager\
-    \ variable - raw native SQL execution."
-  imports:
-  - javax
 - id: java.sqli.r2dbc_databaseclient_sql
   enabled: true
   language: java
@@ -640,25 +561,6 @@
     expect_no_match: true
   description: "Spring R2DBC DatabaseClient.sql(sql) - SQL text remains injectable\
     \ when built from tainted input; bind values separately."
-- id: java.sqli.mybatis_select_one
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: sql-injection
-  severity: medium
-  packages:
-  - org.apache.ibatis
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - SqlSession
-      - selectOne
-  description: "Disabled - MyBatis selectOne usually safe; only dangerous with\
-    \ ${} interpolation in mapper XML."
 - id: java.sqli.spring_jdbctemplate_batchupdate
   enabled: true
   language: java
@@ -820,48 +722,3 @@
     expect_no_match: true
   description: "JDBI Handle.createUpdate(sql) - raw update SQL text remains injectable\
     \ when constructed with tainted input."
-- id: java.sqli.jdbi_handle_execute
-  enabled: false
-  language: java
-  tag: sql-injection
-  severity: critical
-  packages:
-  - org.jdbi
-  - org.apache.commons.exec
-  - graphql
-  - com.datastax.oss
-  - org.springframework.jdbc
-  - org.apache.http
-  - okhttp3
-  - com.github.mustachejava
-  cwe:
-  - CWE-89
-  - CWE-78
-  - CWE-943
-  - CWE-918
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      name: execute
-  match_examples:
-  - name: jdbi handle execute raw sql
-    code: "import org.jdbi.*;\nclass App {\n  int handle(Handle handle, String sql)\
-      \ {\n    return handle.execute(sql);\n  }\n}\nclass Handle {\n  int execute(Object...\
-      \ args) { return 0; }\n}\n"
-    expect_match_text:
-    - handle.execute
-  description: "JDBI Handle.execute(sql) - executes raw SQL built by the caller.\
-    \ Merged collision aliases: java.cmdi.commons_exec_executor, java.graphql.graphql_execute,\
-    \ java.nosql.cqlsession_execute, java.ssrf.httpclient_execute, java.ssrf.closeable_httpclient_execute,\
-    \ java.ssrf.okhttp_call_execute, java.template.mustache_execute."
-  aliases:
-  - java.cmdi.commons_exec_executor
-  - java.graphql.graphql_execute
-  - java.nosql.cqlsession_execute
-  - java.ssrf.httpclient_execute
-  - java.ssrf.closeable_httpclient_execute
-  - java.ssrf.okhttp_call_execute
-  - java.template.mustache_execute
-  disabled_reason:
-    code: over-broad

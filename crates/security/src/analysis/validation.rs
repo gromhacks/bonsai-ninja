@@ -393,10 +393,16 @@ fn match_example_owner_texts(
     if rule.kind == RuleKind::Sink && rule_has_taint_dependent_constraint(rule) {
         return match_arg_tainted_example_owner_texts(pack, rule, ws);
     }
-    crate::matcher::match_rule_against_facts_with_factory(ws, rule, factory)
-        .into_iter()
-        .map(|hit| hit.match_text)
-        .collect()
+    let matches = if rule.kind == RuleKind::Typing && rule_has_taint_dependent_constraint(rule) {
+        // Typing rules are compiler models, never findings. Validate their
+        // exact endpoint and structural constraints while postponing the
+        // source-specific taint predicate that is exercised when the transfer
+        // model is consumed by the IDG.
+        crate::matcher::match_rule_endpoint_for_validation(ws, rule, factory)
+    } else {
+        crate::matcher::match_rule_against_facts_with_factory(ws, rule, factory)
+    };
+    matches.into_iter().map(|hit| hit.match_text).collect()
 }
 
 fn match_arg_tainted_example_owner_texts(pack: &Rulepack, rule: &Rule, ws: &Workspace) -> Vec<String> {
@@ -840,14 +846,15 @@ fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
     if rule.kind != RuleKind::Typing
         && (rule.match_spec.kind == MatchKind::Type
             || !rule.callback_param_types.is_empty()
-            || rule.callback_arg_index.is_some())
+            || rule.callback_arg_index.is_some()
+            || !rule.callback_field_path.is_empty())
     {
         push_validation_issue(
             issues,
             "error",
             "typing-fields-outside-typing-rule",
             Some(rule),
-            "match.kind type, callback_param_types, and callback_arg_index are valid only in typing rules",
+            "match.kind type, callback_param_types, callback_arg_index, and callback_field_path are valid only in typing rules",
         );
     }
     if rule.enabled {
@@ -920,6 +927,27 @@ fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
                         "enabled typing rule must declare returns_type, callback_param_types, taint_semantics, or lifecycle_transition",
                     );
                 }
+                if rule.returns_type.is_some() {
+                    let target = match rule.match_spec.kind {
+                        MatchKind::Call | MatchKind::New | MatchKind::Missing => {
+                            rule.match_spec.callee.as_ref()
+                        }
+                        MatchKind::Read
+                        | MatchKind::Write
+                        | MatchKind::Return
+                        | MatchKind::Param
+                        | MatchKind::Type => rule.match_spec.target.as_ref(),
+                    };
+                    if target.is_none_or(|target| target.name.is_none() && target.attribute.is_none()) {
+                        push_validation_issue(
+                            issues,
+                            "error",
+                            "non-exact-return-typing-target",
+                            Some(rule),
+                            "returns_type requires an exact callee/target name or attribute; regex-only identities cannot produce compiler return-type facts",
+                        );
+                    }
+                }
                 if !rule.callback_param_types.is_empty() {
                     let invalid_shape = rule.callback_param_types.iter().any(Vec::is_empty)
                         || match rule.match_spec.kind {
@@ -943,6 +971,30 @@ fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
                         "orphan-callback-arg-index",
                         Some(rule),
                         "callback_arg_index requires callback_param_types",
+                    );
+                } else if !rule.callback_field_path.is_empty() {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "orphan-callback-field-path",
+                        Some(rule),
+                        "callback_field_path requires callback_param_types",
+                    );
+                }
+                if !rule.callback_field_path.is_empty()
+                    && (rule.match_spec.kind != MatchKind::Call
+                        || rule.callback_arg_index.is_none()
+                        || rule
+                            .callback_field_path
+                            .iter()
+                            .any(|segment| segment.trim().is_empty()))
+                {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "invalid-callback-field-path",
+                        Some(rule),
+                        "callback_field_path requires match.kind call, callback_arg_index, and non-empty exact field names",
                     );
                 }
             }
@@ -1160,6 +1212,7 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
         || semantics.receiver_configuration_guard.is_some()
         || semantics.configured_argument_factory_guard.is_some()
         || semantics.configured_argument_receiver_guard.is_some()
+        || semantics.receiver_callback_configuration_guard.is_some()
         || semantics.configured_call_argument_guard.is_some()
         || semantics.character_escape.is_some()
         || semantics.character_constraint.is_some()
@@ -1236,6 +1289,19 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             "sanitizer_guard must select exactly one of receiver, all arguments, or argument indices",
         );
     }
+    if semantics
+        .sanitizer_guard
+        .as_ref()
+        .is_some_and(|guard| guard.accepted_predicate_value.is_some() && !guard.require_terminal_rejection)
+    {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "sanitizer_guard.accepted_predicate_value requires a terminal-rejection proof",
+        );
+    }
     if let Some(guard) = semantics.configured_call_argument_guard.as_ref() {
         let invalid = guard.guarded_value_argument_indices.is_empty()
             || guard.required_fields.is_empty()
@@ -1282,6 +1348,70 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             Some(rule),
             "character_constraint requires single-character exclusions and/or unique exact non-empty substitutions and, when present, a single-character enclosing delimiter",
         );
+    }
+    if let Some(guard) = semantics.character_constraint.as_ref() {
+        let mut payload_types = std::collections::HashSet::new();
+        if !guard
+            .accepted_untyped_source_payload_types
+            .iter()
+            .all(|payload_type| payload_types.insert(*payload_type))
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "character_constraint.accepted_untyped_source_payload_types must not contain duplicates",
+            );
+        }
+        let callable_target = |target: &RuleTarget| {
+            target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|pattern| !pattern.trim().is_empty())
+        };
+        for (index, provider) in guard.accepted_providers.iter().enumerate() {
+            if !callable_target(&provider.operation)
+                || provider
+                    .factory
+                    .as_ref()
+                    .is_some_and(|factory| !callable_target(factory))
+            {
+                push_validation_issue(
+                    issues,
+                    "error",
+                    "invalid-analysis-semantics",
+                    Some(rule),
+                    &format!(
+                        "character_constraint.accepted_providers[{index}] requires a callable operation and, when present, a callable factory"
+                    ),
+                );
+            }
+            for (role, target) in provider
+                .factory
+                .iter()
+                .map(|target| ("factory", target))
+                .chain(std::iter::once(("operation", &provider.operation)))
+            {
+                if let Some(pattern) = target.regex.as_deref() {
+                    if let Err(error) = Regex::new(pattern) {
+                        push_validation_issue(
+                            issues,
+                            "error",
+                            "invalid-analysis-semantics",
+                            Some(rule),
+                            &format!(
+                                "character_constraint.accepted_providers[{index}].{role}.regex is invalid: {error}"
+                            ),
+                        );
+                    }
+                }
+            }
+        }
     }
     if semantics
         .same_origin_path_constraint
@@ -1364,6 +1494,9 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
         };
         if !callable_target(&path_guard.canonicalizer)
             || !callable_target(&path_guard.containment_check)
+            || path_guard
+                .containment_check_candidate_arg_index
+                .is_some_and(|candidate| candidate == path_guard.containment_check_base_arg_index)
             || path_guard.boundary_places.is_empty()
             || path_guard
                 .boundary_places
@@ -1375,7 +1508,7 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                 "error",
                 "invalid-analysis-semantics",
                 Some(rule),
-                "path_containment_guard requires callable canonicalizer/containment_check targets and non-empty boundary_places",
+                "path_containment_guard requires callable canonicalizer/containment_check targets, distinct candidate/base argument roles, and non-empty boundary_places",
             );
         }
         for (role, target) in [
@@ -1406,32 +1539,65 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                     .as_ref()
                     .is_some_and(|regex| !regex.trim().is_empty())
         };
+        let valid_boundary_value = |value: &bonsai_lang_api::StaticScalarValue| matches!(value, bonsai_lang_api::StaticScalarValue::String(value) if !value.is_empty());
+        let duplicate_containment_result = path_guard
+            .accepted_containment_results
+            .iter()
+            .enumerate()
+            .any(|(index, value)| path_guard.accepted_containment_results[..index].contains(value));
+        let valid_path_constructor = match (
+            path_guard.path_constructor.as_ref(),
+            path_guard.path_constructor_is_string_composition,
+        ) {
+            (Some(target), false) => callable_target(target),
+            (None, true) => true,
+            _ => false,
+        };
         if !callable_target(&path_guard.canonicalizer)
             || path_guard
                 .base_canonicalizer
                 .as_ref()
                 .is_some_and(|target| !callable_target(target))
-            || !callable_target(&path_guard.path_constructor)
+            || !valid_path_constructor
             || !callable_target(&path_guard.containment_check)
+            || path_guard
+                .containment_check_candidate_arg_index
+                .is_some_and(|candidate| candidate == path_guard.containment_check_base_arg_index)
             || path_guard
                 .static_base_factories
                 .iter()
                 .any(|target| !callable_target(target))
-            || (!path_guard.containment_check_is_segment_aware && path_guard.boundary_places.is_empty())
+            || path_guard.boundary_builders.iter().any(|builder| {
+                !callable_target(&builder.call)
+                    || builder.accepted_boundary_values.is_empty()
+                    || builder
+                        .accepted_boundary_values
+                        .iter()
+                        .any(|value| !valid_boundary_value(value))
+            })
+            || (!path_guard.containment_check_is_segment_aware
+                && path_guard.boundary_places.is_empty()
+                && path_guard.boundary_builders.is_empty()
+                && path_guard.accepted_boundary_values.is_empty())
             || path_guard
                 .boundary_places
                 .iter()
                 .any(|place| place.trim().is_empty())
+            || path_guard
+                .accepted_boundary_values
+                .iter()
+                .any(|value| !valid_boundary_value(value))
+            || duplicate_containment_result
         {
             push_validation_issue(
                 issues,
                 "error",
                 "invalid-analysis-semantics",
                 Some(rule),
-                "path_consumer_containment_guard requires callable canonicalizer/path_constructor/containment_check targets and either segment-aware containment or non-empty boundary_places",
+                "path_consumer_containment_guard requires a callable canonicalizer/containment_check, exactly one callable or compiler-composition path constructor, distinct candidate/base argument roles, unique accepted containment results, and a segment-aware check, boundary place, exact non-empty literal boundary, or valid boundary builder",
             );
         }
-        for (role, target) in [
+        let targets = [
             ("canonicalizer", &path_guard.canonicalizer),
             (
                 "base_canonicalizer",
@@ -1440,9 +1606,23 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                     .as_ref()
                     .unwrap_or(&path_guard.canonicalizer),
             ),
-            ("path_constructor", &path_guard.path_constructor),
             ("containment_check", &path_guard.containment_check),
-        ] {
+        ];
+        for (role, target) in targets
+            .into_iter()
+            .chain(
+                path_guard
+                    .path_constructor
+                    .as_ref()
+                    .map(|target| ("path_constructor", target)),
+            )
+            .chain(
+                path_guard
+                    .boundary_builders
+                    .iter()
+                    .map(|builder| ("boundary_builder", &builder.call)),
+            )
+        {
             if let Some(pattern) = target.regex.as_deref() {
                 if let Err(error) = Regex::new(pattern) {
                     push_validation_issue(
@@ -1622,13 +1802,14 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                 .required_nested_factories
                 .iter()
                 .any(|target| !callable_target(target))
+            || (!guard.required_arguments.is_empty() && !sequence_items_are_valid(&guard.required_arguments))
         {
             push_validation_issue(
                 issues,
                 "error",
                 "invalid-analysis-semantics",
                 Some(rule),
-                "receiver_factory_guard requires at least one callable factory target",
+                "receiver_factory_guard requires callable factory targets and valid uniquely indexed exact arguments",
             );
         }
         for (role, targets) in [
@@ -1725,19 +1906,43 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                     .is_some_and(|regex| !regex.trim().is_empty())
         };
         let mut names = BTreeSet::new();
+        let mut positions = BTreeSet::new();
+        let invalid_positional_arguments = guard.required_arguments.iter().any(|required| {
+            !positions.insert(required.index)
+                || (!required.require_static_value
+                    && required.accepted_places.is_empty()
+                    && required.accepted_static_values.is_empty())
+        });
+        let invalid_named_arguments = guard
+            .required_named_arguments
+            .iter()
+            .any(|required| required.name.trim().is_empty() || !names.insert(required.name.as_str()));
+        let invalid_aggregate_argument = guard
+            .required_aggregate_argument
+            .as_ref()
+            .is_some_and(|argument| {
+                let mut paths = BTreeSet::new();
+                argument.required_fields.is_empty()
+                    || argument.required_fields.iter().any(|field| {
+                        field.path.is_empty()
+                            || field.path.iter().any(|part| part.trim().is_empty())
+                            || !paths.insert(field.path.as_slice())
+                    })
+            });
         if !callable_target(&guard.factory)
-            || guard.required_named_arguments.is_empty()
-            || guard
-                .required_named_arguments
-                .iter()
-                .any(|required| required.name.trim().is_empty() || !names.insert(required.name.as_str()))
+            || (guard.required_arguments.is_empty()
+                && guard.required_named_arguments.is_empty()
+                && guard.required_aggregate_argument.is_none())
+            || invalid_positional_arguments
+            || invalid_named_arguments
+            || invalid_aggregate_argument
         {
             push_validation_issue(
                 issues,
                 "error",
                 "invalid-analysis-semantics",
                 Some(rule),
-                "configured_argument_factory_guard requires a callable factory and unique, non-empty required named arguments",
+                "configured_argument_factory_guard requires a callable factory and at least one exact configuration proof; positional arguments, named arguments, and aggregate field paths must be unique and non-empty",
             );
         }
         if let Some(pattern) = guard.factory.regex.as_deref() {
@@ -1828,6 +2033,85 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             }
         }
     }
+    if let Some(guard) = semantics.receiver_callback_configuration_guard.as_ref() {
+        let callable_target = |target: &RuleTarget| {
+            target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|regex| !regex.trim().is_empty())
+        };
+        let invalid_argument = |argument: &crate::rule::RequiredCallArgumentSemantics| {
+            (!argument.require_static_value
+                && argument.accepted_places.is_empty()
+                && argument.accepted_static_values.is_empty())
+                || argument
+                    .accepted_places
+                    .iter()
+                    .any(|place| place.trim().is_empty())
+        };
+        let invalid_required_call = |required: &crate::rule::RequiredReceiverCallSemantics| {
+            let identity: AHashSet<_> = required.identity_argument_indices.iter().copied().collect();
+            !callable_target(&required.call)
+                || identity.len() != required.identity_argument_indices.len()
+                || identity.iter().any(|index| {
+                    !required
+                        .required_arguments
+                        .iter()
+                        .any(|argument| argument.index == *index)
+                })
+                || required.required_arguments.iter().any(invalid_argument)
+        };
+        if !callable_target(&guard.provider_factory)
+            || !callable_target(&guard.wrapper_call)
+            || !callable_target(&guard.sink_receiver_builder)
+            || guard.required_calls.is_empty()
+            || guard.required_calls.iter().any(invalid_required_call)
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "receiver_callback_configuration_guard requires callable provider/wrapper/builder targets and exact required callback calls",
+            );
+        }
+        for (role, target) in [
+            ("provider_factory", &guard.provider_factory),
+            ("wrapper_call", &guard.wrapper_call),
+            ("sink_receiver_builder", &guard.sink_receiver_builder),
+        ] {
+            if let Some(pattern) = target.regex.as_deref() {
+                if let Err(error) = Regex::new(pattern) {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "invalid-analysis-semantics",
+                        Some(rule),
+                        &format!("receiver_callback_configuration_guard.{role}.regex is invalid: {error}"),
+                    );
+                }
+            }
+        }
+        for (index, required) in guard.required_calls.iter().enumerate() {
+            if let Some(pattern) = required.call.regex.as_deref() {
+                if let Err(error) = Regex::new(pattern) {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "invalid-analysis-semantics",
+                        Some(rule),
+                        &format!(
+                            "receiver_callback_configuration_guard.required_calls[{index}].call.regex is invalid: {error}"
+                        ),
+                    );
+                }
+            }
+        }
+    }
     if semantics.character_escape.as_ref().is_some_and(|escape| {
         escape.required_mappings.is_empty()
             || escape
@@ -1842,6 +2126,56 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             Some(rule),
             "character_escape requires non-empty input/output mappings",
         );
+    }
+    if let Some(escape) = semantics.character_escape.as_ref() {
+        let callable_target = |target: &RuleTarget| {
+            target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|pattern| !pattern.trim().is_empty())
+        };
+        for (index, provider) in escape.accepted_providers.iter().enumerate() {
+            if !callable_target(&provider.operation)
+                || provider
+                    .factory
+                    .as_ref()
+                    .is_some_and(|factory| !callable_target(factory))
+            {
+                push_validation_issue(
+                    issues,
+                    "error",
+                    "invalid-analysis-semantics",
+                    Some(rule),
+                    &format!(
+                        "character_escape.accepted_providers[{index}] requires a callable operation and, when present, a callable factory"
+                    ),
+                );
+            }
+            for (role, target) in provider
+                .factory
+                .iter()
+                .map(|target| ("factory", target))
+                .chain(std::iter::once(("operation", &provider.operation)))
+            {
+                if let Some(pattern) = target.regex.as_deref() {
+                    if let Err(error) = Regex::new(pattern) {
+                        push_validation_issue(
+                            issues,
+                            "error",
+                            "invalid-analysis-semantics",
+                            Some(rule),
+                            &format!(
+                                "character_escape.accepted_providers[{index}].{role}.regex is invalid: {error}"
+                            ),
+                        );
+                    }
+                }
+            }
+        }
     }
     if let Some(guard) = semantics.url_network_guard.as_ref() {
         let callable_target = |target: &RuleTarget| {
@@ -1864,6 +2198,7 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
         let root_valid = match &guard.root {
             crate::rule::UrlGuardRootSemantics::SinkReceiver
             | crate::rule::UrlGuardRootSemantics::SinkAssignmentTarget
+            | crate::rule::UrlGuardRootSemantics::SinkArgumentParsedValue { .. }
             | crate::rule::UrlGuardRootSemantics::SinkArgumentParserInput { .. } => true,
             crate::rule::UrlGuardRootSemantics::SinkArgumentAccessor { accessor, .. } => {
                 callable_target(accessor)
@@ -1908,18 +2243,18 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                 .static_collection_factories
                 .iter()
                 .any(|target| !callable_target(target))
-            || !callable_target(&guard.dns.resolver)
-            || guard
-                .dns
-                .address_parser
-                .as_ref()
-                .is_some_and(|parser| !callable_target(&parser.target))
-            || guard.dns.private_address_predicates.is_empty()
-            || guard
-                .dns
-                .private_address_predicates
-                .iter()
-                .any(|target| !callable_target(target))
+            || guard.dns.as_ref().is_some_and(|dns| {
+                !callable_target(&dns.resolver)
+                    || dns
+                        .address_parser
+                        .as_ref()
+                        .is_some_and(|parser| !callable_target(&parser.target))
+                    || dns.private_address_predicates.is_empty()
+                    || dns
+                        .private_address_predicates
+                        .iter()
+                        .any(|target| !callable_target(target))
+            })
             || !redirect_valid
         {
             push_validation_issue(
@@ -1927,11 +2262,11 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                 "error",
                 "invalid-analysis-semantics",
                 Some(rule),
-                "url_network_guard requires callable rule targets, exactly one field/accessor per component, non-empty allowed schemes/private-address predicates, and a valid redirect policy",
+                "url_network_guard requires callable rule targets, exactly one field/accessor per component, non-empty allowed schemes, non-empty private-address predicates when DNS proof is configured, and a valid redirect policy",
             );
         }
         let mut regex_targets: Vec<(&str, &RuleTarget)> = vec![("parser", &guard.parser)];
-        if let Some(parser) = guard.dns.address_parser.as_ref() {
+        if let Some(parser) = guard.dns.as_ref().and_then(|dns| dns.address_parser.as_ref()) {
             regex_targets.push(("dns.address_parser", &parser.target));
         }
         if let crate::rule::UrlGuardRootSemantics::SinkArgumentAccessor { accessor, .. } = &guard.root {
@@ -1952,9 +2287,11 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
         for target in &guard.host_allowlist.static_collection_factories {
             regex_targets.push(("host_allowlist.static_collection_factories", target));
         }
-        regex_targets.push(("dns.resolver", &guard.dns.resolver));
-        for target in &guard.dns.private_address_predicates {
-            regex_targets.push(("dns.private_address_predicates", target));
+        if let Some(dns) = guard.dns.as_ref() {
+            regex_targets.push(("dns.resolver", &dns.resolver));
+            for target in &dns.private_address_predicates {
+                regex_targets.push(("dns.private_address_predicates", target));
+            }
         }
         if let Some(crate::rule::UrlRedirectGuardSemantics::PostSinkCall { call, .. }) =
             guard.redirect.as_ref()
@@ -2137,19 +2474,49 @@ fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) 
                 "taint_semantics.taint_receiver_from_args is only valid on sink or typing rules",
             );
         }
-        let valid_attribute = rule
-            .match_spec
-            .callee
-            .as_ref()
-            .and_then(|target| target.attribute.as_ref())
-            .is_some_and(|attribute| attribute.len() >= 2);
-        if !valid_attribute {
+        if !matches!(
+            rule.match_spec.kind,
+            MatchKind::Call | MatchKind::New | MatchKind::Write
+        ) {
             push_validation_issue(
                 issues,
                 "error",
                 "invalid-taint-semantics",
                 Some(rule),
-                "taint_semantics.taint_receiver_from_args requires a structured callee.attribute with receiver type and method",
+                "taint_semantics.taint_receiver_from_args requires match.kind call, new, or write",
+            );
+        }
+        let transfer_target = match rule.match_spec.kind {
+            MatchKind::Write => rule.match_spec.target.as_ref(),
+            _ => rule.match_spec.callee.as_ref(),
+        };
+        let has_structured_target = transfer_target
+            .as_ref()
+            .and_then(|target| target.attribute.as_ref())
+            .is_some_and(|attribute| attribute.len() >= 2);
+        let has_receiver_type = transfer_target.is_some_and(|target| !target.receiver_type_in.is_empty())
+            || rule.constraints.iter().any(|constraint| {
+                matches!(
+                    constraint,
+                    crate::rule::ConstraintKind::ReceiverTypeIn { receiver_type_in }
+                        if !receiver_type_in.is_empty()
+                )
+            });
+        let has_typed_name_target = transfer_target
+            .and_then(|target| target.name.as_deref())
+            .is_some_and(|name| !name.trim().is_empty())
+            && has_receiver_type;
+        let has_typed_regex_target = transfer_target
+            .and_then(|target| target.regex.as_deref())
+            .is_some_and(|regex| !regex.trim().is_empty())
+            && has_receiver_type;
+        if !has_structured_target && !has_typed_name_target && !has_typed_regex_target {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-taint-semantics",
+                Some(rule),
+                "taint_semantics.taint_receiver_from_args requires either a structured target or a name/regex target constrained by non-empty receiver_type_in",
             );
         }
     }
@@ -2181,13 +2548,13 @@ fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) 
         );
     }
     for callback in &semantics.source_callback_args {
-        if callback.source_param_indices.is_empty() {
+        if callback.source_param_indices.is_empty() && callback.source_param_indices_from.is_none() {
             push_validation_issue(
                 issues,
                 "error",
                 "invalid-taint-semantics",
                 Some(rule),
-                "taint_semantics.source_callback_args entries require source_param_indices",
+                "taint_semantics.source_callback_args entries require source_param_indices or source_param_indices_from",
             );
         }
     }
@@ -2224,7 +2591,8 @@ fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) 
             "source output/callback carriers require match.kind: call",
         );
     }
-    if !semantics.call_result_passthrough_args.is_empty()
+    if (!semantics.call_result_passthrough_args.is_empty()
+        || semantics.call_result_passthrough_args_from.is_some())
         && !matches!(rule.kind, RuleKind::Sanitizer | RuleKind::Typing)
     {
         push_validation_issue(
@@ -2232,7 +2600,7 @@ fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) 
             "error",
             "invalid-taint-semantics",
             Some(rule),
-            "taint_semantics.call_result_passthrough_args is only valid on sanitizer or typing rules",
+            "taint_semantics.call_result_passthrough_args(_from) is only valid on sanitizer or typing rules",
         );
     }
     if semantics.call_result_passthrough_receiver
@@ -2246,14 +2614,78 @@ fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) 
             "taint_semantics.call_result_passthrough_receiver is only valid on sanitizer or typing rules",
         );
     }
-    for flow in &semantics.output_arg_flows {
-        if flow.value_start_arg_index.is_none() && flow.value_arg_indices.is_empty() {
+    if let Some(callback) = &semantics.callback_invocation {
+        if rule.kind != RuleKind::Typing || rule.match_spec.kind != MatchKind::Call {
             push_validation_issue(
                 issues,
                 "error",
                 "invalid-taint-semantics",
                 Some(rule),
-                "taint_semantics.output_arg_flows entries require value_start_arg_index or value_arg_indices",
+                "taint_semantics.callback_invocation requires a typing rule with match.kind: call",
+            );
+        }
+        if callback
+            .forwarded_args_from
+            .is_some_and(|start| start <= callback.callback_arg_index)
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-taint-semantics",
+                Some(rule),
+                "callback_invocation.forwarded_args_from must follow the callback argument",
+            );
+        }
+        let callback_map_mode = !callback.callback_map_field_path.is_empty()
+            || !callback.forwarded_argument_field_path.is_empty()
+            || callback.forwarded_callback_param_index.is_some();
+        if callback_map_mode
+            && (callback.callback_map_field_path.is_empty()
+                || callback.forwarded_argument_field_path.is_empty()
+                || callback.forwarded_callback_param_index.is_none()
+                || callback.forwarded_args_from.is_some()
+                || callback.receiver_to_callback_param.is_some()
+                || callback
+                    .callback_map_field_path
+                    .iter()
+                    .chain(callback.forwarded_argument_field_path.iter())
+                    .any(|segment| segment.trim().is_empty()))
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-taint-semantics",
+                Some(rule),
+                "callback-map invocation requires non-empty exact callback/forwarded field paths and forwarded_callback_param_index, and cannot combine direct forwarding or receiver delivery",
+            );
+        }
+    }
+    for flow in &semantics.output_arg_flows {
+        if !matches!(rule.kind, RuleKind::Sink | RuleKind::Sanitizer | RuleKind::Typing) {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-taint-semantics",
+                Some(rule),
+                "taint_semantics.output_arg_flows is only valid on sink, sanitizer, or typing rules",
+            );
+        }
+        if rule.match_spec.kind != MatchKind::Call {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-taint-semantics",
+                Some(rule),
+                "taint_semantics.output_arg_flows requires match.kind: call",
+            );
+        }
+        if !flow.value_receiver && flow.value_start_arg_index.is_none() && flow.value_arg_indices.is_empty() {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-taint-semantics",
+                Some(rule),
+                "taint_semantics.output_arg_flows entries require value_receiver, value_start_arg_index, or value_arg_indices",
             );
         }
         if flow.value_arg_indices.contains(&flow.output_arg_index) {
@@ -2274,6 +2706,64 @@ fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) 
             Some(rule),
             "taint_semantics.clean_output_overwrite is only valid on sanitizer rules",
         );
+    }
+    if semantics.clean_receiver_overwrite && rule.kind != RuleKind::Sanitizer {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-taint-semantics",
+            Some(rule),
+            "taint_semantics.clean_receiver_overwrite is only valid on sanitizer rules",
+        );
+    }
+    if semantics.clean_receiver_overwrite {
+        let has_nonempty_callee = rule.match_spec.callee.as_ref().is_some_and(|target| {
+            target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|regex| !regex.trim().is_empty())
+        });
+        if rule.match_spec.kind != MatchKind::Call || !has_nonempty_callee {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-taint-semantics",
+                Some(rule),
+                "taint_semantics.clean_receiver_overwrite requires match.kind `call` and a nonempty callee target",
+            );
+        }
+    }
+    if let Some(selector) = semantics.finite_literal_map_selector.as_ref() {
+        let has_nonempty_callee = rule.match_spec.callee.as_ref().is_some_and(|target| {
+            target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|regex| !regex.trim().is_empty())
+        });
+        if rule.kind != RuleKind::Sanitizer
+            || rule.match_spec.kind != MatchKind::Call
+            || !has_nonempty_callee
+            || selector.key_argument_index == selector.fallback_argument_index
+            || selector.map_argument_index.is_some_and(|map_index| {
+                map_index == selector.key_argument_index || map_index == selector.fallback_argument_index
+            })
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-taint-semantics",
+                Some(rule),
+                "taint_semantics.finite_literal_map_selector requires a sanitizer call rule, a nonempty callee target, and distinct map/key/fallback argument indices",
+            );
+        }
     }
 }
 
@@ -2301,13 +2791,7 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
             arg_sequence_items_equal,
         } = constraint
         {
-            let mut indices = AHashSet::new();
-            if arg_sequence_items_equal.items.is_empty()
-                || arg_sequence_items_equal
-                    .items
-                    .iter()
-                    .any(|item| item.accepted_values.is_empty() || !indices.insert(item.index))
-            {
+            if !sequence_items_are_valid(&arg_sequence_items_equal.items) {
                 push_validation_issue(
                     issues,
                     "error",
@@ -2315,6 +2799,84 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
                     Some(rule),
                     "arg_sequence_items_equal requires non-empty, uniquely indexed accepted values",
                 );
+            }
+        }
+        if let crate::rule::ConstraintKind::ReceiverFactoryArgumentsEqual {
+            receiver_factory_arguments_equal,
+        } = constraint
+        {
+            if rule.match_spec.kind != MatchKind::Call
+                || !sequence_items_are_valid(&receiver_factory_arguments_equal.items)
+                || !rule_target_has_callable_identity(&receiver_factory_arguments_equal.factory)
+            {
+                push_validation_issue(
+                    issues,
+                    "error",
+                    "invalid-constraint",
+                    Some(rule),
+                    "receiver_factory_arguments_equal requires match.kind call, a callable factory target, and non-empty uniquely indexed accepted values",
+                );
+            }
+        }
+        if let crate::rule::ConstraintKind::ArgAggregateFieldsEqual {
+            arg_aggregate_fields_equal,
+        } = constraint
+        {
+            if !matches!(rule.match_spec.kind, MatchKind::Call | MatchKind::New)
+                || !aggregate_required_fields_are_valid(&arg_aggregate_fields_equal.required_fields)
+            {
+                push_validation_issue(
+                    issues,
+                    "error",
+                    "invalid-constraint",
+                    Some(rule),
+                    "arg_aggregate_fields_equal requires match.kind call/new and non-empty, uniquely pathed exact fields",
+                );
+            }
+        }
+        if let crate::rule::ConstraintKind::RequiresPriorReceiverWrite {
+            requires_prior_receiver_write,
+        } = constraint
+        {
+            let target = &requires_prior_receiver_write.target;
+            let has_target_identity = target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|pattern| !pattern.trim().is_empty());
+            if !matches!(rule.match_spec.kind, MatchKind::Call | MatchKind::New)
+                || !has_target_identity
+                || (requires_prior_receiver_write.accepted_values.is_empty()
+                    && requires_prior_receiver_write.accepted_calls.is_empty())
+                || requires_prior_receiver_write
+                    .accepted_calls
+                    .iter()
+                    .any(|accepted| {
+                        !rule_target_has_callable_identity(&accepted.call)
+                            || !sequence_items_are_valid(&accepted.items)
+                    })
+            {
+                push_validation_issue(
+                    issues,
+                    "error",
+                    "invalid-constraint",
+                    Some(rule),
+                    "requires_prior_receiver_write requires match.kind call/new, a non-empty member target, and at least one exact scalar value or exact call with uniquely indexed scalar arguments",
+                );
+            }
+            if let Some(pattern) = requires_prior_receiver_write.target.regex.as_deref() {
+                if let Err(error) = Regex::new(pattern) {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "invalid-constraint",
+                        Some(rule),
+                        &format!("requires_prior_receiver_write.target.regex is invalid: {error}"),
+                    );
+                }
             }
         }
         let regex = match constraint {
@@ -2336,6 +2898,12 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
                 "constraints.unless_prior_receiver_call.static_string_args_regex",
                 unless_prior_receiver_call.static_string_args_regex.as_str(),
             )),
+            crate::rule::ConstraintKind::RequiresPriorReceiverCall {
+                requires_prior_receiver_call,
+            } => Some((
+                "constraints.requires_prior_receiver_call.static_string_args_regex",
+                requires_prior_receiver_call.static_string_args_regex.as_str(),
+            )),
             crate::rule::ConstraintKind::ArgMatchesRegex { arg_matches_regex } => {
                 Some(("constraints.arg_matches_regex", arg_matches_regex.regex.as_str()))
             }
@@ -2353,6 +2921,7 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
             )),
             crate::rule::ConstraintKind::ReceiverTypeIn { .. }
             | crate::rule::ConstraintKind::ReceiverTypeNotIn { .. }
+            | crate::rule::ConstraintKind::RequiresPriorReceiverWrite { .. }
             | crate::rule::ConstraintKind::SecondArgEquals { .. }
             | crate::rule::ConstraintKind::ArgEquals { .. }
             | crate::rule::ConstraintKind::KeywordArgEquals { .. }
@@ -2361,6 +2930,7 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
             | crate::rule::ConstraintKind::AnyArgTainted { .. }
             | crate::rule::ConstraintKind::ReceiverOriginCallbackParamReachesCall { .. }
             | crate::rule::ConstraintKind::ReceiverFactoryArgumentFieldsEqual { .. }
+            | crate::rule::ConstraintKind::ReceiverFactoryArgumentsEqual { .. }
             | crate::rule::ConstraintKind::FormatArgIndex { .. }
             | crate::rule::ConstraintKind::Namespace { .. }
             | crate::rule::ConstraintKind::TopLevel { .. }
@@ -2368,7 +2938,13 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
             | crate::rule::ConstraintKind::MinArgs { .. }
             | crate::rule::ConstraintKind::MaxArgs { .. }
             | crate::rule::ConstraintKind::ArgValueNotAggregate { .. }
+            | crate::rule::ConstraintKind::ArgValueKind { .. }
+            | crate::rule::ConstraintKind::ArgStringCompositionStartsWith { .. }
+            | crate::rule::ConstraintKind::ArgStringCompositionNotStartsWith { .. }
+            | crate::rule::ConstraintKind::ArgIsInlineCallback { .. }
+            | crate::rule::ConstraintKind::ArgInlineCallbackReturnsStatic { .. }
             | crate::rule::ConstraintKind::ArgSequenceItemsEqual { .. }
+            | crate::rule::ConstraintKind::ArgAggregateFieldsEqual { .. }
             | crate::rule::ConstraintKind::SameReceiverCallCountAtLeast { .. }
             | crate::rule::ConstraintKind::ArgLt { .. }
             | crate::rule::ConstraintKind::ArgLe { .. }
@@ -2376,6 +2952,7 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
             | crate::rule::ConstraintKind::ArgGe { .. }
             | crate::rule::ConstraintKind::RequiresRuntimeType { .. }
             | crate::rule::ConstraintKind::EnclosingDecoratorIn { .. }
+            | crate::rule::ConstraintKind::EnclosingDecoratorNotIn { .. }
             | crate::rule::ConstraintKind::EnclosingModifierIn { .. }
             | crate::rule::ConstraintKind::SinkTagIn { .. }
             | crate::rule::ConstraintKind::MustAlias { .. }
@@ -2396,6 +2973,36 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
     }
 }
 
+fn aggregate_required_fields_are_valid(fields: &[crate::rule::RequiredAggregateFieldSemantics]) -> bool {
+    let mut paths = AHashSet::new();
+    !fields.is_empty()
+        && fields.iter().all(|field| {
+            !field.path.is_empty()
+                && field.path.iter().all(|part| !part.trim().is_empty())
+                && paths.insert(field.path.as_slice())
+        })
+}
+
+fn sequence_items_are_valid(items: &[crate::rule::RequiredSequenceItemSpec]) -> bool {
+    let mut indices = AHashSet::new();
+    !items.is_empty()
+        && items
+            .iter()
+            .all(|item| !item.accepted_values.is_empty() && indices.insert(item.index))
+}
+
+fn rule_target_has_callable_identity(target: &crate::rule::RuleTarget) -> bool {
+    target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+        || target
+            .attribute
+            .as_ref()
+            .is_some_and(|parts| !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty()))
+        || target
+            .regex
+            .as_ref()
+            .is_some_and(|regex| !regex.trim().is_empty())
+}
+
 fn validate_no_hardcoded_receiver_regex(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
     if !rule.enabled {
         return;
@@ -2408,18 +3015,12 @@ fn validate_no_hardcoded_receiver_regex(rule: &Rule, issues: &mut Vec<PackValida
     if rule.match_spec.kind != MatchKind::Call && rule.match_spec.kind != MatchKind::Read {
         return;
     }
-    let Some(regex) = rule
+    let target = rule
         .match_spec
         .callee
         .as_ref()
-        .and_then(|callee| callee.regex.as_deref())
-        .or_else(|| {
-            rule.match_spec
-                .target
-                .as_ref()
-                .and_then(|target| target.regex.as_deref())
-        })
-    else {
+        .or(rule.match_spec.target.as_ref());
+    let Some(regex) = target.and_then(|target| target.regex.as_deref()) else {
         return;
     };
     let Some(receiver) = lowercase_receiver_token_from_regex(regex) else {
@@ -2460,24 +3061,29 @@ fn validate_receiver_agnostic_regex_has_package_gate(rule: &Rule, issues: &mut V
     if matches!(rule.kind, RuleKind::Sanitizer) {
         return;
     }
-    let Some(regex) = rule
+    let target = rule
         .match_spec
         .callee
         .as_ref()
-        .and_then(|callee| callee.regex.as_deref())
-        .or_else(|| {
-            rule.match_spec
-                .target
-                .as_ref()
-                .and_then(|target| target.regex.as_deref())
-        })
-    else {
+        .or(rule.match_spec.target.as_ref());
+    let Some(regex) = target.and_then(|target| target.regex.as_deref()) else {
         return;
     };
     if !regex_prefix_is_receiver_agnostic(regex) {
         return;
     }
-    let has_signal = !rule.packages.is_empty() || !rule.imports.is_empty() || !rule.modules.is_empty();
+    let has_typed_receiver = target.is_some_and(|target| !target.receiver_type_in.is_empty())
+        || rule.constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                crate::rule::ConstraintKind::ReceiverTypeIn { receiver_type_in }
+                    if !receiver_type_in.is_empty()
+            )
+        });
+    let has_signal = has_typed_receiver
+        || !rule.packages.is_empty()
+        || !rule.imports.is_empty()
+        || !rule.modules.is_empty();
     if has_signal {
         return;
     }
@@ -2487,10 +3093,10 @@ fn validate_receiver_agnostic_regex_has_package_gate(rule: &Rule, issues: &mut V
         "receiver-agnostic-regex-without-package-gate",
         Some(rule),
         &format!(
-            "`regex:` `{regex}` accepts any receiver but the rule has no `packages:` / `imports:` \
-             / `modules:` declaration. Without a package gate the regex collides with peer rules' \
-             match_examples in unrelated files. Add a `packages:` (or `imports:` / `modules:`) \
-             entry naming the framework whose API this rule classifies."
+            "`regex:` `{regex}` accepts any receiver but the rule has neither exact receiver typing \
+             nor a `packages:` / `imports:` / `modules:` declaration. Without one of those semantic \
+             gates the regex collides with peer rules' match_examples in unrelated files. Add \
+             `receiver_type_in` or a package/import/module entry naming the API owner."
         ),
     );
 }
@@ -2698,4 +3304,54 @@ fn push_validation_issue(
         path: rule.map(|r| r.source_path.clone()),
         message: message.to_string(),
     });
+}
+
+#[cfg(test)]
+mod aggregate_constraint_validation_tests {
+    use super::*;
+
+    fn field(path: &[&str]) -> crate::rule::RequiredAggregateFieldSemantics {
+        crate::rule::RequiredAggregateFieldSemantics {
+            path: path.iter().map(|part| (*part).to_string()).collect(),
+            value: bonsai_lang_api::StaticScalarValue::Boolean(false),
+        }
+    }
+
+    #[test]
+    fn exact_aggregate_field_paths_must_be_nonempty_and_unique() {
+        assert!(aggregate_required_fields_are_valid(&[
+            field(&["transport", "verify"]),
+            field(&["transport", "hostname"]),
+        ]));
+        assert!(!aggregate_required_fields_are_valid(&[]));
+        assert!(!aggregate_required_fields_are_valid(&[field(&[])]));
+        assert!(!aggregate_required_fields_are_valid(&[field(&[
+            "transport",
+            " ",
+        ])]));
+        assert!(!aggregate_required_fields_are_valid(&[
+            field(&["transport", "verify"]),
+            field(&["transport", "verify"]),
+        ]));
+    }
+
+    #[test]
+    fn exact_sequence_items_must_be_nonempty_unique_and_constrained() {
+        let item = |index, accepted_values| crate::rule::RequiredSequenceItemSpec {
+            index,
+            accepted_values,
+        };
+        let value = bonsai_lang_api::StaticScalarValue::String("value".to_string());
+
+        assert!(sequence_items_are_valid(&[
+            item(0, vec![value.clone()]),
+            item(2, vec![value.clone()]),
+        ]));
+        assert!(!sequence_items_are_valid(&[]));
+        assert!(!sequence_items_are_valid(&[item(0, Vec::new())]));
+        assert!(!sequence_items_are_valid(&[
+            item(0, vec![value.clone()]),
+            item(0, vec![value]),
+        ]));
+    }
 }

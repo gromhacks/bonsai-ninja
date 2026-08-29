@@ -10,7 +10,7 @@
   category: http-input
   tag: http-input
   payload_types: [query, form]
-  packages: [CGI, "Plack::Request", "Dancer2", "Catalyst", "Mojolicious"]
+  packages: [CGI, "CGI::Simple", "Plack::Request", "Dancer2", "Catalyst", "Mojolicious", Kelp, Raisin, "Web::Simple"]
   match:
     kind: call
     callee:
@@ -23,6 +23,22 @@
         my ($input, $url, $id, $payload, $request) = @_;
         param($input)
       }
+  - name: CGI Simple request parameter
+    code: |
+      use CGI::Simple;
+      sub example {
+        my ($q) = @_;
+        return $q->param('name');
+      }
+    expect_match_text: [q->param]
+  - name: same package without the request accessor
+    code: |
+      use CGI::Simple;
+      sub example {
+        my ($q) = @_;
+        return $q->url();
+      }
+    expect_no_match: true
   description: "->param('name') - CGI $q->param, Plack::Request $req->param, Dancer/Dancer2 param helper, Catalyst $c->req->param. All return user-supplied query/body values."
 
 - id: perl.source.cgi_vars
@@ -32,7 +48,7 @@
   category: http-input
   tag: http-input
   payload_types: [query, form]
-  packages: [CGI]
+  packages: [CGI, "CGI::Simple"]
   match:
     kind: call
     callee:
@@ -54,7 +70,7 @@
   category: http-input
   tag: http-input
   payload_types: [cookie]
-  packages: [CGI, "Plack::Request", "Dancer2", "Catalyst"]
+  packages: [CGI, "CGI::Simple", "Plack::Request", "Dancer2", "Catalyst"]
   match:
     kind: call
     callee:
@@ -76,7 +92,7 @@
   category: http-input
   tag: http-input
   payload_types: [query]
-  packages: [CGI]
+  packages: [CGI, "CGI::Simple"]
   match:
     kind: call
     callee:
@@ -98,7 +114,7 @@
   category: http-input
   tag: http-input
   payload_types: [header]
-  packages: [CGI]
+  packages: [CGI, "CGI::Simple"]
   match:
     kind: call
     callee:
@@ -143,7 +159,7 @@
   category: http-input
   tag: http-input
   payload_types: [form]
-  packages: ["Plack::Request"]
+  packages: ["Plack::Request", Dancer2, Catalyst]
   match:
     kind: call
     callee:
@@ -156,7 +172,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         body_parameters($input)
       }
-  description: "Plack::Request / Dancer2 body_parameters - POST body form fields."
+  description: "Plack::Request, Dancer2, or Catalyst body_parameters - POST body form fields on the framework request object."
 
 - id: perl.source.plack_request_query_parameters
   enabled: true
@@ -165,7 +181,7 @@
   category: http-input
   tag: http-input
   payload_types: [query]
-  packages: ["Plack::Request"]
+  packages: ["Plack::Request", Dancer2, Catalyst]
   match:
     kind: call
     callee:
@@ -178,7 +194,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         query_parameters($input)
       }
-  description: "Plack::Request $req->query_parameters - query string only."
+  description: "Plack::Request, Dancer2, or Catalyst query_parameters - query string only."
 
 - id: perl.source.plack_request_raw_body
   enabled: true
@@ -242,7 +258,7 @@
   category: http-input
   tag: http-input
   payload_types: [query, form, path]
-  packages: [Dancer, Dancer2, Catalyst]
+  packages: [Dancer, Dancer2, Catalyst, Kelp, Raisin, "Web::Simple"]
   match:
     kind: call
     callee:
@@ -256,30 +272,6 @@
         params($input)
       }
   description: "params helper - Dancer/Dancer2 params (merged), Catalyst $c->req->params. Attacker-controlled."
-
-- id: perl.source.dancer2_body_parameters
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  trust: remote
-  category: http-input
-  tag: http-input
-  payload_types: [form]
-  packages: [Dancer2]
-  match:
-    kind: call
-    callee:
-      name: body_parameters
-  match_examples:
-  - name: perl.source.dancer2_body_parameters example
-    code: |
-      use Dancer2;
-      sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        body_parameters($input)
-      }
-  description: "Disabled duplicate - perl.source.plack_request_body_parameters carries the same `body_parameters` call shape and includes Dancer2 package metadata."
 
 - id: perl.source.dancer2_route_parameters
   enabled: true
@@ -393,6 +385,11 @@
         my ($input, $url, $id, $payload, $request) = @_;
         json($input)
       }
+  - name: same json spelling without Mojolicious import negative
+    code: |
+      sub json { return "safe" }
+      sub example { json("local") }
+    expect_no_match: true
   description: "Mojolicious $c->req->json - parsed JSON request body. Fully attacker-controlled. `max_args: 1` keeps it to the request-side accessor/JSON-Pointer form and off encode-side `render(json => {...})` calls that take a hashref payload."
 
 # -- Other I/O sources ---------------------------------------------
@@ -431,62 +428,189 @@
   description: "Second argument of Perl's recv(SOCKET, SCALAR, LENGTH, FLAGS) builtin - buffer overwritten with peer-supplied socket bytes. The return value is peer-address/status information and is not the data carrier."
 
 # -- Disabled / FP-prone -------------------------------------------
-- id: perl.source.dancer_request_body
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  trust: remote
-  category: http-input
-  tag: http-input
-  packages: [Dancer, Dancer2]
-  match:
-    kind: call
-    callee:
-      name: request
-  description: "Disabled - bare `name: request` collides with perl.ssrf.useragent_request ($ua->request). Body coverage already provided by dancer2_body_parameters / catalyst_body_data."
-
 - id: perl.source.mojolicious_req_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: perl
   trust: remote
   category: http-input
   tag: http-input
   packages: [Mojolicious]
+  imports: ["Mojo::Base"]
   match:
     kind: call
     callee:
-      name: param
-  description: "Disabled - overlaps perl.source.cgi_param (same bare `param` name). One rule covers both."
+      regex: '^\$?[A-Za-z_][A-Za-z0-9_]*->param$'
+  constraints:
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: Mojolicious controller parameter
+    code: |
+      package App::Controller::Search;
+      use Mojo::Base 'Mojolicious::Controller', -signatures;
+      sub show ($controller) { return $controller->param('q'); }
+    expect_match_text: [controller->param]
+  - name: non-controller object parameter method is not Mojolicious input
+    code: |
+      package App::Config;
+      sub show ($config) { return $config->param('q'); }
+    expect_no_match: true
+  description: "Mojolicious controller ->param(name) on a file proven by Mojo::Base framework ownership; the receiver binding name is arbitrary."
 
 - id: perl.source.mojolicious_req_body
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: perl
   trust: remote
   category: http-input
   tag: http-input
   packages: [Mojolicious]
+  imports: ["Mojo::Base"]
   match:
     kind: call
     callee:
-      name: body
-  description: "Disabled - bare `body` overmatches HTTP::Response/email/HTML body accessors. body_params + plack_request_raw_body cover the real cases."
+      regex: '^\$?[A-Za-z_][A-Za-z0-9_]*->req->body$'
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: Mojolicious raw request body
+    code: |
+      package App::Controller::State;
+      use Mojo::Base 'Mojolicious::Controller', -signatures;
+      sub restore ($controller) { return $controller->req->body; }
+    expect_match_text: [controller->req->body]
+  - name: response body accessor is not inbound request data
+    code: |
+      package App::Client;
+      sub restore ($client) { return $client->response->body; }
+    expect_no_match: true
+  description: "Mojolicious controller ->req->body raw request bytes, constrained by the exact request chain and Mojo::Base ownership."
 
-- id: perl.source.mojolicious_req_headers
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: perl.source.mojolicious_every_param
+  enabled: true
   language: perl
   trust: remote
   category: http-input
   tag: http-input
+  payload_types: [query, form]
   packages: [Mojolicious]
   match:
     kind: call
     callee:
-      name: headers
-  description: "Disabled - bare `headers` overmatches HTTP::Response::headers, email headers, etc. Use env_http / specific header reads instead."
+      name: every_param
+  constraints:
+  - arg_count: 1
+  match_examples:
+  - name: Mojolicious multi-value request parameter
+    code: |
+      use Mojolicious;
+      sub handle {
+        my ($c) = @_;
+        return $c->every_param('tag');
+      }
+    expect_match_text: [c->every_param]
+  - name: unrelated parameter helper is not the Mojolicious API
+    code: |
+      use Mojolicious;
+      sub handle {
+        my ($c) = @_;
+        return $c->param_names();
+      }
+    expect_no_match: true
+  description: "Mojolicious controller every_param(name) - every client-supplied query/form value for one parameter name."
+
+- id: perl.source.mojolicious_request_header
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [header]
+  packages: [Mojolicious]
+  match:
+    kind: call
+    callee:
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->req->headers->header$"
+  constraints:
+  - arg_count: 1
+  match_examples:
+  - name: Mojolicious inbound request header
+    code: |
+      use Mojolicious;
+      sub handle {
+        my ($c) = @_;
+        return $c->req->headers->header('X-Test');
+      }
+    expect_match_text: [c->req->headers->header]
+  - name: response header lookup is not inbound request input
+    code: |
+      use Mojolicious;
+      sub handle {
+        my ($c) = @_;
+        return $c->res->headers->header('X-Test');
+      }
+    expect_no_match: true
+  description: "Mojolicious c->req->headers->header(name) - one client-supplied inbound request header; the req namespace distinguishes it from response headers."
+
+- id: perl.source.catalyst_route_values
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [path]
+  packages: [Catalyst]
+  match:
+    kind: call
+    callee:
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->req->(args|captures)$"
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: Catalyst captured route arguments
+    code: |
+      use Catalyst;
+      sub handle {
+        my ($c) = @_;
+        return $c->req->captures();
+      }
+    expect_match_text: [c->req->captures]
+  - name: application arguments are not route captures
+    code: |
+      use Catalyst;
+      sub handle {
+        my ($job) = @_;
+        return $job->args();
+      }
+    expect_no_match: true
+  description: "Catalyst c->req->args()/captures() - client-controlled path components captured by the route dispatcher."
+
+- id: perl.source.plack_environment_request_fields
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [header, path, query]
+  packages: [Plack, "Plack::Request", PSGI]
+  match:
+    kind: read
+    target:
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*\\.(QUERY_STRING|PATH_INFO|REQUEST_URI|HTTP_[A-Z0-9_]+|CONTENT_TYPE|CONTENT_LENGTH)$"
+  match_examples:
+  - name: PSGI inbound header environment entry
+    code: |
+      use Plack::Request;
+      sub app {
+        my ($env) = @_;
+        return $env->{HTTP_X_FORWARDED_HOST};
+      }
+    expect_match_text: [env.HTTP_X_FORWARDED_HOST]
+  - name: PSGI server software metadata is not client input
+    code: |
+      use Plack::Request;
+      sub app {
+        my ($env) = @_;
+        return $env->{SERVER_SOFTWARE};
+      }
+    expect_no_match: true
+  description: "PSGI/Plack environment request fields - query/path/request URI, HTTP_* headers, and content headers. Server/process metadata entries are deliberately excluded."

@@ -56,7 +56,7 @@ class and verify each box.
       lang_<name>` and `--test inspect_lang_<name>`.
 - [ ] **Per-language matrix passes.** `cargo test -p bonsai-ninja --test
       per_lang_cli_matrix <lang>_matrix`.
-- [ ] **Mega-flow fixture intact.** `scripts/validate-mega-cli.py`
+- [ ] **Language gauntlet fixture intact.** `scripts/validate-language-gauntlets.py`
       reports the expected finding count.
 - [ ] **Capabilities declaration matches reality.** `fn capabilities()`
       reflects the actual coverage; `Unsupported` levels are honest.
@@ -95,8 +95,9 @@ class and verify each box.
       forms (e.g. `from Crypto.Cipher import DES`, not `import
       pycryptodome`).
 - [ ] **Discriminating constraints have positive AND negative examples.**
-- [ ] **Disabled rules have `subsumed_by` pointing at an enabled
-      canonical** (or transitively-enabled chain).
+- [ ] **Bundled rules are executable.** No `enabled: false` placeholders;
+      duplicates use canonical aliases and genuine family exclusions use
+      `metadata.yml`.
 - [ ] **CWE / severity declared on sinks.** Validator catches missing
       values.
 - [ ] **Taxonomy stays in the pack.** Package/API identities, manifest names,
@@ -143,7 +144,9 @@ class and verify each box.
       `--graph-flow` requests one bounded source/evidence unit per callable.
       Structural inspect and browse summaries never enumerate recursive call
       paths; `path` returns an exact compressed endpoint corridor. These flags
-      change output scope, not the exact/narrowed static-evidence contract.
+      change output scope, not the single compiler-proven static-evidence
+      contract. `Exact` and `Narrowed` remain proof-provenance labels, not
+      analysis modes.
 - [ ] **Stable ID routing holds.** `show F:`, `show G:`, `show T:`,
       `show E:`, `show N:`, `show S:`, and resolver-scoped `show R:`
       delegate to the expected owner command.
@@ -311,6 +314,12 @@ class and verify each box.
       shared scenario lock: measured commands must not compete with one another
       inside Rust's parallel test harness. The lock does not serialize analyzer
       workers.
+- [ ] **Rebuild the distributable after release-profile tests.** Cargo may
+      replace `target/release/bonsai-ninja` while compiling an integration
+      target. Run `scripts/build-release.sh` again after the Elasticsearch gate,
+      then run `scripts/audit-release-binary.py target/release/bonsai-ninja`.
+      Packaging must consume that final path-remapped artifact, not Cargo's
+      intermediate test build.
 - [ ] **Rooted query scheduling charges committed memory, not mapped cache
       history.** The external-memory IDG's clean file-backed pages are
       reclaimable. Keep the named non-reclaimable reserve and per-closure
@@ -333,6 +342,13 @@ class and verify each box.
       pair on one thread. Body matching sizes one continuous worker pool
       against the largest actual source units that can overlap. Memory changes
       concurrency and window size only, never files, rules, or facts.
+- [ ] **Literal/package planning does not duplicate source scans.** Compile a
+      language batch's literal anchors into one multi-pattern pass, carry its
+      compact evidence into syntax-header planning, and build per-file package
+      evidence only when a surviving rule actually needs it. Cache invalidation
+      must use the VFS instance, FileId, edit version, and package-context
+      fingerprint; verify byte-identical results plus the high-severity sink
+      inventory SLO on Elasticsearch.
 - [ ] **Cold security planning stays staged.** A fresh-cache production scan
       applies raw/import/syntax-target filters before receiver ancestry,
       requests ancestry only for typed method candidates it can change, and

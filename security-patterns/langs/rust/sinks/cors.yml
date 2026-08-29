@@ -6,23 +6,38 @@
   category: source-independent
   severity: medium
   packages: [tower_http]
+  imports: [tower_http]
   cwe: [CWE-942]
   match:
     kind: call
     callee:
-      attribute: [CorsLayer, allow_origin]
+      name: allow_origin
+  constraints:
+  - receiver_type_in: [CorsLayer, "tower_http::cors::CorsLayer"]
+  - arg_matches_regex:
+      index: 0
+      regex: '^(tower_http::cors::)?Any$'
   match_examples:
-  - name: generated direct match
+  - name: tower-http wildcard origin
     code: |
-      use tower_http;
-      use tower_http;
-      use tower_http::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          CorsLayer::allow_origin(Any);
+      use tower_http::cors::{Any, CorsLayer};
+      fn configure(layer: CorsLayer) { let _ = layer.allow_origin(Any); }
+    expect_match_text: [layer.allow_origin]
+  - name: tower-http explicit origin is not wildcard
+    code: |
+      use http::HeaderValue;
+      use tower_http::cors::CorsLayer;
+      fn configure(layer: CorsLayer) {
+        let _ = layer.allow_origin(HeaderValue::from_static("https://app.example.com"));
       }
+    expect_no_match: true
+  - name: local CorsLayer is not tower-http
+    code: |
+      use tower_http::cors::CorsLayer as TowerCorsLayer;
+      struct CorsLayer;
+      struct Any;
+      impl CorsLayer { fn allow_origin(self, _: Any) -> Self { self } }
+      fn configure(layer: CorsLayer) { let _ = layer.allow_origin(Any); }
+    expect_no_match: true
   description: |-
     tower-http CorsLayer::allow_origin(Any) - wildcard CORS.
-  imports:
-  - tower_http

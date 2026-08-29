@@ -1,7 +1,7 @@
 - id: ruby.log_injection.logger_newline
   enabled: true
   language: ruby
-  tag: header-injection
+  tag: log-injection
   severity: medium
   cwe:
   - CWE-117

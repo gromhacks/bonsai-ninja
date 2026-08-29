@@ -30,29 +30,6 @@
     expect_no_match: true
   description: "SAXParser.parse - disable external entities."
 
-- id: java.xxe.saxparserfactory_newinstance
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: xxe
-  category: source-independent
-  severity: high
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      regex: "^SAXParserFactory\\.newInstance$"
-  match_examples:
-  - name: generated shape example
-    code: |
-      class App {
-        void handle(String input) throws Exception {
-          SAXParserFactory.newInstance(input);
-        }
-      }
-  description: "Disabled - SAXParserFactory.newInstance only allocates a factory. Report the tainted parse/unmarshal boundary unless compiler facts prove the complete hardened configuration."
-
 - id: java.xxe.documentbuilder_parse
   enabled: true
   language: java
@@ -138,29 +115,6 @@
 
   imports:
   - javax.xml.parsers
-
-- id: java.xxe.documentbuilderfactory_newinstance
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: xxe
-  category: source-independent
-  severity: high
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      regex: "^DocumentBuilderFactory\\.newInstance$"
-  match_examples:
-  - name: generated shape example
-    code: |
-      class App {
-        void handle(String input) throws Exception {
-          DocumentBuilderFactory.newInstance(input);
-        }
-      }
-  description: "Disabled - source-independent DocumentBuilderFactory.newInstance cannot distinguish immediately hardened factories from vulnerable parsers. Tainted DocumentBuilder.parse / JAXB / SAX parse sinks carry the real XXE signal with sanitizer credit."
 
 - id: java.xxe.xmlinputfactory_createreader
   enabled: true
@@ -285,20 +239,6 @@
       }
     expect_no_match: true
   description: "SchemaFactory.newSchema."
-
-- id: java.xxe.xpath_evaluate
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: xxe
-  severity: medium
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [XPath, evaluate]
-  description: "Disabled - XPath itself doesn't fetch entities; flag with XML source."
 
 - id: java.xxe.unmarshaller_unmarshal
   enabled: true
@@ -447,44 +387,3 @@
       }
     expect_no_match: true
   description: "JDOM2 SAXBuilder.build."
-
-- id: java.xxe.apache_poi_xssfworkbook_inputstream
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: xxe
-  severity: high
-  packages: ["org.apache.poi"]
-  cwe: [CWE-611]
-  match:
-    kind: new
-    callee:
-      name: XSSFWorkbook
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: apache poi xssf workbook input stream
-    code: |
-      import org.apache.poi.*;
-      class App {
-        Object handle(InputStream stream) throws Exception {
-          return new XSSFWorkbook(stream);
-        }
-      }
-      class InputStream {}
-      class XSSFWorkbook {
-        XSSFWorkbook(Object... args) {}
-      }
-    expect_match_text: [XSSFWorkbook]
-  - name: arg tainted literal negative
-    code: |
-      import org.apache.poi.*;
-      class App {
-        void handle(String input) throws Exception {
-          new XSSFWorkbook("safe");
-        }
-      }
-    expect_no_match: true
-  description: "Disabled - XSSFWorkbook(InputStream) is not itself an external-entity boundary. Apache POI's historical XXE affected XSSFExportToXml before 4.1.1; archive resource exhaustion requires a separate, version/config-aware rule."

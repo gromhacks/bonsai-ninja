@@ -1,8 +1,9 @@
 use super::super::{
-    emit_using_alias_assigns, extract_catch_param, extract_return_value_flow_with_handler,
-    extract_return_value_kind_with_handler, extract_return_value_name_with_handler,
-    extract_return_value_text, extract_throw_value_name, extract_yield_value_flow_with_handler,
-    looks_like_bare_identifier, node_text, span_of, FlowEvent, Node,
+    emit_using_alias_assigns, extract_catch_arm_param, extract_catch_param,
+    extract_return_value_flow_with_handler, extract_return_value_kind_with_handler,
+    extract_return_value_name_with_handler, extract_return_value_text, extract_throw_value_name,
+    extract_yield_value_flow_with_handler, looks_like_bare_identifier, node_text, span_of, FlowEvent,
+    GrammarHandler, Node,
 };
 use super::{walk_into, LoweringContext};
 
@@ -273,6 +274,40 @@ pub(super) fn lower_try(node: Node<'_>, context: LoweringContext<'_>, out: &mut 
                 false,
             );
         }
+        let exclusive_catch_arms = collect_exclusive_catch_arms(node, handler);
+        let catch_arms = exclusive_catch_arms
+            .iter()
+            .map(|arm| crate::CatchArmFact {
+                span: span_of(file, arm),
+                parameter: extract_catch_arm_param(arm, src),
+                types: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        // Some grammars represent a catch body as a pattern arm whose node
+        // kind is also used for first-class lambdas/partial functions.  A
+        // normal recursive walk therefore (correctly) skips that node in the
+        // enclosing callable, but inside a compiler-declared catch region the
+        // arm is executable handler code.  Lower every exact catch arm here,
+        // including the single-arm case; multiple arms retain their mutually
+        // exclusive branch structure.
+        if !exclusive_catch_arms.is_empty() {
+            let mut lowered_arms = Vec::with_capacity(exclusive_catch_arms.len());
+            for arm in exclusive_catch_arms {
+                let mut events = Vec::new();
+                walk_into(arm, file, src, handler, class_names, &mut events, false);
+                if handler.catch_body_follows_marker {
+                    if let Some(body) = following_fallback_body(node, arm, handler) {
+                        walk_into(body, file, src, handler, class_names, &mut events, false);
+                    }
+                }
+                lowered_arms.push((span_of(file, &arm), events));
+            }
+            catch_events = if lowered_arms.len() == 1 {
+                lowered_arms.pop().map_or_else(Vec::new, |(_, events)| events)
+            } else {
+                nest_catch_arms(lowered_arms)
+            };
+        }
         out.push(FlowEvent::Try {
             span: span_of(file, &node),
             body,
@@ -280,11 +315,71 @@ pub(super) fn lower_try(node: Node<'_>, context: LoweringContext<'_>, out: &mut 
             finally_events,
             catch_param: extract_catch_param(&node, src),
             catch_types: Vec::new(),
+            catch_arms,
         });
         return true;
     }
 
     false
+}
+
+fn following_fallback_body<'tree>(
+    parent: Node<'tree>,
+    marker: Node<'tree>,
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
+    let mut saw_marker = false;
+    let mut cursor = parent.walk();
+    for child in parent.named_children(&mut cursor) {
+        if child.id() == marker.id() {
+            saw_marker = true;
+            continue;
+        }
+        if saw_marker && handler.try_fallback_body_kinds.contains(&child.kind()) {
+            return Some(child);
+        }
+        if saw_marker {
+            return None;
+        }
+    }
+    None
+}
+
+fn collect_exclusive_catch_arms<'tree>(protected: Node<'tree>, handler: &GrammarHandler) -> Vec<Node<'tree>> {
+    if handler.exclusive_catch_arm_kinds.is_empty() {
+        return Vec::new();
+    }
+    let mut arms = Vec::new();
+    let mut stack = Vec::new();
+    let mut cursor = protected.walk();
+    stack.extend(protected.named_children(&mut cursor));
+    while let Some(node) = stack.pop() {
+        if handler.exclusive_catch_arm_kinds.contains(&node.kind()) {
+            arms.push(node);
+            continue;
+        }
+        if handler.is_try(node.kind()) {
+            continue;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    arms.sort_by_key(|arm| (arm.start_byte(), arm.end_byte()));
+    arms.dedup_by_key(|arm| arm.id());
+    arms
+}
+
+fn nest_catch_arms(mut arms: Vec<(bonsai_common::Span, Vec<FlowEvent>)>) -> Vec<FlowEvent> {
+    let (span, events) = arms.remove(0);
+    if arms.is_empty() {
+        return events;
+    }
+    vec![FlowEvent::Branch {
+        span,
+        condition: None,
+        then_events: events,
+        else_events: nest_catch_arms(arms),
+    }]
 }
 
 pub(super) fn lower_function_exit(

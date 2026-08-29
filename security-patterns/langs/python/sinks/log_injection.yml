@@ -164,3 +164,71 @@
           return logger.critical('safe', '`f"f\'format')
     expect_no_match: true
   description: "logger.critical - log-injection via concat / f-string / .format()."
+
+- id: python.log_injection.logging_error_tainted_value
+  enabled: true
+  language: python
+  tag: log-injection
+  severity: high
+  packages: [logging]
+  imports: [logging]
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [logging, error]
+  constraints:
+  - arg_tainted: {index: 0}
+  analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
+  match_examples:
+  - name: logging error receives attacker-controlled text
+    code: |
+      import logging
+      def audit(user_input):
+          logging.error(user_input)
+    expect_match_text: [logging.error]
+  - name: logging error literal is not a tainted log entry
+    code: |
+      import logging
+      def audit():
+          logging.error("authentication failed")
+    expect_no_match: true
+  description: "logging.error(tainted text) can permit forged log records when CR or LF remains in the value."
+
+- id: python.log_injection.logger_error_tainted_value
+  enabled: true
+  language: python
+  tag: log-injection
+  severity: high
+  packages: [logging]
+  imports: [logging]
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      name: error
+  constraints:
+  - receiver_type_in: [Logger]
+  - arg_tainted: {index: 0}
+  analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
+  match_examples:
+  - name: typed logger error receives attacker-controlled text
+    code: |
+      import logging
+      logger = logging.getLogger("audit")
+      def audit(user_input):
+          logger.error(user_input)
+    expect_match_text: [logger.error]
+  - name: unrelated error method is not logging
+    code: |
+      import logging
+      class Reporter:
+          def error(self, value): return value
+      def audit(reporter: Reporter, user_input):
+          reporter.error(user_input)
+    expect_no_match: true
+  description: "logging.Logger.error(tainted text) can permit forged log records when CR or LF remains in the value."

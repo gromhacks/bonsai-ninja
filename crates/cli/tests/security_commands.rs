@@ -129,14 +129,14 @@ fn rule_is_enabled(rule_id: &str) -> bool {
 }
 
 fn micro_path(lang: &str) -> PathBuf {
-    repo_root().join(format!("examples/{lang}/micro"))
+    repo_root().join(format!("test-fixtures/languages/{lang}/micro"))
 }
 
-fn mega_path(lang: &str) -> PathBuf {
-    repo_root().join(format!("examples/{lang}/mega_flow"))
+fn language_gauntlet_path(lang: &str) -> PathBuf {
+    repo_root().join(format!("examples/{lang}/language_gauntlet"))
 }
 
-const MEGA_FLOW_LANGS: &[&str] = &[
+const LANGUAGE_GAUNTLET_LANGS: &[&str] = &[
     "c",
     "cpp",
     "csharp",
@@ -159,9 +159,23 @@ const MEGA_FLOW_LANGS: &[&str] = &[
     "typescript",
 ];
 
-fn expected_mega_chain_hops(lang: &str) -> &'static [&'static str] {
+fn expected_language_gauntlet_chain_hops(lang: &str) -> &'static [&'static str] {
     match lang {
-        "c" | "cpp" | "elixir" => &["main", "orchestrate", "persist", "run"],
+        "c" => &[
+            "handle_request",
+            "orchestrate",
+            "persist",
+            "repository_run",
+            "execute",
+        ],
+        "cpp" => &[
+            "handle_request",
+            "orchestrate",
+            "persist",
+            "run_repository",
+            "execute",
+        ],
+        "elixir" => &["handle", "orchestrate", "persist", "run", "execute"],
         "csharp" => &["Handle", "Orchestrate", "Persist", "Run", "Execute"],
         "dart" | "javascript" | "lua" | "perl" | "php" | "ruby" | "swift" | "typescript" => {
             &["handle_request", "orchestrate", "persist", "run", "execute"]
@@ -183,10 +197,10 @@ fn expected_mega_chain_hops(lang: &str) -> &'static [&'static str] {
     }
 }
 
-fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
+fn expected_language_gauntlet_finding_count_with_inferred_sources(lang: &str) -> usize {
     // Mirrors security_pipeline_regressions.rs
-    // `expected_mega_flow_findings_with_inferred_sources` and
-    // scripts/validate-mega-cli.py `EXPECTED_FINDINGS`. Refreshed
+    // `expected_language_gauntlet_findings_with_inferred_sources` and
+    // scripts/validate-language-gauntlets.py `EXPECTED_FINDINGS`. Refreshed
     // 2026-05-29: FN-language gaps closed (cpp/csharp/dart/elixir/java/
     // scala 0→1, php 0→2); swift settled at 1 once the redundant
     // inferred-source over-claim was filtered; go 2→1 + objc 2→1
@@ -210,17 +224,28 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
         "kotlin" => 1,
         "lua" => 1,
         "objc" => 1,
-        "perl" => 2,
+        // One real CGI-param-to-system flow; the second sink is the clean twin.
+        "perl" => 1,
         "php" => 2,
         "python" => 1,
-        // One distinct stdin_gets -> Kernel.system vulnerability; equivalent
+        // One distinct Rails-params -> Kernel.system vulnerability; equivalent
         // receiver-derived evidence is grouped into the same finding.
         "ruby" => 1,
         "rust" => 1,
         "scala" => 1,
         "swift" => 1,
         "typescript" => 1,
-        other => panic!("missing mega_flow expected finding count for {other}"),
+        other => panic!("missing language_gauntlet expected finding count for {other}"),
+    }
+}
+
+fn expected_language_gauntlet_finding_count_with_concrete_sources(lang: &str) -> usize {
+    match lang {
+        "c" | "cpp" | "csharp" | "dart" | "elixir" | "erlang" | "go" | "java" | "javascript" | "kotlin"
+        | "lua" | "objc" | "perl" | "php" | "python" | "ruby" | "rust" | "scala" | "swift" | "typescript" => {
+            1
+        }
+        other => panic!("missing concrete language_gauntlet finding count for {other}"),
     }
 }
 
@@ -230,9 +255,10 @@ fn chain_contains_hop(chain: &[&str], hop: &str) -> bool {
         .any(|step| *step == hop || step.strip_prefix(hop).is_some_and(|rest| rest.starts_with('@')))
 }
 
-fn mega_entry_symbol(lang: &str) -> &'static str {
+fn language_gauntlet_entry_symbol(lang: &str) -> &'static str {
     match lang {
-        "c" | "cpp" | "elixir" => "main",
+        "c" | "cpp" => "handle_request",
+        "elixir" => "handle",
         "csharp" => "Handle",
         "go" => "handleRequest",
         "java" | "kotlin" | "scala" => "handle",
@@ -240,7 +266,7 @@ fn mega_entry_symbol(lang: &str) -> &'static str {
     }
 }
 
-fn mega_target_symbol(lang: &str) -> &'static str {
+fn language_gauntlet_target_symbol(lang: &str) -> &'static str {
     match lang {
         "csharp" | "go" => "Execute",
         "objc" => "executeCmd",
@@ -248,7 +274,7 @@ fn mega_target_symbol(lang: &str) -> &'static str {
     }
 }
 
-fn required_mega_construct_markers(lang: &str) -> &'static [&'static str] {
+fn required_language_gauntlet_construct_markers(lang: &str) -> &'static [&'static str] {
     match lang {
         "c" => &[
             "#include",
@@ -380,7 +406,7 @@ fn required_mega_construct_markers(lang: &str) -> &'static [&'static str] {
             "defer",
             "select",
             "context.Context",
-            "for tok := range",
+            ":= range tokenize(",
             "panic",
             "recover",
             "switch k :=",
@@ -390,7 +416,7 @@ fn required_mega_construct_markers(lang: &str) -> &'static [&'static str] {
             "range",
         ],
         "java" => &[
-            "package mega",
+            "package gauntlet",
             "record Envelope",
             "import static",
             "<String>",
@@ -457,10 +483,10 @@ fn required_mega_construct_markers(lang: &str) -> &'static [&'static str] {
             "override",
         ],
         "lua" => &[
-            "require(\"storage\")",
+            "require(\"domain.storage\")",
             "local Storage",
             "{ ... }",
-            "return envelope.cmd, envelope.user",
+            "return self.data.cmd, self.data.user",
             "coroutine.wrap",
             "function(acc, tok)",
             "for word in",
@@ -678,7 +704,7 @@ fn required_mega_construct_markers(lang: &str) -> &'static [&'static str] {
     }
 }
 
-fn required_mega_flow_event_kinds(lang: &str) -> &'static [&'static str] {
+fn required_language_gauntlet_event_kinds(lang: &str) -> &'static [&'static str] {
     match lang {
         "c" => &["Assign", "Branch", "Call", "Loop", "Return"],
         "cpp" => &["Assign", "Branch", "Call", "Loop", "Return", "Try"],
@@ -706,7 +732,7 @@ fn required_mega_flow_event_kinds(lang: &str) -> &'static [&'static str] {
     }
 }
 
-fn mega_flow_requires_alias_map(lang: &str) -> bool {
+fn language_gauntlet_requires_alias_map(lang: &str) -> bool {
     matches!(
         lang,
         "csharp" | "dart" | "elixir" | "go" | "javascript" | "lua" | "php" | "python" | "rust" | "typescript"
@@ -1911,8 +1937,8 @@ def run(cmd):
 }
 
 #[test]
-fn c_mega_flow_renders_precise_command_sink_chain() {
-    let ws = mega_path("c");
+fn c_language_gauntlet_renders_precise_command_sink_chain() {
+    let ws = language_gauntlet_path("c");
     if !ws.exists() {
         return;
     }
@@ -1922,19 +1948,18 @@ fn c_mega_flow_renders_precise_command_sink_chain() {
         "--rules-dir",
         &rules_dir(),
         "taint-analysis",
-        "--profile",
-        "all",
+        "--no-cache",
         "--all",
         "--context",
         "32k",
     ])
     .unwrap();
     assert!(
-        out.contains("SOURCE:  c.input.argv_param") && out.contains("main → orchestrate"),
-        "C argv source should propagate out of main through adapter-derived side effects:\n{out}"
+        out.contains("SOURCE:  c.input.recv") && out.contains("handle_request → orchestrate"),
+        "C network source should propagate out of handle_request through adapter-derived side effects:\n{out}"
     );
     assert!(
-        out.contains("main → orchestrate → persist → run → execute"),
+        out.contains("handle_request → orchestrate → persist → repository_run → execute"),
         "C command-injection finding should render the real source-to-sink chain:\n{out}"
     );
     assert!(
@@ -2035,6 +2060,8 @@ fn sink_analysis_maps_python_endpoints_and_exact_upstream_paths() {
         "all",
         "--sink",
         "^python\\.cmdi\\.",
+        "--trust",
+        "remote",
         "--format",
         "json",
         "--all",
@@ -2711,7 +2738,8 @@ def handle():
 
 #[test]
 fn taint_analysis_keeps_a_fitting_flow_in_one_continuous_block() {
-    let ws = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/python/mega_flow");
+    let ws =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/python/language_gauntlet");
     let out = run(&[
         "security",
         ws.to_str().unwrap(),
@@ -3074,7 +3102,7 @@ def safe():
 fn taint_analysis_run_across_every_micro_lang() {
     // One smoke-test per language. Skips gracefully if a micro
     // fixture doesn't exist for a given adapter.
-    for lang in MEGA_FLOW_LANGS {
+    for lang in LANGUAGE_GAUNTLET_LANGS {
         let ws = micro_path(lang);
         if !ws.exists() {
             continue;
@@ -3099,9 +3127,61 @@ fn taint_analysis_run_across_every_micro_lang() {
 }
 
 #[test]
-fn taint_analysis_run_across_every_mega_flow_lang() {
-    for lang in MEGA_FLOW_LANGS {
-        let ws = mega_path(lang);
+fn concrete_rule_backed_taint_analysis_completes_across_every_language_gauntlet() {
+    for lang in LANGUAGE_GAUNTLET_LANGS {
+        let ws = language_gauntlet_path(lang);
+        assert!(ws.exists(), "{lang}: language_gauntlet fixture is missing");
+
+        let out = run(&[
+            "security",
+            ws.to_str().unwrap(),
+            "--rules-dir",
+            &rules_dir(),
+            "taint-analysis",
+            "--format",
+            "json",
+            "--all",
+            "--no-cache",
+        ])
+        .unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).unwrap_or_else(|e| panic!("{lang}: invalid JSON: {e}\n{out}"));
+        assert_eq!(
+            parsed.get("analysis_complete").and_then(|value| value.as_bool()),
+            Some(true),
+            "{lang}: concrete gauntlet analysis must be complete:\n{out}"
+        );
+        let rows = json_rows(&parsed);
+        assert_eq!(
+            rows.len(),
+            expected_language_gauntlet_finding_count_with_concrete_sources(lang),
+            "{lang}: concrete source-to-sink finding count drifted:\n{out}"
+        );
+        assert!(
+            rows.iter().all(|row| {
+                row.get("source")
+                    .and_then(|source| source.get("rule_id"))
+                    .and_then(|rule_id| rule_id.as_str())
+                    .is_some_and(|rule_id| !rule_id.is_empty())
+                    && row
+                        .get("sink")
+                        .and_then(|sink| sink.get("rule_id"))
+                        .and_then(|rule_id| rule_id.as_str())
+                        .is_some_and(|rule_id| !rule_id.is_empty())
+                    && row
+                        .get("chain_display")
+                        .and_then(|chain| chain.as_array())
+                        .is_some_and(|chain| chain.len() >= 2)
+            }),
+            "{lang}: every concrete finding must contain source, sink, and multi-hop compiler chain:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn taint_analysis_run_across_every_language_gauntlet_lang() {
+    for lang in LANGUAGE_GAUNTLET_LANGS {
+        let ws = language_gauntlet_path(lang);
         if !ws.exists() {
             continue;
         }
@@ -3114,7 +3194,7 @@ fn taint_analysis_run_across_every_mega_flow_lang() {
             "--profile",
             "all",
             // Inferred entry-point sources are CLI-opt-in (commit
-            // 1f4922c). The expected counts in expected_mega_finding_count
+            // 1f4922c). The expected counts in expected_language_gauntlet_finding_count
             // were authored against the inferred-on surface.
             "--inferred-sources",
             "--format",
@@ -3125,11 +3205,11 @@ fn taint_analysis_run_across_every_mega_flow_lang() {
         let parsed: serde_json::Value =
             serde_json::from_str(&out).unwrap_or_else(|e| panic!("{lang}: invalid JSON: {e}\n{out}"));
         let rows = json_rows(&parsed);
-        let expected_count = expected_mega_finding_count_with_inferred_sources(lang);
+        let expected_count = expected_language_gauntlet_finding_count_with_inferred_sources(lang);
         assert_eq!(
             rows.len(),
             expected_count,
-            "{lang}: unexpected mega_flow inferred-source finding count:\n{out}"
+            "{lang}: unexpected language_gauntlet inferred-source finding count:\n{out}"
         );
         if expected_count == 0 {
             continue;
@@ -3140,9 +3220,9 @@ fn taint_analysis_run_across_every_mega_flow_lang() {
                     row.get("source")
                         .and_then(|v| v.get("rule_id"))
                         .and_then(|v| v.as_str())
-                        == Some("objc.source.stdin_fgets")
+                        == Some("objc.source.gcdwebserver_request_param")
                 }),
-                "objc: mega_flow must attribute at least one finding to the configured fgets output-argument source:\n{out}"
+                "objc: language_gauntlet must attribute at least one finding to the typed GCDWebServer request source:\n{out}"
             );
         }
         if *lang == "lua" {
@@ -3197,7 +3277,7 @@ fn taint_analysis_run_across_every_mega_flow_lang() {
                     .get("member_finding_ids")
                     .and_then(|v| v.as_array())
                     .is_some_and(|ids| ids.len() >= 2)),
-                "python: grouped mega_flow row must retain concrete and inferred member finding ids:\n{out}"
+                "python: grouped language_gauntlet row must retain concrete and inferred member finding ids:\n{out}"
             );
         }
         assert!(
@@ -3205,9 +3285,9 @@ fn taint_analysis_run_across_every_mega_flow_lang() {
                 .get("chain_display")
                 .and_then(|v| v.as_array())
                 .is_some_and(|c| c.len() >= 2)),
-            "{lang}: expected at least one multi-hop mega_flow chain:\n{out}"
+            "{lang}: expected at least one multi-hop language_gauntlet chain:\n{out}"
         );
-        let expected_hops = expected_mega_chain_hops(lang);
+        let expected_hops = expected_language_gauntlet_chain_hops(lang);
         assert!(
             rows.iter().any(|row| {
                 let chain = row
@@ -3219,15 +3299,15 @@ fn taint_analysis_run_across_every_mega_flow_lang() {
                     .collect::<Vec<_>>();
                 expected_hops.iter().all(|hop| chain_contains_hop(&chain, hop))
             }),
-            "{lang}: expected a canonical mega_flow chain containing {:?}:\n{out}",
+            "{lang}: expected a canonical language_gauntlet chain containing {:?}:\n{out}",
             expected_hops
         );
     }
 }
 
 #[test]
-fn taint_analysis_python_mega_alias_path_does_not_render_overapprox_edges() {
-    let ws = mega_path("python");
+fn taint_analysis_python_language_gauntlet_alias_path_does_not_render_overapprox_edges() {
+    let ws = language_gauntlet_path("python");
     if !ws.exists() {
         return;
     }
@@ -3242,7 +3322,7 @@ fn taint_analysis_python_mega_alias_path_does_not_render_overapprox_edges() {
     .unwrap();
     assert!(
         !out.contains("(over-approx)"),
-        "alias-resolved concrete mega_flow path must not render over-approx edges:\n{out}"
+        "alias-resolved concrete language_gauntlet path must not render over-approx edges:\n{out}"
     );
     assert!(
         out.contains("run_orchestrate(envelope)") && out.contains("run_pipeline -> orchestrate"),
@@ -3251,30 +3331,30 @@ fn taint_analysis_python_mega_alias_path_does_not_render_overapprox_edges() {
 }
 
 #[test]
-fn mega_flow_fixtures_cover_declared_language_constructs() {
-    for lang in MEGA_FLOW_LANGS {
-        let ws = mega_path(lang);
+fn language_gauntlet_fixtures_cover_declared_language_constructs() {
+    for lang in LANGUAGE_GAUNTLET_LANGS {
+        let ws = language_gauntlet_path(lang);
         if !ws.exists() {
             continue;
         }
         let text = read_fixture_text(&ws);
         assert!(
             text.contains("NEGATIVE"),
-            "{lang}: mega_flow fixture must include at least one explicit negative clean-twin sink"
+            "{lang}: language_gauntlet fixture must include at least one explicit negative clean-twin sink"
         );
-        for marker in required_mega_construct_markers(lang) {
+        for marker in required_language_gauntlet_construct_markers(lang) {
             assert!(
                 text.contains(marker),
-                "{lang}: mega_flow fixture is missing required construct marker `{marker}`"
+                "{lang}: language_gauntlet fixture is missing required construct marker `{marker}`"
             );
         }
     }
 }
 
 #[test]
-fn mega_flow_exports_adapter_facts_for_taint_engine() {
-    for lang in MEGA_FLOW_LANGS {
-        let ws = mega_path(lang);
+fn language_gauntlet_exports_adapter_facts_for_taint_engine() {
+    for lang in LANGUAGE_GAUNTLET_LANGS {
+        let ws = language_gauntlet_path(lang);
         if !ws.exists() {
             continue;
         }
@@ -3342,7 +3422,7 @@ fn mega_flow_exports_adapter_facts_for_taint_engine() {
 
         let mut event_kinds = BTreeSet::new();
         collect_flow_event_kinds(&export, &mut event_kinds);
-        for kind in required_mega_flow_event_kinds(lang) {
+        for kind in required_language_gauntlet_event_kinds(lang) {
             let native_kind = kind.to_ascii_lowercase();
             assert!(
                 event_kinds.contains(&native_kind),
@@ -3366,7 +3446,7 @@ fn mega_flow_exports_adapter_facts_for_taint_engine() {
             reachable_fact_kind_count(&export, "write") > 0,
             "{lang}: reachable facts must include assignment/write refs"
         );
-        if mega_flow_requires_alias_map(lang) {
+        if language_gauntlet_requires_alias_map(lang) {
             assert!(
                 alias_map_entry_count(&export) > 0,
                 "{lang}: export taint_graph must include import/symbol alias facts"
@@ -3393,15 +3473,15 @@ fn mega_flow_exports_adapter_facts_for_taint_engine() {
 }
 
 #[test]
-fn mega_flow_cli_surfaces_run_across_every_language() {
-    for lang in MEGA_FLOW_LANGS {
-        let ws = mega_path(lang);
+fn language_gauntlet_cli_surfaces_run_across_every_language() {
+    for lang in LANGUAGE_GAUNTLET_LANGS {
+        let ws = language_gauntlet_path(lang);
         if !ws.exists() {
             continue;
         }
         let workspace = ws.to_str().unwrap();
-        let entry = mega_entry_symbol(lang);
-        let target = mega_target_symbol(lang);
+        let entry = language_gauntlet_entry_symbol(lang);
+        let target = language_gauntlet_target_symbol(lang);
         let rules = rules_dir();
 
         let commands: Vec<Vec<&str>> = vec![
@@ -3523,16 +3603,17 @@ fn pack_inventory_text_keeps_long_rule_ids_readable() {
         "python",
         "--category",
         "insecure-deserialization",
-        "--limit",
-        "6",
+        "--all",
     ])
     .unwrap();
     assert!(
-        out.contains("[RULE 4]  python.deser.celery_pickle_serializer"),
+        out.lines().any(|line| {
+            line.starts_with("[RULE ") && line.ends_with("  python.deser.django_signed_cookie_loads")
+        }),
         "pack inventory should render long rule ids as intact block headings:\n{out}"
     );
     assert!(
-        !out.contains("celery_pickle_s\n"),
+        !out.contains("django_signed_cookie_l\n"),
         "pack inventory must not table-wrap rule ids across lines:\n{out}"
     );
 }
@@ -3838,9 +3919,11 @@ void use_after_free(Cache *cache) {
     std::fs::write(
         ws.join("sql.lua"),
         r#"
-local _luasql = require("luasql")
-function lookup(conn, name)
-    conn:execute("SELECT id FROM users WHERE name = '" .. name .. "'")
+local luasql = require("luasql.mysql")
+function lookup(name)
+    local environment = luasql.mysql()
+    local connection = environment:connect("app", "user", "password")
+    connection:execute("SELECT id FROM users WHERE name = '" .. name .. "'")
 end
 "#,
     )
@@ -3849,6 +3932,7 @@ end
         ws.join("Cases.m"),
         r#"
 #import <Foundation/Foundation.h>
+#import <WebKit/WebKit.h>
 void run(NSString *host) {
     NSTask *task = [NSTask new];
     task.launchPath = @"/bin/sh";
@@ -3997,7 +4081,7 @@ function merge(target: any, source: any) {
             .expect("sink rows");
         assert!(
             !rows.is_empty(),
-            "{rule} should match its benchmark gap fixture:\n{out}"
+            "{rule} should match its security-flow fixture:\n{out}"
         );
     }
     assert!(checked > 0, "common sink shape test skipped every rule");
@@ -4075,15 +4159,17 @@ void run_cmd(const char *user) {
     std::fs::write(
         ws.join("lua_cases.lua"),
         r#"
-local _luasql = require("luasql")
+local luasql = require("luasql.mysql")
 function handle()
   local args = ngx.req.get_uri_args()
   local q = args.q
   ngx.print("<p>" .. q .. "</p>")
 end
 local M = {}
-function M.find(conn, name)
-  conn:execute("SELECT id FROM users WHERE name = '" .. name .. "'")
+function M.find(name)
+  local environment = luasql.mysql()
+  local connection = environment:connect("app", "user", "password")
+  connection:execute("SELECT id FROM users WHERE name = '" .. name .. "'")
 end
 "#,
     )

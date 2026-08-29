@@ -46,7 +46,7 @@
         "group": "Validation",
         "pages": [
           "docs/RELEASE_READINESS",
-          "docs/MEGA_FLOW_COVERAGE",
+          "docs/LANGUAGE_GAUNTLETS",
           "docs/COVERAGE_BASELINE",
           "docs/TAINT_COVERAGE_MATRIX"
         ]
@@ -58,6 +58,7 @@
           "docs/contributing/specification",
           "docs/contributing/architecture",
           "docs/contributing/adapter-contract",
+          "docs/contributing/compiler-conformance",
           "docs/contributing/adapter-capabilities",
           "docs/contributing/flow-event-spec",
           "docs/contributing/analysis-roadmap",

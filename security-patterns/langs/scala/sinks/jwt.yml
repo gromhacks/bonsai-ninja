@@ -153,39 +153,6 @@
     expect_no_match: true
   description: "Nimbus SignedJWT.parse - parse-only; dangerous unless followed by
     verify()."
-- id: scala.jwt.jjwt_parser_build
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: scala
-  tag: jwt
-  severity: high
-  packages:
-  - io.jsonwebtoken
-  cwe:
-  - CWE-347
-  - CWE-345
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Jwts
-      - parser
-  match_examples:
-  - name: generated shape example
-    code: |
-      import io.jsonwebtoken._
-      // uses io.jsonwebtoken
-      object App {
-        def handle(input: String): Unit = {
-          Jwts.parser(input)
-        }
-      }
-  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. jjwt Jwts.parser() - legacy builder
-    that may skip signature check. Merged aliases: scala.jwt.alg_confusion_jjwt."
-  aliases:
-  - scala.jwt.alg_confusion_jjwt
 - id: scala.jwt.auth0_decode
   enabled: true
   language: scala

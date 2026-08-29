@@ -98,6 +98,85 @@ fn compiler_resolution_gaps_drive_finding_completeness_without_name_guesses() {
 }
 
 #[test]
+fn dart_library_calls_do_not_become_spurious_workspace_resolution_gaps() {
+    let root = tempfile::tempdir().expect("temporary Dart workspace");
+    for (path, source) in [
+        (
+            "bin/app.dart",
+            include_str!("../../../../examples/dart/language_gauntlet/bin/app.dart"),
+        ),
+        (
+            "lib/src/http/handler.dart",
+            include_str!("../../../../examples/dart/language_gauntlet/lib/src/http/handler.dart"),
+        ),
+        (
+            "lib/src/domain/envelope.dart",
+            include_str!("../../../../examples/dart/language_gauntlet/lib/src/domain/envelope.dart"),
+        ),
+        (
+            "lib/src/pipeline/pipeline.dart",
+            include_str!("../../../../examples/dart/language_gauntlet/lib/src/pipeline/pipeline.dart"),
+        ),
+        (
+            "lib/src/routing/command_router.dart",
+            include_str!("../../../../examples/dart/language_gauntlet/lib/src/routing/command_router.dart"),
+        ),
+        (
+            "lib/src/storage/storage.dart",
+            include_str!("../../../../examples/dart/language_gauntlet/lib/src/storage/storage.dart"),
+        ),
+        (
+            "lib/src/runtime/executor.dart",
+            include_str!("../../../../examples/dart/language_gauntlet/lib/src/runtime/executor.dart"),
+        ),
+    ] {
+        let destination = root.path().join(path);
+        std::fs::create_dir_all(destination.parent().expect("Dart fixture parent"))
+            .expect("create Dart fixture parent");
+        std::fs::write(destination, source).expect("write Dart fixture");
+    }
+
+    let ws = Workspace::open_with_options(
+        root.path(),
+        bonsai_adapters::all_languages_registry(),
+        bonsai_workspace::WorkspaceOpenOptions::lazy_query(),
+    )
+    .expect("open lazy Dart fixture");
+
+    let global = ws.compiler_linkage_index();
+    let graph = ws.cached_resolved_call_graph();
+    let gaps = graph
+        .unresolved_workspace_site_records()
+        .iter()
+        .map(|site| {
+            let caller = global
+                .decl_of(SymbolId::new(site.caller.raw()))
+                .map_or("<unknown>", |decl| decl.name.as_ref());
+            let snapshot = ws.vfs().snapshot(site.span.file).expect("gap file");
+            let source = snapshot.text.as_ref();
+            let start = usize::try_from(site.span.start).expect("span start");
+            let end = usize::try_from(site.span.end).expect("span end");
+            format!(
+                "{}:{caller}:{}",
+                snapshot.path.display(),
+                source.get(start..end).unwrap_or("<invalid span>")
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(gaps.is_empty(), "spurious Dart resolver gaps: {gaps:#?}");
+
+    let rules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../security-patterns");
+    let pack = crate::load_rulepack(&rules).expect("load bundled rules");
+    let report =
+        run_sink_analysis(&ws, &pack, SinkAnalysisOptions::default()).expect("run Dart sink analysis");
+    assert!(
+        report.analysis_complete,
+        "Dart sink analysis must not invent workspace resolver gaps: {:#?}",
+        report.analysis_incomplete_reasons
+    );
+}
+
+#[test]
 fn grouped_findings_preserve_incomplete_member_reasons() {
     let mut complete = true;
     let mut reasons = Vec::new();
@@ -124,4 +203,28 @@ fn grouped_findings_preserve_incomplete_member_reasons() {
 
     assert!(!complete);
     assert_eq!(reasons, vec!["lineage incomplete", "unresolved-call:encode"]);
+}
+
+#[test]
+fn unattributed_security_endpoints_make_the_whole_report_incomplete() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    let report = finish_taint_analysis_report(
+        Vec::new(),
+        TaintReportCompletion {
+            ws: &ws,
+            scan_files: &[],
+            resolution: None,
+            unattributed_source_matches: 2,
+            unattributed_sink_matches: 3,
+            source_rule_count: 1,
+            sink_rule_count: 1,
+            sanitizer_rule_count: 0,
+        },
+    );
+
+    assert!(!report.analysis_complete);
+    assert_eq!(
+        report.analysis_incomplete_reasons,
+        vec!["unattributed-sink-matches:3", "unattributed-source-matches:2",]
+    );
 }

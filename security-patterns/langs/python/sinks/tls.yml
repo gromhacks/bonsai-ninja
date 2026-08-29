@@ -6,26 +6,43 @@
   severity: high
   packages:
   - requests
+  imports: [requests]
   cwe:
   - CWE-295
   match:
     kind: write
     target:
-      name: verify
+      regex: '^[^\.\s]+\.verify$'
+      receiver_type_in: [Session, requests.Session]
+  constraints:
+  - arg_equals: {index: 0, value: "False"}
   match_examples:
-  - name: tls session verify assign
+  - name: requests session verification disabled
     code: |
       import requests
-      def example(value):
-          session.verify = value
-          return value
-  description: Session.verify = False.
+      def configure(session: requests.Session):
+          session.verify = False
+  - name: requests session verification enabled negative
+    code: |
+      import requests
+      def configure(session: requests.Session):
+          session.verify = True
+    expect_no_match: true
+  - name: bare local verify collision negative
+    code: |
+      import requests
+      def configure():
+          verify = False
+          return verify
+    expect_no_match: true
+  description: "requests Session `verify = False` disables certificate verification; exact member and RHS constraints keep enabled settings and local names quiet."
 - id: python.tls.ssl_create_unverified_context
   enabled: true
   language: python
   tag: weak-tls
   category: source-independent
   severity: critical
+  imports: [ssl]
   cwe:
   - CWE-295
   match:
@@ -34,9 +51,19 @@
       attribute:
       - ssl
       - _create_unverified_context
+      binding_origin: imported
   match_examples:
   - name: tls ssl create unverified context
-    code: "def example(user_input):\n    return ssl._create_unverified_context(user_input)\n"
+    code: "import ssl\ndef example(user_input):\n    return ssl._create_unverified_context(user_input)\n"
+  - name: local ssl call collision negative
+    code: |
+      class ssl:
+          @staticmethod
+          def _create_unverified_context(value):
+              return value
+      def example(value):
+          return ssl._create_unverified_context(value)
+    expect_no_match: true
   description: ssl._create_unverified_context().
 - id: python.tls.ssl_default_https_unverified
   enabled: true
@@ -44,66 +71,111 @@
   tag: weak-tls
   category: source-independent
   severity: critical
+  imports: [ssl]
   cwe:
   - CWE-295
   match:
     kind: write
     target:
-      name: _create_default_https_context
+      attribute: [ssl, _create_default_https_context]
+      binding_origin: imported
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:ssl\.)?_create_unverified_context$'
   match_examples:
-  - name: tls ssl default https unverified
-    code: "def example(value):\n    _create_default_https_context = value\n    return value\n"
-  description: ssl._create_default_https_context = ssl._create_unverified_context (global override).
+  - name: global default HTTPS context override
+    code: |
+      import ssl
+      ssl._create_default_https_context = ssl._create_unverified_context
+  - name: verified default HTTPS context negative
+    code: |
+      import ssl
+      ssl._create_default_https_context = ssl.create_default_context
+    expect_no_match: true
+  - name: local default context collision negative
+    code: |
+      import ssl
+      _create_default_https_context = ssl._create_unverified_context
+    expect_no_match: true
+  - name: local ssl module collision negative
+    code: |
+      import ssl
+      class ssl:
+          _create_unverified_context = staticmethod(lambda: object())
+      ssl._create_default_https_context = ssl._create_unverified_context
+    expect_no_match: true
+  description: "`ssl._create_default_https_context = ssl._create_unverified_context` disables verification globally; compiler-proven imported ownership and callable-value constraints reject local providers, local names, and verified assignments."
 - id: python.tls.sslcontext_check_hostname_off
   enabled: true
   language: python
   tag: weak-tls
   category: source-independent
   severity: high
+  imports: [ssl]
   cwe:
   - CWE-295
   match:
     kind: write
     target:
-      name: check_hostname
+      regex: '^[^\.\s]+\.check_hostname$'
+      receiver_type_in: [SSLContext, ssl.SSLContext]
+  constraints:
+  - arg_equals: {index: 0, value: "False"}
   match_examples:
-  - name: tls sslcontext check hostname off
-    code: "def example(value):\n    check_hostname = value\n    return value\n"
-  description: SSLContext.check_hostname = False.
+  - name: SSL context hostname checks disabled
+    code: |
+      import ssl
+      def configure(context: ssl.SSLContext):
+          context.check_hostname = False
+  - name: SSL context hostname checks enabled negative
+    code: |
+      import ssl
+      def configure(context: ssl.SSLContext):
+          context.check_hostname = True
+    expect_no_match: true
+  - name: bare local hostname flag collision negative
+    code: |
+      import ssl
+      check_hostname = False
+    expect_no_match: true
+  description: "SSLContext `check_hostname = False` disables hostname verification; the member/RHS constraints keep enabled settings and local names quiet."
 - id: python.tls.sslcontext_verify_mode_none
   enabled: true
   language: python
   tag: weak-tls
   category: source-independent
   severity: critical
+  imports: [ssl]
   cwe:
   - CWE-295
   match:
     kind: write
     target:
-      name: verify_mode
+      regex: '^[^\.\s]+\.verify_mode$'
+      receiver_type_in: [SSLContext, ssl.SSLContext]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:ssl\.)?CERT_NONE$'
   match_examples:
-  - name: tls sslcontext verify mode none
-    code: "def example(value):\n    verify_mode = value\n    return value\n"
-  description: SSLContext.verify_mode = ssl.CERT_NONE.
-- id: python.tls.urllib3_disable_warnings
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: weak-tls
-  severity: low
-  packages:
-  - urllib3
-  cwe:
-  - CWE-295
-  match:
-    kind: call
-    callee:
-      attribute:
-      - urllib3
-      - disable_warnings
-  description: "Disabled - disable_warnings is a smell, not a vuln; flag manually."
+  - name: SSL context certificate verification disabled
+    code: |
+      import ssl
+      def configure(context: ssl.SSLContext):
+          context.verify_mode = ssl.CERT_NONE
+  - name: SSL context required verification negative
+    code: |
+      import ssl
+      def configure(context: ssl.SSLContext):
+          context.verify_mode = ssl.CERT_REQUIRED
+    expect_no_match: true
+  - name: bare local verify mode collision negative
+    code: |
+      import ssl
+      verify_mode = ssl.CERT_NONE
+    expect_no_match: true
+  description: "SSLContext `verify_mode = ssl.CERT_NONE` disables certificate verification; exact member/value constraints reject secure modes and local names."
 - id: python.tls.pyopenssl_verify_off
   enabled: true
   language: python
@@ -137,3 +209,126 @@
           ctx.set_verify(SSL.VERIFY_PEER, callback)
     expect_no_match: true
   description: "OpenSSL.SSL.Context.set_verify(VERIFY_NONE, ...) - disables certificate verification."
+
+- id: python.tls.requests_verify_false
+  enabled: true
+  language: python
+  tag: weak-tls
+  category: source-independent
+  severity: high
+  packages: [requests]
+  imports: [requests]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [requests, get]
+  constraints:
+  - keyword_arg_equals: {name: verify, value: "False"}
+  match_examples:
+  - name: requests get explicitly disables certificate verification
+    code: |
+      import requests
+      def fetch(url):
+          return requests.get(url, verify=False)
+    expect_match_text: [requests.get]
+  - name: requests get keeps certificate verification enabled
+    code: |
+      import requests
+      def fetch(url):
+          return requests.get(url, verify=True)
+    expect_no_match: true
+  description: "requests.get(..., verify=False) disables TLS certificate verification."
+
+- id: python.tls.requests_post_verify_false
+  enabled: true
+  language: python
+  tag: weak-tls
+  category: source-independent
+  severity: high
+  packages: [requests]
+  imports: [requests]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [requests, post]
+  constraints:
+  - keyword_arg_equals: {name: verify, value: "False"}
+  match_examples:
+  - name: requests post explicitly disables certificate verification
+    code: |
+      import requests
+      def send(url, body):
+          return requests.post(url, data=body, verify=False)
+    expect_match_text: [requests.post]
+  - name: requests post uses default certificate verification
+    code: |
+      import requests
+      def send(url, body):
+          return requests.post(url, data=body)
+    expect_no_match: true
+  description: "requests.post(..., verify=False) disables TLS certificate verification."
+
+- id: python.tls.httpx_verify_false
+  enabled: true
+  language: python
+  tag: weak-tls
+  category: source-independent
+  severity: high
+  packages: [httpx]
+  imports: [httpx]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [httpx, get]
+  constraints:
+  - keyword_arg_equals: {name: verify, value: "False"}
+  match_examples:
+  - name: httpx get explicitly disables certificate verification
+    code: |
+      import httpx
+      def fetch(url):
+          return httpx.get(url, verify=False)
+    expect_match_text: [httpx.get]
+  - name: httpx get keeps certificate verification enabled
+    code: |
+      import httpx
+      def fetch(url):
+          return httpx.get(url, verify=True)
+    expect_no_match: true
+  description: "httpx.get(..., verify=False) disables TLS certificate verification."
+
+- id: python.tls.aiohttp_ssl_false
+  enabled: true
+  language: python
+  tag: weak-tls
+  category: source-independent
+  severity: high
+  packages: [aiohttp]
+  imports: [aiohttp]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: get
+  constraints:
+  - receiver_type_in: [ClientSession]
+  - keyword_arg_equals: {name: ssl, value: "False"}
+  match_examples:
+  - name: aiohttp session get explicitly disables TLS verification
+    code: |
+      import aiohttp
+      async def fetch(session: aiohttp.ClientSession, url):
+          return await session.get(url, ssl=False)
+    expect_match_text: [session.get]
+  - name: unrelated get method cannot provide aiohttp TLS evidence
+    code: |
+      import aiohttp
+      class Registry:
+          def get(self, key, **options): return key
+      def fetch(registry: Registry, key):
+          return registry.get(key, ssl=False)
+    expect_no_match: true
+  description: "aiohttp ClientSession.get(..., ssl=False) disables TLS certificate verification for the request."

@@ -54,6 +54,17 @@ const ROOTED_SEMANTIC_QUERY_RESIDENT_RESERVE_BYTES: u64 = 7 * BYTES_PER_GIB / 4;
 const SEMANTIC_QUERY_MIN_RESERVE_BYTES: u64 = 768 * BYTES_PER_MIB;
 const WEIGHTED_COMPILER_UNIT_BASE_BYTES: u64 = 64 * BYTES_PER_MIB;
 const WEIGHTED_COMPILER_SOURCE_AMPLIFICATION: u64 = 40;
+// Broad compiler-body consumers retain compact workspace linkage and stream
+// immutable compiler objects through file-local derived-fact projections.
+// Compiler-object pages are file-backed and reclaimable; charging them again
+// through live RSS makes concurrency depend on page-cache history and can
+// serialize identical exact work behind one permit. Elasticsearch's broad
+// security inventory measured a roughly 2 GiB non-reclaimable
+// linkage/rule/output working set. Retain that fixed reserve plus the ordinary
+// syntax headroom, then use the existing source-weighted permits for every
+// decoded body. Under a 3 GiB budget this admits ten small units; constrained
+// 2 GiB and 1 GiB hosts perform the same work serially.
+const STREAMING_COMPILER_BODY_RESIDENT_RESERVE_BYTES: u64 = 2 * BYTES_PER_GIB;
 const WEIGHTED_COMPILER_MIN_HEADROOM_BYTES: u64 = 128 * BYTES_PER_MIB;
 // Retain one quarter of the process budget for allocator variance, immutable
 // graph growth after the schedule is chosen, and platform runtime overhead.
@@ -243,6 +254,21 @@ impl SyntaxMemoryPermitPool {
         ))
     }
 
+    /// Build a weighted gate for streaming already-persisted compiler bodies.
+    ///
+    /// File-backed compiler-object pages are reclaimable, so live RSS is not a
+    /// stable measure of memory committed by this phase. This profile reserves
+    /// the shared non-reclaimable linkage/rule/output working set and admits
+    /// file-local body projections by their exact source weight. It changes
+    /// scheduling only: every body is still decoded and matched, and an
+    /// oversize body still runs alone.
+    #[must_use]
+    pub fn for_streaming_compiler_bodies() -> Self {
+        Self::with_capacity(streaming_compiler_body_working_memory_bytes(
+            effective_memory_limit_bytes(),
+        ))
+    }
+
     fn with_capacity(capacity_bytes: Option<u64>) -> Self {
         Self {
             capacity_bytes,
@@ -325,6 +351,16 @@ fn syntax_working_memory_bytes(limit: Option<u64>, resident_bytes: Option<u64>) 
         let headroom = WEIGHTED_SYNTAX_HEADROOM_BYTES.min(limit.saturating_sub(1));
         let resident = resident_bytes.unwrap_or(SYNTAX_RESIDENT_RESERVE_BYTES);
         limit.saturating_sub(resident).saturating_sub(headroom).max(1)
+    })
+}
+
+fn streaming_compiler_body_working_memory_bytes(limit: Option<u64>) -> Option<u64> {
+    limit.map(|limit| {
+        let headroom = WEIGHTED_SYNTAX_HEADROOM_BYTES.min(limit.saturating_sub(1));
+        limit
+            .saturating_sub(STREAMING_COMPILER_BODY_RESIDENT_RESERVE_BYTES)
+            .saturating_sub(headroom)
+            .max(1)
     })
 }
 
@@ -782,10 +818,10 @@ mod tests {
         callgraph_worker_count_for_limit, candidate_index_worker_count_for_limit,
         compiler_weighted_batches_for_limit, compiler_weighted_batches_for_limit_and_resident,
         compiler_worker_count_for_limit, min_present, rooted_semantic_query_worker_count_for_limit,
-        source_ingestion_batches_for_limit_and_resident, syntax_weighted_batches_for_limit_and_resident,
-        syntax_worker_count_for_limit, syntax_worker_count_for_limit_and_resident,
-        syntax_worker_count_for_sources_and_limit, weighted_compiler_unit_bytes, worker_count_for_limit,
-        SyntaxMemoryPermitPool, BYTES_PER_GIB,
+        source_ingestion_batches_for_limit_and_resident, streaming_compiler_body_working_memory_bytes,
+        syntax_weighted_batches_for_limit_and_resident, syntax_worker_count_for_limit,
+        syntax_worker_count_for_limit_and_resident, syntax_worker_count_for_sources_and_limit,
+        weighted_compiler_unit_bytes, worker_count_for_limit, SyntaxMemoryPermitPool, BYTES_PER_GIB,
     };
     use super::{linux_cgroup_limit_paths, read_numeric_limit};
 
@@ -1003,6 +1039,105 @@ mod tests {
             .expect("an oversize exact compiler unit runs alone");
         assert!(permits.try_acquire(1).is_none());
         drop(oversize);
+    }
+
+    #[test]
+    fn streaming_compiler_bodies_use_non_reclaimable_reserve_not_live_rss() {
+        let three_gib = SyntaxMemoryPermitPool::with_capacity(streaming_compiler_body_working_memory_bytes(
+            Some(3 * BYTES_PER_GIB),
+        ));
+        let mut admitted = Vec::new();
+        for _ in 0..10 {
+            admitted.push(
+                three_gib
+                    .try_acquire(0)
+                    .expect("ten small exact body projections fit at 3 GiB"),
+            );
+        }
+        assert!(
+            three_gib.try_acquire(0).is_none(),
+            "the weighted gate must bound an eleventh body projection"
+        );
+        drop(admitted);
+
+        for limit in [BYTES_PER_GIB, 2 * BYTES_PER_GIB] {
+            let constrained = SyntaxMemoryPermitPool::with_capacity(
+                streaming_compiler_body_working_memory_bytes(Some(limit)),
+            );
+            let only = constrained
+                .try_acquire(0)
+                .expect("a constrained host still performs exact body work");
+            assert!(
+                constrained.try_acquire(0).is_none(),
+                "a constrained host must serialize rather than skip work"
+            );
+            drop(only);
+        }
+    }
+
+    #[test]
+    fn streaming_compiler_body_permits_weight_mixed_small_and_large_units() {
+        let permits = SyntaxMemoryPermitPool::with_capacity(streaming_compiler_body_working_memory_bytes(
+            Some(3 * BYTES_PER_GIB),
+        ));
+        // An 8 MiB body is charged 384 MiB (64 MiB base + 40x source),
+        // leaving exactly four 64 MiB small-body permits in the 640 MiB
+        // streaming envelope.
+        let large = permits.acquire(8 * 1024 * 1024);
+        let small = (0..4)
+            .map(|_| permits.try_acquire(0).expect("weighted peer body fits"))
+            .collect::<Vec<_>>();
+        assert!(
+            permits.try_acquire(0).is_none(),
+            "source weighting must prevent a fifth small peer beside the large body"
+        );
+        drop(large);
+        let replacement = permits
+            .try_acquire(0)
+            .expect("releasing a large body restores admission capacity");
+        drop((small, replacement));
+    }
+
+    #[test]
+    fn streaming_compiler_body_permits_complete_every_submitted_unit() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let permits = Arc::new(SyntaxMemoryPermitPool::with_capacity(
+            streaming_compiler_body_working_memory_bytes(Some(3 * BYTES_PER_GIB)),
+        ));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let sources = [0, 1, 512, 8 * 1024 * 1024, u64::MAX, 4096, 0, 2 * 1024 * 1024];
+        let workers = sources
+            .into_iter()
+            .map(|source_bytes| {
+                let permits = Arc::clone(&permits);
+                let completed = Arc::clone(&completed);
+                std::thread::spawn(move || {
+                    let _permit = permits.acquire(source_bytes);
+                    completed.fetch_add(1, Ordering::Relaxed);
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("exact body projection worker");
+        }
+        assert_eq!(
+            completed.load(Ordering::Relaxed),
+            sources.len(),
+            "memory scheduling must never cap or skip compiler-body work"
+        );
+    }
+
+    #[test]
+    fn streaming_compiler_body_profile_preserves_unbounded_cpu_scheduling() {
+        let permits =
+            SyntaxMemoryPermitPool::with_capacity(streaming_compiler_body_working_memory_bytes(None));
+        let first = permits.try_acquire(u64::MAX).expect("unbounded first body");
+        let second = permits.try_acquire(u64::MAX).expect("unbounded peer body");
+        drop((first, second));
     }
 
     #[test]

@@ -198,18 +198,3 @@
       }
     expect_no_match: true
   description: "Sereal::Decoder::decode_sereal - blessed objects + FREEZE/THAW hooks reinstantiate; with dangerous class allow-list = RCE."
-
-- id: perl.deser.data_dumper_eval
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: perl
-  tag: insecure-deserialization
-  severity: medium
-  packages: ["Data::Dumper"]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: Dumper
-  description: "Disabled - Data::Dumper output alone is inert; only dangerous if the caller eval()s it back. The eval sink already catches that pattern."

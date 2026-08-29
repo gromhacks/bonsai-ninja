@@ -37,6 +37,7 @@ REGISTRY_WAIT_SECONDS = 15 * 60
 RATE_LIMIT_FALLBACK_SECONDS = 10 * 60
 RATE_LIMIT_SAFETY_SECONDS = 5
 RATE_LIMIT_TIMESTAMP = re.compile(r"try again after (.+? GMT)", re.IGNORECASE)
+REGISTRY_REQUEST_ATTEMPTS = 8
 
 
 def run(*args: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
@@ -189,6 +190,16 @@ def publishable_packages(
     return packages, str(version)
 
 
+def workspace_package_names(data: dict[str, object]) -> set[str]:
+    """Return package names for workspace members, excluding external dependencies."""
+    member_ids = set(data["workspace_members"])  # type: ignore[arg-type]
+    return {
+        str(package["name"])
+        for package in data["packages"]  # type: ignore[index]
+        if package["id"] in member_ids
+    }
+
+
 def publication_order(packages: dict[str, dict[str, object]]) -> list[str]:
     dependencies: dict[str, set[str]] = {}
     for name, package in packages.items():
@@ -212,17 +223,67 @@ def publication_order(packages: dict[str, dict[str, object]]) -> list[str]:
     return order
 
 
-def registry_json(path: str) -> dict[str, object] | None:
-    request = urllib.request.Request(
-        f"{REGISTRY_API}/{path}", headers={"User-Agent": USER_AGENT}
-    )
+def http_retry_delay(error: urllib.error.HTTPError) -> float | None:
+    """Return a crates.io backoff for an HTTP 429 response."""
+    if error.code != 429:
+        return None
+
+    retry_after = error.headers.get("Retry-After") if error.headers else None
+    if retry_after:
+        try:
+            return max(0.0, float(retry_after)) + RATE_LIMIT_SAFETY_SECONDS
+        except ValueError:
+            try:
+                retry_at = email.utils.parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=dt.timezone.utc)
+                return max(
+                    0.0,
+                    (retry_at - dt.datetime.now(dt.timezone.utc)).total_seconds(),
+                ) + RATE_LIMIT_SAFETY_SECONDS
+            except (TypeError, ValueError, OverflowError):
+                pass
+
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as error:
-        if error.code == 404:
-            return None
-        raise
+        body = error.read().decode("utf-8", errors="replace")
+    except OSError:
+        body = ""
+    return crates_io_retry_delay(f"429 Too Many Requests: {body}")
+
+
+def registry_bytes(
+    url: str, *, timeout: int, allow_not_found: bool = False
+) -> bytes | None:
+    """Read one registry response with bounded server-directed 429 backoff."""
+    for attempt in range(1, REGISTRY_REQUEST_ATTEMPTS + 1):
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError as error:
+            if error.code == 404 and allow_not_found:
+                error.close()
+                return None
+            delay = http_retry_delay(error)
+            error.close()
+            if delay is None or attempt == REGISTRY_REQUEST_ATTEMPTS:
+                raise
+            retry_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=delay)
+            print(
+                "  crates.io API rate limit reached; "
+                f"retrying at {retry_at:%Y-%m-%d %H:%M:%S} UTC "
+                f"({delay:.0f}s, attempt {attempt + 1}/{REGISTRY_REQUEST_ATTEMPTS})",
+                flush=True,
+            )
+            time.sleep(delay)
+    raise AssertionError("registry request retry loop exhausted without returning")
+
+
+def registry_json(path: str) -> dict[str, object] | None:
+    payload = registry_bytes(
+        f"{REGISTRY_API}/{path}", timeout=30, allow_not_found=True
+    )
+    return None if payload is None else json.loads(payload)
 
 
 def audit_registry(packages: dict[str, dict[str, object]], version: str) -> None:
@@ -273,9 +334,10 @@ def wait_for_registry(name: str, version: str) -> None:
 
 
 def download(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return response.read()
+    payload = registry_bytes(url, timeout=60)
+    if payload is None:
+        raise FileNotFoundError(url)
+    return payload
 
 
 def canonical_crate_contents(
@@ -348,9 +410,47 @@ def assert_registry_credentials() -> None:
     )
 
 
-def publish(order: list[str], version: str, *, resume: bool) -> None:
+def preflight_package_archives(
+    order: list[str], version: str, *, excluded_packages: set[str]
+) -> None:
+    """Build and inspect every upload archive before the first publish.
+
+    Cargo must package the publishable workspace as one unit here. Packaging
+    crates individually cannot resolve an exact-version workspace dependency
+    until that dependency has already reached crates.io, which would defeat
+    the all-archives-before-upload safety property.
+    """
+    print("preflight: packaging every crate before publication", flush=True)
+    command = ["cargo", "package", "--workspace", "--locked", "--no-verify"]
+    for name in sorted(excluded_packages):
+        command.extend(("--exclude", name))
+
+    try:
+        run(*command)
+        for index, name in enumerate(order, start=1):
+            print(f"  [{index}/{len(order)}] {name} {version}", flush=True)
+            archive_path = ROOT / "target" / "package" / f"{name}-{version}.crate"
+            archive = archive_path.read_bytes()
+            canonical_crate_contents(archive, expected_root=f"{name}-{version}")
+    finally:
+        for name in order:
+            remove_package_artifacts(name, version)
+
+
+def publish(
+    order: list[str],
+    version: str,
+    *,
+    resume: bool,
+    excluded_packages: set[str],
+) -> None:
     assert_clean_checkout()
     assert_registry_credentials()
+    preflight_package_archives(
+        order,
+        version,
+        excluded_packages=excluded_packages,
+    )
     for index, name in enumerate(order, start=1):
         print(f"[{index}/{len(order)}] {name} {version}", flush=True)
         if registry_version_exists(name, version):
@@ -389,8 +489,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        packages, version = publishable_packages(metadata())
+        workspace_metadata = metadata()
+        packages, version = publishable_packages(workspace_metadata)
         order = publication_order(packages)
+        excluded_packages = workspace_package_names(workspace_metadata) - set(packages)
         print(f"crates.io: {len(order)} packages, version {version}")
         print("publication order:")
         for index, name in enumerate(order, start=1):
@@ -402,7 +504,12 @@ def main() -> int:
                 raise ValueError(
                     f"--publish requires --confirm-version {version} (got {args.confirm_version!r})"
                 )
-            publish(order, version, resume=args.resume)
+            publish(
+                order,
+                version,
+                resume=args.resume,
+                excluded_packages=excluded_packages,
+            )
     except (OSError, subprocess.CalledProcessError, tarfile.TarError, ValueError) as error:
         print(f"crates.io: {error}", file=sys.stderr)
         return 1

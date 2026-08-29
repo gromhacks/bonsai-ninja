@@ -1,32 +1,79 @@
-# Perl cloud / serverless sources.
-# Keep explicit cloud scaffolding in its own file so the trust-boundary split
-# stays meaningful even when the precise runtime shape is too broad for v1.
-- id: perl.source.aws_lambda_event
-  enabled: false
-  disabled_reason:
-    code: over-broad
+# Perl cloud-service response sources. Handler parameters are not inferred
+# from conventional variable names; cloud identity is proven by an exact
+# imported SDK constructor and receiver-typed service call.
+- id: perl.source.amazon_s3_thin_get_object
+  enabled: true
   language: perl
   trust: service
-  tag: cloud-event
-  payload_types: [event, json]
-  packages: [AWS::Lambda]
+  category: cloud-input
+  tag: cloud-input
+  payload_types: [binary, text]
+  packages: ["Amazon::S3::Thin"]
+  imports: ["Amazon::S3::Thin"]
   match:
-    kind: param
-    target:
-      name: event
-  description: "Disabled - AWS Lambda Perl runtime `event` param is too broad without a runtime-specific handler wrapper."
+    kind: call
+    callee:
+      name: get_object
+  constraints:
+  - receiver_type_in: ["Amazon::S3::Thin"]
+  - min_args: 2
+  - max_args: 3
+  match_examples:
+  - name: Amazon S3 object response
+    code: |
+      use Amazon::S3::Thin;
+      sub download_object {
+        my $client = Amazon::S3::Thin->new({ aws_access_key_id => 'key' });
+        return $client->get_object('uploads', 'incoming.json');
+      }
+    expect_match_text: [client->get_object]
+  - name: unrelated get_object method is not cloud input
+    code: |
+      use Amazon::S3::Thin;
+      package LocalStore;
+      sub get_object { return 'local' }
+      package main;
+      sub download_object {
+        my $store = LocalStore->new();
+        return $store->get_object('uploads', 'incoming.json');
+      }
+    expect_no_match: true
+  description: "Amazon::S3::Thin get_object(bucket, key[, headers]) returns an HTTP response whose body and metadata came from cloud object storage, on a compiler-typed S3 client."
 
-- id: perl.source.gcf_request
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: perl.source.amazon_s3_lite_get_object
+  enabled: true
   language: perl
   trust: service
-  tag: cloud-event
-  payload_types: [event, json]
-  packages: [Google::Cloud::Functions]
+  category: cloud-input
+  tag: cloud-input
+  payload_types: [binary, text]
+  packages: ["Amazon::S3::Lite"]
+  imports: ["Amazon::S3::Lite"]
   match:
-    kind: param
-    target:
-      name: req
-  description: "Disabled - GCF/Functions-style `req` param collides with non-cloud HTTP handlers; enable only in cloud-only audits."
+    kind: call
+    callee:
+      name: get_object
+  constraints:
+  - receiver_type_in: ["Amazon::S3::Lite"]
+  - min_args: 2
+  match_examples:
+  - name: Amazon S3 Lite object response
+    code: |
+      use Amazon::S3::Lite;
+      sub download_object {
+        my $client = Amazon::S3::Lite->new(access_key => 'key', secret_key => 'secret');
+        return $client->get_object('uploads', 'incoming.json');
+      }
+    expect_match_text: [client->get_object]
+  - name: unrelated get_object method remains clean
+    code: |
+      use Amazon::S3::Lite;
+      package LocalStore;
+      sub get_object { return 'local' }
+      package main;
+      sub download_object {
+        my $store = LocalStore->new();
+        return $store->get_object('uploads', 'incoming.json');
+      }
+    expect_no_match: true
+  description: "Amazon::S3::Lite get_object returns cloud object bytes and metadata on a compiler-typed S3 client."

@@ -20,7 +20,7 @@
         -export([test/1]).
         test(Token) ->
           logger:error("token=~p", [Token]).
-      expect_match_text: [logger:error]
+      expect_match_text: ["logger:error"]
     - name: erlang logger ordinary error negative
       code: |
         -module(example).
@@ -47,7 +47,7 @@
         -export([test/1]).
         test(Stack) ->
           error_logger:error_msg("stack trace ~p", [Stack]).
-      expect_match_text: [error_logger:error_msg]
+      expect_match_text: ["error_logger:error_msg"]
     - name: unrelated logger call negative
       code: |
         -module(example).

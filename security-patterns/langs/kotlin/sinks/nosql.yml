@@ -36,10 +36,9 @@
       }
       }
     expect_no_match: true
-  description: "MongoCollection.find - flag tainted Bson filter. Merged collision aliases: kotlin.nosql.mongo_find_local_document, kotlin.ldap.spring_ldap_template_find."
+  description: "MongoCollection.find - flag tainted Bson filter."
   aliases:
   - kotlin.nosql.mongo_find_local_document
-  - kotlin.ldap.spring_ldap_template_find
 - id: kotlin.nosql.mongo_aggregate
   enabled: true
   language: kotlin

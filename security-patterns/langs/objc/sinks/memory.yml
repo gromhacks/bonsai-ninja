@@ -15,7 +15,7 @@
   match:
     kind: call
     callee:
-      name: read
+      regex: "(?:^|\\.)read:maxLength:$"
   constraints:
   - requires_state:
       name: stream

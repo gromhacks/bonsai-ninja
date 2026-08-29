@@ -26,8 +26,14 @@ fn x_13_cpp() {
             lang: "cpp",
             adapter: Arc::new(bonsai_lang_cpp::CppAdapter::new()),
             files: &[
-                ("Util.cpp", "class Util { public: void helper(const char *p) { sink(p); } };\n"),
-                ("Entry.cpp", "class Util { public: void helper(const char *p); };\nvoid entry(const char *args) { Util u; u.helper(args); }\n"),
+                (
+                    "Util.hpp",
+                    "class Util { public: void helper(const char *p) { sink(p); } };\n",
+                ),
+                (
+                    "Entry.cpp",
+                    "#include \"Util.hpp\"\nvoid entry(const char *args) { Util u; u.helper(args); }\n",
+                ),
             ],
             entry: "entry",
             seed: &["args"],

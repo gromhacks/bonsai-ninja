@@ -101,6 +101,318 @@ fn parse_perl_tree(src: &str) -> Tree {
     parser.parse(src.as_bytes(), None).expect("parse perl source")
 }
 
+fn calls_below<'a>(events: &'a [FlowEvent], out: &mut Vec<&'a FlowEvent>) {
+    for event in events {
+        match event {
+            FlowEvent::Call { .. } => out.push(event),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                calls_below(then_events, out);
+                calls_below(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                calls_below(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                calls_below(body, out);
+                calls_below(catch_events, out);
+                calls_below(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn defined_or_static_default_retains_the_exact_left_call_result() {
+    let src = r#"
+package Handler;
+sub show ($self) {
+    my $name = $self->param('name') // '';
+    my $ambiguous = first() // second();
+    return $name;
+}
+"#;
+    let adapter: std::sync::Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        std::sync::Arc::new(PerlAdapter::new());
+    let ws = bonsai_testkit::workspace_with(vec![adapter], &[("handler.pl", src)]);
+    let global = ws.db().global_index();
+    let show = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "show")
+        .expect("show declaration");
+
+    assert!(
+        show.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                source_call: Some(call),
+                ..
+            } if target == "$name" && call == "self->param"
+        )),
+        "defined-or with a static default must retain the compiler-proven call result: {:#?}",
+        show.flow_events
+    );
+    assert!(
+        !show.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                source_call: Some(_),
+                ..
+            } if target == "$ambiguous"
+        )),
+        "two dynamic operands must not be collapsed to one call result: {:#?}",
+        show.flow_events
+    );
+}
+
+#[test]
+fn synthesized_calls_are_restored_to_compiler_evaluation_order() {
+    let src = r#"
+package Store;
+use File::Spec;
+sub read_segments {
+    my ($rel) = @_;
+    my $path = File::Spec->catfile('/srv/assets', $rel);
+    open(my $fh, '<', $path) or return undef;
+    my $data = <$fh>;
+    close($fh);
+    return $data;
+}
+"#;
+    let adapter: std::sync::Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        std::sync::Arc::new(PerlAdapter::new());
+    let ws = bonsai_testkit::workspace_with(vec![adapter], &[("Store.pm", src)]);
+    let global = ws.db().global_index();
+    let decl = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "read_segments")
+        .expect("read_segments declaration");
+
+    let call_index = |name: &str| {
+        decl.flow_events
+            .iter()
+            .position(|event| matches!(event, FlowEvent::Call { name: call, .. } if call == name))
+            .unwrap_or_else(|| panic!("missing call {name}: {:#?}", decl.flow_events))
+    };
+    let path_assign = decl
+        .flow_events
+        .iter()
+        .position(|event| matches!(event, FlowEvent::Assign { target, .. } if target == "$path"))
+        .expect("path assignment");
+    let terminal_return = decl
+        .flow_events
+        .iter()
+        .rposition(
+            |event| matches!(event, FlowEvent::Return { value_text: Some(value), .. } if value == "$data"),
+        )
+        .expect("terminal data return");
+
+    assert!(
+        call_index("File::Spec->catfile") < path_assign,
+        "RHS call must evaluate before its write: {:#?}",
+        decl.flow_events
+    );
+    assert!(
+        path_assign < call_index("open"),
+        "the path write must precede its consumer: {:#?}",
+        decl.flow_events
+    );
+    assert!(
+        call_index("open") < terminal_return,
+        "an earlier synthesized call must not be discarded as post-return code: {:#?}",
+        decl.flow_events
+    );
+}
+
+#[test]
+fn foreach_call_iterable_retains_binding_flow() {
+    let src = r#"
+sub index ($self) {
+    my $raw = $self->param('sort') // 'id';
+    my @keys;
+    for my $k (split /,/, $raw) {
+        $k =~ s/^\s+|\s+$//g;
+        push @keys, $k;
+    }
+    $self->render(json => consume(\@keys));
+}
+"#;
+    let adapter: std::sync::Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        std::sync::Arc::new(PerlAdapter::new());
+    let ws = bonsai_testkit::workspace_with(vec![adapter], &[("handler.pl", src)]);
+    let global = ws.db().global_index();
+    let decl = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "index")
+        .expect("index declaration");
+
+    assert!(
+        decl.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                source_call: Some(call),
+                source_call_args,
+                ..
+            } if target == "$k" && call == "split" && source_call_args.iter().any(|arg| arg == "$raw")
+        )),
+        "the compiler-proven foreach binding must survive adapter post-processing: {:#?}",
+        decl.flow_events
+    );
+    assert!(
+        !decl.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call { name, .. } if name == "m"
+        )),
+        "a split delimiter is not an implicit match operation: {:#?}",
+        decl.flow_events
+    );
+}
+
+#[test]
+fn executable_match_regexp_remains_a_call_fact() {
+    let src = r#"
+sub allowed {
+    my ($value) = @_;
+    return $value =~ /safe/;
+}
+"#;
+    let adapter: std::sync::Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        std::sync::Arc::new(PerlAdapter::new());
+    let ws = bonsai_testkit::workspace_with(vec![adapter], &[("matcher.pl", src)]);
+    let global = ws.db().global_index();
+    let decl = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "allowed")
+        .expect("allowed declaration");
+
+    assert!(
+        decl.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call { name, .. } if name == "m"
+        )),
+        "an executable regex match must retain its compiler call fact: {:#?}",
+        decl.flow_events
+    );
+}
+
+#[test]
+fn external_boundary_call_shapes_are_exact_compiler_facts() {
+    let src = r#"
+use DBI;
+use Net::AMQP::RabbitMQ;
+use Kafka::Consumer;
+use Amazon::S3::Thin;
+use Device::SerialPort;
+use Device::BCM2835;
+sub boundaries {
+    my ($connection) = @_;
+    my $dbh = DBI->connect('dbi:SQLite:dbname=app.db');
+    my $sth = $dbh->prepare('select name from users');
+    my $row = $sth->fetchrow_arrayref();
+    my $rabbit = Net::AMQP::RabbitMQ->new();
+    my $delivery = $rabbit->recv(5);
+    my $consumer = Kafka::Consumer->new(Connection => $connection);
+    my $messages = $consumer->fetch('events', 0, 0, 1048576);
+    my $thin = Amazon::S3::Thin->new({ aws_access_key_id => 'key' });
+    my $object = $thin->get_object('uploads', 'incoming.json');
+    my $port = Device::SerialPort->new('/dev/ttyUSB0');
+    my ($count, $bytes) = $port->read(128);
+    my $gpio = Device::BCM2835::gpio_lev(7);
+    return ($row, $delivery, $messages, $object, $bytes, $gpio);
+}
+"#;
+    let adapter: std::sync::Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        std::sync::Arc::new(PerlAdapter::new());
+    let ws = bonsai_testkit::workspace_with(vec![adapter], &[("boundaries.pl", src)]);
+    let global = ws.db().global_index();
+    let boundaries = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "boundaries")
+        .expect("boundaries declaration");
+    let mut calls = Vec::new();
+    calls_below(&boundaries.flow_events, &mut calls);
+    let actual = calls
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Call {
+                name,
+                receiver,
+                call_kind,
+                args,
+                ..
+            } => Some((name.as_str(), receiver.as_deref(), *call_kind, args.len())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    for expected in [
+        ("DBI->connect", Some("DBI"), CallKind::Method, 1),
+        ("dbh->prepare", Some("dbh"), CallKind::Method, 1),
+        ("sth->fetchrow_arrayref", Some("sth"), CallKind::Method, 0),
+        (
+            "Net::AMQP::RabbitMQ->new",
+            Some("Net::AMQP::RabbitMQ"),
+            CallKind::Constructor,
+            0,
+        ),
+        ("rabbit->recv", Some("rabbit"), CallKind::Method, 1),
+        (
+            "Kafka::Consumer->new",
+            Some("Kafka::Consumer"),
+            CallKind::Constructor,
+            1,
+        ),
+        ("consumer->fetch", Some("consumer"), CallKind::Method, 4),
+        (
+            "Amazon::S3::Thin->new",
+            Some("Amazon::S3::Thin"),
+            CallKind::Constructor,
+            1,
+        ),
+        ("thin->get_object", Some("thin"), CallKind::Method, 2),
+        (
+            "Device::SerialPort->new",
+            Some("Device::SerialPort"),
+            CallKind::Constructor,
+            1,
+        ),
+        ("port->read", Some("port"), CallKind::Method, 1),
+        ("Device::BCM2835::gpio_lev", None, CallKind::Function, 1),
+    ] {
+        assert!(
+            actual.contains(&expected),
+            "missing exact call {expected:?}; got {actual:#?}"
+        );
+    }
+
+    assert!(
+        boundaries.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign { target, source_call: Some(call), .. }
+                if target == "$bytes" && call == "port->read"
+        )),
+        "list-context assignment must bind the second result to $bytes: {:#?}",
+        boundaries.flow_events
+    );
+}
+
 #[test]
 fn use_qw_exports_emit_resolution_local_member_imports() {
     let imports = parse_import_specs("use AuthService qw(verify_token run_admin_command);\n");
@@ -623,5 +935,56 @@ fn oo_package_and_isa_drive_typed_arrow_dispatch() {
             .callees_of(bonsai_common::FuncId::new(entry.symbol.raw()))
             .any(|edge| edge.to == bonsai_common::FuncId::new(helper.symbol.raw())),
         "typed Perl inheritance should resolve the base method"
+    );
+}
+
+#[test]
+fn qualified_oo_package_assignment_alias_resolves_exact_method_dispatch() {
+    let adapter: std::sync::Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        std::sync::Arc::new(PerlAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[
+            (
+                "lib/Domain/Repository.pm",
+                "package Domain::Repository;\n\
+                 sub new { my ($class, $value) = @_; return bless { value => $value }, $class; }\n\
+                 sub run { my ($self) = @_; return $self->{value}; }\n1;\n",
+            ),
+            (
+                "lib/Storage.pm",
+                "use Domain::Repository;\n\
+                 sub persist { my ($value) = @_; my $repository = Domain::Repository->new($value);\n\
+                 my $alias = $repository; return $alias->run(); }\n1;\n",
+            ),
+        ],
+    );
+    let global = ws.db().global_index();
+    let persist = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "persist")
+        .expect("persist declaration");
+    let run = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "run")
+        .expect("run declaration");
+    assert!(
+        persist.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call { name, receiver_types, .. }
+                if name == "alias->run" && receiver_types == &["Domain::Repository"]
+        )),
+        "the exact assignment alias must retain the constructed receiver type: {:#?}",
+        persist.flow_events
+    );
+
+    let call_graph = ws.resolved_call_graph();
+    assert!(
+        call_graph
+            .callees_of(bonsai_common::FuncId::new(persist.symbol.raw()))
+            .any(|edge| edge.to == bonsai_common::FuncId::new(run.symbol.raw())),
+        "the exact typed alias must resolve to the qualified package method"
     );
 }

@@ -39,9 +39,7 @@
   - name: requests get literal negative
     code: "import requests\n\ndef example(user_input):\n    return requests.get('safe')\n"
     expect_no_match: true
-  description: 'requests.get(tainted URL). Merged aliases: python.tls.requests_verify_false.'
-  aliases:
-  - python.tls.requests_verify_false
+  description: requests.get(tainted URL).
 - id: python.ssrf.requests_post
   enabled: true
   language: python
@@ -67,9 +65,7 @@
   - name: requests post literal negative
     code: "import requests\n\ndef example(user_input):\n    return requests.post('safe')\n"
     expect_no_match: true
-  description: "requests.post(url) - HTTP POST to tainted URL allows SSRF with request-body exfiltration. Merged aliases: python.tls.requests_post_verify_false."
-  aliases:
-  - python.tls.requests_post_verify_false
+  description: "requests.post(url) - HTTP POST to tainted URL allows SSRF with request-body exfiltration."
 - id: python.ssrf.requests_put
   enabled: true
   language: python
@@ -398,9 +394,7 @@
   - name: httpx get literal negative
     code: "import httpx\n\ndef example(user_input):\n    return httpx.get('safe')\n"
     expect_no_match: true
-  description: "httpx.get(url) - async HTTP GET to tainted URL allows SSRF to internal services / cloud metadata. Merged aliases: python.tls.httpx_verify_false."
-  aliases:
-  - python.tls.httpx_verify_false
+  description: "httpx.get(url) - HTTP GET to tainted URL allows SSRF to internal services / cloud metadata."
 - id: python.ssrf.httpx_post
   enabled: true
   language: python
@@ -597,37 +591,6 @@
     code: "import httpx\n\ndef example(user_input):\n    return AsyncClient.get('safe')\n"
     expect_no_match: true
   description: httpx.AsyncClient.get.
-- id: python.ssrf.httpx_async_client_get_variable
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.ssrf.httpx_async_client_get
-  language: python
-  tag: ssrf
-  severity: high
-  packages:
-  - httpx
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.get$
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: httpx async client variable get
-    code: "import httpx\nasync def example(client, user_input):\n    return await client.get(user_input)\n"
-    expect_match_text:
-    - client.get
-  - name: httpx async client get variable literal negative
-    code: "import httpx\n\nasync def example(client, user_input):\n    return await client.get('safe')\n"
-    expect_no_match: true
-  - name: dict get is not httpx client negative
-    code: "import httpx\n\nasync def example(envelope, user_input):\n    return envelope.get(user_input)\n"
-    expect_no_match: true
-  description: "Disabled duplicate - typed AsyncClient receivers are covered by python.ssrf.httpx_async_client_get without relying on local receiver names."
 - id: python.ssrf.httpx_async_client_post
   enabled: true
   language: python
@@ -815,9 +778,7 @@
   - name: aiohttp get literal negative
     code: "import aiohttp\n\ndef example(user_input):\n    return ClientSession.get('safe')\n"
     expect_no_match: true
-  description: 'aiohttp ClientSession.get. Merged aliases: python.tls.aiohttp_ssl_false.'
-  aliases:
-  - python.tls.aiohttp_ssl_false
+  description: aiohttp ClientSession.get.
 - id: python.ssrf.aiohttp_post
   enabled: true
   language: python
@@ -893,27 +854,6 @@
     code: "import tornado\n\ndef example(user_input):\n    return AsyncHTTPClient.fetch('safe')\n"
     expect_no_match: true
   description: tornado AsyncHTTPClient.fetch.
-- id: python.ssrf.pycurl_perform
-  enabled: false
-  language: python
-  tag: ssrf
-  severity: high
-  packages:
-  - pycurl
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Curl
-      - perform
-  match_examples:
-  - name: ssrf pycurl perform
-    code: "import pycurl\ndef example(user_input):\n    return Curl.perform(user_input)\n"
-  description: "pycurl Curl.perform - flag URL set via setopt(URL)."
-  disabled_reason:
-    code: over-broad
 - id: python.ssrf.curl_setopt_url
   enabled: true
   language: python
@@ -1014,24 +954,6 @@
     code: "import grequests\n\ndef example(user_input):\n    return grequests.get('safe')\n"
     expect_no_match: true
   description: "grequests.get(url) - concurrent HTTP GET to tainted URL allows SSRF."
-- id: python.ssrf.gevent_socket
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: ssrf
-  severity: medium
-  packages:
-  - gevent
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - gevent
-      - socket
-  description: "Disabled - raw socket SSRF; rare entry point."
 - id: python.ssrf.urllib_urlretrieve
   enabled: true
   language: python
@@ -1056,21 +978,3 @@
     code: "def example(user_input):\n    return request.urlretrieve('safe')\n"
     expect_no_match: true
   description: "urllib.request.urlretrieve - fetches and writes to disk."
-- id: python.ssrf.boto3_client_request
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: ssrf
-  severity: medium
-  packages:
-  - boto3
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - boto3
-      - client
-  description: "Disabled - boto3 client itself isn't SSRF; flag specific S3 download with tainted bucket."

@@ -16,7 +16,6 @@
   - name: generated direct match
     code: |
       use aws_sdk_s3;
-      use aws_sdk_s3;
       use aws_sdk_s3::dummy;
       fn example(target: &str) {
           let query = "user";
@@ -50,7 +49,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      use aws_sdk_s3;
       use aws_sdk_s3;
       use aws_sdk_s3::dummy;
       fn example(target: &str) {
@@ -86,7 +84,6 @@
   - name: generated direct match
     code: |
       use aws_sdk_secretsmanager;
-      use aws_sdk_secretsmanager;
       use aws_sdk_secretsmanager::dummy;
       fn example(target: &str) {
           let query = "user";
@@ -120,7 +117,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      use google_cloud_secretmanager;
       use google_cloud_secretmanager;
       use google_cloud_secretmanager::dummy;
       fn example(target: &str) {

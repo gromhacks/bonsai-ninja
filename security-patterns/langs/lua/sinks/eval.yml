@@ -44,8 +44,12 @@
     callee:
       regex: "^load$"
   constraints:
+  - top_level: true
   - arg_tainted:
       index: 0
+  - arg_string_composition_not_starts_with:
+      index: 0
+      value: "return "
   match_examples:
   - name: lua.eval.load example
     code: |
@@ -56,6 +60,12 @@
     code: |
       function example(input, url, id, payload, request, params, user)
         load("return 1")
+      end
+    expect_no_match: true
+  - name: serialized expression uses the specialized deserialization rule
+    code: |
+      function example(input)
+        load("return " .. input)
       end
     expect_no_match: true
   description: "load(chunk) - Lua 5.2+ chunk loader; string chunk is compiled as Lua source."
@@ -113,31 +123,3 @@
       end
     expect_no_match: true
   description: "loadfile(path) - compiles a Lua file at tainted path for later execution."
-
-- id: lua.eval.debug_sethook
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: lua
-  tag: code-injection
-  severity: high
-  cwe: [CWE-94]
-  match:
-    kind: call
-    callee:
-      attribute: [debug, sethook]
-  description: "Disabled - debug.sethook installs a hook function; dangerous only when the hook is built from tainted source."
-
-- id: lua.eval.require
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: lua
-  tag: code-injection
-  severity: medium
-  cwe: [CWE-94]
-  match:
-    kind: call
-    callee:
-      name: require
-  description: "Disabled - require(tainted) loads an arbitrary module; enable with module-name narrowing."

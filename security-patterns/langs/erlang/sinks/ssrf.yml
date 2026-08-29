@@ -34,6 +34,19 @@
   tag: ssrf
   severity: high
   cwe: [CWE-918]
+  analysis_semantics:
+    compiler_guard:
+      capability: case-arm.finite-pattern-membership
+      required_evidence:
+      - guarded-call:httpc:request
+      - scrutinee-call:uri_string:parse
+      - static-field:scheme=string:https
+      - membership-call:lists:member
+      - finite-string-membership-field:host
+      - guarded-argument:1=scrutinee-argument:0
+      - guarded-static-field:2.autoredirect=string:false
+      sanitizer_tag: ssrf
+      category: finite-url-pattern-membership-guard
   match:
     kind: call
     callee:

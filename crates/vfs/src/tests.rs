@@ -70,6 +70,30 @@ fn remove_tombstones_file_without_reusing_id() {
 }
 
 #[test]
+fn exact_suffix_lookup_is_indexed_unique_and_remove_safe() {
+    let vfs = Vfs::new();
+    let first = vfs.write("project/include/api/config.h", "#define API\n");
+    assert_eq!(
+        vfs.unique_file_ending_with(Path::new("api/config.h"))
+            .map(|(file, _)| file),
+        Some(first)
+    );
+
+    let second = vfs.write("vendor/api/config.h", "#define VENDOR_API\n");
+    assert!(
+        vfs.unique_file_ending_with(Path::new("api/config.h")).is_none(),
+        "an ambiguous include suffix must fail closed"
+    );
+    assert_eq!(vfs.remove(Path::new("vendor/api/config.h")), Some(second));
+    assert_eq!(
+        vfs.unique_file_ending_with(Path::new("api/config.h"))
+            .map(|(file, _)| file),
+        Some(first),
+        "removing one candidate must update the suffix directory"
+    );
+}
+
+#[test]
 fn apply_edits_bumps_workspace_revision() {
     let vfs = Vfs::new();
     let a = vfs.write("a.rs", "abc");

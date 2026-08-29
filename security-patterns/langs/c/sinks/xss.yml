@@ -29,14 +29,12 @@
   description: "MHD_create_response_from_buffer - flag with text/html Content-Type."
 
 - id: c.xss.mongoose_http_reply
-  aliases:
-  - c.info_disclosure.mongoose_error_detail
   enabled: true
   language: c
   tag: xss
   severity: medium
   packages: [mongoose]
-  cwe: [CWE-79, CWE-209]
+  cwe: [CWE-79]
   match:
     kind: call
     callee:
@@ -58,7 +56,7 @@
         mg_http_reply("safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "mongoose mg_http_reply with text/html body. Also covers merged aliases: c.info_disclosure.mongoose_error_detail."
+  description: "mongoose mg_http_reply with an attacker-controlled text/html body."
 
 - id: c.xss.mongoose_printf
   enabled: true

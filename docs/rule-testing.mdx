@@ -81,12 +81,13 @@ parameter source and, when appropriate, a typed receiver. See the
 
 ## Integration Fixtures
 
-Use `examples/<lang>/micro` for command-surface checks,
-`examples/<lang>/mega_flow` for construct coverage, and focused fixtures for
-sanitizer, lifecycle, resolver, and field-sensitive behavior.
+Use `examples/<lang>/language_gauntlet` for public command-surface and construct
+coverage. Focused sanitizer, lifecycle, resolver, and field-sensitive fixtures
+live under `test-fixtures/languages/<lang>/` so `examples/` remains one coherent
+end-to-end project per supported language.
 
 ```bash
-./target/release/bonsai-ninja security examples/python/mega_flow \
+./target/release/bonsai-ninja security examples/python/language_gauntlet \
   taint-analysis \
   --rules-dir security-patterns \
   --format json \
@@ -138,7 +139,7 @@ cargo test -p bonsai-ninja-conformance --test architecture_invariants
 python3 scripts/sanitizer_credit_audit.py
 python3 scripts/sync_skill.py --check
 scripts/audit-adapter-capabilities.sh --check
-python3 scripts/validate-mega-cli.py \
+python3 scripts/validate-language-gauntlets.py \
   --bin ./target/release/bonsai-ninja \
   --skip-realworld
 ```
@@ -208,8 +209,9 @@ python3 scripts/pack_audit.py --json > /tmp/bonsai-pack-audit.json
 
 `pack_audit.py` uses a strict safe YAML loader: duplicate mapping keys fail
 the gate instead of silently letting the later value overwrite the earlier
-one. A `disabled_reason.code: subsumed` entry must also name an existing,
-enabled canonical rule through `subsumed_by`.
+one. The checked-in pack contains only executable rules: duplicates are
+represented by the canonical rule's `aliases`, genuinely inapplicable families
+are declared in `metadata.yml`, and speculative matches stay out of the pack.
 
 Do not enable generic print, log, join, or parse patterns without a real
 security boundary and constraints that keep common safe usage quiet.

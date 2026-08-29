@@ -1,7 +1,5 @@
 # C# response header / CRLF injection.
 - id: csharp.header.response_headers_add
-  aliases:
-    - csharp.smuggle.headers_add_dual_cl_te
   enabled: true
   language: csharp
   tag: header-injection
@@ -22,7 +20,7 @@
       code: |
         class App { void Test() { Headers.Add("X-Name", "safe"); } }
       expect_no_match: true
-  description: "Response.Headers.Add(name, tainted_value) - flag tainted header value (CRLF). Also covers merged aliases: csharp.smuggle.headers_add_dual_cl_te."
+  description: "Response.Headers.Add(name, tainted_value) - flag tainted header value (CRLF)."
 
 - id: csharp.header.response_addheader
   enabled: true

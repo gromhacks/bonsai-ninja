@@ -283,6 +283,65 @@ fn loader_rejects_unknown_rule_fields() {
 }
 
 #[test]
+fn loader_rejects_incomplete_signature_context_targets() {
+    for target in [
+        "in_class_suffix: ['']",
+        "in_owner_base: ['']",
+        "signature_param_types: [{index: 0, type_in: []}]",
+        "signature_param_types: [{index: 0, type_in: [Context]}, {index: 0, type_in: [Other]}]",
+    ] {
+        let tmp = tempdir();
+        write(
+            &tmp.path().join("langs/x/sources/context.yml"),
+            &format!(
+                r#"- id: x.source.context
+  enabled: true
+  trust: remote
+  tag: input
+  match:
+    kind: param
+    target:
+      param_index_in: [1]
+      {target}
+  description: invalid signature context fixture
+"#
+            ),
+        );
+        let error = load_rulepack(tmp.path()).expect_err("invalid context target must fail closed");
+        assert!(
+            matches!(error, LoadError::InvalidTargetContext { .. }),
+            "got {error:?}"
+        );
+    }
+}
+
+#[test]
+fn loader_rejects_binding_origin_without_a_binding_bearing_target() {
+    let tmp = tempdir();
+    write(
+        &tmp.path().join("langs/javascript/sources/remote.yml"),
+        r#"- id: javascript.source.invalid_binding_origin
+  enabled: true
+  trust: remote
+  tag: browser-input
+  match:
+    kind: param
+    target:
+      name: input
+      binding_origin: runtime-global
+  description: invalid parameter binding identity fixture
+"#,
+    );
+
+    let error = load_rulepack(tmp.path()).expect_err("non-binding target identity must fail closed");
+    assert!(
+        matches!(error, LoadError::InvalidTargetContext { .. }),
+        "got {error:?}"
+    );
+    assert!(error.to_string().contains("binding_origin"));
+}
+
+#[test]
 fn loader_rejects_callback_typing_fields_outside_typing_rules() {
     let tmp = tempdir();
     write(
@@ -292,11 +351,59 @@ fn loader_rejects_callback_typing_fields_outside_typing_rules() {
   trust: remote
   tag: http-input
   callback_arg_index: 0
+  callback_field_path: [onstream]
   callback_param_types: [[Request]]
   match:
     kind: call
     callee: {name: route}
   description: invalid source-owned callback signature",
+    );
+
+    let err = load_rulepack(tmp.path()).unwrap_err();
+    assert!(
+        matches!(err, LoadError::InvalidTypingDeclaration { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn loader_accepts_exact_aggregate_callback_typing() {
+    let tmp = tempdir();
+    write(
+        &tmp.path().join("langs/lua/typing/callback.yml"),
+        r#"- id: lua.typing.server_callback
+  enabled: true
+  imports: [http.server]
+  callback_arg_index: 0
+  callback_field_path: [onstream]
+  callback_param_types: [[Server], [ServerStream]]
+  match:
+    kind: call
+    callee: {attribute: [http_server, listen]}
+  description: exact aggregate callback typing"#,
+    );
+
+    let pack = load_rulepack(tmp.path()).expect("valid aggregate callback typing rule");
+    let rule = &pack.packs["lua"].typing[0];
+    assert_eq!(rule.callback_arg_index, Some(0));
+    assert_eq!(rule.callback_field_path, ["onstream"]);
+    assert_eq!(rule.callback_param_types, [["Server"], ["ServerStream"]]);
+}
+
+#[test]
+fn loader_rejects_callback_field_path_without_callback_signature() {
+    let tmp = tempdir();
+    write(
+        &tmp.path().join("langs/lua/typing/callback.yml"),
+        r#"- id: lua.typing.invalid_callback_field
+  enabled: true
+  returns_type: Server
+  callback_arg_index: 0
+  callback_field_path: [onstream]
+  match:
+    kind: call
+    callee: {name: listen}
+  description: invalid orphan callback field"#,
     );
 
     let err = load_rulepack(tmp.path()).unwrap_err();

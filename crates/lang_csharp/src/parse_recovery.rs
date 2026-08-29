@@ -18,11 +18,21 @@ pub(crate) fn csharp_parse_recovery_edits(
     snapshot: &FileSnapshot,
     tree: &SyntaxTree,
 ) -> Vec<ParseRecoveryEdit> {
+    csharp_parse_recovery_edit_batches(snapshot, tree)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+pub(crate) fn csharp_parse_recovery_edit_batches(
+    snapshot: &FileSnapshot,
+    tree: &SyntaxTree,
+) -> Vec<Vec<ParseRecoveryEdit>> {
     if !tree.root_node().has_error() {
         return Vec::new();
     }
 
-    let mut edits = bonsai_lang_api::branch_free_conditional_recovery_edits(
+    let conditionals = bonsai_lang_api::branch_free_conditional_recovery_edits(
         snapshot,
         tree,
         bonsai_lang_api::ConditionalDirectiveSyntax {
@@ -31,12 +41,21 @@ pub(crate) fn csharp_parse_recovery_edits(
             alternatives_without_condition: &["#else"],
             closing: "#endif",
             trailing_comment_prefixes: &["//"],
+            non_directive_node_kinds: &[
+                "comment",
+                "string_literal",
+                "verbatim_string_literal",
+                "raw_string_literal",
+                "interpolated_string_expression",
+                "character_literal",
+            ],
         },
     );
-    edits.extend(csharp_file_directive_edits(snapshot.text.as_ref()));
-    edits.sort_by_key(|edit| (edit.start_byte, edit.end_byte));
-    edits.dedup();
-    edits
+    let file_directives = csharp_file_directive_edits(snapshot.text.as_ref());
+    [conditionals, file_directives]
+        .into_iter()
+        .filter(|batch| !batch.is_empty())
+        .collect()
 }
 
 fn csharp_file_directive_edits(source: &str) -> Vec<ParseRecoveryEdit> {
@@ -142,6 +161,42 @@ mod tests {
         let tree = parser.parse(source, None).expect("parse");
 
         assert!(csharp_parse_recovery_edits(&snapshot, &tree).is_empty());
+    }
+
+    #[test]
+    fn directive_spellings_inside_comments_and_raw_strings_are_not_recovered() {
+        let source = r#"/*
+#if COMMENT_TEXT
+#endif
+*/
+class Example {
+    string text = """
+#if STRING_TEXT
+#endif
+""";
+#if FEATURE
+    public
+#endif
+    int Value { get; set; }
+}
+"#;
+        let vfs = Vfs::new();
+        let file = vfs.write("Example.cs", source);
+        let snapshot = vfs.snapshot(file).expect("snapshot");
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_from_pack("csharp").expect("C# grammar"))
+            .expect("set C# grammar");
+        let tree = parser.parse(source, None).expect("raw parse");
+        assert!(tree.root_node().has_error());
+
+        let edits = csharp_parse_recovery_edits(&snapshot, &tree);
+        assert_eq!(edits.len(), 2, "only the real conditional may be masked");
+        assert!(edits.iter().all(|edit| {
+            let text = &source[edit.start_byte..edit.end_byte];
+            text.contains("FEATURE")
+                || text.contains("#endif") && edit.start_byte > source.find("class Example").unwrap()
+        }));
     }
 
     #[test]

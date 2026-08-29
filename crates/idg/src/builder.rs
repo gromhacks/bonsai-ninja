@@ -69,6 +69,15 @@ struct CalleeEndpointInput {
     /// resolver-proven local callable these are lexical captures;
     /// ordinary functions do not receive capture stitching.
     capture_read_nodes: Vec<(String, NodeId)>,
+    /// Exact projected reads and writes retained from the canonical segment.
+    /// Typed replay may need these facts after the segment has been spilled;
+    /// keeping only the storage identity, optional write span, and stable
+    /// node id avoids reopening the complete compiler body.
+    projected_places: Vec<ProjectedPlaceInput>,
+    /// Consumers of exact projected reads. The edge span is the lexical use
+    /// point needed to validate an imported binding without guessing from a
+    /// local alias spelling.
+    projected_read_consumers: Vec<ProjectedReadConsumerInput>,
     receiver_param_index: Option<usize>,
     receiver_consumer_nodes: Vec<NodeId>,
     receiver_field_bases: Vec<String>,
@@ -87,6 +96,8 @@ struct CalleeEndpoints {
     param_names_end: u32,
     param_write_nodes_end: u32,
     capture_read_nodes_end: u32,
+    projected_places_end: u32,
+    projected_read_consumers_end: u32,
     receiver_param_index: u32,
     receiver_consumer_nodes_end: u32,
     receiver_field_bases_end: u32,
@@ -127,6 +138,41 @@ impl PackedRange {
 struct PackedReturnFieldProjection {
     base: StrId,
     field: StrId,
+}
+
+#[derive(Clone, Debug)]
+struct ProjectedPlaceInput {
+    storage: String,
+    write_span: Option<Span>,
+    node: NodeId,
+    /// Exact scalar operands feeding this projected write. Capture replay
+    /// uses these non-projected compiler nodes at the function boundary;
+    /// projected heap nodes remain state relations rather than call records.
+    scalar_inputs: Vec<NodeId>,
+}
+
+#[derive(Clone, Debug)]
+struct ProjectedReadConsumerInput {
+    storage: String,
+    use_span: Span,
+    read: NodeId,
+    consumer: NodeId,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct PackedProjectedPlace {
+    storage: StrId,
+    write_span: Option<Span>,
+    node: NodeId,
+    scalar_inputs: PackedRange,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct PackedProjectedReadConsumer {
+    storage: StrId,
+    use_span: Span,
+    read: NodeId,
+    consumer: NodeId,
 }
 
 #[derive(Copy, Clone)]
@@ -272,6 +318,40 @@ impl<'a> CalleeEndpointView<'a> {
         .filter_map(|(name, node)| self.index.strings.get(*name).map(|name| (name, *node)))
     }
 
+    fn projected_places(self) -> impl Iterator<Item = (&'a str, Option<Span>, NodeId, &'a [NodeId])> + 'a {
+        self.row_slice(
+            &self.index.projected_places,
+            self.row.projected_places_end,
+            |row| row.projected_places_end,
+        )
+        .iter()
+        .filter_map(|place| {
+            self.index.strings.get(place.storage).map(|storage| {
+                (
+                    storage,
+                    place.write_span,
+                    place.node,
+                    place.scalar_inputs.slice(&self.index.projected_scalar_inputs),
+                )
+            })
+        })
+    }
+
+    fn projected_read_consumers(self) -> impl Iterator<Item = (&'a str, Span, NodeId, NodeId)> + 'a {
+        self.row_slice(
+            &self.index.projected_read_consumers,
+            self.row.projected_read_consumers_end,
+            |row| row.projected_read_consumers_end,
+        )
+        .iter()
+        .filter_map(|read| {
+            self.index
+                .strings
+                .get(read.storage)
+                .map(|storage| (storage, read.use_span, read.read, read.consumer))
+        })
+    }
+
     fn return_passthrough_param_indices(self) -> impl Iterator<Item = usize> + 'a {
         self.row_slice(
             &self.index.param_indices,
@@ -299,6 +379,9 @@ struct CalleeEndpointIndex {
     param_write_nodes: Vec<PackedRange>,
     param_write_node_values: Vec<NodeId>,
     capture_read_nodes: Vec<(StrId, NodeId)>,
+    projected_places: Vec<PackedProjectedPlace>,
+    projected_scalar_inputs: Vec<NodeId>,
+    projected_read_consumers: Vec<PackedProjectedReadConsumer>,
     receiver_consumer_nodes: Vec<NodeId>,
     receiver_field_bases: Vec<StrId>,
     implicit_receiver_bases: Vec<StrId>,
@@ -320,6 +403,9 @@ impl CalleeEndpointIndex {
             param_write_nodes: Vec::new(),
             param_write_node_values: Vec::new(),
             capture_read_nodes: Vec::new(),
+            projected_places: Vec::new(),
+            projected_scalar_inputs: Vec::new(),
+            projected_read_consumers: Vec::new(),
             receiver_consumer_nodes: Vec::new(),
             receiver_field_bases: Vec::new(),
             implicit_receiver_bases: Vec::new(),
@@ -347,6 +433,8 @@ impl CalleeEndpointIndex {
             param_names,
             param_write_nodes,
             capture_read_nodes,
+            projected_places,
+            projected_read_consumers,
             receiver_param_index,
             receiver_consumer_nodes,
             receiver_field_bases,
@@ -369,6 +457,24 @@ impl CalleeEndpointIndex {
             .into_iter()
             .map(|(name, node)| (self.strings.intern(&name), node));
         let capture_read_nodes_end = Self::append_end(&mut self.capture_read_nodes, capture_read_nodes);
+        let projected_places = projected_places.into_iter().map(|place| PackedProjectedPlace {
+            storage: self.strings.intern(&place.storage),
+            write_span: place.write_span,
+            node: place.node,
+            scalar_inputs: PackedRange::append(&mut self.projected_scalar_inputs, place.scalar_inputs),
+        });
+        let projected_places_end = Self::append_end(&mut self.projected_places, projected_places);
+        let projected_read_consumers =
+            projected_read_consumers
+                .into_iter()
+                .map(|read| PackedProjectedReadConsumer {
+                    storage: self.strings.intern(&read.storage),
+                    use_span: read.use_span,
+                    read: read.read,
+                    consumer: read.consumer,
+                });
+        let projected_read_consumers_end =
+            Self::append_end(&mut self.projected_read_consumers, projected_read_consumers);
         let receiver_consumer_nodes_end =
             Self::append_end(&mut self.receiver_consumer_nodes, receiver_consumer_nodes);
         let receiver_field_bases_end = Self::pack_strings(
@@ -404,6 +510,8 @@ impl CalleeEndpointIndex {
             param_names_end,
             param_write_nodes_end,
             capture_read_nodes_end,
+            projected_places_end,
+            projected_read_consumers_end,
             receiver_param_index: receiver_param_index
                 .map(|index| u32::try_from(index).expect("receiver parameter index exceeds u32"))
                 .unwrap_or(u32::MAX),
@@ -531,6 +639,11 @@ struct FieldArgStitch {
     actual_arg: String,
     param_name: String,
     call_span: Span,
+    /// Exact source-expression span for an explicit argument. A projected
+    /// compiler value materialized at this span is evaluated before the call
+    /// even when the language's canonical call span names only the callee
+    /// token and therefore precedes the argument text.
+    argument_value_span: Option<Span>,
     precision: Precision,
     call_kind: CallEdgeKind,
     arg_idx: u32,
@@ -967,6 +1080,65 @@ impl SyntacticFieldUniverse {
             }
         }
     }
+
+    /// Record access paths composed by a call nested directly inside a
+    /// compiler-lowered aggregate return/yield field.
+    ///
+    /// The caller's target prefix is present in the aggregate AST while the
+    /// callee's descendant suffix is present in its lowered return places.
+    /// Neither side alone contains the combined path, but the resolved call
+    /// site proves the composition exactly.  Only pre-existing compiler
+    /// writes are projected here; synthetic worklist output is deliberately
+    /// excluded so recursive returns cannot grow an unbounded field language.
+    fn record_nested_return_projection_demands(
+        &mut self,
+        field_index: &FieldPlaceIndex,
+        sites: &[Arc<ReturnFieldStitch>],
+    ) {
+        // Freeze the adapter-derived suffix language before composing any
+        // nested return prefix.  A nested call may receive its descendants
+        // interprocedurally (so they are absent from the callee's initial
+        // segment), but every admitted suffix must still have appeared in a
+        // compiler place somewhere in this workspace.  Using this immutable
+        // snapshot also means a recursive aggregate return can add one
+        // source-level prefix, never feed its own synthetic output back into
+        // an ever-growing path language.
+        let adapter_suffixes = self.suffixes.iter().cloned().collect::<Vec<_>>();
+        for site in sites {
+            let target = site.target_base.trim();
+            let nested = [
+                crate::transfer::RETURN_FIELD_BASE,
+                crate::transfer::YIELD_FIELD_BASE,
+            ]
+            .into_iter()
+            .find_map(|special_base| {
+                target
+                    .strip_prefix(special_base)
+                    .and_then(|suffix| suffix.strip_prefix('.'))
+                    .filter(|suffix| !suffix.is_empty())
+                    .map(|suffix| (special_base, suffix))
+            });
+            let Some((special_base, nested_prefix)) = nested else {
+                continue;
+            };
+            for suffix in &adapter_suffixes {
+                self.record_full_storage_place(&format!("{special_base}.{nested_prefix}.{suffix}"));
+            }
+            let source = normalize_storage_base_cached(&site.source_base);
+            let Some(hits) = field_index.field_hits_for_normalized_base(
+                site.callee_seg,
+                site.callee,
+                source.as_ref(),
+                true,
+            ) else {
+                continue;
+            };
+            for hit in hits {
+                let projected = format!("{target}.{}", hit.field);
+                self.record_full_storage_place(&projected);
+            }
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -1033,6 +1205,23 @@ pub struct ResolvedCallee {
     pub precision: Precision,
 }
 
+/// Exact lexical environment origin for a callable value passed through a
+/// higher-order formal. The binding name is adapter-normalized compiler IR;
+/// the IDG uses it only as a storage base.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallbackBindingOrigin {
+    /// Lexical caller that constructed and passed the callable value.
+    pub caller: FuncId,
+    /// Exact resolved host-call span where the callable value crossed the
+    /// higher-order boundary.
+    pub call_site: Span,
+    /// Adapter-normalized caller-local storage base for a callable value
+    /// whose environment was explicitly lowered to projected fields. An
+    /// inline callback has no synthetic storage object, but still owns an
+    /// exact lexical environment at [`Self::call_site`].
+    pub binding: Option<String>,
+}
+
 /// Trait the workspace implements to resolve a call site to its
 /// candidate callees. The IDG builder is generic over this so
 /// tests can use a tiny in-memory implementation.
@@ -1067,6 +1256,18 @@ pub trait CalleeResolver {
         Vec::new()
     }
 
+    /// Lexical origins for one callback candidate returned by
+    /// [`CalleeResolver::callback_bindings`]. Empty means the candidate is a
+    /// direct function reference with no compiler-lowered environment.
+    fn callback_binding_origins(
+        &self,
+        _host: FuncId,
+        _param_idx: u32,
+        _callback: FuncId,
+    ) -> Vec<CallbackBindingOrigin> {
+        Vec::new()
+    }
+
     /// Resolve a callable value passed as an argument at `caller`.
     /// Rulepack-declared source-callback APIs use this to model
     /// external/library calls that invoke a callback with source data.
@@ -1080,6 +1281,38 @@ pub trait CalleeResolver {
     /// a library helper in the IDG engine.
     fn callable_args_in_span(&self, _caller: FuncId, _arg_span: Span) -> Vec<ResolvedCallee> {
         Vec::new()
+    }
+
+    /// True when `candidate` is a compiler-declared callable nested inside
+    /// the exact argument expression. This is the precision boundary for
+    /// lexical capture reads and writes on rule-declared external callback
+    /// invocations; a named callback argument deliberately returns false.
+    fn callable_is_inline_in_span(&self, _caller: FuncId, _arg_span: Span, _candidate: FuncId) -> bool {
+        false
+    }
+
+    /// Resolve one adapter-normalized local import binding to its exact
+    /// compiler import target. Shared-state stitching uses this only to join
+    /// projected fields that resolve to the same imported value identity;
+    /// the target remains opaque to the language-neutral IDG. `at_span` is
+    /// the exact adapter-lowered write or consumer span used to reject a
+    /// lexical shadow at that program point.
+    fn imported_binding_target(&self, _func: FuncId, _binding: &str, _at_span: Span) -> Option<String> {
+        None
+    }
+
+    /// Resolve an exact projected storage place rooted in a
+    /// constructor-injected receiver field. Implementations return an opaque
+    /// compiler identity for the injected value plus the remaining projected
+    /// path inside that value. The IDG does not interpret receiver, type, or
+    /// field spellings; ambiguous type identities must return `None`.
+    fn injected_storage_target(
+        &self,
+        _func: FuncId,
+        _storage: &str,
+        _at_span: Span,
+    ) -> Option<(String, String)> {
+        None
     }
 
     /// Static receiver type that owns `func`, when known. The IDG
@@ -1963,10 +2196,10 @@ where
     }
     ws.finish_spool_generation()?;
     // Call stitching is complete. Endpoint vectors include parameter names,
-    // capture nodes, returns, throws, and receiver writes for every function;
-    // field closure consumes only the already-emitted relations. Release this
-    // compiler phase before streaming those relations so the two workspace-
-    // scale lifetimes never overlap.
+    // capture nodes, projected places/read consumers, returns, throws, and
+    // receiver writes for every function; field closure consumes only the
+    // already-emitted relations. Release this compiler phase before streaming
+    // those relations so the two workspace-scale lifetimes never overlap.
     drop(callee_endpoints);
     drop(schedule_to_workspace);
     stitch_debug_log(format_args!(
@@ -2042,6 +2275,21 @@ fn extend_callee_endpoints_for_segment(
         } else {
             Vec::new()
         };
+        let retain_callback_map_storage = stitch_data.get(&func).is_some_and(|data| {
+            data.call_sites.iter().any(|site| {
+                site.callback_invocations
+                    .iter()
+                    .any(|shape| !shape.callback_map_field_path.is_empty())
+            })
+        });
+        // `None` means the resident builder did not request endpoint
+        // filtering, matching capture-read retention above. Treating it as
+        // "retain none" dropped callback lexical writes only on no-cache /
+        // resident graphs while the persisted path remained correct.
+        let retain_projected_storage =
+            capture_funcs.is_none_or(|targets| targets.contains(&func)) || retain_callback_map_storage;
+        let (projected_places, projected_read_consumers) =
+            collect_projected_stitch_places(segment, func, retain_projected_storage);
         out.insert(
             func,
             CalleeEndpointInput {
@@ -2050,6 +2298,8 @@ fn extend_callee_endpoints_for_segment(
                 param_names,
                 param_write_nodes,
                 capture_read_nodes,
+                projected_places,
+                projected_read_consumers,
                 receiver_param_index: stitch_data.get(&func).and_then(|data| data.receiver_param_index),
                 receiver_consumer_nodes: stitch_data
                     .get(&func)
@@ -2080,6 +2330,77 @@ fn extend_callee_endpoints_for_segment(
             },
         );
     }
+}
+
+fn collect_projected_stitch_places(
+    segment: &IdgSegment,
+    func: FuncId,
+    retain_capture_storage: bool,
+) -> (Vec<ProjectedPlaceInput>, Vec<ProjectedReadConsumerInput>) {
+    let mut places = Vec::new();
+    let mut read_consumers = Vec::new();
+    for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
+        if node.func != func {
+            continue;
+        }
+        let node_id = NodeId(u32::try_from(node_index).expect("segment-local node count exceeds u32"));
+        let Some(place) = segment.places.get(node.place) else {
+            continue;
+        };
+        let Some(storage) = place_storage_name(segment, place) else {
+            continue;
+        };
+        if !retain_capture_storage && imported_projected_storage(&storage).is_none() {
+            continue;
+        }
+        match place {
+            Place::Write { span, .. } => {
+                let mut scalar_inputs = segment
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.to == node_id)
+                    .filter_map(|edge| {
+                        let source = segment.nodes.get(edge.from)?;
+                        if source.func != func {
+                            return None;
+                        }
+                        let source_place = segment.places.get(source.place)?;
+                        let source_is_projected =
+                            place_storage_name(segment, source_place).is_some_and(|source_storage| {
+                                imported_projected_storage(&source_storage).is_some()
+                            });
+                        (!source_is_projected).then_some(edge.from)
+                    })
+                    .collect::<Vec<_>>();
+                scalar_inputs.sort_unstable();
+                scalar_inputs.dedup();
+                places.push(ProjectedPlaceInput {
+                    storage,
+                    write_span: Some(*span),
+                    node: node_id,
+                    scalar_inputs,
+                });
+            }
+            Place::Read { .. } => {
+                places.push(ProjectedPlaceInput {
+                    storage: storage.clone(),
+                    write_span: None,
+                    node: node_id,
+                    scalar_inputs: Vec::new(),
+                });
+                for edge in segment.edges.iter().filter(|edge| edge.from == node_id) {
+                    read_consumers.push(ProjectedReadConsumerInput {
+                        storage: storage.clone(),
+                        use_span: edge.meta.via_span,
+                        read: node_id,
+                        consumer: edge.to,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    (places, read_consumers)
 }
 
 fn collect_unrooted_scalar_reads(segment: &IdgSegment, func: FuncId) -> Vec<(String, NodeId)> {
@@ -2463,6 +2784,14 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
     if let Some(stats) = &mut stats {
         stats.sites = stats.sites.saturating_add(1);
     }
+    schedule_rule_compiled_receiver_field_passthrough(
+        caller,
+        caller_seg,
+        caller_remap,
+        site,
+        ws,
+        passthrough_field_copy_sites,
+    );
     let resolve_started = stats.is_some().then(Instant::now);
     let mut candidates = resolver.resolve(
         caller,
@@ -2498,12 +2827,14 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
                 .position(|param| param == &site.callee_name)
                 .and_then(|i| u32::try_from(i).ok())
         };
+    let mut callback_candidate_funcs = AHashSet::new();
     if let Some(param_idx) = callback_param_idx {
         if let Some(stats) = &mut stats {
             stats.callback_lookups = stats.callback_lookups.saturating_add(1);
         }
         let callback_started = stats.is_some().then(Instant::now);
         for cand in resolver.callback_bindings(caller, param_idx) {
+            callback_candidate_funcs.insert(cand.func);
             if let Some(stats) = &mut stats {
                 stats.callback_candidates = stats.callback_candidates.saturating_add(1);
             }
@@ -2527,6 +2858,12 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
     let has_stitchable_candidate = candidates
         .iter()
         .any(|candidate| callee_endpoints.contains_key(candidate.func));
+    let shared_state_candidate_is_unique = candidates
+        .iter()
+        .map(|candidate| candidate.func)
+        .collect::<AHashSet<_>>()
+        .len()
+        == 1;
     // Constructor syntax itself proves that the returned object incorporates
     // its arguments even when the constructor body lives outside the indexed
     // workspace. This exception is keyed only by adapter-emitted CallKind,
@@ -2648,18 +2985,20 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
             }
         }
     }
-    let higher_order_edges = stitch_indirect_callback_inputs(
-        caller,
-        caller_seg,
-        caller_remap,
-        site,
-        resolver,
-        callee_endpoints,
-        ws,
-    );
-    if higher_order_edges > 0 {
-        if let Some(stats) = &mut stats {
-            stats.inter_edges = stats.inter_edges.saturating_add(higher_order_edges);
+    if let Some(param_idx) = callback_param_idx {
+        let environment_edges = stitch_higher_order_callable_environments(
+            caller,
+            site,
+            param_idx,
+            &callback_candidate_funcs,
+            resolver,
+            callee_endpoints,
+            ws,
+        );
+        if environment_edges > 0 {
+            if let Some(stats) = &mut stats {
+                stats.inter_edges = stats.inter_edges.saturating_add(environment_edges);
+            }
         }
     }
     // Wire only candidates that resolved to a known segment. External
@@ -2684,6 +3023,8 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
                 caller_receiver: &caller_receiver,
                 resolver,
                 candidate,
+                shared_state_candidate_is_unique,
+                caller_endpoints: callee_endpoints.get(caller),
                 endpoints,
             },
             ResolvedCandidateOutputs {
@@ -2712,11 +3053,178 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
             stats.inter_edges = stats.inter_edges.saturating_add(source_callback_edges);
         }
     }
+    let callback_invocation_edges = stitch_callback_invocations(
+        caller,
+        caller_seg,
+        caller_remap,
+        site,
+        caller_params,
+        &CallbackInvocationResolverContext {
+            resolver,
+            callee_endpoints,
+        },
+        CallbackInvocationStitchOutput {
+            return_field_sites,
+            ws,
+        },
+    );
+    if callback_invocation_edges > 0 {
+        if let Some(stats) = &mut stats {
+            stats.inter_edges = stats.inter_edges.saturating_add(callback_invocation_edges);
+        }
+    }
     // Ambiguous or unknown callees do not create IDG flow. Library
     // pass-through needs an explicit semantic summary/model; a
     // generic `CallArg -> CallRet` edge would invent dataflow.
     // Drop unused: candidates iterator is consumed.
     drop(candidates);
+}
+
+/// Preserve exact receiver descendants through a rule-compiled
+/// receiver-to-result summary.
+///
+/// Transfer lowering has already selected the concrete call span and emitted
+/// `receiver CallArg -> CallRet`.  Reuse that typed edge as the admission
+/// proof; this phase neither matches a callee name nor assigns meaning to a
+/// receiver type.  The field worklist then rebases only compiler-existing
+/// descendants from the receiver storage base onto the call's assigned
+/// result.
+fn schedule_rule_compiled_receiver_field_passthrough(
+    caller: FuncId,
+    caller_seg: SegmentId,
+    caller_remap: &NodeRemap,
+    site: &CallSiteRef,
+    ws: &IdgWorkspace,
+    passthrough_field_copy_sites: &mut Vec<FieldCopySite>,
+) {
+    let (Some(receiver_node), Some(source_base)) = (
+        site.receiver_arg_node.map(|node| caller_remap.get(node)),
+        site.receiver_storage_base.as_deref().map(str::trim),
+    ) else {
+        return;
+    };
+    let call_ret = caller_remap.get(site.call_ret_node);
+    if receiver_node.is_sentinel() || call_ret.is_sentinel() || source_base.is_empty() {
+        return;
+    }
+    let Some(segment) = ws.segment(caller_seg) else {
+        return;
+    };
+    let Some(summary_edge) = segment.edges.iter().find(|edge| {
+        edge.from == receiver_node
+            && edge.to == call_ret
+            && edge.meta.kind == crate::edge::IdgEdgeKind::IntraAssign
+            && edge.meta.precision == Precision::Narrowed
+            && edge.meta.via_span == site.site.0
+    }) else {
+        return;
+    };
+    for (target_base, write_span, result_field) in
+        call_ret_assignment_targets(ws, caller_seg, caller, call_ret)
+    {
+        if result_field.is_some() {
+            continue;
+        }
+        passthrough_field_copy_sites.push(FieldCopySite {
+            seg_id: caller_seg,
+            func: caller,
+            source_base: source_base.to_string(),
+            target_base,
+            write_span,
+            via_span: site.site.0,
+            precision: summary_edge.meta.precision,
+            call_kind: summary_edge.meta.call_kind,
+        });
+    }
+}
+
+fn stitch_higher_order_callable_environments(
+    host: FuncId,
+    invocation: &CallSiteRef,
+    callback_param_idx: u32,
+    callbacks: &AHashSet<FuncId>,
+    resolver: &dyn CalleeResolver,
+    callee_endpoints: &CalleeEndpointIndex,
+    ws: &mut IdgWorkspace,
+) -> usize {
+    let mut emitted = 0usize;
+    let mut origins = 0usize;
+    let mut projected_sources = 0usize;
+    for &callback in callbacks {
+        let Some(endpoints) = callee_endpoints.get(callback) else {
+            continue;
+        };
+        for origin in resolver.callback_binding_origins(host, callback_param_idx, callback) {
+            origins = origins.saturating_add(1);
+            let Some(origin_segment) = ws.segment_for_func(origin.caller) else {
+                continue;
+            };
+            let Some(origin_endpoints) = callee_endpoints.get(origin.caller) else {
+                continue;
+            };
+            // The callable value was constructed at `origin.call_site`, so
+            // free reads in its body belong to that exact lexical
+            // environment. A formal callback invocation occurs in `host`,
+            // but using the host invocation span to resolve captures loses
+            // caller locals (Ruby `yield` and first-party higher-order
+            // helpers are the canonical examples). Both the callback target
+            // and origin site are compiler-proven; stitch those free reads
+            // directly without interpreting an API name or callback text.
+            emitted = emitted.saturating_add(stitch_lexical_capture_reads_from_endpoint(
+                origin_segment,
+                endpoints.segment,
+                origin_endpoints,
+                endpoints,
+                origin.call_site,
+                Precision::Narrowed,
+                CallEdgeKind::Indirect,
+                ws,
+            ));
+            let Some(binding) = origin.binding.as_deref() else {
+                continue;
+            };
+            for (param_index, &param_node) in endpoints.params().iter().enumerate() {
+                if param_node.is_sentinel() || endpoints.receiver_param_index() == Some(param_index) {
+                    continue;
+                }
+                let Some(param_name) = endpoints.param_name(param_index) else {
+                    continue;
+                };
+                let capture_place = format!("{}.{}", binding.trim(), param_name.trim());
+                let sources =
+                    projected_producers_from_endpoint(origin_endpoints, &capture_place, origin.call_site);
+                projected_sources = projected_sources.saturating_add(sources.len());
+                for source in sources {
+                    place_inter_edge(
+                        origin_segment,
+                        endpoints.segment,
+                        IdgEdge {
+                            from: source,
+                            to: param_node,
+                            meta: crate::edge::EdgeMeta {
+                                precision: Precision::Narrowed,
+                                kind: crate::edge::IdgEdgeKind::InterCallArg,
+                                call_kind: CallEdgeKind::Indirect,
+                                via_span: invocation.site.0,
+                            },
+                        },
+                        ws,
+                    );
+                    emitted = emitted.saturating_add(1);
+                }
+            }
+        }
+    }
+    stitch_debug_log(format_args!(
+        "higher-order-environment: host={} param={} callbacks={} origins={} projected-sources={} emitted={}",
+        host.raw(),
+        callback_param_idx,
+        callbacks.len(),
+        origins,
+        projected_sources,
+        emitted,
+    ));
+    emitted
 }
 
 #[derive(Clone, Copy)]
@@ -2734,6 +3242,8 @@ struct ResolvedCandidateStitch<'a> {
     caller_receiver: &'a CallerReceiverContext<'a>,
     resolver: &'a dyn CalleeResolver,
     candidate: &'a ResolvedCallee,
+    shared_state_candidate_is_unique: bool,
+    caller_endpoints: Option<CalleeEndpointView<'a>>,
     endpoints: CalleeEndpointView<'a>,
 }
 
@@ -2771,6 +3281,7 @@ fn stitch_resolved_candidate(request: ResolvedCandidateStitch<'_>, outputs: Reso
     let is_ancestor_dispatch = resolver.is_ancestor_dispatch(caller, cand.func);
     stitch_candidate_receiver_inputs(request, is_ancestor_dispatch, ws, field_arg_sites, &mut stats);
     stitch_candidate_explicit_arguments(request, ws, field_arg_sites, &mut stats);
+    stitch_candidate_shared_binding_state(request, ws, &mut stats);
     stitch_candidate_capture_inputs(request, ws, &mut stats);
     stitch_candidate_return_outputs(
         request,
@@ -2780,8 +3291,148 @@ fn stitch_resolved_candidate(request: ResolvedCandidateStitch<'_>, outputs: Reso
         passthrough_field_copy_sites,
         &mut stats,
     );
-    stitch_candidate_constructor_receiver_effects(request, is_ancestor_dispatch, receiver_mutation_sites);
+    stitch_candidate_receiver_effects(request, is_ancestor_dispatch, receiver_mutation_sites);
     stitch_candidate_constructor_result(request, ws, constructor_return_sites);
+}
+
+/// Carry exact projected state on a compiler-identified shared binding across
+/// a resolved call boundary. This covers module/singleton imports and
+/// constructor-injected receiver fields without interpreting any provider,
+/// type, or field name. Only a caller write preceding this call and a callee
+/// read whose storage resolves to the same opaque compiler identity are
+/// connected. Same-spelled fields with different identities remain disjoint.
+fn stitch_candidate_shared_binding_state(
+    request: ResolvedCandidateStitch<'_>,
+    ws: &mut IdgWorkspace,
+    stats: &mut Option<&mut StitchStats>,
+) {
+    let ResolvedCandidateStitch {
+        caller,
+        caller_seg,
+        site,
+        resolver,
+        candidate: cand,
+        caller_endpoints,
+        endpoints,
+        shared_state_candidate_is_unique,
+        ..
+    } = request;
+    if !shared_state_candidate_is_unique {
+        return;
+    }
+    let Some(caller_endpoints) = caller_endpoints else {
+        return;
+    };
+
+    let mut projected_writes = 0usize;
+    let mut bound_writes = 0usize;
+    let mut writes: AHashMap<(String, String), Vec<NodeId>> = AHashMap::new();
+    for (storage, write_span, node, _) in caller_endpoints.projected_places() {
+        let Some(span) = write_span else {
+            continue;
+        };
+        if span.file == site.site.0.file && span.start > site.site.0.start {
+            continue;
+        }
+        projected_writes = projected_writes.saturating_add(1);
+        let Some((target, suffix)) = resolved_shared_projected_storage(resolver, caller, storage, span)
+        else {
+            continue;
+        };
+        bound_writes = bound_writes.saturating_add(1);
+        writes.entry((target, suffix)).or_default().push(node);
+    }
+    if writes.is_empty() {
+        stitch_debug_log(format_args!(
+            "imported-binding-state: caller={} callee={} projected-writes={} bound-writes=0",
+            caller.raw(),
+            cand.func.raw(),
+            projected_writes,
+        ));
+        return;
+    }
+
+    let mut projected_reads = 0usize;
+    let mut bound_reads = 0usize;
+    let mut reads = Vec::new();
+    for (storage, use_span, _, consumer) in endpoints.projected_read_consumers() {
+        projected_reads = projected_reads.saturating_add(1);
+        // Named read places are interned per function and can therefore have
+        // several concrete consumers. Each outgoing compiler edge retains
+        // the exact source-expression span. Resolve the import binding at
+        // that use and stitch directly to the consumer, so a later lexical
+        // shadow cannot retroactively reclassify an earlier use (or vice
+        // versa).
+        let Some((target, suffix)) =
+            resolved_shared_projected_storage(resolver, cand.func, storage, use_span)
+        else {
+            continue;
+        };
+        bound_reads = bound_reads.saturating_add(1);
+        let key = (target, suffix);
+        if writes.contains_key(&key) && !reads.contains(&(key.clone(), consumer)) {
+            reads.push((key, consumer));
+        }
+    }
+    let mut emitted = 0usize;
+    for (key, target_node) in reads {
+        let Some(sources) = writes.get(&key) else {
+            continue;
+        };
+        for &source in sources {
+            place_inter_edge(
+                caller_seg,
+                endpoints.segment,
+                IdgEdge {
+                    from: source,
+                    to: target_node,
+                    meta: crate::edge::EdgeMeta {
+                        precision: Precision::Narrowed,
+                        kind: crate::edge::IdgEdgeKind::InterSharedFieldState,
+                        call_kind: cand.edge_kind,
+                        via_span: site.site.0,
+                    },
+                },
+                ws,
+            );
+            emitted = emitted.saturating_add(1);
+        }
+    }
+    if let Some(stats) = stats.as_deref_mut() {
+        stats.inter_edges = stats.inter_edges.saturating_add(emitted);
+    }
+    stitch_debug_log(format_args!(
+        "imported-binding-state: caller={} callee={} projected-writes={} bound-writes={} projected-reads={} bound-reads={} emitted={}",
+        caller.raw(),
+        cand.func.raw(),
+        projected_writes,
+        bound_writes,
+        projected_reads,
+        bound_reads,
+        emitted,
+    ));
+}
+
+fn imported_projected_storage(storage: &str) -> Option<(&str, &str)> {
+    let storage = storage.trim();
+    let split = storage.find('.')?;
+    let base = storage[..split].trim();
+    let suffix = storage[split + 1..].trim();
+    (!base.is_empty() && !suffix.is_empty()).then_some((base, suffix))
+}
+
+fn resolved_shared_projected_storage(
+    resolver: &dyn CalleeResolver,
+    func: FuncId,
+    storage: &str,
+    at_span: Span,
+) -> Option<(String, String)> {
+    if let Some((base, suffix)) = imported_projected_storage(storage) {
+        if let Some(target) = resolver.imported_binding_target(func, base, at_span) {
+            return Some((target, suffix.to_string()));
+        }
+    }
+    resolver.injected_storage_target(func, storage, at_span)
 }
 
 fn stitch_candidate_receiver_inputs(
@@ -3085,6 +3736,7 @@ fn stitch_candidate_explicit_arguments(
                     actual_arg: actual_arg.trim().to_string(),
                     param_name: param_name.trim().to_string(),
                     call_span: site.site.0,
+                    argument_value_span: site.call_arg_spans.get(i).copied(),
                     precision: cand.precision,
                     call_kind: cand.edge_kind,
                     arg_idx: u32::try_from(i).expect("call argument index exceeds u32"),
@@ -3312,7 +3964,7 @@ fn stitch_candidate_return_outputs(
     }
 }
 
-fn stitch_candidate_constructor_receiver_effects(
+fn stitch_candidate_receiver_effects(
     request: ResolvedCandidateStitch<'_>,
     is_ancestor_dispatch: bool,
     receiver_mutation_sites: &mut Vec<Arc<ReceiverMutationStitch>>,
@@ -3331,8 +3983,10 @@ fn stitch_candidate_constructor_receiver_effects(
         endpoints,
         ..
     } = request;
+    let is_constructor = resolver.is_constructor_func(cand.func);
+    let writes_receiver_state = endpoints.receiver_field_bases().next().is_some();
     if matches!(site.call_kind, CallKind::Method | CallKind::Constructor)
-        && resolver.is_constructor_func(cand.func)
+        && (is_constructor || writes_receiver_state)
     {
         let explicit_receiver = site
             .receiver
@@ -3365,7 +4019,12 @@ fn stitch_candidate_constructor_receiver_effects(
             })
             .unwrap_or_default();
         if !target_base.is_empty() {
-            for callee_receiver_param_name in constructor_receiver_bases(endpoints) {
+            let receiver_bases = if is_constructor {
+                constructor_receiver_bases(endpoints)
+            } else {
+                endpoints.receiver_field_bases().map(str::to_string).collect()
+            };
+            for callee_receiver_param_name in receiver_bases {
                 let projected_target_base =
                     projected_receiver_target_base(&target_base, &callee_receiver_param_name);
                 receiver_mutation_sites.push(Arc::new(ReceiverMutationStitch {
@@ -3447,7 +4106,8 @@ fn stitch_lexical_capture_reads(
 ) -> usize {
     let mut added = 0usize;
     for (capture_name, capture_read) in endpoints.capture_reads() {
-        for source in scalar_producers_live_at_span(ws, caller_seg, caller, capture_name, call_span) {
+        let sources = scalar_producers_live_at_span(ws, caller_seg, caller, capture_name, call_span);
+        for source in sources {
             place_inter_edge(
                 caller_seg,
                 callee_seg,
@@ -3469,12 +4129,245 @@ fn stitch_lexical_capture_reads(
     added
 }
 
+#[allow(clippy::too_many_arguments)]
+fn stitch_lexical_capture_reads_from_endpoint(
+    caller_seg: SegmentId,
+    callee_seg: SegmentId,
+    caller_endpoints: CalleeEndpointView<'_>,
+    callee_endpoints: CalleeEndpointView<'_>,
+    call_span: Span,
+    precision: Precision,
+    call_kind: CallEdgeKind,
+    ws: &mut IdgWorkspace,
+) -> usize {
+    let mut added = 0usize;
+    for (capture_name, capture_read) in callee_endpoints.capture_reads() {
+        for source in storage_producers_from_endpoint(caller_endpoints, capture_name, call_span) {
+            place_inter_edge(
+                caller_seg,
+                callee_seg,
+                IdgEdge {
+                    from: source,
+                    to: capture_read,
+                    meta: crate::edge::EdgeMeta {
+                        precision,
+                        kind: crate::edge::IdgEdgeKind::InterCallArg,
+                        call_kind,
+                        via_span: call_span,
+                    },
+                },
+                ws,
+            );
+            added = added.saturating_add(1);
+        }
+    }
+    added
+}
+
+/// Connect one compiler-proven inline callable's lexical reads to the values
+/// live in its enclosing callable at the definition/argument span.
+///
+/// This is closure environment construction, not callback execution. The
+/// workspace adapter supplies only exact callable-argument relations whose
+/// target declaration is lexically nested in `parent`; no API name or
+/// callback convention is interpreted here. Invocation remains governed by
+/// the ordinary callgraph or rule-declared callback semantics.
+pub(crate) fn stitch_inline_lexical_capture_environment(
+    ws: &mut IdgWorkspace,
+    parent: FuncId,
+    callback: FuncId,
+    definition_span: Span,
+) -> usize {
+    let Some(parent_segment) = ws.segment_for_func(parent) else {
+        return 0;
+    };
+    let Some(callback_segment) = ws.segment_for_func(callback) else {
+        return 0;
+    };
+    let captures = ws
+        .segment(callback_segment)
+        .map(|segment| collect_unrooted_scalar_reads(segment, callback))
+        .unwrap_or_default();
+    let mut added = 0usize;
+    for (capture_name, capture_read) in captures {
+        for source in
+            scalar_producers_live_at_span(ws, parent_segment, parent, &capture_name, definition_span)
+        {
+            place_inter_edge(
+                parent_segment,
+                callback_segment,
+                IdgEdge {
+                    from: source,
+                    to: capture_read,
+                    meta: crate::edge::EdgeMeta {
+                        precision: Precision::Narrowed,
+                        kind: crate::edge::IdgEdgeKind::InterCallArg,
+                        call_kind: CallEdgeKind::Indirect,
+                        via_span: definition_span,
+                    },
+                },
+                ws,
+            );
+            added = added.saturating_add(1);
+        }
+    }
+    added
+}
+
+/// Publish writes performed by one exact inline callback back into reads of
+/// the same lexical storage in its enclosing caller. The compiler proves all
+/// three identities before this runs: the callback declaration is contained
+/// by the argument span, the matcher declares that the outer API invokes that
+/// callback, and both endpoints carry the same adapter-normalized storage
+/// name. A later caller write kills the callback value for subsequent reads.
+fn stitch_lexical_capture_writes(
+    caller: FuncId,
+    caller_seg: SegmentId,
+    callback_endpoints: CalleeEndpointView<'_>,
+    call_span: Span,
+    precision: Precision,
+    call_kind: CallEdgeKind,
+    ws: &mut IdgWorkspace,
+) -> usize {
+    let mut added = 0usize;
+    for (storage, callback_write_span, callback_write, _) in callback_endpoints.projected_places() {
+        let Some(_callback_write_span) = callback_write_span else {
+            continue;
+        };
+        // Scalar consumers are normally linked directly from the live writer
+        // (for example `displayParam` into an `innerHTML` field write), so
+        // there need not be a separate Read endpoint in the caller. Reuse the
+        // exact post-call consumer relation used by out-parameter write-back.
+        // A clean intervening assignment has no edge from the pre-call writer
+        // and therefore naturally kills callback propagation.
+        let consumer_edges = scalar_post_call_consumer_edges(ws, caller_seg, caller, storage, call_span);
+        if consumer_edges.is_empty() {
+            continue;
+        }
+        // Materialize the callback's lexical side effect at the exact host
+        // invocation before reconnecting ordinary caller-local consumers.
+        // This is the scalar return-family shape used by out-parameter
+        // write-back: context-sensitive closure can unwind the invocation,
+        // while the caller-local edge remains an ordinary intra-function
+        // relation. A direct callback-write -> consumer edge is a
+        // non-canonical call boundary and cannot carry stack context.
+        let Some(host_write) = ensure_scalar_write_node(ws, caller_seg, caller, storage, call_span) else {
+            continue;
+        };
+        place_inter_edge(
+            callback_endpoints.segment,
+            caller_seg,
+            IdgEdge {
+                from: callback_write,
+                to: host_write,
+                meta: crate::edge::EdgeMeta {
+                    precision,
+                    kind: crate::edge::IdgEdgeKind::InterReturn,
+                    call_kind,
+                    via_span: call_span,
+                },
+            },
+            ws,
+        );
+        added = added.saturating_add(1);
+        for consumer_edge in consumer_edges {
+            place_inter_edge(
+                caller_seg,
+                caller_seg,
+                IdgEdge {
+                    from: host_write,
+                    to: consumer_edge.to,
+                    meta: consumer_edge.meta,
+                },
+                ws,
+            );
+            added = added.saturating_add(1);
+        }
+    }
+    added
+}
+
 fn scalar_producers_live_at_span(
     ws: &IdgWorkspace,
     seg_id: SegmentId,
     func: FuncId,
     name: &str,
     at_span: Span,
+) -> Vec<NodeId> {
+    producers_live_at_span(ws, seg_id, func, name, at_span, false)
+}
+
+fn projected_producers_from_endpoint(
+    endpoints: CalleeEndpointView<'_>,
+    name: &str,
+    at_span: Span,
+) -> Vec<NodeId> {
+    let mut writes = Vec::new();
+    for (storage, write_span, _, scalar_inputs) in endpoints.projected_places() {
+        if storage != name {
+            continue;
+        }
+        match write_span {
+            Some(span) if span.file != at_span.file || span.start <= at_span.start => {
+                writes.push((span.start, scalar_inputs));
+            }
+            Some(_) => {}
+            None => {}
+        }
+    }
+    if let Some(latest_start) = writes.iter().map(|(start, _)| *start).max() {
+        let mut out = writes
+            .into_iter()
+            .filter(|(start, _)| *start == latest_start)
+            .flat_map(|(_, scalar_inputs)| scalar_inputs.iter().copied())
+            .collect::<Vec<_>>();
+        out.sort_by_key(|node| node.0);
+        out.dedup();
+        return out;
+    }
+    Vec::new()
+}
+
+fn storage_producers_from_endpoint(
+    endpoints: CalleeEndpointView<'_>,
+    name: &str,
+    at_span: Span,
+) -> Vec<NodeId> {
+    let mut writes = Vec::new();
+    let mut reads = Vec::new();
+    for (storage, write_span, node, _) in endpoints.projected_places() {
+        if storage != name {
+            continue;
+        }
+        match write_span {
+            Some(span) if span.file != at_span.file || span.start <= at_span.start => {
+                writes.push((span.start, node));
+            }
+            Some(_) => {}
+            None => reads.push(node),
+        }
+    }
+    if let Some(latest_start) = writes.iter().map(|(start, _)| *start).max() {
+        let mut out = writes
+            .into_iter()
+            .filter_map(|(start, node)| (start == latest_start).then_some(node))
+            .collect::<Vec<_>>();
+        out.sort_unstable();
+        out.dedup();
+        return out;
+    }
+    reads.sort_unstable();
+    reads.dedup();
+    reads
+}
+
+fn producers_live_at_span(
+    ws: &IdgWorkspace,
+    seg_id: SegmentId,
+    func: FuncId,
+    name: &str,
+    at_span: Span,
+    allow_projected: bool,
 ) -> Vec<NodeId> {
     let Some(segment) = ws.segment(seg_id) else {
         return Vec::new();
@@ -3494,11 +4387,12 @@ fn scalar_producers_live_at_span(
         let node_id = NodeId(node_idx as u32);
         match place {
             Place::Write { path, span, .. }
-                if path.is_empty() && (span.file != at_span.file || span.start <= at_span.start) =>
+                if (allow_projected || path.is_empty())
+                    && (span.file != at_span.file || span.start <= at_span.start) =>
             {
                 writes.push((span.start, node_id));
             }
-            Place::Read { path, .. } if path.is_empty() => reads.push(node_id),
+            Place::Read { path, .. } if allow_projected || path.is_empty() => reads.push(node_id),
             _ => {}
         }
     }
@@ -3621,7 +4515,7 @@ fn scalar_post_call_consumer_edges(
         // consumer for mutable write-back stitching.
         .filter(|edge| edge.meta.kind != crate::edge::IdgEdgeKind::IntraAggregateConsume)
         .filter(|edge| {
-            edge.meta.via_span.file != call_span.file || edge.meta.via_span.start > call_span.start
+            edge.meta.via_span.file != call_span.file || edge.meta.via_span.start >= call_span.end
         })
         .filter(|edge| seen.insert((edge.to, edge.meta)))
         .copied()
@@ -3646,18 +4540,52 @@ fn stitch_source_callback_args(
     }
     let mut emitted = 0usize;
     for shape in &site.source_callback_args {
-        let Some(callback_text) = site.call_arg_places.get(shape.callback_arg_index) else {
-            continue;
-        };
-        let callback_text = callback_text.trim();
-        if callback_text.is_empty() {
-            continue;
+        let mut candidates = Vec::new();
+        let mut seen = AHashSet::new();
+        if let Some(argument_span) = site.call_arg_spans.get(shape.callback_arg_index) {
+            for candidate in resolver.callable_args_in_span(caller, *argument_span) {
+                if seen.insert(candidate.func) {
+                    candidates.push(candidate);
+                }
+            }
         }
-        for cand in resolver.callable_arg(caller, callback_text) {
+        if let Some(callback_text) = site.call_arg_places.get(shape.callback_arg_index) {
+            let callback_text = callback_text.trim();
+            if !callback_text.is_empty() {
+                for candidate in resolver.callable_arg(caller, callback_text) {
+                    if seen.insert(candidate.func) {
+                        candidates.push(candidate);
+                    }
+                }
+            }
+        }
+        bonsai_diagnostics::debug_log!(
+            "idg-closure",
+            "source callback stitch caller={} call={:?} arg={} span={:?} candidates={:?}",
+            caller.raw(),
+            site.site.0,
+            shape.callback_arg_index,
+            site.call_arg_spans.get(shape.callback_arg_index),
+            candidates
+                .iter()
+                .map(|candidate| candidate.func.raw())
+                .collect::<Vec<_>>()
+        );
+        for cand in candidates {
             let Some(endpoints) = callee_endpoints.get(cand.func) else {
+                bonsai_diagnostics::debug_log!(
+                    "idg-closure",
+                    "source callback target {} has no endpoint directory entry",
+                    cand.func.raw()
+                );
                 continue;
             };
-            for &source_param_index in &shape.source_param_indices {
+            for source_param_index in shape.resolved_source_param_indices(
+                endpoints
+                    .params()
+                    .len()
+                    .saturating_sub(usize::from(endpoints.receiver_param_index().is_some())),
+            ) {
                 let callee_param_idx =
                     explicit_arg_param_index(source_param_index, endpoints.receiver_param_index());
                 let Some(&callee_param_node) = endpoints.params().get(callee_param_idx) else {
@@ -3704,6 +4632,319 @@ fn stitch_source_callback_args(
     emitted
 }
 
+struct CallbackInvocationResolverContext<'a> {
+    resolver: &'a dyn CalleeResolver,
+    callee_endpoints: &'a CalleeEndpointIndex,
+}
+
+struct CallbackInvocationStitchOutput<'a> {
+    return_field_sites: &'a mut ReturnFieldSiteQueue,
+    ws: &'a mut IdgWorkspace,
+}
+
+fn stitch_callback_invocations(
+    caller: FuncId,
+    caller_seg: SegmentId,
+    caller_remap: &NodeRemap,
+    site: &CallSiteRef,
+    caller_params: &[String],
+    context: &CallbackInvocationResolverContext<'_>,
+    output: CallbackInvocationStitchOutput<'_>,
+) -> usize {
+    let resolver = context.resolver;
+    let callee_endpoints = context.callee_endpoints;
+    let ws = output.ws;
+    let return_field_sites = output.return_field_sites;
+    if site.callback_invocations.is_empty() {
+        return 0;
+    }
+    let caller_call_ret = caller_remap.get(site.call_ret_node);
+    // Callback execution is independent of whether the host call's return is
+    // consumed. Void-style APIs such as collection iteration still invoke
+    // the compiler-proven callback and can publish lexical writes. Only the
+    // optional callback-return projection needs a concrete host CallRet node.
+    let assignment_targets = if caller_call_ret.is_sentinel() {
+        Vec::new()
+    } else {
+        call_ret_assignment_targets(ws, caller_seg, caller, caller_call_ret)
+    };
+    let mut emitted = 0usize;
+    for shape in &site.callback_invocations {
+        if !shape.callback_map_field_path.is_empty() {
+            emitted = emitted.saturating_add(stitch_callback_map_invocation(
+                caller,
+                caller_seg,
+                site,
+                shape,
+                callee_endpoints,
+                ws,
+            ));
+            continue;
+        }
+        let Some(argument_span) = site.call_arg_spans.get(shape.callback_arg_index) else {
+            continue;
+        };
+        let mut candidates = resolver.callable_args_in_span(caller, *argument_span);
+        candidates.extend(
+            shape
+                .resolved_callback_targets
+                .iter()
+                .filter_map(|(span, target)| {
+                    (*span == site.site.0).then_some(ResolvedCallee {
+                        func: *target,
+                        precision: Precision::Narrowed,
+                        edge_kind: CallEdgeKind::Indirect,
+                    })
+                }),
+        );
+        let callback_formal_param_index = site
+            .call_arg_places
+            .get(shape.callback_arg_index)
+            .map(String::as_str)
+            .filter(|place| !place.trim().is_empty())
+            .and_then(|place| {
+                caller_params
+                    .iter()
+                    .position(|param| param == place)
+                    .and_then(|index| u32::try_from(index).ok())
+            });
+        if let Some(param_index) = callback_formal_param_index {
+            candidates.extend(resolver.callback_bindings(caller, param_index));
+        }
+        candidates.sort_by_key(|candidate| candidate.func.raw());
+        candidates.dedup_by_key(|candidate| candidate.func);
+        let [candidate] = candidates.as_slice() else {
+            // Passing a callable proves only a value relationship. Invocation
+            // is admitted solely when the compiler resolves this exact
+            // argument to one callable declaration.
+            continue;
+        };
+        let Some(endpoints) = callee_endpoints.get(candidate.func) else {
+            continue;
+        };
+        if let Some(param_index) = callback_formal_param_index {
+            emitted = emitted.saturating_add(stitch_higher_order_callable_environments(
+                caller,
+                site,
+                param_index,
+                &AHashSet::from([candidate.func]),
+                resolver,
+                callee_endpoints,
+                ws,
+            ));
+        }
+
+        if let Some(callback_param_index) = shape.receiver_to_callback_param {
+            // The callback's invocation and lexical environment are proven by
+            // its exact callable argument independently of whether the host
+            // call exposes a value-carrying receiver. A missing receiver can
+            // suppress only this optional parameter projection; it must not
+            // discard capture reads/writes or forwarded explicit arguments.
+            if let Some(receiver_node) = site.receiver_arg_node {
+                let callee_param_index =
+                    explicit_arg_param_index(callback_param_index, endpoints.receiver_param_index());
+                if let Some(&callee_param) = endpoints.params().get(callee_param_index) {
+                    let caller_receiver = caller_remap.get(receiver_node);
+                    if !caller_receiver.is_sentinel() && !callee_param.is_sentinel() {
+                        place_inter_edge(
+                            caller_seg,
+                            endpoints.segment,
+                            IdgEdge::inter_call_arg(
+                                caller_receiver,
+                                callee_param,
+                                site.site.0,
+                                candidate.precision,
+                                candidate.edge_kind,
+                            ),
+                            ws,
+                        );
+                        emitted = emitted.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        if let Some(start) = shape.forwarded_args_from {
+            for outer_index in start..site.call_arg_nodes.len() {
+                let callback_index = outer_index - start;
+                let callee_param_index =
+                    explicit_arg_param_index(callback_index, endpoints.receiver_param_index());
+                let Some(&callee_param) = endpoints.params().get(callee_param_index) else {
+                    break;
+                };
+                let caller_arg = caller_remap.get(site.call_arg_nodes[outer_index]);
+                if caller_arg.is_sentinel() || callee_param.is_sentinel() {
+                    continue;
+                }
+                place_inter_edge(
+                    caller_seg,
+                    endpoints.segment,
+                    IdgEdge::inter_call_arg(
+                        caller_arg,
+                        callee_param,
+                        site.site.0,
+                        candidate.precision,
+                        candidate.edge_kind,
+                    ),
+                    ws,
+                );
+                emitted = emitted.saturating_add(1);
+            }
+        }
+
+        let inline = resolver.callable_is_inline_in_span(caller, *argument_span, candidate.func);
+        if inline {
+            emitted = emitted.saturating_add(stitch_lexical_capture_reads(
+                caller,
+                caller_seg,
+                endpoints.segment,
+                endpoints,
+                site.site.0,
+                candidate.precision,
+                candidate.edge_kind,
+                ws,
+            ));
+            emitted = emitted.saturating_add(stitch_lexical_capture_writes(
+                caller,
+                caller_seg,
+                endpoints,
+                site.site.0,
+                candidate.precision,
+                candidate.edge_kind,
+                ws,
+            ));
+        }
+
+        let Some(callback_return) = endpoints.return_node() else {
+            continue;
+        };
+        let expected_result = shape.callback_return_result_offset.to_string();
+        for (target_base, write_span, result_field) in &assignment_targets {
+            let targets_callback_result = result_field
+                .as_deref()
+                .map_or(shape.callback_return_result_offset == 0, |field| {
+                    field == expected_result
+                });
+            if !targets_callback_result {
+                continue;
+            }
+            let Some(target_write) =
+                ensure_scalar_write_node(ws, caller_seg, caller, target_base, *write_span)
+            else {
+                continue;
+            };
+            place_inter_edge(
+                endpoints.segment,
+                caller_seg,
+                IdgEdge::inter_return(
+                    callback_return,
+                    target_write,
+                    site.site.0,
+                    candidate.precision,
+                    candidate.edge_kind,
+                ),
+                ws,
+            );
+            emitted = emitted.saturating_add(1);
+            return_field_sites.push(ReturnFieldStitch {
+                caller,
+                caller_seg,
+                callee: candidate.func,
+                callee_seg: endpoints.segment,
+                source_base: crate::transfer::RETURN_FIELD_BASE.to_string(),
+                target_base: target_base.clone(),
+                call_span: site.site.0,
+                write_span: *write_span,
+                precision: candidate.precision,
+                call_kind: candidate.edge_kind,
+            });
+        }
+    }
+    emitted
+}
+
+fn stitch_callback_map_invocation(
+    caller: FuncId,
+    caller_seg: SegmentId,
+    site: &CallSiteRef,
+    shape: &crate::transfer::CallbackInvocationSpec,
+    callee_endpoints: &CalleeEndpointIndex,
+    ws: &mut IdgWorkspace,
+) -> usize {
+    let Some(callback_param_index) = shape.forwarded_callback_param_index else {
+        return 0;
+    };
+    let Some(argument_base) = site
+        .call_arg_places
+        .get(shape.callback_arg_index)
+        .map(String::as_str)
+        .filter(|base| !base.trim().is_empty())
+    else {
+        return 0;
+    };
+    let Some(caller_endpoints) = callee_endpoints.get(caller) else {
+        return 0;
+    };
+    let forwarded_storage = std::iter::once(argument_base)
+        .chain(shape.forwarded_argument_field_path.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(".");
+    // Some grammars key a call by the callee token, which precedes the
+    // argument expression that materializes this temporary aggregate. The
+    // argument span is the compiler-owned evaluation boundary; comparing the
+    // field write against the callee token would incorrectly discard it as a
+    // future write.
+    let producer_boundary = site
+        .call_arg_spans
+        .get(shape.callback_arg_index)
+        .copied()
+        .unwrap_or(site.site.0);
+    let producers = storage_producers_from_endpoint(caller_endpoints, &forwarded_storage, producer_boundary);
+    if producers.is_empty() {
+        return 0;
+    }
+
+    let mut targets = shape
+        .resolved_callback_targets
+        .iter()
+        .filter_map(|(call_span, target)| (*call_span == site.site.0).then_some(*target))
+        .collect::<Vec<_>>();
+    targets.sort_unstable_by_key(|target| target.raw());
+    targets.dedup();
+    let mut emitted = 0usize;
+    for target in targets {
+        let Some(endpoints) = callee_endpoints.get(target) else {
+            continue;
+        };
+        let param_index = explicit_arg_param_index(callback_param_index, endpoints.receiver_param_index());
+        let Some(&param_node) = endpoints.params().get(param_index) else {
+            continue;
+        };
+        if param_node.is_sentinel() {
+            continue;
+        }
+        for &producer in &producers {
+            if producer.is_sentinel() {
+                continue;
+            }
+            place_inter_edge(
+                caller_seg,
+                endpoints.segment,
+                IdgEdge::inter_call_arg(
+                    producer,
+                    param_node,
+                    site.site.0,
+                    Precision::Narrowed,
+                    CallEdgeKind::Indirect,
+                ),
+                ws,
+            );
+            emitted = emitted.saturating_add(1);
+        }
+    }
+    emitted
+}
+
 fn source_callback_projection_read_nodes(
     ws: &IdgWorkspace,
     segment_id: SegmentId,
@@ -3740,99 +4981,6 @@ fn source_callback_projection_read_nodes(
     out.sort_unstable();
     out.dedup();
     out
-}
-
-/// Route the data operands of an AST-proven indirect callback invocation to
-/// its first parameter. Only indirect callgraph evidence contained by an
-/// explicit source argument proves that the argument is callable. Textual
-/// name lookup is reserved for rulepack-declared callback positions; using it
-/// here would reinterpret an ordinary value such as `text` as any same-named
-/// method in the workspace. For a method call the receiver is also a data
-/// operand; for a free call every non-callback source-level argument is a
-/// candidate input.
-#[allow(clippy::too_many_arguments)]
-fn stitch_indirect_callback_inputs(
-    caller: FuncId,
-    caller_seg: SegmentId,
-    caller_remap: &NodeRemap,
-    site: &CallSiteRef,
-    resolver: &dyn CalleeResolver,
-    callee_endpoints: &CalleeEndpointIndex,
-    ws: &mut IdgWorkspace,
-) -> usize {
-    let mut callback_arg_indices = AHashSet::new();
-    let mut callback_candidates = Vec::new();
-    let mut seen_candidates = AHashSet::new();
-    for idx in 0..site.explicit_args_count as usize {
-        let resolved = site
-            .call_arg_spans
-            .get(idx)
-            .into_iter()
-            .flat_map(|arg_span| resolver.callable_args_in_span(caller, *arg_span))
-            .collect::<Vec<_>>();
-        if resolved.is_empty() {
-            continue;
-        }
-        callback_arg_indices.insert(idx);
-        for cand in resolved {
-            if cand.edge_kind == bonsai_callgraph::EdgeKind::Indirect
-                && callee_endpoints.contains_key(cand.func)
-                && seen_candidates.insert(cand.func)
-            {
-                callback_candidates.push(cand);
-            }
-        }
-    }
-    if callback_arg_indices.is_empty() {
-        return 0;
-    }
-
-    let mut input_nodes = Vec::new();
-    if matches!(site.call_kind, CallKind::Method) {
-        if let Some(receiver_arg_node) = site.receiver_arg_node {
-            input_nodes.push(receiver_arg_node);
-        }
-    }
-    input_nodes.extend(
-        site.call_arg_nodes
-            .iter()
-            .take(site.explicit_args_count as usize)
-            .enumerate()
-            .filter_map(|(idx, node)| (!callback_arg_indices.contains(&idx)).then_some(*node)),
-    );
-    if input_nodes.is_empty() {
-        return 0;
-    }
-
-    let mut emitted = 0usize;
-    for cand in callback_candidates {
-        let Some(endpoints) = callee_endpoints.get(cand.func) else {
-            continue;
-        };
-        let callback_param_idx = explicit_arg_param_index(0, endpoints.receiver_param_index());
-        let Some(&callee_param_node) = endpoints.params().get(callback_param_idx) else {
-            continue;
-        };
-        if callee_param_node.is_sentinel() {
-            continue;
-        }
-        for &input_node in &input_nodes {
-            let caller_call_arg = caller_remap.get(input_node);
-            if caller_call_arg.is_sentinel() {
-                continue;
-            }
-            let edge = IdgEdge::inter_call_arg(
-                caller_call_arg,
-                callee_param_node,
-                site.site.0,
-                cand.precision,
-                cand.edge_kind,
-            );
-            place_inter_edge(caller_seg, endpoints.segment, edge, ws);
-            emitted = emitted.saturating_add(1);
-        }
-    }
-    emitted
 }
 
 fn constructor_receiver_target_base(
@@ -4030,6 +5178,7 @@ fn push_receiver_field_arg_site(
         actual_arg,
         param_name: param_name.trim().to_string(),
         call_span,
+        argument_value_span: None,
         precision,
         call_kind,
         arg_idx: u32::MAX,
@@ -4078,6 +5227,7 @@ fn push_nested_receiver_field_arg_sites(
             actual_arg: actual_nested_base,
             param_name: nested_param_base.to_string(),
             call_span,
+            argument_value_span: None,
             precision,
             call_kind,
             arg_idx: u32::MAX,
@@ -4132,6 +5282,7 @@ fn push_bare_implicit_member_field_arg_sites(
                 actual_arg,
                 param_name: nested_param_base.to_string(),
                 call_span,
+                argument_value_span: None,
                 precision,
                 call_kind,
                 arg_idx: u32::MAX,
@@ -4294,7 +5445,7 @@ fn flush_symbolic_site_queues(
             target,
             exact_field: NO_SYMBOLIC_STRING,
             call_span: site.call_span,
-            write_span: site.call_span,
+            write_span: site.argument_value_span.unwrap_or(site.call_span),
             precision: site.precision,
             call_kind: site.call_kind,
             kind: SymbolicFieldTransformKind::Argument,
@@ -4514,6 +5665,7 @@ fn stitch_field_argument_forwarding(
     let mut field_index = FieldPlaceIndex::from_workspace_for_keys_streaming(ws, &requested_field_places)?;
     let mut syntactic_fields = field_index.take_syntactic_field_universe();
     syntactic_fields.record_argument_projection_demands(&field_index, sites);
+    syntactic_fields.record_nested_return_projection_demands(&field_index, return_field_sites);
     let mut inter_call_arg_entries =
         InterCallArgEntryIndex::from_workspace_for_segments_streaming(ws, &requested_segments)?;
     let mut synthetic_field_writes = SyntheticFieldWriteCache::from_workspace(ws);
@@ -4958,6 +6110,7 @@ fn field_transform_source_may_apply(
     match transform {
         FieldWriteTransform::Argument(site) => {
             site.allow_out_of_order_source
+                || source.span == site.argument_value_span
                 || source_write_can_reach_call(
                     source,
                     site.call_span,
@@ -4990,6 +6143,7 @@ fn apply_field_argument_write(
     state: &mut FieldPropagationState<'_>,
 ) {
     if (!site.allow_out_of_order_source
+        && source.span != site.argument_value_span
         && !source_write_can_reach_call(
             source,
             site.call_span,
@@ -5342,6 +6496,11 @@ fn source_write_can_reach_call(
     };
     write_span.file != call_span.file
         || write_span.start <= call_span.start
+        // An assignment expression or compiler-materialized aggregate field
+        // inside an argument is evaluated before the invocation itself. Its
+        // source span is nested in the call span rather than textually before
+        // it, but it is still an exact predecessor of the call boundary.
+        || (call_span.start <= write_span.start && write_span.end <= call_span.end)
         || inter_call_arg_entries.contains(seg_id, func, source.node)
 }
 
@@ -6524,6 +7683,20 @@ fn place_inter_edge(from_seg: SegmentId, to_seg: SegmentId, edge: IdgEdge, ws: &
     if from_seg == to_seg {
         if let Some(seg) = ws.segment_mut(from_seg) {
             seg.add_edge(edge);
+        } else {
+            // External-memory typed replay deliberately keeps only the
+            // active caller segment resident. A later-resolved relation can
+            // still connect two functions in the same spilled segment (for
+            // example a higher-order callback and its lexical origin). Keep
+            // that exact edge in the paged cross-segment relation rather
+            // than silently dropping it or hydrating a complete compiler
+            // body. Query traversal treats segment ids as stable endpoints;
+            // equality does not change the edge semantics.
+            ws.push_cross_file_edge(CrossFileEdge {
+                from_segment: from_seg,
+                to_segment: to_seg,
+                edge,
+            });
         }
     } else {
         ws.push_cross_file_edge(CrossFileEdge {

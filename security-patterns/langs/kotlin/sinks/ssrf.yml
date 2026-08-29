@@ -1,23 +1,28 @@
-- id: kotlin.ssrf.urlconnection_openconnection
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+- id: kotlin.ssrf.url_openconnection_tainted_receiver
+  enabled: true
   language: kotlin
   tag: ssrf
   severity: high
-  cwe:
-  - CWE-918
+  packages: [java.net]
+  cwe: [CWE-918]
   match:
     kind: call
     callee:
-      attribute:
-      - URL
-      - openConnection
+      attribute: [URL, openConnection]
+  constraints:
+  - receiver_tainted: true
   match_examples:
-  - name: generated shape example
-    code: "class App {\n  fun handle(input: String) {\n    URL.openConnection(input)\n\
-      \  }\n}\n"
-  description: "Disabled - URL.openConnection() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
+  - name: URL connection from tainted text
+    code: |
+      import java.net.URL
+      fun fetch(value: String) = URL(value).openConnection()
+    expect_match_text: [URL(value).openConnection]
+  - name: URL connection from a literal
+    code: |
+      import java.net.URL
+      fun fetch(value: String) = URL("https://example.test/status").openConnection()
+    expect_no_match: true
+  description: "URL.openConnection() on a receiver constructed from tainted URL text performs the outbound request."
 - id: kotlin.ssrf.url_ctor
   enabled: true
   language: kotlin
@@ -32,6 +37,21 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    url_reconstruction_guard:
+      sink_argument_index: 0
+      parser: {attribute: [URI, create]}
+      scheme:
+        component: {field: scheme}
+        comparison_predicate: {name: equals}
+        allowed_values: [https]
+      host_allowlist:
+        component: {field: host}
+        membership_predicate: {name: contains}
+        static_collection_factories:
+        - {name: setOf}
+      path_component: {field: path}
+      path_fallback: "/"
   match_examples:
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    URL(input)\n  }\n}\nclass\
@@ -259,30 +279,6 @@
       fun handle(input: String) {\n  WebClient.uri(\"safe\")\n}\n}\n"
     expect_no_match: true
   description: Spring WebClient.uri.
-- id: kotlin.ssrf.webclient_retrieve
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: kotlin
-  tag: ssrf
-  severity: high
-  packages:
-  - org.springframework.web.reactive.function.client
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: retrieve
-  match_examples:
-  - name: webclient retrieve request
-    code: "import org.springframework.web.reactive.function.client.*\nclass App {\n\
-      \  fun handle(requestSpec: RequestSpec): Any? {\n    return requestSpec.retrieve()\n\
-      \  }\n}\nclass RequestSpec {\n  fun retrieve(vararg args: Any?): Any? = null\n\
-      }\n"
-    expect_match_text:
-    - requestSpec.retrieve
-  description: "Disabled - WebClient retrieve() dispatches URI held in receiver state; WebClient.uri(tainted) carries the tainted argument."
 - id: kotlin.ssrf.play_wsclient_url
   enabled: true
   language: kotlin
@@ -302,6 +298,21 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    url_reconstruction_guard:
+      sink_argument_index: 0
+      parser: {attribute: [URI, create]}
+      scheme:
+        component: {field: scheme}
+        comparison_predicate: {name: equals}
+        allowed_values: [https]
+      host_allowlist:
+        component: {field: host}
+        membership_predicate: {name: contains}
+        static_collection_factories:
+        - {name: setOf}
+      path_component: {field: path}
+      path_fallback: "/"
   match_examples:
   - name: play wsclient url
     code: "import com.typesafe.play.*\nclass App {\n  fun handle(url: String): Any?\
@@ -341,28 +352,6 @@
       safe\")\n}\n}\n"
     expect_no_match: true
   description: "OkHttp Request.Builder().url(tainted) - tainted URL."
-- id: kotlin.ssrf.okhttp_call_execute
-  enabled: false
-  language: kotlin
-  tag: ssrf
-  severity: high
-  packages:
-  - okhttp3
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Call
-      - execute
-  match_examples:
-  - name: generated shape example
-    code: "import okhttp3.*\n// uses okhttp3\nclass App {\n  fun handle(input: String)\
-      \ {\n    Call.execute(input)\n  }\n}\n"
-  description: "OkHttp Call.execute - dispatches Request to tainted URL."
-  disabled_reason:
-    code: over-broad
 - id: kotlin.ssrf.ktor_httpclient_request
   enabled: true
   language: kotlin
@@ -394,70 +383,6 @@
   imports:
   - io
   - io.ktor.ktorclientcore
-- id: kotlin.ssrf.java_httpclient_send
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: ssrf
-  severity: high
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - HttpClient
-      - send
-  match_examples:
-  - name: generated shape example
-    code: "class App {\n  fun handle(input: String) {\n    HttpClient.send(input)\n\
-      \  }\n}\n"
-  description: "Disabled duplicate - same matcher as canonical kotlin.ssrf.jdk_httpclient_send."
-- id: kotlin.ssrf.java_httpclient_sendasync
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: ssrf
-  severity: high
-  packages:
-  - java.net.http
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - HttpClient
-      - sendAsync
-  match_examples:
-  - name: generated shape example
-    code: "import java.net.http.*\nclass App {\n  fun handle(input: String) {\n  \
-      \  HttpClient.sendAsync(input)\n  }\n}\n"
-  description: "Disabled duplicate - same matcher as canonical kotlin.ssrf.jdk_httpclient_sendasync."
-  imports:
-  - java
-- id: kotlin.ssrf.url_openstream
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: kotlin
-  tag: ssrf
-  severity: high
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - URL
-      - openStream
-  match_examples:
-  - name: generated shape example
-    code: "class App {\n  fun handle(input: String) {\n    URL.openStream(input)\n\
-      \  }\n}\n"
-  description: "Disabled - URL.openStream() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
 - id: kotlin.ssrf.jsoup_connect
   enabled: true
   language: kotlin
@@ -540,28 +465,6 @@
     expect_no_match: true
   description: "OkHttpClient.newCall(request) - dispatches a Request whose URL\
     \ may be tainted (SSRF)."
-- id: kotlin.ssrf.okhttp_call_enqueue
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: kotlin
-  tag: ssrf
-  severity: high
-  packages:
-  - okhttp3
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Call
-      - enqueue
-  match_examples:
-  - name: generated shape example
-    code: "import okhttp3.*\n// uses okhttp3\nclass App {\n  fun handle(input: String)\
-      \ {\n    Call.enqueue(input)\n  }\n}\n"
-  description: "Disabled - OkHttp Call.enqueue(callback) dispatches receiver Request state; Request.Builder.url(tainted) and OkHttpClient.newCall(tainted) carry the tainted arguments."
 - id: kotlin.ssrf.jdk_httpclient_send
   enabled: true
   language: kotlin

@@ -3,12 +3,13 @@ mod parse_recovery;
 
 use bonsai_common::FileId;
 use bonsai_lang_api::{
-    collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
+    collect_modifier_visibility, collect_param_type_aliases, decl_index_from_tree_with_handler,
+    extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, CallArg, CallKind, CallTargetExtraction, DeclIndex, DeclKind, FieldWrite,
-    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
-    LanguageId, ModifierVocabulary, ParseRecoveryEdit, SourceFileRepresentation, SyntaxTree,
-    TypeAliasBinding, TypeAliasVocabulary, Vfs, Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, CallTargetExtraction, DeclIndex, DeclKind, FieldWrite, GrammarHandler,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    ModifierVocabulary, ParseRecoveryEdit, SourceFileRepresentation, SyntaxTree, TypeAliasBinding,
+    TypeAliasVocabulary, Vfs, Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::Node;
 
@@ -34,6 +35,38 @@ fn typescript_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
             ))
         })
         .flatten()
+}
+
+/// Preserve the runtime value expression through TypeScript-only type
+/// wrappers before applying the ECMAScript value-shape classifier. The
+/// grammar places the runtime operand first for `as`/`satisfies` and last for
+/// angle-bracket assertions; type nodes are never treated as value operands.
+fn typescript_expression_value_kind(
+    mut node: Node<'_>,
+    src: &[u8],
+) -> Option<bonsai_lang_api::AssignValueKind> {
+    loop {
+        if let Some(kind) = ecmascript_expression_value_kind(node, src) {
+            return Some(kind);
+        }
+        node = match node.kind() {
+            "parenthesized_expression" | "non_null_expression" => {
+                let mut cursor = node.walk();
+                let mut children = node.named_children(&mut cursor);
+                let child = children.next()?;
+                if children.next().is_some() {
+                    return None;
+                }
+                child
+            }
+            "as_expression" | "satisfies_expression" => node.named_child(0)?,
+            "type_assertion" => {
+                let index = node.named_child_count().checked_sub(1)?;
+                node.named_child(u32::try_from(index).ok()?)?
+            }
+            _ => return None,
+        };
+    }
 }
 
 const TYPESCRIPT_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -62,15 +95,135 @@ const TYPESCRIPT_VOCAB: ModifierVocabulary = ModifierVocabulary {
 use bonsai_lang_javascript::{
     apply_ecmascript_assigned_member_callable_owners, apply_javascript_getter_property_sources,
     apply_js_ts_commonjs_named_export_aliases, apply_js_ts_default_export_aliases,
-    ecmascript_source_file_representation, extract_ecmascript_pseudo_call, js_ts_imports,
-    js_ts_module_segments, js_ts_require_calls, populate_ecmascript_compiler_facts,
-    JS_TS_MODULE_RESOLUTION_EXTENSIONS,
+    ecmascript_expression_value_kind, ecmascript_source_file_representation, ecmascript_static_scalar,
+    extract_ecmascript_pseudo_call, js_ts_imports, js_ts_module_segments, js_ts_require_calls,
+    normalize_node_builtin_scheme, populate_ecmascript_compiler_facts, JS_TS_MODULE_RESOLUTION_EXTENSIONS,
 };
 use tree_sitter::{Language, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("typescript");
 const PACK_NAME: &str = "typescript";
 const TSX_PACK_NAME: &str = "tsx";
+
+// TypeScript/TSX CST spellings inspected outside the path-selected handlers,
+// including the ECMAScript compiler post-processing reused from
+// `lang_javascript` and the adapter's narrow import-type parse recovery. This
+// inventory is grammar checked as part of conformance rather than trusted as
+// an unverified string table.
+macro_rules! declare_typescript_grammar_node_kinds {
+    (
+        common: [$($common:expr,)*],
+        typescript_only: [$($typescript_only:expr,)*],
+        tsx_only: [$($tsx_only:expr,)*],
+    ) => {
+        const TYPESCRIPT_ADDITIONAL_GRAMMAR_NODE_KINDS: &[(&str, &str)] =
+            &[$($common,)* $($typescript_only,)*];
+        const TSX_ADDITIONAL_GRAMMAR_NODE_KINDS: &[(&str, &str)] = &[$($common,)* $($tsx_only,)*];
+        const ADDITIONAL_GRAMMAR_NODE_KINDS: &[(&str, &str)] =
+            &[$($common,)* $($typescript_only,)* $($tsx_only,)*];
+    };
+}
+
+declare_typescript_grammar_node_kinds! {
+    common: [
+    ("adapter_postprocessor", "abstract_method_signature"),
+    ("adapter_postprocessor", "accessibility_modifier"),
+    ("adapter_postprocessor", "arguments"),
+    ("adapter_postprocessor", "array"),
+    ("adapter_postprocessor", "arrow_function"),
+    ("adapter_postprocessor", "as_expression"),
+    ("adapter_postprocessor", "assignment_expression"),
+    ("adapter_postprocessor", "assignment_pattern"),
+    ("adapter_postprocessor", "augmented_assignment_expression"),
+    ("adapter_postprocessor", "binary_expression"),
+    ("adapter_postprocessor", "call_expression"),
+    ("adapter_postprocessor", "catch_clause"),
+    ("adapter_postprocessor", "class"),
+    ("adapter_postprocessor", "class_declaration"),
+    ("adapter_postprocessor", "class_heritage"),
+    ("adapter_postprocessor", "const"),
+    ("adapter_postprocessor", "continue_statement"),
+    ("adapter_postprocessor", "default"),
+    ("adapter_postprocessor", "delete"),
+    ("adapter_postprocessor", "export_specifier"),
+    ("adapter_postprocessor", "export_statement"),
+    ("adapter_postprocessor", "expression_statement"),
+    ("adapter_postprocessor", "extends_clause"),
+    ("adapter_postprocessor", "false"),
+    ("adapter_postprocessor", "for_in_statement"),
+    ("adapter_postprocessor", "for_statement"),
+    ("adapter_postprocessor", "formal_parameters"),
+    ("adapter_postprocessor", "function_declaration"),
+    ("adapter_postprocessor", "function_expression"),
+    ("adapter_postprocessor", "function_type"),
+    ("adapter_postprocessor", "generator_function"),
+    ("adapter_postprocessor", "generator_function_declaration"),
+    ("adapter_postprocessor", "generic_type"),
+    ("adapter_postprocessor", "identifier"),
+    ("adapter_postprocessor", "if_statement"),
+    ("adapter_postprocessor", "import"),
+    ("adapter_postprocessor", "import_require_clause"),
+    ("adapter_postprocessor", "import_clause"),
+    ("adapter_postprocessor", "import_specifier"),
+    ("adapter_postprocessor", "import_statement"),
+    ("adapter_postprocessor", "lexical_declaration"),
+    ("adapter_postprocessor", "member_expression"),
+    ("adapter_postprocessor", "method_definition"),
+    ("adapter_postprocessor", "method_signature"),
+    ("adapter_postprocessor", "named_imports"),
+    ("adapter_postprocessor", "namespace_import"),
+    ("adapter_postprocessor", "nested_identifier"),
+    ("adapter_postprocessor", "nested_type_identifier"),
+    ("adapter_postprocessor", "new_expression"),
+    ("adapter_postprocessor", "null"),
+    ("adapter_postprocessor", "number"),
+    ("adapter_postprocessor", "object"),
+    ("adapter_postprocessor", "object_assignment_pattern"),
+    ("adapter_postprocessor", "object_pattern"),
+    ("adapter_postprocessor", "optional_parameter"),
+    ("adapter_postprocessor", "pair"),
+    ("adapter_postprocessor", "pair_pattern"),
+    ("adapter_postprocessor", "parenthesized_expression"),
+    ("adapter_postprocessor", "predefined_type"),
+    ("adapter_postprocessor", "private_property_identifier"),
+    ("adapter_postprocessor", "program"),
+    ("adapter_postprocessor", "property_identifier"),
+    ("adapter_postprocessor", "public_field_definition"),
+    ("adapter_postprocessor", "regex"),
+    ("adapter_postprocessor", "required_parameter"),
+    ("adapter_postprocessor", "rest_pattern"),
+    ("adapter_postprocessor", "return_statement"),
+    ("adapter_postprocessor", "satisfies_expression"),
+    ("adapter_postprocessor", "shorthand_property_identifier"),
+    ("adapter_postprocessor", "shorthand_property_identifier_pattern"),
+    ("adapter_postprocessor", "spread_element"),
+    ("adapter_postprocessor", "statement_block"),
+    ("adapter_postprocessor", "string"),
+    ("adapter_postprocessor", "string_fragment"),
+    ("adapter_postprocessor", "subscript_expression"),
+    ("adapter_postprocessor", "switch_body"),
+    ("adapter_postprocessor", "template_string"),
+    ("adapter_postprocessor", "template_substitution"),
+    ("adapter_postprocessor", "ternary_expression"),
+    ("adapter_postprocessor", "this"),
+    ("adapter_postprocessor", "true"),
+    ("adapter_postprocessor", "type_annotation"),
+    ("adapter_postprocessor", "type_identifier"),
+    ("adapter_postprocessor", "unary_expression"),
+    ("adapter_postprocessor", "undefined"),
+    ("adapter_postprocessor", "update_expression"),
+    ("adapter_postprocessor", "variable_declarator"),
+    ],
+    typescript_only: [
+        ("adapter_postprocessor", "type_assertion"),
+    ],
+    tsx_only: [
+        ("adapter_postprocessor", "jsx_attribute"),
+        ("adapter_postprocessor", "jsx_namespace_name"),
+        ("adapter_postprocessor", "jsx_opening_element"),
+        ("adapter_postprocessor", "jsx_self_closing_element"),
+    ],
+}
 
 fn grammar_pack_for_file(file: FileId, ctx: &AdapterContext<'_>) -> &'static str {
     ctx.vfs
@@ -82,8 +235,8 @@ fn grammar_pack_for_file(file: FileId, ctx: &AdapterContext<'_>) -> &'static str
         .filter(|extension| extension.eq_ignore_ascii_case("tsx"))
         .map_or(PACK_NAME, |_| TSX_PACK_NAME)
 }
-const HANDLER: GrammarHandler = GrammarHandler {
-    expression_value_kind_extractor: None,
+const COMMON_HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: Some(typescript_expression_value_kind),
     literal_value_kinds: &["null", "number", "true", "false"],
     string_literal_kinds: &["string", "template_string"],
     comment_kinds: &["comment", "hash_bang_line"],
@@ -93,7 +246,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     parameter_kinds: &["identifier", "required_parameter", "optional_parameter"],
     parameter_modifier_kinds: &["decorator"],
     parameter_annotation_kinds: &["decorator"],
-    variadic_parameter_kinds: &["rest_pattern", "rest_parameter"],
+    variadic_parameter_kinds: &["rest_pattern"],
     destructured_parameter_kinds: &["object_pattern", "array_pattern", "object_type"],
     binding_identifier_kinds: &["identifier", "shorthand_property_identifier_pattern"],
     binding_lhs_pattern_kinds: &["assignment_pattern"],
@@ -113,15 +266,13 @@ const HANDLER: GrammarHandler = GrammarHandler {
     lambda_value_container_kinds: &["object", "pair", "array", "object_type"],
     transparent_call_wrapper_kinds: &[
         "member_expression",
-        "property_access_expression",
         "parenthesized_expression",
         "await_expression",
         "as_expression",
         "satisfies_expression",
         "non_null_expression",
-        "type_assertion",
     ],
-    single_expression_group_kinds: &["expressions"],
+    single_expression_group_kinds: &[],
     assignment_target_wrapper_kinds: &["variable_declarator"],
     binding_declaration_keyword_spellings: &["var", "let", "const"],
     fn_kinds: &[
@@ -147,11 +298,11 @@ const HANDLER: GrammarHandler = GrammarHandler {
     syntax_event_extractor: None,
     argument_passing_mode_extractor: None,
     call_ref_kinds: &["call_expression", "new_expression"],
-    member_expression_kinds: &["member_expression", "property_access_expression"],
+    member_expression_kinds: &["member_expression"],
     subscript_expression_kinds: &["subscript_expression"],
-    member_base_field_names: &["object", "expression"],
+    member_base_field_names: &["object"],
     member_name_field_names: &["property", "name"],
-    subscript_base_field_names: &["object", "expression"],
+    subscript_base_field_names: &["object"],
     subscript_index_field_names: &["index", "argument"],
     static_subscript_key_extractor: Some(bonsai_lang_javascript::ecmascript_static_subscript_key),
     constructor_names: &["constructor"],
@@ -188,14 +339,21 @@ const HANDLER: GrammarHandler = GrammarHandler {
     branch_then_field_names: &["consequence", "body"],
     branch_else_field_names: &["alternative"],
     branch_condition_field_names: &["condition", "value"],
+    condition_group_kinds: &["parenthesized_expression"],
+    condition_all_operators: &["&&"],
+    condition_any_operators: &["||"],
+    condition_not_operators: &["!"],
     loop_body_field_names: &["body"],
     loop_body_kinds: &["statement_block", "expression_statement"],
+    loop_update_field_names: &["increment"],
     branch_arm_kinds: &[
         "statement_block",
         "expression_statement",
         "switch_case",
         "switch_default",
     ],
+    exclusive_branch_arm_kinds: &["switch_case", "switch_default"],
+    fallthrough_branch_arm_kinds: &["switch_case", "switch_default"],
     for_kinds: &["for_statement"],
     foreach_kinds: &["for_in_statement"],
     foreach_binding_extractor: Some(typescript_foreach_binding),
@@ -229,6 +387,29 @@ const HANDLER: GrammarHandler = GrammarHandler {
     implicit_receiver_names: &["this"],
     ..EMPTY_HANDLER
 };
+
+const TYPESCRIPT_HANDLER: GrammarHandler = GrammarHandler {
+    transparent_call_wrapper_kinds: &[
+        "member_expression",
+        "parenthesized_expression",
+        "await_expression",
+        "as_expression",
+        "satisfies_expression",
+        "non_null_expression",
+        "type_assertion",
+    ],
+    ..COMMON_HANDLER
+};
+
+const TSX_HANDLER: GrammarHandler = GrammarHandler { ..COMMON_HANDLER };
+
+fn grammar_handler_for_grammar(grammar: &str) -> &'static GrammarHandler {
+    if grammar == TSX_PACK_NAME {
+        &TSX_HANDLER
+    } else {
+        &TYPESCRIPT_HANDLER
+    }
+}
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct TypeScriptAdapter;
@@ -290,15 +471,48 @@ impl LanguageAdapter for TypeScriptAdapter {
             ..LanguageCapabilities::partial_baseline()
         }
     }
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        Some(&TYPESCRIPT_HANDLER)
+    }
+
+    fn grammar_handler_for_path(&self, path: &std::path::Path) -> Option<&'static GrammarHandler> {
+        Some(grammar_handler_for_grammar(self.grammar_name_for_path(path)))
+    }
+
+    fn additional_grammar_node_kinds(&self) -> &'static [(&'static str, &'static str)] {
+        ADDITIONAL_GRAMMAR_NODE_KINDS
+    }
+
+    fn additional_grammar_node_kinds_for_path(
+        &self,
+        path: &std::path::Path,
+    ) -> &'static [(&'static str, &'static str)] {
+        if self.grammar_name_for_path(path) == TSX_PACK_NAME {
+            TSX_ADDITIONAL_GRAMMAR_NODE_KINDS
+        } else {
+            TYPESCRIPT_ADDITIONAL_GRAMMAR_NODE_KINDS
+        }
+    }
+
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let grammar = grammar_pack_for_file(file, ctx);
-        let mut decl_index = decl_index_with_handler(grammar, file, ctx, &HANDLER);
-        if let Some((snapshot, tree)) = parse_with(grammar, file, ctx) {
+        let handler = grammar_handler_for_grammar(grammar);
+        let parsed = parse_with(grammar, file, ctx);
+        let mut decl_index = parsed.as_ref().map_or_else(
+            || DeclIndex {
+                file,
+                ..Default::default()
+            },
+            |(snapshot, tree)| {
+                decl_index_from_tree_with_handler(file, snapshot.text.as_bytes(), tree, handler)
+            },
+        );
+        if let Some((snapshot, tree)) = parsed.as_ref() {
             let src = snapshot.text.as_bytes();
-            populate_ecmascript_compiler_facts(&mut decl_index, &tree, file, src);
-            populate_typescript_readonly_instance_literals(&mut decl_index, &tree, file, src);
-            apply_ecmascript_assigned_member_callable_owners(&mut decl_index, &tree, file, src);
-            apply_js_ts_commonjs_named_export_aliases(&mut decl_index, &tree, src, file);
+            populate_ecmascript_compiler_facts(&mut decl_index, tree, file, src);
+            populate_typescript_readonly_instance_literals(&mut decl_index, tree, file, src);
+            apply_ecmascript_assigned_member_callable_owners(&mut decl_index, tree, file, src);
+            apply_js_ts_commonjs_named_export_aliases(&mut decl_index, tree, src, file);
         }
         // TS/JS module = workspace-relative file path with `.ts`/`.tsx` (etc.) stripped.
         let module_segments = ctx
@@ -311,26 +525,26 @@ impl LanguageAdapter for TypeScriptAdapter {
             // Fall back to the file stem when the workspace root is unknown.
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
         }
-        if let Some((snapshot, tree)) = parse_with(grammar, file, ctx) {
+        if let Some((snapshot, tree)) = parsed.as_ref() {
             let src = snapshot.text.as_bytes();
-            apply_js_ts_default_export_aliases(&mut decl_index, &tree, src, file);
+            apply_js_ts_default_export_aliases(&mut decl_index, tree, src, file);
             // Phase-6 return-type extraction: `function f(): T {}` / `(): T => ...`
             // populates `Decl.return_type` for `apply_assign_call_result_types`.
-            bonsai_lang_api::populate_decl_return_types(&mut decl_index, &tree, src, &HANDLER);
+            bonsai_lang_api::populate_decl_return_types(&mut decl_index, tree, src, handler);
             // Visibility from `public/protected/private` keywords, and parameter type aliases.
             let visibility_by_span =
                 collect_modifier_visibility(tree.root_node(), file, src, &TYPESCRIPT_VOCAB);
-            let type_aliases_by_span = collect_param_type_aliases(&tree, file, src, &TYPESCRIPT_TYPE_ALIASES);
+            let type_aliases_by_span = collect_param_type_aliases(tree, file, src, &TYPESCRIPT_TYPE_ALIASES);
             // WS2 cast typing: `const c = make() as Foo` / `const c = <Foo>make()`.
             // The cast type lives only on the initializer (the declared-type /
             // return-type paths don't see it), so capture it as a local type
             // alias so `c.method(...)` resolves `receiver_type_in` / `[Foo, m]`.
-            let cast_aliases_by_span = collect_typescript_cast_aliases(&tree, file, src);
+            let cast_aliases_by_span = collect_typescript_cast_aliases(tree, file, src);
             // TypeScript constructor parameter properties are both parameters
             // and instance fields: `constructor(private svc: Service)`.
             // The generic assignment walker sees no `this.svc = svc` write,
             // so emit the equivalent precise field/type facts from the syntax.
-            let parameter_properties_by_span = collect_typescript_parameter_properties(&tree, file, src);
+            let parameter_properties_by_span = collect_typescript_parameter_properties(tree, file, src);
             for decl in &mut decl_index.defs {
                 if let Some(vis) = visibility_by_span.get(&decl.span).copied() {
                     decl.visibility = vis;
@@ -361,7 +575,7 @@ impl LanguageAdapter for TypeScriptAdapter {
             // Per-class `bases`: `class Echo extends WebSocketHandler implements Mixin { ... }`
             // becomes `["WebSocketHandler", "Mixin"]`. The TS grammar groups extends +
             // implements under a `class_heritage` child of the class.
-            let bases_by_span = collect_typescript_class_bases(&tree, file, src);
+            let bases_by_span = collect_typescript_class_bases(tree, file, src);
             for decl in &mut decl_index.defs {
                 // Bases only make sense on type-defining declarations.
                 if !is_class_like(decl.kind) {
@@ -374,8 +588,7 @@ impl LanguageAdapter for TypeScriptAdapter {
                     decl.bases = bases.clone();
                 }
             }
-            apply_javascript_getter_property_sources(&mut decl_index, &tree, src, file);
-            inject_typescript_graphql_root_resolver_calls(&mut decl_index, &tree, src, file);
+            apply_javascript_getter_property_sources(&mut decl_index, tree, src, file);
         }
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
@@ -448,10 +661,16 @@ fn populate_typescript_readonly_instance_literals(
                 value_span: span_of(file, &value),
                 call_sites: Vec::new(),
                 value_flow: bonsai_lang_api::ExpressionFlow::default(),
+                static_value: ecmascript_static_scalar(value, src),
                 exact_callable_return: None,
+                inline_callback_static_return: None,
+                inline_callback_fields: Vec::new(),
                 exact_static_call_args: None,
                 direct_call_name: None,
+                direct_call_span: None,
                 direct_call_receiver: None,
+                direct_call_receiver_span: None,
+                direct_call_receiver_flow: None,
             });
     }
     index.assignment_values.sort_by_key(|fact| {
@@ -467,495 +686,45 @@ fn populate_typescript_readonly_instance_literals(
     index.assignment_values.dedup();
 }
 
-#[derive(Clone, Debug)]
-struct TsGraphqlRootResolver {
-    name: String,
-    arg_fields: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-struct TsGraphqlResolverDispatch {
-    call_span: bonsai_common::Span,
-    arg_span: bonsai_common::Span,
-    variable_values: String,
-    resolvers: Vec<TsGraphqlRootResolver>,
-}
-
-fn inject_typescript_graphql_root_resolver_calls(
-    decl_index: &mut DeclIndex,
-    tree: &Tree,
-    src: &[u8],
-    file: FileId,
-) {
-    let dispatches = collect_typescript_graphql_resolver_dispatches(tree, src, file);
-    if dispatches.is_empty() {
-        return;
-    }
-    for decl in &mut decl_index.defs {
-        let owner_span = decl.body_span.unwrap_or(decl.span);
-        let relevant = dispatches
-            .iter()
-            .filter(|dispatch| span_contains_or_equal(owner_span, dispatch.call_span))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !relevant.is_empty() {
-            insert_graphql_resolver_dispatches(&mut decl.flow_events, &relevant);
-        }
-    }
-}
-
-fn collect_typescript_graphql_resolver_dispatches(
-    tree: &Tree,
-    src: &[u8],
-    file: FileId,
-) -> Vec<TsGraphqlResolverDispatch> {
-    let root_resolvers = collect_typescript_graphql_root_resolvers(tree, src);
-    if root_resolvers.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for call in collect_kinds(tree, &["call_expression"]) {
-        if !typescript_graphql_execute_call(&call, src) {
-            continue;
-        }
-        let Some(args) = call.child_by_field_name("arguments") else {
-            continue;
-        };
-        let Some(config) = first_named_child_of_kind(&args, "object") else {
-            continue;
-        };
-        let Some(root_value) = typescript_object_pair_value(config, src, "rootValue") else {
-            continue;
-        };
-        let root_name = node_text(&root_value, src).trim();
-        if root_name.is_empty()
-            || !root_name
-                .chars()
-                .all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
-        {
-            continue;
-        }
-        let Some(variable_values) = typescript_object_pair_value(config, src, "variableValues") else {
-            continue;
-        };
-        let variable_values_text = node_text(&variable_values, src).trim().to_string();
-        if variable_values_text.is_empty() {
-            continue;
-        }
-        let Some(resolvers) = root_resolvers.get(root_name) else {
-            continue;
-        };
-        if resolvers.is_empty() {
-            continue;
-        }
-        out.push(TsGraphqlResolverDispatch {
-            call_span: span_of(file, &call),
-            arg_span: span_of(file, &variable_values),
-            variable_values: variable_values_text,
-            resolvers: resolvers.clone(),
-        });
-    }
-    out
-}
-
-fn collect_typescript_graphql_root_resolvers(
-    tree: &Tree,
-    src: &[u8],
-) -> std::collections::HashMap<String, Vec<TsGraphqlRootResolver>> {
-    let mut out = std::collections::HashMap::new();
-    for declarator in collect_kinds(tree, &["variable_declarator"]) {
-        let Some(name_node) = declarator.child_by_field_name("name") else {
-            continue;
-        };
-        if name_node.kind() != "identifier" {
-            continue;
-        }
-        let Some(value_node) = declarator.child_by_field_name("value") else {
-            continue;
-        };
-        if value_node.kind() != "object" {
-            continue;
-        }
-        let name = node_text(&name_node, src).trim().to_string();
-        if name.is_empty() {
-            continue;
-        }
-        let resolvers = typescript_object_resolvers(value_node, src);
-        if !resolvers.is_empty() {
-            out.insert(name, resolvers);
-        }
-    }
-    out
-}
-
-fn typescript_object_resolvers(object: Node<'_>, src: &[u8]) -> Vec<TsGraphqlRootResolver> {
-    let mut out = Vec::new();
-    let mut cursor = object.walk();
-    for child in object.named_children(&mut cursor) {
-        match child.kind() {
-            "pair" => {
-                let Some(key_node) = child.child_by_field_name("key") else {
-                    continue;
-                };
-                let Some(value_node) = child.child_by_field_name("value") else {
-                    continue;
-                };
-                if !matches!(
-                    value_node.kind(),
-                    "arrow_function" | "function" | "function_expression" | "generator_function"
-                ) {
-                    continue;
-                }
-                let Some(name) = typescript_object_field_key(key_node, src) else {
-                    continue;
-                };
-                out.push(TsGraphqlRootResolver {
-                    name,
-                    arg_fields: typescript_first_param_object_fields(value_node, src),
-                });
-            }
-            "method_definition" => {
-                let Some(name_node) = child.child_by_field_name("name") else {
-                    continue;
-                };
-                let Some(name) = typescript_object_field_key(name_node, src) else {
-                    continue;
-                };
-                out.push(TsGraphqlRootResolver {
-                    name,
-                    arg_fields: typescript_first_param_object_fields(child, src),
-                });
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-fn typescript_graphql_execute_call(call: &Node<'_>, src: &[u8]) -> bool {
-    let Some(callee) = call.child_by_field_name("function") else {
-        return false;
-    };
-    let callee_text = node_text(&callee, src).trim();
-    let tail = callee_text
-        .rsplit(['.', ':'])
-        .find(|part| !part.trim().is_empty())
-        .unwrap_or(callee_text)
-        .trim();
-    matches!(tail, "graphql" | "execute")
-}
-
-fn typescript_object_pair_value<'tree>(object: Node<'tree>, src: &[u8], key: &str) -> Option<Node<'tree>> {
-    let mut cursor = object.walk();
-    for child in object.named_children(&mut cursor) {
-        if child.kind() != "pair" {
-            continue;
-        }
-        let Some(key_node) = child.child_by_field_name("key") else {
-            continue;
-        };
-        if typescript_object_field_key(key_node, src).as_deref() != Some(key) {
-            continue;
-        }
-        return child.child_by_field_name("value");
-    }
-    None
-}
-
-fn typescript_object_field_key(node: Node<'_>, src: &[u8]) -> Option<String> {
-    let raw = node_text(&node, src).trim();
-    let key = raw
-        .strip_prefix('"')
-        .and_then(|part| part.strip_suffix('"'))
-        .or_else(|| raw.strip_prefix('\'').and_then(|part| part.strip_suffix('\'')))
-        .or_else(|| raw.strip_prefix('`').and_then(|part| part.strip_suffix('`')))
-        .unwrap_or(raw)
-        .trim();
-    if key.is_empty()
-        || !key
-            .chars()
-            .all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
-    {
-        return None;
-    }
-    Some(key.to_string())
-}
-
-fn typescript_first_param_object_fields(callable: Node<'_>, src: &[u8]) -> Vec<String> {
-    let Some(params) = callable
-        .child_by_field_name("parameters")
-        .or_else(|| first_named_child_of_kind(&callable, "formal_parameters"))
-    else {
-        return Vec::new();
-    };
-    let mut cursor = params.walk();
-    let Some(first_param) = params.named_children(&mut cursor).find(|child| {
-        matches!(
-            child.kind(),
-            "required_parameter" | "optional_parameter" | "identifier" | "object_pattern"
-        )
-    }) else {
-        return Vec::new();
-    };
-    let pattern = first_param.child_by_field_name("pattern").unwrap_or(first_param);
-    let object_pattern = if pattern.kind() == "object_pattern" {
-        Some(pattern)
-    } else {
-        first_named_child_of_kind(&pattern, "object_pattern")
-    };
-    let Some(object_pattern) = object_pattern else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    collect_typescript_object_pattern_fields(object_pattern, src, &mut out);
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn collect_typescript_object_pattern_fields(pattern: Node<'_>, src: &[u8], out: &mut Vec<String>) {
-    let mut cursor = pattern.walk();
-    for child in pattern.named_children(&mut cursor) {
-        match child.kind() {
-            "shorthand_property_identifier_pattern" => {
-                let field = node_text(&child, src).trim();
-                if !field.is_empty() {
-                    out.push(field.to_string());
-                }
-            }
-            "pair_pattern" => {
-                if let Some(key_node) = child.child_by_field_name("key") {
-                    if let Some(field) = typescript_object_field_key(key_node, src) {
-                        out.push(field);
-                    }
-                }
-            }
-            _ => collect_typescript_object_pattern_fields(child, src, out),
-        }
-    }
-}
-
-fn insert_graphql_resolver_dispatches(events: &mut Vec<FlowEvent>, dispatches: &[TsGraphqlResolverDispatch]) {
-    let mut index = 0usize;
-    while index < events.len() {
-        match &mut events[index] {
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                insert_graphql_resolver_dispatches(then_events, dispatches);
-                insert_graphql_resolver_dispatches(else_events, dispatches);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                insert_graphql_resolver_dispatches(body, dispatches);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                insert_graphql_resolver_dispatches(body, dispatches);
-                insert_graphql_resolver_dispatches(catch_events, dispatches);
-                insert_graphql_resolver_dispatches(finally_events, dispatches);
-            }
-            _ => {}
-        }
-
-        let inserts = match &events[index] {
-            FlowEvent::Call { span, name, .. } if matches!(name.as_str(), "graphql" | "execute") => {
-                dispatches
-                    .iter()
-                    .filter(|dispatch| spans_overlap_or_contain(*span, dispatch.call_span))
-                    .flat_map(graphql_dispatch_call_events)
-                    .filter(|event| !graphql_dispatch_event_exists(events, event))
-                    .collect::<Vec<_>>()
-            }
-            _ => Vec::new(),
-        };
-        if inserts.is_empty() {
-            index += 1;
-            continue;
-        }
-        let inserted = inserts.len();
-        let insert_at = index + 1;
-        events.splice(insert_at..insert_at, inserts);
-        index += inserted + 1;
-    }
-}
-
-fn graphql_dispatch_call_events(dispatch: &TsGraphqlResolverDispatch) -> Vec<FlowEvent> {
-    let mut out = Vec::new();
-    for resolver in &dispatch.resolvers {
-        let arg_text = if resolver.arg_fields.len() == 1 {
-            format!("{}.{}", dispatch.variable_values, resolver.arg_fields[0])
-        } else {
-            dispatch.variable_values.clone()
-        };
-        out.push(FlowEvent::Call {
-            span: dispatch.call_span,
-            receiver: None,
-            receiver_types: Vec::new(),
-            name: resolver.name.clone(),
-            call_kind: CallKind::Function,
-            args: vec![CallArg {
-                passing_mode: Default::default(),
-                span: dispatch.arg_span,
-                name: None,
-                place: Some(arg_text.clone()),
-                source_names: vec![dispatch.variable_values.clone(), arg_text.clone()],
-                value_text: arg_text,
-            }],
-        });
-    }
-    out
-}
-
-fn graphql_dispatch_event_exists(events: &[FlowEvent], candidate: &FlowEvent) -> bool {
-    let FlowEvent::Call {
-        span: wanted_span,
-        name: wanted_name,
-        ..
-    } = candidate
-    else {
-        return false;
-    };
-    events.iter().any(|event| match event {
-        FlowEvent::Call { span, name, .. } => span == wanted_span && name == wanted_name,
-        FlowEvent::Branch {
-            then_events,
-            else_events,
-            ..
-        } => {
-            graphql_dispatch_event_exists(then_events, candidate)
-                || graphql_dispatch_event_exists(else_events, candidate)
-        }
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-            graphql_dispatch_event_exists(body, candidate)
-        }
-        FlowEvent::Try {
-            body,
-            catch_events,
-            finally_events,
-            ..
-        } => {
-            graphql_dispatch_event_exists(body, candidate)
-                || graphql_dispatch_event_exists(catch_events, candidate)
-                || graphql_dispatch_event_exists(finally_events, candidate)
-        }
-        _ => false,
-    })
-}
-
-fn span_contains_or_equal(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
-    outer.file == inner.file && outer.start <= inner.start && outer.end >= inner.end
-}
-
-fn spans_overlap_or_contain(left: bonsai_common::Span, right: bonsai_common::Span) -> bool {
-    left.file == right.file
-        && (span_contains_or_equal(left, right)
-            || span_contains_or_equal(right, left)
-            || (left.start < right.end && right.start < left.end))
-}
-
 /// Combine ES-module imports, CommonJS `require(...)` calls, and the
 /// TypeScript-only `import x = require("y")` legacy form. Delegates to
 /// the JS helpers so the two adapters cannot drift on import semantics.
 fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
     let mut imports = js_ts_imports(file, tree, src);
-    // Dedup against `import_alias`: the JS helper sees an anonymous `require("y")`
-    // and would emit `alias=None` for the same module the TS-specific pass below
-    // emits with `alias=Some("x")`.
-    let mut require_calls = js_ts_require_calls(file, tree, src);
-    let alias_call_spans = ts_import_alias_call_spans(tree);
-    require_calls.retain(|spec| !span_inside_any(spec.span, &alias_call_spans));
-    imports.extend(require_calls);
-    // `import x = require("y")` — TS legacy form. tree-sitter-typescript wraps it
-    // in `import_alias` (not `import_statement`), so the JS helper never sees it.
-    imports.extend(parse_ts_import_alias(file, tree, src));
+    imports.extend(js_ts_require_calls(file, tree, src));
+    // `import x = require("y")` is an `import_statement` containing an
+    // `import_require_clause` in the pinned grammar.  It is neither an
+    // ECMAScript import clause nor a call expression, so both shared passes
+    // intentionally leave it to this exact TypeScript syntax pass.
+    imports.extend(parse_ts_import_require_clauses(file, tree, src));
     imports
 }
 
-/// Return the byte spans of every `call_expression` that lives
-/// inside an `import_alias` node. Used to dedup the JS helper's
-/// anonymous emission against the TS-specific aliased emission.
-fn ts_import_alias_call_spans(tree: &Tree) -> Vec<(u32, u32)> {
-    let mut alias_call_spans = Vec::new();
-    for alias_node in collect_kinds(tree, &["import_alias"]) {
-        let mut stack = vec![alias_node];
-        while let Some(current) = stack.pop() {
-            if current.kind() == "call_expression" {
-                let start = current.start_byte() as u32;
-                let end = current.end_byte() as u32;
-                alias_call_spans.push((start, end));
-            }
-            // Descend even past `call_expression` — nested forms are rare but possible.
-            let mut cursor = current.walk();
-            for child in current.named_children(&mut cursor) {
-                stack.push(child);
-            }
-        }
-    }
-    alias_call_spans
-}
-
-/// True when `span` is byte-contained within any of the given ranges.
-/// Used to suppress duplicate require-call imports that already have an
-/// `import_alias` entry above them.
-fn span_inside_any(span: bonsai_common::Span, ranges: &[(u32, u32)]) -> bool {
-    ranges
-        .iter()
-        .any(|&(start, end)| span.start >= u64::from(start) && span.end <= u64::from(end))
-}
-
 /// Parse TypeScript-only `import x = require("y")` statements. The
-/// grammar wraps these in `import_alias` nodes whose `name` field
-/// holds `x` and whose `value` field is a call to `require` with a
-/// single string argument. Emits a single Module-scope ImportSpec
+/// grammar emits an `import_require_clause` whose first identifier is `x`
+/// and whose `source` field is the module string. Emits one Module-scope ImportSpec
 /// with `alias = Some("x")` so resolve sees `x` as an alias for
 /// the `y` module.
-fn parse_ts_import_alias(file: FileId, tree: &Tree, src: &[u8]) -> Vec<ImportSpec> {
+fn parse_ts_import_require_clauses(file: FileId, tree: &Tree, src: &[u8]) -> Vec<ImportSpec> {
     let mut imports = Vec::new();
-    for alias_node in collect_kinds(tree, &["import_alias"]) {
-        let local_alias = alias_node
-            .child_by_field_name("name")
-            .map(|name_node| node_text(&name_node, src).to_string());
-        // Prefer the documented `value` field; fall back to the first `call_expression`
-        // named child to tolerate grammar revisions that expose the require call differently.
-        let value_node = alias_node.child_by_field_name("value").or_else(|| {
-            let mut cursor = alias_node.walk();
-            // Bind explicitly so the cursor outlives the iterator return.
-            let found = alias_node
-                .named_children(&mut cursor)
-                .find(|child| child.kind() == "call_expression");
-            found
-        });
-        let Some(value_node) = value_node else { continue };
-        // The value is typically `require("...")`; pull the module path from the first string.
-        let module = first_named_child_of_kind(&value_node, "string")
-            .and_then(|string_node| first_named_child_of_kind(&string_node, "string_fragment"))
+    for clause in collect_kinds(tree, &["import_require_clause"]) {
+        let mut cursor = clause.walk();
+        let local_alias = clause
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == "identifier")
+            .map(|name| node_text(&name, src).to_string());
+        let Some(source) = clause.child_by_field_name("source") else {
+            continue;
+        };
+        let module = first_named_child_of_kind(&source, "string_fragment")
             .map(|fragment| node_text(&fragment, src).to_string())
-            .unwrap_or_else(|| {
-                // Fallback: walk for any `string_fragment` descendant. Rare, but covers
-                // grammars that nest the literal under different node kinds.
-                let mut stack = vec![value_node];
-                while let Some(current) = stack.pop() {
-                    if current.kind() == "string_fragment" {
-                        return node_text(&current, src).to_string();
-                    }
-                    let mut cursor = current.walk();
-                    for child in current.named_children(&mut cursor) {
-                        stack.push(child);
-                    }
-                }
-                String::new()
-            });
+            .unwrap_or_else(|| node_text(&source, src).trim_matches(['\'', '"']).to_string());
+        let module = normalize_node_builtin_scheme(&module);
         if module.is_empty() {
             continue;
         }
         imports.push(ImportSpec {
-            span: span_of(file, &alias_node),
+            span: span_of(file, &clause),
             module,
             alias: local_alias,
             is_wildcard: false,

@@ -12,13 +12,30 @@
     kind: call
     callee:
       name: CORS
+      binding_origin: imported
+  constraints:
+  - keyword_arg_equals: {name: origins, value: '"*"'}
   match_examples:
   - name: cors flask cors wildcard with credentials
     code: |
       import flask_cors
-      def example(user_input):
-          return CORS(user_input, origins="*")
-  description: Flask-CORS(origins='*') - open CORS.
+      def example(app):
+          return flask_cors.CORS(app, origins="*")
+  - name: flask cors explicit origin negative
+    code: |
+      import flask_cors
+      def example(app):
+          return flask_cors.CORS(app, origins="https://app.example")
+    expect_no_match: true
+  - name: application CORS constructor collision negative
+    code: |
+      import flask_cors
+      class CORS:
+          def __init__(self, app, **options): pass
+      def example(app):
+          return CORS(app, origins="*")
+    expect_no_match: true
+  description: "Flask-CORS with the exact `origins=\"*\"` option permits every origin; exact keyword-value and imported-provider identity keep explicit allowlists and local constructors quiet."
 
 - id: python.cors.starlette_cors_wildcard_origin
   enabled: true
@@ -34,11 +51,28 @@
     kind: call
     callee:
       name: CORSMiddleware
+      binding_origin: imported
+  constraints:
+  - keyword_arg_equals: {name: allow_origins, value: '["*"]'}
   match_examples:
   - name: cors starlette wildcard origin
     code: |
-      import starlette
+      from starlette.middleware.cors import CORSMiddleware
       def example(app):
           return CORSMiddleware(app, allow_origins=["*"])
     expect_match_text: [CORSMiddleware]
-  description: "Starlette/FastAPI CORSMiddleware(allow_origins=['*']) - open CORS policy."
+  - name: starlette explicit origin negative
+    code: |
+      from starlette.middleware.cors import CORSMiddleware
+      def example(app):
+          return CORSMiddleware(app, allow_origins=["https://app.example"])
+    expect_no_match: true
+  - name: application CORSMiddleware collision negative
+    code: |
+      import starlette.middleware.cors
+      class CORSMiddleware:
+          def __init__(self, app, **options): pass
+      def example(app):
+          return CORSMiddleware(app, allow_origins=["*"])
+    expect_no_match: true
+  description: "Starlette/FastAPI `CORSMiddleware(..., allow_origins=[\"*\"])` permits every origin; exact keyword-value and imported-provider identity keep allowlists and local constructors quiet."

@@ -2773,7 +2773,14 @@ const IDG_WORKSPACE_TABLE_ID: u32 = 101;
 // distinct so compiler demand preserves boundary direction; sparse call-return
 // spans stay body projections and unified node directories use bounded
 // counting partitions so the resident compiler core remains proportional.
-const IDG_WORKSPACE_VERSION: u32 = 23;
+// v25: cross-owner state includes exact type-and-field heap summaries for
+// constructor-injected references. Older sidecars lack those semantic edges
+// even when every source file and transfer option is unchanged.
+// v26: rule-compiled static callback maps retain projected call-argument
+// storage through the spooled endpoint directory and use the compiler-owned
+// argument span as their evaluation boundary. A v25 graph can decode while
+// lacking those inter-callback edges, so it must never be reused.
+const IDG_WORKSPACE_VERSION: u32 = 26;
 const IDG_QUERY_ACCELERATOR_CONTAINER_VERSION: u32 = 1;
 const IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES: u64 = 256 * 1024 * 1024;
 

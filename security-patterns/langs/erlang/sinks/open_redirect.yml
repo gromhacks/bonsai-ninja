@@ -3,30 +3,10 @@
 # Why this family is sparse:
 #   The dominant Erlang web stack (cowboy) has no dedicated redirect helper -
 #   redirects are issued via cowboy_req:reply(302, #{<<"location">> => Url}, Req),
-#   the same call used for every other status. The adapter strips arity, so
-#   `^cowboy_req:reply` cannot be narrowed to "reply with Location header"
-#   without map-key constraint support. We keep that broad rule disabled
-#   (see cowboy_reply_location below) to avoid flagging every 200 OK.
-#
 #   Frameworks/libraries that DO expose explicit redirect helpers - Yaws's
 #   {redirect, Url} return tuple is matched server-side (not via a callable);
 #   Nova exposes nova:redirect/1; ChicagoBoss exposes cb_controller:redirect.
 #   Those are flagged precisely below.
-- id: erlang.open_redirect.cowboy_reply_location
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: erlang
-  tag: open-redirect
-  severity: high
-  packages: [cowboy]
-  cwe: [CWE-601]
-  match:
-    kind: call
-    callee:
-      regex: "^cowboy_req:reply"
-  description: "Disabled - must inspect status code and Location header map; bare cowboy_req:reply matches normal 200 responses."
-
 - id: erlang.open_redirect.nova_redirect
   enabled: true
   language: erlang

@@ -55,8 +55,9 @@ will leave unrecognized forms as diagnostic incompleteness.
 ## TL;DR
 
 - The engine runs taint analysis successfully on every language in the table.
-- Public findings have one accuracy contract: exact/narrowed semantic
-  evidence only. `Precision::OverApproximate` and `Precision::Unknown`
+- Public findings have one accuracy contract: compiler-proven evidence only.
+  `Exact` and `Narrowed` record proof provenance, not selectable modes.
+  `Precision::OverApproximate` and `Precision::Unknown`
   are diagnostic-only and must not become user-facing findings.
 - A `Partial` cell means *"recognized forms produce proven static
   evidence; rare forms are marked incomplete/unsupported instead of
@@ -76,7 +77,7 @@ will leave unrecognized forms as diagnostic incompleteness.
 | Level | Internal evidence declaration | Effect on rules | When you'd see it |
 |---|---|---|---|
 | `Exact` | Construct has a closed static model for the admitted source evidence. Findings may use `Precision::Exact`; this is not a claim about unmodeled runtime behavior. | Rule fires whenever that static model proves a match. | Set only when an adapter has a closed-form analysis for the category. |
-| `Partial` | Recognized forms produce semantic evidence; unrecognized forms are marked incomplete/unsupported. | Rule fires only when exact/narrowed semantic evidence exists. | The conservative default. Most cells. Means "the engine works here, with honest completion metadata." |
+| `Partial` | Recognized forms produce semantic evidence; unrecognized forms are marked incomplete/unsupported. | Rule fires only for compiler-proven evidence (`Exact` or `Narrowed` provenance). | The conservative default. Most cells. Means "the engine works here, with honest completion metadata." |
 | `Unsupported` | Construct has no static evidence model. | **Rules requiring this category are rejected at rulepack load time.** | A deliberate gate: prevents false-precision findings on shapes the engine would not analyze correctly. |
 | `n/a` | Construct doesn't exist in this language. | No rule could target it anyway. | E.g. macros in JS, exceptions in Rust, generics in Lua. |
 
@@ -166,7 +167,7 @@ therefore remains diagnostic/incomplete rather than a guessed finding.
 These don't gate rule loading; they affect how the resolver narrows
 candidate edges. `Unsupported` here means findings that go through this
 construct are not emitted as semantic evidence; `Partial` means recognized
-forms can emit exact/narrowed evidence and unrecognized forms stay
+forms can emit compiler-proven evidence and unrecognized forms stay
 diagnostic-only.
 
 | Language | Macros | Reflection | FFI |

@@ -277,8 +277,6 @@
   - name: generated direct match
     code: |
       #include <boost/process.hpp>
-      #include <boost/process.hpp>
-      #include <boost/process.hpp>
       void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
@@ -316,8 +314,6 @@
   - name: tainted boost process spawn command
     code: |
       #include <boost/process.hpp>
-      #include <boost/process.hpp>
-      #include <boost/process.hpp>
       void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
@@ -354,8 +350,6 @@
   - name: generated direct match
     code: |
       #include <boost/process.hpp>
-      #include <boost/process.hpp>
-      #include <boost/process.hpp>
       void example(const char *arg) {
         auto *x = new child(arg);
       }
@@ -390,7 +384,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      #include <QtCore/Qt>
       #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example(const char *arg) {
@@ -430,7 +423,6 @@
   - name: generated direct match
     code: |
       #include <QtCore/Qt>
-      #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example(const char *arg) {
         const char *fmt = arg;
@@ -468,7 +460,6 @@
   match_examples:
   - name: tainted qprocess execute command
     code: |
-      #include <QtCore/Qt>
       #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example(const char *arg) {
@@ -508,7 +499,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      #include <QtCore/Qt>
       #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example(const char *arg) {
@@ -621,33 +611,6 @@
       }
     expect_no_match: true
   description: "execv(path, argv) - direct exec; tainted path or argv element runs arbitrary binaries."
-- id: cpp.cmdi.execv_argv
-  enabled: true
-  language: cpp
-  tag: command-injection
-  severity: critical
-  cwe:
-  - CWE-78
-  match:
-    kind: call
-    callee:
-      name: execv
-  constraints:
-  - arg_tainted:
-      index: 1
-  match_examples:
-  - name: tainted arg 1
-    code: |
-      void example(const char *input) {
-        execv("safe", input);
-      }
-  - name: literal arg 1 negative
-    code: |
-      void example() {
-        execv("safe", "safe");
-      }
-    expect_no_match: true
-  description: "execv(path, argv) - tainted argv can pass attacker-controlled flags or subcommands."
 - id: cpp.cmdi.execle
   enabled: true
   language: cpp
@@ -861,8 +824,6 @@
   - name: tainted boost process v2 process
     code: |
       #include <boost/process.hpp>
-      #include <boost/process.hpp>
-      #include <boost/process.hpp>
       void example(const char *arg) {
         auto *x = new process_v2::process(arg);
       }
@@ -898,8 +859,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      #include <boost/process.hpp>
-      #include <boost/process.hpp>
       #include <boost/process.hpp>
       void example(const char *arg) {
         const char *fmt = arg;
@@ -1084,21 +1043,3 @@
       }
     expect_no_match: true
   description: "fexecve(fd, argv, envp) - exec from an open fd; tainted argv runs the program with attacker-controlled arguments."
-- id: cpp.cmdi.asio_io_context_post
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: code-injection
-  severity: medium
-  packages:
-  - boost.asio
-  cwe:
-  - CWE-94
-  match:
-    kind: call
-    callee:
-      attribute:
-      - io_context
-      - post
-  description: "Disabled - boost::asio::io_context::post(callback) is a generic dispatch; flag manually if the callback closes over tainted command/script bytes (audit only)."

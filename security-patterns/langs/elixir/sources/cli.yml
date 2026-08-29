@@ -101,19 +101,43 @@
   description: "IO.binread/2 - reads raw bytes from a device (stdin by default); binary counterpart of IO.read/2."
 
 - id: elixir.cli.mix_task_args
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: elixir
   trust: local
   tag: local-input
   payload_types: [text]
   frameworks: [mix]
+  packages: [mix]
+  imports: [Mix.Task]
   match:
     kind: param
     target:
-      name: args
-  description: "Disabled - a parameter named args does not prove the enclosing module uses Mix.Task or that the function is run/1. System.argv/0 remains the precise process boundary until generic `use Mix.Task` facts are available."
+      regex: '^[a-z_][A-Za-z0-9_]*$'
+      in_method: [run]
+      param_index_in: [0]
+      param_count_in: [1]
+  match_examples:
+  - name: Mix task run arguments with arbitrary binding name
+    code: |
+      defmodule Mix.Tasks.Audit do
+        use Mix.Task
+        def run(argv), do: consume(argv)
+      end
+    expect_match_text: [argv]
+  - name: ordinary run function is not a Mix task
+    code: |
+      defmodule Worker do
+        def run(argv), do: consume(argv)
+      end
+    expect_no_match: true
+  - name: wrong Mix task callback arity is not process input
+    code: |
+      defmodule Mix.Tasks.Audit do
+        use Mix.Task
+        def run(argv, config), do: consume(argv, config)
+      end
+    expect_no_match: true
+  description: "First parameter of Mix.Task run/1 - command-line arguments proven by use Mix.Task plus callback name, arity, and position; the binding name is irrelevant."
 
 - id: elixir.config.system_get_env
   enabled: true

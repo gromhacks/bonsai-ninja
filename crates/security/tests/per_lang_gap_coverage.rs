@@ -1214,7 +1214,7 @@ g7_best_effort_test!(g7_swift_foreach, "g7-swift", "swift", "app.swift",
     "func step(_ item: String) { sink(item) }\nfunc handle(_ items: [String]) { items.forEach(step) }\nfunc sink(_ s: String) {}\n",
     "swift.sink", "sink");
 g7_best_effort_test!(g7_rust_iter, "g7-rust", "rust", "app.rs",
-    "fn step(item: &str) { sink(item); }\nfn handle(items: &[String]) { items.iter().for_each(|i| step(i)); }\nfn sink(s: &str) {}\n",
+    "fn step(item: &str) { sink(item); }\nfn apply(callback: fn(&str), item: &str) { callback(item); }\nfn handle(item: &str) { apply(step, item); }\nfn sink(s: &str) {}\n",
     "rust.sink", "sink");
 g7_best_effort_test!(g7_php_array_walk, "g7-php", "php", "app.php",
     "<?php\nfunction step($item) { sink($item); }\nfunction handle($items) { array_walk($items, 'step'); }\nfunction sink($s) {}\n",

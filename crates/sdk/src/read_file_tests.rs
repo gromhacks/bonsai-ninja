@@ -1,5 +1,4 @@
 use super::*;
-use bonsai_common::Precision;
 use bonsai_security::{AlternateTaintFlow, MatchOrigin, TaintPropagationStep, TaintedArgInfo};
 
 fn site(rule_id: &str, text: &str, enclosing_fn: &str) -> FindingMatch {
@@ -185,24 +184,6 @@ fn read_file_path_resolution_requires_path_boundary() {
     .expect("exact file should resolve");
     assert!(out.source.contains("myapp_marker"));
     std::fs::remove_dir_all(&root).ok();
-}
-
-#[test]
-fn read_file_taint_options_are_semantic_only() {
-    let defaulted = semantic_read_file_taint_options(TaintAnalysisOptions::default());
-    assert_eq!(defaulted.max_precision, Some(Precision::Narrowed));
-
-    let exact = semantic_read_file_taint_options(TaintAnalysisOptions {
-        max_precision: Some(Precision::Exact),
-        ..Default::default()
-    });
-    assert_eq!(exact.max_precision, Some(Precision::Exact));
-
-    let broad = semantic_read_file_taint_options(TaintAnalysisOptions {
-        max_precision: Some(Precision::OverApproximate),
-        ..Default::default()
-    });
-    assert_eq!(broad.max_precision, Some(Precision::Narrowed));
 }
 
 #[test]

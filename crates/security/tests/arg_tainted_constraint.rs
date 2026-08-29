@@ -624,9 +624,9 @@ fn matcher_policy_fingerprint_matches_current_semantics() {
     // `collect_lifecycle_states` consumes them. Rules that opt
     // into `requires_state` start firing for the affected
     // languages.
-    // Bumped 0x0015 → 0x0016 when MatchKind::Missing gained a
-    // `search_depth` field that opts the walker into BFS through
-    // the call graph for cross-procedural absence checks.
+    // 0x0016 historically added a bounded cross-call Missing-rule walker.
+    // That field was removed because a finite graph prefix cannot prove
+    // whole-program absence; Missing rules now consume local compiler facts.
     // Bumped 0x0016 → 0x0017 when P1 RequiresRuntimeType moved
     // from a flow-insensitive name→type map to a CFG-aware
     // narrowing list bound to the then-branch span. Rules using
@@ -670,9 +670,12 @@ fn matcher_policy_fingerprint_matches_current_semantics() {
     // semantics.
     // Bumped 0x0038 → 0x0039 when configured-receiver factory fields and
     // exact finite-collection membership began changing matched rule sites.
+    // Bumped 0x0039 → 0x003a when rule-declared external callable identity
+    // began failing closed on compiler-proven lexical/workspace collisions
+    // and semantic decorator configuration stopped becoming a text anchor.
     assert_eq!(
         bonsai_security::MATCHER_POLICY_FINGERPRINT,
-        0x4d41_5443_4845_525f_504f_4c49_4359_0039_u128
+        0x4d41_5443_4845_525f_504f_4c49_4359_003a_u128
     );
 }
 

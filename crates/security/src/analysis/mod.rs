@@ -40,10 +40,10 @@ use bonsai_lang_api::{
     StringCompositionPart,
 };
 use bonsai_taint::{
-    compose_idg_seed_nodes, CallResultPassthrough, CleanOutputOverwrite, EntryTaintGraph, IdgSeedRequest,
-    IdgTaintQuery, IdgTaintSource, IdgTaintTargets, IdgTaintTransfers, InterTaintCaches, InterTaintConfig,
-    OutputArgFlow, ReceiverStatePropagation, SourceCallbackArgs, SourceOutputArgs, TaintedCall,
-    TaintedCallEdge, TokenSet,
+    compose_idg_seed_nodes, CallResultPassthrough, CallbackInvocation, CleanOutputOverwrite,
+    CleanReceiverOverwrite, EntryTaintGraph, IdgSeedRequest, IdgTaintQuery, IdgTaintSource, IdgTaintTargets,
+    IdgTaintTransfers, InterTaintCaches, InterTaintConfig, OutputArgFlow, ReceiverStatePropagation,
+    SourceCallbackArgs, SourceOutputArgs, TaintedCall, TaintedCallEdge, TokenSet,
 };
 use bonsai_workspace::Workspace;
 use regex::Regex;
@@ -63,9 +63,10 @@ mod source_seeds;
 mod taint_cache;
 mod validation;
 use clean_overwrite::{
-    call_arg_target_keys, clean_overwrite_callee_tail, clean_overwrite_target_key,
-    interprocedural_clean_overwrite_kills_lineage_arg, same_function_clean_overwrite_kills_sink_arg,
-    tainted_arg_info_from_events, tainted_arg_target_keys, CleanOverwritePolicy,
+    call_arg_target_keys, clean_overwrite_callee_tail, clean_overwrite_target_key, compiler_target_place_key,
+    interprocedural_clean_overwrite_kills_lineage_arg, latest_same_function_taint_reentry_span,
+    same_function_clean_overwrite_kills_sink_arg, tainted_arg_info_from_events, tainted_arg_target_keys,
+    CleanOverwritePolicy,
 };
 #[cfg(test)]
 use clean_overwrite::{clean_output_call_overwrites_target, try_region_clean_overwrites_target};
@@ -83,14 +84,15 @@ use guard_sanitizers::{
     character_constraint_sanitizer, character_escape_sanitizer, collect_compiler_call_sites_reaching_value,
     compiler_guard_sanitizer, configured_argument_factory_guard_sanitizer,
     configured_argument_receiver_guard_sanitizer, configured_call_argument_guard_sanitizer,
-    finite_literal_selection_sanitizer, nosql_eq_filter_wrapper_sanitizer,
-    parameterized_query_guard_sanitizer, path_consumer_containment_guard_sanitizer,
-    path_containment_guard_sanitizer, place_is_assigned_between, receiver_configuration_guard_sanitizer,
-    receiver_factory_guard_sanitizer, relative_path_containment_guard_sanitizer,
-    runtime_type_rejection_guard_sanitizer, same_origin_path_constraint_sanitizer,
-    sanitized_context_rewrite_covers_consumer, source_sink_pair_is_low_signal,
-    terminal_rejection_predicate_guard_span, url_network_guard_sanitizer, url_reconstruction_guard_sanitizer,
-    CompilerGuardContext,
+    finite_literal_map_selector_call_is_proven, finite_literal_selection_sanitizer,
+    nosql_eq_filter_wrapper_sanitizer, parameterized_query_guard_sanitizer,
+    path_consumer_containment_guard_sanitizer, path_containment_guard_sanitizer,
+    predicate_return_implies_call_value, receiver_callback_configuration_guard_sanitizer,
+    receiver_configuration_guard_sanitizer, receiver_factory_guard_sanitizer,
+    relative_path_containment_guard_sanitizer, runtime_type_rejection_guard_sanitizer,
+    same_origin_path_constraint_sanitizer, sanitized_context_rewrite_covers_consumer,
+    source_sink_pair_is_low_signal, terminal_rejection_predicate_guard_span, url_network_guard_sanitizer,
+    url_reconstruction_guard_sanitizer, CompilerGuardContext,
 };
 use prototype_guard::prototype_pollution_sink_is_guarded;
 #[cfg(test)]
@@ -176,11 +178,6 @@ pub struct TaintAnalysisOptions {
     /// propagated paths; public reports suppress paths whose relevant sink
     /// class has been sanitizer-cleared unless this is set.
     pub show_sanitized: bool,
-    /// Optional maximum tolerated flow precision. Public security
-    /// analysis is semantic-only: `Some(Precision::Narrowed)` keeps
-    /// exact and narrowed findings and rejects broad diagnostic
-    /// classes.
-    pub max_precision: Option<Precision>,
     /// When true, drop findings whose source OR sink lives in a
     /// conventional test path (`test/`, `tests/`, `*_test.go`, etc.).
     /// See `crate::finding::path_is_test_file` for the exact rule.
@@ -213,27 +210,10 @@ impl Default for TaintAnalysisOptions {
             include_inferred_sources: false,
             include_pattern_only: false,
             show_sanitized: false,
-            max_precision: Some(PUBLIC_SEMANTIC_MAX_PRECISION),
             exclude_tests: false,
             attach_flow_evidence: true,
             taint_graph_resident_cache_entries: None,
         }
-    }
-}
-
-impl TaintAnalysisOptions {
-    /// Enforce the production semantic-only precision contract.
-    ///
-    /// `Exact` remains exact. Every other request is capped at
-    /// `Narrowed`, so broad diagnostic classes cannot leak into
-    /// user-facing taint results through SDK defaults or custom callers.
-    #[must_use]
-    pub fn semantic_precision_only(mut self) -> Self {
-        self.max_precision = Some(match self.max_precision {
-            Some(Precision::Exact) => Precision::Exact,
-            _ => PUBLIC_SEMANTIC_MAX_PRECISION,
-        });
-        self
     }
 }
 
@@ -534,6 +514,35 @@ impl ResolutionCoverage {
                 .filter(|(caller, _)| analyzed_funcs.contains(caller))
                 .collect(),
         }
+    }
+}
+
+fn debug_resolution_gaps(ws: &Workspace, global: &GlobalIndex, coverage: &ResolutionCoverage) {
+    let mut sites = coverage
+        .unresolved_workspace_sites
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    sites.sort_unstable_by_key(|(caller, span)| (caller.raw(), span.file.raw(), span.start, span.end));
+    for (caller, span) in sites {
+        let caller_name = global
+            .decl_of(SymbolId::new(caller.raw()))
+            .map_or("<unknown>", |decl| decl.name.as_ref());
+        let Ok(snapshot) = ws.vfs().snapshot(span.file) else {
+            continue;
+        };
+        let start = usize::try_from(span.start).unwrap_or(usize::MAX);
+        let end = usize::try_from(span.end).unwrap_or(usize::MAX);
+        let call = snapshot.text.get(start..end).unwrap_or("<invalid-span>");
+        bonsai_diagnostics::debug_log!(
+            "security-resolution",
+            "unresolved workspace call: caller={} file={} span={}..{} call={}",
+            caller_name,
+            snapshot.path.display(),
+            span.start,
+            span.end,
+            call
+        );
     }
 }
 
@@ -922,9 +931,8 @@ where
     if let Some(flow_id) = options.flow_id.as_deref() {
         findings_raw.retain(|item| item.finding.representative_flow_id.as_deref() == Some(flow_id));
     }
-    if let Some(max_precision) = options.max_precision {
-        findings_raw.retain(|item| finding_precision_within(&item.finding.precision, max_precision));
-    }
+    findings_raw
+        .retain(|item| finding_precision_within(&item.finding.precision, PUBLIC_SEMANTIC_MAX_PRECISION));
     if !options.exclude_files.is_empty() || options.exclude_tests {
         findings_raw.retain(|item| {
             !finding_has_excluded_path(
@@ -1092,8 +1100,9 @@ where
 /// entire public analysis operation. Match planning may stream and release
 /// compiler bodies, but every file in the operation must see the same package
 /// evidence. Inventory commands need the same lifecycle as full taint/source
-/// analysis because template files commonly inherit their runtime package
-/// from a workspace manifest rather than a file-local import.
+/// analysis because framework-owned source and template files commonly
+/// inherit their runtime package from a workspace manifest rather than a
+/// file-local import.
 fn begin_dependency_package_snapshot(
     ws: &Workspace,
     pack: &Rulepack,
@@ -1211,7 +1220,7 @@ pub fn run_taint_analysis_with_phase_progress<F>(
 where
     F: FnMut(AnalysisProgress),
 {
-    run_taint_pipeline_with_phase_progress(ws, pack, options, false, "taint-analysis", on_progress)
+    run_taint_pipeline_with_phase_progress(ws, pack, options, false, true, "taint-analysis", on_progress)
         .map(|output| output.report)
 }
 
@@ -1221,14 +1230,16 @@ struct TaintPipelineOutput {
 }
 
 /// Shared source/sink fixed-point pipeline. `collect_sink_matches` changes
-/// only endpoint retention for the sink-centric view: the same matcher pass
-/// supplies both the upstream proof engine and the complete selected sink
-/// inventory, avoiding a second whole-workspace scan.
+/// only endpoint retention for the sink-centric view. Source matching is
+/// independently optional because source-independent sink lineage does not
+/// require a security source; callers request that broad phase only when the
+/// separate `security_source_flows` annotation was selected.
 fn run_taint_pipeline_with_phase_progress<F>(
     ws: &Workspace,
     pack: &Rulepack,
     options: TaintAnalysisOptions,
     collect_sink_matches: bool,
+    collect_security_source_flows: bool,
     analysis_mode: &'static str,
     mut on_progress: F,
 ) -> Result<TaintPipelineOutput>
@@ -1249,7 +1260,6 @@ where
     ws.release_resolved_call_graph_cache();
     ws.release_exact_body_cache();
     ws.db().release_global_index();
-    let options = options.semantic_precision_only();
     let SelectedTaintRules {
         sources,
         mut sinks,
@@ -1286,21 +1296,29 @@ where
             options.exclude_files.len()
         ),
     });
-    let mut source_hits = gather_strict_matches_phased(
-        ws,
-        &sources,
-        SOURCE_MATCH_PHASES,
-        &scan_files,
-        &rulepack_typing,
-        &mut on_progress,
-    );
+    let mut source_hits = if collect_security_source_flows {
+        gather_strict_matches_phased(
+            ws,
+            &sources,
+            SOURCE_MATCH_PHASES,
+            &scan_files,
+            &rulepack_typing,
+            &mut on_progress,
+        )
+    } else {
+        on_progress(AnalysisProgress::Note {
+            label: "scope",
+            detail: format!("{analysis_mode} security_source_flows=not-requested"),
+        });
+        Vec::new()
+    };
     // Inferred per-function entry-point sources are opt-in (was: emitted
     // by default whenever no `--source` regex was given). Default off
     // because these synthetic sources O(functions) and outrank real
     // source-rule findings in unfiltered output. Pass
     // `--inferred-sources` to restore the legacy behavior; combine with
     // `--trust local --category inferred` to view only the inferred set.
-    if options.include_inferred_sources && options.source.is_none() {
+    if collect_security_source_flows && options.include_inferred_sources && options.source.is_none() {
         // A broad inferred entry-point param source is redundant noise
         // when a concrete source in the same function is rooted at that
         // same parameter (e.g. Go's `unreferenced_entry.param_1` for `r`
@@ -1373,11 +1391,10 @@ where
     on_progress(AnalysisProgress::Note {
         label: "scope",
         detail: format!(
-            "{analysis_mode} source_matches={} endpoint_files={} source_languages={} static_evidence={}",
+            "{analysis_mode} source_matches={} endpoint_files={} source_languages={} static_evidence=compiler-proven",
             source_hits.len(),
             endpoint_scan_files.len(),
-            source_languages.len(),
-            static_evidence_label(options.max_precision)
+            source_languages.len()
         ),
     });
 
@@ -1494,7 +1511,7 @@ where
         sinks: &sink_hits,
         sanitizers: &sanitizer_hits,
         pack,
-        max_precision: options.max_precision,
+        max_precision: Some(PUBLIC_SEMANTIC_MAX_PRECISION),
         taint_graph_resident_cache_entries: options.taint_graph_resident_cache_entries,
         rulepack_typing: &rulepack_typing,
         on_progress: &mut on_progress,
@@ -1580,6 +1597,10 @@ where
     F: FnMut(AnalysisProgress),
 {
     let lineage_options = options.clone();
+    let collect_security_source_flows = options.source.is_some()
+        || options.trust.is_some()
+        || options.category.is_some()
+        || options.include_inferred_sources;
     let taint_options = TaintAnalysisOptions {
         source: options.source,
         trust: options.trust,
@@ -1603,6 +1624,7 @@ where
         pack,
         taint_options,
         true,
+        collect_security_source_flows,
         "sink-analysis",
         &mut on_progress,
     )?;
@@ -1841,13 +1863,27 @@ fn compile_sink_upstream_flows(
         label: "building sink lineage scope",
         total: 3,
     });
+    let linkage_started = Instant::now();
     let global = ws.compiler_linkage_index();
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "sink lineage linkage index: {:.3}s",
+        linkage_started.elapsed().as_secs_f64()
+    );
+    let attribution_started = Instant::now();
     let mut attributed: Vec<(usize, FuncId, Span)> = sink_matches
         .iter()
         .enumerate()
         .filter_map(|(index, sink)| func_id_for_match(ws, sink).map(|func| (index, func, sink.span)))
         .collect();
     attributed.sort_unstable_by_key(|(index, func, span)| (func.raw(), span.file.raw(), span.start, *index));
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "sink lineage attribution: matches={} attributed={} elapsed={:.3}s",
+        sink_matches.len(),
+        attributed.len(),
+        attribution_started.elapsed().as_secs_f64()
+    );
     if attributed.is_empty() {
         on_progress(AnalysisProgress::PhaseTicked);
         on_progress(AnalysisProgress::PhaseTicked);
@@ -1865,15 +1901,30 @@ fn compile_sink_upstream_flows(
         );
     }
 
+    let call_graph_started = Instant::now();
     let call_graph = ws.cached_resolved_call_graph();
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "sink lineage callgraph: {:.3}s",
+        call_graph_started.elapsed().as_secs_f64()
+    );
     on_progress(AnalysisProgress::PhaseTicked);
     let sink_funcs: AHashSet<FuncId> = attributed.iter().map(|(_, func, _)| *func).collect();
+    let scope_started = Instant::now();
     let lineage_scope = sink_analysis_lineage_func_scope(
         &sink_funcs,
         global.as_ref(),
         call_graph.as_ref(),
         Some(Precision::Narrowed),
     );
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "sink lineage closure: sinks={} functions={} elapsed={:.3}s",
+        sink_funcs.len(),
+        lineage_scope.len(),
+        scope_started.elapsed().as_secs_f64()
+    );
+    let scoped_files_started = Instant::now();
     let mut scoped_funcs: Vec<FuncId> = lineage_scope.iter().copied().collect();
     scoped_funcs.sort_unstable_by_key(|func| func.raw());
     let mut scoped_files: Vec<FileId> = scoped_funcs
@@ -1882,15 +1933,22 @@ fn compile_sink_upstream_flows(
         .collect();
     scoped_files.sort_unstable_by_key(|file| file.raw());
     scoped_files.dedup();
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "sink lineage scoped files: files={} elapsed={:.3}s",
+        scoped_files.len(),
+        scoped_files_started.elapsed().as_secs_f64()
+    );
     on_progress(AnalysisProgress::PhaseTicked);
 
+    let transfer_started = Instant::now();
     let transfer_languages: AHashSet<String> = scoped_files
         .iter()
         .filter_map(|file| ws.db().adapter_for(*file))
         .map(|adapter| adapter.language_id().as_str().to_string())
         .collect();
     let rulepack_typing = crate::matcher::build_rulepack_typing(&pack.all_rules());
-    let receiver_state_propagations = compiled_receiver_state_propagations_for_languages(
+    let compiled_transfers = compiled_transfer_sites_for_languages(
         ws,
         pack,
         &transfer_languages,
@@ -1898,28 +1956,38 @@ fn compile_sink_upstream_flows(
         Some(&scoped_files),
         || {},
     );
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "sink lineage transfer sites: {:.3}s",
+        transfer_started.elapsed().as_secs_f64()
+    );
     let graph_config = InterTaintConfig {
         clean_output_overwrites: clean_output_overwrites_from_rulepack_for_languages(
             pack,
             &transfer_languages,
         ),
+        clean_receiver_overwrites: Vec::new(),
         // Raw sink-lineage enumeration has no source endpoint selection.
         // Source-only API transfers are added by the taint pass, where exact
         // matcher-approved source sites are available.
         source_output_args: Vec::new(),
         source_callback_args: Vec::new(),
-        call_result_passthroughs: call_result_passthroughs_from_rulepack_for_languages(
-            pack,
-            &transfer_languages,
-        ),
-        output_arg_flows: output_arg_flows_from_rulepack_for_languages(pack, &transfer_languages),
-        receiver_state_propagations,
+        call_result_passthroughs: compiled_transfers.call_result_passthroughs,
+        callback_invocations: compiled_transfers.callback_invocations,
+        output_arg_flows: compiled_transfers.output_arg_flows,
+        receiver_state_propagations: compiled_transfers.receiver_state_propagations,
         max_edge_precision: Some(Precision::Narrowed),
     };
+    let release_started = Instant::now();
     crate::matcher::release_matcher_fact_caches();
     ws.release_idg_service_cache();
     ws.release_exact_body_cache();
     ws.db().release_global_index();
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "sink lineage cache release: {:.3}s",
+        release_started.elapsed().as_secs_f64()
+    );
     on_progress(AnalysisProgress::PhaseTicked);
     on_progress(AnalysisProgress::PhaseFinished);
 
@@ -1934,7 +2002,11 @@ fn compile_sink_upstream_flows(
                 ws,
                 pack,
                 languages: &transfer_languages,
+                output_arg_flows: &graph_config.output_arg_flows,
+                call_result_passthroughs: &graph_config.call_result_passthroughs,
+                callback_invocations: &graph_config.callback_invocations,
                 receiver_state_propagations: &graph_config.receiver_state_propagations,
+                clean_receiver_overwrites: &graph_config.clean_receiver_overwrites,
                 source_output_args: &graph_config.source_output_args,
                 source_callback_args: &graph_config.source_callback_args,
                 included_files: &scoped_files,
@@ -2071,6 +2143,7 @@ fn compile_sink_upstream_flows(
         &pack.metadata.test_path_patterns,
     );
     let resolution = ResolutionCoverage::from_graph(call_graph.as_ref(), lineage_scope.iter().copied());
+    debug_resolution_gaps(ws, global.as_ref(), &resolution);
     let incomplete_reasons = workspace_analysis_incomplete_reasons(ws, &scan_files, Some(&resolution));
     (flows, incomplete_reasons)
 }
@@ -2230,6 +2303,7 @@ struct SourceGraphJob {
     output_arg_names: Vec<String>,
     callback_only: bool,
     output_only: bool,
+    match_kind: bonsai_taint::IdgRuleMatchKind,
     graph_key: Vec<String>,
 }
 
@@ -2302,8 +2376,17 @@ fn schedule_source_graph_groups(
             let anchor = source_anchor_for_rule_match(pack, hit.hit);
             let callback_only = source_rule_is_callback_only(pack, hit.hit);
             let output_only = source_rule_is_output_only(pack, hit.hit);
-            let graph_key =
+            let match_kind = pack
+                .find_rule_by_id(&hit.hit.rule_id)
+                .filter(|rule| rule.match_spec.kind == MatchKind::Read)
+                .map_or(bonsai_taint::IdgRuleMatchKind::General, |_| {
+                    bonsai_taint::IdgRuleMatchKind::Read
+                });
+            let mut graph_key =
                 sorted_seed_key_with_anchor(&seeds, anchor, &output_arg_names, callback_only, output_only);
+            if match_kind == bonsai_taint::IdgRuleMatchKind::Read {
+                graph_key.push("__read_match".to_string());
+            }
             source_jobs.push((
                 hit.index,
                 SourceGraphJob {
@@ -2314,6 +2397,7 @@ fn schedule_source_graph_groups(
                     output_arg_names,
                     callback_only,
                     output_only,
+                    match_kind,
                     graph_key,
                 },
             ));
@@ -2477,7 +2561,11 @@ where
             ws: context.ws,
             pack: context.pack,
             languages: context.transfer_languages,
+            output_arg_flows: &context.graph_config.output_arg_flows,
+            call_result_passthroughs: &context.graph_config.call_result_passthroughs,
+            callback_invocations: &context.graph_config.callback_invocations,
             receiver_state_propagations: &context.graph_config.receiver_state_propagations,
+            clean_receiver_overwrites: &context.graph_config.clean_receiver_overwrites,
             source_output_args: &context.graph_config.source_output_args,
             source_callback_args: &context.graph_config.source_callback_args,
             included_files: &scoped_files,
@@ -2523,6 +2611,13 @@ fn build_source_group_candidates(
                         )
                     } else if first.output_only {
                         bonsai_taint::IdgTaintSource::output_rule_match(
+                            group.start,
+                            &first.seeds,
+                            first.anchor,
+                            &first.output_arg_names,
+                        )
+                    } else if first.match_kind == bonsai_taint::IdgRuleMatchKind::Read {
+                        bonsai_taint::IdgTaintSource::read_rule_match(
                             group.start,
                             &first.seeds,
                             first.anchor,
@@ -2874,7 +2969,7 @@ where
         label: "compiling transfer sites",
         total: scan_files.len() as u64,
     });
-    let receiver_state_propagations = compiled_receiver_state_propagations_for_languages(
+    let compiled_transfers = compiled_transfer_sites_for_languages(
         ws,
         pack,
         &transfer_languages,
@@ -2888,6 +2983,7 @@ where
             pack,
             &transfer_languages,
         ),
+        clean_receiver_overwrites: Vec::new(),
         source_output_args: source_output_args_from_rulepack_for_languages(
             ws,
             pack,
@@ -2900,12 +2996,10 @@ where
             &transfer_languages,
             &source_hits,
         ),
-        call_result_passthroughs: call_result_passthroughs_from_rulepack_for_languages(
-            pack,
-            &transfer_languages,
-        ),
-        output_arg_flows: output_arg_flows_from_rulepack_for_languages(pack, &transfer_languages),
-        receiver_state_propagations,
+        call_result_passthroughs: compiled_transfers.call_result_passthroughs,
+        callback_invocations: compiled_transfers.callback_invocations,
+        output_arg_flows: compiled_transfers.output_arg_flows,
+        receiver_state_propagations: compiled_transfers.receiver_state_propagations,
         max_edge_precision: Some(Precision::Narrowed),
     };
     // Exact source-seeded graphs are cached through the workspace
@@ -2917,8 +3011,10 @@ where
     let source_graph_caches = ws.inter_taint_caches();
     let mut source_idg_transfer_options = idg_transfer_options_from_rulepack_shapes(
         &source_graph_config.clean_output_overwrites,
+        &source_graph_config.clean_receiver_overwrites,
         &source_graph_config.source_output_args,
         &source_graph_config.source_callback_args,
+        &source_graph_config.callback_invocations,
         &source_graph_config.output_arg_flows,
         &source_graph_config.receiver_state_propagations,
     );
@@ -3014,24 +3110,11 @@ where
         analysis_incomplete_reasons
             .insert(format!("runtime-disabled-rules:{}", runtime_disabled_rules.len()));
     }
-    if lineage_summary.incomplete_flows > 0 {
-        analysis_incomplete_reasons.insert(format!(
-            "incomplete-source-lineage-flows:{}",
-            lineage_summary.incomplete_flows
-        ));
-    }
-    if lineage_summary.truncated_hop_flows > 0 {
-        analysis_incomplete_reasons.insert(format!(
-            "source-lineage-truncated-hop-flows:{}",
-            lineage_summary.truncated_hop_flows
-        ));
-    }
-    if lineage_summary.omitted_paths > 0 {
-        analysis_incomplete_reasons.insert(format!(
-            "source-lineage-omitted-paths:{}",
-            lineage_summary.omitted_paths
-        ));
-    }
+    // Lineage limits bound only the representative paths materialised for the
+    // renderer. The sparse fixed point above is still exact and complete, so a
+    // truncated presentation must not be reported as a compiler/analysis gap.
+    // `lineage_summary` and each candidate's `SourceLineageStatus` retain the
+    // explicit hop/path omissions for consumers that need to request `--all`.
     let analysis_incomplete_reasons: Vec<String> = analysis_incomplete_reasons.into_iter().collect();
     finish_taint_cache_write_through(ws, source_scope.cache_persist_started, &mut on_progress);
     Ok(SourceAnalysisReport {
@@ -4065,6 +4148,14 @@ fn build_call_evidence<'a>(
                 canonical_chain_index,
                 source_func,
                 call.caller,
+            );
+            bonsai_diagnostics::debug_log!(
+                "security-lineage",
+                "source={} terminal={} primary={:?} canonical={:?}",
+                source_func.raw(),
+                call.caller.raw(),
+                primary.iter().map(|func| func.raw()).collect::<Vec<_>>(),
+                chain_funcs.iter().map(|func| func.raw()).collect::<Vec<_>>()
             );
             // The chain and the taint_path must describe the SAME route: rebuild
             // the step records along the rewritten chain from the recorded edges
@@ -6710,6 +6801,9 @@ mod wrapper_dedup_tests {
             direct_call_span: Some(nested_span),
             value_kind: None,
             inline_callback_params: Vec::new(),
+            inline_callback_span: None,
+            inline_callback_static_return: None,
+            inline_callback_fields: Vec::new(),
             value_flow: bonsai_lang_api::ExpressionFlow {
                 call_sites: vec![nested_span],
                 ..bonsai_lang_api::ExpressionFlow::default()
@@ -7260,8 +7354,41 @@ fn helper_functions_reaching_tainted_sink_args(
         "sink_argument_helpers sink={} call_sites={:?} helpers={:?}",
         sink.rule_id,
         call_sites,
-        helpers
+        helpers,
     );
+    helpers
+}
+
+/// Direct predicate helpers evaluated before a sink are sanitizer candidates,
+/// even though their boolean result does not itself flow into the sink value.
+/// This is candidate discovery only; sanitizer credit still requires the
+/// complete return implication, argument lineage, and terminal rejecting
+/// branch proved later.
+fn predicate_helper_functions_before_sink(
+    ws: &Workspace,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+) -> Vec<FuncId> {
+    let mut helpers = call_graph
+        .callees_of(sink_func)
+        .filter(|edge| {
+            edge.precision.is_semantic()
+                && edge.span.file == sink.span.file
+                && edge.span.start < sink.span.start
+        })
+        .filter_map(|edge| {
+            let helper = ws.exact_decl(SymbolId::new(edge.to.raw()))?;
+            let index = ws.exact_decl_index_shared(helper.span.file)?;
+            index
+                .predicate_returns
+                .iter()
+                .any(|fact| fact.function_span == helper.span)
+                .then_some(edge.to)
+        })
+        .collect::<Vec<_>>();
+    helpers.sort_by_key(|function| function.raw());
+    helpers.dedup();
     helpers
 }
 
@@ -7830,6 +7957,8 @@ fn assignment_sources_include_any(
 
 struct SanitizerGuardContext<'a> {
     ws: &'a Workspace,
+    call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
+    sink_func: FuncId,
     sink_tainted_args: &'a [TaintedArgInfo],
 }
 
@@ -7852,6 +7981,11 @@ fn sanitizer_guard_feeds_sink_arg(
     else {
         return false;
     };
+    if guard.require_terminal_rejection
+        && sanitizer_predicate_helper_guards_sink(context, sanitizer_func, san, guard, snk)
+    {
+        return true;
+    }
     if san.span.file != snk.span.file || !match_precedes_or_same(san, snk) {
         return false;
     }
@@ -7867,7 +8001,7 @@ fn sanitizer_guard_feeds_sink_arg(
         return false;
     };
     if guard.require_terminal_rejection {
-        return terminal_type_guards_cover_sink_targets(
+        let proven = terminal_type_guards_cover_sink_targets(
             context.ws,
             &decl,
             sanitizer_rule,
@@ -7876,6 +8010,16 @@ fn sanitizer_guard_feeds_sink_arg(
             snk,
             &target_keys,
         );
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "sanitizer_guard rule={} sink={} function={} target_count={} proven={}",
+            sanitizer_rule.id,
+            snk.rule_id,
+            sanitizer_func.raw(),
+            target_keys.len(),
+            proven
+        );
+        return proven;
     }
     let guarded = sanitizer_guard_variables_in_events(&decl.flow_events, san, guard);
     if guarded.is_empty() {
@@ -7902,6 +8046,142 @@ fn sanitizer_guard_feeds_sink_arg(
     )
 }
 
+/// Join a first-party boolean helper to the caller's rejecting guard.
+///
+/// The language frontend proves the helper's complete return expression and
+/// the caller's branch truth. The call graph proves the unique callable edge;
+/// rule data supplies only the selected predicate operation and accepted
+/// value. No helper name or language API is interpreted here.
+fn sanitizer_predicate_helper_guards_sink(
+    context: &SanitizerGuardContext<'_>,
+    sanitizer_func: FuncId,
+    sanitizer: &RuleMatch,
+    guard: &SanitizerGuardSemantics,
+    sink: &RuleMatch,
+) -> bool {
+    if sanitizer_func == context.sink_func {
+        return false;
+    }
+    let Some(helper) = context.ws.exact_decl(SymbolId::new(sanitizer_func.raw())) else {
+        return false;
+    };
+    let Some(helper_index) = context.ws.exact_decl_index_shared(helper.span.file) else {
+        return false;
+    };
+    let guarded = sanitizer_guard_variables_in_events(&helper.flow_events, sanitizer, guard);
+    let guarded_parameters = helper
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(_, parameter)| guarded.iter().any(|place| place == *parameter))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let [guarded_parameter] = guarded_parameters.as_slice() else {
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "sanitizer_predicate_helper helper={} guarded={:?} params={:?} guarded_parameters={:?}",
+            helper.name,
+            guarded,
+            helper.params,
+            guarded_parameters
+        );
+        return false;
+    };
+    let predicate_is_required = helper_index.predicate_returns.iter().any(|fact| {
+        fact.function_span == helper.span
+            && (spans_overlap(fact.return_span, sanitizer.span)
+                || fact.return_span.start <= sanitizer.span.start)
+            && predicate_return_implies_call_value(
+                &fact.expression,
+                sanitizer.span,
+                guard.accepted_predicate_value.unwrap_or(true),
+            )
+    });
+    if !predicate_is_required {
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "sanitizer_predicate_helper helper={} predicate not required · facts={:?} · span={:?} · accepted={:?}",
+            helper.name,
+            helper_index.predicate_returns,
+            sanitizer.span,
+            guard.accepted_predicate_value
+        );
+        return false;
+    }
+    let Some(caller) = context.ws.exact_decl(SymbolId::new(context.sink_func.raw())) else {
+        return false;
+    };
+    let Some(caller_index) = context.ws.exact_decl_index_shared(caller.span.file) else {
+        return false;
+    };
+    let sink_targets = context
+        .sink_tainted_args
+        .iter()
+        .flat_map(tainted_arg_target_keys)
+        .collect::<AHashSet<_>>();
+    if sink_targets.is_empty() {
+        return false;
+    }
+    context
+        .call_graph
+        .callees_of(context.sink_func)
+        .filter(|edge| {
+            edge.to == sanitizer_func
+                && edge.precision.is_semantic()
+                && edge.span.file == sink.span.file
+                && edge.span.start < sink.span.start
+        })
+        .any(|edge| {
+            let Some(argument) = bonsai_lang_api::call_argument_value_fact(
+                &caller_index.call_argument_values,
+                edge.span,
+                *guarded_parameter,
+            ) else {
+                return false;
+            };
+            let argument_keys = argument
+                .value_flow
+                .place
+                .iter()
+                .chain(argument.value_flow.source_names.iter())
+                .filter_map(|place| clean_overwrite_target_key(place))
+                .collect::<AHashSet<_>>();
+            let argument_reaches_sink = argument_keys.iter().any(|place| sink_targets.contains(place));
+            // A predicate helper constrains only the argument passed to it.
+            // Do not let that proof erase an independent caller parameter
+            // that also contributes to the same sink value (for example a
+            // runtime-selected base joined with a checked leaf name).
+            let has_unguarded_parameter = caller.params.iter().any(|parameter| {
+                clean_overwrite_target_key(parameter).is_some_and(|parameter| {
+                    sink_targets.contains(&parameter) && !argument_keys.contains(&parameter)
+                })
+            });
+            let terminal = terminal_rejection_predicate_guard_span(
+                context.ws,
+                &caller,
+                edge.span,
+                sink.span,
+                true,
+            )
+            .is_some();
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "sanitizer_predicate_helper helper={} caller={} edge={:?} argument_keys={:?} sink_targets={:?} reaches={} unguarded={} terminal={}",
+                helper.name,
+                caller.name,
+                edge.span,
+                argument_keys,
+                sink_targets,
+                argument_reaches_sink,
+                has_unguarded_parameter,
+                terminal
+            );
+            argument_reaches_sink
+                && !has_unguarded_parameter
+                && terminal
+        })
+}
+
 fn terminal_type_guards_cover_sink_targets(
     ws: &Workspace,
     decl: &bonsai_lang_api::Decl,
@@ -7921,17 +8201,166 @@ fn terminal_type_guards_cover_sink_targets(
             })
             .any(|candidate| {
                 let guarded = sanitizer_guard_variables_in_events(&decl.flow_events, candidate, guard);
-                if !guarded.iter().any(|place| place == target) {
-                    return false;
-                }
-                let Some(branch_span) =
-                    terminal_rejection_predicate_guard_span(ws, decl, candidate.span, sink.span)
-                else {
+                let Some(branch_span) = terminal_rejection_predicate_guard_span(
+                    ws,
+                    decl,
+                    candidate.span,
+                    sink.span,
+                    guard.accepted_predicate_value.unwrap_or(true),
+                ) else {
+                    bonsai_diagnostics::debug_log!(
+                        "security-taint",
+                        "sanitizer_guard rule={} target={} has no terminal rejection",
+                        sanitizer_rule.id,
+                        target
+                    );
                     return false;
                 };
-                !place_is_assigned_between(&decl.flow_events, target, branch_span.end, sink.span.start)
+                let reaches = straight_line_guarded_values_reach_sink_target(
+                    &decl.flow_events,
+                    &guarded,
+                    target,
+                    branch_span.end,
+                    sink.span,
+                );
+                bonsai_diagnostics::debug_log!(
+                    "security-taint",
+                    "sanitizer_guard rule={} target={} guarded={:?} branch={:?} reaches={}",
+                    sanitizer_rule.id,
+                    target,
+                    guarded,
+                    branch_span,
+                    reaches
+                );
+                reaches
             })
     })
+}
+
+/// Prove a local value dependency from a terminally guarded place to the
+/// exact sink target along the straight-line compiler event sequence.
+///
+/// Branch/loop/try events between the guard and sink fail closed: proving a
+/// value across those constructs requires the corresponding CFG guard fact,
+/// not an optimistic textual alias. Assignments are interpreted in compiler
+/// order and overwrite prior provenance, so a later clean or unrelated write
+/// cannot inherit sanitizer credit.
+fn straight_line_guarded_values_reach_sink_target(
+    events: &[FlowEvent],
+    guarded: &[String],
+    sink_target: &str,
+    after: u64,
+    sink_span: Span,
+) -> bool {
+    let before = sink_span.start;
+    let mut proven = guarded.iter().cloned().collect::<AHashSet<_>>();
+    if !advance_guarded_values_to_sink(events, &mut proven, after, before, sink_span) {
+        return false;
+    }
+    proven.contains(sink_target)
+}
+
+fn advance_guarded_values_to_sink(
+    events: &[FlowEvent],
+    proven: &mut AHashSet<String>,
+    after: u64,
+    before: u64,
+    sink_span: Span,
+) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_name,
+                source_call_args,
+                source_names,
+                ..
+            } if span.start >= after && span.start < before => {
+                let Some(target) = clean_overwrite_target_key(target) else {
+                    continue;
+                };
+                let derives_from_guarded = assignment_sources_include_any(
+                    source_name.as_deref(),
+                    source_call_args,
+                    source_names,
+                    proven,
+                );
+                bonsai_diagnostics::debug_log!(
+                    "security-taint",
+                    "sanitizer_guard assignment target={} source={:?} call_args={:?} sources={:?} proven_before={:?} derives={}",
+                    target,
+                    source_name,
+                    source_call_args,
+                    source_names,
+                    proven,
+                    derives_from_guarded
+                );
+                if derives_from_guarded {
+                    proven.insert(target);
+                } else {
+                    proven.remove(&target);
+                }
+            }
+            FlowEvent::Loop { span, body, .. }
+            | FlowEvent::Defer { span, body }
+            | FlowEvent::Using { span, body }
+                if span.start >= after && span.start < before =>
+            {
+                if !span_contains(*span, sink_span)
+                    || !advance_guarded_values_to_sink(body, proven, after, before, sink_span)
+                {
+                    return false;
+                }
+            }
+            FlowEvent::Branch {
+                span,
+                then_events,
+                else_events,
+                ..
+            } if span.start >= after && span.start < before => {
+                let then_contains = then_events
+                    .iter()
+                    .any(|event| span_contains(event.span(), sink_span));
+                let else_contains = else_events
+                    .iter()
+                    .any(|event| span_contains(event.span(), sink_span));
+                let selected = match (then_contains, else_contains) {
+                    (true, false) => then_events,
+                    (false, true) => else_events,
+                    (false, false) if span_contains(*span, sink_span) => return true,
+                    _ => return false,
+                };
+                if !advance_guarded_values_to_sink(selected, proven, after, before, sink_span) {
+                    return false;
+                }
+            }
+            FlowEvent::Try {
+                span,
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } if span.start >= after && span.start < before => {
+                let arms = [
+                    body.as_slice(),
+                    catch_events.as_slice(),
+                    finally_events.as_slice(),
+                ]
+                .into_iter()
+                .filter(|arm| arm.iter().any(|event| span_contains(event.span(), sink_span)))
+                .collect::<Vec<_>>();
+                let [selected] = arms.as_slice() else {
+                    return false;
+                };
+                if !advance_guarded_values_to_sink(selected, proven, after, before, sink_span) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    true
 }
 
 fn sanitizer_guard_variables_in_events(
@@ -7958,7 +8387,7 @@ fn collect_sanitizer_guard_variables(
                 span, receiver, args, ..
             } if spans_overlap(*span, san.span) || span_contains(*span, san.span) => {
                 if guard.use_receiver {
-                    if let Some(receiver) = receiver.as_deref().and_then(clean_overwrite_target_key) {
+                    if let Some(receiver) = receiver.as_deref().and_then(compiler_target_place_key) {
                         vars.push(receiver);
                     }
                 }
@@ -8002,7 +8431,7 @@ fn collect_guard_argument_places<'a>(
     vars: &mut Vec<String>,
 ) {
     for argument in arguments {
-        if let Some(place) = argument.place.as_deref().and_then(clean_overwrite_target_key) {
+        if let Some(place) = argument.place.as_deref().and_then(compiler_target_place_key) {
             vars.push(place);
         }
         if let Some(value) = clean_overwrite_target_key(&argument.value_text) {
@@ -8420,6 +8849,7 @@ fn source_seed_set(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_lang_api::Dec
     let is_inferred = src.origin != MatchOrigin::Rulepack;
     let rule = pack.find_rule_by_id(&src.rule_id);
     let is_param_rule = rule.is_some_and(|rule| rule.match_spec.kind == MatchKind::Param);
+    let is_read_rule = rule.is_some_and(|rule| rule.match_spec.kind == MatchKind::Read);
     let source_output_args = rule
         .and_then(|rule| rule.taint_semantics.as_ref())
         .map(|semantics| semantics.source_output_args.as_slice())
@@ -8434,9 +8864,23 @@ fn source_seed_set(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_lang_api::Dec
     let source_callback_only = rule
         .and_then(|rule| rule.taint_semantics.as_ref())
         .is_some_and(|semantics| semantics.source_callback_only);
-    if is_inferred || is_param_rule {
+    if is_inferred || is_param_rule || is_read_rule {
+        // A read matcher owns one exact AST value span. When that read is the
+        // receiver of a wider call (`location.search.forEach(...)`), the
+        // generic call event overlaps the match and contributes the outer
+        // callee spelling. Keep the compiler-matched read itself as a seed
+        // name so the anchored IDG read-value lookup can select the receiver
+        // slot rather than filtering it out as an unrelated call.
         insert_taint_aliases(&mut out, &src.match_text);
-        insert_descendant_taint_aliases(&mut out, &src.match_text);
+        if is_inferred || is_param_rule || is_read_rule {
+            // A rule may match the structural carrier of the consumed read
+            // while the adapter preserves a more precise static projection
+            // (`os.environ` at the matched AST span becomes
+            // `os.environ.CMD`). Descendant expansion remains constrained by
+            // that exact rule-match span in the IDG seeder; it does not
+            // authorize a workspace-wide or sibling-name lookup.
+            insert_descendant_taint_aliases(&mut out, &src.match_text);
+        }
     }
     let allow_text_only_source_match = is_inferred || is_param_rule;
     collect_source_seed_targets(
@@ -8516,13 +8960,6 @@ fn precision_label(precision: Precision) -> &'static str {
         Precision::Narrowed => "narrowed",
         Precision::OverApproximate => "over-approximate",
         Precision::Unknown => "unknown",
-    }
-}
-
-fn static_evidence_label(max_precision: Option<Precision>) -> &'static str {
-    match max_precision {
-        Some(Precision::Exact) => "exact",
-        _ => "exact+narrowed",
     }
 }
 
@@ -8721,8 +9158,10 @@ fn clean_output_overwrites_from_rulepack_for_languages(
 
 fn idg_transfer_options_from_rulepack_shapes(
     overwrites: &[CleanOutputOverwrite],
+    receiver_overwrites: &[CleanReceiverOverwrite],
     source_outputs: &[SourceOutputArgs],
     source_callbacks: &[SourceCallbackArgs],
+    callback_invocations: &[CallbackInvocation],
     output_arg_flows: &[OutputArgFlow],
     receiver_state_propagations: &[ReceiverStatePropagation],
 ) -> bonsai_idg::TransferOptions {
@@ -8733,6 +9172,13 @@ fn idg_transfer_options_from_rulepack_shapes(
                 callee: shape.callee.clone(),
                 output_arg_index: shape.output_arg_index,
                 value_start_arg_index: shape.value_start_arg_index,
+            })
+            .collect(),
+        clean_receiver_overwrites: receiver_overwrites
+            .iter()
+            .map(|shape| bonsai_idg::CleanReceiverOverwriteSpec {
+                callee: shape.callee.clone(),
+                resolved_call_sites: shape.resolved_call_sites.clone(),
             })
             .collect(),
         source_output_args: source_outputs
@@ -8750,7 +9196,23 @@ fn idg_transfer_options_from_rulepack_shapes(
                 callee: shape.callee.clone(),
                 callback_arg_index: shape.callback_arg_index,
                 source_param_indices: shape.source_param_indices.clone(),
+                source_param_indices_from: shape.source_param_indices_from,
                 resolved_call_sites: shape.resolved_call_sites.clone(),
+            })
+            .collect(),
+        callback_invocations: callback_invocations
+            .iter()
+            .map(|shape| bonsai_idg::CallbackInvocationSpec {
+                callee: shape.callee.clone(),
+                callback_arg_index: shape.callback_arg_index,
+                callback_map_field_path: shape.callback_map_field_path.clone(),
+                forwarded_argument_field_path: shape.forwarded_argument_field_path.clone(),
+                forwarded_callback_param_index: shape.forwarded_callback_param_index,
+                forwarded_args_from: shape.forwarded_args_from,
+                receiver_to_callback_param: shape.receiver_to_callback_param,
+                callback_return_result_offset: shape.callback_return_result_offset,
+                resolved_call_sites: shape.resolved_call_sites.clone(),
+                resolved_callback_targets: shape.resolved_callback_targets.clone(),
             })
             .collect(),
         call_result_passthroughs: Vec::new(),
@@ -8759,8 +9221,10 @@ fn idg_transfer_options_from_rulepack_shapes(
             .map(|shape| bonsai_idg::OutputArgFlowSpec {
                 callee: shape.callee.clone(),
                 output_arg_index: shape.output_arg_index,
+                input_receiver: shape.input_receiver,
                 value_arg_indices: shape.value_arg_indices.clone(),
                 value_start_arg_index: shape.value_start_arg_index,
+                resolved_call_sites: shape.resolved_call_sites.clone(),
             })
             .collect(),
         receiver_state_propagations: receiver_state_propagations
@@ -8789,6 +9253,7 @@ fn idg_transfer_options_from_rulepack_shapes(
 pub struct RulepackTaintTransfers {
     pub receiver_state_propagations: Vec<ReceiverStatePropagation>,
     pub call_result_passthroughs: Vec<CallResultPassthrough>,
+    pub callback_invocations: Vec<CallbackInvocation>,
     pub output_arg_flows: Vec<OutputArgFlow>,
 }
 
@@ -8796,6 +9261,7 @@ pub fn taint_transfers_from_rulepack(pack: &Rulepack) -> RulepackTaintTransfers 
     RulepackTaintTransfers {
         receiver_state_propagations: receiver_state_propagations_from_rulepack(pack),
         call_result_passthroughs: call_result_passthroughs_from_rulepack(pack),
+        callback_invocations: callback_invocations_from_rules(pack.all_rules(), &AHashMap::new()),
         output_arg_flows: output_arg_flows_from_rulepack(pack),
     }
 }
@@ -8818,29 +9284,38 @@ pub fn seed_idg_service_for_rulepack(ws: &Workspace, pack: &Rulepack) -> Arc<bon
         .collect();
     let source_transfer_hits = crate::matcher::match_rules_against_facts(ws, &source_transfer_rules);
     let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, &languages);
+    let receiver_overwrite_rules: Vec<&Rule> = pack
+        .all_rules()
+        .into_iter()
+        .filter(|rule| {
+            rule.enabled
+                && rule.kind == RuleKind::Sanitizer
+                && rule
+                    .taint_semantics
+                    .as_ref()
+                    .is_some_and(|semantics| semantics.clean_receiver_overwrite)
+        })
+        .collect();
+    let receiver_overwrite_hits = crate::matcher::match_rules_against_facts(ws, &receiver_overwrite_rules);
+    let receiver_overwrites =
+        clean_receiver_overwrites_from_rulepack_for_languages(ws, pack, &languages, &receiver_overwrite_hits);
     let source_outputs =
         source_output_args_from_rulepack_for_languages(ws, pack, &languages, &source_transfer_hits);
     let source_callbacks =
         source_callback_args_from_rulepack_for_languages(ws, pack, &languages, &source_transfer_hits);
-    let output_arg_flows = output_arg_flows_from_rulepack_for_languages(pack, &languages);
-    let receiver_state_propagations = compiled_receiver_state_propagations_for_languages(
-        ws,
-        pack,
-        &languages,
-        &rulepack_typing,
-        None,
-        || {},
-    );
+    let compiled_transfers =
+        compiled_transfer_sites_for_languages(ws, pack, &languages, &rulepack_typing, None, || {});
     let mut options = idg_transfer_options_from_rulepack_shapes(
         &overwrites,
+        &receiver_overwrites,
         &source_outputs,
         &source_callbacks,
-        &output_arg_flows,
-        &receiver_state_propagations,
+        &compiled_transfers.callback_invocations,
+        &compiled_transfers.output_arg_flows,
+        &compiled_transfers.receiver_state_propagations,
     );
-    options.call_result_passthroughs = idg_call_result_passthrough_specs(
-        &call_result_passthroughs_from_rulepack_for_languages(pack, &languages),
-    );
+    options.call_result_passthroughs =
+        idg_call_result_passthrough_specs(&compiled_transfers.call_result_passthroughs);
     options.symbolic_field_languages = ws.db().complete_field_place_languages();
     options.symbolic_field_forwarding = !options.symbolic_field_languages.is_empty();
     ws.build_and_seed_idg_service_with_transfer_options(&options)
@@ -8850,7 +9325,11 @@ struct ScopedIdgSeedRequest<'a> {
     ws: &'a Workspace,
     pack: &'a Rulepack,
     languages: &'a AHashSet<String>,
+    output_arg_flows: &'a [OutputArgFlow],
+    call_result_passthroughs: &'a [CallResultPassthrough],
+    callback_invocations: &'a [CallbackInvocation],
     receiver_state_propagations: &'a [ReceiverStatePropagation],
+    clean_receiver_overwrites: &'a [CleanReceiverOverwrite],
     source_output_args: &'a [SourceOutputArgs],
     source_callback_args: &'a [SourceCallbackArgs],
     included_files: &'a [FileId],
@@ -8869,7 +9348,11 @@ where
         ws,
         pack,
         languages,
+        output_arg_flows,
+        call_result_passthroughs,
+        callback_invocations,
         receiver_state_propagations,
+        clean_receiver_overwrites,
         source_output_args,
         source_callback_args,
         included_files,
@@ -8877,24 +9360,24 @@ where
         call_graph,
     } = request;
     let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, languages);
-    let output_arg_flows = output_arg_flows_from_rulepack_for_languages(pack, languages);
     let mut options = idg_transfer_options_from_rulepack_shapes(
         &overwrites,
+        clean_receiver_overwrites,
         source_output_args,
         source_callback_args,
-        &output_arg_flows,
+        callback_invocations,
+        output_arg_flows,
         receiver_state_propagations,
     );
-    options.call_result_passthroughs = idg_call_result_passthrough_specs(
-        &call_result_passthroughs_from_rulepack_for_languages(pack, languages),
-    );
+    options.call_result_passthroughs = idg_call_result_passthrough_specs(call_result_passthroughs);
     options.symbolic_field_languages = symbolic_field_languages(ws, included_files);
     options.symbolic_field_forwarding = !options.symbolic_field_languages.is_empty();
     bonsai_diagnostics::debug_log!(
         "security-phase",
-        "semantic graph transfer options languages={} funcs={} receiver_method_propagation={} field_argument_forwarding={} symbolic_field_languages={}",
+        "semantic graph transfer options languages={} funcs={} callback_invocations={} receiver_method_propagation={} field_argument_forwarding={} symbolic_field_languages={}",
         languages.len(),
         included_funcs.len(),
+        options.callback_invocations.len(),
         options.include_receiver_method_propagation,
         options.include_field_argument_forwarding,
         options.symbolic_field_languages.len()
@@ -8926,7 +9409,7 @@ fn source_output_args_from_rulepack_for_languages(
     languages: &AHashSet<String>,
     source_hits: &[RuleMatch],
 ) -> Vec<SourceOutputArgs> {
-    let sites_by_rule = source_transfer_sites_by_rule(ws, source_hits);
+    let sites_by_rule = transfer_sites_by_rule(ws, source_hits);
     let mut out: Vec<_> = pack
         .all_rules()
         .into_iter()
@@ -8965,7 +9448,7 @@ fn source_callback_args_from_rulepack_for_languages(
     languages: &AHashSet<String>,
     source_hits: &[RuleMatch],
 ) -> Vec<SourceCallbackArgs> {
-    let sites_by_rule = source_transfer_sites_by_rule(ws, source_hits);
+    let sites_by_rule = transfer_sites_by_rule(ws, source_hits);
     let mut out = Vec::new();
     for rule in pack.all_rules() {
         if !rule.enabled || rule.kind != RuleKind::Source || !languages.contains(rule.language.as_str()) {
@@ -8991,6 +9474,7 @@ fn source_callback_args_from_rulepack_for_languages(
                 callee: callee.clone(),
                 callback_arg_index: callback.callback_arg_index,
                 source_param_indices,
+                source_param_indices_from: callback.source_param_indices_from,
                 resolved_call_sites: resolved_call_sites.clone(),
             });
         }
@@ -8999,19 +9483,19 @@ fn source_callback_args_from_rulepack_for_languages(
     out
 }
 
-fn source_transfer_sites_by_rule(ws: &Workspace, source_hits: &[RuleMatch]) -> AHashMap<String, Vec<Span>> {
+fn transfer_sites_by_rule(ws: &Workspace, hits: &[RuleMatch]) -> AHashMap<String, Vec<Span>> {
     let mut sites: AHashMap<String, Vec<Span>> = AHashMap::new();
-    for source in source_hits {
-        let Some(func) = func_id_for_match(ws, source) else {
+    for hit in hits {
+        let Some(func) = func_id_for_match(ws, hit) else {
             continue;
         };
         let Some(decl) = ws.exact_decl(SymbolId::new(func.raw())) else {
             continue;
         };
-        let Some(FlowEvent::Call { span, .. }) = find_call_event_at(&decl.flow_events, source.span) else {
+        let Some(FlowEvent::Call { span, .. }) = find_call_event_at(&decl.flow_events, hit.span) else {
             continue;
         };
-        sites.entry(source.rule_id.clone()).or_default().push(*span);
+        sites.entry(hit.rule_id.clone()).or_default().push(*span);
     }
     for spans in sites.values_mut() {
         spans.sort();
@@ -9020,59 +9504,188 @@ fn source_transfer_sites_by_rule(ws: &Workspace, source_hits: &[RuleMatch]) -> A
     sites
 }
 
-fn call_result_passthroughs_from_rulepack(pack: &Rulepack) -> Vec<CallResultPassthrough> {
-    call_result_passthroughs_from_rules(pack.all_rules())
-}
-
-fn call_result_passthroughs_from_rulepack_for_languages(
+fn clean_receiver_overwrites_from_rulepack_for_languages(
+    _ws: &Workspace,
     pack: &Rulepack,
     languages: &AHashSet<String>,
-) -> Vec<CallResultPassthrough> {
-    call_result_passthroughs_from_rules(
-        pack.all_rules()
-            .into_iter()
-            .filter(|rule| languages.contains(rule.language.as_str())),
-    )
+    sanitizer_hits: &[RuleMatch],
+) -> Vec<CleanReceiverOverwrite> {
+    // `kind: call` matcher hits already carry the exact adapter-emitted call
+    // span. Preserve that identity directly: resolving through an enclosing
+    // declaration can only lose operator calls whose syntax is synthesized
+    // after the generic declaration walk.
+    let mut sites_by_rule: AHashMap<String, Vec<Span>> = AHashMap::new();
+    for hit in sanitizer_hits {
+        sites_by_rule
+            .entry(hit.rule_id.clone())
+            .or_default()
+            .push(hit.span);
+    }
+    for spans in sites_by_rule.values_mut() {
+        spans.sort();
+        spans.dedup();
+    }
+    let mut out: Vec<_> = pack
+        .all_rules()
+        .into_iter()
+        .filter(|rule| {
+            rule.enabled
+                && rule.kind == RuleKind::Sanitizer
+                && languages.contains(rule.language.as_str())
+                && rule
+                    .taint_semantics
+                    .as_ref()
+                    .is_some_and(|semantics| semantics.clean_receiver_overwrite)
+        })
+        .filter_map(|rule| {
+            let callee = rule
+                .match_spec
+                .callee
+                .as_ref()
+                .and_then(semantic_transfer_callee)?;
+            Some(CleanReceiverOverwrite {
+                callee,
+                resolved_call_sites: sites_by_rule.get(&rule.id)?.clone(),
+            })
+        })
+        .collect();
+    for shape in &mut out {
+        shape.resolved_call_sites.sort();
+        shape.resolved_call_sites.dedup();
+    }
+    out.sort_by(|a, b| (&a.callee, &a.resolved_call_sites).cmp(&(&b.callee, &b.resolved_call_sites)));
+    out.dedup();
+    out
+}
+
+fn call_result_passthroughs_from_rulepack(pack: &Rulepack) -> Vec<CallResultPassthrough> {
+    call_result_passthroughs_from_rules(pack.all_rules(), &AHashMap::new())
 }
 
 fn call_result_passthroughs_from_rules<'a>(
     rules: impl IntoIterator<Item = &'a Rule>,
+    sites_by_rule: &AHashMap<String, Vec<Span>>,
 ) -> Vec<CallResultPassthrough> {
     let mut out: Vec<_> = rules
         .into_iter()
         .filter(|rule| rule.enabled && matches!(rule.kind, RuleKind::Sanitizer | RuleKind::Typing))
-        .filter_map(|rule| {
-            let semantics = rule.taint_semantics.as_ref()?;
+        .flat_map(|rule| {
+            let Some(semantics) = rule.taint_semantics.as_ref() else {
+                return Vec::new();
+            };
             if semantics.call_result_passthrough_args.is_empty()
+                && semantics.call_result_passthrough_args_from.is_none()
                 && !semantics.call_result_passthrough_receiver
             {
-                return None;
+                return Vec::new();
             }
-            let target = rule.match_spec.callee.as_ref()?;
-            let (callee, receiver_type) = if rule.kind == RuleKind::Typing {
+            let Some(target) = rule.match_spec.callee.as_ref() else {
+                return Vec::new();
+            };
+            let Some(callee) = semantic_transfer_callee(target) else {
+                return Vec::new();
+            };
+            let receiver_types = if rule.kind == RuleKind::Typing {
                 if let Some(attribute) = target.attribute.as_ref().filter(|parts| parts.len() >= 2) {
-                    (
-                        attribute.last()?.clone(),
-                        Some(attribute[..attribute.len() - 1].join(".")),
-                    )
+                    vec![Some(attribute[..attribute.len() - 1].join("."))]
                 } else {
-                    (semantic_transfer_callee(target)?, None)
+                    let mut declared = target.receiver_type_in.clone();
+                    for constraint in &rule.constraints {
+                        if let crate::rule::ConstraintKind::ReceiverTypeIn { receiver_type_in } = constraint {
+                            declared.extend(receiver_type_in.iter().cloned());
+                        }
+                    }
+                    declared.sort();
+                    declared.dedup();
+                    // A typing rule with an unstructured method target must
+                    // stay receiver-typed. Validation enforces this contract;
+                    // retaining the fail-closed branch here prevents a future
+                    // malformed pack from turning an API summary into a
+                    // workspace-wide same-name transfer.
+                    if declared.is_empty() {
+                        return Vec::new();
+                    }
+                    declared.into_iter().map(Some).collect()
                 }
             } else {
-                (semantic_transfer_callee(target)?, None)
+                vec![None]
             };
             let mut input_arg_indices = semantics.call_result_passthrough_args.clone();
             input_arg_indices.sort_unstable();
             input_arg_indices.dedup();
-            Some(CallResultPassthrough {
-                callee,
-                receiver_type,
-                input_arg_indices,
-                input_receiver: semantics.call_result_passthrough_receiver,
-            })
+            receiver_types
+                .into_iter()
+                .map(|receiver_type| CallResultPassthrough {
+                    callee: callee.clone(),
+                    receiver_type,
+                    input_arg_indices: input_arg_indices.clone(),
+                    input_arg_start_index: semantics.call_result_passthrough_args_from,
+                    input_receiver: semantics.call_result_passthrough_receiver,
+                    resolved_call_sites: sites_by_rule.get(&rule.id).cloned().unwrap_or_default(),
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
     sort_call_result_passthroughs(&mut out);
+    out
+}
+
+fn callback_invocations_from_rules<'a>(
+    rules: impl IntoIterator<Item = &'a Rule>,
+    sites_by_rule: &AHashMap<String, Vec<Span>>,
+) -> Vec<CallbackInvocation> {
+    let mut out: Vec<_> = rules
+        .into_iter()
+        .filter(|rule| rule.enabled && rule.kind == RuleKind::Typing)
+        .filter_map(|rule| {
+            let semantics = rule.taint_semantics.as_ref()?.callback_invocation.as_ref()?;
+            let callee = rule
+                .match_spec
+                .callee
+                .as_ref()
+                .and_then(semantic_transfer_callee)?;
+            Some(CallbackInvocation {
+                callee,
+                callback_arg_index: semantics.callback_arg_index,
+                callback_map_field_path: semantics.callback_map_field_path.clone(),
+                forwarded_argument_field_path: semantics.forwarded_argument_field_path.clone(),
+                forwarded_callback_param_index: semantics.forwarded_callback_param_index,
+                forwarded_args_from: semantics.forwarded_args_from,
+                receiver_to_callback_param: semantics.receiver_to_callback_param,
+                callback_return_result_offset: semantics.callback_return_result_offset,
+                resolved_call_sites: sites_by_rule.get(&rule.id).cloned().unwrap_or_default(),
+                resolved_callback_targets: Vec::new(),
+                callback_hosts: Vec::new(),
+            })
+        })
+        .collect();
+    out.sort_by(|left, right| {
+        (
+            &left.callee,
+            left.callback_arg_index,
+            &left.callback_map_field_path,
+            &left.forwarded_argument_field_path,
+            left.forwarded_callback_param_index,
+            left.forwarded_args_from,
+            left.receiver_to_callback_param,
+            left.callback_return_result_offset,
+            &left.resolved_call_sites,
+            &left.callback_hosts,
+        )
+            .cmp(&(
+                &right.callee,
+                right.callback_arg_index,
+                &right.callback_map_field_path,
+                &right.forwarded_argument_field_path,
+                right.forwarded_callback_param_index,
+                right.forwarded_args_from,
+                right.receiver_to_callback_param,
+                right.callback_return_result_offset,
+                &right.resolved_call_sites,
+                &right.callback_hosts,
+            ))
+    });
+    out.dedup();
     out
 }
 
@@ -9085,27 +9698,21 @@ fn idg_call_result_passthrough_specs(
             callee: passthrough.callee.clone(),
             receiver_type: passthrough.receiver_type.clone(),
             input_arg_indices: passthrough.input_arg_indices.clone(),
+            input_arg_start_index: passthrough.input_arg_start_index,
             input_receiver: passthrough.input_receiver,
+            resolved_call_sites: passthrough.resolved_call_sites.clone(),
         })
         .collect()
 }
 
 fn output_arg_flows_from_rulepack(pack: &Rulepack) -> Vec<OutputArgFlow> {
-    output_arg_flows_from_rules(pack.all_rules())
+    output_arg_flows_from_rules(pack.all_rules(), &AHashMap::new())
 }
 
-fn output_arg_flows_from_rulepack_for_languages(
-    pack: &Rulepack,
-    languages: &AHashSet<String>,
+fn output_arg_flows_from_rules<'a>(
+    rules: impl IntoIterator<Item = &'a Rule>,
+    sites_by_rule: &AHashMap<String, Vec<Span>>,
 ) -> Vec<OutputArgFlow> {
-    output_arg_flows_from_rules(
-        pack.all_rules()
-            .into_iter()
-            .filter(|rule| languages.contains(rule.language.as_str())),
-    )
-}
-
-fn output_arg_flows_from_rules<'a>(rules: impl IntoIterator<Item = &'a Rule>) -> Vec<OutputArgFlow> {
     let mut out: Vec<_> = rules
         .into_iter()
         .filter(|rule| rule.enabled)
@@ -9123,6 +9730,7 @@ fn output_arg_flows_from_rules<'a>(rules: impl IntoIterator<Item = &'a Rule>) ->
                         .map(|flow| OutputArgFlow {
                             callee: callee.clone(),
                             output_arg_index: flow.output_arg_index,
+                            input_receiver: flow.value_receiver,
                             value_start_arg_index: flow.value_start_arg_index,
                             value_arg_indices: {
                                 let mut indices = flow.value_arg_indices.clone();
@@ -9130,6 +9738,7 @@ fn output_arg_flows_from_rules<'a>(rules: impl IntoIterator<Item = &'a Rule>) ->
                                 indices.dedup();
                                 indices
                             },
+                            resolved_call_sites: sites_by_rule.get(&rule.id).cloned().unwrap_or_default(),
                         })
                         .collect::<Vec<_>>()
                 })
@@ -9152,20 +9761,27 @@ fn receiver_state_propagations_from_rulepack(pack: &Rulepack) -> Vec<ReceiverSta
     receiver_state_propagations_from_rules(pack.all_rules(), &AHashMap::new())
 }
 
-/// Compile receiver-mutation summaries against the current compiler snapshot.
+struct CompiledTransferSites {
+    call_result_passthroughs: Vec<CallResultPassthrough>,
+    callback_invocations: Vec<CallbackInvocation>,
+    output_arg_flows: Vec<OutputArgFlow>,
+    receiver_state_propagations: Vec<ReceiverStatePropagation>,
+}
+
+/// Compile rule-owned transfer summaries against the current compiler snapshot.
 /// Adapter-emitted receiver types remain sufficient on their own. When an
 /// external type exists only in rulepack typing (for example Kotlin/JVM calls
 /// whose CST does not distinguish constructors from functions), the canonical
 /// matcher contributes exact call spans. The IDG consumes those spans as typed
 /// evidence and never interprets a provider/API spelling itself.
-fn compiled_receiver_state_propagations_for_languages<F>(
+fn compiled_transfer_sites_for_languages<F>(
     ws: &Workspace,
     pack: &Rulepack,
     languages: &AHashSet<String>,
     factory: &Arc<crate::matcher::RulepackTyping>,
     files: Option<&[FileId]>,
     on_file_done: F,
-) -> Vec<ReceiverStatePropagation>
+) -> CompiledTransferSites
 where
     F: FnMut(),
 {
@@ -9175,16 +9791,26 @@ where
         .filter(|rule| {
             rule.enabled
                 && languages.contains(rule.language.as_str())
-                && matches!(rule.kind, RuleKind::Sink | RuleKind::Typing)
-                && (rule.kind == RuleKind::Typing || rule_has_taint_predicate(rule))
-                && rule
-                    .taint_semantics
-                    .as_ref()
-                    .is_some_and(|semantics| semantics.taint_receiver_from_args)
+                && matches!(rule.kind, RuleKind::Sink | RuleKind::Sanitizer | RuleKind::Typing)
+                && (matches!(rule.kind, RuleKind::Typing | RuleKind::Sanitizer)
+                    || rule_has_taint_predicate(rule))
+                && rule.taint_semantics.as_ref().is_some_and(|semantics| {
+                    semantics.taint_receiver_from_args
+                        || !semantics.output_arg_flows.is_empty()
+                        || !semantics.call_result_passthrough_args.is_empty()
+                        || semantics.call_result_passthrough_args_from.is_some()
+                        || semantics.call_result_passthrough_receiver
+                        || semantics.callback_invocation.is_some()
+                })
         })
         .collect();
     if rules.is_empty() {
-        return Vec::new();
+        return CompiledTransferSites {
+            call_result_passthroughs: Vec::new(),
+            callback_invocations: Vec::new(),
+            output_arg_flows: Vec::new(),
+            receiver_state_propagations: Vec::new(),
+        };
     }
     let all_files;
     let files = if let Some(files) = files {
@@ -9207,18 +9833,513 @@ where
         factory,
         on_file_done,
     );
+    // A matched call/new target may be anchored to a callee identifier while
+    // the IDG transfer is keyed by the complete compiler Call event. Writes
+    // are already keyed by their exact Assign event and must retain that
+    // span: an adapter may also emit a call-like property access inside the
+    // assignment, but that nested call is not the state mutation.
+    let call_shaped_transfer_rules: AHashSet<&str> = rules
+        .iter()
+        .filter(|rule| matches!(rule.match_spec.kind, MatchKind::Call | MatchKind::New))
+        .map(|rule| rule.id.as_str())
+        .collect();
     let mut sites_by_rule: AHashMap<String, Vec<Span>> = AHashMap::new();
+    let mut caller_by_site: AHashMap<Span, FuncId> = AHashMap::new();
     for rule_match in matches {
+        let caller = func_id_for_match(ws, &rule_match);
+        // Matcher attribution may intentionally anchor an imported callee's
+        // identifier while IDG transfer is keyed by the complete compiler
+        // Call event. Canonicalize through the owning HIR event once here;
+        // transfer lowering must never try to reconcile source-text spans.
+        let site_span = if call_shaped_transfer_rules.contains(rule_match.rule_id.as_str()) {
+            caller
+                .and_then(|caller| ws.exact_decl(SymbolId::new(caller.raw())))
+                .and_then(|decl| find_call_event_at(&decl.flow_events, rule_match.span).map(FlowEvent::span))
+                .unwrap_or(rule_match.span)
+        } else {
+            rule_match.span
+        };
+        if let Some(caller) = caller {
+            caller_by_site.entry(site_span).or_insert(caller);
+        }
         sites_by_rule
             .entry(rule_match.rule_id)
             .or_default()
-            .push(rule_match.span);
+            .push(site_span);
     }
     for sites in sites_by_rule.values_mut() {
         sites.sort();
         sites.dedup();
     }
-    receiver_state_propagations_from_rules(rules, &sites_by_rule)
+    if bonsai_diagnostics::debug::is_enabled("security-phase") {
+        let mut matched: Vec<_> = sites_by_rule
+            .iter()
+            .map(|(rule, sites)| format!("{rule}={}", sites.len()))
+            .collect();
+        matched.sort();
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "compiled transfer rules={} matched_rules={} sites=[{}]",
+            rules.len(),
+            matched.len(),
+            matched.join(",")
+        );
+    }
+    let mut callback_invocations = callback_invocations_from_rules(rules.iter().copied(), &sites_by_rule);
+    enrich_callback_invocation_hosts(ws, &caller_by_site, &mut callback_invocations);
+    CompiledTransferSites {
+        call_result_passthroughs: call_result_passthroughs_from_rules(rules.iter().copied(), &sites_by_rule),
+        callback_invocations,
+        output_arg_flows: output_arg_flows_from_rules(rules.iter().copied(), &sites_by_rule),
+        receiver_state_propagations: receiver_state_propagations_from_rules(
+            rules.iter().copied(),
+            &sites_by_rule,
+        ),
+    }
+}
+
+fn enrich_callback_invocation_hosts(
+    ws: &Workspace,
+    caller_by_site: &AHashMap<Span, FuncId>,
+    invocations: &mut [CallbackInvocation],
+) {
+    let mut callers: Vec<FuncId> = invocations
+        .iter()
+        .flat_map(|invocation| invocation.resolved_call_sites.iter())
+        .filter_map(|site| caller_by_site.get(site).copied())
+        .collect();
+    callers.sort_unstable_by_key(|func| func.raw());
+    callers.dedup();
+    if callers.is_empty() {
+        return;
+    }
+    let global = ws.compiler_linkage_index();
+    let graph = ws.resolved_call_graph_direct_neighborhood(&callers, Some(Precision::Narrowed));
+    for invocation in invocations {
+        let mut hosts = Vec::new();
+        let mut resolved_callback_targets = Vec::new();
+        for site in &invocation.resolved_call_sites {
+            let Some(caller) = caller_by_site.get(site).copied() else {
+                continue;
+            };
+            let Some(decl) = ws.exact_decl(SymbolId::new(caller.raw())) else {
+                continue;
+            };
+            if !invocation.callback_map_field_path.is_empty() {
+                let targets = compiler_callback_map_targets(
+                    ws,
+                    global.as_ref(),
+                    &decl,
+                    *site,
+                    invocation.callback_arg_index,
+                    &invocation.callback_map_field_path,
+                    &invocation.forwarded_argument_field_path,
+                );
+                for target in targets {
+                    resolved_callback_targets.push((*site, target));
+                    hosts.push((target, caller));
+                }
+                continue;
+            }
+            let Some(FlowEvent::Call { args, .. }) = find_call_event_at(&decl.flow_events, *site) else {
+                continue;
+            };
+            let Some(argument) = args.get(invocation.callback_arg_index) else {
+                continue;
+            };
+            let mut targets: Vec<FuncId> = graph
+                .callable_argument_records()
+                .iter()
+                .filter(|relation| {
+                    relation.caller == caller
+                        && relation.target != caller
+                        && relation.span.file == argument.span.file
+                        && relation.span.start >= argument.span.start
+                        && relation.span.end <= argument.span.end
+                })
+                .map(|relation| relation.target)
+                .collect();
+            if targets.is_empty() {
+                targets.extend(
+                    graph
+                        .callable_argument_records()
+                        .iter()
+                        .filter(|relation| {
+                            relation.caller == caller
+                                && relation.target != caller
+                                && relation.span.file == argument.span.file
+                                && relation.span.start <= argument.span.start
+                                && relation.span.end >= argument.span.end
+                        })
+                        .map(|relation| relation.target),
+                );
+            }
+            if targets.is_empty() {
+                // External/runtime callback contracts are not first-party
+                // callgraph edges until a typing rule matches the outer API.
+                // Resolve an inline callback directly from compiler
+                // declaration ancestry and exact argument containment. This
+                // is the same fail-closed identity used by IDG stitching and
+                // does not infer execution from a callback-looking token.
+                targets.extend(compiler_inline_callable_targets(
+                    global.as_ref(),
+                    caller,
+                    argument.span,
+                ));
+            }
+            if targets.is_empty() {
+                let callback_param_index = argument.place.as_deref().and_then(|place| {
+                    decl.params
+                        .iter()
+                        .position(|param| param == place)
+                        .and_then(|index| u32::try_from(index).ok())
+                });
+                if let Some(callback_param_index) = callback_param_index {
+                    targets.extend(compiler_bound_callback_targets(
+                        ws,
+                        global.as_ref(),
+                        graph.as_ref(),
+                        caller,
+                        callback_param_index,
+                    ));
+                }
+            }
+            targets.sort_unstable_by_key(|func| func.raw());
+            targets.dedup();
+            if let [target] = targets.as_slice() {
+                hosts.push((*target, caller));
+                resolved_callback_targets.push((*site, *target));
+            }
+        }
+        hosts.sort_unstable_by_key(|(target, host)| (target.raw(), host.raw()));
+        hosts.dedup();
+        resolved_callback_targets.sort_unstable_by_key(|(site, target)| (*site, target.raw()));
+        resolved_callback_targets.dedup();
+        invocation.resolved_callback_targets = resolved_callback_targets;
+        invocation.callback_hosts = hosts;
+    }
+}
+
+/// Resolve every callable in one immutable, statically initialized callback
+/// map selected by a rule-matched external call. The frontend owns aggregate,
+/// assignment, scope, and declaration facts; this compiler step merely joins
+/// those exact identities. Dynamic fields, mutable/reassigned maps, and
+/// ambiguous callback declarations fail closed.
+fn compiler_callback_map_targets(
+    ws: &Workspace,
+    global: &GlobalIndex,
+    caller: &bonsai_lang_api::Decl,
+    call_span: Span,
+    callback_arg_index: usize,
+    callback_map_field_path: &[String],
+    forwarded_argument_field_path: &[String],
+) -> Vec<FuncId> {
+    if callback_map_field_path.is_empty() || forwarded_argument_field_path.is_empty() {
+        return Vec::new();
+    }
+    let Some(file_index) = ws.exact_decl_index_shared(call_span.file) else {
+        return Vec::new();
+    };
+    let arguments = file_index
+        .call_argument_values
+        .iter()
+        .filter(|fact| fact.call_span == call_span && fact.argument_index == callback_arg_index)
+        .collect::<Vec<_>>();
+    let [argument] = arguments.as_slice() else {
+        return Vec::new();
+    };
+    let Some(map_flow) = exact_aggregate_field_flow(&argument.value_flow, callback_map_field_path) else {
+        return Vec::new();
+    };
+    if exact_aggregate_field_flow(&argument.value_flow, forwarded_argument_field_path).is_none() {
+        return Vec::new();
+    }
+
+    // A callback map may be written inline in the selected field. That shape
+    // is already a complete compiler fact on the call argument itself.
+    let mut callback_spans = argument
+        .inline_callback_fields
+        .iter()
+        .filter_map(|callback| {
+            callback
+                .path
+                .strip_prefix(callback_map_field_path)
+                .filter(|suffix| !suffix.is_empty())
+                .map(|_| callback.callback_span)
+        })
+        .collect::<Vec<_>>();
+
+    if callback_spans.is_empty() {
+        let Some(map_place) = map_flow.place.clone().or_else(|| {
+            map_flow
+                .projection
+                .as_ref()
+                .map(|projection| projection.canonical_place())
+        }) else {
+            return Vec::new();
+        };
+        if caller.params.iter().any(|param| param == &map_place) {
+            return Vec::new();
+        }
+        let assignments = file_index
+            .assignment_values
+            .iter()
+            .filter(|fact| {
+                fact.target.as_deref() == Some(map_place.as_str())
+                    && fact.assignment_span.start < call_span.start
+                    && assignment_value_visible_to_decl(file_index.as_ref(), caller, fact)
+            })
+            .collect::<Vec<_>>();
+        let Some(latest_start) = assignments.iter().map(|fact| fact.assignment_span.start).max() else {
+            return Vec::new();
+        };
+        let latest = assignments
+            .into_iter()
+            .filter(|fact| fact.assignment_span.start == latest_start)
+            .collect::<Vec<_>>();
+        let [map] = latest.as_slice() else {
+            return Vec::new();
+        };
+        if !map.target_is_immutable || map.inline_callback_fields.is_empty() {
+            return Vec::new();
+        }
+        // Immutable bindings do not imply immutable aggregate contents.
+        // Reject any compiler-visible write to the map or a descendant after
+        // initialization and before the invoking call.
+        let mutated = file_index.assignment_values.iter().any(|fact| {
+            fact.assignment_span.start > map.assignment_span.start
+                && fact.assignment_span.start < call_span.start
+                && assignment_value_visible_to_decl(file_index.as_ref(), caller, fact)
+                && fact.target.as_deref().is_some_and(|target| {
+                    target == map_place
+                        || target
+                            .strip_prefix(&map_place)
+                            .is_some_and(|tail| tail.starts_with('.'))
+                })
+        });
+        if mutated {
+            return Vec::new();
+        }
+        callback_spans.extend(
+            map.inline_callback_fields
+                .iter()
+                .map(|callback| callback.callback_span),
+        );
+    }
+
+    callback_spans.sort();
+    callback_spans.dedup();
+    let mut out = Vec::new();
+    for callback_span in callback_spans {
+        let candidates =
+            compiler_callable_targets_for_exact_callback_span(global, caller.symbol, callback_span);
+        let [target] = candidates.as_slice() else {
+            return Vec::new();
+        };
+        out.push(*target);
+    }
+    out.sort_unstable_by_key(|func| func.raw());
+    out.dedup();
+    out
+}
+
+fn exact_aggregate_field_flow<'a>(
+    flow: &'a bonsai_lang_api::ExpressionFlow,
+    path: &[String],
+) -> Option<&'a bonsai_lang_api::ExpressionFlow> {
+    let mut current = flow;
+    for segment in path {
+        let fields = current
+            .aggregate_fields
+            .iter()
+            .filter(|field| field.name == *segment)
+            .collect::<Vec<_>>();
+        let [field] = fields.as_slice() else {
+            return None;
+        };
+        current = &field.value;
+    }
+    Some(current)
+}
+
+fn assignment_value_visible_to_decl(
+    file_index: &bonsai_lang_api::DeclIndex,
+    decl: &bonsai_lang_api::Decl,
+    fact: &bonsai_lang_api::AssignmentValueFact,
+) -> bool {
+    if let Some(owner) = fact.target_owner {
+        if owner == decl.symbol {
+            return true;
+        }
+        let mut current = decl.parent;
+        while let Some(symbol) = current {
+            if symbol == owner {
+                return true;
+            }
+            current = file_index
+                .defs
+                .iter()
+                .find(|candidate| candidate.symbol == symbol)
+                .and_then(|candidate| candidate.parent);
+        }
+        return false;
+    }
+    file_index
+        .defs
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            ) && candidate.name != bonsai_lang_api::kit::MODULE_DECL_NAME
+                && span_contains(candidate.span, fact.assignment_span)
+        })
+        .min_by_key(|candidate| candidate.span.len())
+        .is_none_or(|owner| owner.symbol == decl.symbol)
+}
+
+fn compiler_callable_targets_for_exact_callback_span(
+    global: &GlobalIndex,
+    caller: SymbolId,
+    callback_span: Span,
+) -> Vec<FuncId> {
+    let mut ranked = global
+        .decls_in(callback_span.file)
+        .iter()
+        .filter(|candidate| {
+            candidate.symbol != caller
+                && matches!(
+                    candidate.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                )
+        })
+        .filter_map(|candidate| {
+            let rank = if candidate.span == callback_span {
+                0
+            } else if span_contains(candidate.span, callback_span) {
+                1
+            } else if candidate
+                .body_span
+                .is_some_and(|body| span_contains(callback_span, body))
+            {
+                2
+            } else {
+                return None;
+            };
+            Some((rank, candidate.span.len(), FuncId::new(candidate.symbol.raw())))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_unstable();
+    let Some(best) = ranked.first().map(|(rank, len, _)| (*rank, *len)) else {
+        return Vec::new();
+    };
+    ranked
+        .into_iter()
+        .filter_map(|(rank, len, func)| ((rank, len) == best).then_some(func))
+        .collect()
+}
+
+/// Resolve callable values bound to a first-party formal parameter through
+/// exact call edges and callable-argument relations. A runtime typing rule may
+/// invoke a named formal (`dispatch_sync(queue, work)`) rather than an inline
+/// callback; this fixed point recovers the concrete callable passed by its
+/// callers, including chains of first-party forwarding formals. It never
+/// resolves argument text as a declaration name.
+fn compiler_bound_callback_targets(
+    ws: &Workspace,
+    global: &GlobalIndex,
+    graph: &bonsai_callgraph::ResolvedCallGraph,
+    host: FuncId,
+    param_index: u32,
+) -> Vec<FuncId> {
+    let mut pending = vec![(host, param_index)];
+    let mut visited = AHashSet::new();
+    let mut targets = AHashSet::new();
+    while let Some((current_host, current_param_index)) = pending.pop() {
+        if !visited.insert((current_host, current_param_index)) {
+            continue;
+        }
+        for edge in graph.callers_of(current_host) {
+            let caller = edge.from;
+            let Some(caller_decl) = ws.exact_decl(SymbolId::new(caller.raw())) else {
+                continue;
+            };
+            let Some(FlowEvent::Call { args, .. }) = find_call_event_at(&caller_decl.flow_events, edge.span)
+            else {
+                continue;
+            };
+            let Some(argument) = usize::try_from(current_param_index)
+                .ok()
+                .and_then(|index| args.get(index))
+            else {
+                continue;
+            };
+            let graph_targets = graph
+                .callable_argument_records()
+                .iter()
+                .filter(|relation| {
+                    relation.caller == caller
+                        && relation.span.file == argument.span.file
+                        && relation.span.start >= argument.span.start
+                        && relation.span.end <= argument.span.end
+                })
+                .map(|relation| relation.target)
+                .collect::<Vec<_>>();
+            if graph_targets.is_empty() {
+                targets.extend(compiler_inline_callable_targets(global, caller, argument.span));
+            } else {
+                targets.extend(graph_targets);
+            }
+            if let Some(caller_param_index) = argument.place.as_deref().and_then(|place| {
+                caller_decl
+                    .params
+                    .iter()
+                    .position(|param| param == place)
+                    .and_then(|index| u32::try_from(index).ok())
+            }) {
+                pending.push((caller, caller_param_index));
+            }
+        }
+    }
+    let mut targets: Vec<_> = targets.into_iter().collect();
+    targets.sort_unstable_by_key(|func| func.raw());
+    targets
+}
+
+fn compiler_inline_callable_targets(
+    global: &GlobalIndex,
+    caller: FuncId,
+    argument_span: Span,
+) -> Vec<FuncId> {
+    let caller_symbol = SymbolId::new(caller.raw());
+    let mut targets = global
+        .decls_in(argument_span.file)
+        .iter()
+        .filter_map(|candidate| {
+            if candidate.symbol == caller_symbol
+                || !matches!(
+                    candidate.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                )
+                || candidate.span.file != argument_span.file
+                || candidate.span.start < argument_span.start
+                || candidate.span.end > argument_span.end
+            {
+                return None;
+            }
+            let mut parent = candidate.parent;
+            while let Some(symbol) = parent {
+                if symbol == caller_symbol {
+                    return Some(FuncId::new(candidate.symbol.raw()));
+                }
+                parent = global.decl_of(symbol).and_then(|decl| decl.parent);
+            }
+            None
+        })
+        .collect::<Vec<_>>();
+    targets.sort_unstable_by_key(|func| func.raw());
+    targets.dedup();
+    targets
 }
 
 fn receiver_state_propagations_from_rules<'a>(
@@ -9303,36 +10424,52 @@ fn sort_source_callback_args(items: &mut Vec<SourceCallbackArgs>) {
 }
 
 fn sort_call_result_passthroughs(items: &mut Vec<CallResultPassthrough>) {
+    for item in items.iter_mut() {
+        item.resolved_call_sites.sort();
+        item.resolved_call_sites.dedup();
+    }
     items.sort_by(|a, b| {
         (
             &a.callee,
             &a.receiver_type,
             &a.input_arg_indices,
+            a.input_arg_start_index,
             a.input_receiver,
+            &a.resolved_call_sites,
         )
             .cmp(&(
                 &b.callee,
                 &b.receiver_type,
                 &b.input_arg_indices,
+                b.input_arg_start_index,
                 b.input_receiver,
+                &b.resolved_call_sites,
             ))
     });
     items.dedup();
 }
 
 fn sort_output_arg_flows(items: &mut Vec<OutputArgFlow>) {
+    for item in items.iter_mut() {
+        item.resolved_call_sites.sort();
+        item.resolved_call_sites.dedup();
+    }
     items.sort_by(|a, b| {
         (
             &a.callee,
             a.output_arg_index,
+            a.input_receiver,
             a.value_start_arg_index,
             &a.value_arg_indices,
+            &a.resolved_call_sites,
         )
             .cmp(&(
                 &b.callee,
                 b.output_arg_index,
+                b.input_receiver,
                 b.value_start_arg_index,
                 &b.value_arg_indices,
+                &b.resolved_call_sites,
             ))
     });
     items.dedup();
@@ -9350,18 +10487,43 @@ fn sort_receiver_state_propagations(items: &mut Vec<ReceiverStatePropagation>) {
 }
 
 fn receiver_state_propagation_from_rule(rule: &Rule) -> Option<ReceiverStatePropagation> {
-    let target = rule.match_spec.callee.as_ref()?;
-    let attribute = target.attribute.as_ref()?;
-    if attribute.len() < 2 {
-        return None;
-    }
-    let method = attribute.last()?.trim();
+    let target = match rule.match_spec.kind {
+        MatchKind::Write => rule.match_spec.target.as_ref()?,
+        MatchKind::Call | MatchKind::New => rule.match_spec.callee.as_ref()?,
+        _ => return None,
+    };
+    let declared_receiver_type = target.receiver_type_in.first().cloned().or_else(|| {
+        rule.constraints.iter().find_map(|constraint| {
+            if let ConstraintKind::ReceiverTypeIn { receiver_type_in } = constraint {
+                receiver_type_in.first().cloned()
+            } else {
+                None
+            }
+        })
+    });
+    let (method, receiver_type) = if let Some(attribute) = target.attribute.as_ref() {
+        if attribute.len() < 2 {
+            return None;
+        }
+        (
+            attribute.last()?.trim(),
+            Some(attribute[..attribute.len() - 1].join(".")),
+        )
+    } else if let Some(name) = target.name.as_deref() {
+        // A name-only transfer is still exact when the matcher compiled its
+        // concrete call spans from rule-owned receiver constraints. Keep the
+        // transfer vocabulary-free and restrict it to those spans instead of
+        // requiring a synthetic type spelling in the callee target.
+        (name.trim(), declared_receiver_type)
+    } else {
+        (target.regex.as_deref()?.trim(), declared_receiver_type)
+    };
     if method.is_empty() {
         return None;
     }
     Some(ReceiverStatePropagation {
         method: method.to_string(),
-        receiver_type: Some(attribute[..attribute.len() - 1].join(".")),
+        receiver_type,
         resolved_call_sites: Vec::new(),
     })
 }
@@ -9538,6 +10700,47 @@ mod source_seed_tests {
     }
 
     #[test]
+    fn parameter_source_inside_compound_call_argument_seeds_only_compiler_places() {
+        let file = FileId::new(1);
+        let events = vec![FlowEvent::Assign {
+            span: Span::new(file, 20, 70),
+            target: "safe".to_string(),
+            source_name: None,
+            source_call: Some("HtmlUtils.htmlEscape".to_string()),
+            source_call_args: vec!["q == null ? \"\" : q".to_string()],
+            source_names: vec!["q".to_string()],
+            value_kind: Some(AssignValueKind::CallResult),
+            declares_new_binding: true,
+        }];
+        let mut source = source_rule_match_at(Span::new(file, 4, 5));
+        source.match_text = "q".to_string();
+        let mut seeds = TokenSet::default();
+
+        collect_source_seed_targets(
+            &events,
+            SourceSeedContext {
+                source: &source,
+                output_args: &[],
+                output_args_from: None,
+                callback_args: &[],
+                callback_only: false,
+                allow_text_only_match: true,
+            },
+            &mut seeds,
+        );
+
+        assert!(seeds.contains("q"));
+        assert!(
+            !seeds.contains("safe"),
+            "the source is an input, not the call result"
+        );
+        assert!(
+            seeds.iter().all(|seed| !seed.contains("null")),
+            "rendered expressions must never be normalized into invented field paths: {seeds:?}"
+        );
+    }
+
+    #[test]
     fn callback_only_source_does_not_taint_assigned_registration_result() {
         let file = FileId::new(1);
         let events = vec![FlowEvent::Assign {
@@ -9555,6 +10758,7 @@ mod source_seed_tests {
         let callbacks = [SourceCallbackArgSemantics {
             callback_arg_index: 1,
             source_param_indices: vec![0],
+            source_param_indices_from: None,
         }];
         let mut seeds = TokenSet::default();
 
@@ -9595,6 +10799,7 @@ mod source_seed_tests {
         let callbacks = [SourceCallbackArgSemantics {
             callback_arg_index: 1,
             source_param_indices: vec![0],
+            source_param_indices_from: None,
         }];
         let mut seeds = TokenSet::default();
 

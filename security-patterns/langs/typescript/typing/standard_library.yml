@@ -1,13 +1,98 @@
 # TypeScript library-return models used by exact source receiver constraints.
+- id: typescript.typing.graphql_root_value_callback_map
+  enabled: true
+  language: typescript
+  packages: [graphql]
+  imports: [graphql]
+  taint_semantics:
+    callback_invocation:
+      callback_arg_index: 0
+      callback_map_field_path: [rootValue]
+      forwarded_argument_field_path: [variableValues]
+      forwarded_callback_param_index: 0
+      callback_return_result_offset: 0
+  match:
+    kind: call
+    callee:
+      name: graphql
+      binding_origin: imported
+  match_examples:
+  - name: GraphQL invokes a static root resolver map with variable values
+    code: |
+      import { graphql } from "graphql";
+      const root = { products: ({ filter }: { filter: string }) => findProducts(filter) };
+      graphql({ schema, source: query, rootValue: root, variableValues: variables });
+    expect_match_text: [graphql]
+  - name: locally shadowed graphql helper is not the package runtime
+    code: |
+      import { graphql as packageGraphql } from "graphql";
+      void packageGraphql;
+      function graphql(options: unknown) { return options; }
+      graphql({ rootValue: root, variableValues: variables });
+    expect_no_match: true
+  description: "The imported GraphQL runtime invokes compiler-proven callbacks in the exact rootValue map and forwards variableValues into each resolver parameter. Field and provider roles live in rule data; IDG construction receives only matched spans and resolved callable identities."
+
+- id: typescript.typing.foreach_callback_invocation
+  enabled: true
+  language: typescript
+  taint_semantics:
+    callback_invocation:
+      callback_arg_index: 0
+      receiver_to_callback_param: 0
+      callback_return_result_offset: 0
+  match:
+    kind: call
+    callee:
+      name: forEach
+  constraints:
+  - arg_is_inline_callback: 0
+  match_examples:
+  - name: typed inline collection callback
+    code: 'function visit(input: string): void { input.split("&").forEach((part) => consume(part)); }'
+    expect_match_text: ['input.split("&").forEach']
+  - name: non-callback argument
+    code: 'function visit(collection: unknown, value: unknown): void { collection.forEach(value); }'
+    expect_no_match: true
+  description: "TypeScript forEach invokes inline callback argument zero with values from the receiver. The matcher proves the callback AST and exact call span; typing-only transfer semantics carry the receiver value into callback parameter zero."
+
+- id: typescript.typing.promise_executor_invocation
+  enabled: true
+  language: typescript
+  taint_semantics:
+    callback_invocation:
+      callback_arg_index: 0
+      callback_return_result_offset: 0
+  match:
+    kind: call
+    callee:
+      name: Promise
+      binding_origin: runtime-global
+  constraints:
+  - arg_is_inline_callback: 0
+  match_examples:
+  - name: native Promise invokes its inline executor
+    code: 'function load(input: string): Promise<string> { return new Promise((resolve) => resolve(transform(input))); }'
+    expect_match_text: [Promise]
+  - name: locally shadowed Promise is not the native runtime
+    code: |
+      function demo(input: string) {
+        const Promise = (callback: unknown) => callback;
+        return new Promise((resolve: (value: string) => void) => resolve(input));
+      }
+    expect_no_match: true
+  description: "The native Promise constructor invokes inline executor argument zero synchronously. Typing-only callback semantics expose compiler-proven lexical capture without assigning security meaning to the runtime in shared analysis."
+
 - id: typescript.typing.readline_interface
   enabled: true
   language: typescript
   packages: [readline]
+  imports: [readline, "node:readline", "readline/promises", "node:readline/promises"]
   returns_type: Interface
   match:
     kind: call
     callee:
-      name: createInterface
+      attribute: [readline, createInterface]
+      binding_origin: imported
   match_examples:
   - name: typed readline factory returns Interface
     code: |
@@ -15,4 +100,11 @@
       const rl = readline.createInterface({ input: process.stdin });
       rl.question("name?", answer => sink(answer));
     expect_match_text: [readline.createInterface]
+  - name: local createInterface method is not Node readline
+    code: |
+      import * as standard from "readline";
+      void standard.createInterface;
+      const readline = { createInterface() { return {}; } };
+      readline.createInterface();
+    expect_no_match: true
   description: "readline.createInterface(...) returns an Interface; typing-only factory evidence for receiver-scoped input rules."

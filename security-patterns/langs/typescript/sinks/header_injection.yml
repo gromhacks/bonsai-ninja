@@ -8,8 +8,6 @@
   - restify
   cwe:
   - CWE-113
-  - CWE-601
-  - CWE-444
   match:
     kind: call
     callee:
@@ -19,14 +17,20 @@
   constraints:
   - arg_tainted:
       index: 1
+  - arg_not_matches_regex:
+      index: 0
+      regex: "^['\"]Location['\"]$"
   analysis_semantics:
     character_constraint:
       required_excluded_characters: ["\r", "\n"]
-    character_escape:
-      value_arg_indices: [1]
-      required_mappings:
-      - {input: "\r", output: "_"}
-      - {input: "\n", output: "_"}
+      accepted_providers:
+      - operation: {regex: '^replace$'}
+      - factory: {name: String}
+        operation: {regex: '^String\.replace$'}
+      - factory: {name: map}
+        operation: {regex: '^map\.join$'}
+      - factory: {regex: '^charCodeAt\.toString\.padStart$'}
+        operation: {regex: '^(?:replace|String\.replace)$'}
   match_examples:
   - name: express res set value
     code: |
@@ -41,9 +45,7 @@
         return res.set("Content-Disposition", "attachment; filename=safe.txt");
       }
     expect_no_match: true
-  description: 'Express/Restify res.set(name, tainted). Merged aliases: typescript.open_redirect.express_res_set_location.'
-  aliases:
-  - typescript.open_redirect.express_res_set_location
+  description: Express/Restify res.set(name, tainted).
 - id: typescript.header.express_res_set_object
   enabled: true
   language: typescript
@@ -54,7 +56,6 @@
   - restify
   cwe:
   - CWE-113
-  - CWE-601
   match:
     kind: call
     callee:
@@ -114,9 +115,7 @@
         return res.header("Content-Disposition", "attachment; filename=safe.txt");
       }
     expect_no_match: true
-  description: "Express/Restify res.header(name, tainted) - alias of res.set. Merged collision aliases: typescript.open_redirect.express_res_header_location."
-  aliases:
-  - typescript.open_redirect.express_res_header_location
+  description: "Express/Restify res.header(name, tainted) - alias of res.set."
 - id: typescript.header.node_setheader
   enabled: true
   language: typescript
@@ -125,8 +124,6 @@
   packages: [http, express, fastify, '@hapi/hapi', koa, '@nestjs/common']
   cwe:
   - CWE-113
-  - CWE-601
-  - CWE-444
   match:
     kind: call
     callee:
@@ -154,9 +151,8 @@
         return res.setHeader("X-User", "safe");
       }
     expect_no_match: true
-  description: "Node res.setHeader(name, value with CRLF) - response splitting. Merged aliases: typescript.open_redirect.node_setheader_location."
+  description: "Node res.setHeader(name, tainted value) - response header injection."
   aliases:
-  - typescript.open_redirect.node_setheader_location
   - typescript.header.node_content_disposition_setheader
   - typescript.header.nest_res_setheader
 - id: typescript.header.express_res_cookie
@@ -236,7 +232,6 @@
   - koa
   cwe:
   - CWE-113
-  - CWE-601
   match:
     kind: call
     callee:
@@ -246,6 +241,9 @@
   constraints:
   - arg_tainted:
       index: 1
+  - arg_not_matches_regex:
+      index: 0
+      regex: "^['\"]Location['\"]$"
   match_examples:
   - name: koa set
     code: |
@@ -262,9 +260,14 @@
         return ctx.set("Content-Disposition", "attachment; filename=safe.txt");
       }
     expect_no_match: true
-  description: 'Koa ctx.set(name, tainted). Koa''s `ctx.set(field, val)` is the 2-arg overload (or `ctx.set(obj)` 1-arg). `min_args: 2` rejects unrelated `ctx.set(x)` decoys (Map.set, custom-context single-arg setters). Merged aliases: typescript.open_redirect.koa_set_location.'
-  aliases:
-  - typescript.open_redirect.koa_set_location
+  - name: koa location header belongs to open redirect negative
+    code: |
+      const _u = require("koa");
+      function demo(input: string) {
+        return ctx.set("Location", input);
+      }
+    expect_no_match: true
+  description: 'Koa ctx.set(name, tainted). Koa''s `ctx.set(field, val)` is the 2-arg overload (or `ctx.set(obj)` 1-arg).'
 - id: typescript.header.koa_set_object
   enabled: true
   language: typescript
@@ -274,7 +277,6 @@
   - koa
   cwe:
   - CWE-113
-  - CWE-601
   match:
     kind: call
     callee:
@@ -335,9 +337,7 @@
         return reply.header("Content-Disposition", "attachment; filename=safe.txt");
       }
     expect_no_match: true
-  description: 'Fastify reply.header(name, tainted). Merged aliases: typescript.open_redirect.fastify_header_location.'
-  aliases:
-  - typescript.open_redirect.fastify_header_location
+  description: Fastify reply.header(name, tainted).
 - id: typescript.header.bun_response_content_disposition
   enabled: true
   language: typescript
@@ -348,8 +348,6 @@
   - next
   cwe:
   - CWE-113
-  - CWE-79
-  - CWE-601
   match:
     kind: new
     callee:
@@ -357,6 +355,9 @@
   constraints:
   - arg_tainted:
       index: 1
+  - arg_matches_regex:
+      index: 1
+      regex: '(?i)content-disposition'
   match_examples:
   - name: bun response content disposition
     code: |
@@ -373,10 +374,7 @@
         return new Response("ok", { headers: { "Content-Disposition": "attachment; filename=safe.txt" } });
       }
     expect_no_match: true
-  description: "Bun/fetch Response headers Content-Disposition value - tainted filename can inject response headers. Merged aliases: typescript.xss.bun_response_html_body."
-  aliases:
-  - typescript.xss.bun_response_html_body
-  - typescript.open_redirect.fetch_response_location
+  description: "Bun/fetch Response headers Content-Disposition value - tainted filename can inject response headers."
 - id: typescript.header.hapi_content_disposition
   enabled: true
   language: typescript
@@ -386,8 +384,6 @@
   - '@hapi/hapi'
   cwe:
   - CWE-113
-  - CWE-601
-  - CWE-79
   match:
     kind: call
     callee:
@@ -400,9 +396,20 @@
   constraints:
   - arg_tainted:
       index: 1
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:"Content-Disposition"|''Content-Disposition'')$'
   analysis_semantics:
     character_constraint:
       required_excluded_characters: ["\r", "\n"]
+      accepted_providers:
+      - operation: {regex: '^replace$'}
+      - factory: {name: String}
+        operation: {regex: '^String\.replace$'}
+      - factory: {name: map}
+        operation: {regex: '^map\.join$'}
+      - factory: {regex: '^charCodeAt\.toString\.padStart$'}
+        operation: {regex: '^(?:replace|String\.replace)$'}
   match_examples:
   - name: hapi response content disposition
     code: |
@@ -429,10 +436,7 @@
         return h.response("ok").header("Content-Disposition", "attachment; filename=safe.txt");
       }
     expect_no_match: true
-  description: "Hapi <h>.response(...).header('Content-Disposition', tainted) - filename/header value can inject response headers. The bare `response.header(...)` shape is intentionally not matched here to avoid colliding with express/fastify; rely on the response()-prefixed shape and the package gate. Merged aliases: typescript.open_redirect.hapi_response_header_location, typescript.xss.hapi_response_html_body."
-  aliases:
-  - typescript.open_redirect.hapi_response_header_location
-  - typescript.xss.hapi_response_html_body
+  description: "Hapi <h>.response(...).header('Content-Disposition', tainted) - filename/header value can inject response headers."
 - id: typescript.header.nest_header_xss_protection_disabled
   enabled: true
   language: typescript

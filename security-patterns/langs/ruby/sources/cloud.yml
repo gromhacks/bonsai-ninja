@@ -1,42 +1,33 @@
 # Ruby cloud serverless sources. Handlers take attacker-controlled event
 # payloads. trust: service - upstream gateway brokered.
-- id: ruby.source.aws_lambda_event
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: ruby
-  tag: cloud-event
-  trust: service
-  packages: [aws_lambda_ric]
-  match:
-    kind: param
-    target:
-      name: event
-  description: "Disabled - Ruby Lambda handlers are configured externally, so a bare `event` parameter plus aws_lambda_ric does not prove a runtime entry boundary."
-
 - id: ruby.source.gcf_request
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: ruby
   tag: cloud-event
   trust: service
   packages: [functions_framework]
   match:
-    kind: param
-    target:
-      name: request
-  description: "Disabled - Ruby Functions Framework HTTP handlers are registered through a DSL block; a bare `request` method parameter does not prove registration. Re-enable when callback-block parameters retain their registration call target."
-
-- id: ruby.source.azure_function_req
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: cloud-event
-  trust: service
-  match:
-    kind: param
-    target:
-      name: req
-  description: "Disabled - bare `req` has no Azure runtime, custom-handler, type, or registration evidence and matches ordinary Ruby methods."
+    kind: call
+    callee:
+      attribute: [FunctionsFramework, http]
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: Google Functions Framework HTTP request block
+    code: |
+      require "functions_framework"
+      FunctionsFramework.http "audit" do |request|
+        sink(request.params["q"])
+      end
+    expect_match_text: [FunctionsFramework.http]
+  - name: startup callback is not an HTTP request
+    code: |
+      require "functions_framework"
+      FunctionsFramework.on_startup do |function|
+        sink(function)
+      end
+    expect_no_match: true
+  description: "FunctionsFramework.http(name) block parameter zero is the Rack::Request delivered for a Google Cloud HTTP invocation; the DSL registration result remains clean."

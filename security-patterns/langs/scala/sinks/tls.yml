@@ -11,43 +11,27 @@
     kind: call
     callee:
       name: disableCertVerification
+  constraints:
+  - arg_count: 0
   match_examples:
-  - name: generated shape example
+  - name: sttp certificate verification disabled
     code: |
       import sttp._
       object App {
-        def handle(input: String): Unit = {
-          disableCertVerification(input)
+        def configure(options: BackendOptions): Unit = {
+          options.disableCertVerification()
         }
       }
-  description: "sttp backend with disableCertVerification - trusts any server cert."
-
-- id: scala.tls.akka_http_https_permissive
-  enabled: true
-  language: scala
-  tag: weak-tls
-  category: source-independent
-  severity: high
-  packages: [akka.http.scaladsl]
-  cwe: [CWE-295]
-  match:
-    kind: call
-    callee:
-      attribute: [ConnectionContext, https]
-  match_examples:
-  - name: generated shape example
+  - name: same method name with argument collision negative
     code: |
-      import akka.http.scaladsl._
-      // uses akka.http.scaladsl
+      import sttp._
       object App {
-        def handle(input: String): Unit = {
-          ConnectionContext.https(input)
-        }
+        def disableCertVerification(enabled: Boolean): Unit = ()
+        def configure(): Unit = disableCertVerification(false)
       }
-  description: "Akka HTTP ConnectionContext.https(...) - dangerous if SSLContext trusts all / hostnameVerifier is noop."
+    expect_no_match: true
+  description: "An imported sttp backend `disableCertVerification()` operation disables certificate validation; exact zero-argument syntax keeps overloaded application helpers quiet."
 
-  imports:
-  - akka.http.scaladsl
 - id: scala.tls.play_ws_acceptanycertificate
   enabled: true
   language: scala
@@ -55,86 +39,100 @@
   category: source-independent
   severity: high
   packages: [play.api.libs.ws]
+  imports: [play.api.libs.ws.WSClientConfig]
   cwe: [CWE-295]
   match:
-    kind: write
-    target:
-      name: acceptAnyCertificate
+    kind: call
+    callee:
+      attribute: [play.api.libs.ws, WSClientConfig]
+      binding_origin: imported
+  constraints:
+  - keyword_arg_equals: {name: acceptAnyCertificate, value: "true"}
   match_examples:
-  - name: generated shape example
+  - name: Play WS accepts any certificate
     code: |
-      import play.api.libs.ws._
+      import play.api.libs.ws.WSClientConfig
       object App {
-        def handle(input: String): Unit = {
-          acceptAnyCertificate = input
-        }
+        def configure(): WSClientConfig =
+          WSClientConfig(acceptAnyCertificate = true)
       }
-  description: "Play WS acceptAnyCertificate=true - disables TLS cert validation."
-
-  imports:
-  - play.api.libs.ws
+    expect_match_text: [WSClientConfig]
+  - name: Play WS certificate verification enabled negative
+    code: |
+      import play.api.libs.ws.WSClientConfig
+      object App {
+        def configure(): WSClientConfig =
+          WSClientConfig(acceptAnyCertificate = false)
+      }
+    expect_no_match: true
+  - name: local config constructor collision negative
+    code: |
+      import play.api.libs.ws.WSClientConfig as PlayWSClientConfig
+      case class WSClientConfig(acceptAnyCertificate: Boolean)
+      object App {
+        def configure(): WSClientConfig = WSClientConfig(acceptAnyCertificate = true)
+      }
+    expect_no_match: true
+  description: "Imported Play WSClientConfig construction with exact `acceptAnyCertificate = true` disables TLS certificate validation; secure values and same-named local constructors stay quiet."
 - id: scala.tls.okhttp_hostnameverifier
   enabled: true
   language: scala
   tag: weak-tls
   category: source-independent
   severity: high
-  packages: [okhttp]
+  packages: [okhttp3]
+  imports: [okhttp3.OkHttpClient]
   cwe: [CWE-295]
   match:
     kind: call
     callee:
       name: hostnameVerifier
+      receiver_type_in: [okhttp3.OkHttpClient.Builder]
+  constraints:
+  - arg_inline_callback_returns_static:
+      index: 0
+      value: {kind: boolean, value: true}
   match_examples:
-  - name: generated shape example
+  - name: OkHttp inline verifier always accepts
     code: |
-      import okhttp._
+      import okhttp3.OkHttpClient
       object App {
-        def handle(input: String): Unit = {
-          hostnameVerifier(input)
+        def configure(builder: OkHttpClient.Builder): Unit = {
+          builder.hostnameVerifier((_, _) => true)
         }
       }
-  description: "okhttp builder.hostnameVerifier(...) - flag when set to allow-all implementation."
-
-- id: scala.tls.x509_trust_manager_empty
-  enabled: true
-  language: scala
-  tag: weak-tls
-  category: source-independent
-  severity: high
-  cwe: [CWE-295]
-  match:
-    kind: new
-    callee:
-      name: X509TrustManager
-  match_examples:
-  - name: generated shape example
+  - name: OkHttp inline verifier rejects negative
     code: |
+      import okhttp3.OkHttpClient
       object App {
-        def handle(input: String): Unit = {
-          new X509TrustManager(input)
+        def configure(builder: OkHttpClient.Builder): Unit = {
+          builder.hostnameVerifier((_, _) => false)
         }
       }
-      class X509TrustManager(args: Any*)
-  description: "Anonymous X509TrustManager - flag when checkClient/ServerTrusted is empty."
-
-- id: scala.tls.ssl_context_init
-  enabled: true
-  language: scala
-  tag: weak-tls
-  category: source-independent
-  severity: medium
-  cwe: [CWE-295]
-  match:
-    kind: call
-    callee:
-      attribute: [SSLContext, init]
-  match_examples:
-  - name: generated shape example
+    expect_no_match: true
+  - name: aliased OkHttp builder inline verifier always accepts
     code: |
+      import okhttp3.OkHttpClient as NetworkClient
       object App {
-        def handle(input: String): Unit = {
-          SSLContext.init(input)
+        def configure(builder: NetworkClient.Builder): Unit = {
+          builder.hostnameVerifier((_, _) => true)
         }
       }
-  description: "SSLContext.init(_, trustManagers, _) - flag when trustManagers contains TrustAll."
+  - name: application builder collision negative
+    code: |
+      class Builder { def hostnameVerifier(callback: (String, String) => Boolean): Unit = () }
+      object App {
+        def configure(builder: Builder): Unit = builder.hostnameVerifier((_, _) => true)
+      }
+    expect_no_match: true
+  - name: same terminal nested builder from another provider negative
+    code: |
+      import okhttp3.OkHttpClient as NetworkClient
+      import application.http.OkHttpClient
+      object App {
+        def configure(builder: OkHttpClient.Builder): Unit = {
+          builder.hostnameVerifier((_, _) => true)
+        }
+      }
+    expect_no_match: true
+  description: "An exactly imported OkHttp Builder.hostnameVerifier with an inline callback whose complete normal return is the static boolean true accepts every hostname; aliases resolve through compiler import identity, while rejecting, mixed, named, and wrong-provider callbacks stay quiet."

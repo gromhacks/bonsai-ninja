@@ -31,6 +31,42 @@
       }
     expect_no_match: true
   description: "xmlquery.Query(node, tainted XPath) - concatenated XPath predicates allow XPath injection."
+- id: go.xpath.xmlquery_find
+  enabled: true
+  language: go
+  tag: xpath-injection
+  severity: high
+  packages:
+  - github.com/antchfx/xmlquery
+  cwe:
+  - CWE-643
+  match:
+    kind: call
+    callee:
+      attribute:
+      - xmlquery
+      - Find
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: xmlquery find tainted xpath
+    code: |
+      package main
+      import "github.com/antchfx/xmlquery"
+      func find(expr string) {
+        _ = xmlquery.Find(nil, expr)
+      }
+    expect_match_text: [xmlquery.Find]
+  - name: xmlquery find literal xpath negative
+    code: |
+      package main
+      import "github.com/antchfx/xmlquery"
+      func find() {
+        _ = xmlquery.Find(nil, "//user")
+      }
+    expect_no_match: true
+  description: "xmlquery.Find(node, tainted XPath) compiles and evaluates attacker-controlled XPath. It is the panic-on-invalid-expression counterpart to QueryAll and has its own exact package function target."
 - id: go.xpath.xmlquery_queryall
   enabled: true
   language: go

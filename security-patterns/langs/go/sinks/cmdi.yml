@@ -5,10 +5,8 @@
   severity: critical
   packages:
   - os/exec
-  - github.com/robertkrimen/otto
   cwe:
   - CWE-78
-  - CWE-94
   match:
     kind: call
     callee:
@@ -40,7 +38,6 @@
   - go.cmdi.exec_command_chained_run
   - go.cmdi.exec_command_chained_output
   - go.cmdi.exec_command_chained_combined_output
-  - go.eval.otto_run
 - id: go.cmdi.exec_command_shell_wrapper
   enabled: true
   language: go
@@ -136,14 +133,8 @@
   severity: critical
   packages:
   - syscall
-  - go.starlark.net
-  - github.com/graph-gophers/graphql-go
-  - database/sql
   cwe:
   - CWE-78
-  - CWE-94
-  - CWE-943
-  - CWE-89
   match:
     kind: call
     callee:
@@ -173,11 +164,7 @@
         syscall.Exec("/usr/bin/true", []string{"true"}, nil)
       }
     expect_no_match: true
-  description: "syscall.Exec(argv0, argv, env) - tainted argv0 replaces the process image. Merged collision aliases: go.eval.starlark_exec, go.graphql.schema_exec, go.sqli.db_exec."
-  aliases:
-  - go.eval.starlark_exec
-  - go.graphql.schema_exec
-  - go.sqli.db_exec
+  description: "syscall.Exec(argv0, argv, env) - tainted argv0 replaces the process image. Same-spelled Exec APIs in other packages are modeled by their own typed rules."
 - id: go.cmdi.syscall_exec_argv
   enabled: true
   language: go
@@ -373,60 +360,6 @@
       }
     expect_no_match: true
   description: "os.StartProcess(name, argv, attr) - tainted argv controls flags or subcommands passed to the spawned process."
-- id: go.cmdi.cmd_start
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  tag: command-injection
-  severity: critical
-  packages:
-  - os/exec
-  cwe:
-  - CWE-78
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Cmd
-      - Start
-  description: "Disabled - Cmd.Start() has no command argument; needs receiver state from exec.Command, Cmd.Path, or Cmd.Args taint."
-- id: go.cmdi.cmd_output
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  tag: command-injection
-  severity: critical
-  packages:
-  - os/exec
-  cwe:
-  - CWE-78
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Cmd
-      - Output
-  description: "Disabled - Cmd.Output() executes receiver state and has no command argument; needs tainted Cmd state tracking."
-- id: go.cmdi.cmd_combined_output
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  tag: command-injection
-  severity: critical
-  packages:
-  - os/exec
-  cwe:
-  - CWE-78
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Cmd
-      - CombinedOutput
-  description: "Disabled - Cmd.CombinedOutput() executes receiver state and has no command argument; needs tainted Cmd state tracking."
 - id: go.cmdi.syscall_forkexec
   enabled: true
   language: go
@@ -505,40 +438,3 @@
       }
     expect_no_match: true
   description: "syscall.ForkExec(argv0, argv, attr) - tainted argv controls flags or subcommands passed to the spawned process."
-- id: go.cmdi.exec_lookpath_tainted
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: command-injection
-  severity: medium
-  packages:
-  - os/exec
-  cwe:
-  - CWE-78
-  - CWE-427
-  match:
-    kind: call
-    callee:
-      attribute:
-      - exec
-      - LookPath
-  description: "Disabled - exec.LookPath(tainted) can resolve an attacker-planted binary on $PATH; enable with PATH-hardening analysis."
-- id: go.cmdi.cmd_path_tainted
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: command-injection
-  severity: critical
-  packages:
-  - os/exec
-  cwe:
-  - CWE-78
-  match:
-    kind: write
-    target:
-      attribute:
-      - cmd
-      - Path
-  description: "Disabled audit variant - cmd.Path = tainted assigns the executable path of an existing exec.Cmd; subsequent Run/Start/Output then runs an attacker-chosen binary."

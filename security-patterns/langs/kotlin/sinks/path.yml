@@ -224,6 +224,22 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {name: toRealPath}
+      canonicalizer_input_from_receiver: true
+      base_canonicalizer: {name: toRealPath}
+      path_constructor: {name: resolve}
+      path_constructor_base_from_receiver: true
+      containment_check: {name: startsWith}
+      static_base_factories:
+      - {attribute: [Path, of]}
+      - {attribute: [Paths, get]}
+      containment_check_is_segment_aware: true
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: []
   match_examples:
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    Files.readAllBytes(input)\n  }\n}\n"
@@ -496,39 +512,6 @@
       class File(vararg args: Any?)
     expect_no_match: true
   description: new java.io.File(tainted).
-- id: kotlin.path.file_ctor_child
-  enabled: true
-  language: kotlin
-  tag: path-traversal
-  severity: high
-  cwe:
-  - CWE-22
-  match:
-    kind: new
-    callee:
-      name: File
-  constraints:
-  - arg_tainted:
-      index: 1
-  match_examples:
-  - name: tainted child path
-    code: |
-      class App {
-        fun handle(input: String) {
-          File("safe", input)
-        }
-      }
-      class File(vararg args: Any?)
-  - name: literal child path negative
-    code: |
-      class App {
-      fun handle(input: String) {
-        File("safe", "child.txt")
-      }
-      }
-      class File(vararg args: Any?)
-    expect_no_match: true
-  description: "new java.io.File(parent, tainted_child) - tainted child path can escape the intended parent."
 - id: kotlin.path.file_readtext
   enabled: true
   language: kotlin
@@ -547,6 +530,24 @@
       - readText
   constraints:
   - receiver_tainted: true
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {name: canonicalFile}
+      canonicalizer_input_from_receiver: true
+      base_canonicalizer: {name: canonicalFile}
+      path_constructor: {name: File}
+      containment_check: {name: startsWith}
+      acceptance_guard: {name: require}
+      acceptance_guard_condition_arg_index: 0
+      containment_candidate_projection: {name: path}
+      containment_base_projection: {name: path}
+      static_base_factories:
+      - {name: File}
+      sink_path_from_receiver: true
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: [File.separator]
   match_examples:
   - name: tainted file receiver
     code: |
@@ -707,11 +708,7 @@
       }
       }
     expect_no_match: true
-  description: "java.nio.file.Paths.get(tainted) - path resolution without normalize/startsWith check. Merged collision aliases: kotlin.ssrf.play_wsrequest_get, kotlin.ssrf.ktor_httpclient_get, kotlin.ssrf.fuel_http_get."
-  aliases:
-  - kotlin.ssrf.play_wsrequest_get
-  - kotlin.ssrf.ktor_httpclient_get
-  - kotlin.ssrf.fuel_http_get
+  description: "java.nio.file.Paths.get(tainted) - path resolution without normalize/startsWith check."
   packages:
   - com.typesafe.play
   - play.libs.ws
@@ -981,133 +978,177 @@
   description: Apache Commons IO FileUtils.forceDelete.
   imports:
   - org.apache.commons.io
-- id: kotlin.path.zip_getnextentry
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: kotlin
-  tag: path-traversal
-  severity: high
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      attribute:
-      - ZipInputStream
-      - getNextEntry
-  match_examples:
-  - name: generated shape example
-    code: "class App {\n  fun handle(input: String) {\n    ZipInputStream.getNextEntry(input)\n  }\n}\n"
-  description: "Disabled - ZipInputStream.getNextEntry() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."
 - id: kotlin.path.file_readbytes
   enabled: true
   language: kotlin
   tag: path-traversal
   severity: high
   packages:
-  - kotlin
+  - java.io
+  - kotlin.io
   cwe:
   - CWE-22
   match:
     kind: call
     callee:
-      name: readBytes
+      attribute: [File, readBytes]
   constraints:
-  - arg_tainted:
-      index: 0
+  - receiver_tainted: true
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {name: canonicalFile}
+      canonicalizer_input_from_receiver: true
+      base_canonicalizer: {name: canonicalFile}
+      path_constructor: {name: File}
+      containment_check: {name: startsWith}
+      acceptance_guard: {name: require}
+      acceptance_guard_condition_arg_index: 0
+      containment_candidate_projection: {name: path}
+      containment_base_projection: {name: path}
+      static_base_factories:
+      - {name: File}
+      sink_path_from_receiver: true
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: [File.separator]
   match_examples:
-  - name: generated shape example
+  - name: tainted typed file receiver
     code: |
-      import kotlin.*
+      import java.io.File
+      import kotlin.io.*
       class App {
         fun handle(input: String) {
-          readBytes(input)
+          val file = File(input)
+          file.readBytes()
         }
       }
-  - name: arg tainted literal negative
+    expect_match_text: [file.readBytes]
+  - name: literal file receiver is not tainted
     code: |
-      import kotlin.*
+      import java.io.File
+      import kotlin.io.*
       class App {
-      fun handle(input: String) {
-        readBytes("safe")
+        fun handle(input: String) {
+          val file = File("safe.txt")
+          file.readBytes()
+        }
       }
+    expect_no_match: true
+  - name: unrelated typed receiver with the same member is not a file read
+    code: |
+      import java.io.File
+      import kotlin.io.*
+      class LocalBuffer(private val value: String) {
+        fun readBytes(): ByteArray = value.encodeToByteArray()
+      }
+      class App {
+        fun handle(input: String) = LocalBuffer(input).readBytes()
       }
     expect_no_match: true
   description: "File(...).readBytes() - kotlin.io extension reads file at the (potentially tainted) path."
-  imports:
-  - kotlin
+  imports: [java.io.File, kotlin.io]
 - id: kotlin.path.file_readlines
   enabled: true
   language: kotlin
   tag: path-traversal
   severity: high
   packages:
-  - kotlin
+  - java.io
+  - kotlin.io
   cwe:
   - CWE-22
   match:
     kind: call
     callee:
-      name: readLines
+      attribute: [File, readLines]
   constraints:
-  - arg_tainted:
-      index: 0
+  - receiver_tainted: true
   match_examples:
-  - name: generated shape example
+  - name: tainted typed file receiver
     code: |
-      import kotlin.*
+      import java.io.File
+      import kotlin.io.*
       class App {
         fun handle(input: String) {
-          readLines(input)
+          val file = File(input)
+          file.readLines()
         }
       }
-  - name: arg tainted literal negative
+    expect_match_text: [file.readLines]
+  - name: literal file receiver is not tainted
     code: |
-      import kotlin.*
+      import java.io.File
+      import kotlin.io.*
       class App {
-      fun handle(input: String) {
-        readLines("safe")
+        fun handle(input: String) {
+          val file = File("safe.txt")
+          file.readLines()
+        }
       }
+    expect_no_match: true
+  - name: unrelated typed receiver with the same member is not a file read
+    code: |
+      import java.io.File
+      import kotlin.io.*
+      class LocalBuffer(private val value: String) {
+        fun readLines(): List<String> = listOf(value)
+      }
+      class App {
+        fun handle(input: String) = LocalBuffer(input).readLines()
       }
     expect_no_match: true
   description: "File(...).readLines([charset]) - same exposure as readBytes."
-  imports:
-  - kotlin
+  imports: [java.io.File, kotlin.io]
 - id: kotlin.path.file_inputstream_method
   enabled: true
   language: kotlin
   tag: path-traversal
   severity: high
   packages:
-  - kotlin
+  - java.io
+  - kotlin.io
   cwe:
   - CWE-22
   match:
     kind: call
     callee:
-      name: inputStream
+      attribute: [File, inputStream]
   constraints:
-  - arg_tainted:
-      index: 0
+  - receiver_tainted: true
   match_examples:
-  - name: generated shape example
+  - name: tainted typed file receiver
     code: |
-      import kotlin.*
+      import java.io.File
+      import kotlin.io.*
       class App {
         fun handle(input: String) {
-          inputStream(input)
+          val file = File(input)
+          file.inputStream()
         }
       }
-  - name: arg tainted literal negative
+    expect_match_text: [file.inputStream]
+  - name: literal file receiver is not tainted
     code: |
-      import kotlin.*
+      import java.io.File
+      import kotlin.io.*
       class App {
-      fun handle(input: String) {
-        inputStream("safe")
+        fun handle(input: String) {
+          val file = File("safe.txt")
+          file.inputStream()
+        }
       }
+    expect_no_match: true
+  - name: unrelated typed receiver with the same member is not a file stream
+    code: |
+      import java.io.File
+      import kotlin.io.*
+      class LocalBuffer(private val value: String) {
+        fun inputStream() = value.byteInputStream()
+      }
+      class App {
+        fun handle(input: String) = LocalBuffer(input).inputStream()
       }
     expect_no_match: true
   description: "File(...).inputStream() - opens a FileInputStream at the tainted path. Distinct from kotlin.path.file_input_stream which matches `new FileInputStream(...)`."
-  imports:
-  - kotlin
+  imports: [java.io.File, kotlin.io]

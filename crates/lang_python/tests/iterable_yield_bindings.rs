@@ -49,3 +49,38 @@ fn tuple_iterable_yield_refinement_reuses_the_generic_tuple_place() {
         "a tuple yield refinement must not create a second clean scalar write: {part_bindings:?}"
     );
 }
+
+#[test]
+fn list_splat_loop_pattern_retains_every_compiler_binding() {
+    let vfs = Arc::new(Vfs::new());
+    vfs.write(
+        "sample.py".to_string(),
+        Arc::<str>::from(
+            "def expand(parts):\n    for first, *rest in produce(parts):\n        consume(first, rest)\n",
+        ),
+    );
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+    let db = AnalyzerDb::new(vfs, registry);
+    let global = db.global_index();
+    let declaration = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "expand")
+        .expect("expand declaration");
+    let yield_targets = declaration
+        .flow_events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                value_kind: Some(AssignValueKind::YieldResult),
+                ..
+            } => Some(target.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert!(yield_targets.contains(&"first"), "{yield_targets:?}");
+    assert!(yield_targets.contains(&"rest"), "{yield_targets:?}");
+}

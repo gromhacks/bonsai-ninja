@@ -183,17 +183,20 @@ The workflow builds archives for:
 - macOS Intel and Apple Silicon;
 - Windows x64 and arm64.
 
-Archives include the self-contained binary, readable `security-patterns/`
-source for inspection/customization, the versioned native export JSON Schema,
-human documentation,
+Archives include one relocatable CLI binary with its default rulepack embedded,
+readable `security-patterns/` source for inspection/customization, the
+versioned native export JSON Schema, human documentation,
 `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `AGENTS.md`,
 `SKILLS.md`, the installable agent skill, license information, and checksums.
 Each tagged archive and checksum manifest receives a signed GitHub/Sigstore
 artifact attestation. A
 relocated binary-only smoke uses no adjacent rulepack plus an empty user/parser
-cache and an empty workspace cache. This proves native parser delivery and the
-embedded rulepack fallback without relying on earlier runner state or the
-source checkout.
+cache and an empty workspace cache. The smoke intentionally exercises the
+first-use download and verification of the pinned native parser bundle as well
+as the embedded rulepack fallback, without relying on earlier runner state or
+the source checkout. Fully offline deployment therefore requires prepopulating
+that verified parser cache or supplying a platform bundle built from the
+pinned parser sources.
 
 ## Large-workspace regression gate
 
@@ -269,7 +272,7 @@ CARGO_PROFILE_TEST_DEBUG=2 CARGO_PROFILE_TEST_OPT_LEVEL=0 \
   cargo test -p <crate> <test-name>
 ```
 
-The complete pattern-pack and mega-CLI validators run once against the release
+The complete pattern-pack and language-gauntlet CLI validators run once against the release
 binary in their dedicated workflows. They are not duplicated inside each
 platform's debug-oriented workspace test process.
 

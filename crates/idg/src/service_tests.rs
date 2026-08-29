@@ -69,6 +69,37 @@ fn structural_boundary_index_groups_exact_callees_without_hash_buckets() {
 }
 
 #[test]
+fn symbolic_field_demand_is_single_flight_across_rooted_workers() {
+    let runtime = Arc::new(SymbolicRuntimeIndex::default());
+    let barrier = Arc::new(std::sync::Barrier::new(16));
+    let demands = std::thread::scope(|scope| {
+        let handles = (0..16)
+            .map(|_| {
+                let runtime = Arc::clone(&runtime);
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    IdgQueryService::ensure_symbolic_field_demand(&runtime, Some(Precision::Narrowed))
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("rooted demand worker"))
+            .collect::<Vec<_>>()
+    });
+
+    let published = runtime.field_demands[2]
+        .get()
+        .expect("narrowed demand must be published once");
+    assert!(demands.iter().all(|demand| Arc::ptr_eq(demand, published)));
+    assert!(
+        published.is_empty(),
+        "a runtime with no projected syntax must prove that field-page work is unnecessary"
+    );
+}
+
+#[test]
 fn contextual_boundary_demand_remaps_only_synthetic_same_site_endpoints() {
     let caller = FuncId::new(10);
     let callee = FuncId::new(11);
@@ -204,6 +235,32 @@ fn contextual_fixed_width_rows_round_trip_every_boundary_field() {
     assert_eq!(decoded_boundary.key, boundary.key);
     assert_eq!(decoded_boundary.target, boundary.target);
     assert_eq!(decoded_boundary.cross_call, boundary.cross_call);
+}
+
+#[test]
+fn cross_call_relations_round_trip_and_only_exact_calls_render() {
+    let relations = [
+        CrossCallRelation::Argument,
+        CrossCallRelation::Callback,
+        CrossCallRelation::Capture,
+        CrossCallRelation::Return,
+        CrossCallRelation::FieldState,
+        CrossCallRelation::SharedStateCall,
+    ];
+    for relation in relations {
+        assert_eq!(
+            decode_cross_call_relation(encode_cross_call_relation(relation)),
+            relation
+        );
+    }
+    assert!(
+        !CrossCallRelation::FieldState.is_renderable_call(),
+        "allocation-insensitive field state must not invent a source-level call"
+    );
+    assert!(
+        CrossCallRelation::SharedStateCall.is_renderable_call(),
+        "state transferred at one compiler-resolved invocation is exact lineage evidence"
+    );
 }
 
 #[test]
@@ -824,6 +881,92 @@ fn persisted_query_accelerator_restores_exact_narrowed_runtime() {
     assert!(
         loaded.scoped_symbolic_runtime.lock().is_none(),
         "a warm scope must page the validated global symbolic representation"
+    );
+}
+
+#[test]
+fn lazy_global_sidecar_open_validates_before_hydrating_headers() {
+    let func = FuncId::new(71);
+    let mut segment = crate::segment::IdgSegment::new();
+    let parameter_place = segment.intern_place(Place::Param { idx: 0 });
+    let return_place = segment.intern_place(Place::Return);
+    let parameter = segment.intern_node(func, parameter_place);
+    let returned = segment.intern_node(func, return_place);
+    segment.add_edge(IdgEdge::intra_assign(parameter, returned, span(0, 1, 2)));
+    segment.record_func(func);
+
+    let mut workspace = IdgWorkspace::new();
+    workspace.register_segment(segment);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sidecar = dir.path().join("lazy-global-idg.factstore");
+    let missing = dir.path().join("missing-idg.factstore");
+    let corrupt = dir.path().join("corrupt-idg.factstore");
+    const PIPELINE: u64 = 0x1A2B_3C4D;
+    workspace.save_to_disk(&sidecar, PIPELINE).expect("save sidecar");
+
+    let missing_hydrations = std::cell::Cell::new(0_usize);
+    let missing_service = IdgQueryService::load_from_disk_with_global(&missing, PIPELINE, || {
+        missing_hydrations.set(missing_hydrations.get() + 1);
+        Arc::new(GlobalIndex::new())
+    })
+    .expect("missing sidecar is a cache miss");
+    assert!(missing_service.is_none());
+    assert_eq!(missing_hydrations.get(), 0);
+
+    let stale_hydrations = std::cell::Cell::new(0_usize);
+    let stale_service = IdgQueryService::load_from_disk_with_global(&sidecar, PIPELINE ^ 1, || {
+        stale_hydrations.set(stale_hydrations.get() + 1);
+        Arc::new(GlobalIndex::new())
+    })
+    .expect("stale sidecar is a cache miss");
+    assert!(stale_service.is_none());
+    assert_eq!(stale_hydrations.get(), 0);
+
+    let valid_hydrations = std::cell::Cell::new(0_usize);
+    let lazy = IdgQueryService::load_from_disk_with_global(&sidecar, PIPELINE, || {
+        valid_hydrations.set(valid_hydrations.get() + 1);
+        Arc::new(GlobalIndex::new())
+    })
+    .expect("load valid sidecar")
+    .expect("valid sidecar is present");
+    assert_eq!(
+        valid_hydrations.get(),
+        1,
+        "headers hydrate exactly once after validation"
+    );
+
+    let wrapper = IdgQueryService::load_from_disk(&sidecar, PIPELINE, Arc::new(GlobalIndex::new()))
+        .expect("load through compatibility wrapper")
+        .expect("valid sidecar is present through wrapper");
+    assert_eq!(lazy.segment_count(), wrapper.segment_count());
+    assert_eq!(lazy.param_nodes_of(func), wrapper.param_nodes_of(func));
+    assert_eq!(
+        lazy.forward_closure(&lazy.param_nodes_of(func)),
+        wrapper.forward_closure(&wrapper.param_nodes_of(func)),
+        "lazy and compatibility loaders must expose identical query facts"
+    );
+
+    std::fs::copy(&sidecar, &corrupt).expect("copy sidecar for corruption");
+    let original_len = std::fs::metadata(&corrupt).expect("corrupt metadata").len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&corrupt)
+        .expect("open corrupt sidecar")
+        .set_len(original_len / 2)
+        .expect("truncate corrupt sidecar");
+    let corrupt_hydrations = std::cell::Cell::new(0_usize);
+    let corrupt_service = IdgQueryService::load_from_disk_with_global(&corrupt, PIPELINE, || {
+        corrupt_hydrations.set(corrupt_hydrations.get() + 1);
+        Arc::new(GlobalIndex::new())
+    });
+    assert!(
+        !matches!(corrupt_service, Ok(Some(_))),
+        "a corrupt persisted layout must fail closed"
+    );
+    assert_eq!(
+        corrupt_hydrations.get(),
+        0,
+        "corrupt layout must not hydrate compiler headers"
     );
 }
 
@@ -2397,7 +2540,8 @@ fn reachable_name_lookup_preserves_exact_projected_writes() {
     let func = func_id(&idx, "set_header");
     let service = IdgQueryService::new(ws, idx.clone());
     let seeds = service.param_nodes_for_names(func, &["user_input".to_string()], idx.as_ref());
-    let closure: AHashSet<_> = service.forward_closure(&seeds).into_iter().collect();
+    let closure_nodes = service.forward_closure(&seeds);
+    let closure: AHashSet<_> = closure_nodes.iter().copied().collect();
     let names = service.read_or_write_names_in_reachable_nodes(func, &closure);
 
     assert!(names.contains("cd"));
@@ -2405,6 +2549,20 @@ fn reachable_name_lookup_preserves_exact_projected_writes() {
     assert!(
         !names.contains("response.headers.Location"),
         "exact projected lookup must not taint sibling header fields"
+    );
+    let target_funcs = AHashSet::from_iter([func]);
+    let writes =
+        service.write_storage_spans_in_reachable_nodes_for_funcs(&closure_nodes, Some(&target_funcs));
+    assert!(writes.contains(&(
+        func,
+        span(0, 30, 50),
+        "response.headers.Content-Disposition".to_string()
+    )));
+    assert!(
+        !writes.iter().any(|(_, span, storage)| {
+            *span == self::span(0, 60, 70) || storage == "response.headers.Location"
+        }),
+        "reachable write projection must retain exact span and field identity: {writes:?}"
     );
 
     let inventory = service.read_or_write_names_of_func(func);
@@ -3299,13 +3457,29 @@ fn module_path_method_call_forwards_field_precise_argument() {
 
 #[test]
 fn aggregate_yield_field_forwards_to_exact_loop_binding_field() {
+    let generator_assignment = span(0, 35, 58);
     let generator_call = span(0, 40, 52);
     let sink_call = span(0, 70, 82);
     let mut entry = empty_decl(1, 0, "entry");
     entry.params = vec!["raw".to_string()];
     entry.flow_events = vec![
-        FlowEvent::Assign {
+        FlowEvent::Call {
             span: generator_call,
+            name: "generate".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
+                span: span(0, 49, 52),
+                name: None,
+                value_text: "raw".to_string(),
+                place: Some("raw".to_string()),
+                source_names: vec!["raw".to_string()],
+            }],
+        },
+        FlowEvent::Assign {
+            span: generator_assignment,
             target: "item".to_string(),
             source_name: None,
             source_call: Some("generate".to_string()),
@@ -3969,6 +4143,7 @@ fn reconstructed_constructor_value_flows_through_record_accessor() {
             finally_events: Vec::new(),
             catch_param: Some("error".to_string()),
             catch_types: vec!["Exception".to_string()],
+            catch_arms: Vec::new(),
         },
         FlowEvent::Call {
             span: consume_site,

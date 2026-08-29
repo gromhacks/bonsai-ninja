@@ -265,20 +265,6 @@
     expect_match_text: [Path.safe_relative]
   description: "Path.safe_relative/1,2 - rejects absolute paths and traversal components; returns `:error` on unsafe input."
 
-- id: elixir.sanitizer.path_expand_with_root
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: elixir
-  tag: path-sanitize
-  match:
-    kind: call
-    callee:
-      attribute: [Path, expand]
-  description: "Disabled - Path.expand/2 normalises `..` but does NOT enforce a root on its own. Only counts as a sanitiser
-    when paired with a `String.starts_with?(root)` check; enable manually once that pattern is confirmed."
-
-# -- Numeric coercion -----------------------------------------------
 - id: elixir.sanitizer.string_to_integer
   enabled: true
   language: elixir
@@ -623,36 +609,6 @@
     expect_no_match: true
   description: "String.starts_with?(input, \"/...\") - same-origin redirect/path guard for slash-rooted local paths."
 
-- id: elixir.sanitizer.allowlist_member
-  enabled: false
-  language: elixir
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      regex: "^(Enum\\.member\\?|MapSet\\.member\\?|Map\\.has_key\\?)$"
-  constraints:
-  - arg_matches_regex:
-      index: 0
-      regex: "^(allowed|allowlist|whitelist|safe_values|safe_paths)$"
-  match_examples:
-  - name: enum member allowlist
-    code: |
-      defmodule App do
-        def test(input) do
-          Enum.member?(allowed, input)
-        end
-      end
-    expect_match_text: ["Enum.member?"]
-  - name: enum member allowlist negative constraint boundary
-    code: "defmodule App do\n  def test(input) do\n    Enum.member?()\n  end\nend\n"
-    expect_no_match: true
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    Enum.member?/MapSet.member?/Map.has_key? against an allowlist-named collection - validates membership in a finite accepted
-    set."
-
-  disabled_reason:
-    code: over-broad
 - id: elixir.sanitizer.regex_match_full
   enabled: true
   language: elixir
@@ -1124,3 +1080,71 @@
   description: "Ecto.Adapters.SQL.query(repo, sql, params) - raw SQL executed with a separate parameter list; the $N placeholders bind through the driver instead of string concatenation."
   imports:
   - Ecto
+- id: elixir.sanitizer.finite_literal_map_get
+  enabled: true
+  language: elixir
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      attribute: [Map, get]
+  constraints:
+  - min_args: 3
+  - max_args: 3
+  taint_semantics:
+    finite_literal_map_selector:
+      map_argument_index: 0
+      key_argument_index: 1
+      fallback_argument_index: 2
+  match_examples:
+  - name: finite module map selection
+    code: |
+      defmodule Selector do
+        @choices %{"first" => "alpha", "second" => "beta"}
+        def choose(key), do: Map.get(@choices, key, "fallback")
+      end
+    expect_match_text: [Map.get]
+  - name: dynamic selector implementation is not the declared API
+    code: |
+      defmodule Selector do
+        def choose(map, key), do: Registry.get(map, key, "fallback")
+      end
+    expect_no_match: true
+  description: "Map.get/3 is credited only when compiler facts prove an immutable, complete string map, a literal fallback, and exact map/key/fallback argument roles."
+
+- id: elixir.sanitizer.binary_to_term_safe
+  enabled: true
+  language: elixir
+  tag: deser-secure
+  match:
+    kind: call
+    callee:
+      regex: '^:erlang\.binary_to_term$'
+  constraints:
+  - arg_count: 2
+  - arg_sequence_items_equal:
+      argument_index: 1
+      items:
+      - index: 0
+        accepted_values:
+        - {kind: string, value: safe}
+  match_examples:
+  - name: exact safe decoder option
+    code: |
+      defmodule App do
+        def decode(input), do: :erlang.binary_to_term(input, [:safe])
+      end
+    expect_match_text: [":erlang.binary_to_term"]
+  - name: unrelated option is not safe
+    code: |
+      defmodule App do
+        def decode(input), do: :erlang.binary_to_term(input, [:used])
+      end
+    expect_no_match: true
+  - name: same option on an unrelated call is not safe
+    code: |
+      defmodule App do
+        def decode(input), do: Local.decode(input, [:safe])
+      end
+    expect_no_match: true
+  description: ":erlang.binary_to_term/2 with the exact `[:safe]` option rejects unsafe term identities and creation of new atoms; compiler sequence facts distinguish the option structurally."

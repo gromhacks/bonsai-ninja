@@ -1,8 +1,7 @@
 # Lua sanitizers - canonical tags only.
 #
-# NOTE: ngx.unescape_uri is intentionally NOT a sanitizer - it is the
-# inverse (decode) operation and re-introduces metacharacters. See the
-# disabled stub `lua.sanitizer.ngx_unescape_uri` below.
+# NOTE: ngx.unescape_uri is intentionally not a sanitizer: decoding can
+# re-introduce metacharacters.
 - id: lua.sanitizer.ngx_escape_uri
   enabled: true
   language: lua
@@ -113,18 +112,6 @@
     expect_match_text: ["resty_string.to_hex"]
   description: "lua-resty-string to_hex - hex-encodes bytes; output cannot contain shell/SQL/HTML metacharacters."
 
-- id: lua.sanitizer.string_format_q
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: lua
-  tag: shell-escape
-  match:
-    kind: call
-    callee:
-      attribute: [string, format]
-  description: "Disabled - string.format with %q quotes for Lua source only; NOT a shell or SQL escape."
-
 - id: lua.sanitizer.ngx_encode_args
   enabled: true
   language: lua
@@ -200,21 +187,6 @@
   description: "lua-resty-string sha256_bin - one-way SHA-256 digest; downstream cannot recover original taint payload (use
     only as identifier, not for auth)."
 
-- id: lua.sanitizer.ngx_unescape_uri
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: lua
-  tag: url-decode
-  frameworks: [openresty]
-  match:
-    kind: call
-    callee:
-      attribute: [ngx, unescape_uri]
-  description: "Disabled - ngx.unescape_uri is the DECODE inverse of escape_uri; it re-introduces percent-encoded metacharacters
-    and MUST NOT be treated as a sanitizer. Listed for audit visibility only."
-
-# -- Audit-derived validation / binding sanitizers -----------------------------
 - id: lua.sanitizer.same_origin_string_match
   enabled: true
   language: lua
@@ -239,27 +211,6 @@
     expect_no_match: true
   description: "string.match(value, '^/') - same-origin redirect/path guard for root-relative targets."
 
-- id: lua.sanitizer.table_allowlist_lookup
-  enabled: false
-  language: lua
-  tag: allowlist-validate
-  match:
-    kind: read
-    target:
-      regex: "(?i)allow(ed|list)|permitted|valid"
-  match_examples:
-  - name: lua.sanitizer.table_allowlist_lookup example
-    code: |
-      function example(role)
-        local allowed = { user = true, admin = true }
-        return allowed[role]
-      end
-    expect_match_text: [allowed]
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    allowed[value] table lookup - table-backed enum/set allowlist membership check."
-
-  disabled_reason:
-    code: over-broad
 - id: lua.sanitizer.string_match_full_shape
   enabled: true
   language: lua
@@ -283,6 +234,126 @@
     code: "function example(slug)\n  string.match()\nend\n"
     expect_no_match: true
   description: "string.match(value, '^...$') - full-string shape validator for slugs, identifiers, and similar bounded formats."
+
+- id: lua.sanitizer.method_match_shell_safe_alphabet
+  enabled: true
+  language: lua
+  tag: shell-escape
+  category: validation
+  match:
+    kind: call
+    callee:
+      name: match
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^[''"]\^\[%w%\.%\-\]\+\$[''"]$'
+  analysis_semantics:
+    sanitizer_guard:
+      use_receiver: true
+      require_terminal_rejection: true
+      accepted_predicate_value: true
+  match_examples:
+  - name: terminally required shell-safe alphabet
+    code: |
+      local function valid(value)
+        return value:match("^[%w%.%-]+$") ~= nil
+      end
+      local function run(value)
+        if not valid(value) then return end
+        consume(value)
+      end
+    expect_match_text: [value.match]
+  - name: a different alphabet is not this shell-safe match
+    code: |
+      local function run(value)
+        local observed = value:match("^[%w_]+$")
+        consume(value)
+        return observed
+      end
+    expect_no_match: true
+  - name: a permissive wildcard is not a shell-safe alphabet
+    code: |
+      local function valid(value)
+        return value:match("^.*$") ~= nil
+      end
+    expect_no_match: true
+  description: "A Lua method-form full-string allowlist limited to alphanumeric, dot, percent-class word, and hyphen characters. Sanitizer credit additionally requires compiler-proven terminal rejection on the accepted predicate path."
+
+- id: lua.sanitizer.string_find_parent_segment_absence
+  enabled: true
+  language: lua
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      name: find
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^[''"]%\.%\.[''"]$'
+  analysis_semantics:
+    sanitizer_guard:
+      use_receiver: true
+      require_terminal_rejection: true
+      accepted_predicate_value: false
+  match_examples:
+  - name: parent-segment absence predicate
+    code: |
+      local function valid(value)
+        return value:find("%.%.") == nil
+      end
+    expect_match_text: [value.find]
+  - name: unrelated substring search is not a path guard
+    code: |
+      local function valid(value)
+        return value:find("draft") == nil
+      end
+    expect_no_match: true
+  description: "Lua string find for the escaped parent-directory token; sanitizer credit requires compiler-proven false/nil acceptance and a terminal rejecting caller guard."
+
+- id: lua.sanitizer.xml_doctype_terminal_rejection
+  enabled: true
+  language: lua
+  tag: xxe-sanitizer
+  category: validation
+  match:
+    kind: call
+    callee:
+      name: find
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^[''"]<!DOCTYPE[''"]$'
+  analysis_semantics:
+    sanitizer_guard:
+      use_receiver: true
+      require_terminal_rejection: true
+      accepted_predicate_value: false
+  match_examples:
+  - name: terminal DOCTYPE rejection before XML parsing
+    code: |
+      local function parse(xml)
+        if xml:find("<!DOCTYPE", 1, true) then return end
+        consume_xml(xml)
+      end
+    expect_match_text: [xml.find]
+  - name: observation without terminal rejection is not credited
+    code: |
+      local function parse(xml)
+        local observed = xml:find("<!DOCTYPE", 1, true)
+        consume_xml(xml)
+        return observed
+      end
+    expect_match_text: [xml.find]
+  - name: unrelated substring is not an XML declaration guard
+    code: |
+      local function parse(xml)
+        if xml:find("draft", 1, true) then return end
+        consume_xml(xml)
+      end
+    expect_no_match: true
+  description: "An exact Lua DOCTYPE search is an XXE guard only when compiler control-flow proves the matching path exits before XML consumption; merely observing the predicate receives no sanitizer credit."
 
 - id: lua.sanitizer.statement_bind_values
   enabled: true

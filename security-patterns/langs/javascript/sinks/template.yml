@@ -327,24 +327,6 @@
     code: "const _u = require(\"dot\");\nfunction demo() {\n  return doT.template(\"Hello user\");\n}\n"
     expect_no_match: true
   description: doT.template(tainted).
-- id: javascript.template.mustache_render
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: ssti
-  severity: medium
-  packages:
-  - mustache
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Mustache
-      - render
-  description: "Disabled - Mustache is logic-less; not SSTI-to-RCE."
 - id: javascript.template.lodash_template
   enabled: true
   language: javascript
@@ -398,22 +380,6 @@
     code: "const _u = require(\"lodash\");\nfunction demo() {\n  return lodash.template(\"Hello user\");\n}\n"
     expect_no_match: true
   description: "lodash.template(tainted) - same JS-evaluation hazard as the `_` alias form."
-- id: javascript.template.consolidate_render
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: ssti
-  severity: medium
-  packages:
-  - consolidate
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      name: render
-  description: "Disabled - generic render; flag with engine-specific constraint."
 - id: javascript.template.swig_render
   enabled: true
   language: javascript
@@ -569,24 +535,6 @@
     code: "const _u = require(\"eta\");\nfunction demo() {\n  return Eta.render(\"Hello user\", {});\n}\n"
     expect_no_match: true
   description: "Eta.render(tainted, ctx) - Eta is an EJS-style engine; tainted template source = SSTI to RCE."
-- id: javascript.template.markojs_load
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: ssti
-  severity: medium
-  packages:
-  - marko
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - marko
-      - load
-  description: "Disabled - Marko load takes a path; only dangerous when path is tainted. Enable with source-proximity."
 - id: javascript.template.swig_setdefaults_autoescape_off
   enabled: true
   language: javascript
@@ -607,25 +555,6 @@
   - name: swig setdefaults autoescape off
     code: "const _u = require(\"swig\");\nfunction demo(input, req, obj) {\n  return swig.setDefaults(input, { autoescape: false });\n}\n"
   description: "swig.setDefaults({autoescape: false}) - global autoescape off; NodeGoat tutorial XSS."
-- id: javascript.template.handlebars_safe_string
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.template.handlebars_safestring
-  language: javascript
-  tag: xss
-  severity: high
-  packages:
-  - handlebars
-  cwe:
-  - CWE-79
-  match:
-    kind: new
-    callee:
-      attribute:
-      - Handlebars
-      - SafeString
-  description: "Disabled duplicate - same Handlebars.SafeString match shape is covered by javascript.template.handlebars_safestring."
 - id: javascript.template.nunjucks_configure_autoescape_off
   enabled: true
   language: javascript

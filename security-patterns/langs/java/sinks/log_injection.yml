@@ -345,6 +345,11 @@
   analysis_semantics:
     character_constraint:
       required_excluded_characters: ["\r", "\n"]
+      accepted_providers:
+      - operation:
+          regex: '^(?:(?:java[.]lang[.])?String[.](?:replace#(?:character-literal|single-character-string|regex-meta-character-string)|replaceAll#(?:single-character-string|regex-character-class)))(?:[|](?:java[.]lang[.])?String[.](?:replace#(?:character-literal|single-character-string|regex-meta-character-string)|replaceAll#(?:single-character-string|regex-character-class)))*$'
+      - factory: {regex: '^java[.]util[.]regex[.]Pattern[.]compile$'}
+        operation: {regex: '^matcher[|]replaceAll$'}
     context_flow:
       channel: logging.mdc
       role: producer
@@ -389,11 +394,7 @@
         }
       }
     expect_no_match: true
-  description: "MDC.put(key, tainted header) - attacker-controlled logging context value can forge structured logs or poison downstream log correlation. Merged collision aliases: java.nosql.basicdbobject_where_put, java.nosql.basicdbobjectbuilder_where."
-  aliases:
-  - java.nosql.basicdbobject_where_put
-  - java.nosql.basicdbobjectbuilder_where
-  - java.nosql.basicdbobject_operator_put
+  description: "MDC.put(key, tainted header) - attacker-controlled logging context value can forge structured logs or poison downstream log correlation."
 - id: java.log_injection.mdc_context_logger_info
   enabled: true
   language: java
@@ -410,6 +411,11 @@
   analysis_semantics:
     character_constraint:
       required_excluded_characters: ["\r", "\n"]
+      accepted_providers:
+      - operation:
+          regex: '^(?:(?:java[.]lang[.])?String[.](?:replace#(?:character-literal|single-character-string|regex-meta-character-string)|replaceAll#(?:single-character-string|regex-character-class)))(?:[|](?:java[.]lang[.])?String[.](?:replace#(?:character-literal|single-character-string|regex-meta-character-string)|replaceAll#(?:single-character-string|regex-character-class)))*$'
+      - factory: {regex: '^java[.]util[.]regex[.]Pattern[.]compile$'}
+        operation: {regex: '^matcher[|]replaceAll$'}
     context_flow:
       channel: logging.mdc
       role: consumer

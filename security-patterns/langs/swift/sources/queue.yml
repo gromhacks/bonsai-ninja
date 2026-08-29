@@ -1,29 +1,33 @@
 # Swift queue/messaging sources (less common in Swift ecosystem).
-- id: swift.queue.nio_amqp_delivery
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: swift.source.kafka_consumer_messages
+  enabled: true
   language: swift
   trust: service
   tag: queue-input
-  payload_types: [binary]
-  packages: ["AMQPClient"]
+  payload_types: [queue-message, binary]
+  packages: [Kafka, swift-kafka-client]
+  imports: [Kafka]
   match:
-    kind: param
+    kind: read
     target:
-      name: delivery
-  description: "Disabled - Swift NIO AMQP delivery param; enable when using RabbitMQ consumer."
-- id: swift.queue.kafka_message
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  trust: service
-  tag: queue-input
-  payload_types: [binary]
-  packages: ["Kafka"]
-  match:
-    kind: param
-    target:
-      name: message
-  description: "Disabled - Kafka consumer message param; enable when active."
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.messages$'
+      receiver_type_in: [KafkaConsumer]
+  match_examples:
+  - name: Swift Kafka consumer message sequence
+    code: |
+      import Kafka
+      func consume(_ consumer: KafkaConsumer) async throws {
+        for try await message in consumer.messages {
+          sink(message)
+        }
+      }
+    expect_match_text: [consumer.messages]
+  - name: local messages property is not Kafka input
+    code: |
+      import Kafka
+      struct LocalInbox { let messages: [String] }
+      func consume(_ inbox: LocalInbox) {
+        for message in inbox.messages { sink(message) }
+      }
+    expect_no_match: true
+  description: "swift-kafka-client KafkaConsumer.messages is the AsyncSequence of broker-delivered records on a compiler-typed consumer."

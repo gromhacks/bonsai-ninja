@@ -26,6 +26,15 @@
           message
         end
       end
+  - name: same arity outside the Broadway callback is not a message boundary
+    code: |
+      alias Broadway
+      defmodule App do
+        def deliver(_processor, message, context) do
+          {message, context}
+        end
+      end
+    expect_no_match: true
   description: "Second parameter of Broadway handle_message/3 - queue message proven by callback name, arity, and position."
 
   imports:
@@ -54,6 +63,15 @@
           messages
         end
       end
+  - name: wrong callback arity is not a Broadway batch boundary
+    code: |
+      alias Broadway
+      defmodule App do
+        def handle_batch(messages, _info, context) do
+          {messages, context}
+        end
+      end
+    expect_no_match: true
   description: "Second parameter of Broadway handle_batch/4 - batch of queue messages proven by callback name, arity, and position."
 
   imports:
@@ -107,6 +125,15 @@
           job
         end
       end
+  - name: ordinary one-argument function is not an Oban boundary
+    code: |
+      alias Oban
+      defmodule App do
+        def execute(job) do
+          job
+        end
+      end
+    expect_no_match: true
   description: "First parameter of Oban.Worker perform/1 - job payload proven by callback name, arity, and position."
 
   imports:
@@ -134,36 +161,122 @@
           events
         end
       end
+  - name: same event parameter outside handle_events is not GenStage input
+    code: |
+      alias Gen_stage
+      defmodule App do
+        def dispatch(events, _from, state) do
+          {events, state}
+        end
+      end
+    expect_no_match: true
   description: "First parameter of GenStage handle_events/3 - upstream event batch proven by callback name, arity, and position."
 
   imports:
   - Gen_stage
-- id: elixir.amqp.basic_deliver
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: elixir.amqp.basic_get
+  enabled: true
   language: elixir
   trust: service
   tag: queue-input
   payload_types: [queue-message]
   packages: [amqp]
   match:
-    kind: param
-    target:
-      name: payload
+    kind: call
+    callee:
+      attribute: [AMQP, Basic, get]
+  constraints:
+  - min_args: 2
+  - max_args: 3
   match_examples:
-  - name: declared shape
+  - name: RabbitMQ polling delivery
     code: |
-      alias Amqp
-      defmodule App do
-        def handle(payload) do
-          payload
+      alias AMQP.Basic
+      defmodule Consumer do
+        def poll(channel, queue) do
+          AMQP.Basic.get(channel, queue)
         end
       end
-  description: "Disabled - duplicate bare `payload` parameter shape with elixir.phoenix.channel_handle_in under the current matcher."
+    expect_match_text: [AMQP.Basic.get]
+  - name: aliased RabbitMQ polling delivery without parentheses
+    code: |
+      alias AMQP.Basic, as: Basic
+      defmodule Consumer do
+        def poll(channel, queue), do: Basic.get channel, queue
+      end
+    expect_match_text: [Basic.get]
+  - name: RabbitMQ publication is not queue input
+    code: |
+      alias AMQP.Basic
+      defmodule Producer do
+        def send(channel, payload) do
+          AMQP.Basic.publish(channel, "events", "", payload)
+        end
+      end
+    expect_no_match: true
+  description: "AMQP.Basic.get/2,3 - polls RabbitMQ and returns {:ok, payload, metadata} or an empty/error result; the returned tuple is broker-controlled input."
+  imports: [AMQP.Basic]
 
-  imports:
-  - Amqp
+- id: elixir.amqp.queue_subscribe
+  enabled: true
+  language: elixir
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message]
+  packages: [amqp]
+  match:
+    kind: call
+    callee:
+      attribute: [AMQP, Queue, subscribe]
+  constraints:
+  - min_args: 3
+  - max_args: 4
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 2
+      source_param_indices: [0, 1]
+  match_examples:
+  - name: RabbitMQ inline subscription callback
+    code: |
+      alias AMQP.Queue
+      defmodule Consumer do
+        def subscribe(channel, queue) do
+          AMQP.Queue.subscribe(channel, queue, fn payload, metadata ->
+            consume(payload, metadata)
+          end)
+        end
+      end
+    expect_match_text: [AMQP.Queue.subscribe]
+  - name: RabbitMQ callback destructures a payload map
+    code: |
+      alias AMQP.Queue, as: Queue
+      defmodule Consumer do
+        def subscribe(channel, queue) do
+          Queue.subscribe(channel, queue, fn %{data: data}, metadata ->
+            consume(data, metadata)
+          end)
+        end
+      end
+    expect_match_text: [Queue.subscribe]
+  - name: RabbitMQ queue declaration is not a delivery callback
+    code: |
+      alias AMQP.Queue
+      defmodule Setup do
+        def declare(channel, queue), do: AMQP.Queue.declare(channel, queue)
+      end
+    expect_no_match: true
+  - name: same tail on an unrelated module is not a delivery callback
+    code: |
+      alias AMQP.Queue
+      defmodule Consumer do
+        def subscribe(channel, queue, callback) do
+          LocalQueue.subscribe(channel, queue, callback)
+        end
+      end
+    expect_no_match: true
+  description: "AMQP.Queue.subscribe/3,4 delivers the broker payload and metadata as callback parameters zero and one; its registration return is not source data."
+  imports: [AMQP.Queue]
 - id: elixir.bandit.handle_data
   enabled: true
   language: elixir
@@ -187,6 +300,15 @@
           data
         end
       end
+  - name: same arity outside handle_data is not peer input
+    code: |
+      alias Bandit
+      defmodule App do
+        def encode(data, state) do
+          {data, state}
+        end
+      end
+    expect_no_match: true
   description: "First parameter of Bandit/WebSock handle_data/2 - peer bytes proven by callback name, arity, and position."
   imports:
   - Bandit

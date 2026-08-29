@@ -184,13 +184,11 @@
   description: "dlopen(tainted) - loads an arbitrary shared library from a tainted path; the library's constructors run attacker-controlled native code (CWE-470). ObjC code routinely bridges to dlopen/dlsym."
 
 - id: objc.eval.nslog_format
-  aliases:
-  - objc.info_disclosure.nslog_secret
   enabled: true
   language: objc
   tag: format-string
   severity: low
-  cwe: [CWE-134, CWE-117, CWE-200]
+  cwe: [CWE-134, CWE-117]
   match:
     kind: call
     callee:
@@ -208,4 +206,4 @@
         nslog_format("safe");
       }
     expect_no_match: true
-  description: "NSLog / os_log with tainted format string - log injection (CWE-117) and format-string conversion abuse (CWE-134). Sink emits when the format-string slot is tainted. Also covers merged aliases: objc.info_disclosure.nslog_secret."
+  description: "NSLog / os_log with a tainted format string - log injection (CWE-117) and format-string conversion abuse (CWE-134)."

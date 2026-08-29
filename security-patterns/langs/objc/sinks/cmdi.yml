@@ -117,22 +117,77 @@
   description: "NSTask +launchedTaskWithLaunchPath:arguments: / -launchAndReturnError: - spawns child process with tainted argv/path."
 
 - id: objc.cmdi.nstask_launch_bare
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: objc
   tag: command-injection
   severity: critical
+  packages: [Foundation]
   cwe: [CWE-78]
   match:
     kind: call
     callee:
       name: launch
+  constraints:
+  - receiver_type_in: [NSTask]
+  - receiver_tainted: true
+  - arg_count: 0
+  - requires_prior_receiver_write:
+      target:
+        name: launchPath
+      accepted_values:
+      - kind: string
+        value: /bin/sh
+      - kind: string
+        value: /bin/bash
+      - kind: string
+        value: /bin/zsh
+      - kind: string
+        value: /usr/bin/sh
+      - kind: string
+        value: /usr/bin/bash
+      - kind: string
+        value: /usr/bin/zsh
   match_examples:
-  - name: declared shape
+  - name: NSTask shell launch after tainted arguments
     code: |
-      void test(id input) { id target = input; int amount = 1; [NSTask launch:input]; }
-  description: "Disabled - bare `launch` has no command argument and needs receiver-state evidence from prior NSTask setters before it can be reported semantically."
+      #import <Foundation/Foundation.h>
+      void test(NSString *input) {
+        NSTask *task = [[NSTask alloc] init];
+        task.launchPath = @"/bin/sh";
+        task.arguments = @[@"-c", input];
+        [task launch];
+      }
+    expect_match_text: [task.launch]
+  - name: NSTask direct executable with tainted argv negative
+    code: |
+      #import <Foundation/Foundation.h>
+      void test(NSString *input) {
+        NSTask *task = [[NSTask alloc] init];
+        task.launchPath = @"/usr/bin/printf";
+        task.arguments = @[input];
+        [task launch];
+      }
+    expect_no_match: true
+  - name: conditional shell state negative
+    code: |
+      #import <Foundation/Foundation.h>
+      void test(NSString *input, BOOL useShell) {
+        NSTask *task = [[NSTask alloc] init];
+        task.launchPath = @"/bin/sh";
+        if (useShell) { task.launchPath = @"/usr/bin/printf"; }
+        task.arguments = @[@"-c", input];
+        [task launch];
+      }
+    expect_no_match: true
+  - name: unrelated launch receiver negative
+    code: |
+      #import <Foundation/Foundation.h>
+      @interface Worker : NSObject
+      - (void)launch;
+      @end
+      void test(Worker *worker, NSString *input) { worker.command = input; [worker launch]; }
+    expect_no_match: true
+  description: "NSTask launch on a compiler-typed receiver with tainted state is command injection only when the exact reaching launchPath selects a shell; direct executable argv remains quiet."
 
 - id: objc.cmdi.nstask_setters
   enabled: true
@@ -144,21 +199,30 @@
   match:
     kind: write
     target:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(launchPath|arguments|executableURL)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(launchPath|executableURL)$"
   constraints:
+  - receiver_type_in: [NSTask]
   - arg_tainted:
       index: 0
   match_examples:
   - name: nstask member setter
     code: |
       #import <Foundation/Foundation.h>
-      void test(id input) { NSTask.launchPath = input; }
+      void test(NSTask *task, NSString *input) { task.launchPath = input; }
+    expect_match_text: [task.launchPath]
   - name: local task property name negative
     code: |
       #import <Foundation/Foundation.h>
       void test(id input) { id launchPath = input; }
     expect_no_match: true
-  description: "NSTask .launchPath / .arguments / .executableURL - tainted values feed subsequent -launch call. Constrained to NSTask receivers to avoid collisions."
+  - name: direct executable tainted argv negative
+    code: |
+      #import <Foundation/Foundation.h>
+      void test(NSTask *task, NSString *input) {
+        task.arguments = @[input];
+      }
+    expect_no_match: true
+  description: "NSTask .launchPath / .executableURL - tainted executable selection feeds a subsequent launch. Argument arrays alone are direct argv and are not command injection without proven shell state."
 
 - id: objc.cmdi.posix_spawn
   enabled: true
@@ -190,20 +254,3 @@
 # on each individual write; this complement keys on the assignment to
 # `launchPath` with shell-binary literal so the shell-path corner case
 # is callable as its own ID for triage / audit metrics.
-- id: objc.cmdi.nstask_launchpath_sh
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: objc
-  tag: command-injection
-  severity: critical
-  cwe: [CWE-78]
-  match:
-    kind: write
-    target:
-      name: launchPath
-  match_examples:
-  - name: declared shape
-    code: |
-      void test(id input) { id target = input; int amount = 1; NSTask.launchPath = @"/bin/sh"; }
-  description: "Disabled duplicate - objc.cmdi.nstask_setters already reports NSTask launchPath assignments; keep the shell-path shape documented until multi-assignment correlation can distinguish launchPath + arguments."

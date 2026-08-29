@@ -1,3 +1,53 @@
+- id: objc.xss.mutable_string_append_html
+  enabled: true
+  language: objc
+  tag: xss
+  severity: high
+  packages: [Foundation]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee: {name: appendString}
+  constraints:
+  - receiver_type_in: [NSMutableString]
+  - arg_tainted:
+      index: 0
+  - arg_count: 1
+  analysis_semantics:
+    character_escape:
+      required_mappings:
+      - {input: "&", output: "&amp;"}
+      - {input: "<", output: "&lt;"}
+      - {input: ">", output: "&gt;"}
+      - {input: '"', output: "&quot;"}
+      - {input: "'", output: "&#39;"}
+  match_examples:
+  - name: tainted value appended to mutable HTML buffer
+    code: |
+      #import <Foundation/Foundation.h>
+      void render(NSString *input) {
+        NSMutableString *page = [NSMutableString stringWithString:@"<html><body>"];
+        [page appendString:input];
+      }
+    expect_match_text: [page.appendString]
+  - name: literal append negative
+    code: |
+      #import <Foundation/Foundation.h>
+      void render(void) {
+        NSMutableString *page = [NSMutableString string];
+        [page appendString:@"<p>safe</p>"];
+      }
+    expect_no_match: true
+  - name: unrelated appendString receiver negative
+    code: |
+      #import <Foundation/Foundation.h>
+      @interface LocalBuffer : NSObject
+      - (void)appendString:(NSString *)value;
+      @end
+      void render(LocalBuffer *buffer, NSString *input) { [buffer appendString:input]; }
+    expect_no_match: true
+  description: "NSMutableString appendString: composes a raw HTML buffer from caller-controlled text; complete entity escaping suppresses the finding."
+
 - id: objc.xss.uiwebview_load_html
   enabled: true
   language: objc
@@ -23,11 +73,50 @@
     code: |
       void test(void) { [UIWebView loadHTMLString:@"<p>safe</p>"]; }
     expect_no_match: true
-  description: "UIWebView (deprecated, removed iOS 12+) / WKWebView -loadHTMLString:baseURL: with tainted HTML - script\
-    \ executes in webview origin. The baseURL controls the SOP origin (file:// vs https://app/), so a tainted baseURL widens\
-    \ the blast radius. Constrained to webview receivers. Merged collision aliases: objc.xss.wkwebview_loadhtml_concat."
-  aliases:
-  - objc.xss.wkwebview_loadhtml_concat
+  description: "UIWebView loadHTMLString: with tainted HTML executes attacker-controlled markup in the legacy webview origin."
+
+- id: objc.xss.wkwebview_loadhtml_concat
+  enabled: true
+  language: objc
+  tag: xss
+  severity: high
+  packages: [WebKit]
+  imports: [WebKit]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [WKWebView, "loadHTMLString:baseURL:"]
+      receiver_type_in: [WKWebView]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: typed WKWebView loads tainted HTML
+    code: |
+      #import <WebKit/WebKit.h>
+      void render(WKWebView *view, NSString *input) {
+        [view loadHTMLString:input baseURL:nil];
+      }
+    expect_match_text: ["view.loadHTMLString:baseURL:"]
+  - name: typed WKWebView loads literal HTML negative
+    code: |
+      #import <WebKit/WebKit.h>
+      void render(WKWebView *view) {
+        [view loadHTMLString:@"<p>safe</p>" baseURL:nil];
+      }
+    expect_no_match: true
+  - name: local same-named webview type negative
+    code: |
+      #import <WebKit/WebKit.h>
+      @interface WKWebView
+      - (void)loadHTMLString:(NSString *)html baseURL:(NSURL *)url;
+      @end
+      void render(WKWebView *view, NSString *input) {
+        [view loadHTMLString:input baseURL:nil];
+      }
+    expect_no_match: true
+  description: "WKWebView loadHTMLString:baseURL: with tainted HTML executes attacker-controlled markup in the configured web origin."
 - id: objc.xss.webview_loaddata
   enabled: true
   language: objc
@@ -53,22 +142,6 @@
     expect_no_match: true
   description: "WKWebView -loadData:MIMEType:characterEncodingName:baseURL: - same XSS surface as loadHTMLString when\
     \ MIMEType is text/html and data is tainted. Constrained to webview receivers."
-- id: objc.xss.wkwebview_evaluatejavascript
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: objc
-  tag: xss
-  severity: critical
-  cwe:
-  - CWE-79
-  - CWE-94
-  match:
-    kind: call
-    callee:
-      name: evaluateJavaScript
-  description: "Disabled - canonical rule is objc.eval.evaluate_javascript in eval.yml. evaluateJavaScript:completionHandler:\
-    \ is code-injection, not pure XSS."
 - id: objc.xss.webview_stringbyevaluatingjs
   enabled: true
   language: objc
@@ -120,18 +193,3 @@
     expect_no_match: true
   description: "NSAttributedString -initWithHTML:documentAttributes: - parses HTML and may fetch remote subresources\
     \ (NSHTMLTextDocumentType). Constrained to attributed string receivers."
-- id: objc.xss.nsattributedstring_initdata
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: objc
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: initWithData
-  description: "Disabled - NSAttributedString -initWithData:options:documentAttributes:error: renders HTML only when\
-    \ NSHTMLTextDocumentType option set; cannot observe dict keys."

@@ -491,6 +491,9 @@ fn factstore_sidecar_rejects_dependency_metadata_change() {
     let registry = Arc::new(LanguageRegistry::new());
     registry.register(python_adapter());
     let options = WorkspaceOpenOptions {
+        persistent_semantic_cache: true,
+        load_compiler_object_sidecar: true,
+        save_compiler_object_sidecar: true,
         load_callgraph_sidecar: false,
         load_dataflow_sidecar: false,
         prewarm_dataflow: true,

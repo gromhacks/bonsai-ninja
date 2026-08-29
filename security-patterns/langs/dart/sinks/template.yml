@@ -25,9 +25,6 @@
   - name: tainted template source
     code: |
       import 'package:mustache_template/mustache_template.dart';
-      import 'package:mustache_template/mustache_template.dart';
-      import 'package:mustache_template/mustache_template.dart';
-      import 'package:mustache_template/mustache_template.dart';
       import 'package:mustache_template/mustache_template.dart'; // mustache_template
       class Template { Template([dynamic input, {dynamic htmlEscapeValues}]); }
       void test(String input) { var result = Template(input); }
@@ -63,9 +60,6 @@
   - name: tainted render string source
     code: |
       import 'package:mustache_template/mustache_template.dart';
-      import 'package:mustache_template/mustache_template.dart';
-      import 'package:mustache_template/mustache_template.dart';
-      import 'package:mustache_template/mustache_template.dart';
       import 'package:mustache_template/mustache_template.dart'; // mustache_template
       void test(String input) { template.renderString(input); }
   - name: literal render string source negative
@@ -98,9 +92,6 @@
   - name: tainted jinja source
     code: |
       import 'package:jinja/jinja.dart';
-      import 'package:jinja/jinja.dart';
-      import 'package:jinja/jinja.dart';
-      import 'package:jinja/jinja.dart';
       import 'package:jinja/jinja.dart'; // jinja
       void test(String input) { Environment.fromString(input); }
   - name: literal jinja source negative
@@ -111,19 +102,3 @@
   description: jinja Environment.fromString(tainted).
   imports:
   - jinja/jinja.dart
-- id: dart.template.jinja_template_new
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: ssti
-  severity: high
-  packages:
-  - jinja
-  cwe:
-  - CWE-1336
-  match:
-    kind: new
-    callee:
-      name: Template
-  description: "Disabled - merged into dart.template.mustache_template (same bare `Template` constructor name)."

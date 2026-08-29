@@ -517,7 +517,11 @@ fn render_text(out: &ReadFileOut, compact: bool) {
         } else {
             out.analysis_incomplete_reasons.join("; ")
         };
-        cli_println!("{} {}", u.warn("semantic-only view incomplete:"), u.dim(&reasons));
+        cli_println!(
+            "{} {}",
+            u.warn("compiler-proven view incomplete:"),
+            u.dim(&reasons)
+        );
         if out.truncated.callers_dropped > 0 || out.truncated.callees_dropped > 0 {
             cli_println!(
                 "{}",

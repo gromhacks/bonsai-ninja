@@ -47,6 +47,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(?:exception|stack\s*trace|throwable|error\s+details|password|passwd|secret|token|api[_-]?key)'
   match_examples:
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    logger.error(\"token=$input\")\n  }\n}\n"
@@ -81,6 +84,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(?:exception|stack\s*trace|throwable|error\s+details?)'
   match_examples:
   - name: generated shape example
     code: |
@@ -101,6 +107,4 @@
         }
       }
     expect_no_match: true
-  description: 'Ktor call.respondText with exception or stack details exposes implementation information to clients. Merged collision aliases: kotlin.xss.ktor_respond_text.'
-  aliases:
-  - kotlin.xss.ktor_respond_text
+  description: 'Ktor call.respondText with exception or stack details exposes implementation information to clients.'

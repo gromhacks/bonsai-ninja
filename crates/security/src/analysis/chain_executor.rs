@@ -30,6 +30,33 @@ struct SinkCandidate<'a> {
     endpoint_identity_proven: bool,
 }
 
+enum EvidencedEmission<'a, T> {
+    MissingEvidence,
+    Duplicate,
+    Ready(&'a T),
+}
+
+/// Claim a source/sink emission only after its exact compiler lineage exists.
+/// A synthetic duplicate that cannot reconstruct lineage must not reserve the
+/// key and suppress a later, fully evidenced endpoint for the same flow.
+fn reserve_evidenced_emission<'a, K, T>(
+    emitted: &mut AHashSet<K>,
+    key: K,
+    evidence: Option<&'a T>,
+) -> EvidencedEmission<'a, T>
+where
+    K: Eq + std::hash::Hash,
+{
+    let Some(evidence) = evidence else {
+        return EvidencedEmission::MissingEvidence;
+    };
+    if emitted.insert(key) {
+        EvidencedEmission::Ready(evidence)
+    } else {
+        EvidencedEmission::Duplicate
+    }
+}
+
 impl GroupTaintTargets {
     fn sink_funcs<'a>(&'a self, group: &'a ScheduledSourceGroup) -> Option<&'a AHashSet<FuncId>> {
         if self.nodes.is_some() {
@@ -45,10 +72,16 @@ fn unique_named_overlap_span(
     language: &str,
     call: &bonsai_taint::TaintedCall,
 ) -> Option<Span> {
+    fn same_compiler_call_identity(left: &str, right: &str) -> bool {
+        let left = bonsai_common::qualified_name_segments(left);
+        let right = bonsai_common::qualified_name_segments(right);
+        !left.is_empty() && left == right
+    }
+
     let mut unique = None;
     for sink in candidate_sinks {
         if sink.language != language
-            || sink.match_text != call.name
+            || !same_compiler_call_identity(&sink.match_text, &call.name)
             || !spans_overlap(call.call_span, sink.span)
         {
             continue;
@@ -191,6 +224,13 @@ impl SourceGroupExecutor<'_> {
                 source_item.anchor,
                 &source_item.output_arg_names,
             )
+        } else if source_item.match_kind == bonsai_taint::IdgRuleMatchKind::Read {
+            IdgSeedRequest::read_rule_match(
+                source_func,
+                &source_item.seeds,
+                source_item.anchor,
+                &source_item.output_arg_names,
+            )
         } else {
             IdgSeedRequest::rule_match(
                 source_func,
@@ -228,6 +268,13 @@ impl SourceGroupExecutor<'_> {
                             )
                         } else if source_item.output_only {
                             bonsai_taint::IdgTaintSource::output_rule_match(
+                                source_func,
+                                &source_item.seeds,
+                                source_item.anchor,
+                                &source_item.output_arg_names,
+                            )
+                        } else if source_item.match_kind == bonsai_taint::IdgRuleMatchKind::Read {
+                            bonsai_taint::IdgTaintSource::read_rule_match(
                                 source_func,
                                 &source_item.seeds,
                                 source_item.anchor,
@@ -330,11 +377,19 @@ impl SourceGroupExecutor<'_> {
             );
             return false;
         }
+        let overwrite_source_span = latest_same_function_taint_reentry_span(
+            source_func,
+            call.caller,
+            source.span,
+            sink.span,
+            trace_index,
+            call,
+        );
         if same_function_clean_overwrite_kills_sink_arg(
             self.clean_overwrite_policy,
             source_func,
             call.caller,
-            source.span,
+            overwrite_source_span,
             sink.span,
             &call.tainted_args,
             call.tainted_receiver.as_deref(),
@@ -458,6 +513,7 @@ impl SourceGroupExecutor<'_> {
         let source_work = self.source_work;
         let pack = self.pack;
         let chain_call_graph = self.chain_call_graph;
+        let static_provenance_call_graph = self.static_provenance_call_graph;
         let sink_by_func = self.sink_by_func;
         let san_by_func = self.san_by_func;
         let debug_taint_phase = self.debug_taint_phase;
@@ -610,18 +666,6 @@ impl SourceGroupExecutor<'_> {
                     ) {
                         continue;
                     }
-                    if !emitted_for_source_sink_flow.insert(source_sink_flow_emission_key(idx, snk, call)) {
-                        bonsai_diagnostics::debug_log!(
-                            "security-taint",
-                            "sink_match_duplicate source_rule={} sink_rule={} caller={} call={} span={:?}",
-                            src.rule_id,
-                            snk.rule_id,
-                            call.caller.raw(),
-                            call.name,
-                            call.call_span
-                        );
-                        continue;
-                    }
                     let evidence = cached_evidence.get_or_insert_with(|| {
                         build_call_evidence(
                             ws,
@@ -632,33 +676,52 @@ impl SourceGroupExecutor<'_> {
                             call,
                         )
                     });
-                    let Some(evidence) = evidence.as_ref() else {
-                        metrics.lineage_misses = metrics.lineage_misses.saturating_add(1);
-                        if debug_taint_phase {
-                            let records = graph
-                                .call_records
-                                .iter()
-                                .map(|record| {
-                                    format!(
-                                        "{}:{}->{} parent={:?}",
-                                        record.trace_id,
-                                        record.caller.raw(),
-                                        record.callee.raw(),
-                                        record.parent_trace_id
-                                    )
-                                })
-                                .collect::<Vec<_>>();
+                    let evidence = match reserve_evidenced_emission(
+                        &mut emitted_for_source_sink_flow,
+                        source_sink_flow_emission_key(idx, snk, call),
+                        evidence.as_ref(),
+                    ) {
+                        EvidencedEmission::Ready(evidence) => evidence,
+                        EvidencedEmission::Duplicate => {
                             bonsai_diagnostics::debug_log!(
                                 "security-taint",
-                                "lineage_missing source_func={} sink_func={} call={} parent={:?} records={:?}",
-                                src_func_id.raw(),
+                                "sink_match_duplicate source_rule={} sink_rule={} caller={} call={} span={:?}",
+                                src.rule_id,
+                                snk.rule_id,
                                 call.caller.raw(),
                                 call.name,
-                                call.parent_trace_id,
-                                records
+                                call.call_span
                             );
+                            continue;
                         }
-                        continue;
+                        EvidencedEmission::MissingEvidence => {
+                            metrics.lineage_misses = metrics.lineage_misses.saturating_add(1);
+                            if debug_taint_phase {
+                                let records = graph
+                                    .call_records
+                                    .iter()
+                                    .map(|record| {
+                                        format!(
+                                            "{}:{}->{} parent={:?}",
+                                            record.trace_id,
+                                            record.caller.raw(),
+                                            record.callee.raw(),
+                                            record.parent_trace_id
+                                        )
+                                    })
+                                    .collect::<Vec<_>>();
+                                bonsai_diagnostics::debug_log!(
+                                    "security-taint",
+                                    "lineage_missing source_func={} sink_func={} call={} parent={:?} records={:?}",
+                                    src_func_id.raw(),
+                                    call.caller.raw(),
+                                    call.name,
+                                    call.parent_trace_id,
+                                    records
+                                );
+                            }
+                            continue;
+                        }
                     };
                     let taint_path = align_terminal_taint_step_to_sink(evidence.taint_path.clone(), snk);
                     let group_id = group_id_for_taint_path(&evidence.chain_names, &taint_path);
@@ -678,6 +741,7 @@ impl SourceGroupExecutor<'_> {
                             ws,
                             global: self.global,
                             call_graph: self.chain_call_graph.as_ref(),
+                            static_provenance_call_graph: static_provenance_call_graph.as_ref(),
                             tainted_call_spans: &tainted_call_spans,
                             sink_tainted_args: evidence.sink_tainted_args.clone(),
                             taint_path,

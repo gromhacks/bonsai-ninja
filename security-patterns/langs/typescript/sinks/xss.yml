@@ -38,20 +38,6 @@
     code: "function demo(input) {\n  const outerHTML = input; return outerHTML;\n}\n"
     expect_no_match: true
   description: Element.outerHTML = tainted.
-- id: typescript.xss.insertadjacenthtml
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: typescript
-  tag: xss
-  severity: high
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: insertAdjacentHTML
-  description: "Disabled - bare `insertAdjacentHTML` name has no receiver constraint; flag via Element receiver when analysis supports it."
 - id: typescript.xss.document_write
   enabled: true
   language: typescript
@@ -114,13 +100,21 @@
     target:
       regex: "(?is)^\\s*(?:`|'|\").*(<!doctype|<html\\b|<[a-z][a-z0-9:-]*\\b[^>]*>)"
   analysis_semantics:
-    character_escape:
+    character_constraint:
       required_mappings:
       - {input: "&", output: "&amp;"}
       - {input: "<", output: "&lt;"}
       - {input: ">", output: "&gt;"}
       - {input: '"', output: "&quot;"}
       - {input: "'", output: "&#39;"}
+      accepted_providers:
+      - operation: {regex: '^replace$'}
+      - factory: {name: String}
+        operation: {regex: '^String\.replace$'}
+      - factory: {name: map}
+        operation: {regex: '^map\.join$'}
+      - factory: {regex: '^charCodeAt\.toString\.padStart$'}
+        operation: {regex: '^(?:replace|String\.replace)$'}
   match_examples:
   - name: raw html template return
     code: "function page(q: string) {\n  return `<!doctype html><h1>${q}</h1>`;\n}\n"
@@ -197,22 +191,6 @@
       }
     expect_no_match: true
   description: "React/Solid dangerouslySetInnerHTML - renders raw HTML."
-- id: typescript.xss.vue_v_html
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: xss
-  severity: high
-  packages:
-  - vue
-  cwe:
-  - CWE-79
-  match:
-    kind: write
-    target:
-      name: v-html
-  description: "Disabled - `v-html` is a Vue template directive, not a JS identifier; it appears inside .vue SFC templates and is not emitted as a write-target name by the TS parser. Flag at SFC-template analysis level."
 - id: typescript.xss.angular_bypass_html
   enabled: true
   language: typescript
@@ -442,70 +420,6 @@
     expect_match_text:
     - sceDelegateProvider.resourceUrlWhitelist
   description: AngularJS resourceUrlWhitelist containing '**' allows templates/resources from arbitrary origins.
-- id: typescript.xss.jquery_html
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: xss
-  severity: high
-  packages:
-  - jquery
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: html
-  description: "Disabled - bare `html` name matches any method; need jQuery receiver narrowing."
-- id: typescript.xss.jquery_append
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: xss
-  severity: high
-  packages:
-  - jquery
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: append
-  description: "Disabled - bare `append` name is too ubiquitous (Array, FormData, URLSearchParams, etc)."
-- id: typescript.xss.jquery_prepend
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: xss
-  severity: high
-  packages:
-  - jquery
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: prepend
-  description: "Disabled - bare `prepend` name too ubiquitous (Node.prepend, etc)."
-- id: typescript.xss.jquery_after
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: xss
-  severity: high
-  packages:
-  - jquery
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: after
-  description: "Disabled - bare `after` name is too ubiquitous (testing after(), Element.after())."
 - id: typescript.xss.jquery_dollar_html
   enabled: true
   language: typescript
@@ -536,34 +450,6 @@
       }
     expect_no_match: true
   description: "$(...).html(tainted) - jQuery HTML insertion (receiver $)."
-- id: typescript.xss.location_href_assign
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: typescript
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: write
-    target:
-      name: href
-  description: "Disabled - `href = tainted` matches every anchor href; need javascript: constraint."
-- id: typescript.xss.script_src_assign
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: write
-    target:
-      name: src
-  description: "Disabled - `src = tainted` matches every img/iframe/script src; too broad."
 - id: typescript.xss.iframe_srcdoc
   enabled: true
   language: typescript
@@ -609,22 +495,6 @@
       }
     expect_no_match: true
   description: "Range.createContextualFragment(tainted) - parses and renders HTML."
-- id: typescript.xss.dom_parser_parsefromstring
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - DOMParser
-      - parseFromString
-  description: "Disabled - DOMParser parses but does not auto-render; flag downstream inserts instead."
 - id: typescript.xss.express_res_end_html
   enabled: true
   language: typescript

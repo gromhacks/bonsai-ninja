@@ -1,6 +1,7 @@
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::{
-    CharacterConstraintDomain, CharacterConstraintOutput, FlowEvent, LanguageRegistry, StringCompositionPart,
+    AssignValueKind, CharacterConstraintDomain, CharacterConstraintOutput, FlowEvent, LanguageRegistry,
+    StringCompositionPart,
 };
 use bonsai_vfs::Vfs;
 use std::sync::Arc;
@@ -124,6 +125,49 @@ fn collect_returns(events: &[FlowEvent], out: &mut Vec<(Option<String>, bonsai_l
     }
 }
 
+fn assignment_value_kind(events: &[FlowEvent], target: &str) -> Option<AssignValueKind> {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                target: assigned,
+                value_kind,
+                ..
+            } if assigned == target => return *value_kind,
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(kind) = assignment_value_kind(then_events, target)
+                    .or_else(|| assignment_value_kind(else_events, target))
+                {
+                    return Some(kind);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(kind) = assignment_value_kind(body, target) {
+                    return Some(kind);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(kind) = assignment_value_kind(body, target)
+                    .or_else(|| assignment_value_kind(catch_events, target))
+                    .or_else(|| assignment_value_kind(finally_events, target))
+                {
+                    return Some(kind);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 #[test]
 fn range_clauses_emit_precise_iteration_value_assignments() {
     let db = db_with(
@@ -158,6 +202,16 @@ func entry(cmd string, tokens []string) {
             .any(|(target, _, source_call, _)| target == "tok" && source_call.as_deref() == Some("tokenize")),
         "single-target channel range should bind tok from tokenize() return: {assigns:?}"
     );
+    let entry = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "entry")
+        .expect("entry declaration");
+    assert_eq!(
+        assignment_value_kind(&entry.flow_events, "tok"),
+        Some(AssignValueKind::YieldResult),
+        "a range over a compiler-proven channel-returning call consumes yielded elements"
+    );
     assert!(
         assigns.iter().any(|(target, source_name, _, source_names)| {
             target == "t"
@@ -169,6 +223,55 @@ func entry(cmd string, tokens []string) {
     assert!(
         !assigns.iter().any(|(target, _, _, _)| target == "range"),
         "Go range lowering must not keep broad synthetic range assignments: {assigns:?}"
+    );
+}
+
+#[test]
+fn returned_channel_send_emits_exact_yield_endpoint() {
+    let db = db_with(
+        r#"
+package main
+
+func tokenize(input string) <-chan string {
+    out := make(chan string)
+    go func() { out <- input }()
+    return out
+}
+"#,
+    );
+    let global = db.global_index();
+    let tokenize = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "tokenize")
+        .expect("tokenize declaration");
+    fn has_yield(events: &[FlowEvent]) -> bool {
+        events.iter().any(|event| match event {
+            FlowEvent::Yield { value_flow, .. } => {
+                value_flow.place.as_deref() == Some("input")
+                    && value_flow.source_names.iter().any(|name| name == "input")
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => has_yield(then_events) || has_yield(else_events),
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                has_yield(body)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => has_yield(body) || has_yield(catch_events) || has_yield(finally_events),
+            _ => false,
+        })
+    }
+    assert!(
+        has_yield(&tokenize.flow_events),
+        "a value sent through the returned channel must reach the callable yield endpoint: {:#?}",
+        tokenize.flow_events
     );
 }
 

@@ -54,7 +54,7 @@ fn bin_path() -> PathBuf {
 }
 
 fn workspace_path() -> PathBuf {
-    repo_root().join("examples/python/micro")
+    repo_root().join("test-fixtures/languages/python/micro")
 }
 
 fn temp_workspace(name: &str) -> PathBuf {
@@ -90,11 +90,14 @@ fn copy_dir(src: &Path, dst: &Path) {
 }
 
 fn lang_workspace_path(lang: &str) -> PathBuf {
-    repo_root().join(format!("examples/{lang}/micro"))
+    repo_root()
+        .join("test-fixtures/languages")
+        .join(lang)
+        .join("micro")
 }
 
 fn lang_workspace_arg(lang: &str) -> String {
-    format!("examples/{lang}/micro")
+    format!("test-fixtures/languages/{lang}/micro")
 }
 
 fn rules_dir() -> PathBuf {
@@ -279,9 +282,9 @@ fn normalize_json_files(value: &mut Value) {
 fn normalize_path(path: &str) -> String {
     // Strip the absolute prefix the SDK emits when running off
     // an absolute rulepack root, so we compare relative paths
-    // (which the CLI prints natively). Both `examples/` and
-    // `security-patterns/` are repo-relative anchors.
-    for anchor in ["examples/", "security-patterns/"] {
+    // (which the CLI prints natively). Fixture, example, and rulepack paths
+    // are all compared from their stable repository-relative anchors.
+    for anchor in ["test-fixtures/", "examples/", "security-patterns/"] {
         if let Some(idx) = path.find(anchor) {
             return path[idx..].to_string();
         }
@@ -463,7 +466,23 @@ fn entry_symbol(lang: &str) -> &'static str {
 }
 
 fn trace_source_symbol(lang: &str) -> &'static str {
-    entry_symbol(lang)
+    match lang {
+        // Objective-C preserves the interface prototype and implementation as
+        // separate compiler declarations. Trace must select the executable
+        // implementation instead of relying on an ambiguous short selector.
+        "objc" => "Gateway.m:9:handleRequestWithToken",
+        _ => entry_symbol(lang),
+    }
+}
+
+fn diagnostic_entry_symbol(lang: &str) -> String {
+    match lang {
+        // Objective-C preserves the interface prototype and implementation as
+        // separate compiler declarations. HIR/CFG/AST/taint diagnostics must
+        // name the executable syntax site explicitly.
+        "objc" => "Gateway.m:9:handleRequestWithToken".to_string(),
+        _ => entry_symbol(lang).to_string(),
+    }
 }
 
 fn slice_site(lang: &str) -> (&'static str, u32, &'static str) {
@@ -483,7 +502,7 @@ fn slice_site(lang: &str) -> (&'static str, u32, &'static str) {
         "perl" => ("result", 8, "gateway.pl"),
         "php" => ("$result", 10, "gateway.php"),
         "python" => ("result", 15, "gateway.py"),
-        "ruby" => ("result", 16, "gateway.rb"),
+        "ruby" => ("result", 13, "gateway.rb"),
         "rust" => ("result", 12, "gateway.rs"),
         "scala" => ("result", 17, "Gateway.scala"),
         "swift" => ("result", 11, "Gateway.swift"),
@@ -527,7 +546,7 @@ fn rows_or_array(value: Value) -> Value {
 #[test]
 fn taint_analysis_cli_flags_map_one_to_one_to_sdk_options() {
     let project = security_project();
-    let workspace = "examples/python/micro";
+    let workspace = "test-fixtures/languages/python/micro";
 
     let cases = [
         ("default/all", vec!["--all"], TaintAnalysisOptions::default()),
@@ -617,7 +636,7 @@ fn taint_analysis_paged_cli_json_is_a_window_over_sdk_results() {
 
     for page in ["1", "2"] {
         let mut cli = run_cli(&security_cli_args(
-            "examples/python/micro",
+            "test-fixtures/languages/python/micro",
             "taint-analysis",
             &["--context", "512", "--page", page],
         ));
@@ -927,7 +946,7 @@ fn cache_commands_cli_json_match_sdk_facade() {
 #[test]
 fn source_analysis_cli_flags_map_one_to_one_to_sdk_options() {
     let project = security_project();
-    let workspace = "examples/python/micro";
+    let workspace = "test-fixtures/languages/python/micro";
 
     let cases = [
         ("default/all", vec!["--all"], source_analysis_all_options()),
@@ -1014,7 +1033,7 @@ fn source_analysis_paged_cli_json_is_a_window_over_sdk_results() {
 
     for page in ["1", "2"] {
         let cli = run_cli(&security_cli_args(
-            "examples/python/micro",
+            "test-fixtures/languages/python/micro",
             "source-analysis",
             &["--context", "512", "--page", page],
         ));
@@ -1031,7 +1050,7 @@ fn source_analysis_paged_cli_json_is_a_window_over_sdk_results() {
 #[test]
 fn sink_analysis_cli_flags_map_one_to_one_to_sdk_options() {
     let project = security_project();
-    let workspace = "examples/python/micro";
+    let workspace = "test-fixtures/languages/python/micro";
     let cases = [
         ("default/all", vec!["--all"], SinkAnalysisOptions::default()),
         (
@@ -1116,7 +1135,10 @@ fn sink_analysis_paged_cli_json_is_a_window_over_sdk_results() {
         .collect();
 
     for page in ["1", "2"] {
-        let rows = cli_sink_json("examples/python/micro", &["--context", "512", "--page", page]);
+        let rows = cli_sink_json(
+            "test-fixtures/languages/python/micro",
+            &["--context", "512", "--page", page],
+        );
         for row in rows.as_array().expect("paged sink rows") {
             let signature = source_site_sig(row.get("sink").expect("sink"));
             assert!(
@@ -1208,7 +1230,7 @@ fn security_inventory_cli_json_matches_sdk_for_every_language() {
 fn security_pack_cli_json_matches_sdk() {
     let sdk = sdk();
     let pack = sdk.security_pack().expect("SDK security pack");
-    let workspace = "examples/python/micro";
+    let workspace = "test-fixtures/languages/python/micro";
     // CLI/SDK parity only needs one representative language slice. The
     // dedicated Pack Audit gate validates the complete rulepack in release
     // mode; repeating that audit and validation twice in this debug
@@ -1391,7 +1413,7 @@ fn browse_fact_commands_cli_json_match_sdk_for_every_language() {
 #[test]
 fn read_file_cli_json_matches_sdk_facade() {
     let project = security_project();
-    let workspace = "examples/python/micro";
+    let workspace = "test-fixtures/languages/python/micro";
 
     assert_json_eq(
         "python read-file",
@@ -1446,7 +1468,7 @@ fn inspect_decl_group_ids(value: &Value, target: &str) -> BTreeSet<String> {
 #[test]
 fn inspect_structural_flow_ids_match_sdk_facade() {
     let project = basic_project_for_lang("python");
-    let workspace = "examples/python/micro";
+    let workspace = "test-fixtures/languages/python/micro";
     let target = "run_admin_command";
     let cli = run_cli(&[
         "inspect",
@@ -1486,7 +1508,7 @@ fn inspect_structural_flow_ids_match_sdk_facade() {
 #[test]
 fn show_structural_ids_roundtrip_through_cli_and_sdk() {
     let project = security_project();
-    let workspace = "examples/python/micro";
+    let workspace = "test-fixtures/languages/python/micro";
     let edge = project
         .dump()
         .edges(Default::default())
@@ -1768,14 +1790,15 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
         let ws_arg = lang_workspace_arg(lang);
         let ws_arg = ws_arg.as_str();
         let entry = entry_symbol(lang);
+        let diagnostic_entry = diagnostic_entry_symbol(lang);
 
         assert_json_eq(
             &format!("{lang} dump-hir"),
-            run_cli(&["dump-hir", ws_arg, entry]),
+            run_cli(&["dump-hir", ws_arg, &diagnostic_entry]),
             serde_json::to_value(
                 project
                     .dump()
-                    .hir(entry)
+                    .hir(&diagnostic_entry)
                     .expect("sdk dump-hir")
                     .expect("sdk dump-hir found"),
             )
@@ -1783,11 +1806,11 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
         );
         assert_json_eq(
             &format!("{lang} dump-cfg"),
-            run_cli(&["dump-cfg", ws_arg, entry]),
+            run_cli(&["dump-cfg", ws_arg, &diagnostic_entry]),
             serde_json::to_value(
                 project
                     .dump()
-                    .cfg(entry)
+                    .cfg(&diagnostic_entry)
                     .expect("sdk dump-cfg")
                     .expect("sdk dump-cfg found"),
             )
@@ -1832,7 +1855,7 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
             .expect("path json"),
         );
         let ast = match project.dump().ast(bonsai_sdk::AstFilters {
-            function: Some(entry),
+            function: Some(&diagnostic_entry),
             max_depth: Some(3),
             ..Default::default()
         }) {
@@ -1848,7 +1871,7 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
                 "dump-ast",
                 ws_arg,
                 "--function",
-                entry,
+                &diagnostic_entry,
                 "--max-depth",
                 "3",
                 "--format",
@@ -1884,7 +1907,7 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
         );
 
         let taint = match project.dump().taint(bonsai_sdk::TaintFilters {
-            source: entry,
+            source: &diagnostic_entry,
             ..Default::default()
         }) {
             bonsai_sdk::TaintOutcome::Report(report) => report,
@@ -1899,7 +1922,14 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
         };
         assert_json_eq(
             &format!("{lang} dump-taint"),
-            run_cli(&["dump-taint", ws_arg, "--source", entry, "--format", "json"]),
+            run_cli(&[
+                "dump-taint",
+                ws_arg,
+                "--source",
+                &diagnostic_entry,
+                "--format",
+                "json",
+            ]),
             serde_json::to_value(taint).expect("taint json"),
         );
 

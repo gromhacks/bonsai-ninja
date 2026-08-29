@@ -76,24 +76,6 @@
   aliases:
   - javascript.jwt.verify_ignore_expiration
   - javascript.jwt.alg_confusion
-- id: javascript.jwt.sign_no_secret
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: jwt
-  severity: high
-  packages:
-  - jsonwebtoken
-  cwe:
-  - CWE-327
-  match:
-    kind: call
-    callee:
-      attribute:
-      - jwt
-      - sign
-  description: "Disabled - overlaps with sign_none; enable only when missing-secret detection is wired up."
 - id: javascript.jwt.decode_unsafe
   enabled: true
   language: javascript

@@ -284,36 +284,6 @@
       }
     expect_no_match: true
   description: "Return of a raw HTML response/helper body in a web package. Taint reachability is required for attacker-controlled content in the returned expression; package gating keeps ordinary string helpers out."
-- id: go.xss.fmt_fprintf_w
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - fmt
-      - Fprintf
-  description: "Disabled - generic fmt.Fprintf; enable with a Content-Type: text/html response constraint."
-- id: go.xss.responsewriter_write
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      regex: \.Write$
-  description: "Disabled - w.Write([]byte(tainted)); enable when response Content-Type is text/html."
 - id: go.xss.fmt_fprint_html_response
   enabled: true
   language: go
@@ -431,57 +401,3 @@
       }
     expect_no_match: true
   description: "iris Context.HTML(tainted) writes caller-controlled raw HTML without template escaping."
-- id: go.xss.fiber_send_string
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: xss
-  severity: medium
-  packages:
-  - github.com/gofiber/fiber
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      regex: \.SendString$
-  description: "Disabled - fiber Ctx.SendString; enable when response Content-Type is text/html."
-- id: go.xss.buffalo_render_string
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  tag: xss
-  severity: high
-  frameworks:
-  - buffalo
-  packages:
-  - github.com/gobuffalo/buffalo
-  - github.com/gobuffalo/buffalo/render
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      regex: \.Render$
-  constraints:
-  - arg_tainted:
-      index: 1
-  match_examples:
-  - name: buffalo render raw string
-    code: "package main\nimport (\n  \"github.com/gobuffalo/buffalo\"\n  \"github.com/gobuffalo/buffalo/render\"\n)\nfunc handler(c buffalo.Context, r *render.Engine, name string) error {\n  return c.Render(200, r.String(\"<h1>\" + name + \"</h1>\"))\n}\n"
-    expect_match_text:
-    - c.Render
-  - name: buffalo render raw string literal negative
-    code: |
-      package main
-      import (
-        "github.com/gobuffalo/buffalo"
-        "github.com/gobuffalo/buffalo/render"
-      )
-      func handler(c buffalo.Context, r *render.Engine) error {
-        return c.Render(200, r.String("<h1>safe</h1>"))
-      }
-    expect_no_match: true
-  description: "Disabled - buffalo Context.Render(status, r.String(...)) needs nested-call taint correlation so literal render strings stay quiet while attacker-controlled render strings are reported."

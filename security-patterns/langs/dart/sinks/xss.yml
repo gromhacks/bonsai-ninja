@@ -99,38 +99,6 @@
       '
     expect_no_match: true
   description: iframe.srcdoc = tainted.
-- id: dart.xss.flutter_html_widget
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: xss
-  severity: medium
-  packages:
-  - flutter_html
-  cwe:
-  - CWE-79
-  match:
-    kind: new
-    callee:
-      name: Html
-  description: "Disabled - flutter_html Html widget; flag with tainted data argument."
-- id: dart.xss.html_parse
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: xss
-  severity: medium
-  packages:
-  - html
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: parse
-  description: "Disabled - bare `parse` name is FP-prone (matches every parse() across the codebase). Re-enable with import-scoped matching when adapter supports it. The dangerous flow is package:html parse + downstream innerHtml/setInnerHtml sink, which the existing XSS rules already catch."
 - id: dart.xss.html_parse_fragment
   enabled: true
   language: dart
@@ -172,3 +140,58 @@
   description: "package:html parseFragment(tainted) - fragment parser with un-escaped DOM-build risk. `parseFragment` is a sufficiently distinctive name to scope without import context."
   imports:
   - html/html.dart
+
+- id: dart.xss.shelf_response_ok_html
+  enabled: true
+  language: dart
+  tag: xss
+  severity: high
+  packages: [shelf]
+  imports: [shelf/shelf.dart]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, ok]
+  constraints:
+  - arg_tainted:
+      index: 0
+  - any_arg_matches_regex: '(?i)(?:content-type|contenttype).*(?:text/html|ContentType\.html)'
+  analysis_semantics:
+    character_escape:
+      required_mappings:
+      - {input: "&", output: "&amp;"}
+      - {input: "<", output: "&lt;"}
+      - {input: ">", output: "&gt;"}
+      - {input: '"', output: "&quot;"}
+      - {input: "'", output: "&#39;"}
+    character_constraint:
+      required_mappings:
+      - {input: "&", output: "&amp;"}
+      - {input: "<", output: "&lt;"}
+      - {input: ">", output: "&gt;"}
+      - {input: '"', output: "&quot;"}
+      - {input: "'", output: "&#39;"}
+      accepted_providers:
+      - operation: {attribute: [String, replaceAll]}
+  match_examples:
+  - name: shelf HTML response with tainted body
+    code: |
+      import 'package:shelf/shelf.dart';
+      Response render(String value) =>
+          Response.ok('<html>$value</html>', headers: {'content-type': 'text/html'});
+    expect_match_text: [Response.ok]
+  - name: shelf HTML response with literal body
+    code: |
+      import 'package:shelf/shelf.dart';
+      Response render(String value) =>
+          Response.ok('<html>safe</html>', headers: {'content-type': 'text/html'});
+    expect_no_match: true
+  - name: same method on local response type is not shelf
+    code: |
+      import 'package:shelf/shelf.dart';
+      class LocalResponse { static Object ok(Object value, {Object? headers}) => value; }
+      Object render(String value) =>
+          LocalResponse.ok('<html>$value</html>', headers: {'content-type': 'text/html'});
+    expect_no_match: true
+  description: "shelf Response.ok with a tainted HTML response body and an explicit HTML content type."

@@ -9,6 +9,38 @@ use super::super::{
 };
 use super::{walk_into, LoweringContext};
 
+/// Whether this assignment-shaped CST node introduces a lexical binding.
+///
+/// Several grammars lower a declaration initializer through the same node
+/// shape as an ordinary assignment.  The adapter already owns the exact
+/// declaration-keyword spellings for its grammar; inspect only the assignment
+/// node and its immediate wrapper so a later `name = value` can never be
+/// mistaken for a declaration.  This distinction is material for closure
+/// capture: a callback-local shadow is not a write to an enclosing binding.
+fn assignment_declares_new_binding(
+    node: Node<'_>,
+    src: &[u8],
+    handler: &super::super::GrammarHandler,
+) -> bool {
+    if handler.binding_declaration_keyword_spellings.is_empty() {
+        return false;
+    }
+
+    [Some(node), node.parent()]
+        .into_iter()
+        .flatten()
+        .any(|candidate| {
+            let mut cursor = candidate.walk();
+            let has_declaration_keyword = candidate.children(&mut cursor).any(|child| {
+                handler
+                    .binding_declaration_keyword_spellings
+                    .iter()
+                    .any(|keyword| child.kind() == *keyword || node_text(&child, src).trim() == *keyword)
+            });
+            has_declaration_keyword
+        })
+}
+
 pub(super) fn lower_assignment(
     node: Node<'_>,
     context: LoweringContext<'_>,
@@ -77,6 +109,7 @@ pub(super) fn lower_assignment(
         let target = target_node
             .and_then(|target| assignment_place(target, src, handler))
             .unwrap_or_default();
+        let declares_new_binding = assignment_declares_new_binding(node, src, handler);
         // RHS: most grammars expose it via `right` or `value`. Kotlin's
         // property_declaration has no field for the initializer — it's
         // just a sibling of the variable-declaration identifier. We'd
@@ -272,7 +305,7 @@ pub(super) fn lower_assignment(
                         source_call: source_call.clone(),
                         source_call_args: source_call_args.clone(),
                         source_names: source_names.clone(),
-                        declares_new_binding: false,
+                        declares_new_binding,
                         value_kind: assignment_value_kind,
                     });
                 }
@@ -297,7 +330,7 @@ pub(super) fn lower_assignment(
                     source_names: keyed_source
                         .map(|source| vec![source.clone()])
                         .unwrap_or_else(|| source_names.clone()),
-                    declares_new_binding: false,
+                    declares_new_binding,
                     value_kind: keyed_source
                         .map(|_| crate::AssignValueKind::Destructure)
                         .or(assignment_value_kind),
@@ -351,7 +384,7 @@ pub(super) fn lower_assignment(
                     source_call,
                     source_call_args,
                     source_names,
-                    declares_new_binding: false,
+                    declares_new_binding,
                     value_kind: assignment_value_kind,
                 });
             }

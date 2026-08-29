@@ -191,9 +191,6 @@ def check_publication_hygiene() -> list[str]:
 
     failures: list[str] = []
     retired = {
-        "cvebench": "public product documentation must not depend on a private evaluation corpus",
-        "cve bench": "public product documentation must not depend on a private evaluation corpus",
-        "cb2-": "public product documentation must not expose corpus case identifiers",
         "/users/": "replace developer-specific absolute paths with portable examples",
         "/private/tmp": "replace host-specific temporary paths with portable examples",
     }

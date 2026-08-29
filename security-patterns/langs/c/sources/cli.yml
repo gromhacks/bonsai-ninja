@@ -58,6 +58,10 @@
     kind: call
     callee:
       name: getenv
+  constraints:
+  - arg_not_matches_regex:
+      index: 0
+      regex: '^"(QUERY_STRING|PATH_INFO|REQUEST_URI|HTTP_[A-Z0-9_]+)"$'
   match_examples:
   - name: generated direct match
     code: |
@@ -66,7 +70,12 @@
         char *fmt = arg;
         getenv(arg);
       }
-  description: "libc getenv - environment lookup including CGI variables (HTTP_*, QUERY_STRING)."
+  - name: CGI request environment is classified remotely
+    code: |
+      #include <stdlib.h>
+      const char *query(void) { return getenv("QUERY_STRING"); }
+    expect_no_match: true
+  description: "libc getenv for ordinary process-environment input. Exact CGI request keys are excluded here and classified as remote HTTP input by c.source.cgi_environment."
 - id: c.input.fgets
   enabled: true
   language: c
@@ -247,19 +256,6 @@
       }
     expect_match_text: [preadv]
   description: "POSIX preadv(fd, iov, iovcnt, offset) - positioned scatter-read into caller-supplied iovec buffers."
-- id: c.input.sscanf
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  trust: local
-  tag: local-input
-  payload_types: [text]
-  match:
-    kind: call
-    callee:
-      name: sscanf
-  description: "Disabled - sscanf parses an in-memory buffer; taint comes from the buffer, not sscanf itself."
 - id: c.input.scanf
   enabled: true
   language: c

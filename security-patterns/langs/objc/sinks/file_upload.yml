@@ -1,22 +1,5 @@
-# Objective-C file-upload sinks (NSURLSession upload, AFNetworking multipart).
-- id: objc.upload.nsurlsession_uploadtask
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
-  language: objc
-  tag: file-upload
-  severity: medium
-  cwe: [CWE-434]
-  match:
-    kind: call
-    callee:
-      regex: "^(uploadTaskWithRequest|uploadTaskWithStreamedRequest)$"
-  match_examples:
-  - name: declared shape
-    code: |
-      void test(id input) { id target = input; int amount = 1; uploadTaskWithRequest(input); }
-  description: "Disabled - Objective-C selector/argument facts need to distinguish uploadTaskWithRequest:fromFile: before this can model the local-file path sink accurately."
-
+# Objective-C multipart upload sinks. NSURLSession's outbound upload methods
+# are not CWE-434 server-side unrestricted-upload sinks.
 - id: objc.upload.afnetworking_multipart
   enabled: true
   language: objc

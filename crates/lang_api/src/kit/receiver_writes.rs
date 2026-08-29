@@ -904,8 +904,20 @@ fn structural_argument_place(node: Node<'_>, src: &[u8], handler: &GrammarHandle
         return Some(format!("{base}.{member}"));
     }
     if handler.subscript_expression_kinds.contains(&kind) {
-        let base = first_declared_field(node, handler.subscript_base_field_names)?;
-        let key = first_declared_field(node, handler.subscript_index_field_names)?;
+        // Some grammars (PHP is the canonical case) define the operands by
+        // ordered CST children rather than named fields. Use the adapter's
+        // exact operand extractor before the field-based grammar path so
+        // call-argument places retain the same field precision as ordinary
+        // expression-flow lowering.
+        let (base, key) = handler
+            .computed_subscript_extractor
+            .and_then(|extract| extract(node))
+            .or_else(|| {
+                Some((
+                    first_declared_field(node, handler.subscript_base_field_names)?,
+                    first_declared_field(node, handler.subscript_index_field_names)?,
+                ))
+            })?;
         return structural_subscript_place(base, key, src, handler);
     }
     if handler.transparent_call_wrapper_kinds.contains(&kind) {

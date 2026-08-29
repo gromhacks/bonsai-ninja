@@ -1,0 +1,63 @@
+# Lua physical-device sources backed by lua-periphery receiver lineage.
+- id: lua.source.periphery_gpio_read
+  enabled: true
+  language: lua
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  payload_types: [sensor-frame]
+  packages: [lua-periphery, periphery]
+  imports: [periphery]
+  match:
+    kind: call
+    callee:
+      name: read
+  constraints:
+  - receiver_type_in: [GPIO]
+  - max_args: 0
+  match_examples:
+  - name: lua-periphery GPIO value
+    code: |
+      local periphery = require('periphery')
+      local gpio = periphery.GPIO('/dev/gpiochip0', 10, 'in')
+      local value = gpio:read()
+    expect_match_text: [gpio.read]
+  - name: ordinary object read is not GPIO input
+    code: |
+      local periphery = require('periphery')
+      local buffer = LocalBuffer()
+      local value = buffer:read()
+    expect_no_match: true
+  description: "lua-periphery GPIO:read returns the voltage-derived value observed on a compiler-typed GPIO input."
+
+- id: lua.source.periphery_serial_read
+  enabled: true
+  language: lua
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  payload_types: [binary, text]
+  packages: [lua-periphery, periphery]
+  imports: [periphery]
+  match:
+    kind: call
+    callee:
+      name: read
+  constraints:
+  - receiver_type_in: [Serial]
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: lua-periphery serial bytes
+    code: |
+      local periphery = require('periphery')
+      local serial = periphery.Serial('/dev/ttyUSB0', 115200)
+      local bytes = serial:read(128, 500)
+    expect_match_text: [serial.read]
+  - name: ordinary object read is not serial input
+    code: |
+      local periphery = require('periphery')
+      local buffer = LocalBuffer()
+      local bytes = buffer:read(128, 500)
+    expect_no_match: true
+  description: "lua-periphery Serial:read returns bytes received from an attached serial device on a compiler-typed receiver."

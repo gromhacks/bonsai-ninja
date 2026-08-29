@@ -1,15 +1,18 @@
 use super::bindings::{extract_comprehension_for_clause_assigns, extract_foreach_binding_assigns};
 use super::{
-    annotate_tuple_call_result_bindings, apply_assign_call_result_types, apply_call_receiver_types,
-    apply_call_receiver_types_with_language_syntax, apply_constructor_result_type_aliases, argument_place,
-    assign_lexical_callable_parents, assignment_value_node, build_call_event, callable_reference_name,
-    canonical_simple_type_name, collect_kinds, expression_flow_from_node, extend_alias_map_with_flow_events,
-    extract_assignment_value_facts, extract_call_receiver_facts, extract_direct_call_info,
-    extract_return_value_name, extract_rhs_expr_operands, extract_runtime_type_narrowing_facts,
-    extract_string_literals, language_from_pack, lower_local_closure_captures, mark_namespace_call_receivers,
-    node_at_span, node_text, normalize_call_name_whitespace, normalize_call_result_assignment_sources,
+    annotate_tuple_call_result_bindings, apply_assign_call_result_types, apply_assignment_type_aliases,
+    apply_call_receiver_types, apply_call_receiver_types_with_language_syntax,
+    apply_constructor_result_type_aliases, argument_place, assign_lexical_callable_parents,
+    assignment_value_node, build_call_event, call_arg_from_nodes_with_handler, callable_reference_name,
+    canonical_simple_type_name, collect_kinds, complete_finite_selection_return_span,
+    expression_flow_from_node, extend_alias_map_with_flow_events, extract_assignment_value_facts,
+    extract_call_receiver_facts, extract_direct_call_info, extract_return_value_name,
+    extract_rhs_expr_operands, extract_runtime_type_narrowing_facts, extract_string_literals,
+    language_from_pack, lower_adapter_local_breaks, lower_local_closure_captures,
+    mark_namespace_call_receivers, node_at_span, node_text, normalize_call_name_whitespace,
+    normalize_call_result_assignment_sources, normalize_decl_event_evaluation_order,
     package_module_segments_with_workspace_prefix, receiver_projected_alias_matches, same_identifier_name,
-    span_of, walk_flow_events, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
+    span_of, walk_flow_events, SyntaxKindIndex, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
 use crate::{
     AliasTarget, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, CallReceiverFact,
@@ -24,6 +27,114 @@ fn parse_language(pack: &str, src: &[u8]) -> tree_sitter::Tree {
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&language).expect("set language grammar");
     parser.parse(src, None).expect("parse source")
+}
+
+#[test]
+fn collect_kinds_is_true_source_order_preorder() {
+    let source = b"function f() { first(); second(); third(); }";
+    let tree = parse_language("javascript", source);
+    let calls = collect_kinds(&tree, &["call_expression"]);
+    let starts: Vec<usize> = calls.iter().map(Node::start_byte).collect();
+    assert_eq!(calls.len(), 3, "fixture must expose three call expressions");
+    assert!(
+        starts.windows(2).all(|pair| pair[0] < pair[1]),
+        "collect_kinds promises pre-order but returned reverse/non-source order: {starts:?}"
+    );
+}
+
+#[test]
+fn adapter_proven_local_break_truncates_only_its_structured_arm() {
+    let file = FileId::new(1);
+    let local_break = Span::new(file, 20, 25);
+    let mut events = vec![
+        FlowEvent::Branch {
+            span: Span::new(file, 10, 40),
+            condition: None,
+            then_events: vec![
+                FlowEvent::Assign {
+                    span: Span::new(file, 11, 19),
+                    target: "value".into(),
+                    source_name: Some("input".into()),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: vec!["input".into()],
+                    declares_new_binding: false,
+                    value_kind: Some(AssignValueKind::Compound),
+                },
+                FlowEvent::Break {
+                    span: local_break,
+                    label: None,
+                },
+                FlowEvent::Call {
+                    span: Span::new(file, 26, 30),
+                    receiver: None,
+                    receiver_types: Vec::new(),
+                    name: "unreachable_in_arm".into(),
+                    call_kind: CallKind::Function,
+                    args: Vec::new(),
+                },
+            ],
+            else_events: vec![FlowEvent::Break {
+                span: Span::new(file, 31, 35),
+                label: None,
+            }],
+        },
+        FlowEvent::Call {
+            span: Span::new(file, 41, 50),
+            receiver: None,
+            receiver_types: Vec::new(),
+            name: "after_branch".into(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        },
+    ];
+    lower_adapter_local_breaks(&mut events, &std::collections::HashSet::from([local_break]));
+
+    let FlowEvent::Branch {
+        then_events,
+        else_events,
+        ..
+    } = &events[0]
+    else {
+        panic!("expected structured branch")
+    };
+    assert_eq!(
+        then_events.len(),
+        1,
+        "events after the local arm break are unreachable"
+    );
+    assert!(matches!(then_events[0], FlowEvent::Assign { .. }));
+    assert!(
+        matches!(else_events[0], FlowEvent::Break { .. }),
+        "an unproved loop/function break must remain"
+    );
+    assert!(matches!(&events[1], FlowEvent::Call { name, .. } if name == "after_branch"));
+}
+
+#[test]
+fn syntax_kind_index_matches_independent_preorder_walks() {
+    let source = b"function f(a) { if (a) first(); second(); }";
+    let tree = parse_language("javascript", source);
+    let index = SyntaxKindIndex::new(
+        &tree,
+        &["function_declaration", "if_statement", "call_expression"],
+    );
+    for wanted in [
+        &["call_expression"][..],
+        &["if_statement"][..],
+        &["function_declaration", "call_expression"][..],
+    ] {
+        let indexed = index
+            .collect(wanted)
+            .into_iter()
+            .map(|node| (node.kind().to_string(), node.start_byte(), node.end_byte()))
+            .collect::<Vec<_>>();
+        let direct = collect_kinds(&tree, wanted)
+            .into_iter()
+            .map(|node| (node.kind().to_string(), node.start_byte(), node.end_byte()))
+            .collect::<Vec<_>>();
+        assert_eq!(indexed, direct, "indexed and direct CST walks must agree");
+    }
 }
 
 fn legacy_node_at_span<'a>(root: Node<'a>, span: Span, expected_kinds: &[&str]) -> Option<Node<'a>> {
@@ -692,6 +803,50 @@ fn foreach_bindings_cover_fielded_and_wrapped_grammar_shapes() {
 }
 
 #[test]
+fn foreach_call_binding_preserves_the_exact_receiver_dependency() {
+    let src =
+        b"object App { def run(request: Request) = for { value <- request.read(\"key\") } yield value }";
+    let tree = parse_language("scala", src);
+    let loop_node = collect_kinds(&tree, &["for_expression"])
+        .into_iter()
+        .next()
+        .expect("Scala for expression");
+    let handler = GrammarHandler {
+        foreach_binding_extractor: Some(fixture_foreach_binding),
+        member_expression_kinds: &["field_expression"],
+        member_base_field_names: &["value", "object"],
+        member_name_field_names: &["field", "name"],
+        ..GENERIC_HANDLER
+    };
+    let events = extract_foreach_binding_assigns(FileId::new(0), &loop_node, src, &handler);
+    let assignment = events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                source_call,
+                source_names,
+                ..
+            } if target == "value" => Some((source_call, source_names)),
+            _ => None,
+        })
+        .expect("generator binding assignment");
+
+    assert!(
+        assignment.0.is_some(),
+        "the generator must retain its compiler-recognized call result: {events:#?}"
+    );
+    assert!(
+        assignment.1.iter().any(|name| name == "request"),
+        "the exact receiver value must reach the generator binding: {events:#?}"
+    );
+    assert!(
+        assignment.1.iter().all(|name| name != "read"),
+        "method syntax must not become a value dependency: {events:#?}"
+    );
+}
+
+#[test]
 fn local_closure_conversion_adds_only_ast_proven_free_bindings() {
     let file = FileId::new(0);
     let mut caller = m9_func_decl(
@@ -750,6 +905,11 @@ fn local_closure_conversion_adds_only_ast_proven_free_bindings() {
     assert_eq!(defs[1].name, "closure");
     assert!(matches!(
         &defs[0].flow_events[1],
+        FlowEvent::Assign { target, source_name, .. }
+            if target == "closure.captured" && source_name.as_deref() == Some("captured")
+    ));
+    assert!(matches!(
+        &defs[0].flow_events[2],
         FlowEvent::Call { call_kind: CallKind::Indirect, args, .. }
             if args.len() == 1 && args[0].place.as_deref() == Some("captured")
     ));
@@ -1342,6 +1502,116 @@ fn call_result_types_fail_closed_on_same_name_overload_conflict() {
     );
 }
 
+fn exact_type_alias_assign(target: &str, source: &str, offset: u64) -> FlowEvent {
+    FlowEvent::Assign {
+        span: Span::new(FileId::new(0), offset, offset + 1),
+        target: target.to_string(),
+        source_name: Some(source.to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: true,
+        value_kind: Some(AssignValueKind::Compound),
+    }
+}
+
+#[test]
+fn exact_assignment_alias_propagates_receiver_type_without_language_names() {
+    let mut repository = m9_func_decl(0, "Repository", None, Vec::new());
+    repository.kind = DeclKind::Class;
+    let mut handler = m9_func_decl(
+        1,
+        "handler",
+        None,
+        vec![
+            exact_type_alias_assign("$alias", "$repository", 10),
+            FlowEvent::Call {
+                span: Span::new(FileId::new(0), 20, 30),
+                name: "alias->run".to_string(),
+                receiver: Some("alias".to_string()),
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Method,
+                args: Vec::new(),
+            },
+        ],
+    );
+    handler.type_aliases.push(crate::TypeAliasBinding {
+        name: "$repository".to_string(),
+        type_name: "Repository".to_string(),
+    });
+    let mut idx = DeclIndex {
+        defs: vec![repository, handler],
+        ..DeclIndex::default()
+    };
+
+    apply_assignment_type_aliases(&mut idx);
+    apply_call_receiver_types(&mut idx);
+
+    let handler = &idx.defs[1];
+    assert!(handler
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "$alias" && alias.type_name == "Repository"));
+    assert!(matches!(
+        &handler.flow_events[1],
+        FlowEvent::Call { receiver_types, .. } if receiver_types == &["Repository"]
+    ));
+}
+
+#[test]
+fn assignment_type_alias_inference_fails_closed_on_conflict_or_overwrite() {
+    let mut conflicting = m9_func_decl(
+        0,
+        "conflicting",
+        None,
+        vec![
+            exact_type_alias_assign("alias", "left", 10),
+            exact_type_alias_assign("alias", "right", 20),
+        ],
+    );
+    conflicting.type_aliases = vec![
+        crate::TypeAliasBinding {
+            name: "left".to_string(),
+            type_name: "Left".to_string(),
+        },
+        crate::TypeAliasBinding {
+            name: "right".to_string(),
+            type_name: "Right".to_string(),
+        },
+    ];
+    let mut overwritten = m9_func_decl(
+        1,
+        "overwritten",
+        None,
+        vec![
+            exact_type_alias_assign("alias", "source", 30),
+            FlowEvent::Assign {
+                span: Span::new(FileId::new(0), 40, 41),
+                target: "alias".to_string(),
+                source_name: None,
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: Vec::new(),
+                declares_new_binding: false,
+                value_kind: Some(AssignValueKind::Literal),
+            },
+        ],
+    );
+    overwritten.type_aliases.push(crate::TypeAliasBinding {
+        name: "source".to_string(),
+        type_name: "Source".to_string(),
+    });
+    let mut idx = DeclIndex {
+        defs: vec![conflicting, overwritten],
+        ..DeclIndex::default()
+    };
+
+    apply_assignment_type_aliases(&mut idx);
+
+    assert!(!idx.defs[0].type_aliases.iter().any(|alias| alias.name == "alias"));
+    assert!(!idx.defs[1].type_aliases.iter().any(|alias| alias.name == "alias"));
+}
+
 #[test]
 fn constructor_result_typing_handles_source_call_and_adjacent_new_call() {
     let file = FileId::new(0);
@@ -1390,6 +1660,15 @@ fn constructor_result_typing_handles_source_call_and_adjacent_new_call() {
             // receiver as the owner, not as the method call tail.
             assign("obj", Some("Util->new"), sp(31, 39)),
             qualified_constructor("Util->new", "Util", sp(34, 38)),
+            // Method-based constructor syntax must preserve the complete
+            // parsed owner rather than collapsing it to the terminal type.
+            // This keeps equally named types in distinct providers separate.
+            assign("qualified", Some("External::Nested::Context.new"), sp(161, 200)),
+            qualified_constructor(
+                "External::Nested::Context.new",
+                "External::Nested::Context",
+                sp(173, 199),
+            ),
             // Declaration resolution, not casing, proves this lower-case
             // symbol is a constructed type.
             assign("lower", Some("widget"), sp(141, 150)),
@@ -1417,6 +1696,12 @@ fn constructor_result_typing_handles_source_call_and_adjacent_new_call() {
     };
     assert_eq!(typed("conn"), Some("Connection"), "{:?}", decl.type_aliases);
     assert_eq!(typed("obj"), Some("Util"), "{:?}", decl.type_aliases);
+    assert_eq!(
+        typed("qualified"),
+        Some("External::Nested::Context"),
+        "qualified constructor owners must remain exact: {:?}",
+        decl.type_aliases
+    );
     assert_eq!(typed("lower"), Some("widget"), "{:?}", decl.type_aliases);
     assert_eq!(typed("unknown"), None, "{:?}", decl.type_aliases);
     assert_eq!(
@@ -1514,6 +1799,25 @@ fn string_literal_extraction_preserves_large_ast_literals() {
     let strings = extract_string_literals(&tree, FileId::new(0), source.as_bytes(), &GENERIC_HANDLER);
 
     assert!(strings.iter().any(|literal| literal.text.contains(&content)));
+}
+
+#[test]
+fn callable_argument_does_not_treat_captures_as_host_value_operands() {
+    let source = b"register(function (value) { sink(captured, value); });";
+    let tree = parse_language("javascript", source);
+    let callable = collect_kinds(&tree, &["function_expression"])
+        .into_iter()
+        .next()
+        .expect("anonymous callback");
+    let argument =
+        call_arg_from_nodes_with_handler(callable, callable, FileId::new(0), source, None, &GENERIC_HANDLER)
+            .expect("callable argument");
+
+    assert!(argument.place.is_none());
+    assert!(
+        argument.source_names.is_empty(),
+        "callback captures are environment reads at execution time, not scalar values delivered to register: {argument:?}"
+    );
 }
 
 #[test]
@@ -1626,6 +1930,82 @@ fn receiver_type_joins_sigiled_ast_aliases_by_canonical_binding_name() {
     assert!(matches!(
         &idx.defs[1].flow_events[0],
         FlowEvent::Call { receiver_types, .. } if receiver_types == &["Child"]
+    ));
+}
+
+#[test]
+fn receiver_type_retains_distinct_provider_identities_with_one_terminal_name() {
+    let mut idx = DeclIndex::default();
+    let mut entry = m9_func_decl(
+        0,
+        "entry",
+        None,
+        vec![FlowEvent::Call {
+            span: Span::new(FileId::new(0), 10, 20),
+            name: "client.consume".to_string(),
+            receiver: Some("client".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        }],
+    );
+    entry.type_aliases = vec![
+        crate::TypeAliasBinding {
+            name: "client".to_string(),
+            type_name: "Client".to_string(),
+        },
+        crate::TypeAliasBinding {
+            name: "client".to_string(),
+            type_name: "provider.transport.Client".to_string(),
+        },
+        crate::TypeAliasBinding {
+            name: "client".to_string(),
+            type_name: "application.transport.Client".to_string(),
+        },
+    ];
+    idx.defs.push(entry);
+
+    apply_call_receiver_types(&mut idx);
+
+    assert!(matches!(
+        &idx.defs[0].flow_events[0],
+        FlowEvent::Call { receiver_types, .. }
+            if receiver_types == &[
+                "Client".to_string(),
+                "provider.transport.Client".to_string(),
+                "application.transport.Client".to_string(),
+            ]
+    ));
+}
+
+#[test]
+fn receiver_type_uses_the_outer_qualified_generic_constructor() {
+    let mut idx = DeclIndex::default();
+    let mut entry = m9_func_decl(
+        0,
+        "entry",
+        None,
+        vec![FlowEvent::Call {
+            span: Span::new(FileId::new(0), 10, 20),
+            name: "values.push".to_string(),
+            receiver: Some("values".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        }],
+    );
+    entry.type_aliases = vec![crate::TypeAliasBinding {
+        name: "values".to_string(),
+        type_name: "std::vector<std::string>".to_string(),
+    }];
+    idx.defs.push(entry);
+
+    apply_call_receiver_types(&mut idx);
+
+    assert!(matches!(
+        &idx.defs[0].flow_events[0],
+        FlowEvent::Call { receiver_types, .. }
+            if receiver_types == &["std::vector".to_string()]
     ));
 }
 
@@ -1910,6 +2290,269 @@ fn m9_func_decl(raw: u32, name: &str, return_type: Option<&str>, flow_events: Ve
 }
 
 #[test]
+fn evaluation_order_places_exact_binding_before_its_first_dependent_use() {
+    let file = FileId::new(0);
+    let source = FlowEvent::Call {
+        span: Span::new(file, 20, 26),
+        name: "source".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: Vec::new(),
+    };
+    let binding = FlowEvent::Assign {
+        span: Span::new(file, 10, 30),
+        target: "bound".to_string(),
+        source_name: None,
+        source_call: Some("source".to_string()),
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: true,
+        value_kind: Some(AssignValueKind::CallResult),
+    };
+    let use_bound = FlowEvent::Call {
+        span: Span::new(file, 40, 47),
+        name: "consume".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            span: Span::new(file, 48, 53),
+            passing_mode: crate::ArgumentPassingMode::Value,
+            name: None,
+            value_text: "bound".to_string(),
+            place: Some("bound".to_string()),
+            source_names: vec!["bound".to_string()],
+        }],
+    };
+    let aggregate = FlowEvent::Assign {
+        span: Span::new(file, 0, 60),
+        target: "result".to_string(),
+        source_name: None,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: vec!["bound".to_string()],
+        declares_new_binding: true,
+        value_kind: Some(AssignValueKind::Compound),
+    };
+    let mut index = DeclIndex::default();
+    index.defs.push(m9_func_decl(
+        1,
+        "pipeline",
+        None,
+        vec![aggregate, source, binding, use_bound],
+    ));
+
+    normalize_decl_event_evaluation_order(&mut index);
+    let events = &index.defs[0].flow_events;
+    assert!(matches!(&events[0], FlowEvent::Call { name, .. } if name == "source"));
+    assert!(matches!(&events[1], FlowEvent::Assign { target, .. } if target == "bound"));
+    assert!(matches!(&events[2], FlowEvent::Call { name, .. } if name == "consume"));
+    assert!(matches!(&events[3], FlowEvent::Assign { target, .. } if target == "result"));
+}
+
+#[test]
+fn evaluation_order_self_assignment_executes_rhs_before_write_without_a_cycle() {
+    let file = FileId::new(0);
+    let assignment_span = Span::new(file, 10, 30);
+    let rhs_call_span = Span::new(file, 14, 26);
+    let assignment = FlowEvent::Assign {
+        span: assignment_span,
+        target: "value".to_string(),
+        source_name: None,
+        source_call: Some("transform".to_string()),
+        source_call_args: vec!["value".to_string()],
+        source_names: vec!["value".to_string()],
+        declares_new_binding: false,
+        value_kind: Some(AssignValueKind::CallResult),
+    };
+    let rhs_call = FlowEvent::Call {
+        span: rhs_call_span,
+        name: "transform".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            span: Span::new(file, 24, 25),
+            passing_mode: crate::ArgumentPassingMode::Value,
+            name: None,
+            value_text: "value".to_string(),
+            place: Some("value".to_string()),
+            source_names: vec!["value".to_string()],
+        }],
+    };
+    let later_use = FlowEvent::Call {
+        span: Span::new(file, 40, 54),
+        name: "consume".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            span: Span::new(file, 48, 53),
+            passing_mode: crate::ArgumentPassingMode::Value,
+            name: None,
+            value_text: "value".to_string(),
+            place: Some("value".to_string()),
+            source_names: vec!["value".to_string()],
+        }],
+    };
+    let mut index = DeclIndex::default();
+    index.defs.push(m9_func_decl(
+        1,
+        "pipeline",
+        None,
+        vec![assignment, rhs_call, later_use],
+    ));
+
+    normalize_decl_event_evaluation_order(&mut index);
+    let events = &index.defs[0].flow_events;
+    assert!(matches!(&events[0], FlowEvent::Call { name, .. } if name == "transform"));
+    assert!(matches!(&events[1], FlowEvent::Assign { target, .. } if target == "value"));
+    assert!(matches!(&events[2], FlowEvent::Call { name, .. } if name == "consume"));
+}
+
+#[test]
+fn evaluation_order_recovers_a_late_emitted_lexical_write_before_its_branch_use() {
+    let file = FileId::new(0);
+    let branch = FlowEvent::Branch {
+        span: Span::new(file, 40, 80),
+        condition: Some("path != empty".to_string()),
+        then_events: vec![FlowEvent::Call {
+            span: Span::new(file, 60, 64),
+            name: "consume".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: Span::new(file, 65, 69),
+                passing_mode: crate::ArgumentPassingMode::Value,
+                name: None,
+                value_text: "path".to_string(),
+                place: Some("path".to_string()),
+                source_names: vec!["path".to_string()],
+            }],
+        }],
+        else_events: Vec::new(),
+    };
+    let lexical_write = FlowEvent::Assign {
+        span: Span::new(file, 10, 35),
+        target: "path".to_string(),
+        source_name: Some("input".to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: vec!["input".to_string()],
+        declares_new_binding: true,
+        value_kind: Some(AssignValueKind::Compound),
+    };
+    let mut index = DeclIndex::default();
+    // Some adapters add expression facts after the primary statement walk.
+    index
+        .defs
+        .push(m9_func_decl(1, "pipeline", None, vec![branch, lexical_write]));
+
+    normalize_decl_event_evaluation_order(&mut index);
+    let events = &index.defs[0].flow_events;
+    assert!(matches!(&events[0], FlowEvent::Assign { target, .. } if target == "path"));
+    assert!(matches!(&events[1], FlowEvent::Branch { .. }));
+}
+
+#[test]
+fn evaluation_order_preserves_lowered_loop_body_before_textually_earlier_update() {
+    let file = FileId::new(0);
+    let body_call = FlowEvent::Call {
+        span: Span::new(file, 50, 61),
+        name: "consume".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            span: Span::new(file, 58, 59),
+            passing_mode: crate::ArgumentPassingMode::Value,
+            name: None,
+            value_text: "value".to_string(),
+            place: Some("value".to_string()),
+            source_names: vec!["value".to_string()],
+        }],
+    };
+    let header_update = FlowEvent::Assign {
+        span: Span::new(file, 30, 45),
+        target: "value".to_string(),
+        source_name: None,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: Some(AssignValueKind::Literal),
+    };
+    let loop_event = FlowEvent::Loop {
+        span: Span::new(file, 10, 65),
+        loop_kind: crate::LoopKind::For,
+        // The compiler lowering encodes runtime phase order: body, then update.
+        body: vec![body_call, header_update],
+    };
+    let mut index = DeclIndex::default();
+    index
+        .defs
+        .push(m9_func_decl(1, "pipeline", None, vec![loop_event]));
+
+    normalize_decl_event_evaluation_order(&mut index);
+    let FlowEvent::Loop { body, .. } = &index.defs[0].flow_events[0] else {
+        panic!("expected loop event");
+    };
+    assert!(matches!(&body[0], FlowEvent::Call { name, .. } if name == "consume"));
+    assert!(matches!(&body[1], FlowEvent::Assign { target, .. } if target == "value"));
+}
+
+#[test]
+fn evaluation_order_keeps_a_loop_assignment_after_its_nested_rhs_call() {
+    let file = FileId::new(0);
+    let assignment = FlowEvent::Assign {
+        span: Span::new(file, 50, 80),
+        target: "value".to_string(),
+        source_name: Some("value".to_string()),
+        source_call: Some("transform".to_string()),
+        source_call_args: vec!["value".to_string()],
+        source_names: vec!["value".to_string()],
+        declares_new_binding: false,
+        value_kind: Some(AssignValueKind::CallResult),
+    };
+    let rhs_call = FlowEvent::Call {
+        span: Span::new(file, 58, 76),
+        name: "transform".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            span: Span::new(file, 68, 73),
+            passing_mode: crate::ArgumentPassingMode::Value,
+            name: None,
+            value_text: "value".to_string(),
+            place: Some("value".to_string()),
+            source_names: vec!["value".to_string()],
+        }],
+    };
+    let loop_event = FlowEvent::Loop {
+        span: Span::new(file, 10, 90),
+        loop_kind: crate::LoopKind::For,
+        // A secondary adapter pass may append the nested call after the
+        // enclosing assignment. AST containment still defines evaluator
+        // order inside a loop body.
+        body: vec![assignment, rhs_call],
+    };
+    let mut index = DeclIndex::default();
+    index
+        .defs
+        .push(m9_func_decl(1, "pipeline", None, vec![loop_event]));
+
+    normalize_decl_event_evaluation_order(&mut index);
+    let FlowEvent::Loop { body, .. } = &index.defs[0].flow_events[0] else {
+        panic!("expected loop event");
+    };
+    assert!(matches!(&body[0], FlowEvent::Call { name, .. } if name == "transform"));
+    assert!(matches!(&body[1], FlowEvent::Assign { target, .. } if target == "value"));
+}
+
+#[test]
 fn lexical_callable_parent_stack_selects_nearest_ast_owner() {
     let file = FileId::new(0);
     let mut outer = m9_func_decl(1, "outer", None, Vec::new());
@@ -2029,4 +2672,87 @@ fn canonical_simple_type_name_strips_array_nullable_pointer_suffixes() {
     assert_eq!(canonical_simple_type_name("*const T"), "T");
     assert_eq!(canonical_simple_type_name("&User"), "User");
     assert_eq!(canonical_simple_type_name("Outer::Inner"), "Inner");
+}
+
+#[test]
+fn finite_selection_return_proof_requires_every_returning_path() {
+    let file = FileId::new(0);
+    let selection = Span::new(file, 20, 30);
+    let finite_return = FlowEvent::Return {
+        span: Span::new(file, 10, 32),
+        value_kind: None,
+        value_text: None,
+        value_name: None,
+        value_flow: ExpressionFlow::default(),
+    };
+    let literal_return = FlowEvent::Return {
+        span: Span::new(file, 40, 50),
+        value_kind: Some(AssignValueKind::Literal),
+        value_text: None,
+        value_name: None,
+        value_flow: ExpressionFlow::default(),
+    };
+    let dynamic_return = FlowEvent::Return {
+        span: Span::new(file, 60, 70),
+        value_kind: None,
+        value_text: None,
+        value_name: Some("runtime".to_string()),
+        value_flow: ExpressionFlow::from_place("runtime"),
+    };
+
+    assert_eq!(
+        complete_finite_selection_return_span(std::slice::from_ref(&finite_return), &[selection]),
+        Some(selection)
+    );
+    assert_eq!(
+        complete_finite_selection_return_span(
+            &[FlowEvent::Branch {
+                span: Span::new(file, 5, 55),
+                condition: None,
+                then_events: vec![finite_return.clone()],
+                else_events: vec![literal_return],
+            }],
+            &[selection],
+        ),
+        Some(selection),
+        "literal alternatives remain within the same finite output domain"
+    );
+    assert_eq!(
+        complete_finite_selection_return_span(
+            &[FlowEvent::Branch {
+                span: Span::new(file, 5, 75),
+                condition: None,
+                then_events: vec![finite_return.clone()],
+                else_events: vec![dynamic_return],
+            }],
+            &[selection],
+        ),
+        None,
+        "one dynamic return must invalidate the whole callable summary"
+    );
+    assert_eq!(
+        complete_finite_selection_return_span(
+            &[
+                FlowEvent::Branch {
+                    span: Span::new(file, 5, 35),
+                    condition: None,
+                    then_events: vec![finite_return],
+                    else_events: Vec::new(),
+                },
+                FlowEvent::Assign {
+                    span: Span::new(file, 80, 90),
+                    target: "result".to_string(),
+                    source_name: None,
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: Vec::new(),
+                    declares_new_binding: true,
+                    value_kind: Some(AssignValueKind::Literal),
+                },
+            ],
+            &[selection],
+        ),
+        None,
+        "a conditional selection with a fallthrough path is not a complete return proof"
+    );
 }

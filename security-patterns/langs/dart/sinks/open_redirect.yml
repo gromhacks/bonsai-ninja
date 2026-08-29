@@ -17,10 +17,6 @@
   - name: tainted found redirect url
     code: |
       import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
       void test(String input) { Response.found(input); }
   - name: literal found redirect url negative
     code: |
@@ -49,10 +45,6 @@
   - name: tainted see other redirect url
     code: |
       import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
       void test(String input) { Response.seeOther(input); }
   - name: literal see other redirect url negative
     code: |
@@ -80,10 +72,6 @@
   match_examples:
   - name: tainted moved permanently redirect url
     code: |
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
       import 'package:shelf/shelf.dart';
       void test(String input) { Response.movedPermanently(input); }
   - name: literal moved permanently redirect url negative
@@ -117,18 +105,3 @@
       void test(input) { var href = input; }
     expect_no_match: true
   description: "window.location.href = tainted."
-
-- id: dart.open_redirect.launchurl
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: open-redirect
-  severity: medium
-  packages: [url_launcher]
-  cwe: [CWE-601]
-  match:
-    kind: call
-    callee:
-      name: launchUrl
-  description: "Disabled - url_launcher.launchUrl opens external app; flag with context."

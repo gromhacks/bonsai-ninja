@@ -1,0 +1,8 @@
+{
+  "name": "bonsai/language-gauntlet",
+  "description": "Compiler and dataflow fixture",
+  "type": "project",
+  "require": {
+    "php": ">=8.0"
+  }
+}

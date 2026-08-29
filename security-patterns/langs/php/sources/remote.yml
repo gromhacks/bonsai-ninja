@@ -66,9 +66,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_FILES;;\n}\n"
   description: $_FILES - uploaded file metadata; name is client-controlled.
 - id: php.source.superglobal_server
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: php
   trust: remote
   tag: http-input
@@ -93,7 +91,7 @@
         return $_SERVER["SERVER_SOFTWARE"];
       }
     expect_no_match: true
-  description: "Disabled pending exact static-subscript source anchors: only HTTP_*, request URI/query/path/content fields, and REMOTE_ADDR are client-facing. The current matcher sees the whole $_SERVER base but cannot constrain a source match to the proven static key, so treating every server/process metadata key as remote input would be incorrect."
+  description: "Exact static $_SERVER request fields: HTTP_*, content headers, request URI/query/path, and REMOTE_ADDR. Server/process metadata keys remain excluded by the compiler-projected key regex."
 - id: php.source.php_input_stream
   enabled: true
   language: php
@@ -213,22 +211,6 @@
       $vars = filter_input_array(INPUT_ENV);
     expect_no_match: true
   description: "filter_input_array(INPUT_GET|INPUT_POST|INPUT_COOKIE, ...) - returns request-origin values. Per-field filter definitions are separate context-sensitive sanitizer evidence, not a reason to discard the source boundary."
-- id: php.source.symfony_request_get
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  trust: remote
-  tag: http-input
-  packages:
-  - symfony/http-foundation
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Request
-      - get
-  description: Disabled - adapters index local `$request->get(...)` calls by receiver name, not Symfony Request type facts; a bare `get` fallback would match unrelated APIs.
 - id: php.source.symfony_request_query_get
   enabled: true
   language: php
@@ -246,7 +228,6 @@
   - name: php.source.symfony_request_query_get example
     code: |
       <?php
-      use symfony\httpfoundation;
       use symfony\httpfoundation;
       use symfony\http-foundation;
       function example($input, $url, $id, $payload, $request) {
@@ -278,11 +259,18 @@
     code: |
       <?php
       use symfony\httpfoundation;
-      use symfony\httpfoundation;
       use symfony\http-foundation;
       function example($input, $url, $id, $payload, $request) {
         $request->get($input);
       }
+  - name: zero argument request get is not remote input
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      function example($request) {
+        return $request->get();
+      }
+    expect_no_match: true
   description: 'Symfony/Yii request->get - request body/query accessor. Signature: `get($key, $default = null)`; `min_args: 1` rejects unrelated 0-arg `request->get()` decoys (container.get, Map.get accessors).'
   imports:
   - symfony
@@ -305,7 +293,6 @@
   - name: php.source.symfony_request_headers_get example
     code: |
       <?php
-      use symfony\httpfoundation;
       use symfony\httpfoundation;
       use symfony\http-foundation;
       function example($input, $url, $id, $payload, $request) {
@@ -334,7 +321,6 @@
     code: |
       <?php
       use symfony\httpfoundation;
-      use symfony\httpfoundation;
       use symfony\http-foundation;
       function example($input, $url, $id, $payload, $request) {
         $cookies->get($input);
@@ -361,7 +347,6 @@
   - name: php.source.symfony_request_files_get example
     code: |
       <?php
-      use symfony\httpfoundation;
       use symfony\httpfoundation;
       use symfony\http-foundation;
       function example($input, $url, $id, $payload, $request) {
@@ -392,7 +377,6 @@
   - name: php.source.uploaded_file_client_original_name example
     code: |
       <?php
-      use symfony\httpfoundation;
       use symfony\httpfoundation;
       use symfony\http-foundation;
       function example($file) {
@@ -436,7 +420,6 @@
     code: |
       <?php
       use psr\httpmessage;
-      use psr\httpmessage;
       use psr\http-message;
       function example($uploadedFile) {
         return $uploadedFile->getClientFilename();
@@ -474,7 +457,6 @@
     code: |
       <?php
       use symfony\httpfoundation;
-      use symfony\httpfoundation;
       use symfony\http-foundation;
       function example($input, $url, $id, $payload, $request) {
         $server->get($input);
@@ -502,7 +484,6 @@
     code: |
       <?php
       use symfony\httpfoundation;
-      use symfony\httpfoundation;
       use symfony\http-foundation;
       function example($input, $url, $id, $payload, $request) {
         $attributes->get($input);
@@ -529,7 +510,6 @@
   - name: php.source.symfony_request_get_content example
     code: |
       <?php
-      use symfony\httpfoundation;
       use symfony\httpfoundation;
       use symfony\http-foundation;
       function example($input, $url, $id, $payload, $request) {
@@ -567,7 +547,6 @@
   - name: php.source.symfony_request_get_payload example
     code: |
       <?php
-      use symfony\httpfoundation;
       use symfony\httpfoundation;
       function example($input, $url, $id, $payload, $request) {
         return $request->getPayload();
@@ -609,6 +588,17 @@
         $x = $request->input('name');
         return $x;
       }
+  - name: unrelated typed input method is not Laravel request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      class Console {
+        public function input($name) { return "local"; }
+      }
+      function handle(Console $console) {
+        return $console->input('name');
+      }
+    expect_no_match: true
   description: "Laravel/Lumen Illuminate Request.input() - request parameter read on a typed Request receiver (covers both Laravel and Lumen, which reuse Illuminate\\Http\\Request)."
 
   imports:
@@ -902,20 +892,23 @@
   trust: remote
   tag: http-input
   packages:
+  - psr/http-message
   - slim/slim
+  - laminas/laminas-diactoros
+  - mezzio/mezzio
   match:
     kind: call
     callee:
-      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*\\.getQueryParams$"
+      name: getQueryParams
   constraints:
+  - receiver_type_in: [ServerRequestInterface]
   - max_args: 0
   match_examples:
   - name: php.source.slim_request_get_params example
     code: |
       <?php
-      use slim\slim;
-      use slim\slim;
-      function example($input, $url, $id, $payload, $request) {
+      use Psr\Http\Message\ServerRequestInterface as Incoming;
+      function example(Incoming $request) {
         return $request->getQueryParams();
       }
     expect_match_text:
@@ -923,31 +916,56 @@
   - name: php.source.slim_request_get_params negative arity boundary
     code: |
       <?php
-      use slim\slim;
-      function example($request) {
+      use Psr\Http\Message\ServerRequestInterface as Incoming;
+      function example(Incoming $request) {
         return $request->getQueryParams($request);
       }
     expect_no_match: true
-  description: Slim PSR-7 ServerRequestInterface::getQueryParams() on local request receivers; receiver-regex match is package/import gated.
-  imports:
-  - slim\slim
-  - slim
+  - name: unrelated same-spelled query accessor is not PSR-7 input
+    code: |
+      <?php
+      class QueryBag { function getQueryParams() { return []; } }
+      function example(QueryBag $request) {
+        return $request->getQueryParams();
+      }
+    expect_no_match: true
+  description: "PSR-7 ServerRequestInterface::getQueryParams() on a compiler-typed inbound request; the imported interface may use any local alias."
+  imports: [Psr, Psr\Http\Message]
 - id: php.source.slim_request_get_body
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   trust: remote
   tag: http-input
   packages:
   - slim/slim
+  - psr/http-message
+  - laminas/laminas-diactoros
+  - mezzio/mezzio
   match:
     kind: call
     callee:
-      attribute:
-      - Request
-      - getBody
-  description: Disabled - typed receiver matching does not work for local `$request->getBody()` calls, and bare `getBody` is too broad.
+      name: getBody
+  constraints:
+  - receiver_type_in: [ServerRequestInterface]
+  - max_args: 0
+  match_examples:
+  - name: PSR-7 request body stream
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      function handle(ServerRequestInterface $request) {
+          return $request->getBody()->getContents();
+      }
+    expect_match_text: [$request.getBody]
+  - name: unrelated body provider is not inbound request input
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      class Document { function getBody() { return "local"; } }
+      function helper(Document $document) { return $document->getBody(); }
+    expect_no_match: true
+  description: "PSR-7 ServerRequestInterface::getBody() - inbound request body stream. This legacy Slim rule id now uses compiler receiver typing and covers every PSR-7 implementation without matching unrelated getBody methods."
+  imports: [Psr, Psr\Http\Message]
 - id: php.source.slim_request_parsed
   enabled: true
   language: php
@@ -965,7 +983,6 @@
   - name: php.source.slim_request_parsed example
     code: |
       <?php
-      use slim\slim;
       use slim\slim;
       function example($input, $url, $id, $payload, $request) {
         return $request->getParsedBody();
@@ -1002,7 +1019,6 @@
     code: |
       <?php
       use codeigniter4\framework;
-      use codeigniter4\framework;
       function example($input, $url, $id, $payload, $request) {
         $input->post($input);
       }
@@ -1027,7 +1043,6 @@
   - name: php.source.codeigniter_input_get example
     code: |
       <?php
-      use codeigniter4\framework;
       use codeigniter4\framework;
       function example($input, $url, $id, $payload, $request) {
         $input->get($input);
@@ -1054,7 +1069,6 @@
     code: |
       <?php
       use codeigniter4\framework;
-      use codeigniter4\framework;
       function example($input, $url, $id, $payload, $request) {
         $input->cookie($input);
       }
@@ -1079,7 +1093,6 @@
   - name: php.source.codeigniter_input_server example
     code: |
       <?php
-      use codeigniter4\framework;
       use codeigniter4\framework;
       function example($input, $url, $id, $payload, $request) {
         $input->server($input);
@@ -1108,10 +1121,17 @@
     code: |
       <?php
       use cakephp\cakephp;
-      use cakephp\cakephp;
       function example($input, $url, $id, $payload, $request) {
         $request->getData($input);
       }
+  - name: cake data accessor rejects an unrelated overload
+    code: |
+      <?php
+      use cakephp\cakephp;
+      function example($request) {
+        return $request->getData("name", null, true);
+      }
+    expect_no_match: true
   description: 'CakePHP $this->request->getData. Signature `getData(?string $name = null, $default = null)`; `max_args: 2` rejects same-name decoys with extra args.'
   imports:
   - cakephp\cakephp
@@ -1136,30 +1156,21 @@
     code: |
       <?php
       use cakephp\cakephp;
-      use cakephp\cakephp;
       function example($input, $url, $id, $payload, $request) {
         $request->getQuery($input);
       }
+  - name: cake query accessor rejects an unrelated overload
+    code: |
+      <?php
+      use cakephp\cakephp;
+      function example($request) {
+        return $request->getQuery("name", null, true);
+      }
+    expect_no_match: true
   description: 'CakePHP $this->request->getQuery. Same `getQuery(?string $name = null, $default = null)` shape as getData; `max_args: 2` rejects unrelated overloads.'
   imports:
   - cakephp\cakephp
   - cakephp
-- id: php.source.yii_request_get
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  trust: remote
-  tag: http-input
-  packages:
-  - yiisoft/yii2
-  match:
-    kind: call
-    callee:
-      attribute:
-      - request
-      - get
-  description: Disabled duplicate - same `request.get` shape as php.source.symfony_request_request_get; Yii package metadata is merged there.
 - id: php.source.yii_request_post
   enabled: true
   language: php
@@ -1180,29 +1191,21 @@
     code: |
       <?php
       use yiisoft\yii2;
-      use yiisoft\yii2;
       function example($input, $url, $id, $payload, $request) {
         $request->post($input);
       }
+  - name: yii post accessor rejects an unrelated overload
+    code: |
+      <?php
+      use yiisoft\yii2;
+      function example($request) {
+        return $request->post("name", null, true);
+      }
+    expect_no_match: true
   description: 'Yii request->post. Signature `post($name = null, $defaultValue = null)`; `max_args: 2` rejects same-name decoys with extra args.'
   imports:
   - yiisoft\yii2
   - yiisoft
-- id: php.source.wordpress_get
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: php.source.superglobal_get
-  language: php
-  trust: remote
-  tag: http-input
-  packages:
-  - wordpress
-  match:
-    kind: read
-    target:
-      name: _GET
-  description: Disabled duplicate - covered by superglobal_get.
 - id: php.source.getallheaders
   enabled: true
   language: php
@@ -1257,43 +1260,10 @@
     code: |
       <?php
       use wordpress;
-      use wordpress;
       function example($input, $url, $id, $payload, $request) {
         get_query_var($input);
       }
   description: WordPress get_query_var() - returns a public query-var resolved from the URL/$_GET; remote input passthrough.
-- id: php.source.laravel_auth_user
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  trust: remote
-  tag: http-input
-  packages:
-  - laravel/framework
-  match:
-    kind: call
-    callee:
-      name: auth
-  description: Disabled - auth()->user() returns the authenticated identity; values are session-bound but identity fields (name, email) are user-editable. Enable in projects that treat identity as untrusted; currently off because bare `auth` would match unrelated helpers and the chain `auth()->user()->name` resolves through the typed-receiver path that the v1 adapter does not model.
-- id: php.source.lumen_request_input
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: php.source.laravel_request_input
-  language: php
-  trust: remote
-  tag: http-input
-  packages:
-  - laravel/lumen-framework
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Request
-      - input
-  description: "Subsumed by php.source.laravel_request_input: Lumen reuses Illuminate\\Http\\Request, so the now-enabled receiver-typed Laravel rule (imports: [Illuminate]) already covers `$request->input(...)` in Lumen apps."
-
 - id: php.source.graphql_resolver_args_param
   enabled: true
   language: php
@@ -1330,3 +1300,419 @@
       }
     expect_no_match: true
   description: "webonyx/graphql-php resolver resolve(..., $args) parameter - GraphQL caller-supplied arguments. Scoped to resolver method names to avoid tainting ordinary helpers named args."
+
+# PSR-7 and framework request accessors. API/package identity belongs in the
+# rulepack; the PHP adapter supplies only typed call and parameter facts.
+- id: php.source.psr7_server_params
+  enabled: true
+  language: php
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [header, query, path]
+  packages: [psr/http-message, slim/slim, laminas/laminas-diactoros, mezzio/mezzio]
+  match:
+    kind: call
+    callee:
+      name: getServerParams
+  constraints:
+  - receiver_type_in: [ServerRequestInterface]
+  - max_args: 0
+  match_examples:
+  - name: PSR-7 server request parameters
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      function handle(ServerRequestInterface $request) {
+          return $request->getServerParams();
+      }
+    expect_match_text: [$request.getServerParams]
+  - name: unrelated server parameter accessor
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      class Config { function getServerParams() { return ["local"]; } }
+      function helper(Config $config) { return $config->getServerParams(); }
+    expect_no_match: true
+  description: "PSR-7 ServerRequestInterface::getServerParams() - request/server parameters including client-controlled HTTP headers, URI fields, and peer metadata. Compiler receiver typing keeps same-name application methods quiet."
+  imports: [Psr, Psr\Http\Message]
+
+- id: php.source.psr7_cookie_params
+  enabled: true
+  language: php
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [cookie]
+  packages: [psr/http-message, slim/slim, laminas/laminas-diactoros, mezzio/mezzio]
+  match:
+    kind: call
+    callee:
+      name: getCookieParams
+  constraints:
+  - receiver_type_in: [ServerRequestInterface]
+  - max_args: 0
+  match_examples:
+  - name: PSR-7 request cookies
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      function handle(ServerRequestInterface $request) {
+          return $request->getCookieParams();
+      }
+    expect_match_text: [$request.getCookieParams]
+  - name: response cookie builder is not request input
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      class Response { function getCookieParams() { return []; } }
+      function helper(Response $response) { return $response->getCookieParams(); }
+    expect_no_match: true
+  description: "PSR-7 ServerRequestInterface::getCookieParams() - client-supplied cookie mapping on a compiler-typed request receiver."
+  imports: [Psr, Psr\Http\Message]
+
+- id: php.source.psr7_uploaded_files
+  enabled: true
+  language: php
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [file, path]
+  packages: [psr/http-message, slim/slim, laminas/laminas-diactoros, mezzio/mezzio]
+  match:
+    kind: call
+    callee:
+      name: getUploadedFiles
+  constraints:
+  - receiver_type_in: [ServerRequestInterface]
+  - max_args: 0
+  match_examples:
+  - name: PSR-7 uploaded files
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      function handle(ServerRequestInterface $request) {
+          return $request->getUploadedFiles();
+      }
+    expect_match_text: [$request.getUploadedFiles]
+  - name: application upload registry is not an inbound request
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      class Registry { function getUploadedFiles() { return []; } }
+      function helper(Registry $registry) { return $registry->getUploadedFiles(); }
+    expect_no_match: true
+  description: "PSR-7 ServerRequestInterface::getUploadedFiles() - multipart upload objects and browser-controlled upload metadata."
+  imports: [Psr, Psr\Http\Message]
+
+- id: php.source.psr7_request_attribute
+  enabled: true
+  language: php
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [path]
+  packages: [psr/http-message, slim/slim, laminas/laminas-diactoros, mezzio/mezzio]
+  match:
+    kind: call
+    callee:
+      name: getAttribute
+  constraints:
+  - receiver_type_in: [ServerRequestInterface]
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: PSR-7 route attribute
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      function handle(ServerRequestInterface $request) {
+          return $request->getAttribute("route-id");
+      }
+    expect_match_text: [$request.getAttribute]
+  - name: untyped attribute bag is not automatically remote
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      class Record { function getAttribute($name) { return "local"; } }
+      function helper(Record $record) { return $record->getAttribute("id"); }
+    expect_no_match: true
+  description: "PSR-7 ServerRequestInterface::getAttribute(name) - route and middleware request attributes. Request typing is required because application object attributes are not an input boundary."
+  imports: [Psr, Psr\Http\Message]
+
+- id: php.source.psr7_request_attributes
+  enabled: true
+  language: php
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [path]
+  packages: [psr/http-message, slim/slim, laminas/laminas-diactoros, mezzio/mezzio]
+  match:
+    kind: call
+    callee:
+      name: getAttributes
+  constraints:
+  - receiver_type_in: [ServerRequestInterface]
+  - max_args: 0
+  match_examples:
+  - name: all PSR-7 request attributes
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      function handle(ServerRequestInterface $request) {
+          return $request->getAttributes();
+      }
+    expect_match_text: [$request.getAttributes]
+  - name: application model attributes are not a request boundary
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      class Model { function getAttributes() { return ["local"]; } }
+      function helper(Model $model) { return $model->getAttributes(); }
+    expect_no_match: true
+  description: "PSR-7 ServerRequestInterface::getAttributes() - request attribute map, including route captures supplied by a router."
+  imports: [Psr, Psr\Http\Message]
+
+- id: php.source.psr7_request_header
+  enabled: true
+  language: php
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [header]
+  packages: [psr/http-message, slim/slim, laminas/laminas-diactoros, mezzio/mezzio]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(getHeader|getHeaderLine)$"
+  constraints:
+  - receiver_type_in: [ServerRequestInterface]
+  - arg_count: 1
+  match_examples:
+  - name: PSR-7 request header
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      function handle(ServerRequestInterface $request) {
+          return $request->getHeaderLine("X-Forwarded-Host");
+      }
+    expect_match_text: [$request.getHeaderLine]
+  - name: response-like header accessor is not inbound input
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      class Message { function getHeaderLine($name) { return "local"; } }
+      function helper(Message $message) { return $message->getHeaderLine("X-Test"); }
+    expect_no_match: true
+  description: "PSR-7 ServerRequestInterface::getHeader()/getHeaderLine() - one client-supplied request header on a typed inbound request."
+  imports: [Psr, Psr\Http\Message]
+
+- id: php.source.psr7_request_headers
+  enabled: true
+  language: php
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [header]
+  packages: [psr/http-message, slim/slim, laminas/laminas-diactoros, mezzio/mezzio]
+  match:
+    kind: call
+    callee:
+      name: getHeaders
+  constraints:
+  - receiver_type_in: [ServerRequestInterface]
+  - max_args: 0
+  match_examples:
+  - name: all PSR-7 request headers
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      function handle(ServerRequestInterface $request) {
+          return $request->getHeaders();
+      }
+    expect_match_text: [$request.getHeaders]
+  - name: unrelated message headers are not request input
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      class Mail { function getHeaders() { return ["local"]; } }
+      function helper(Mail $mail) { return $mail->getHeaders(); }
+    expect_no_match: true
+  description: "PSR-7 ServerRequestInterface::getHeaders() - all client-supplied inbound request headers."
+  imports: [Psr, Psr\Http\Message]
+
+- id: php.source.psr7_request_uri
+  enabled: true
+  language: php
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [url, path, query]
+  packages: [psr/http-message, slim/slim, laminas/laminas-diactoros, mezzio/mezzio]
+  match:
+    kind: call
+    callee:
+      name: getUri
+  constraints:
+  - receiver_type_in: [ServerRequestInterface]
+  - max_args: 0
+  match_examples:
+  - name: PSR-7 inbound request URI
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      function handle(ServerRequestInterface $request) {
+          return $request->getUri();
+      }
+    expect_match_text: [$request.getUri]
+  - name: application URL holder is not a request boundary
+    code: |
+      <?php
+      use Psr\Http\Message\ServerRequestInterface;
+      class Link { function getUri() { return "https://example.test"; } }
+      function helper(Link $link) { return $link->getUri(); }
+    expect_no_match: true
+  description: "PSR-7 ServerRequestInterface::getUri() - the client-requested URI object; taint propagates through subsequent URI component accessors."
+  imports: [Psr, Psr\Http\Message]
+
+- id: php.source.slim_route_args
+  enabled: true
+  language: php
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [path]
+  packages: [slim/slim]
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.(get|post|put|patch|delete|options|any|map)$'
+  constraints:
+  - receiver_type_in: [App]
+  - arg_count: 2
+  - arg_is_inline_callback: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [2]
+  match_examples:
+  - name: Slim route argument array
+    code: |
+      <?php
+      use Slim\Factory\AppFactory;
+      use Psr\Http\Message\ServerRequestInterface;
+      use Psr\Http\Message\ResponseInterface;
+      $app = AppFactory::create();
+      $app->get('/users/{id}', function (ServerRequestInterface $request, ResponseInterface $response, array $args) {
+          return $args['id'];
+      });
+    expect_match_text: [$app.get]
+  - name: unrelated get callback in a Slim project is not a route boundary
+    code: |
+      <?php
+      use Slim\Factory\AppFactory;
+      $cache = new LocalCache();
+      $cache->get('/users/{id}', function ($left, $right, array $options) { return $options; });
+    expect_no_match: true
+  description: "Slim App route registration supplies route captures as inline callback parameter two. Compiler factory typing proves the receiver is Slim App; callback-source semantics taints the parameter without relying on its spelling."
+  imports: [Slim, Psr]
+
+- id: php.source.phalcon_request_query
+  enabled: true
+  language: php
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [query]
+  packages: [phalcon/cphalcon]
+  match:
+    kind: call
+    callee:
+      attribute: [request, getQuery]
+  constraints:
+  - max_args: 4
+  match_examples:
+  - name: Phalcon request query input
+    code: |
+      <?php
+      use Phalcon\Mvc\Controller;
+      class SearchController extends Controller {
+          public function indexAction() { return $this->request->getQuery('q'); }
+      }
+  - name: Phalcon response namespace is not request query input
+    code: |
+      <?php
+      use Phalcon\Mvc\Controller;
+      class SearchController extends Controller {
+          public function indexAction() { return $this->response->getQuery('q'); }
+      }
+    expect_no_match: true
+  description: "Phalcon request->getQuery(name, filters, default, notAllowEmpty) - query-string input on the framework request property."
+  imports: [Phalcon]
+
+- id: php.source.phalcon_request_post
+  enabled: true
+  language: php
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [form]
+  packages: [phalcon/cphalcon]
+  match:
+    kind: call
+    callee:
+      attribute: [request, getPost]
+  constraints:
+  - max_args: 4
+  match_examples:
+  - name: Phalcon request body input
+    code: |
+      <?php
+      use Phalcon\Mvc\Controller;
+      class FormController extends Controller {
+          public function saveAction() { return $this->request->getPost('name'); }
+      }
+  - name: unrelated post reader is not a Phalcon request
+    code: |
+      <?php
+      use Phalcon\Mvc\Controller;
+      class Store { function getPost($id) { return 'local'; } }
+      function helper(Store $store) { return $store->getPost(1); }
+    expect_no_match: true
+  description: "Phalcon request->getPost(name, filters, default, notAllowEmpty) - form/body input from the inbound request."
+  imports: [Phalcon]
+
+- id: php.source.phalcon_request_header
+  enabled: true
+  language: php
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [header]
+  packages: [phalcon/cphalcon]
+  match:
+    kind: call
+    callee:
+      attribute: [request, getHeader]
+  constraints:
+  - arg_count: 1
+  match_examples:
+  - name: Phalcon inbound header
+    code: |
+      <?php
+      use Phalcon\Mvc\Controller;
+      class ApiController extends Controller {
+          public function indexAction() { return $this->request->getHeader('X-Test'); }
+      }
+  - name: response header lookup is not inbound request input
+    code: |
+      <?php
+      use Phalcon\Mvc\Controller;
+      class ApiController extends Controller {
+          public function indexAction() { return $this->response->getHeader('X-Test'); }
+      }
+    expect_no_match: true
+  description: "Phalcon request->getHeader(name) - one client-supplied inbound request header."
+  imports: [Phalcon]

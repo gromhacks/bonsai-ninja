@@ -73,6 +73,9 @@ impl Default for Vfs {
 #[derive(Debug, Default)]
 struct Inner {
     by_path: AHashMap<PathBuf, FileId>,
+    /// Candidate directory for exact compiler include/module suffix lookup.
+    /// Basenames narrow a suffix query without scanning every source file.
+    by_basename: AHashMap<PathBuf, Vec<FileId>>,
     files: Vec<Option<FileSnapshot>>,
     edits_since: Vec<Vec<TextEdit>>,
     revision: u64,
@@ -137,6 +140,7 @@ impl Vfs {
         inner.files.push(Some(snapshot));
         inner.edits_since.push(Vec::new());
         inner.by_path.insert(lookup_key, id);
+        insert_basename_candidate(&mut inner.by_basename, &path, id);
         inner.revision = inner.revision.wrapping_add(1);
         id
     }
@@ -193,11 +197,12 @@ impl Vfs {
         );
         inner.files[index] = Some(FileSnapshot {
             file_id,
-            path: Arc::new(path),
+            path: Arc::new(path.clone()),
             text,
             version: 0,
         });
         inner.by_path.insert(lookup_key, file_id);
+        insert_basename_candidate(&mut inner.by_basename, &path, file_id);
         inner.revision = inner.revision.wrapping_add(1);
         file_id
     }
@@ -210,6 +215,20 @@ impl Vfs {
         let mut inner = self.inner.write();
         let id = inner.by_path.remove(&lookup_key)?;
         let idx = id.raw() as usize;
+        let basename = inner
+            .files
+            .get(idx)
+            .and_then(Option::as_ref)
+            .map(|snapshot| canonical_basename_key(&snapshot.path));
+        if let Some(basename) = basename {
+            let remove_entry = inner.by_basename.get_mut(&basename).is_some_and(|candidates| {
+                candidates.retain(|candidate| *candidate != id);
+                candidates.is_empty()
+            });
+            if remove_entry {
+                inner.by_basename.remove(&basename);
+            }
+        }
         if let Some(slot) = inner.files.get_mut(idx) {
             *slot = None;
         }
@@ -282,6 +301,25 @@ impl Vfs {
         self.inner.read().by_path.get(&canonical_path_key(path)).copied()
     }
 
+    /// Resolve one exact path suffix when it identifies a unique VFS file.
+    ///
+    /// Native include lookup uses this only after the including file's local
+    /// directory fails. Ambiguity returns `None`; compiler consumers must not
+    /// guess a build include root.
+    pub fn unique_file_ending_with(&self, suffix: &Path) -> Option<(FileId, Arc<PathBuf>)> {
+        let inner = self.inner.read();
+        let candidates = inner.by_basename.get(&canonical_basename_key(suffix))?;
+        let canonical_suffix = canonical_path_key(suffix);
+        let mut matches = candidates.iter().filter_map(|file| {
+            let snapshot = inner.files.get(file.raw() as usize)?.as_ref()?;
+            canonical_path_key(&snapshot.path)
+                .ends_with(&canonical_suffix)
+                .then_some((*file, snapshot.path.clone()))
+        });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
     /// Return and clear the queued edits for a file. The parser calls this
     /// when it wants to incrementally reparse.
     pub fn take_edits(&self, file: FileId) -> Result<Vec<TextEdit>, VfsError> {
@@ -338,6 +376,19 @@ fn canonical_path_key(path: &Path) -> PathBuf {
         PathBuf::from(path.to_string_lossy().to_lowercase())
     } else {
         path.to_path_buf()
+    }
+}
+
+fn canonical_basename_key(path: &Path) -> PathBuf {
+    path.file_name()
+        .map(PathBuf::from)
+        .map_or_else(PathBuf::new, |name| canonical_path_key(&name))
+}
+
+fn insert_basename_candidate(by_basename: &mut AHashMap<PathBuf, Vec<FileId>>, path: &Path, file: FileId) {
+    let candidates = by_basename.entry(canonical_basename_key(path)).or_default();
+    if !candidates.contains(&file) {
+        candidates.push(file);
     }
 }
 

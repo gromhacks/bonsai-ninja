@@ -14,7 +14,6 @@
   - name: generated direct match
     code: |
       use percent_encoding;
-      use percent_encoding;
       use percent_encoding::dummy;
       fn example() {
           let target = "tainted";
@@ -262,21 +261,6 @@
       }
     expect_match_text: ["shell_escape::escape"]
   description: "shell_escape::escape - POSIX shell argument escaping before interpolating into a shell command string."
-- id: rust.sanitizer.canonicalize
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: path-sanitize
-  packages: [std]
-  match:
-    kind: call
-    callee:
-      attribute: [fs, canonicalize]
-  description: "Disabled - path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
-    traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer
-    must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component).
-    Marking these as sanitizers produced false negatives on attacker-controlled paths."
 - id: rust.sanitizer.strip_prefix
   enabled: true
   language: rust
@@ -414,20 +398,6 @@
       }
     expect_match_text: ["usize::from_str"]
   description: "usize::from_str - parsed integer; narrows string to numeric domain (common for index/length parsing)."
-- id: rust.sanitizer.jwt_decode_with_validation
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: rust
-  tag: jwt-verify
-  packages: [jsonwebtoken]
-  match:
-    kind: call
-    callee:
-      attribute: [jsonwebtoken, decode]
-  description: "Disabled - same `[jsonwebtoken, decode]` attribute chain as rust.jwt.jsonwebtoken_decode sink. Without structural
-    inspection of the Validation struct we cannot tell strict from permissive configs; defaulting to the sink (flag everywhere
-    and let the analyst verify Validation) is safer."
 - id: rust.sanitizer.v_htmlescape_escape
   enabled: true
   language: rust
@@ -558,28 +528,6 @@
     expect_no_match: true
   description: "str::starts_with(\"/...\") - same-origin redirect/path guard for slash-rooted local paths."
 
-- id: rust.sanitizer.allowlist_contains
-  enabled: false
-  language: rust
-  tag: allowlist-validate
-  packages: [std]
-  match:
-    kind: call
-    callee:
-      regex: "\\.(contains|contains_key)$"
-  match_examples:
-  - name: set contains allowlist
-    code: |
-      use std::process::Command;
-      fn example(input: &str) {
-          allowed.contains(input);
-      }
-    expect_match_text: [allowed.contains]
-  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Allowlist-named
-    HashSet/BTreeSet/HashMap membership check - validates a value against a finite set or map of accepted keys."
-
-  disabled_reason:
-    code: over-broad
 - id: rust.sanitizer.sqlx_query_as_bind
   enabled: true
   language: rust
@@ -829,6 +777,39 @@
 # pointer (the canonical raw-pointer aliasing UAF shape). Tagged
 # `passthrough-transform` (canonical passthrough family); the engine
 # acts on `call_result_passthrough_args`.
+- id: rust.passthrough.bytes_to_vec
+  enabled: true
+  language: rust
+  tag: passthrough-transform
+  packages: [axum, bytes]
+  imports: [axum, bytes]
+  match:
+    kind: call
+    callee:
+      regex: "\\.to_vec$"
+  constraints:
+  - receiver_type_in: [Bytes, "bytes::Bytes"]
+  - max_args: 0
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: typed HTTP bytes copied into a vector
+    code: |
+      use axum::body::Bytes;
+      fn copy(body: Bytes) {
+          consume(body.to_vec());
+      }
+    expect_match_text: [body.to_vec]
+  - name: unrelated local to vec method is not a bytes transfer
+    code: |
+      struct Token;
+      impl Token { fn to_vec(&self) -> Vec<u8> { vec![] } }
+      fn copy(token: Token) {
+          consume(token.to_vec());
+      }
+    expect_no_match: true
+  description: "bytes::Bytes::to_vec copies the receiver bytes into an owned vector without changing their trust; the imported typed receiver prevents a generic same-named application method from becoming a taint transform."
+
 - id: rust.passthrough.box_into_raw
   enabled: true
   language: rust
@@ -890,3 +871,36 @@
       }
     expect_match_text: ["CString::into_raw"]
   description: "CString::into_raw(s) - leaks the C string to a raw pointer aliasing its buffer; taint flows through."
+- id: rust.sanitizer.xml_doctype_terminal_rejection
+  enabled: true
+  language: rust
+  tag: xxe-sanitizer
+  category: validation
+  match:
+    kind: call
+    callee:
+      name: contains
+  constraints:
+  - any_arg_matches_regex: '(?i)^["'']<!\s*DOCTYPE'
+  analysis_semantics:
+    sanitizer_guard:
+      use_receiver: true
+      require_terminal_rejection: true
+      accepted_predicate_value: false
+  match_examples:
+  - name: DOCTYPE rejection before XML use
+    code: |
+      fn parse(input: &str) {
+          if input.contains("<!DOCTYPE") { return; }
+          consume_xml(input);
+      }
+    expect_match_text: [input.contains]
+  - name: unrelated substring predicate is not an XML guard match
+    code: |
+      fn parse(input: &str) {
+          let observed = input.contains("note");
+          consume_xml(input);
+          consume(observed);
+      }
+    expect_no_match: true
+  description: "A dominating terminal rejection of the XML DOCTYPE marker prevents external-subset processing. The exact marker and XXE meaning remain rule data; the engine proves receiver identity and control flow."

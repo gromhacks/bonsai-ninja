@@ -53,7 +53,7 @@ fn bin_path() -> Option<PathBuf> {
 }
 
 fn ws() -> PathBuf {
-    repo_root().join("examples/python/micro")
+    repo_root().join("test-fixtures/languages/python/micro")
 }
 
 fn page_cache_test_lock() -> MutexGuard<'static, ()> {
@@ -1133,7 +1133,10 @@ fn inspect_truncation_hints_resume_next_page() {
     // actionable instruction silently.
     let Some(out) = run(&[
         "inspect",
-        repo_root().join("examples/python/complex").to_str().unwrap(),
+        repo_root()
+            .join("test-fixtures/languages/python/complex")
+            .to_str()
+            .unwrap(),
         "--query",
         "request",
         "--context",
@@ -1224,7 +1227,7 @@ fn all_flag_uncaps_inspect_occurrence_table() {
     // under a tight budget. Lossless guarantee for the escape
     // hatch.
     let ws_str = repo_root()
-        .join("examples/python/complex")
+        .join("test-fixtures/languages/python/complex")
         .to_str()
         .unwrap()
         .to_string();
@@ -1292,7 +1295,7 @@ fn reported_tokens_match_observed_bytes_for_inspect() {
 // ---------------------------------------------------------------------------
 
 fn complex_ws() -> PathBuf {
-    repo_root().join("examples/python/complex")
+    repo_root().join("test-fixtures/languages/python/complex")
 }
 
 struct TempWorkspace {

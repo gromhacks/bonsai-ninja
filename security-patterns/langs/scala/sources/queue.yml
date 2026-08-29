@@ -58,17 +58,31 @@
   description: "Alpakka AMQP ReadResult parameter - RabbitMQ delivery proven by its declared stream result type."
 
 - id: scala.queue.aws_sqs_message
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: scala.aws.lambda_event
+  enabled: true
   language: scala
   trust: service
   tag: event-input
   payload_types: [event]
   frameworks: [aws-sqs]
+  packages: ["software.amazon.awssdk:sqs", "com.amazonaws:aws-java-sdk-sqs"]
+  imports: [software.amazon.awssdk.services.sqs.model, com.amazonaws.services.sqs.model]
   match:
     kind: param
     target:
-      name: sqsEvent
-  description: "Subsumed by scala.aws.lambda_event, which matches the first RequestHandler input regardless of its concrete AWS event type or variable name."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in:
+      - software.amazon.awssdk.services.sqs.model.Message
+      - com.amazonaws.services.sqs.model.Message
+      - Message
+  match_examples:
+  - name: AWS SQS message parameter
+    code: |
+      import software.amazon.awssdk.services.sqs.model.Message
+      object Consumer { def handle(message: Message): Unit = () }
+    expect_match_text: [message]
+  - name: same parameter name without SQS type evidence
+    code: |
+      import software.amazon.awssdk.services.sqs.model.Message
+      object Consumer { def handle(message: String): Unit = () }
+    expect_no_match: true
+  description: "AWS SDK SQS Message parameter - queue payload proven by its declared provider type, independent of Lambda handler events."

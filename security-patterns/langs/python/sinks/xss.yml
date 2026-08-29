@@ -1,28 +1,3 @@
-- id: python.xss.flask_render_template_string
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: xss
-  severity: high
-  category: template-render
-  frameworks:
-  - flask
-  - jinja2
-  packages:
-  - flask
-  - jinja2
-  imports:
-  - flask
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - flask
-      - render_template_string
-  description: "Disabled duplicate - flask.render_template_string is classified as SSTI in python.template.flask_render_template_string; that finding is the higher-severity root cause."
 - id: python.xss.markupsafe_markup
   enabled: true
   language: python
@@ -526,3 +501,41 @@
           return text
     expect_no_match: true
   description: Falcon response.text/body assignment with string-built HTML - tainted content is sent in the response body.
+
+- id: python.xss.jinja2_environment_autoescape_false
+  enabled: true
+  language: python
+  tag: xss
+  category: source-independent
+  severity: high
+  packages: [jinja2]
+  imports: [jinja2]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [jinja2, Environment]
+  constraints:
+  - keyword_arg_equals: {name: autoescape, value: "False"}
+  match_examples:
+  - name: jinja environment explicitly disables automatic HTML escaping
+    code: |
+      import jinja2
+      def environment():
+          return jinja2.Environment(autoescape=False)
+    expect_match_text: [jinja2.Environment]
+  - name: jinja environment keeps automatic HTML escaping enabled
+    code: |
+      import jinja2
+      def environment():
+          return jinja2.Environment(autoescape=True)
+    expect_no_match: true
+  - name: application Environment constructor is not Jinja
+    code: |
+      import jinja2
+      class Environment:
+          def __init__(self, **options): pass
+      def environment():
+          return Environment(autoescape=False)
+    expect_no_match: true
+  description: "jinja2.Environment(autoescape=False) disables the template engine's automatic HTML escaping."

@@ -103,22 +103,6 @@
           return response
     expect_no_match: true
   description: "Django `response[name] = value` on a typed HttpResponse receiver - a tainted header name or value is CRLF/header injection. The adapter lowers subscript assignment as a typed indexed-write operation; no provider API spelling is embedded in shared analysis."
-- id: python.header.fastapi_response_headers
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: header-injection
-  severity: high
-  packages:
-  - fastapi
-  cwe:
-  - CWE-113
-  match:
-    kind: write
-    target:
-      name: headers
-  description: "Disabled - matched any assignment to a variable called `headers`, which is ubiquitous across HTTP-client and server code. Re-enable once attribute-chain writes (`response.headers = ...`) are matchable."
 - id: python.header.starlette_response_set_cookie
   enabled: true
   language: python
@@ -183,24 +167,6 @@
           return RequestHandler.set_header('X-Name', 'safe')
     expect_no_match: true
   description: Tornado RequestHandler.set_header.
-- id: python.header.aiohttp_headers_assign
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: header-injection
-  severity: medium
-  packages:
-  - aiohttp
-  cwe:
-  - CWE-113
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Response
-      - headers
-  description: "Disabled - `response.headers[k] = v` is a read+subscript-assign, not an attribute call; this rule's match shape never fires."
 - id: python.header.response_headers_location_write
   enabled: true
   language: python
@@ -214,7 +180,6 @@
   - pyramid
   cwe:
   - CWE-113
-  - CWE-444
   match:
     kind: write
     target:
@@ -246,9 +211,7 @@
       def redirect(response, user_input):
           response.headers["X-Share-Id"] = user_input
     expect_no_match: true
-  description: "response.headers['Location'] = tainted - manual redirect/header assignment can produce response splitting or tainted Location redirects. Merged collision aliases: python.smuggle.set_dual_cl_te_headers."
-  aliases:
-  - python.smuggle.set_dual_cl_te_headers
+  description: "response.headers['Location'] = tainted - manual redirect/header assignment can produce response splitting or tainted Location redirects."
 - id: python.header.response_headers_content_disposition_write
   enabled: true
   language: python
@@ -281,11 +244,11 @@
           response.headers["Content-Disposition"] = cd
     expect_match_text:
     - response.headers.Content-Disposition
-  - name: literal content disposition negative
+  - name: unrelated response header negative
     code: |
       from aiohttp import web
-      def set_download_header(response):
-          response.headers["Content-Disposition"] = 'attachment; filename="report.txt"'
+      def set_download_header(response, user_input):
+          response.headers["X-Download-Name"] = user_input
     expect_no_match: true
   description: "response.headers['Content-Disposition'] = tainted - CRLF in filenames or disposition parameters can split HTTP response headers."
 - id: python.header.response_headers_update
@@ -425,17 +388,3 @@
           return self.set_header('X-Name', 'safe')
     expect_no_match: true
   description: "Tornado RequestHandler.set_header(name, value) instance form - tainted values can produce response splitting."
-- id: python.header.set_cookie_generic
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: header-injection
-  severity: medium
-  cwe:
-  - CWE-113
-  match:
-    kind: call
-    callee:
-      name: set_cookie
-  description: "Disabled - generic set_cookie; many frameworks already validate."

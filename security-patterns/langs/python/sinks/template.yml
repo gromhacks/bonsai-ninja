@@ -225,41 +225,6 @@
           return mako.TemplateLookup('safe', '{{ user }}')
     expect_no_match: true
   description: mako.lookup.TemplateLookup with tainted directories.
-- id: python.template.mako_template_render
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: python
-  tag: xss
-  category: source-independent
-  severity: high
-  packages:
-  - mako
-  imports:
-  - mako
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      regex: ^[a-z_][A-Za-z0-9_]*\.render$
-  constraints:
-  - any_arg_tainted: true
-  match_examples:
-  - name: mako template render user value
-    code: |
-      import mako
-      def example(template, user_input):
-          return template.render(name=user_input)
-    expect_match_text:
-    - template.render
-  - name: mako template render literal negative
-    code: |
-      import mako
-      def example(template):
-          return template.render(name="safe")
-    expect_no_match: true
-  description: "Disabled - Template.render receives context data, not template source. Re-enable only with exact receiver typing plus template-output escape facts; the enabled Template constructor rule reports SSTI at compilation."
 - id: python.template.chameleon_pagetemplate
   enabled: true
   language: python
@@ -402,22 +367,6 @@
           return template.Template('safe', '{{ user }}')
     expect_no_match: true
   description: django.template.Template(tainted).
-- id: python.template.string_template_substitute
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: ssti
-  severity: low
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Template
-      - substitute
-  description: "Disabled - string.Template only does $var substitution; not RCE."
 - id: python.template.tornado_template_string
   enabled: true
   language: python
@@ -457,94 +406,6 @@
           return tornado.Template('safe', '{{ user }}')
     expect_no_match: true
   description: "tornado.template.Template(tainted) - Python in template tags."
-- id: python.template.cheetah_template
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: python
-  tag: ssti
-  severity: critical
-  packages:
-  - Cheetah3
-  cwe:
-  - CWE-94
-  - CWE-1336
-  match:
-    kind: new
-    callee:
-      name: Template
-  description: "Disabled - bare `Template(...)` collides with jinja2.Template / mako.Template / string.Template and many app-level classes named Template. Re-enable when a qualified-name match for `Cheetah.Template.Template` is wired up."
-- id: python.template.airflow_jinja_render
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: ssti
-  severity: high
-  packages:
-  - airflow
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Template
-      - render
-  description: "Disabled - Airflow Jinja templating; flag with op_kwargs source."
-- id: python.template.jinja2_environment_ctor
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: ssti
-  category: source-independent
-  severity: high
-  packages:
-  - jinja2
-  imports:
-  - jinja2
-  cwe:
-  - CWE-1336
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - jinja2
-      - Environment
-  match_examples:
-  - name: template jinja2 environment ctor
-    code: |
-      import jinja2
-      def example(user_input):
-          return jinja2.Environment(user_input, "{{ user }}")
-  description: "Disabled - constructing jinja2.Environment is configuration, not an SSTI flow. The enabled Environment.from_string rules report attacker-controlled template compilation at the actual execution boundary."
-  aliases:
-  - python.template.jinja2_environment_autoescape_off
-  - python.xss.jinja2_environment_autoescape_false
-  frameworks:
-  - jinja2
-- id: python.template.flask_render_template_string_msg
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.template.flask_render_template_string
-  language: python
-  tag: ssti
-  severity: critical
-  packages:
-  - flask
-  imports:
-  - flask
-  cwe:
-  - CWE-94
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      regex: ^render_template_string$
-  description: "Disabled duplicate of python.template.flask_render_template_string - alias expansion already covers `from flask import render_template_string`."
 - id: python.template.jinja2_native_environment
   enabled: true
   language: python
@@ -580,30 +441,6 @@
           return NativeEnvironment.from_string('safe', '{{ user }}')
     expect_no_match: true
   description: "jinja2.nativetypes.NativeEnvironment.from_string(tainted) - evaluates Python literal expressions in the template; SSTI -> arbitrary expr."
-- id: python.template.jinja2_environment_no_autoescape
-  enabled: true
-  language: python
-  tag: ssti
-  category: source-independent
-  severity: high
-  packages:
-  - jinja2
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Environment
-      - init
-  match_examples:
-  - name: template jinja2 environment no autoescape
-    code: |
-      import jinja2
-      def example(user_input):
-          return Environment.init(user_input, "autoescape=False")
-  description: "Environment init with autoescape=False - same XSS exposure."
-
 - id: python.template.jinja2_sandboxed_environment_from_string
   enabled: true
   language: python

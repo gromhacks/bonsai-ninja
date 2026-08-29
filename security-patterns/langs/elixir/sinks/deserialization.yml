@@ -33,20 +33,6 @@
     expect_no_match: true
   description: ":erlang.binary_to_term/2 with [:safe] - still requires structural validation of attacker-controlled terms. Also covers merged aliases: elixir.deser.binary_to_term_unsafe_arity1, elixir.deser.binary_to_term_unsafe_opts."
 
-- id: elixir.deser.term_to_binary_untrusted
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: elixir
-  tag: insecure-deserialization
-  severity: medium
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      regex: "^:erlang\\.term_to_binary$"
-  description: "Disabled - :erlang.term_to_binary is the encode direction and is not a sink on its own; kept for visibility when auditing round-trip flows that stash attacker data in caches."
-
 - id: elixir.deser.erlport_decode
   enabled: true
   language: elixir

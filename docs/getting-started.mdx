@@ -16,7 +16,11 @@ bonsai-ninja --version
 ```
 
 Cargo compiles the published source for the current host. The package embeds
-the same content-addressed default rulepack as the release archives.
+the same content-addressed default rulepack as the release archives. The first
+compiler-backed command for a language may fetch that host's pinned native
+Tree-sitter parser bundle into the user cache; later commands reuse the
+verified bundle. See [Platform And Architecture Support](platform-support.mdx)
+for the supported release targets and offline deployment options.
 Re-run the install command with `--force` to replace an older Cargo-installed
 release.
 
@@ -29,8 +33,9 @@ cargo build --release --locked -p bonsai-ninja
 
 ### Install from source on macOS or Linux
 
-The release binary contains the default security rulepack, so it can be
-installed and run from any directory without a companion data path:
+The release binary contains the default security rulepack, so security rules
+work from any directory without a companion data path. Native Tree-sitter
+parsers use the pinned platform-bundle delivery described below:
 
 ```bash
 cargo build --release --locked -p bonsai-ninja

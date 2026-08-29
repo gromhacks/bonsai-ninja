@@ -21,7 +21,6 @@
     code: |
       <?php
       use mongodb\mongodb;
-      use mongodb\mongodb;
       function example($input, $url, $id, $payload, $request) {
         Collection::find($payload);
       }
@@ -63,7 +62,6 @@
     code: |
       <?php
       use mongodb\mongodb;
-      use mongodb\mongodb;
       function example($input, $url, $id, $payload, $request) {
         Collection::aggregate($payload);
       }
@@ -102,7 +100,6 @@
     code: |
       <?php
       use mongodb\mongodb;
-      use mongodb\mongodb;
       function example($input, $url, $id, $payload, $request) {
         Database::command($payload);
       }
@@ -140,7 +137,6 @@
   - name: php.nosql.mongo_legacy_find example
     code: |
       <?php
-      use mongo;
       use mongo;
       function example($input, $url, $id, $payload, $request) {
         MongoCollection::find($payload);

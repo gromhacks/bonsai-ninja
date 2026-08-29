@@ -11,6 +11,10 @@
     kind: call
     callee:
       name: origins
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:"\*"|\x27\*\x27)$'
   match_examples:
   - name: ruby.cors.rack_cors_wildcard example
     code: |
@@ -18,5 +22,12 @@
       def example(input, url, id, payload, request, params)
         origins("*")
       end
+  - name: rack cors explicit origin negative
+    code: |
+      require "rack-cors"
+      def example
+        origins "https://app.example"
+      end
+    expect_no_match: true
   description: |-
-    rack-cors origins '*' - wildcard CORS allow-all.
+    rack-cors `origins "*"` permits every origin; the exact scalar argument keeps explicit origin allowlists quiet.

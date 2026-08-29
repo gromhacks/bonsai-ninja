@@ -142,27 +142,26 @@
     SQLite parameters."
 
 - id: objc.sanitizer.fmdb_parameter_dictionary
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: objc
   tag: sql-parameter
   packages: [fmdb]
   match:
     kind: call
     callee:
-      regex: "^(executeUpdate:withParameterDictionary:|executeQuery:withParameterDictionary:)$"
+      regex: "(?:^|\\.)(?:executeUpdate:withParameterDictionary:|executeQuery:withParameterDictionary:)$"
   match_examples:
   - name: declared shape
     code: |
       #import <fmdb/fmdb.h>
       void test(FMDatabase *db, id input) { [db executeUpdate:@"insert" withParameterDictionary:input]; }
-    expect_match_text: ["executeUpdate:withParameterDictionary:"]
-  description: "Disabled - the ObjC adapter emits only the first selector keyword (`executeUpdate`) for a message send, so the
-    full multi-part selector `executeUpdate:withParameterDictionary:` is not adapter-visible and cannot be matched without
-    over-matching the array-argument form. FMDB named-parameter forms (-executeUpdate:withParameterDictionary:,
-    -executeQuery:withParameterDictionary:) bind dictionary values as named SQLite parameters (`:name`); values cannot be
-    interpreted as SQL."
+    expect_match_text: ["db.executeUpdate:withParameterDictionary:"]
+  - name: array selector with the same first keyword is not the dictionary sanitizer
+    code: |
+      #import <fmdb/fmdb.h>
+      void test(FMDatabase *db, id input) { [db executeUpdate:@"insert" withArgumentsInArray:input]; }
+    expect_no_match: true
+  description: "FMDB named-parameter forms (-executeUpdate:withParameterDictionary:, -executeQuery:withParameterDictionary:) bind dictionary values as named SQLite parameters (`:name`); the exact compiler selector keeps the array and dictionary overload families distinct."
 
 - id: objc.sanitizer.gtm_string_escape_html
   enabled: true
@@ -265,12 +264,12 @@
   match:
     kind: call
     callee:
-      regex: "^(?:.*\\.)?(unarchivedObjectOfClass|unarchivedObjectOfClasses|initForReadingFromData)$"
+      regex: "^(?:.*\\.)?(?:unarchivedObjectOfClass:fromData:error:|unarchivedObjectOfClasses:fromData:error:|initForReadingFromData:error:)$"
   match_examples:
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; [NSKeyedUnarchiver unarchivedObjectOfClass:input fromData:input error:nil]; }
-    expect_match_text: [NSKeyedUnarchiver.unarchivedObjectOfClass]
+    expect_match_text: ["NSKeyedUnarchiver.unarchivedObjectOfClass:fromData:error:"]
   description: "NSKeyedUnarchiver +unarchivedObjectOfClass:fromData:error: / +unarchivedObjectOfClasses:fromData:error: -
     secure-coding-enforced decode that requires the target class to conform to NSSecureCoding; neutralizes class-substitution
     RCE."
@@ -329,24 +328,6 @@
     expect_no_match: true
   description: "NSString -hasPrefix:@\"/...\" - slash-rooted same-origin redirect/path guard."
 
-- id: objc.sanitizer.contains_object_allowlist
-  enabled: false
-  language: objc
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      regex: "(^|\\.)(containsObject|containsObject:|objectForKey|objectForKeyedSubscript)$"
-  match_examples:
-  - name: NSArray containsObject allowlist
-    code: |
-      void test(id input) { [allowed containsObject:input]; }
-    expect_match_text: [allowed.containsObject]
-  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. NSArray/NSSet/NSDictionary
-    lookup on allowlist-named receivers - finite set/map validation."
-
-  disabled_reason:
-    code: over-broad
 - id: objc.sanitizer.nspredicate_self_matches
   enabled: true
   language: objc
@@ -374,7 +355,7 @@
   match:
     kind: call
     callee:
-      name: stringByReplacingOccurrencesOfString
+      regex: "(?:^|\\.)stringByReplacingOccurrencesOfString:withString:options:range:$"
   constraints:
   - any_arg_matches_regex: "\\[\\^[^\\]]+\\]"
   - any_arg_matches_regex: '^@?""$'
@@ -383,30 +364,12 @@
   - name: strip non slug chars
     code: |
       void test(id input) { [input stringByReplacingOccurrencesOfString:@"[^A-Za-z0-9_-]" withString:@"" options:NSRegularExpressionSearch range:NSMakeRange(0, 1)]; }
-    expect_match_text: [input.stringByReplacingOccurrencesOfString]
+    expect_match_text: ["input.stringByReplacingOccurrencesOfString:withString:options:range:"]
   - name: strip non slug chars negative constraint boundary
     code: "void example() {\n  input.stringByReplacingOccurrencesOfString();\n}\n"
     expect_no_match: true
   description: "NSString regex replacement of `[^safe]` with empty string - strips characters outside an allowlist."
 
-- id: objc.sanitizer.nsregularexpression_validate
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: objc
-  tag: validation
-  match:
-    kind: call
-    callee:
-      name: numberOfMatchesInString
-  description: "Disabled - NSRegularExpression -numberOfMatchesInString: is only a sanitizer when used as an allowlist guard;
-    cannot prove guard semantics from the call shape alone. Enable per-project with rule-narrowing."
-
-# URL decode passthrough sanitizers (T301). Tagged
-# `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) - taint propagates THROUGH instead of
-# being cleared. Bludit CVE-2019-16113 used urldecode to
-# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: objc.passthrough.string_by_removing_percent
   enabled: true
   language: objc

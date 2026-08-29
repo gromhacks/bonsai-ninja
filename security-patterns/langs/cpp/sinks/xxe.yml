@@ -5,6 +5,7 @@
   tag: xxe
   severity: high
   packages: [libxml2]
+  imports: [libxml/parser.h, libxml2/libxml/parser.h]
   cwe: [CWE-611]
   match:
     kind: call
@@ -36,6 +37,7 @@
   tag: xxe
   severity: high
   packages: [libxml2]
+  imports: [libxml/parser.h, libxml2/libxml/parser.h]
   cwe: [CWE-611]
   match:
     kind: call
@@ -44,22 +46,31 @@
   constraints:
   - arg_tainted:
       index: 0
+  - arg_matches_regex:
+      index: 4
+      regex: '(?:XML_PARSE_NOENT|XML_PARSE_DTDLOAD)'
   match_examples:
-  - name: generated direct match
+  - name: libxml2 entity-expanding memory parse
     code: |
       #include <libxml2/libxml/parser.h>
       void example(const char *arg) {
-        const char *fmt = arg;
-        const char *query = arg;
-        xmlReadMemory(arg);
+        xmlReadMemory(arg, 1, nullptr, nullptr, XML_PARSE_NOENT | XML_PARSE_DTDLOAD);
       }
-  - name: literal arg 0 negative
+    expect_match_text: [xmlReadMemory]
+  - name: literal XML input negative
     code: |
       void example() {
-        xmlReadMemory("safe");
+        xmlReadMemory("<safe/>", 7, nullptr, nullptr, XML_PARSE_NOENT);
       }
     expect_no_match: true
-  description: "libxml2 xmlReadMemory - same options concern as xmlReadFile."
+  - name: non-network parser without entity expansion negative
+    code: |
+      #include <libxml2/libxml/parser.h>
+      void example(const char *arg) {
+        xmlReadMemory(arg, 1, nullptr, nullptr, XML_PARSE_NONET);
+      }
+    expect_no_match: true
+  description: "libxml2 xmlReadMemory on tainted XML with XML_PARSE_NOENT or XML_PARSE_DTDLOAD explicitly enables external-entity/DTD processing; safe option sets remain quiet."
 
 - id: cpp.xxe.libxml2_xmlctxtreadfile
   enabled: true
@@ -203,7 +214,6 @@
   - name: generated direct match
     code: |
       #include <QtCore/Qt>
-      #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example(const char *arg) {
         const char *fmt = arg;
@@ -221,47 +231,3 @@
   imports:
   - QtCore
   - QtCore/Qt
-- id: cpp.xxe.poco_sax_parser
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: xxe
-  severity: high
-  packages: [Poco]
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [SAXParser, parse]
-  description: "Disabled - merged into cpp.xxe.xerces_sax_parse (same `[SAXParser, parse]` attribute chain; packages list now covers Poco)."
-
-- id: cpp.xxe.tinyxml2_loadfile
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: xxe
-  severity: low
-  packages: [tinyxml2]
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [XMLDocument, LoadFile]
-  description: "Disabled - tinyxml2 has limited entity support; no XXE surface."
-
-- id: cpp.xxe.pugixml_load_file
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: xxe
-  severity: low
-  packages: [pugixml]
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [xml_document, load_file]
-  description: "Disabled - pugixml does not resolve external entities."

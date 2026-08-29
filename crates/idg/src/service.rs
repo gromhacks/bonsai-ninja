@@ -87,6 +87,13 @@ pub enum PointKind {
     Other,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReachableStoragePlace {
+    func: FuncId,
+    storage: String,
+    write_span: Option<Span>,
+}
+
 /// Assignment target fed by a call site's result slot.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CallRetAssignmentTarget {
@@ -178,6 +185,12 @@ pub enum CrossCallRelation {
     Return,
     /// Projected object/container state crossing function ownership.
     FieldState,
+    /// Exact shared binding state crossing a compiler-resolved call site.
+    ///
+    /// Unlike allocation-insensitive [`Self::FieldState`], this relation is
+    /// anchored to one resolved caller/callee invocation and is therefore
+    /// valid lineage evidence. It carries no positional argument claim.
+    SharedStateCall,
 }
 
 impl CrossCallRelation {
@@ -739,7 +752,14 @@ struct SymbolicRuntimeIndex {
     reverse_scalar_transforms: ReverseScalarTransformIndex,
     fact_pages: Mutex<SymbolicFactPager>,
     transforms: Mutex<SymbolicTransformPager>,
-    field_demands: Mutex<AHashMap<Option<Precision>, Arc<SymbolicFieldDemand>>>,
+    /// One immutable backward-demand fixed point per precision contract.
+    ///
+    /// Rooted query batches call this relation concurrently. `OnceLock`
+    /// provides single-flight publication: one worker compiles a precision's
+    /// exact relation while its peers wait for and share the same value.
+    /// A check-then-compute mutex map allowed every worker to perform the
+    /// complete fixed point before only one result won insertion.
+    field_demands: [OnceLock<Arc<SymbolicFieldDemand>>; 5],
 }
 
 // Version 5 retains the exact positional argument/parameter slots on
@@ -819,7 +839,7 @@ impl Default for SymbolicRuntimeIndex {
             reverse_scalar_transforms: ReverseScalarTransformIndex::empty(),
             fact_pages: Mutex::new(SymbolicFactPager::new(0)),
             transforms: Mutex::new(SymbolicTransformPager::empty()),
-            field_demands: Mutex::new(AHashMap::default()),
+            field_demands: std::array::from_fn(|_| OnceLock::new()),
         }
     }
 }
@@ -931,7 +951,7 @@ impl PersistedSymbolicRuntime {
             reverse_scalar_transforms,
             fact_pages: Mutex::new(fact_pages),
             transforms: Mutex::new(transforms),
-            field_demands: Mutex::new(AHashMap::default()),
+            field_demands: std::array::from_fn(|_| OnceLock::new()),
         })
     }
 }
@@ -951,6 +971,10 @@ struct SymbolicFieldDemand {
 }
 
 impl SymbolicFieldDemand {
+    fn is_empty(&self) -> bool {
+        self.facts.len() == 0 && self.wildcard_bases.len() == 0
+    }
+
     fn contains(&self, base: u32, field: u32) -> bool {
         self.wildcard_bases.contains(u128::from(base))
             || self.facts.contains(u128::from(symbolic_fact_key(base, field)))
@@ -2684,6 +2708,7 @@ fn encode_cross_call_relation(relation: CrossCallRelation) -> u8 {
         CrossCallRelation::Capture => 2,
         CrossCallRelation::Return => 3,
         CrossCallRelation::FieldState => 4,
+        CrossCallRelation::SharedStateCall => 5,
     }
 }
 
@@ -2694,6 +2719,7 @@ fn decode_cross_call_relation(value: u8) -> CrossCallRelation {
         2 => CrossCallRelation::Capture,
         3 => CrossCallRelation::Return,
         4 => CrossCallRelation::FieldState,
+        5 => CrossCallRelation::SharedStateCall,
         _ => panic!("invalid compact cross-call relation"),
     }
 }
@@ -4239,6 +4265,27 @@ impl IdgQueryService {
         pipeline_hash: u64,
         global: Arc<GlobalIndex>,
     ) -> crate::IdgResult<Option<Self>> {
+        Self::load_from_disk_with_global(path, pipeline_hash, || global)
+    }
+
+    /// Open the canonical warm-query sidecar and construct compiler headers
+    /// only after its complete persisted layout has been validated.
+    ///
+    /// This is the query-oriented counterpart to [`Self::load_from_disk`]. A
+    /// stale, missing, or corrupt graph must remain a cheap cache miss: eager
+    /// callers used to validate the graph once, build the complete header
+    /// projection, and then validate the same graph layout a second time while
+    /// opening it. Delaying `global` lets the canonical query loader perform
+    /// the one exact validation it already owns before any compiler-header
+    /// hydration. The wrapper above preserves the existing public API.
+    pub fn load_from_disk_with_global<F>(
+        path: &std::path::Path,
+        pipeline_hash: u64,
+        global: F,
+    ) -> crate::IdgResult<Option<Self>>
+    where
+        F: FnOnce() -> Arc<GlobalIndex>,
+    {
         let Some(workspace) = IdgWorkspace::load_query_from_disk(path, pipeline_hash)? else {
             return Ok(None);
         };
@@ -4265,7 +4312,7 @@ impl IdgQueryService {
             .transpose()?;
         Ok(Some(Self::from_parts(
             Arc::new(workspace),
-            global,
+            global(),
             unified,
             accelerator,
         )))
@@ -6250,6 +6297,55 @@ impl IdgQueryService {
         out
     }
 
+    /// Find the exact value nodes produced by storage reads evaluated at a
+    /// source match span, paired with the compiler storage identity read.
+    ///
+    /// A read expression can be nested inside an enclosing assignment or
+    /// call. Those enclosing constructs have span-bearing `Write`, `CallArg`,
+    /// and `CallRet` nodes that overlap the read but are not the value named by
+    /// a `kind: read` rule. The edge's `via_span` and `Place::Read` endpoint
+    /// preserve the adapter-lowered identity without recovering syntax from
+    /// text or widening to sibling arguments.
+    pub fn source_read_value_nodes_at_span(&self, func: FuncId, match_span: Span) -> Vec<(WsNodeId, String)> {
+        let unified = self.ensure_unified();
+        let Some(seg_id) = self.workspace.segment_for_func(func) else {
+            return Vec::new();
+        };
+        let Some(segment) = self.workspace.segment_view(seg_id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for edge in &segment.edges {
+            if !spans_overlap(edge.meta.via_span, match_span) {
+                continue;
+            }
+            let Some(source_node) = segment.nodes.get(edge.from).filter(|node| node.func == func) else {
+                continue;
+            };
+            let Some(source_place) = segment.places.get(source_node.place) else {
+                continue;
+            };
+            if !matches!(source_place, Place::Read { .. } | Place::Write { .. }) {
+                continue;
+            }
+            if segment.nodes.get(edge.to).is_none_or(|node| node.func != func) {
+                continue;
+            }
+            let Some(ws_node) = Self::ws_node_for(&unified, seg_id, edge.to) else {
+                continue;
+            };
+            let source_name = self
+                .build_point_ref(source_node.func, source_place, &segment.strings)
+                .name;
+            out.push((ws_node, source_name));
+        }
+        out.sort_by(|(left_node, left_name), (right_node, right_name)| {
+            left_node.cmp(right_node).then_with(|| left_name.cmp(right_name))
+        });
+        out.dedup();
+        out
+    }
+
     /// Find every span-bearing IDG node in `func` anchored at
     /// `match_span`. Unlike [`Self::source_seed_nodes_at_span`], this
     /// keeps call arguments because sink reachability targets are
@@ -6511,6 +6607,49 @@ impl IdgQueryService {
         closure: &[WsNodeId],
         target_funcs: Option<&AHashSet<FuncId>>,
     ) -> Vec<(FuncId, String)> {
+        let mut out = self
+            .reachable_storage_places_for_funcs(closure, target_funcs)
+            .into_iter()
+            .map(|place| (place.func, place.storage))
+            .collect::<Vec<_>>();
+        out.sort_unstable_by(|left, right| (left.0.raw(), &left.1).cmp(&(right.0.raw(), &right.1)));
+        out.dedup();
+        out
+    }
+
+    /// Return exact reachable storage writes, including their compiler span.
+    ///
+    /// Security write attribution consumes this projection instead of
+    /// re-deriving write reachability from flattened storage names. Distinct
+    /// writes to the same place therefore retain their control-flow identity.
+    pub fn write_storage_spans_in_reachable_nodes_for_funcs(
+        &self,
+        closure: &[WsNodeId],
+        target_funcs: Option<&AHashSet<FuncId>>,
+    ) -> Vec<(FuncId, Span, String)> {
+        let mut out = self
+            .reachable_storage_places_for_funcs(closure, target_funcs)
+            .into_iter()
+            .filter_map(|place| place.write_span.map(|span| (place.func, span, place.storage)))
+            .collect::<Vec<_>>();
+        out.sort_unstable_by(|left, right| {
+            (left.0.raw(), left.1.file.raw(), left.1.start, left.1.end, &left.2).cmp(&(
+                right.0.raw(),
+                right.1.file.raw(),
+                right.1.start,
+                right.1.end,
+                &right.2,
+            ))
+        });
+        out.dedup();
+        out
+    }
+
+    fn reachable_storage_places_for_funcs(
+        &self,
+        closure: &[WsNodeId],
+        target_funcs: Option<&AHashSet<FuncId>>,
+    ) -> Vec<ReachableStoragePlace> {
         let unified = self.ensure_unified();
         // A warm query owns only a bounded segment-page cache. Reopening a
         // segment once per reachable node turns an otherwise sparse closure
@@ -6550,8 +6689,9 @@ impl IdgQueryService {
                 let Some(place) = segment.places.get(node.place) else {
                     continue;
                 };
-                let (name, path) = match place {
-                    Place::Read { name, path } | Place::Write { name, path, .. } => (*name, path),
+                let (name, path, write_span) = match place {
+                    Place::Read { name, path } => (*name, path, None),
+                    Place::Write { name, path, span } => (*name, path, Some(*span)),
                     _ => continue,
                 };
                 let Some(base) = segment.strings.get(name) else {
@@ -6568,13 +6708,15 @@ impl IdgQueryService {
                     storage.push_str(part);
                 }
                 if complete && !storage.trim().is_empty() {
-                    out.push((node.func, storage));
+                    out.push(ReachableStoragePlace {
+                        func: node.func,
+                        storage,
+                        write_span,
+                    });
                 }
             }
             cursor = end;
         }
-        out.sort_unstable_by(|left, right| (left.0.raw(), &left.1).cmp(&(right.0.raw(), &right.1)));
-        out.dedup();
         out
     }
 
@@ -7613,9 +7755,6 @@ impl IdgQueryService {
                 &crate::segment::IdgSegment,
                 &crate::segment::IdgSegment,
             )>| {
-                let projected_heap_relation = edge.meta.kind.is_inter()
-                    && (Self::node_is_projected_storage(&unified, from_segment, edge.from)
-                        || Self::node_is_projected_storage(&unified, to_segment, edge.to));
                 if max_precision.is_some_and(|max| edge.meta.precision > max) {
                     return;
                 }
@@ -7628,6 +7767,17 @@ impl IdgQueryService {
                 if !node_pair_is_allowed(from, to) {
                     return;
                 }
+                // A scalar call boundary remains a stack relation even when
+                // the opposite endpoint uses a projected compiler storage
+                // spelling. Multi-result bindings are the canonical example:
+                // `callback.Return -> caller.value.__bonsai_tuple_result_1`
+                // is still an exact return boundary, not allocation-
+                // insensitive heap flow. Only non-canonical endpoints need
+                // compatibility heap treatment.
+                let projected_heap_relation = edge.meta.kind.is_inter()
+                    && !Self::contextual_endpoint_is_structural(&unified, edge.meta.kind, from, to)
+                    && (Self::node_is_projected_storage(&unified, from_segment, edge.from)
+                        || Self::node_is_projected_storage(&unified, to_segment, edge.to));
                 if edge.meta.kind.is_inter() && !projected_heap_relation {
                     if !Self::contextual_endpoint_is_structural(&unified, edge.meta.kind, from, to) {
                         if let Some((key, _)) = Self::contextual_boundary_identity(&unified, edge, from, to) {
@@ -7697,6 +7847,20 @@ impl IdgQueryService {
                                 relation: CrossCallRelation::Return,
                             })
                         }
+                        (IdgEdgeKind::InterSharedFieldState, Some(caller), Some(callee))
+                            if caller != callee =>
+                        {
+                            Some(CrossCallEdge {
+                                caller,
+                                callee,
+                                call_span: edge.meta.via_span,
+                                arg_idx: u32::MAX,
+                                param_idx: u32::MAX,
+                                precision: edge.meta.precision,
+                                call_kind: edge.meta.call_kind,
+                                relation: CrossCallRelation::SharedStateCall,
+                            })
+                        }
                         _ => None,
                     };
                     heap_rows.push((
@@ -7723,9 +7887,27 @@ impl IdgQueryService {
             self.workspace
                 .visit_cross_file_edges(|edges| {
                     for edge in edges {
-                        let projected_heap_relation = edge.edge.meta.kind.is_inter()
-                            && (Self::node_is_projected_storage(&unified, edge.from_segment, edge.edge.from)
-                                || Self::node_is_projected_storage(&unified, edge.to_segment, edge.edge.to));
+                        let projected_heap_relation =
+                            Self::ws_node_for(&unified, edge.from_segment, edge.edge.from)
+                                .zip(Self::ws_node_for(&unified, edge.to_segment, edge.edge.to))
+                                .is_some_and(|(from, to)| {
+                                    edge.edge.meta.kind.is_inter()
+                                        && !Self::contextual_endpoint_is_structural(
+                                            &unified,
+                                            edge.edge.meta.kind,
+                                            from,
+                                            to,
+                                        )
+                                        && (Self::node_is_projected_storage(
+                                            &unified,
+                                            edge.from_segment,
+                                            edge.edge.from,
+                                        ) || Self::node_is_projected_storage(
+                                            &unified,
+                                            edge.to_segment,
+                                            edge.edge.to,
+                                        ))
+                                });
                         if projected_heap_relation {
                             projected_cross_file
                                 .entry((edge.from_segment, edge.to_segment))
@@ -7820,12 +8002,6 @@ impl IdgQueryService {
                 if max_precision.is_some_and(|max| edge.meta.precision > max) {
                     return;
                 }
-                if edge.meta.kind.is_inter()
-                    && (Self::node_is_projected_storage(&unified, from_segment, edge.from)
-                        || Self::node_is_projected_storage(&unified, to_segment, edge.to))
-                {
-                    return;
-                }
                 let Some(from) = Self::ws_node_for(&unified, from_segment, edge.from) else {
                     return;
                 };
@@ -7835,6 +8011,13 @@ impl IdgQueryService {
                 if !node_pair_is_allowed(from, to) {
                     return;
                 }
+                if edge.meta.kind.is_inter()
+                    && !Self::contextual_endpoint_is_structural(&unified, edge.meta.kind, from, to)
+                    && (Self::node_is_projected_storage(&unified, from_segment, edge.from)
+                        || Self::node_is_projected_storage(&unified, to_segment, edge.to))
+                {
+                    return;
+                }
                 let Some((endpoint_key, enters_callee)) =
                     Self::contextual_boundary_identity(&unified, edge, from, to)
                 else {
@@ -7842,6 +8025,10 @@ impl IdgQueryService {
                 };
                 let structural = structural_boundaries.for_site(endpoint_key.caller, endpoint_key.span);
                 let endpoint_is_structural = structural.iter().any(|key| key.callee == endpoint_key.callee);
+                let preserves_exact_capture_target = edge.meta.kind == IdgEdgeKind::InterCallArg
+                    && unified.call_args.get(from).is_none()
+                    && unified.params.get(to).is_none()
+                    && unified.node_boundaries.get(from.0 as usize).copied() != Some(NODE_BOUNDARY_CALL_RET);
                 let mut push_boundary = |key: ContextBoundaryKey| {
                     let cross_call = match edge.meta.kind {
                         IdgEdgeKind::InterCallArg | IdgEdgeKind::InterSourceCallback => {
@@ -7909,7 +8096,7 @@ impl IdgQueryService {
                         return_rows.push((NodeId(from.0), boundary));
                     }
                 };
-                if structural.is_empty() || endpoint_is_structural {
+                if structural.is_empty() || endpoint_is_structural || preserves_exact_capture_target {
                     push_boundary(endpoint_key);
                 } else {
                     for &key in structural {
@@ -8240,6 +8427,37 @@ impl IdgQueryService {
             nodes.len(),
             worklist.facts.len()
         );
+        if bonsai_diagnostics::debug::is_enabled("idg-closure-detail") {
+            for (chunk_index, chunk) in nodes.chunks(256).enumerate() {
+                let rendered = chunk
+                    .iter()
+                    .map(|node| {
+                        let workspace_node = WsNodeId(node.0);
+                        self.resolve_point(workspace_node).map_or_else(
+                            || format!("ws#{}", node.0),
+                            |point| {
+                                format!(
+                                    "ws#{}=func{}:{:?}:{}@{}..{}",
+                                    node.0,
+                                    point.func.raw(),
+                                    point.kind,
+                                    point.name,
+                                    point.span.start,
+                                    point.span.end,
+                                )
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                bonsai_diagnostics::debug_log!(
+                    "idg-closure-detail",
+                    "symbolic closure nodes chunk={} total={} nodes={:?}",
+                    chunk_index,
+                    nodes.len(),
+                    rendered,
+                );
+            }
+        }
         nodes
     }
 
@@ -8328,6 +8546,15 @@ impl IdgQueryService {
             return;
         }
         worklist.enqueue_node(node, context);
+        // Backward demand is the exact admissibility predicate for projected
+        // field facts. When it is empty, every fact from every compiler page
+        // would be rejected by `enqueue_fact_state`. Avoid opening and
+        // serializing on the shared external-memory page cache in that common
+        // scalar-only case; ordinary/contextual node propagation above is
+        // unchanged.
+        if worklist.field_demand.is_empty() {
+            return;
+        }
         if !worklist.activate_fact_source(node, context) {
             return;
         }
@@ -8509,7 +8736,12 @@ impl IdgQueryService {
                         .span_id()
                         .and_then(|span| runtime.span(span))
                         .is_some_and(|span| {
-                            span.file == transform.call_span.file && span.start > transform.call_span.start
+                            let is_exact_argument_value = transform.kind
+                                == SymbolicFieldTransformKind::Argument
+                                && span.into_span() == transform.write_span;
+                            !is_exact_argument_value
+                                && span.file == transform.call_span.file
+                                && span.start > transform.call_span.start
                         }))
             {
                 continue;
@@ -9075,10 +9307,23 @@ impl IdgQueryService {
         runtime: &Arc<SymbolicRuntimeIndex>,
         max_precision: Option<Precision>,
     ) -> Arc<SymbolicFieldDemand> {
-        if let Some(demand) = runtime.field_demands.lock().get(&max_precision).cloned() {
-            return demand;
-        }
+        let slot = match max_precision {
+            None => 0,
+            Some(Precision::Exact) => 1,
+            Some(Precision::Narrowed) => 2,
+            Some(Precision::OverApproximate) => 3,
+            Some(Precision::Unknown) => 4,
+        };
+        Arc::clone(
+            runtime.field_demands[slot]
+                .get_or_init(|| Self::compile_symbolic_field_demand(runtime, max_precision)),
+        )
+    }
 
+    fn compile_symbolic_field_demand(
+        runtime: &SymbolicRuntimeIndex,
+        max_precision: Option<Precision>,
+    ) -> Arc<SymbolicFieldDemand> {
         // A whole value passed to an unresolved/external consumer demands
         // every concrete suffix that can reach that compiler base. Keep this
         // as a sparse wildcard relation instead of materializing
@@ -9150,8 +9395,7 @@ impl IdgQueryService {
             demand.wildcard_bases.len(),
             max_precision
         );
-        let mut cache = runtime.field_demands.lock();
-        Arc::clone(cache.entry(max_precision).or_insert_with(|| Arc::clone(&demand)))
+        demand
     }
 
     fn load_persisted_symbolic_runtime(
@@ -9482,7 +9726,7 @@ impl IdgQueryService {
                     param_idx: u32::MAX,
                     precision: link.precision,
                     call_kind: bonsai_callgraph::EdgeKind::Indirect,
-                    relation: CrossCallRelation::FieldState,
+                    relation: CrossCallRelation::SharedStateCall,
                 });
         }
         let mut projected_by_pair: AHashMap<(SegmentId, SegmentId), Vec<(WsNodeId, IdgEdge)>> =
@@ -9795,6 +10039,18 @@ fn lift_cross_call_edge_from_unified(
             CompactCrossCallLift::Complete(None)
         };
     }
+    if edge.meta.kind == IdgEdgeKind::InterSharedFieldState && caller != callee {
+        return CompactCrossCallLift::Complete(Some(CrossCallEdge {
+            caller,
+            callee,
+            call_span: edge.meta.via_span,
+            arg_idx: u32::MAX,
+            param_idx: u32::MAX,
+            precision: edge.meta.precision,
+            call_kind: edge.meta.call_kind,
+            relation: CrossCallRelation::SharedStateCall,
+        }));
+    }
     if matches!(
         edge.meta.kind,
         IdgEdgeKind::InterReturn | IdgEdgeKind::InterFieldReturn | IdgEdgeKind::InterYield
@@ -9906,6 +10162,18 @@ fn lift_call_arg_edge(
             } else {
                 CrossCallRelation::Capture
             },
+        });
+    }
+    if edge.meta.kind == crate::edge::IdgEdgeKind::InterSharedFieldState && from_node.func != to_node.func {
+        return Some(CrossCallEdge {
+            caller: from_node.func,
+            callee: to_node.func,
+            call_span: edge.meta.via_span,
+            arg_idx: u32::MAX,
+            param_idx: u32::MAX,
+            precision: edge.meta.precision,
+            call_kind: edge.meta.call_kind,
+            relation: CrossCallRelation::SharedStateCall,
         });
     }
     // Return/outbound edge: any interprocedural return-family edge flows

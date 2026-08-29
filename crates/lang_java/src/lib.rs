@@ -3,18 +3,18 @@ mod parse_recovery;
 
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
-    decl_index_with_handler,
+    decl_index_from_tree_with_handler,
     kit::{
-        collect_kinds, language_from_pack, node_text, package_module_segments_with_workspace_prefix,
-        parse_with, span_of,
+        language_from_pack, node_text, package_module_segments_with_workspace_prefix, parse_with, span_of,
+        SyntaxKindIndex,
     },
     AdapterContext, AdapterError, AssignValueKind, CallTargetExtraction, CharacterConstraintDomain,
     CharacterConstraintFact, CharacterConstraintOutput, CharacterSubstitutionDomain,
     CharacterSubstitutionFact, ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclIndex,
     DeclKind, FileSnapshot, FiniteLiteralSelectionFact, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ParseRecoveryEdit, PatternBindingSite,
-    SameOriginPathConstraintFact, StaticScalarValue, StringCompositionFact, StringCompositionPart,
-    SyntaxTree, TypeAliasBinding, Vfs, Visibility, EMPTY_HANDLER,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, ParseRecoveryEdit,
+    PatternBindingSite, SameOriginPathConstraintFact, StaticScalarValue, StringCompositionFact,
+    StringCompositionPart, SyntaxTree, TypeAliasBinding, Vfs, Visibility, EMPTY_HANDLER,
 };
 use parse_recovery::java_parse_recovery_edits;
 use tree_sitter::{Language, Node, Tree};
@@ -145,17 +145,119 @@ fn java_pattern_binding_identifiers<'tree>(
 
 pub const LANG_ID: LanguageId = LanguageId::new("java");
 const PACK_NAME: &str = "java";
+const JAVA_POSTPROCESS_NODE_KINDS: &[&str] = &[
+    "annotation_type_declaration",
+    "array_creation_expression",
+    "catch_formal_parameter",
+    "class_declaration",
+    "constructor_declaration",
+    "enhanced_for_statement",
+    "enum_declaration",
+    "false",
+    "field_declaration",
+    "formal_parameter",
+    "if_statement",
+    "import_declaration",
+    "interface_declaration",
+    "lambda_expression",
+    "local_variable_declaration",
+    "method_declaration",
+    "method_invocation",
+    "null_literal",
+    "object_creation_expression",
+    "record_declaration",
+    "record_pattern_component",
+    "return_statement",
+    "scoped_type_identifier",
+    "spread_parameter",
+    "string_literal",
+    "true",
+    "type_pattern",
+    "variable_declarator",
+];
 const MODULE_SOURCE_ROOTS: &[&[&str]] = &[
     &["src", "main", "java"],
     &["src", "test", "java"],
     &["src", "java"],
 ];
 
+// Tree-sitter spellings consumed by Java-only compiler post-processing.
+// Keep this separate from `HANDLER`: the conformance grammar contract checks
+// both inventories so a grammar upgrade cannot silently disable an exact
+// sanitizer/value-shape, type, import, or control-flow fact.
+const ADDITIONAL_GRAMMAR_NODE_KINDS: &[(&str, &str)] = &[
+    ("adapter_postprocessor", "annotation_type_declaration"),
+    ("adapter_postprocessor", "array_creation_expression"),
+    ("adapter_postprocessor", "array_initializer"),
+    ("adapter_postprocessor", "asterisk"),
+    ("adapter_postprocessor", "binary_expression"),
+    ("adapter_postprocessor", "binary_integer_literal"),
+    ("adapter_postprocessor", "block"),
+    ("adapter_postprocessor", "break_statement"),
+    ("adapter_postprocessor", "cast_expression"),
+    ("adapter_postprocessor", "catch_clause"),
+    ("adapter_postprocessor", "catch_formal_parameter"),
+    ("adapter_postprocessor", "catch_type"),
+    ("adapter_postprocessor", "character_literal"),
+    ("adapter_postprocessor", "class_body"),
+    ("adapter_postprocessor", "class_declaration"),
+    ("adapter_postprocessor", "constructor_body"),
+    ("adapter_postprocessor", "constructor_declaration"),
+    ("adapter_postprocessor", "decimal_floating_point_literal"),
+    ("adapter_postprocessor", "decimal_integer_literal"),
+    ("adapter_postprocessor", "enhanced_for_statement"),
+    ("adapter_postprocessor", "enum_declaration"),
+    ("adapter_postprocessor", "false"),
+    ("adapter_postprocessor", "field_declaration"),
+    ("adapter_postprocessor", "final"),
+    ("adapter_postprocessor", "formal_parameter"),
+    ("adapter_postprocessor", "generic_type"),
+    ("adapter_postprocessor", "hex_floating_point_literal"),
+    ("adapter_postprocessor", "hex_integer_literal"),
+    ("adapter_postprocessor", "identifier"),
+    ("adapter_postprocessor", "if_statement"),
+    ("adapter_postprocessor", "import_declaration"),
+    ("adapter_postprocessor", "inferred_parameters"),
+    ("adapter_postprocessor", "instanceof_expression"),
+    ("adapter_postprocessor", "interface_declaration"),
+    ("adapter_postprocessor", "lambda_expression"),
+    ("adapter_postprocessor", "local_variable_declaration"),
+    ("adapter_postprocessor", "method_declaration"),
+    ("adapter_postprocessor", "method_invocation"),
+    ("adapter_postprocessor", "modifiers"),
+    ("adapter_postprocessor", "null_literal"),
+    ("adapter_postprocessor", "object_creation_expression"),
+    ("adapter_postprocessor", "octal_integer_literal"),
+    ("adapter_postprocessor", "package_declaration"),
+    ("adapter_postprocessor", "parenthesized_expression"),
+    ("adapter_postprocessor", "program"),
+    ("adapter_postprocessor", "record_declaration"),
+    ("adapter_postprocessor", "record_pattern"),
+    ("adapter_postprocessor", "record_pattern_body"),
+    ("adapter_postprocessor", "record_pattern_component"),
+    ("adapter_postprocessor", "return_statement"),
+    ("adapter_postprocessor", "scoped_identifier"),
+    ("adapter_postprocessor", "scoped_type_identifier"),
+    ("adapter_postprocessor", "spread_parameter"),
+    ("adapter_postprocessor", "static"),
+    ("adapter_postprocessor", "string_literal"),
+    ("adapter_postprocessor", "switch_block_statement_group"),
+    ("adapter_postprocessor", "switch_expression"),
+    ("adapter_postprocessor", "switch_label"),
+    ("adapter_postprocessor", "ternary_expression"),
+    ("adapter_postprocessor", "true"),
+    ("adapter_postprocessor", "type_bound"),
+    ("adapter_postprocessor", "type_identifier"),
+    ("adapter_postprocessor", "type_parameter"),
+    ("adapter_postprocessor", "type_pattern"),
+    ("adapter_postprocessor", "unary_expression"),
+    ("adapter_postprocessor", "variable_declarator"),
+];
+
 const HANDLER: GrammarHandler = GrammarHandler {
     expression_value_kind_extractor: None,
     literal_value_kinds: &[
         "null_literal",
-        "boolean_literal",
         "decimal_integer_literal",
         "hex_integer_literal",
         "octal_integer_literal",
@@ -168,21 +270,11 @@ const HANDLER: GrammarHandler = GrammarHandler {
     string_literal_kinds: &["string_literal", "character_literal", "template_expression"],
     comment_kinds: &["line_comment", "block_comment"],
     doc_comment_prefixes: &["/**"],
-    decorator_kinds: &[
-        "annotation",
-        "marker_annotation",
-        "normal_annotation",
-        "single_element_annotation",
-    ],
+    decorator_kinds: &["annotation", "marker_annotation"],
     parameter_container_kinds: &["formal_parameters"],
     parameter_kinds: &["formal_parameter", "spread_parameter", "receiver_parameter"],
     parameter_modifier_kinds: &["modifiers"],
-    parameter_annotation_kinds: &[
-        "annotation",
-        "marker_annotation",
-        "normal_annotation",
-        "single_element_annotation",
-    ],
+    parameter_annotation_kinds: &["annotation", "marker_annotation"],
     variadic_parameter_kinds: &["spread_parameter"],
     binding_identifier_kinds: &["identifier"],
     pattern_binding_extractor: Some(java_pattern_bindings),
@@ -253,9 +345,16 @@ const HANDLER: GrammarHandler = GrammarHandler {
     branch_then_field_names: &["consequence", "body"],
     branch_else_field_names: &["alternative"],
     branch_condition_field_names: &["condition", "value"],
+    condition_group_kinds: &["parenthesized_expression"],
+    condition_all_operators: &["&&"],
+    condition_any_operators: &["||"],
+    condition_not_operators: &["!"],
     loop_body_field_names: &["body"],
     loop_body_kinds: &["block", "expression_statement"],
+    loop_update_field_names: &["update"],
     branch_arm_kinds: &["block", "expression_statement", "switch_block_statement_group"],
+    exclusive_branch_arm_kinds: &["switch_block_statement_group", "switch_rule"],
+    fallthrough_branch_arm_kinds: &["switch_block_statement_group"],
     for_kinds: &["for_statement"],
     foreach_kinds: &["enhanced_for_statement"],
     foreach_binding_extractor: Some(java_foreach_binding),
@@ -276,10 +375,11 @@ const HANDLER: GrammarHandler = GrammarHandler {
     lambda_kinds: &["lambda_expression"],
     try_kinds: &["try_statement", "try_with_resources_statement"],
     catch_kinds: &["catch_clause"],
+    exclusive_catch_arm_kinds: &["catch_clause"],
     finally_kinds: &["finally_clause"],
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
-    control_label_field_names: &["label"],
+    control_label_field_names: &[],
     yield_kinds: &["yield_statement"],
     yield_value_field_names: &["value"],
     try_body_field_names: &["body"],
@@ -353,32 +453,37 @@ impl LanguageAdapter for JavaAdapter {
             ..LanguageCapabilities::partial_baseline()
         }
     }
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        Some(&HANDLER)
+    }
+    fn additional_grammar_node_kinds(&self) -> &'static [(&'static str, &'static str)] {
+        ADDITIONAL_GRAMMAR_NODE_KINDS
+    }
+
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
-        let mut index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
         let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) else {
-            return index;
+            return DeclIndex {
+                file,
+                ..Default::default()
+            };
         };
         let src = snapshot.text.as_bytes();
-        populate_java_condition_expressions(&mut index.branch_conditions, &tree, file, src);
-        populate_java_static_scalar_facts(&mut index, &tree, file, src);
-        populate_java_immutable_assignment_facts(&mut index, &tree, file, src);
-        index.string_compositions = java_string_compositions(&tree, file, src);
-        index.finite_literal_selections = java_finite_literal_selections(&index, &tree, file, src);
-        index.character_substitutions = java_character_substitutions(&index.defs, &tree, file, src);
+        let syntax = SyntaxKindIndex::new(&tree, JAVA_POSTPROCESS_NODE_KINDS);
+        let imports = collect_java_imports_from_syntax(&syntax, file, src);
+        let bindings = java_bindings_from_syntax(&syntax, src);
+        let mut index = decl_index_from_tree_with_handler(file, src, &tree, &HANDLER);
+        populate_java_condition_expressions(&mut index.branch_conditions, &syntax, file, src);
+        populate_java_static_scalar_facts(&mut index, &tree, &syntax, file, src);
+        populate_java_immutable_assignment_facts(&mut index, &syntax, file, src);
+        index.string_compositions = java_string_compositions(&syntax, file, src);
+        index.finite_literal_selections =
+            java_finite_literal_selections(&index, &tree, &syntax, &imports, &bindings, file, src);
+        index.character_substitutions = java_character_substitutions(&index.defs, &syntax, file, src);
         index.character_constraints = bonsai_lang_api::character_constraints_from_substitutions(
             &index.defs,
             &index.character_substitutions,
         );
-        index.same_origin_path_constraints = java_same_origin_path_constraints(&index, &tree, file, src);
-        index
-            .character_constraints
-            .extend(java_compiled_pattern_constraints(&index, &tree, file, src));
-        index
-            .character_constraints
-            .sort_by_key(|fact| (fact.transform_span.start, fact.transform_span.end));
-        index
-            .character_constraints
-            .dedup_by_key(|fact| fact.transform_span);
+        index.same_origin_path_constraints = java_same_origin_path_constraints(&index, &syntax, file, src);
         // Phase-6 return-type extraction: `T method() {}` populates
         // `Decl.return_type` for `apply_assign_call_result_types`.
         bonsai_lang_api::populate_decl_return_types(&mut index, &tree, src, &HANDLER);
@@ -390,7 +495,7 @@ impl LanguageAdapter for JavaAdapter {
             rewrite_java_reflection_chain(&mut decl.flow_events);
         }
         let field_aliases = collect_java_type_aliases(tree.root_node(), src, &["field_declaration"]);
-        let method_aliases = collect_java_method_type_aliases(&tree, file, src, &field_aliases);
+        let method_aliases = collect_java_method_type_aliases(&syntax, file, src, &field_aliases);
         for decl in &mut index.defs {
             if let Some(aliases) = method_aliases
                 .iter()
@@ -399,13 +504,13 @@ impl LanguageAdapter for JavaAdapter {
                 decl.type_aliases = aliases.clone();
             }
         }
-        attach_java_nested_callable_type_aliases(&mut index, &tree, file, src);
+        attach_java_nested_callable_type_aliases(&mut index, &syntax, file, src);
         // Resolve generic type variables from their Tree-sitter type bounds.
         // `T data` in `class Box<T extends App.Envelope>` carries both the
         // declared `T` identity and the compiler-proven `App.Envelope` upper
         // bound, so receiver dispatch on `data.method()` can resolve against
         // the bound without any method-name inventory.
-        let class_type_bounds = collect_java_class_type_parameter_bounds(&tree, file, src);
+        let class_type_bounds = collect_java_class_type_parameter_bounds(&syntax, file, src);
         let bounds_by_parent: std::collections::HashMap<_, _> = index
             .defs
             .iter()
@@ -425,7 +530,7 @@ impl LanguageAdapter for JavaAdapter {
         // ["B", "I", "J"]. Lets `kind: param` rules require an
         // ancestor type (`in_class: [WebSocketHandler]` matching a
         // user `class Echo extends WebSocketHandler { ... }`).
-        let bases_by_span = collect_java_class_bases(&tree, file, src);
+        let bases_by_span = collect_java_class_bases(&syntax, file, src);
         for decl in &mut index.defs {
             if !is_class_like(decl.kind) {
                 continue;
@@ -437,9 +542,9 @@ impl LanguageAdapter for JavaAdapter {
                 decl.bases = bases.clone();
             }
         }
-        qualify_java_instance_field_receivers(&mut index, &tree, src);
+        qualify_java_instance_field_receivers(&mut index, &tree, &bindings, src);
         rewrite_java_explicit_constructor_invocations(&mut index);
-        let constants_by_class = collect_java_class_string_constants(&tree, file, src);
+        let constants_by_class = collect_java_class_string_constants(&syntax, file, src);
         attach_java_class_string_constants(&mut index, &constants_by_class);
         // Java visibility from real syntax — `public`/`private`/
         // `protected` modifiers, and absence-of-modifier = package-private.
@@ -450,17 +555,18 @@ impl LanguageAdapter for JavaAdapter {
             }
         }
         // Module path from `package com.foo.bar;` declaration. A compilation
-        // unit without a package declaration belongs to Java's unnamed
-        // package; its filename is not a namespace. Keeping the module path
-        // empty lets exact receiver-type resolution link peer types in that
-        // package while still rejecting duplicate type identities as invalid
-        // Java source.
+        // unit without a package declaration belongs to an unnamed package,
+        // whose package-private declarations remain visible to peer
+        // compilation units in that exact source directory. Empty module
+        // identity means "unknown" to the shared resolver and therefore
+        // correctly fails closed to file scope; emit a directory-scoped
+        // unnamed-package identity instead so Java visibility remains exact.
         if let Some(segments) = extract_java_package(tree.root_node(), src) {
             let segments =
                 package_module_segments_with_workspace_prefix(file, ctx, segments, MODULE_SOURCE_ROOTS);
             bonsai_lang_api::apply_module_path_semantic_identity(&mut index, segments);
         } else {
-            bonsai_lang_api::apply_module_path_semantic_identity(&mut index, Vec::new());
+            apply_java_unnamed_package_semantic_identity(&mut index, ctx);
         }
         for decl in &mut index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
@@ -485,6 +591,26 @@ impl LanguageAdapter for JavaAdapter {
         // part of Java's type system, and is never used as proof.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut index);
+        // Candidate runtime transformations are lowered only after Java's
+        // exact type/import facts exist. The adapter records provider-bound
+        // syntax and value domains; the rulepack decides which providers
+        // give those candidates security meaning.
+        index
+            .character_constraints
+            .extend(java_direct_character_constraints(
+                &index, &syntax, &imports, file, src,
+            ));
+        index
+            .character_constraints
+            .extend(java_compiled_pattern_constraints(
+                &index, &syntax, &imports, &bindings, file, src,
+            ));
+        index.character_constraints.sort_by(|left, right| {
+            (left.transform_span.start, left.transform_span.end)
+                .cmp(&(right.transform_span.start, right.transform_span.end))
+                .then_with(|| format!("{:?}", left.domain).cmp(&format!("{:?}", right.domain)))
+        });
+        index.character_constraints.dedup();
         index
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
@@ -494,15 +620,45 @@ impl LanguageAdapter for JavaAdapter {
                 ..Default::default()
             };
         };
+        let syntax = SyntaxKindIndex::new(&tree, JAVA_POSTPROCESS_NODE_KINDS);
         ImportIndex {
             file,
-            imports: collect_java_imports(&tree, file, snapshot.text.as_bytes()),
+            imports: collect_java_imports_from_syntax(&syntax, file, snapshot.text.as_bytes()),
         }
     }
 }
 
-fn populate_java_immutable_assignment_facts(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
-    for field in collect_kinds(tree, &["field_declaration"]) {
+fn apply_java_unnamed_package_semantic_identity(index: &mut DeclIndex, ctx: &AdapterContext<'_>) {
+    let mut segments = vec!["<java-unnamed-package>".to_string()];
+    if let Some(relative) = ctx.workspace_relative_path(index.file) {
+        if let Some(parent) = relative.parent() {
+            segments.extend(parent.components().filter_map(|component| match component {
+                std::path::Component::Normal(part) => {
+                    let text = part.to_string_lossy();
+                    (!text.is_empty()).then(|| text.into_owned())
+                }
+                _ => None,
+            }));
+        }
+    }
+    let module_path = ModulePath::from_segments(segments);
+    for decl in &mut index.defs {
+        if decl.qualified_name.is_none() {
+            decl.qualified_name = Some(decl.name.clone());
+        }
+        if decl.module_path.is_empty() {
+            decl.module_path = module_path.clone();
+        }
+    }
+}
+
+fn populate_java_immutable_assignment_facts(
+    index: &mut DeclIndex,
+    syntax: &SyntaxKindIndex<'_>,
+    file: FileId,
+    src: &[u8],
+) {
+    for field in syntax.collect(&["field_declaration"]) {
         if !java_declaration_has_final_modifier(field) {
             continue;
         }
@@ -540,12 +696,12 @@ fn populate_java_immutable_assignment_facts(index: &mut DeclIndex, tree: &Tree, 
 
 fn java_same_origin_path_constraints(
     index: &DeclIndex,
-    tree: &Tree,
+    syntax: &SyntaxKindIndex<'_>,
     file: FileId,
     src: &[u8],
 ) -> Vec<SameOriginPathConstraintFact> {
     let mut facts = Vec::new();
-    for method in collect_kinds(tree, &["method_declaration"]) {
+    for method in syntax.collect(&["method_declaration"]) {
         let method_span = span_of(file, &method);
         let Some(decl) = index.defs.iter().find(|decl| decl.span == method_span) else {
             continue;
@@ -719,42 +875,12 @@ fn java_starts_with_literal(
 
 fn java_character_substitutions(
     defs: &[bonsai_lang_api::Decl],
-    tree: &Tree,
+    syntax: &SyntaxKindIndex<'_>,
     file: FileId,
     src: &[u8],
 ) -> Vec<CharacterSubstitutionFact> {
     let mut facts = Vec::new();
-    for return_node in collect_kinds(tree, &["return_statement"]) {
-        let return_span = span_of(file, &return_node);
-        let Some(decl) = defs
-            .iter()
-            .filter(|decl| {
-                matches!(decl.kind, DeclKind::Method | DeclKind::Constructor)
-                    && decl.span.start <= return_span.start
-                    && return_span.end <= decl.span.end
-            })
-            .min_by_key(|decl| decl.span.len())
-        else {
-            continue;
-        };
-        let Some(expression) = return_node.named_child(0) else {
-            continue;
-        };
-        let Some((input_param_index, exact_mappings, characters)) =
-            java_inline_replace_chain(expression, &decl.params, src)
-        else {
-            continue;
-        };
-        facts.push(CharacterSubstitutionFact {
-            function_span: decl.span,
-            transform_span: return_span,
-            input_param_index,
-            exact_mappings,
-            table: String::new(),
-            domain: CharacterSubstitutionDomain::ExactCharacters { characters },
-        });
-    }
-    for method in collect_kinds(tree, &["method_declaration"]) {
+    for method in syntax.collect(&["method_declaration"]) {
         let method_span = span_of(file, &method);
         let Some(decl) = defs.iter().find(|decl| decl.span == method_span) else {
             continue;
@@ -944,34 +1070,109 @@ fn java_switch_character_substitution(
     Some((input_param_index, span_of(file, switch_node), mappings))
 }
 
-fn java_inline_replace_chain(
-    expression: Node<'_>,
-    params: &[String],
+/// One syntax-decoded candidate substitution in a direct fluent chain.
+///
+/// `pattern_shape` describes only the argument's exact source/value shape.
+/// It deliberately does not say which runtime operation interprets that
+/// shape as a replacement pattern; provider meaning stays in rule data.
+struct JavaDirectSubstitution {
+    input_param_index: usize,
+    operation_call: String,
+    mappings: Vec<bonsai_lang_api::StaticStringMapEntry>,
+    excluded_characters: Vec<String>,
+}
+
+fn java_direct_character_constraints(
+    index: &DeclIndex,
+    syntax: &SyntaxKindIndex<'_>,
+    imports: &[ImportSpec],
+    file: FileId,
     src: &[u8],
-) -> Option<(usize, Vec<bonsai_lang_api::StaticStringMapEntry>, Vec<String>)> {
+) -> Vec<CharacterConstraintFact> {
+    let mut facts = Vec::new();
+    for return_node in syntax.collect(&["return_statement"]) {
+        let return_span = span_of(file, &return_node);
+        let Some(decl) = index
+            .defs
+            .iter()
+            .filter(|decl| {
+                matches!(decl.kind, DeclKind::Method | DeclKind::Constructor)
+                    && decl.span.start <= return_span.start
+                    && return_span.end <= decl.span.end
+            })
+            .min_by_key(|decl| decl.span.len())
+        else {
+            continue;
+        };
+        let Some(expression) = return_node.named_child(0) else {
+            continue;
+        };
+        let Some(candidate) = java_inline_static_substitution_chain(expression, decl, syntax, imports, src)
+        else {
+            continue;
+        };
+        let input_place = decl.params[candidate.input_param_index].clone();
+        let provider = |domain| CharacterConstraintDomain::ProviderBound {
+            factory_call: String::new(),
+            operation_call: candidate.operation_call.clone(),
+            domain: Box::new(domain),
+        };
+        facts.push(CharacterConstraintFact {
+            function_span: decl.span,
+            transform_span: return_span,
+            input_place: input_place.clone(),
+            input_param_index: Some(candidate.input_param_index),
+            proof: bonsai_lang_api::CharacterConstraintProof::ExactRuntimeSemantics,
+            output: CharacterConstraintOutput::Return,
+            domain: provider(CharacterConstraintDomain::SubstitutesExact {
+                mappings: candidate.mappings,
+            }),
+        });
+        if !candidate.excluded_characters.is_empty() {
+            facts.push(CharacterConstraintFact {
+                function_span: decl.span,
+                transform_span: return_span,
+                input_place,
+                input_param_index: Some(candidate.input_param_index),
+                proof: bonsai_lang_api::CharacterConstraintProof::ExactRuntimeSemantics,
+                output: CharacterConstraintOutput::Return,
+                domain: provider(CharacterConstraintDomain::ExcludesExact {
+                    characters: candidate.excluded_characters,
+                }),
+            });
+        }
+    }
+    facts.sort_by_key(|fact| (fact.function_span.start, fact.transform_span.start));
+    facts.dedup();
+    facts
+}
+
+fn java_inline_static_substitution_chain(
+    expression: Node<'_>,
+    decl: &bonsai_lang_api::Decl,
+    syntax: &SyntaxKindIndex<'_>,
+    imports: &[ImportSpec],
+    src: &[u8],
+) -> Option<JavaDirectSubstitution> {
     let mut current = expression;
     let mut mappings = Vec::new();
-    let mut characters = Vec::new();
+    let mut operations = Vec::new();
     while current.kind() == "method_invocation" {
         let method = current.child_by_field_name("name")?;
         let method = node_text(&method, src).trim();
-        if !matches!(method, "replace" | "replaceAll") {
-            break;
+        if method.is_empty() {
+            return None;
         }
         let arguments = current.child_by_field_name("arguments")?;
         let args = arguments
             .named_children(&mut arguments.walk())
             .collect::<Vec<_>>();
         let [pattern, replacement] = args.as_slice() else {
-            return None;
+            break;
         };
         let output = java_static_string_or_character(*replacement, src)?;
-        let replaced = if method == "replace" {
-            let value = java_static_string_or_character(*pattern, src)?;
-            (value.chars().count() == 1).then(|| vec![value])?
-        } else {
-            java_exact_regex_character_class(&java_static_string_literal(*pattern, src)?)?
-        };
+        let (replaced, pattern_shape) = java_static_substitution_pattern(*pattern, src)?;
+        operations.push((method.to_string(), pattern_shape));
         for input in replaced {
             if mappings
                 .iter()
@@ -982,7 +1183,6 @@ fn java_inline_replace_chain(
                 return None;
             }
             if !mappings.iter().any(|entry| entry.key == input) {
-                characters.push(input.clone());
                 mappings.push(bonsai_lang_api::StaticStringMapEntry {
                     key: input,
                     value: output.clone(),
@@ -995,11 +1195,96 @@ fn java_inline_replace_chain(
         return None;
     }
     let input = node_text(&current, src).trim();
-    let input_param_index = params.iter().position(|param| param == input)?;
-    characters.sort();
-    characters.dedup();
+    let input_param_index = decl.params.iter().position(|param| param == input)?;
+    let receiver_type = java_exact_binding_type_identity(decl, input, syntax, imports, src)?;
+    operations.reverse();
+    let operation_call = operations
+        .into_iter()
+        .map(|(operation, pattern_shape)| format!("{receiver_type}.{operation}#{pattern_shape}"))
+        .collect::<Vec<_>>()
+        .join("|");
+    let mut excluded_characters = mappings
+        .iter()
+        .filter(|mapping| !mapping.value.contains(&mapping.key))
+        .map(|mapping| mapping.key.clone())
+        .collect::<Vec<_>>();
+    excluded_characters.sort();
+    excluded_characters.dedup();
     mappings.sort_by(|left, right| left.key.cmp(&right.key));
-    Some((input_param_index, mappings, characters))
+    Some(JavaDirectSubstitution {
+        input_param_index,
+        operation_call,
+        mappings,
+        excluded_characters,
+    })
+}
+
+fn java_static_substitution_pattern(node: Node<'_>, src: &[u8]) -> Option<(Vec<String>, &'static str)> {
+    if node.kind() == "character_literal" {
+        let value = java_static_string_or_character(node, src)?;
+        return (value.chars().count() == 1).then(|| (vec![value], "character-literal"));
+    }
+    let value = java_static_string_literal(node, src)?;
+    if value.chars().count() == 1 {
+        let pattern_shape = value
+            .chars()
+            .next()
+            .filter(|character| ".^$|?*+()[]{}\\".contains(*character))
+            .map_or("single-character-string", |_| "regex-meta-character-string");
+        return Some((vec![value], pattern_shape));
+    }
+    java_exact_regex_character_class(&value).map(|characters| (characters, "regex-character-class"))
+}
+
+/// Resolve a typed receiver without attaching any operation semantics.
+/// Explicit imports and qualified types retain their exact provider; a
+/// same-file declaration is marked workspace-local so it cannot collide with
+/// a rulepack-selected runtime type.
+fn java_exact_binding_type_identity(
+    decl: &bonsai_lang_api::Decl,
+    binding: &str,
+    syntax: &SyntaxKindIndex<'_>,
+    imports: &[ImportSpec],
+    src: &[u8],
+) -> Option<String> {
+    let mut types = decl
+        .type_aliases
+        .iter()
+        .filter(|alias| alias.name == binding)
+        .map(|alias| alias.type_name.as_str())
+        .collect::<Vec<_>>();
+    types.sort_by_key(|type_name| std::cmp::Reverse(type_name.len()));
+    types.dedup();
+    let type_name = *types.first()?;
+    if type_name.contains('.') {
+        return Some(type_name.to_string());
+    }
+    if java_declares_type_named(syntax, src, type_name) {
+        return Some(format!("workspace.{type_name}"));
+    }
+    if let Some(module) = java_exact_imported_type(type_name, imports) {
+        return Some(module);
+    }
+    Some(type_name.to_string())
+}
+
+fn java_exact_imported_type(type_name: &str, imports: &[ImportSpec]) -> Option<String> {
+    let exact = imports
+        .iter()
+        .filter(|import| !import.is_wildcard && import.alias.as_deref() == Some(type_name))
+        .map(|import| import.module.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if exact.len() == 1 {
+        return exact.into_iter().next().map(str::to_string);
+    }
+    let wildcard = imports
+        .iter()
+        .filter(|import| import.is_wildcard)
+        .map(|import| format!("{}.{}", import.module, type_name))
+        .collect::<std::collections::BTreeSet<_>>();
+    (wildcard.len() == 1)
+        .then(|| wildcard.into_iter().next())
+        .flatten()
 }
 
 fn java_static_string_or_character(node: Node<'_>, src: &[u8]) -> Option<String> {
@@ -1055,13 +1340,14 @@ fn java_exact_regex_character_class(pattern: &str) -> Option<Vec<String>> {
 
 fn java_compiled_pattern_constraints(
     index: &DeclIndex,
-    tree: &Tree,
+    syntax: &SyntaxKindIndex<'_>,
+    imports: &[ImportSpec],
+    bindings: &JavaBindings<'_>,
     file: FileId,
     src: &[u8],
 ) -> Vec<CharacterConstraintFact> {
-    let bindings = java_bindings(tree, src);
     let mut patterns = Vec::new();
-    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+    for declarator in syntax.collect(&["variable_declarator"]) {
         let (Some(name), Some(value)) = (
             declarator.child_by_field_name("name"),
             declarator.child_by_field_name("value"),
@@ -1071,16 +1357,13 @@ fn java_compiled_pattern_constraints(
         if name.kind() != "identifier" || value.kind() != "method_invocation" {
             continue;
         }
-        let (Some(object), Some(method), Some(arguments)) = (
-            value.child_by_field_name("object"),
-            value.child_by_field_name("name"),
-            value.child_by_field_name("arguments"),
-        ) else {
+        let Some(arguments) = value.child_by_field_name("arguments") else {
             continue;
         };
-        if node_text(&object, src).trim() != "Pattern" || node_text(&method, src).trim() != "compile" {
+        let Some(factory_call) = java_exact_direct_call_identity(value, syntax, imports, bindings, src)
+        else {
             continue;
-        }
+        };
         let args = arguments
             .named_children(&mut arguments.walk())
             .collect::<Vec<_>>();
@@ -1104,11 +1387,11 @@ fn java_compiled_pattern_constraints(
             continue;
         };
         let name = node_text(&name, src).trim().to_string();
-        patterns.push((name, span_of(file, &value), characters));
+        patterns.push((name, span_of(file, &value), factory_call, characters));
     }
 
     let mut facts = Vec::new();
-    for call in collect_kinds(tree, &["method_invocation"]) {
+    for call in syntax.collect(&["method_invocation"]) {
         let (Some(method), Some(receiver), Some(arguments)) = (
             call.child_by_field_name("name"),
             call.child_by_field_name("object"),
@@ -1116,7 +1399,8 @@ fn java_compiled_pattern_constraints(
         ) else {
             continue;
         };
-        if node_text(&method, src).trim() != "replaceAll" || receiver.kind() != "method_invocation" {
+        let operation = node_text(&method, src).trim();
+        if operation.is_empty() || receiver.kind() != "method_invocation" {
             continue;
         }
         let (Some(matcher_name), Some(pattern_receiver), Some(matcher_args)) = (
@@ -1126,7 +1410,8 @@ fn java_compiled_pattern_constraints(
         ) else {
             continue;
         };
-        if node_text(&matcher_name, src).trim() != "matcher" || pattern_receiver.kind() != "identifier" {
+        let constructor_operation = node_text(&matcher_name, src).trim();
+        if constructor_operation.is_empty() || pattern_receiver.kind() != "identifier" {
             continue;
         }
         let pattern_name = node_text(&pattern_receiver, src).trim();
@@ -1138,9 +1423,9 @@ fn java_compiled_pattern_constraints(
             continue;
         };
         let binding_value_span = span_of(file, &binding.initializer);
-        let Some((_, _, mut characters)) = patterns
+        let Some((_, _, factory_call, mut characters)) = patterns
             .iter()
-            .find(|(name, value_span, _)| name == pattern_name && *value_span == binding_value_span)
+            .find(|(name, value_span, _, _)| name == pattern_name && *value_span == binding_value_span)
             .cloned()
         else {
             continue;
@@ -1194,28 +1479,78 @@ fn java_compiled_pattern_constraints(
             transform_span,
             input_place,
             input_param_index,
+            proof: bonsai_lang_api::CharacterConstraintProof::ExactRuntimeSemantics,
             output,
-            domain: CharacterConstraintDomain::ExcludesExact { characters },
+            domain: CharacterConstraintDomain::ProviderBound {
+                factory_call,
+                operation_call: format!("{constructor_operation}|{operation}"),
+                domain: Box::new(CharacterConstraintDomain::ExcludesExact { characters }),
+            },
         });
     }
     facts
 }
 
+/// Canonicalize one direct Java call through exact lexical/import evidence.
+/// The returned string is a provider identity only; no operation meaning is
+/// assigned here. Ambiguous imports and value-shadowed type spellings remain
+/// distinct from rulepack-selected external providers.
+fn java_exact_direct_call_identity(
+    call: Node<'_>,
+    syntax: &SyntaxKindIndex<'_>,
+    imports: &[ImportSpec],
+    bindings: &JavaBindings<'_>,
+    src: &[u8],
+) -> Option<String> {
+    if call.kind() != "method_invocation" {
+        return None;
+    }
+    let receiver = call.child_by_field_name("object")?;
+    let operation = call.child_by_field_name("name")?;
+    let operation = node_text(&operation, src).trim();
+    if operation.is_empty() {
+        return None;
+    }
+    let receiver_text = node_text(&receiver, src).trim();
+    if receiver_text.is_empty() {
+        return None;
+    }
+    if receiver.kind() == "identifier" {
+        if bindings
+            .resolve(receiver_text, receiver.start_byte(), receiver.end_byte())
+            .is_some()
+        {
+            return Some(format!("value.{receiver_text}.{operation}"));
+        }
+        if java_declares_type_named(syntax, src, receiver_text) {
+            return Some(format!("workspace.{receiver_text}.{operation}"));
+        }
+        if let Some(provider) = java_exact_imported_type(receiver_text, imports) {
+            return Some(format!("{provider}.{operation}"));
+        }
+        return Some(format!("{receiver_text}.{operation}"));
+    }
+    matches!(receiver.kind(), "scoped_identifier" | "field_access")
+        .then(|| format!("{receiver_text}.{operation}"))
+}
+
 fn java_finite_literal_selections(
     index: &DeclIndex,
     tree: &Tree,
+    syntax: &SyntaxKindIndex<'_>,
+    imports: &[ImportSpec],
+    bindings: &JavaBindings<'_>,
     file: FileId,
     src: &[u8],
 ) -> Vec<FiniteLiteralSelectionFact> {
-    if !java_imports_standard_map(tree, file, src) {
+    if !java_imports_standard_map(imports) {
         return Vec::new();
     }
-    let bindings = java_bindings(tree, src);
     if !bindings.bindings.iter().any(|binding| binding.finite_map) {
         return Vec::new();
     }
     let mut selections = Vec::new();
-    for call in collect_kinds(tree, &["method_invocation"]) {
+    for call in syntax.collect(&["method_invocation"]) {
         let Some(object) = call.child_by_field_name("object") else {
             continue;
         };
@@ -1292,15 +1627,18 @@ impl<'tree> JavaBindings<'tree> {
     }
 }
 
-fn java_imports_standard_map(tree: &Tree, file: FileId, src: &[u8]) -> bool {
-    collect_java_imports(tree, file, src)
+fn java_imports_standard_map(imports: &[ImportSpec]) -> bool {
+    imports
         .iter()
         .any(|import| import.module == "java.util.Map" && !import.is_wildcard)
 }
 
-fn java_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> JavaBindings<'tree> {
+fn java_bindings_from_syntax<'tree>(
+    syntax: &SyntaxKindIndex<'tree>,
+    src: &'tree [u8],
+) -> JavaBindings<'tree> {
     let mut bindings = Vec::new();
-    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+    for declarator in syntax.collect(&["variable_declarator"]) {
         let Some(target) = declarator.child_by_field_name("name") else {
             continue;
         };
@@ -1326,10 +1664,7 @@ fn java_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> JavaBindings<'tr
         });
     }
 
-    for parameter in collect_kinds(
-        tree,
-        &["formal_parameter", "spread_parameter", "catch_formal_parameter"],
-    ) {
+    for parameter in syntax.collect(&["formal_parameter", "spread_parameter", "catch_formal_parameter"]) {
         let Some(name_node) = parameter
             .child_by_field_name("name")
             .filter(|name| name.kind() == "identifier")
@@ -1355,7 +1690,7 @@ fn java_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> JavaBindings<'tr
         push_java_blocking_binding(&mut bindings, name_node, scope, name);
     }
 
-    for lambda in collect_kinds(tree, &["lambda_expression"]) {
+    for lambda in syntax.collect(&["lambda_expression"]) {
         let Some(parameters) = lambda.child_by_field_name("parameters") else {
             continue;
         };
@@ -1377,7 +1712,7 @@ fn java_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> JavaBindings<'tr
         }
     }
 
-    for enhanced_for in collect_kinds(tree, &["enhanced_for_statement"]) {
+    for enhanced_for in syntax.collect(&["enhanced_for_statement"]) {
         let Some(name_node) = enhanced_for
             .child_by_field_name("name")
             .filter(|name| name.kind() == "identifier")
@@ -1391,7 +1726,7 @@ fn java_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> JavaBindings<'tr
         push_java_blocking_binding(&mut bindings, name_node, scope, name);
     }
 
-    for pattern in collect_kinds(tree, &["type_pattern", "record_pattern_component"]) {
+    for pattern in syntax.collect(&["type_pattern", "record_pattern_component"]) {
         let mut cursor = pattern.walk();
         let Some(name_node) = pattern
             .named_children(&mut cursor)
@@ -1410,7 +1745,7 @@ fn java_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> JavaBindings<'tr
     for (index, binding) in bindings.iter().enumerate() {
         by_name.entry(binding.name.to_string()).or_default().push(index);
     }
-    if by_name.contains_key("Map") || java_declares_type_named(tree, src, "Map") {
+    if by_name.contains_key("Map") || java_declares_type_named(syntax, src, "Map") {
         for binding in &mut bindings {
             binding.finite_map = false;
         }
@@ -1424,7 +1759,12 @@ fn java_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> JavaBindings<'tr
 /// `this.data.cmd()`). The shared IDG consumes the resulting place directly;
 /// it must not guess whether an arbitrary bare receiver is a local, field,
 /// type, or package.
-fn qualify_java_instance_field_receivers(index: &mut DeclIndex, tree: &Tree, src: &[u8]) {
+fn qualify_java_instance_field_receivers(
+    index: &mut DeclIndex,
+    tree: &Tree,
+    bindings: &JavaBindings<'_>,
+    src: &[u8],
+) {
     let Some(current_receiver) = HANDLER
         .implicit_receiver_names
         .first()
@@ -1433,8 +1773,6 @@ fn qualify_java_instance_field_receivers(index: &mut DeclIndex, tree: &Tree, src
     else {
         return;
     };
-    let bindings = java_bindings(tree, src);
-
     // Field initializers and later receiver calls must name the same storage
     // place. Tree-sitter exposes the declarator target as a bare identifier,
     // but Java resolves a non-static field target through the current
@@ -1624,23 +1962,21 @@ fn java_enclosing_block(mut node: Node<'_>) -> Option<Node<'_>> {
     None
 }
 
-fn java_declares_type_named(tree: &Tree, src: &[u8], wanted: &str) -> bool {
-    collect_kinds(
-        tree,
-        &[
+fn java_declares_type_named(syntax: &SyntaxKindIndex<'_>, src: &[u8], wanted: &str) -> bool {
+    syntax
+        .collect(&[
             "class_declaration",
             "interface_declaration",
             "enum_declaration",
             "record_declaration",
             "annotation_type_declaration",
-        ],
-    )
-    .into_iter()
-    .any(|declaration| {
-        declaration
-            .child_by_field_name("name")
-            .is_some_and(|name| node_text(&name, src).trim() == wanted)
-    })
+        ])
+        .into_iter()
+        .any(|declaration| {
+            declaration
+                .child_by_field_name("name")
+                .is_some_and(|name| node_text(&name, src).trim() == wanted)
+        })
 }
 
 fn java_binding_scope_and_declaration(mut node: Node<'_>) -> Option<(Node<'_>, Node<'_>, bool)> {
@@ -1772,11 +2108,11 @@ fn java_is_literal_value(mut node: Node<'_>, src: &[u8]) -> bool {
 
 fn populate_java_condition_expressions(
     facts: &mut [bonsai_lang_api::BranchConditionFact],
-    tree: &Tree,
+    syntax: &SyntaxKindIndex<'_>,
     file: FileId,
     src: &[u8],
 ) {
-    for branch in collect_kinds(tree, &["if_statement"]) {
+    for branch in syntax.collect(&["if_statement"]) {
         let branch_span = span_of(file, &branch);
         let Some(condition) = branch.child_by_field_name("condition") else {
             continue;
@@ -1900,6 +2236,7 @@ fn merge_java_condition_junction(
 fn java_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
     ConditionOperandFact {
         span: span_of(file, &node),
+        direct_call_span: (node.kind() == "method_invocation").then(|| span_of(file, &node)),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER),
         static_string: java_static_string_literal(node, src),
         static_value: java_static_scalar(node, src),
@@ -1993,9 +2330,13 @@ fn java_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
     }
 }
 
-fn java_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<StringCompositionFact> {
+fn java_string_compositions(
+    syntax: &SyntaxKindIndex<'_>,
+    file: FileId,
+    src: &[u8],
+) -> Vec<StringCompositionFact> {
     let mut facts = Vec::new();
-    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+    for declarator in syntax.collect(&["variable_declarator"]) {
         let (Some(name), Some(value)) = (
             declarator.child_by_field_name("name"),
             declarator.child_by_field_name("value"),
@@ -2011,6 +2352,7 @@ fn java_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<String
                 container_span: span_of(file, &declarator),
                 value_span: span_of(file, &value),
                 target: Some(node_text(&name, src).trim().to_string()),
+                dynamic_anchor_span: None,
                 parts,
             });
         }
@@ -2136,24 +2478,30 @@ fn java_method_call_identity(node: Node<'_>, src: &[u8]) -> Option<(String, Stri
     ))
 }
 
-fn populate_java_static_scalar_facts(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
-    let static_values: std::collections::HashMap<_, _> =
-        collect_kinds(tree, &["string_literal", "true", "false", "null_literal"])
-            .into_iter()
-            .filter_map(|node| {
-                let value = java_static_scalar(node, src)?;
-                let span = span_of(file, &node);
-                Some(((span.start, span.end), value))
-            })
-            .collect();
-    let call_values: std::collections::HashMap<_, _> =
-        collect_kinds(tree, &["method_invocation", "object_creation_expression"])
-            .into_iter()
-            .map(|node| {
-                let span = span_of(file, &node);
-                ((span.start, span.end), node)
-            })
-            .collect();
+fn populate_java_static_scalar_facts(
+    index: &mut DeclIndex,
+    tree: &Tree,
+    syntax: &SyntaxKindIndex<'_>,
+    file: FileId,
+    src: &[u8],
+) {
+    let static_values: std::collections::HashMap<_, _> = syntax
+        .collect(&["string_literal", "true", "false", "null_literal"])
+        .into_iter()
+        .filter_map(|node| {
+            let value = java_static_scalar(node, src)?;
+            let span = span_of(file, &node);
+            Some(((span.start, span.end), value))
+        })
+        .collect();
+    let call_values: std::collections::HashMap<_, _> = syntax
+        .collect(&["method_invocation", "object_creation_expression"])
+        .into_iter()
+        .map(|node| {
+            let span = span_of(file, &node);
+            ((span.start, span.end), node)
+        })
+        .collect();
     for fact in &mut index.assignment_values {
         if fact.direct_call_name.is_none() {
             continue;
@@ -2188,15 +2536,28 @@ fn populate_java_static_scalar_facts(index: &mut DeclIndex, tree: &Tree, file: F
         &HANDLER,
         java_static_scalar,
     );
-    populate_java_array_argument_sequences(index, tree, file, src);
+    bonsai_lang_api::kit::populate_assignment_inline_callback_static_returns(
+        index,
+        tree,
+        src,
+        &HANDLER,
+        java_static_scalar,
+    );
+    populate_java_array_argument_sequences(index, syntax, file, src);
 }
 
 /// Lower Java's `new T[] { ... }` wrapper into the shared ordered-sequence
 /// fact. The wrapper and `array_initializer` field are Java grammar details;
 /// downstream matching sees only exact scalar values (and `None` for dynamic
 /// elements).
-fn populate_java_array_argument_sequences(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
-    let arrays: std::collections::HashMap<_, _> = collect_kinds(tree, &["array_creation_expression"])
+fn populate_java_array_argument_sequences(
+    index: &mut DeclIndex,
+    syntax: &SyntaxKindIndex<'_>,
+    file: FileId,
+    src: &[u8],
+) {
+    let arrays: std::collections::HashMap<_, _> = syntax
+        .collect(&["array_creation_expression"])
         .into_iter()
         .map(|node| {
             let span = span_of(file, &node);
@@ -2229,13 +2590,13 @@ fn populate_java_array_argument_sequences(index: &mut DeclIndex, tree: &Tree, fi
 /// Build per-method type-alias bindings (`Foo bar` → `bar : Foo`) by
 /// merging file-level field aliases with each method's local declarations.
 fn collect_java_method_type_aliases(
-    tree: &Tree,
+    syntax: &SyntaxKindIndex<'_>,
     file: FileId,
     src: &[u8],
     field_aliases: &[TypeAliasBinding],
 ) -> Vec<(bonsai_common::Span, Vec<TypeAliasBinding>)> {
     let mut aliases_by_method = Vec::new();
-    for method_node in collect_kinds(tree, &["method_declaration", "constructor_declaration"]) {
+    for method_node in syntax.collect(&["method_declaration", "constructor_declaration"]) {
         // Start every method with the file's field aliases — fields are
         // visible throughout the method body.
         let mut method_aliases = field_aliases.to_vec();
@@ -2264,26 +2625,24 @@ fn collect_java_method_type_aliases(
 type JavaTypeParameterBounds = Vec<(String, Vec<String>)>;
 
 fn collect_java_class_type_parameter_bounds(
-    tree: &Tree,
+    syntax: &SyntaxKindIndex<'_>,
     file: FileId,
     src: &[u8],
 ) -> Vec<(Span, JavaTypeParameterBounds)> {
-    collect_kinds(
-        tree,
-        &[
+    syntax
+        .collect(&[
             "class_declaration",
             "interface_declaration",
             "record_declaration",
             "enum_declaration",
             "annotation_type_declaration",
-        ],
-    )
-    .into_iter()
-    .filter_map(|node| {
-        let bounds = java_type_parameter_bounds(node, src);
-        (!bounds.is_empty()).then(|| (span_of(file, &node), bounds))
-    })
-    .collect()
+        ])
+        .into_iter()
+        .filter_map(|node| {
+            let bounds = java_type_parameter_bounds(node, src);
+            (!bounds.is_empty()).then(|| (span_of(file, &node), bounds))
+        })
+        .collect()
 }
 
 fn java_type_parameter_bounds(node: Node<'_>, src: &[u8]) -> JavaTypeParameterBounds {
@@ -2354,9 +2713,14 @@ fn expand_java_type_parameter_aliases(aliases: &mut Vec<TypeAliasBinding>, bound
 /// the lambda value `f` to `Interface`; it does not tell us the external
 /// interface method's parameter types. Those external signatures are
 /// rulepack typing data and are applied later by the matcher.
-fn attach_java_nested_callable_type_aliases(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+fn attach_java_nested_callable_type_aliases(
+    index: &mut DeclIndex,
+    syntax: &SyntaxKindIndex<'_>,
+    file: FileId,
+    src: &[u8],
+) {
     let mut callable_bindings = Vec::new();
-    for declaration in collect_kinds(tree, &["local_variable_declaration"]) {
+    for declaration in syntax.collect(&["local_variable_declaration"]) {
         let Some(type_node) = declaration.child_by_field_name("type") else {
             continue;
         };
@@ -2613,13 +2977,19 @@ fn dedup_type_aliases(aliases: &mut Vec<TypeAliasBinding>) {
     *aliases = deduped;
 }
 
-fn collect_java_imports(tree: &Tree, file: FileId, src: &[u8]) -> Vec<ImportSpec> {
-    let mut imports: Vec<_> = collect_kinds(tree, &["import_declaration"])
+fn collect_java_imports_from_syntax(
+    syntax: &SyntaxKindIndex<'_>,
+    file: FileId,
+    src: &[u8],
+) -> Vec<ImportSpec> {
+    let mut imports: Vec<_> = syntax
+        .collect(&["import_declaration"])
         .into_iter()
         .filter_map(|import| java_import_spec(import, file, src))
         .collect();
     imports.extend(
-        collect_kinds(tree, &["scoped_type_identifier"])
+        syntax
+            .collect(&["scoped_type_identifier"])
             .into_iter()
             .filter(|type_use| !has_ancestor_kind(*type_use, "import_declaration"))
             .filter(|type_use| {
@@ -2896,7 +3266,7 @@ fn rewrite_java_explicit_constructor_invocations_in_events(
 /// `interface_declaration` uses `extends_interfaces` instead of
 /// `superclass`. `record_declaration` only has `interfaces`.
 fn collect_java_class_bases(
-    tree: &Tree,
+    syntax: &SyntaxKindIndex<'_>,
     file: FileId,
     src: &[u8],
 ) -> Vec<(bonsai_common::Span, Vec<String>)> {
@@ -2908,7 +3278,7 @@ fn collect_java_class_bases(
         "enum_declaration",
         "annotation_type_declaration",
     ];
-    for class_node in collect_kinds(tree, class_kinds) {
+    for class_node in syntax.collect(class_kinds) {
         let mut bases: Vec<String> = Vec::new();
         // `superclass` field — single parent.
         if let Some(sc) = class_node.child_by_field_name("superclass") {
@@ -2941,7 +3311,7 @@ fn collect_java_class_bases(
 }
 
 fn collect_java_class_string_constants(
-    tree: &Tree,
+    syntax: &SyntaxKindIndex<'_>,
     file: FileId,
     src: &[u8],
 ) -> Vec<(bonsai_common::Span, Vec<FlowEvent>)> {
@@ -2953,7 +3323,7 @@ fn collect_java_class_string_constants(
         "annotation_type_declaration",
     ];
     let mut out = Vec::new();
-    for class_node in collect_kinds(tree, class_kinds) {
+    for class_node in syntax.collect(class_kinds) {
         let Some(body) = class_node.child_by_field_name("body") else {
             continue;
         };
@@ -3193,6 +3563,7 @@ fn populate_java_exception_types(events: &mut [bonsai_lang_api::FlowEvent], tree
                 finally_events,
                 catch_types,
                 catch_param,
+                catch_arms,
                 ..
             } => {
                 if let Some(node) =
@@ -3207,6 +3578,14 @@ fn populate_java_exception_types(events: &mut [bonsai_lang_api::FlowEvent], tree
                     // adapter where we have the structural context.
                     if let Some(name) = collect_java_catch_param_name(node, src) {
                         *catch_param = Some(name);
+                    }
+                    for arm in catch_arms {
+                        if let Some(clause) =
+                            bonsai_lang_api::kit::node_at_span(tree.root_node(), arm.span, &["catch_clause"])
+                        {
+                            arm.parameter = java_catch_clause_param_name(clause, src);
+                            arm.types = java_catch_clause_types(clause, src);
+                        }
                     }
                 }
                 populate_java_exception_types(body, tree, src);
@@ -3271,25 +3650,32 @@ fn collect_java_catch_param_name(try_node: Node<'_>, src: &[u8]) -> Option<Strin
         if child.kind() != "catch_clause" {
             continue;
         }
-        let mut ccur = child.walk();
-        for sub in child.named_children(&mut ccur) {
-            if sub.kind() != "catch_formal_parameter" {
-                continue;
+        if let Some(parameter) = java_catch_clause_param_name(child, src) {
+            return Some(parameter);
+        }
+    }
+    None
+}
+
+fn java_catch_clause_param_name(clause: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut ccur = clause.walk();
+    for sub in clause.named_children(&mut ccur) {
+        if sub.kind() != "catch_formal_parameter" {
+            continue;
+        }
+        if let Some(n) = sub.child_by_field_name("name") {
+            return Some(node_text(&n, src).trim().to_string());
+        }
+        // Fallback: rightmost `identifier` (after the type).
+        let mut pcur = sub.walk();
+        let mut last_ident: Option<Node<'_>> = None;
+        for ptype in sub.named_children(&mut pcur) {
+            if ptype.kind() == "identifier" {
+                last_ident = Some(ptype);
             }
-            if let Some(n) = sub.child_by_field_name("name") {
-                return Some(node_text(&n, src).trim().to_string());
-            }
-            // Fallback: rightmost `identifier` (after the type).
-            let mut pcur = sub.walk();
-            let mut last_ident: Option<Node<'_>> = None;
-            for ptype in sub.named_children(&mut pcur) {
-                if ptype.kind() == "identifier" {
-                    last_ident = Some(ptype);
-                }
-            }
-            if let Some(n) = last_ident {
-                return Some(node_text(&n, src).trim().to_string());
-            }
+        }
+        if let Some(n) = last_ident {
+            return Some(node_text(&n, src).trim().to_string());
         }
     }
     None
@@ -3302,25 +3688,35 @@ fn collect_java_catch_types(try_node: Node<'_>, src: &[u8]) -> Vec<String> {
         if child.kind() != "catch_clause" {
             continue;
         }
-        // catch_clause > catch_formal_parameter > catch_type > type_identifier (one or more)
-        let mut ccur = child.walk();
-        for sub in child.named_children(&mut ccur) {
-            if sub.kind() != "catch_formal_parameter" {
-                continue;
+        for name in java_catch_clause_types(child, src) {
+            if !out.iter().any(|existing| existing == &name) {
+                out.push(name);
             }
-            let mut pcur = sub.walk();
-            for ptype in sub.named_children(&mut pcur) {
-                if ptype.kind() == "catch_type" {
-                    let mut tcur = ptype.walk();
-                    for t in ptype.named_children(&mut tcur) {
-                        if matches!(
-                            t.kind(),
-                            "type_identifier" | "generic_type" | "scoped_type_identifier"
-                        ) {
-                            let name = bonsai_lang_api::kit::canonical_simple_type_name(node_text(&t, src));
-                            if !name.is_empty() && !out.iter().any(|x| x == &name) {
-                                out.push(name);
-                            }
+        }
+    }
+    out
+}
+
+fn java_catch_clause_types(clause: Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    // catch_clause > catch_formal_parameter > catch_type > type_identifier (one or more)
+    let mut ccur = clause.walk();
+    for sub in clause.named_children(&mut ccur) {
+        if sub.kind() != "catch_formal_parameter" {
+            continue;
+        }
+        let mut pcur = sub.walk();
+        for ptype in sub.named_children(&mut pcur) {
+            if ptype.kind() == "catch_type" {
+                let mut tcur = ptype.walk();
+                for t in ptype.named_children(&mut tcur) {
+                    if matches!(
+                        t.kind(),
+                        "type_identifier" | "generic_type" | "scoped_type_identifier"
+                    ) {
+                        let name = bonsai_lang_api::kit::canonical_simple_type_name(node_text(&t, src));
+                        if !name.is_empty() && !out.iter().any(|x| x == &name) {
+                            out.push(name);
                         }
                     }
                 }

@@ -113,6 +113,7 @@
     callee:
       name: proc_open
   constraints:
+  - arg_value_not_aggregate: 0
   - arg_tainted:
       index: 0
   match_examples:
@@ -120,6 +121,13 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  proc_open($input);\n}\n"
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  proc_open(\"safe\");\n}\n"
+    expect_no_match: true
+  - name: direct argv array does not invoke a shell
+    code: |
+      <?php
+      function example($input) {
+        proc_open(['/usr/bin/tool', '--value', $input], [], $pipes);
+      }
     expect_no_match: true
   description: proc_open() - flag if first arg is a string (uses shell).
 - id: php.cmdi.popen
@@ -190,7 +198,6 @@
     code: |
       <?php
       use symfony\process;
-      use symfony\process;
       function example($input, $url, $id, $payload, $request) {
         Process::fromShellCommandline($input);
       }
@@ -206,38 +213,6 @@
   imports:
   - symfony\process
   - symfony
-- id: php.cmdi.symfony_process_new
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: command-injection
-  severity: medium
-  category: process-exec
-  packages:
-  - symfony/process
-  cwe:
-  - CWE-78
-  match:
-    kind: new
-    callee:
-      name: Process
-  description: Disabled - Process(array) is safe; flag only when string command.
-- id: php.cmdi.backtick_exec
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: command-injection
-  severity: critical
-  category: process-exec
-  cwe:
-  - CWE-78
-  match:
-    kind: call
-    callee:
-      name: shell_exec
-  description: Disabled duplicate - backtick `cmd` desugars to shell_exec; covered above.
 - id: php.cmdi.laravel_artisan_call
   enabled: true
   language: php
@@ -262,7 +237,6 @@
   - name: php.cmdi.laravel_artisan_call example
     code: |
       <?php
-      use laravel\framework;
       use laravel\framework;
       function example($input, $url, $id, $payload, $request) {
         Artisan::call($input);
@@ -325,22 +299,3 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  mail('to@example.com', 'subject', 'body', 'From: noreply@example.com', '-f noreply@example.com');\n}\n"
     expect_no_match: true
   description: mail() - 5th arg additional_params goes to sendmail shell.
-- id: php.cmdi.symfony_process_run
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: command-injection
-  severity: medium
-  category: process-exec
-  packages:
-  - symfony/process
-  cwe:
-  - CWE-78
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Process
-      - run
-  description: Disabled - Process::run is safe with array cmd; flag when constructed via fromShellCommandline.

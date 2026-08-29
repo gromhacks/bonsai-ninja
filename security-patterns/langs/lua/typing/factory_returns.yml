@@ -1,0 +1,442 @@
+# External-library constructor return types. These rules only provide receiver
+# evidence for exact downstream source matching.
+- id: lua.typing.resty_aws_root
+  enabled: true
+  language: lua
+  packages: [lua-resty-aws, resty.aws]
+  imports: [resty.aws]
+  returns_type: AwsSdk
+  match:
+    kind: call
+    callee:
+      name: AWS
+      binding_origin: imported
+  match_examples:
+  - name: lua-resty-aws root instance
+    code: |
+      local AWS = require("resty.aws")
+      local aws = AWS({ region = "us-east-1" })
+    expect_match_text: [AWS]
+  - name: unrelated callable is not an AWS instance
+    code: |
+      local imported_aws = require("resty.aws")
+      local AWS = LocalFactory
+      local aws = AWS({ region = "us-east-1" })
+    expect_no_match: true
+  description: "The module returned by require('resty.aws') is callable and yields an AWS SDK instance. Typing-only."
+
+- id: lua.typing.resty_aws_s3
+  enabled: true
+  language: lua
+  packages: [lua-resty-aws, resty.aws]
+  imports: [resty.aws]
+  returns_type: AwsS3Client
+  match:
+    kind: call
+    callee:
+      name: S3
+  constraints:
+  - receiver_type_in: [AwsSdk]
+  match_examples:
+  - name: typed lua-resty-aws S3 service
+    code: |
+      local AWS = require("resty.aws")
+      local aws = AWS({ region = "us-east-1" })
+      local s3 = aws:S3()
+    expect_match_text: [aws.S3]
+  - name: unrelated S3 method is not an AWS service
+    code: |
+      local AWS = require("resty.aws")
+      local local_sdk = LocalSdk()
+      local s3 = local_sdk:S3()
+    expect_no_match: true
+  description: "lua-resty-aws AwsSdk:S3 returns an S3 service receiver. Typing-only."
+
+- id: lua.typing.resty_mysql_client
+  enabled: true
+  language: lua
+  packages: [lua-resty-mysql, resty.mysql]
+  imports: [resty.mysql]
+  returns_type: RestyMysqlClient
+  match:
+    kind: call
+    callee:
+      attribute: [mysql, new]
+      binding_origin: imported
+  match_examples:
+  - name: lua-resty-mysql client
+    code: |
+      local mysql = require("resty.mysql")
+      local db = mysql:new()
+    expect_match_text: [mysql.new]
+  - name: unrelated constructor is not a MySQL client
+    code: |
+      local imported_mysql = require("resty.mysql")
+      local mysql = LocalFactory
+      local db = mysql:new()
+    expect_no_match: true
+  description: "resty.mysql:new returns a MySQL connection receiver. Typing-only."
+
+- id: lua.typing.resty_postgres_client
+  enabled: true
+  language: lua
+  packages: [lua-resty-postgres, resty.postgres]
+  imports: [resty.postgres]
+  returns_type: RestyPostgresClient
+  match:
+    kind: call
+    callee:
+      attribute: [postgres, new]
+      binding_origin: imported
+  match_examples:
+  - name: lua-resty-postgres client
+    code: |
+      local postgres = require("resty.postgres")
+      local arbitrary_client = postgres:new()
+    expect_match_text: [postgres.new]
+  - name: unrelated constructor is not a PostgreSQL client
+    code: |
+      local imported_postgres = require("resty.postgres")
+      local postgres = LocalFactory
+      local arbitrary_client = postgres:new()
+    expect_no_match: true
+  description: "resty.postgres:new returns a PostgreSQL connection receiver. Typing-only."
+
+- id: lua.typing.pgmoon_client
+  enabled: true
+  language: lua
+  packages: [pgmoon]
+  imports: [pgmoon]
+  returns_type: PgmoonClient
+  match:
+    kind: call
+    callee:
+      attribute: [pgmoon, new]
+      binding_origin: imported
+  match_examples:
+  - name: pgmoon client
+    code: |
+      local pgmoon = require("pgmoon")
+      local arbitrary_client = pgmoon.new({ database = "app" })
+    expect_match_text: [pgmoon.new]
+  - name: unrelated constructor is not a pgmoon client
+    code: |
+      local imported_pgmoon = require("pgmoon")
+      local pgmoon = LocalFactory
+      local arbitrary_client = pgmoon.new({ database = "app" })
+    expect_no_match: true
+  description: "pgmoon.new returns a PostgreSQL client receiver. Typing-only."
+
+- id: lua.typing.resty_http_client
+  enabled: true
+  language: lua
+  packages: [lua-resty-http, resty.http]
+  imports: [resty.http]
+  returns_type: RestyHttpClient
+  match:
+    kind: call
+    callee:
+      attribute: [http, new]
+      binding_origin: imported
+  match_examples:
+  - name: lua-resty-http client
+    code: |
+      local http = require("resty.http")
+      local arbitrary_client = http.new()
+    expect_match_text: [http.new]
+  - name: unrelated constructor is not an HTTP client
+    code: |
+      local imported_http = require("resty.http")
+      local http = LocalFactory
+      local arbitrary_client = http.new()
+    expect_no_match: true
+  description: "resty.http.new returns an HTTP client receiver. Typing-only."
+
+- id: lua.typing.luasql_mysql_environment
+  enabled: true
+  language: lua
+  packages: [luasql, luasql-mysql, luasql.mysql]
+  imports: [luasql.mysql]
+  returns_type: LuaSqlEnvironment
+  match:
+    kind: call
+    callee:
+      attribute: [luasql, mysql]
+      binding_origin: imported
+  match_examples:
+  - name: LuaSQL environment
+    code: |
+      local luasql = require("luasql.mysql")
+      local environment = luasql.mysql()
+    expect_match_text: [luasql.mysql]
+  - name: unrelated factory is not a LuaSQL environment
+    code: |
+      local imported_luasql = require("luasql.mysql")
+      local luasql = LocalFactory
+      local environment = luasql.mysql()
+    expect_no_match: true
+  description: "A backend-specific LuaSQL module factory returns its environment receiver. Typing-only."
+
+- id: lua.typing.luasql_postgres_environment
+  enabled: true
+  language: lua
+  packages: [luasql, luasql-postgres, luasql.postgres]
+  imports: [luasql.postgres]
+  returns_type: LuaSqlEnvironment
+  match:
+    kind: call
+    callee:
+      attribute: [luasql, postgres]
+      binding_origin: imported
+  match_examples:
+  - name: LuaSQL PostgreSQL environment
+    code: |
+      local luasql = require("luasql.postgres")
+      local environment = luasql.postgres()
+    expect_match_text: [luasql.postgres]
+  - name: unrelated factory is not a LuaSQL environment
+    code: |
+      local imported_luasql = require("luasql.postgres")
+      local luasql = LocalFactory
+      local environment = luasql.postgres()
+    expect_no_match: true
+  description: "The LuaSQL PostgreSQL module factory returns its environment receiver. Typing-only."
+
+- id: lua.typing.luasql_sqlite3_environment
+  enabled: true
+  language: lua
+  packages: [luasql, luasql-sqlite3, luasql.sqlite3]
+  imports: [luasql.sqlite3]
+  returns_type: LuaSqlEnvironment
+  match:
+    kind: call
+    callee:
+      attribute: [luasql, sqlite3]
+      binding_origin: imported
+  match_examples:
+  - name: LuaSQL SQLite environment
+    code: |
+      local luasql = require("luasql.sqlite3")
+      local environment = luasql.sqlite3()
+    expect_match_text: [luasql.sqlite3]
+  - name: unrelated factory is not a LuaSQL environment
+    code: |
+      local imported_luasql = require("luasql.sqlite3")
+      local luasql = LocalFactory
+      local environment = luasql.sqlite3()
+    expect_no_match: true
+  description: "The LuaSQL SQLite module factory returns its environment receiver. Typing-only."
+
+- id: lua.typing.luasql_connection
+  enabled: true
+  language: lua
+  packages: [luasql, luasql-mysql, luasql-postgres, luasql-sqlite3, luasql.mysql]
+  imports: [luasql.mysql, luasql.postgres, luasql.sqlite3]
+  returns_type: LuaSqlConnection
+  match:
+    kind: call
+    callee:
+      name: connect
+  constraints:
+  - receiver_type_in: [LuaSqlEnvironment]
+  match_examples:
+  - name: typed LuaSQL environment connection
+    code: |
+      local luasql = require("luasql.mysql")
+      local environment = luasql.mysql()
+      local arbitrary_handle = environment:connect("app", "user", "password")
+    expect_match_text: [environment.connect]
+  - name: unrelated connect method is not a LuaSQL connection
+    code: |
+      local luasql = require("luasql.mysql")
+      local environment = LocalEnvironment.new()
+      local arbitrary_handle = environment:connect("app")
+    expect_no_match: true
+  description: "LuaSQL Environment:connect returns a connection receiver; the environment type, not a variable spelling, proves ownership. Typing-only."
+
+- id: lua.typing.lsqlite3_connection
+  enabled: true
+  language: lua
+  packages: [lsqlite3]
+  imports: [lsqlite3]
+  returns_type: LuaSqliteConnection
+  match:
+    kind: call
+    callee:
+      attribute: [sqlite3, open]
+      binding_origin: imported
+  match_examples:
+  - name: lsqlite3 connection
+    code: |
+      local sqlite3 = require("lsqlite3")
+      local arbitrary_handle = sqlite3.open("app.db")
+    expect_match_text: [sqlite3.open]
+  - name: unrelated open factory is not SQLite
+    code: |
+      local imported_sqlite3 = require("lsqlite3")
+      local sqlite3 = LocalFactory
+      local arbitrary_handle = sqlite3.open("app.db")
+    expect_no_match: true
+  description: "lsqlite3.open returns a SQLite connection receiver. Typing-only."
+
+- id: lua.typing.lzmq_context
+  enabled: true
+  language: lua
+  packages: [lzmq]
+  imports: [lzmq]
+  returns_type: ZmqContext
+  match:
+    kind: call
+    callee:
+      attribute: [zmq, context]
+      binding_origin: imported
+  match_examples:
+  - name: lzmq context
+    code: |
+      local zmq = require("lzmq")
+      local context = zmq.context()
+    expect_match_text: [zmq.context]
+  - name: unrelated context factory is not ZeroMQ
+    code: |
+      local imported_zmq = require("lzmq")
+      local zmq = LocalFactory
+      local context = zmq.context()
+    expect_no_match: true
+  description: "lzmq.context returns a ZeroMQ context receiver. Typing-only."
+
+- id: lua.typing.lzmq_socket
+  enabled: true
+  language: lua
+  packages: [lzmq]
+  imports: [lzmq]
+  returns_type: ZmqSocket
+  match:
+    kind: call
+    callee:
+      name: socket
+  constraints:
+  - receiver_type_in: [ZmqContext]
+  match_examples:
+  - name: typed lzmq socket
+    code: |
+      local zmq = require("lzmq")
+      local context = zmq.context()
+      local socket = context:socket(zmq.PULL)
+    expect_match_text: [context.socket]
+  - name: unrelated socket method is not ZeroMQ
+    code: |
+      local zmq = require("lzmq")
+      local context = LocalContext()
+      local socket = context:socket("pull")
+    expect_no_match: true
+  description: "lzmq Context:socket returns a ZeroMQ socket receiver. Typing-only."
+
+- id: lua.typing.lanes_linda
+  enabled: true
+  language: lua
+  packages: [lanes, LuaLanes]
+  imports: [lanes]
+  returns_type: Linda
+  match:
+    kind: call
+    callee:
+      attribute: [lanes, linda]
+      binding_origin: imported
+  match_examples:
+  - name: Lua Lanes Linda mailbox
+    code: |
+      local lanes = require("lanes").configure()
+      local mailbox = lanes.linda()
+    expect_match_text: [lanes.linda]
+  - name: unrelated linda constructor is not Lua Lanes
+    code: |
+      local imported_lanes = require("lanes").configure()
+      local lanes = LocalFactory
+      local mailbox = lanes.linda()
+    expect_no_match: true
+  description: "Lua Lanes lanes.linda returns a typed inter-thread mailbox receiver. Typing-only."
+
+- id: lua.typing.lua_http_server_onstream
+  enabled: true
+  language: lua
+  packages: [lua-http, http.server]
+  imports: [http.server]
+  callback_arg_index: 0
+  callback_field_path: [onstream]
+  callback_param_types:
+  - [HttpServer]
+  - [HttpServerStream]
+  match:
+    kind: call
+    callee:
+      attribute: [http_server, listen]
+      binding_origin: imported
+  match_examples:
+  - name: lua-http server onstream configuration callback
+    code: |
+      local http_server = require "http.server"
+      local server = http_server.listen({
+        onstream = function(server, stream)
+          local headers = stream:get_headers()
+        end
+      })
+    expect_match_text: [http_server.listen]
+  - name: unrelated listen factory is not lua-http
+    code: |
+      local imported_http_server = require "http.server"
+      local http_server = LocalFactory
+      local server = http_server.listen({
+        onstream = function(server, stream) consume(stream) end
+      })
+    expect_no_match: true
+  description: "http.server.listen's exact onstream configuration field receives the server and inbound request stream. Typing-only; the compiler supplies the parsed aggregate-field callback relationship."
+
+- id: lua.typing.periphery_gpio
+  enabled: true
+  language: lua
+  packages: [lua-periphery, periphery]
+  imports: [periphery]
+  returns_type: GPIO
+  match:
+    kind: call
+    callee:
+      attribute: [periphery, GPIO]
+      binding_origin: imported
+  match_examples:
+  - name: lua-periphery GPIO constructor
+    code: |
+      local periphery = require('periphery')
+      local gpio = periphery.GPIO('/dev/gpiochip0', 10, 'in')
+    expect_match_text: [periphery.GPIO]
+  - name: local GPIO constructor is not periphery
+    code: |
+      local imported_periphery = require('periphery')
+      local periphery = LocalFactory
+      local gpio = periphery.GPIO(10)
+    expect_no_match: true
+  description: "lua-periphery periphery.GPIO returns a GPIO receiver. Typing-only; never a finding."
+
+- id: lua.typing.periphery_serial
+  enabled: true
+  language: lua
+  packages: [lua-periphery, periphery]
+  imports: [periphery]
+  returns_type: Serial
+  match:
+    kind: call
+    callee:
+      attribute: [periphery, Serial]
+      binding_origin: imported
+  match_examples:
+  - name: lua-periphery Serial constructor
+    code: |
+      local periphery = require('periphery')
+      local serial = periphery.Serial('/dev/ttyUSB0', 115200)
+    expect_match_text: [periphery.Serial]
+  - name: local Serial constructor is not periphery
+    code: |
+      local imported_periphery = require('periphery')
+      local periphery = LocalFactory
+      local serial = periphery.Serial('/dev/ttyUSB0')
+    expect_no_match: true
+  description: "lua-periphery periphery.Serial returns a Serial receiver. Typing-only; never a finding."

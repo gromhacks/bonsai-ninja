@@ -124,20 +124,6 @@
     code: "<?php\nfunction example($ldap, $input, $url, $id, $payload, $request) {\n  ldap_delete($ldap, \"uid=alice,dc=example,dc=com\");\n}\n"
     expect_no_match: true
   description: ldap_delete() - tainted DN lets the attacker delete arbitrary LDAP entries.
-- id: php.ldap.ldap_bind
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: ldap-injection
-  severity: medium
-  cwe:
-  - CWE-90
-  match:
-    kind: call
-    callee:
-      name: ldap_bind
-  description: Disabled - bind is auth; flag DN-injection with constraint.
 - id: php.ldap.symfony_ldap_search
   enabled: true
   language: php
@@ -160,7 +146,6 @@
   - name: php.ldap.symfony_ldap_search example
     code: |
       <?php
-      use symfony\ldap;
       use symfony\ldap;
       function example($input, $url, $id, $payload, $request) {
         Ldap::query("dc=example,dc=com", $input);
@@ -189,6 +174,11 @@
     kind: call
     callee:
       name: ldap_bind
+  constraints:
+  - arg_count: 3
+  - arg_matches_regex:
+      index: 2
+      regex: '^(?:NULL|null|\x27\x27|"")$'
   match_examples:
   - name: php.ldap.anonymous_bind_null_password example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  ldap_bind($input, \"cn=admin,dc=example,dc=com\", NULL);\n}\n"
@@ -198,4 +188,11 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  ldap_bind($input, \"cn=admin,dc=example,dc=com\", '');\n}\n"
     expect_match_text:
     - ldap_bind
-  description: ldap_bind with NULL or empty password can create an anonymous LDAP bind instead of enforcing authentication.
+  - name: LDAP bind with non-empty credential negative
+    code: |
+      <?php
+      function authenticate($connection, $password) {
+        ldap_bind($connection, "cn=admin,dc=example,dc=com", $password);
+      }
+    expect_no_match: true
+  description: ldap_bind with a compiler-decoded NULL or empty password can create an anonymous LDAP bind instead of enforcing authentication; non-empty or dynamic credentials stay quiet.

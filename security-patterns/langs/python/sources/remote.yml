@@ -167,56 +167,6 @@
           value = request.rel_url
           return value
   description: aiohttp request.rel_url - relative URL object (path + query) from the client.
-- id: python.aiohttp.request_cookies
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.pyramid.request_cookies
-  language: python
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [cookie]
-  frameworks: [aiohttp, fastapi, flask]
-  packages: [aiohttp, fastapi, flask, starlette]
-  match:
-    kind: read
-    target:
-      attribute: [request, cookies]
-  description: "Disabled duplicate - same request.cookies adapter fact as python.pyramid.request_cookies, which carries aiohttp/FastAPI/Flask/Starlette package metadata."
-- id: python.aiohttp.request_headers
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.web.request_headers_get
-  language: python
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [header]
-  frameworks: [aiohttp, django, fastapi, flask]
-  packages: [aiohttp, django, fastapi, flask, starlette]
-  match:
-    kind: read
-    target:
-      attribute: [request, headers]
-  description: "Disabled duplicate - bare request.headers is too broad; python.web.request_headers_get covers keyed header reads across major frameworks."
-- id: python.tornado.request_body
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.tornado.self_request_body
-  language: python
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [binary]
-  frameworks: [tornado]
-  match:
-    kind: read
-    target:
-      attribute: [request, body]
-  description: "Disabled duplicate - bare `request.body` is too broad; python.tornado.self_request_body covers Tornado's `self.request.body` with an explicit receiver regex."
 - id: python.django.request_get
   enabled: true
   language: python
@@ -260,22 +210,6 @@
           value = request.POST
           return value
   description: Django/Pyramid request.POST - form parameters supplied by the remote client.
-- id: python.django.request_body
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.pyramid.request_body
-  language: python
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [json]
-  frameworks: [django]
-  match:
-    kind: read
-    target:
-      attribute: [request, body]
-  description: "Disabled duplicate - same request.body adapter fact as python.pyramid.request_body, which carries Django/Pyramid/Bottle package metadata."
 - id: python.django.request_cookies
   enabled: true
   language: python
@@ -295,22 +229,6 @@
           value = request.COOKIES
           return value
   description: Django request.COOKIES.
-- id: python.django.request_headers
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.web.request_headers_get
-  language: python
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [header]
-  frameworks: [django]
-  match:
-    kind: read
-    target:
-      attribute: [request, headers]
-  description: "Disabled duplicate - bare `request.headers` is too broad; python.web.request_headers_get covers `request.headers.get(name)` across all major frameworks (aiohttp, bottle, fastapi, flask, pyramid, sanic, starlette, tornado, django)."
 - id: python.django.request_meta
   enabled: true
   language: python
@@ -397,29 +315,6 @@
     expect_match_text: [request.query_params]
   description: FastAPI / Starlette / DRF request.query_params.
 
-- id: python.fastapi.request_json
-  analysis_semantics:
-    source_specificity_rank: 5
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.aiohttp.request_json
-  language: python
-  tag: http-input
-  trust: remote
-  category: http-input
-  frameworks: [fastapi]
-  packages: [fastapi, starlette]
-  imports: [fastapi]
-  payload_types: [json]
-  match:
-    kind: call
-    callee:
-      attribute: [request, json]
-  constraints:
-  - max_args: 0
-  description: "Disabled duplicate - same `request.json()` adapter fact as python.aiohttp.request_json (enabled), which carries fastapi/starlette in frameworks/packages."
-
 - id: python.fastapi.uploadfile_filename
   enabled: true
   language: python
@@ -440,26 +335,15 @@
       def handle(file: UploadFile):
           name = file.filename
           return name
+  - name: filename on an unrelated typed object is not upload input
+    code: |
+      from fastapi import UploadFile
+      class LocalFile:
+          filename: str
+      def handle(file: LocalFile):
+          return file.filename
+    expect_no_match: true
   description: "UploadFile.filename - client-supplied multipart filename read on a typed UploadFile receiver."
-- id: python.fastapi.request_form
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.flask.request_form
-  language: python
-  tag: http-input
-  category: http-input
-  trust: remote
-  frameworks: [fastapi, starlette]
-  packages: [fastapi, starlette]
-  payload_types: [form, multipart]
-  match:
-    kind: call
-    callee:
-      attribute: [request, form]
-  constraints:
-  - max_args: 0
-  description: "Disabled duplicate - current matching also emits `request.form`; python.flask.request_form (enabled) carries FastAPI/Starlette package metadata for this adapter fact."
 - id: python.fastapi.request_body
   enabled: true
   language: python
@@ -481,64 +365,13 @@
       import fastapi
       def example(user_input):
           return request.body()
-  description: "Starlette/FastAPI await request.body() - raw request bytes. `body()` takes 0 args; `max_args: 0` rejects unrelated overloads."
-- id: python.fastapi.request_cookies
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.pyramid.request_cookies
-  language: python
-  tag: http-input
-  category: http-input
-  trust: remote
-  frameworks: [fastapi, starlette]
-  payload_types: [cookie]
-  match:
-    kind: read
-    target:
-      attribute: [request, cookies]
-  description: "Disabled duplicate - same `request.cookies` shape as python.pyramid.request_cookies (enabled), which carries fastapi/starlette in frameworks/packages."
-- id: python.fastapi.request_headers
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.web.request_headers_get
-  language: python
-  tag: http-input
-  category: http-input
-  trust: remote
-  frameworks: [fastapi, starlette]
-  payload_types: [header]
-  match:
-    kind: read
-    target:
-      attribute: [request, headers]
-  description: "Disabled duplicate - bare `request.headers` is too broad; python.web.request_headers_get covers `request.headers.get(name)` across all major frameworks."
-- id: python.flask.request_args
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [query]
-  frameworks: [flask, sanic]
-  packages: [flask, sanic]
-  manifests: [pyproject.toml, requirements.txt, setup.py]
-  lockfiles: [poetry.lock, Pipfile.lock, uv.lock]
-  match:
-    kind: read
-    target:
-      attribute: [request, args]
-  match_examples:
-  - name: flask request args
+  - name: body method with an argument is not the request accessor
     code: |
-      import flask
-      def example():
-          value = request.args
-          return value
-  description: "Disabled duplicate - python.flask.request_args_get covers query values at the call site and avoids duplicate source findings on request.args.get(...)."
+      import fastapi
+      def example(request, value):
+          return request.body(value)
+    expect_no_match: true
+  description: "Starlette/FastAPI await request.body() - raw request bytes. `body()` takes 0 args; `max_args: 0` rejects unrelated overloads."
 - id: python.flask.request_args_get
   aliases: [python.flask.request_args]
   enabled: true
@@ -563,52 +396,13 @@
       def example(user_input):
           return request.args.get(user_input)
     expect_match_text: [request.args.get]
-  description: "Flask/Sanic request.args.get(name) - explicit query-value source retained for source-rule filtering and precise call-site attribution."
-- id: python.flask.req_args_get
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.flask.request_args_get
-    reenable_when: "The explicit receiver regex `^[A-Za-z_$][A-Za-z0-9_$]*\\.args\\.get$` on python.flask.request_args_get already covers any local variable name (req, request, r, etc.); this rule's match shape is identical and would collide."
-  language: python
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [query]
-  frameworks: [flask]
-  packages: [flask]
-  match:
-    kind: call
-    callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.args\\.get$"
-  constraints:
-  - min_args: 1
-  - max_args: 2
-  match_examples:
-  - name: flask short req args get
+  - name: zero argument args get is not a query read
     code: |
       import flask
-      def example(req):
-          return req.args.get("name")
-    expect_match_text: [req.args.get]
-  description: "Flask-style short handler variable `req.args.get(...)` - common in internal helpers and tests where the request object is passed as `req`. Subsumed by python.flask.request_args_get through the shared explicit receiver regex."
-- id: python.flask.request_json
-  analysis_semantics:
-    source_specificity_rank: 5
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: python
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [json]
-  frameworks: [flask]
-  match:
-    kind: read
-    target:
-      attribute: [request, json]
-  description: "Disabled - `request.json` also matches non-web request DTOs; needs framework/type-aware receiver matching."
+      def example(request):
+          return request.args.get()
+    expect_no_match: true
+  description: "Flask/Sanic request.args.get(name) - explicit query-value source retained for source-rule filtering and precise call-site attribution."
 - id: python.flask.request_form
   enabled: true
   language: python
@@ -651,52 +445,6 @@
           value = request.data
           return value
   description: Flask request.data - raw request body bytes supplied by the remote client.
-- id: python.flask.request_files
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: python
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [file, multipart]
-  frameworks: [flask]
-  match:
-    kind: read
-    target:
-      attribute: [request, files]
-  description: "Disabled - `request.files` also matches non-web request DTOs; needs framework/type-aware receiver matching."
-- id: python.flask.request_headers
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.web.request_headers_get
-  language: python
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [header]
-  frameworks: [flask]
-  match:
-    kind: read
-    target:
-      attribute: [request, headers]
-  description: "Disabled duplicate - bare `request.headers` is too broad; python.web.request_headers_get covers `request.headers.get(name)` across all major frameworks."
-- id: python.flask.request_cookies
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  trust: remote
-  tag: http-input
-  category: http-input
-  payload_types: [cookie]
-  frameworks: [flask]
-  match:
-    kind: read
-    target:
-      attribute: [request, cookies]
-  description: "Disabled duplicate - same `request.cookies` shape as python.aiohttp.request_cookies; package metadata is merged there."
 - id: python.flask.request_values
   enabled: true
   language: python
@@ -911,6 +659,12 @@
           def resolver(self, info):
               return info
     expect_match_text: [info]
+  - name: info on an ordinary helper is not GraphQL input
+    code: |
+      import strawberry
+      def helper(info):
+          return info
+    expect_no_match: true
   description: "Strawberry GraphQL resolver `info` parameter - carries variable_values, context, and request envelope from the GraphQL request. Param-rule scoping (`in_method`) pins the resolver signature so unrelated helpers with an `info` param do not match."
 
 - id: python.graphql.graphene_resolver_kwargs

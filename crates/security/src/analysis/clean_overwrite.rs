@@ -57,10 +57,24 @@ fn semantic_target_keys(place: Option<&str>, source_names: &[String]) -> Vec<Str
         .iter()
         .filter_map(|source| clean_overwrite_target_key(source))
         .collect();
-    out.extend(place.and_then(clean_overwrite_target_key));
+    // `place` is adapter-owned compiler IR, not rendered source. Preserve its
+    // exact canonical spelling so member storage such as `receiver.payload`
+    // can be compared across a guard, assignment, and sink. Applying the
+    // rendered-text cleaner here silently discarded every qualified place and
+    // broke otherwise exact receiver-field proofs.
+    out.extend(place.and_then(compiler_target_place_key));
     out.sort();
     out.dedup();
     out
+}
+
+/// Retain one adapter-proven canonical place without reparsing its syntax.
+///
+/// Callers must only pass typed `place` fields emitted by a language adapter.
+/// Raw display strings continue to go through [`clean_overwrite_target_key`].
+pub(super) fn compiler_target_place_key(place: &str) -> Option<String> {
+    let place = place.trim();
+    (!place.is_empty()).then(|| place.to_string())
 }
 
 pub(super) fn same_function_clean_overwrite_kills_sink_arg(
@@ -111,6 +125,46 @@ pub(super) fn same_function_clean_overwrite_kills_sink_arg(
             target,
         )
     })
+}
+
+/// Move the overwrite window to the latest compiler-proven taint re-entry
+/// into the sink function. The IDG can leave a function through an inline
+/// callback/callee and later publish its returned or captured value back into
+/// that same function. A clean assignment before that re-entry cannot kill
+/// the value that arrived afterward; a clean assignment after it still does.
+pub(super) fn latest_same_function_taint_reentry_span(
+    source_func: FuncId,
+    sink_func: FuncId,
+    source_span: Span,
+    sink_span: Span,
+    trace_index: &AHashMap<u64, &TaintedCallEdge>,
+    terminal_call: &TaintedCall,
+) -> Span {
+    if source_func != sink_func {
+        return source_span;
+    }
+    let direct_lineage = lineage_records_for_call_indexed(trace_index, terminal_call)
+        .into_iter()
+        .flatten();
+    // A return into the source function deliberately does not become that
+    // function's global first-inflow record: doing so would create a cycle in
+    // rendered call lineage. It is nevertheless exact target-cut evidence in
+    // this one source closure. Include all such incoming records from the
+    // closure index so a compiler-proven callback/callee write can re-enter
+    // after an earlier clean initializer without that initializer erasing the
+    // later tainted value.
+    direct_lineage
+        .chain(trace_index.values().copied())
+        .filter(|record| {
+            record.callee == sink_func
+                && record.caller != sink_func
+                && record.call_span.file == source_span.file
+                && record.call_span.start > source_span.start
+                && record.call_span.start < sink_span.start
+        })
+        .map(|record| record.call_span)
+        .max_by_key(|span| (span.start, span.end))
+        .unwrap_or(source_span)
 }
 
 pub(super) fn interprocedural_clean_overwrite_kills_lineage_arg(
@@ -1007,7 +1061,7 @@ pub(super) fn clean_output_call_overwrites_target(
     target: &str,
 ) -> bool {
     clean_output_overwrites.iter().any(|shape| {
-        if !configured_clean_output_name_matches(&shape.callee, name) {
+        if !configured_transfer_name_matches(&shape.callee, name) {
             return false;
         }
         let Some(output) = args.get(shape.output_arg_index) else {
@@ -1038,7 +1092,7 @@ pub(super) fn clean_output_call_overwrites_target(
     })
 }
 
-fn configured_clean_output_name_matches(configured: &str, observed: &str) -> bool {
+pub(super) fn configured_transfer_name_matches(configured: &str, observed: &str) -> bool {
     if let Some(regex) = configured.trim().strip_prefix("regex:") {
         return regex::Regex::new(regex)
             .ok()
@@ -1876,10 +1930,16 @@ mod retired_rendered_source_regressions {
                 value_span,
                 call_sites: Vec::new(),
                 value_flow: Default::default(),
+                static_value: None,
                 exact_callable_return: None,
+                inline_callback_static_return: None,
+                inline_callback_fields: Vec::new(),
                 exact_static_call_args: None,
                 direct_call_name: None,
+                direct_call_span: None,
                 direct_call_receiver: None,
+                direct_call_receiver_span: None,
+                direct_call_receiver_flow: None,
             }
         }
 

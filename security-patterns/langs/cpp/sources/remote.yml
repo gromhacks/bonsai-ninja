@@ -171,43 +171,6 @@
       }
     expect_match_text: [file.getFileName]
   description: "Drogon HttpFile::getFileName() - client-controlled multipart filename; report when it reaches a path/file-write sink."
-- id: cpp.input.read_socket
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  trust: remote
-  tag: network-input
-  payload_types: [binary]
-  match:
-    kind: call
-    callee:
-      name: read
-  description: "Disabled - bare `read` name collides with iostream / container `.read()` methods; rely on recv/recvfrom/Boost.Beast for socket reads."
-- id: cpp.input.accept
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  trust: remote
-  tag: network-input
-  match:
-    kind: call
-    callee:
-      name: accept
-  description: "Disabled - accept yields fd, not tainted bytes directly."
-- id: cpp.input.params_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  trust: remote
-  tag: http-input
-  match:
-    kind: param
-    target:
-      name: params
-  description: "Disabled - unscoped `params` parameter name matches every function with a param named `params` (render loops, math helpers, anything). The per-framework crow / drogon / pistache / cpphttplib rules below capture the real HTTP-handler shape with proper package scoping."
 - id: cpp.input.crow_request_param
   enabled: true
   language: cpp
@@ -220,7 +183,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [request, crow::request]
+      param_type_in: [request, "crow::request"]
   match_examples:
   - name: crow request parameter
     code: |
@@ -237,6 +200,37 @@
       }
     expect_no_match: true
   description: "Crow crow::request handler parameter - complete HTTP request matched from its declared compiler type."
+
+- id: cpp.input.crow_request_body
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  payload_types: [binary, text, json]
+  frameworks: [crow]
+  packages: [crow]
+  match:
+    kind: read
+    target:
+      regex: '^[A-Za-z_][A-Za-z0-9_]*[.]body$'
+      receiver_type_in: [request, "crow::request"]
+  match_examples:
+  - name: typed Crow request body read
+    code: |
+      #include <crow.h>
+      void example(const crow::request& request) {
+        auto payload = request.body;
+      }
+    expect_match_text: [request.body]
+  - name: same property on a local type negative
+    code: |
+      #include <crow.h>
+      struct LocalRequest { std::string body; };
+      void example(const LocalRequest& request) {
+        auto payload = request.body;
+      }
+    expect_no_match: true
+  description: "Crow crow::request.body read - the exact typed request body supplied by the remote client."
 - id: cpp.input.drogon_request_param
   enabled: true
   language: cpp
@@ -248,7 +242,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [HttpRequestPtr, drogon::HttpRequestPtr]
+      param_type_in: [HttpRequestPtr, "drogon::HttpRequestPtr"]
   match_examples:
   - name: drogon request parameter
     code: |
@@ -276,7 +270,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Request, Rest::Request, Pistache::Rest::Request]
+      param_type_exact_in: ["Rest::Request", "Pistache::Rest::Request"]
   match_examples:
   - name: pistache request parameter
     code: |
@@ -289,6 +283,22 @@
     code: |
       #include <pistache/endpoint.h>
       void example(const char *request) {
+        (void)request;
+      }
+    expect_no_match: true
+  - name: unqualified request type has no Pistache ownership negative
+    code: |
+      #include <pistache/endpoint.h>
+      struct Request {};
+      void example(const Request& request) {
+        (void)request;
+      }
+    expect_no_match: true
+  - name: cpp httplib request type is not Pistache negative
+    code: |
+      #include <pistache/endpoint.h>
+      namespace httplib { struct Request; }
+      void example(const httplib::Request& request) {
         (void)request;
       }
     expect_no_match: true
@@ -305,7 +315,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Request, httplib::Request]
+      param_type_exact_in: ["httplib::Request"]
   match_examples:
   - name: cpp httplib request parameter
     code: |
@@ -318,6 +328,22 @@
     code: |
       #include <httplib.h>
       void example(const char *request) {
+        (void)request;
+      }
+    expect_no_match: true
+  - name: unqualified request type has no cpp httplib ownership negative
+    code: |
+      #include <httplib.h>
+      struct Request {};
+      void example(const Request& request) {
+        (void)request;
+      }
+    expect_no_match: true
+  - name: Pistache request type is not cpp httplib negative
+    code: |
+      #include <httplib.h>
+      namespace Pistache::Rest { struct Request; }
+      void example(const Pistache::Rest::Request& request) {
         (void)request;
       }
     expect_no_match: true
@@ -335,7 +361,6 @@
   match_examples:
   - name: qt tcp socket read all
     code: |
-      #include <QtCore/Qt>
       #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       #include <QtNetwork/QTcpSocket>
@@ -360,7 +385,6 @@
   match_examples:
   - name: qt network reply read all
     code: |
-      #include <QtCore/Qt>
       #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       #include <QtNetwork/QNetworkReply>
@@ -459,7 +483,7 @@
     callee:
       regex: "\\.receiveBytes$"
   constraints:
-  - receiver_type_in: [StreamSocket, Poco::Net::StreamSocket]
+  - receiver_type_in: [StreamSocket, "Poco::Net::StreamSocket"]
   - min_args: 2
   taint_semantics:
     source_output_args: [0]
@@ -480,21 +504,6 @@
     expect_no_match: true
   description: "Poco StreamSocket::receiveBytes(buffer, length, ...) writes remote socket bytes to output buffer argument 0; the integer return is the byte count."
 
-- id: cpp.input.grpc_request_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  trust: remote
-  tag: http-input
-  payload_types: [protobuf]
-  packages: [grpc]
-  match:
-    kind: param
-    target:
-      name: reader
-  description: "Disabled - the ServerReader object is framework state, not the protobuf payload; the payload is written by ServerReader::Read and is modeled by cpp.input.grpc_server_reader_read."
-
 - id: cpp.input.grpc_server_reader_read
   enabled: true
   language: cpp
@@ -507,7 +516,7 @@
     kind: call
     callee: { name: Read }
   constraints:
-  - receiver_type_in: [ServerReader, ServerReaderInterface, grpc::ServerReader, grpc::ServerReaderInterface]
+  - receiver_type_in: [ServerReader, ServerReaderInterface, "grpc::ServerReader", "grpc::ServerReaderInterface"]
   - min_args: 1
   - max_args: 1
   taint_semantics:
@@ -605,6 +614,13 @@
         const char *query = arg;
         request::get_header_value(arg);
       }
+  - name: same qualified spelling without crow evidence negative
+    code: |
+      namespace request {
+      const char* get_header_value(const char*) { return "safe"; }
+      }
+      void example() { request::get_header_value("X-Test"); }
+    expect_no_match: true
   description: "Crow request::get_header_value(name) - caller-controlled HTTP header. Signature: `get_header_value(const std::string &name)` - exactly 1 arg; bounds reject same-name decoys."
 
 - id: cpp.input.crow_request_url_params_get
@@ -679,53 +695,6 @@
       }
   description: "Drogon HttpRequest::getHeader(name) - caller-controlled HTTP header."
 
-- id: cpp.input.qt_qnetworkrequest_url
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  trust: remote
-  tag: http-input
-  packages: [Qt]
-  match:
-    kind: call
-    callee:
-      attribute: [QNetworkRequest, url]
-  match_examples:
-  - name: outbound qnetworkrequest url is not input
-    code: |
-      #include <QNetworkRequest>
-      QUrl destination(const QNetworkRequest &request) { return request.url(); }
-    expect_no_match: true
-  description: "Disabled - QNetworkRequest is outbound client request configuration, not received network input. QNetworkReply accessors model response data."
-
-  imports:
-  - QtCore
-  - QtCore/Qt
-- id: cpp.input.qt_qnetworkrequest_rawheader
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  trust: remote
-  tag: http-input
-  payload_types: [header]
-  packages: [Qt]
-  match:
-    kind: call
-    callee:
-      attribute: [QNetworkRequest, rawHeader]
-  match_examples:
-  - name: outbound qnetworkrequest header is not input
-    code: |
-      #include <QNetworkRequest>
-      QByteArray header(const QNetworkRequest &request) { return request.rawHeader("X-Trace"); }
-    expect_no_match: true
-  description: "Disabled - QNetworkRequest headers are outbound client configuration, not received network input."
-
-  imports:
-  - QtCore
-  - QtCore/Qt
 - id: cpp.input.grpc_servercontext_client_metadata
   enabled: true
   language: cpp
@@ -764,7 +733,6 @@
   - name: generated direct match
     code: |
       #include <QtCore/Qt>
-      #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example() {
         const char *arg = "tainted";
@@ -780,28 +748,116 @@
   imports:
   - QtCore
   - QtCore/Qt
-- id: cpp.input.untrusted_size_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: cpp.source.userver_http_request_value
+  enabled: true
   language: cpp
   trust: remote
-  tag: network-input
-  payload_types: [binary]
+  tag: http-input
+  category: http-input
+  payload_types: [query, path, header, text]
+  packages: [userver]
   match:
-    kind: param
-    target:
-      regex: "^(size|len|length|n|count|n_bytes|num_bytes|payload_len|msg_len|frame_len|total_len|hdr_len)$"
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(GetArg|GetHeader|RequestBody)$"
+  constraints:
+  - receiver_type_in: [HttpRequest, "userver::server::http::HttpRequest"]
   match_examples:
-  - name: generated direct match
+  - name: userver request argument
     code: |
-      void example(const char *size) {
-        (void)size;
-      }
-  - name: unrelated param name is not a size field
+      #include <userver/server/http/http_request.hpp>
+      std::string value(const userver::server::http::HttpRequest& request) { return request.GetArg("q"); }
+    expect_match_text: [request.GetArg]
+  - name: same method on unrelated receiver negative
     code: |
-      void example(const char *result) {
-        (void)result;
-      }
+      #include <userver/server/http/http_request.hpp>
+      struct Cache { std::string GetArg(const char*); };
+      std::string value(Cache& cache) { return cache.GetArg("q"); }
     expect_no_match: true
-  description: "Disabled: a parameter named `size`, `len`, `length`, or `count` is not evidence of a remote trust boundary. Allocation and copy sinks remain active for values reached from concrete remote sources."
+  description: "userver HttpRequest GetArg/GetHeader/RequestBody accessors return client-controlled request data; receiver type prevents generic method collisions."
+
+- id: cpp.source.restbed_request_value
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, header, binary, text]
+  packages: [restbed]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(get_query_parameter|get_header|get_body)$"
+  constraints:
+  - receiver_type_in: [Request, "restbed::Request"]
+  match_examples:
+  - name: restbed query parameter
+    code: |
+      #include <restbed>
+      std::string value(const restbed::Request& request) { return request.get_query_parameter("q"); }
+    expect_match_text: [request.get_query_parameter]
+  - name: same method on unrelated receiver negative
+    code: |
+      #include <restbed>
+      struct Settings { std::string get_header(const char*); };
+      std::string value(Settings& settings) { return settings.get_header("name"); }
+    expect_no_match: true
+  description: "Restbed Request query/header/body accessors return inbound HTTP values; the typed receiver excludes ordinary application getters."
+
+- id: cpp.source.cinatra_request_query
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, text]
+  packages: [cinatra]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?get_query_value$"
+  constraints:
+  - receiver_type_in: [coro_http_request, "cinatra::coro_http_request"]
+  - arg_count: 1
+  match_examples:
+  - name: cinatra request query value
+    code: |
+      #include <cinatra.hpp>
+      auto value(cinatra::coro_http_request& request) { return request.get_query_value("q"); }
+    expect_match_text: [request.get_query_value]
+  - name: same method on unrelated receiver negative
+    code: |
+      #include <cinatra.hpp>
+      struct Config { int get_query_value(const char*); };
+      int value(Config& config) { return config.get_query_value("q"); }
+    expect_no_match: true
+  description: "Cinatra coro_http_request get_query_value(name) returns client-controlled query input; receiver type prevents application helper collisions."
+
+- id: cpp.source.qt_http_server_request_value
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, header, binary, text]
+  packages: [QtHttpServer]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(query|body|headers)$"
+  constraints:
+  - receiver_type_in: [QHttpServerRequest]
+  - arg_count: 0
+  match_examples:
+  - name: Qt HTTP server request query
+    code: |
+      #include <QtHttpServer/QHttpServerRequest>
+      QUrlQuery value(const QHttpServerRequest& request) { return request.query(); }
+    expect_match_text: [request.query]
+  - name: same method on unrelated receiver negative
+    code: |
+      #include <QtHttpServer/QHttpServerRequest>
+      struct Document { QByteArray body() const; };
+      QByteArray value(const Document& document) { return document.body(); }
+    expect_no_match: true
+  description: "Qt QHttpServerRequest query/body/headers accessors expose inbound HTTP request data; zero arity and receiver type exclude common application methods."

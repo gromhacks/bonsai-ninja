@@ -1,19 +1,35 @@
 - id: c.ssrf.curl_easy_setopt
-  aliases:
-  - c.ssrf.curl_easy_setopt_postfields
-  - c.tls.curl_ssl_verifypeer_off
-  - c.tls.curl_ssl_verifyhost_off
   enabled: true
   language: c
   tag: ssrf
   severity: high
   packages: [libcurl]
-  cwe: [CWE-918, CWE-295]
+  cwe: [CWE-918]
+  analysis_semantics:
+    compiler_guard:
+      capability: terminal-predicate.compound-static-allowlist
+      required_evidence:
+        - guarded-argument:2=predicate-argument:0
+        - predicate-complete:true
+        - finite-static-string-membership:true
+        - prefix-call:strncmp
+        - prefix-value:string:https://
+        - prefix-length:number:8
+        - membership-call:strncmp
+        - membership-token-boundary:true
+        - related-call:curl_easy_setopt:argument:0=guarded-argument:0
+        - related-call:curl_easy_setopt:argument:1=place:CURLOPT_FOLLOWLOCATION
+        - related-call:curl_easy_setopt:argument:2=number:0
+      sanitizer_tag: ssrf
+      category: finite-host-allowlist-and-no-redirect
   match:
     kind: call
     callee:
       name: curl_easy_setopt
   constraints:
+  - arg_equals:
+      index: 1
+      value: CURLOPT_URL
   - arg_tainted:
       index: 2
   match_examples:
@@ -22,15 +38,22 @@
       #include <curl/curl.h>
       #include <curl/curl.h> /* libcurl */
       void example(char *input) {
-        curl_easy_setopt("safe", "safe", input);
+        curl_easy_setopt(handle, CURLOPT_URL, input);
       }
   - name: literal arg 2 negative
     code: |
       void example(void) {
-        curl_easy_setopt("safe", "safe", "safe");
+        curl_easy_setopt(handle, CURLOPT_URL, "https://example.test/");
       }
     expect_no_match: true
-  description: "curl_easy_setopt(handle, CURLOPT_URL, tainted) - attacker-chosen URL. Also covers merged aliases: c.ssrf.curl_easy_setopt_postfields, c.tls.curl_ssl_verifypeer_off, c.tls.curl_ssl_verifyhost_off."
+  - name: tainted request body option is not a URL negative
+    code: |
+      #include <curl/curl.h>
+      void example(CURL *handle, char *input) {
+        curl_easy_setopt(handle, CURLOPT_POSTFIELDS, input);
+      }
+    expect_no_match: true
+  description: "curl_easy_setopt(handle, CURLOPT_URL, tainted) - attacker-chosen URL; other libcurl options are not SSRF URL sinks."
   imports:
   - curl/curl.h
   - curl
@@ -61,20 +84,6 @@
       }
     expect_no_match: true
   description: "getaddrinfo with tainted host - DNS lookup for attacker-chosen target."
-- id: c.ssrf.curl_easy_perform
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  tag: ssrf
-  severity: medium
-  packages: [libcurl]
-  cwe: [CWE-918]
-  match:
-    kind: call
-    callee:
-      name: curl_easy_perform
-  description: "Disabled - flag if URL is tainted."
 - id: c.ssrf.gethostbyname
   enabled: true
   language: c

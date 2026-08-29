@@ -87,6 +87,10 @@ pub enum IdgEdgeKind {
     /// it is deliberately distinct from the registration call's return
     /// value.
     InterSourceCallback = 15,
+    /// Exact projected state on one compiler-resolved shared binding crosses
+    /// a resolved call boundary. This is non-positional object/module state,
+    /// not a scalar argument, return, or renderable call record.
+    InterSharedFieldState = 16,
 }
 
 impl IdgEdgeKind {
@@ -206,6 +210,14 @@ impl IdgEdgeKind {
                 FlowEdgeKind::InterFile,
                 FlowEdgeKind::InterPackage,
             ],
+            Self::InterSharedFieldState => &[
+                FlowEdgeKind::HeapLoad,
+                FlowEdgeKind::HeapStore,
+                FlowEdgeKind::ContainerLoad,
+                FlowEdgeKind::ContainerStore,
+                FlowEdgeKind::InterFile,
+                FlowEdgeKind::InterPackage,
+            ],
         }
     }
 
@@ -222,6 +234,7 @@ impl IdgEdgeKind {
                 | Self::InterFieldReturn
                 | Self::InterYield
                 | Self::InterSourceCallback
+                | Self::InterSharedFieldState
         )
     }
 
@@ -260,6 +273,7 @@ impl IdgEdgeKind {
             13 => Some(Self::IntraAggregateConsume),
             14 => Some(Self::InterYield),
             15 => Some(Self::InterSourceCallback),
+            16 => Some(Self::InterSharedFieldState),
             _ => None,
         }
     }

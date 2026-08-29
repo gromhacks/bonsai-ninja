@@ -65,6 +65,37 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+/// Populate a workspace frontend directly from fixture files without opening
+/// or publishing any external analysis sidecar. Architecture tests exercise
+/// adapter facts; coupling them to the user's OS cache would make sandboxed
+/// and hermetic runners fail before parsing begins.
+fn load_fixture_sources(ws: &bonsai_workspace::Workspace, root: &Path) {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    ws.db().set_workspace_root(root.clone());
+    let mut pending = vec![root];
+    let mut files = Vec::new();
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).unwrap_or_else(|error| panic!("read {}: {error}", dir.display())) {
+            let path = entry.expect("fixture directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| !ws.registry().adapters_for_extension(ext).is_empty())
+            {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    for path in files {
+        let source =
+            fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        ws.vfs().write(path, std::sync::Arc::<str>::from(source));
+    }
+}
+
 fn security_analysis_source(root: &Path) -> String {
     let mut source = read(&root.join("crates/security/src/analysis/mod.rs"));
     source.push('\n');
@@ -263,7 +294,7 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
     ImportContractCase {
         lang: "c",
         file_suffix: "app.c",
-        module: "stdio.h",
+        module: "gauntlet/envelope.h",
         alias: None,
         original_name: None,
         is_wildcard: false,
@@ -271,7 +302,7 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
     ImportContractCase {
         lang: "cpp",
         file_suffix: "app.cpp",
-        module: "envelope.hpp",
+        module: "gauntlet/model/envelope.hpp",
         alias: None,
         original_name: None,
         is_wildcard: false,
@@ -286,8 +317,8 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
     },
     ImportContractCase {
         lang: "dart",
-        file_suffix: "app.dart",
-        module: "dart:io",
+        file_suffix: "lib/src/http/handler.dart",
+        module: "shelf/shelf.dart",
         alias: None,
         original_name: None,
         is_wildcard: true,
@@ -295,7 +326,7 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
     ImportContractCase {
         lang: "elixir",
         file_suffix: "pipeline.ex",
-        module: "Mega.Storage",
+        module: "LanguageGauntlet.Storage",
         alias: Some("Store"),
         original_name: None,
         is_wildcard: false,
@@ -343,7 +374,7 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
     ImportContractCase {
         lang: "lua",
         file_suffix: "storage.lua",
-        module: "executor",
+        module: "runtime.executor",
         alias: Some("Executor"),
         original_name: None,
         is_wildcard: false,
@@ -354,7 +385,7 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
         module: "Foundation/Foundation.h",
         alias: None,
         original_name: None,
-        is_wildcard: false,
+        is_wildcard: true,
     },
     ImportContractCase {
         lang: "perl",
@@ -374,7 +405,7 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
     },
     ImportContractCase {
         lang: "python",
-        file_suffix: "app.py",
+        file_suffix: "entrypoints/http.py",
         module: "flask",
         alias: None,
         original_name: Some("request"),
@@ -382,8 +413,8 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
     },
     ImportContractCase {
         lang: "ruby",
-        file_suffix: "app.rb",
-        module: "pipeline",
+        file_suffix: "app/controllers/commands_controller.rb",
+        module: "../../lib/application/pipeline",
         alias: None,
         original_name: None,
         is_wildcard: false,
@@ -391,15 +422,15 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
     ImportContractCase {
         lang: "rust",
         file_suffix: "src/main.rs",
-        module: "std::io",
-        alias: Some("io"),
+        module: "axum::extract::Query",
+        alias: None,
         original_name: None,
         is_wildcard: false,
     },
     ImportContractCase {
         lang: "scala",
         file_suffix: "Pipeline.scala",
-        module: "mega",
+        module: "gauntlet.storage",
         alias: Some("Store"),
         original_name: Some("Storage"),
         is_wildcard: false,
@@ -410,7 +441,7 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
         module: "Foundation",
         alias: None,
         original_name: None,
-        is_wildcard: false,
+        is_wildcard: true,
     },
     ImportContractCase {
         lang: "typescript",
@@ -478,9 +509,9 @@ fn engine_crates_have_no_language_adapter_deps() {
 }
 
 #[test]
-fn adapters_emit_documented_import_targets_for_mega_flow() {
+fn adapters_emit_documented_import_targets_for_language_gauntlet() {
     // ImportSpec.module is the rulepack package-gate key. This test
-    // opens each supported mega_flow fixture with the bundled adapter
+    // opens each supported language_gauntlet fixture with the bundled adapter
     // registry and pins one representative adapter-visible target per
     // language to the contract documented on ImportSpec.
     let root = repo_root();
@@ -490,10 +521,12 @@ fn adapters_emit_documented_import_targets_for_mega_flow() {
 
     let mut violations = Vec::new();
     for lang in langs {
-        let fixture_root = root.join("examples").join(lang).join("mega_flow");
-        let ws =
-            bonsai_workspace::Workspace::open_query(&fixture_root, bonsai_adapters::all_languages_registry())
-                .unwrap_or_else(|e| panic!("open {}: {e}", fixture_root.display()));
+        let fixture_root = root.join("examples").join(lang).join("language_gauntlet");
+        // This is an in-process frontend contract test, not a sidecar test.
+        // Ingest directly so a restricted test runner never needs access to
+        // the user's OS cache directory.
+        let ws = bonsai_workspace::Workspace::new(bonsai_adapters::all_languages_registry());
+        load_fixture_sources(&ws, &fixture_root);
 
         for case in IMPORT_CONTRACT_CASES.iter().filter(|case| case.lang == lang) {
             let mut saw_file = false;
@@ -528,7 +561,7 @@ fn adapters_emit_documented_import_targets_for_mega_flow() {
             }
             if !saw_file {
                 violations.push(format!(
-                    "{}: missing mega_flow fixture file {}",
+                    "{}: missing language_gauntlet fixture file {}",
                     case.lang, case.file_suffix
                 ));
             } else if !saw_import {
@@ -854,6 +887,30 @@ fn shared_ast_lowering_selects_adapter_capabilities_not_language_ids() {
         "shared Tree-sitter lowering must dispatch through GrammarHandler syntax capabilities:\n  {}",
         violations.join("\n  ")
     );
+}
+
+#[test]
+fn production_callgraph_paths_decode_each_import_header_once() {
+    let root = repo_root();
+    let workspace = read(&root.join("crates/workspace/src/lib.rs"));
+    let taint_idg = read(&root.join("crates/taint/src/idg_build.rs"));
+    let canonical = function_body(&taint_idg, "callgraph_alias_projection_callbacks");
+    assert_eq!(
+        canonical.matches("imports_for_uncached").count(),
+        1,
+        "simple and typed alias projections must share one exact compiler import-header decode"
+    );
+    for function in [
+        "resolved_call_graph_for_files",
+        "source_reachable_resolved_call_graph_with_scope",
+    ] {
+        let body = function_body(&workspace, function);
+        assert!(
+            body.contains("callgraph_alias_projection_callbacks")
+                && !body.contains("imports_for_uncached"),
+            "{function} must use the canonical one-decode alias projection rather than reopening compiler imports"
+        );
+    }
 }
 
 #[test]
@@ -1746,8 +1803,10 @@ fn arg_tainted_keyword_rules_use_kw_capable_adapters() {
     // match a named argument. Perl's `combine_perl_fat_comma_call_args`
     // collapses `f(key => $v)` into one CallArg with `name = Some("key")`,
     // so fat-comma named-arg sinks (Net::LDAP search filter, XML::LibXML
-    // load_xml string, Mojolicious render text, ...) match via `kw`.
-    let kw_capable = ["python", "dart", "perl"];
+    // load_xml string, Mojolicious render text, ...) match via `kw`. Swift's
+    // `value_argument` grammar likewise exposes labels through its exact
+    // `name` field (`Data(contentsOf: value)` -> `contentsOf`).
+    let kw_capable = ["python", "dart", "perl", "swift"];
     let mut violations = Vec::new();
     for rule in rulepack_rules() {
         if rule.arg_tainted_kw && !kw_capable.contains(&rule.lang.as_str()) {
@@ -2208,9 +2267,10 @@ fn every_language_adapter_owns_its_tree_sitter_lowering() {
         checked += 1;
         let source = live_code(&read(&lib_path));
         for required in [
-            "const HANDLER: GrammarHandler",
             "impl LanguageAdapter for",
             "fn tree_sitter_language",
+            "fn grammar_handler",
+            "fn additional_grammar_node_kinds",
             "fn capabilities(",
             "module_default_export_names:",
             "universal_type_names:",
@@ -2228,6 +2288,9 @@ fn every_language_adapter_owns_its_tree_sitter_lowering() {
             if !source.contains(required) {
                 violations.push(format!("{name}: missing adapter-owned `{required}`"));
             }
+        }
+        if !source.contains(": GrammarHandler = GrammarHandler") {
+            violations.push(format!("{name}: missing adapter-owned `GrammarHandler` constant"));
         }
         if !source.contains("decl_index_with_handler(")
             && !source.contains("decl_index_from_tree_with_handler(")
@@ -2261,6 +2324,104 @@ fn every_language_adapter_owns_its_tree_sitter_lowering() {
         violations.is_empty(),
         "each lang_* crate must own its Tree-sitter syntax lowering:\n  {}",
         violations.join("\n  ")
+    );
+}
+
+/// Adapter post-processing may retain and reuse the one exact parse selected
+/// for a file, but it must not reopen the frontend independently for each
+/// semantic pass. Repeated `parse_with` calls duplicate Tree-sitter work and
+/// can attach facts from different snapshots if an editor changes the file
+/// between passes. An adapter must either delegate the only parse to
+/// `decl_index_with_handler`, or acquire one tree itself and pass that exact
+/// tree to `decl_index_from_tree_with_handler`; combining the internally
+/// parsing helper with any direct parse is also duplicate frontend work.
+#[test]
+fn adapter_declaration_lowering_never_reparses_one_file_per_semantic_pass() {
+    let root = repo_root();
+    let crates_dir = root.join("crates");
+    let mut checked = 0_usize;
+    let mut offenders = Vec::new();
+
+    for entry in fs::read_dir(&crates_dir).expect("read crates dir") {
+        let path = entry.expect("crate entry").path();
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if !name.starts_with("lang_") || name == "lang_api" {
+            continue;
+        }
+        let lib_path = path.join("src/lib.rs");
+        if !lib_path.exists() {
+            continue;
+        }
+        checked += 1;
+        let source = live_code(&read(&lib_path));
+        let body = function_body(&source, "extract_declarations");
+        let parse_calls = body.matches("parse_with(").count();
+        let internally_parses = body.contains("decl_index_with_handler(");
+        if internally_parses && parse_calls > 0 {
+            offenders.push(format!(
+                "{name}: extract_declarations combines decl_index_with_handler with {parse_calls} direct parse_with call(s)"
+            ));
+            continue;
+        }
+        if parse_calls > 1 {
+            offenders.push(format!(
+                "{name}: extract_declarations calls parse_with {parse_calls} times"
+            ));
+        }
+    }
+
+    assert_eq!(checked, 20, "expected every bundled language adapter");
+    assert!(
+        offenders.is_empty(),
+        "adapter declaration lowering reparses the same file:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Import lowering follows the same one-tree contract as declarations. The
+/// generic `extract_imports_via` helper parses internally, so an adapter may
+/// use it or own one `parse_with` call, but never combine both or reopen the
+/// frontend for a second import projection.
+#[test]
+fn adapter_import_lowering_never_reparses_one_file_per_semantic_pass() {
+    let root = repo_root();
+    let crates_dir = root.join("crates");
+    let mut checked = 0_usize;
+    let mut offenders = Vec::new();
+
+    for entry in fs::read_dir(&crates_dir).expect("read crates dir") {
+        let path = entry.expect("crate entry").path();
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if !name.starts_with("lang_") || name == "lang_api" {
+            continue;
+        }
+        let lib_path = path.join("src/lib.rs");
+        if !lib_path.exists() {
+            continue;
+        }
+        checked += 1;
+        let source = live_code(&read(&lib_path));
+        let body = function_body(&source, "extract_imports");
+        let parse_calls = body.matches("parse_with(").count();
+        let internally_parses = body.contains("extract_imports_via(");
+        if internally_parses && parse_calls > 0 {
+            offenders.push(format!(
+                "{name}: extract_imports combines extract_imports_via with {parse_calls} direct parse_with call(s)"
+            ));
+            continue;
+        }
+        if parse_calls > 1 {
+            offenders.push(format!(
+                "{name}: extract_imports calls parse_with {parse_calls} times"
+            ));
+        }
+    }
+
+    assert_eq!(checked, 20, "expected every bundled language adapter");
+    assert!(
+        offenders.is_empty(),
+        "adapter import lowering reparses the same file:\n{}",
+        offenders.join("\n")
     );
 }
 
@@ -2659,9 +2820,19 @@ fn receiver_method_dispatch_narrows_by_type() {
         "type_alias_for_receiver must consult Decl.type_aliases for receiver narrowing"
     );
     assert!(
-        body.contains("resolve_class("),
-        "collect_receiver_method_targets must use resolve_class (context-aware) instead of bare \
-         workspace-wide lookups"
+        body.contains("resolve_declared_receiver_class("),
+        "collect_receiver_method_targets must use the ambiguity-safe declared-receiver resolver"
+    );
+    let resolver_text = read(&root.join("crates").join("resolve").join("src").join("lib.rs"));
+    let declared_receiver_resolver = function_body(&resolver_text, "resolve_declared_receiver_class");
+    let identity_gate = function_body(&resolver_text, "declared_receiver_candidates_with_one_identity");
+    assert!(
+        declared_receiver_resolver.contains("resolve_class(")
+            && declared_receiver_resolver
+                .contains("declared_receiver_candidates_with_one_identity")
+            && identity_gate.contains("first_identity")
+            && identity_gate.contains("candidates.iter().all"),
+        "declared receiver resolution must try scoped resolve_class first and fail closed unless every fallback candidate shares one semantic identity"
     );
     // The fallback when caller_file is unavailable must NOT be a
     // bare `find_by_name` call — that would re-introduce the
@@ -2879,9 +3050,8 @@ fn public_idg_query_defaults_are_semantic_by_default() {
 }
 
 /// Source-analysis and dump-taint are user-visible evidence surfaces.
-/// They may expose unresolved/capped conditions as incomplete
-/// metadata, but the flows they do emit must stay inside the semantic
-/// exact/narrowed precision scope.
+/// They may expose unresolved conditions as incomplete metadata, but
+/// their flows must stay inside the one compiler-proven contract.
 #[test]
 fn source_and_debug_flow_surfaces_are_semantic_only() {
     let root = repo_root();
@@ -3077,11 +3247,17 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     );
     let security_taint_body = function_body(&cli_security, "cmd_flows");
     assert!(
-        security_taint_body.contains("max_precision = Some(Precision::Narrowed)")
+        security_analysis.contains(
+            "pub(crate) const PUBLIC_SEMANTIC_MAX_PRECISION: Precision = Precision::Narrowed",
+        )
+            && security_analysis
+                .contains("max_precision: Some(PUBLIC_SEMANTIC_MAX_PRECISION)")
+            && !security_taint_body.contains("max_precision")
+            && !security_taint_body.contains("Precision::")
             && !security_taint_body.contains("SemanticPrecisionFilter")
             && !security_taint_body.contains("OverApproximate")
             && !security_taint_body.contains("Unknown"),
-        "security taint-analysis must run one semantic taint precision mode without exposing diagnostic precision filters"
+        "security taint-analysis must use one internal semantic evidence contract without exposing a precision mode or override"
     );
     let export_callgraph_body = function_body(&native_export, "export_structural_callgraph_count");
     assert!(
@@ -3811,11 +3987,13 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
             && write_generation.contains("try_visit_parallel")
             && write_generation.contains("append_prepared_compiler_object")
             && write_generation.contains("collect::<Option<Vec<_>>>()")
+            && write_generation.contains("ParallelVisitOrder::Completion")
             && parallel_compiler_work.contains("sync_channel")
-            && parallel_compiler_work.contains("completed_count")
-            && parallel_compiler_work.contains("visit(index, result?)")
+            && parallel_compiler_work.contains("published_count")
+            && parallel_compiler_work.contains("ParallelVisitOrder::Completion")
+            && parallel_compiler_work.contains("ParallelVisitOrder::Input")
+            && parallel_compiler_work.contains("reorder.remove(&next_to_publish)")
             && parallel_compiler_work.contains("max_in_flight")
-            && !parallel_compiler_work.contains("BTreeMap")
             && !parallel_compiler_work.contains("compiler_weighted_batches")
             && !write_generation.contains(".take(")
             && !write_generation.contains(".truncate("),
@@ -3859,13 +4037,29 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
     );
     let bulk_objects = function_body(&compiler_object, "visit_compiler_file_objects_uncached");
     assert!(
-        bulk_objects.contains("compiler_weighted_batches")
+        bulk_objects.contains("try_visit_parallel")
+            && bulk_objects.contains("syntax_worker_count_for_sources")
+            && bulk_objects.contains("SyntaxMemoryPermitPool")
+            && bulk_objects.contains("ParallelVisitOrder::Input")
             && bulk_objects.contains("compiler_file_object_uncached")
             && bulk_objects.contains("visit(file, object)")
             && !bulk_objects.contains("ThreadPoolBuilder")
+            && !bulk_objects.contains("compiler_weighted_batches")
+            && !bulk_objects.contains("for range in batches")
             && !bulk_objects.contains(".take(")
             && !bulk_objects.contains(".truncate("),
-        "bulk compiler-object visits must cover every requested file in order, release each batch, and reuse shared scheduling while memory changes only parallel width"
+        "bulk compiler-object visits must cover every requested file in order through a bounded continuous source-weighted worklist"
+    );
+    let bulk_diagnostics = function_body(&compiler_object, "visit_parser_diagnostics_uncached");
+    assert!(
+        bulk_diagnostics.contains("try_visit_parallel")
+            && bulk_diagnostics.contains("syntax_worker_count_for_sources")
+            && bulk_diagnostics.contains("SyntaxMemoryPermitPool")
+            && bulk_diagnostics.contains("ParallelVisitOrder::Input")
+            && bulk_diagnostics.contains("parser_diagnostics_uncached")
+            && !bulk_diagnostics.contains("compiler_weighted_batches")
+            && !bulk_diagnostics.contains("for range in batches"),
+        "parser diagnostics must use the same bounded continuous source-weighted compiler worklist"
     );
 
     let build_reach = function_body(&service, "build_reach");
@@ -3906,8 +4100,8 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
         ),
         (
             "global index",
-            function_body(&db, "build_streaming_global_index"),
-            "compiler_weighted_batches",
+            function_body(&db, "stream_decl_indexes_in_order"),
+            "SyntaxMemoryPermitPool",
         ),
         (
             "compiler objects",
@@ -3944,6 +4138,10 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             );
         }
     }
+    assert!(
+        function_body(&db, "build_streaming_global_index").contains("stream_decl_indexes_in_order"),
+        "global header construction must delegate its complete file set to the continuous weighted scheduler"
+    );
     let transfer_sizes = function_body(&idg, "idg_transfer_source_bytes");
     let transfer_window = function_body(&idg, "fill_window");
     assert!(
@@ -4053,13 +4251,18 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && broad_matcher.contains("filtered_rule_refs_for_syntax_header")
             && broad_matcher.contains("compiler_syntax_header_uncached(file)")
             && broad_matcher
-                .find("let raw_scan_files")
+                .find("let raw_scan_candidates")
                 .zip(broad_matcher.find("prepare_compiler_object_session_for_body_scan"))
                 .is_some_and(|(raw, compiler)| raw < compiler)
             && broad_matcher
-                .split_once("let raw_scan_files")
+                .split_once("let raw_scan_candidates")
                 .and_then(|(_, tail)| tail.split_once("let imports_started"))
-                .is_some_and(|(raw_plan, _)| raw_plan.contains("parallel_map_with_progress"))
+                .is_some_and(|(raw_plan, _)| {
+                    raw_plan.contains("parallel_map_with_progress")
+                        && raw_plan.contains("anchor_matches")
+                        && raw_plan.contains("let raw_scan_files")
+                })
+            && broad_matcher.contains("matched_text_anchors: Some(matched_text_anchors)")
             && parallel_matcher_map.contains(".par_iter()")
             && broad_matcher
                 .find("let mut scan_plan")
@@ -4089,11 +4292,24 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && function_body(&security_matcher, "release_matcher_fact_caches")
                 .matches("clear_retained()")
                 .count()
-                == 3
+                == 5
             && function_body(&security_matcher, "release_matcher_fact_caches")
                 .matches("point_matcher_fact_cache_budget_share")
                 .count()
-                == 3
+                == 5
+            && [
+                "FILE_PACKAGE_SET_CACHE",
+                "LANGUAGE_IMPORT_PACKAGE_CONTEXT_CACHE",
+                "EXACT_MODULE_FILE_INDEX_CACHE",
+                "MODULE_EXPORT_TYPE_CACHE",
+                "DECL_FACTS_CACHE",
+            ]
+            .iter()
+            .all(|cache| {
+                let release = function_body(&security_matcher, "release_matcher_fact_caches");
+                release.contains(&format!("{cache}.clear_retained()"))
+                    && release.contains(&format!("{cache}.set_retained_budget("))
+            })
             && function_body(
                 &security_matcher,
                 "match_rules_against_facts_with_progress_and_mode"
@@ -4174,7 +4390,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
                 .find("install_query_accelerator")
                 .zip(idg_persist.find("save_into_disk"))
                 .is_some_and(|(install, save)| install < save)
-            && function_body(&idg_service, "load_from_disk")
+            && function_body(&idg_service, "load_from_disk_with_global")
                 .contains("PersistedQueryAccelerator::decode")
             && function_body(&idg_workspace, "load_query_from_disk")
                 .contains("metadata.func_segments")
@@ -4875,23 +5091,28 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
             && idg_builder.contains("rows: Vec<CalleeEndpoints>")
             && idg_builder.contains("row_by_func: Vec<u32>")
             && idg_builder.contains("capture_funcs.is_none_or(|targets| targets.contains(&func))")
-            && idg_adapter.contains("let capture_funcs = local_callable_bindings")
+            && idg_adapter.contains("let mut capture_funcs = local_callable_bindings")
+            && idg_adapter.contains("call_graph.visit_callable_arguments")
+            && idg_adapter.contains("let Some(parent) = decl.parent")
+            && idg_adapter.contains("capture_funcs.insert(parent_func)")
+            && idg_adapter.contains("capture_funcs.insert(candidate)")
             && idg_adapter.contains("capture_funcs: Some(&capture_funcs)"),
         "cold IDG stitching must keep endpoint records packed and retain lexical captures only for AST/callgraph-proven local callables"
     );
     let hydrate = function_body(&workspace, "load_idg_sidecar");
     assert!(
         hydrate
-            .find("compiler_header_index()")
-            .is_some_and(|headers| hydrate
-                .find("IdgQueryService::load_from_disk")
-                .is_some_and(|idg| headers < idg))
+            .find("IdgQueryService::load_from_disk_with_global")
+            .is_some_and(|idg| hydrate
+                .find("compiler_header_index()")
+                .is_some_and(|headers| idg < headers))
             && !hydrate.contains("compiler_linkage_index()"),
-        "warm query open must load stable compiler headers without retaining call-linkage beside the live IDG"
+        "warm query open must validate the IDG before lazily loading stable compiler headers, without retaining call-linkage beside the live graph"
     );
     let streaming_imports = function_body(&db, "imports_for_uncached");
     let cached_imports = function_body(&db, "import_index");
     let seed_callgraph = function_body(&workspace, "seed_resolved_call_graph");
+    let publish_callgraph = function_body(&workspace, "publish_resolved_call_graph");
     let release_callgraph = function_body(&workspace, "release_resolved_call_graph_cache");
     let cached_callgraph = function_body(&workspace, "cached_resolved_call_graph");
     assert!(
@@ -4899,9 +5120,10 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
             && cached_imports.contains("compiler_import_index_uncached(file)")
             && !cached_imports.contains("extract_imports")
             && !streaming_imports.contains("build_import_index_uncached(file)")
-            && seed_callgraph.contains("dataflow.seed_call_graph(graph.clone())")
-            && cached_callgraph.contains("seed_resolved_call_graph(graph.clone())")
-            && cached_callgraph.contains("dataflow.seed_call_graph(arc.clone())")
+            && seed_callgraph.contains("publish_resolved_call_graph(graph)")
+            && publish_callgraph.contains("dataflow.seed_call_graph(graph.clone())")
+            && cached_callgraph.contains("publish_resolved_call_graph(graph.clone())")
+            && cached_callgraph.contains("publish_resolved_call_graph(arc.clone())")
             && release_callgraph.contains("dataflow.release_call_graph()")
             && function_body(&dataflow, "release_call_graph").contains("cached_call_graph.write()")
             && !flow_ids.contains("ResolvedCallGraph")
@@ -5414,7 +5636,8 @@ fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
         "source attribution must carry a compiler-proven endpoint identity into taint-only constraint checks"
     );
     assert!(
-        unique_overlap.contains("sink.match_text != call.name")
+        unique_overlap.contains("same_compiler_call_identity")
+            && unique_overlap.contains("spans_overlap(call.call_span, sink.span)")
             && unique_overlap.contains("span != sink.span")
             && unique_overlap.contains("return None"),
         "overlapping adapter spans may reuse endpoint proofs only when the exact candidate identity is unique"
@@ -5750,8 +5973,9 @@ fn typed_lang_adapters_emit_decl_type_aliases() {
         std::fs::create_dir_all(&ws_dir).unwrap_or_else(|e| panic!("mkdir {}: {e}", ws_dir.display()));
         let path = ws_dir.join(file);
         std::fs::write(&path, src).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-        let ws = Workspace::open_query(&ws_dir, bonsai_adapters::all_languages_registry())
-            .unwrap_or_else(|e| panic!("open {}: {e}", ws_dir.display()));
+        let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+        ws.db().set_workspace_root(ws_dir.clone());
+        ws.vfs().write(path, std::sync::Arc::<str>::from(src));
         let mut found_type_alias = false;
         for f in ws.db().global_index().all_files() {
             for d in ws.db().global_index().decls_in(f) {
@@ -5943,7 +6167,6 @@ fn structured_security_guards_are_rulepack_driven() {
     let xxe_pack = read(&root.join("security-patterns/langs/python/sinks/xxe.yml"));
     let language_types = read(&root.join("crates/lang_api/src/types.rs"));
     let language_kit = read(&root.join("crates/lang_api/src/kit/mod.rs"));
-    let ruby = read(&root.join("crates/lang_ruby/src/lib.rs"));
     let native_export = read(&root.join("crates/browse/src/native_export.rs"));
     let metadata = read(&root.join("security-patterns/metadata.yml"));
     let assignment_lowering = read(&root.join("crates/lang_api/src/kit/walker/assignment.rs"));
@@ -5983,28 +6206,31 @@ fn structured_security_guards_are_rulepack_driven() {
         "receiver mutation proofs must consume taint_receiver_from_args rule targets"
     );
     assert!(
-        analysis.contains("fn compiled_receiver_state_propagations_for_languages")
+        analysis.contains("fn compiled_transfer_sites_for_languages")
             && analysis.contains("match_rules_against_facts_for_sink_inventory_with_progress_on_files",)
+            && analysis.contains("receiver_state_propagations_from_rules(")
             && analysis.contains("propagation.resolved_call_sites"),
-        "rulepack-only receiver typing must compile complete matcher proofs to exact AST call sites"
+        "rulepack-only transfer typing must compile complete matcher proofs to exact AST call sites"
     );
     let transfer_fingerprint = function_body(&idg_transfer, "semantic_fingerprint");
     let receiver_transfer = function_body(&idg_transfer, "apply_receiver_state_propagation_call");
     assert!(
         transfer_fingerprint.contains("spec.resolved_call_sites")
-            && receiver_transfer.contains("shape.resolved_call_sites.binary_search(&span)"),
+            && idg_transfer.contains("struct ResolvedCallSiteIndex")
+            && receiver_transfer.contains("resolved_receiver_state_propagations")
+            && receiver_transfer.contains("matching_indices(span)"),
         "IDG receiver transfer must consume exact typed sites and include them in graph identity"
     );
-    let path_guard = function_body(guards_runtime, "path_containment_guard_sanitizer");
+    let path_guard = function_body(guards_runtime, "path_consumer_containment_guard_sanitizer");
     assert!(
-        path_guard.contains("GuardProfile::CanonicalPathContainment")
-            && path_guard.contains("path_containment_guard"),
+        path_guard.contains("GuardProfile::PathConsumerContainment")
+            && path_guard.contains("path_consumer_containment_guard"),
         "path containment must be selected by typed analysis semantics"
     );
     assert!(
-        rules.contains("pub struct PathContainmentGuardSemantics")
-            && path_pack.contains("guard_profile: python-path-containment")
-            && path_pack.contains("path_containment_guard:"),
+        rules.contains("pub struct PathConsumerContainmentGuardSemantics")
+            && path_pack.contains("guard_profile: path-consumer-containment")
+            && path_pack.contains("path_consumer_containment_guard:"),
         "callable roles for path containment must be declared in the rule schema and rulepack"
     );
     let condition_proof = function_body(guards_runtime, "path_containment_guard_condition");
@@ -6018,9 +6244,8 @@ fn structured_security_guards_are_rulepack_driven() {
     assert!(
         language_types.contains("pub struct BranchConditionFact")
             && language_kit.contains("extract_branch_condition_facts(tree, file, handler, src)")
-            && ruby.contains("extract_branch_condition_facts(&tree")
             && native_export.contains("branch_conditions: index.branch_conditions.clone()"),
-        "branch-condition compiler facts must be emitted by shared/custom frontend paths and preserved by export"
+        "branch-condition compiler facts must be emitted by the shared exact-tree frontend path and preserved by export"
     );
     for spelling in ["XMLParser", "resolve_entities", "no_network"] {
         assert!(
@@ -6028,7 +6253,12 @@ fn structured_security_guards_are_rulepack_driven() {
             "configured factory role `{spelling}` must remain rulepack data"
         );
     }
-    let configured_factory = function_body(&guards, "configured_argument_factory_guard_sanitizer");
+    let configured_factory = format!(
+        "{}\n{}\n{}",
+        function_body(&guards, "configured_argument_factory_guard_sanitizer"),
+        function_body(&guards, "configured_factory_call_is_exact"),
+        function_body(&guards, "configured_factory_argument_proof_span")
+    );
     assert!(
         configured_factory.contains("assignment_values")
             && configured_factory.contains("call_argument_value_fact")
@@ -6466,6 +6696,36 @@ fn external_callback_signatures_are_rulepack_owned() {
     );
 }
 
+/// External dispatcher APIs and configuration-field spellings are rulepack
+/// knowledge. A frontend may retain exact call, aggregate-field, and callable
+/// facts from the CST, but it must not translate a provider name into invented
+/// execution edges.
+#[test]
+fn typescript_external_dispatch_semantics_are_rulepack_owned() {
+    let root = repo_root();
+    let typescript = live_code(&read(&root.join("crates/lang_typescript/src/lib.rs")));
+    for provider_token in [
+        "TsGraphqlRootResolver",
+        "inject_typescript_graphql_root_resolver_calls",
+        "rootValue",
+        "variableValues",
+        "matches!(tail, \"graphql\" | \"execute\")",
+    ] {
+        assert!(
+            !typescript.contains(provider_token),
+            "TypeScript adapter must not compile external dispatch semantic `{provider_token}`"
+        );
+    }
+
+    let graphql_rules = read(&root.join("security-patterns/langs/typescript/sinks/graphql.yml"));
+    assert!(
+        graphql_rules.contains("graphqlHTTP")
+            && graphql_rules.contains("rootValue")
+            && graphql_rules.contains("ApolloServer"),
+        "TypeScript GraphQL provider identities must remain in rule data"
+    );
+}
+
 /// Rust permits one type's inherent impl blocks to be split across modules.
 /// The adapter must retain the AST owner and rooted module identity so shared
 /// resolution never compensates with a workspace-wide leaf-name search.
@@ -6486,5 +6746,152 @@ fn rust_split_impl_resolution_is_compiler_fact_driven() {
             && resolver.contains("Visibility::ModuleTree")
             && resolver.contains("starts_with(&decl_module.segments)"),
         "Rust module-tree privacy must be a typed visibility fact, not a file-local approximation"
+    );
+}
+
+/// Every public adapter must execute the same baseline compiler contract.
+/// Adapter-local bespoke tests are additive; they may never replace the
+/// shared parse/lowering/span/determinism gate.
+#[test]
+fn every_bundled_adapter_runs_the_shared_conformance_suite() {
+    let root = repo_root();
+    let bundled: BTreeSet<String> = bonsai_adapters::all_adapters()
+        .into_iter()
+        .map(|adapter| adapter.language_id().as_str().to_string())
+        .collect();
+    assert!(!bundled.is_empty(), "adapter registry unexpectedly empty");
+    for language in bundled {
+        let test = root
+            .join("crates")
+            .join(format!("lang_{language}"))
+            .join("tests/conformance.rs");
+        assert!(
+            test.is_file(),
+            "{language} has no adapter-local shared conformance test at {}",
+            test.display()
+        );
+        let source = read(&test);
+        assert_eq!(
+            source.matches("run_language_suite!(").count(),
+            1,
+            "{language} must invoke the shared conformance suite exactly once"
+        );
+    }
+}
+
+/// IDG-backed query facades must get callable headers from the IDG's compact
+/// linkage generation. Calling `AnalyzerDb::global_index()` here rebuilds and
+/// retains every adapter-lowered body beside the graph.
+#[test]
+fn idg_backed_taint_queries_never_materialize_the_workspace_body_index() {
+    let root = repo_root();
+    let reachable = read(&root.join("crates/taint/src/reachable.rs"));
+    let value_flow = read(&root.join("crates/taint/src/value_flow.rs"));
+    for (source, function) in [
+        (&reachable, "taint_facts_and_graph_for_entry_with_caches"),
+        (&value_flow, "value_flow_for_function_with_caches"),
+    ] {
+        let body = function_body(source, function);
+        assert!(
+            !body.contains("db.global_index()") && !body.contains("db.build_global_index"),
+            "{function} opens the canonical IDG and therefore must reuse its compact global_linkage_index"
+        );
+    }
+}
+
+/// A cold IDG build already owns an immutable linkage generation. The call
+/// graph must be resolved against those exact headers rather than building a
+/// second complete header/linkage table for the same snapshot.
+#[test]
+fn cold_idg_build_reuses_its_existing_linkage_headers_for_callgraph_resolution() {
+    let source = read(&repo_root().join("crates/taint/src/idg_build.rs"));
+    let body = function_body(&source, "build_idg_service");
+    assert!(
+        body.contains("build_resolved_call_graph_snapshot_with_headers")
+            && !body.contains("build_resolved_call_graph_snapshot(db)"),
+        "cold IDG construction must not build global linkage and then rebuild global headers for the call graph"
+    );
+}
+
+/// Per-file callgraph work is part of the caller's continuous compiler
+/// schedule. Creating a private Rayon pool for each wave causes nested-pool
+/// stalls and repeatedly pays thread creation on large workspaces.
+#[test]
+fn callgraph_file_resolution_uses_the_shared_continuous_scheduler() {
+    let source = read(&repo_root().join("crates/callgraph/src/lib.rs"));
+    let body = function_body(&source, "collect_resolved_file_edges");
+    assert!(
+        !body.contains("ThreadPoolBuilder") && !body.contains("current_thread_index"),
+        "collect_resolved_file_edges must run on a caller-owned bounded scheduler, never create or serialize around a nested pool"
+    );
+}
+
+/// Expensive workspace-wide semantic caches require single-flight
+/// construction, not merely single-winner publication after every contender
+/// independently finishes the same graph.
+#[test]
+fn resolved_callgraph_cache_is_single_flight_during_construction() {
+    let source = read(&repo_root().join("crates/workspace/src/lib.rs"));
+    let body = function_body(&source, "cached_resolved_call_graph");
+    let has_single_flight = [
+        "get_or_init",
+        "single_flight",
+        "build_lock",
+        "construction_lock",
+        "OnceLock",
+        "OnceCell",
+    ]
+    .iter()
+    .any(|needle| body.contains(needle));
+    assert!(
+        has_single_flight,
+        "cached_resolved_call_graph lets concurrent misses duplicate the complete graph before one result wins publication"
+    );
+}
+
+/// Compiler headers must be lowered as one continuous, memory-weighted work
+/// stream. Phase-local batches and private pools create barriers that strand
+/// workers behind the largest file in every batch.
+#[test]
+fn streaming_global_headers_have_no_batch_barriers_or_private_pool() {
+    let source = read(&repo_root().join("crates/db/src/lib.rs"));
+    let body = function_body(&source, "build_streaming_global_index");
+    let consuming = function_body(&source, "populate_global_index_consuming_with_workers");
+    assert!(
+        !body.contains("compiler_weighted_batches")
+            && !body.contains("ThreadPoolBuilder")
+            && !body.contains("for range in batches")
+            && body.contains("stream_decl_indexes_in_order")
+            && consuming.contains("stream_decl_indexes_in_order")
+            && !consuming.contains("ThreadPoolBuilder")
+            && !consuming.contains(".chunks("),
+        "global-index builders must share continuous bounded work rather than batch barriers/private pools"
+    );
+}
+
+/// Ordinary files should parse directly from the immutable VFS snapshot.
+/// A mutable copy is justified only when an adapter actually returns recovery
+/// edits; cloning every source file doubles cold-front-end traffic and peak
+/// memory for the common path.
+#[test]
+fn parser_common_path_does_not_clone_every_source_buffer() {
+    let source = read(&repo_root().join("crates/parser/src/lib.rs"));
+    let body = function_body(&source, "parse_snapshot");
+    assert!(
+        !body.contains("snapshot.text.as_bytes().to_vec()"),
+        "parse_snapshot unconditionally clones every file before knowing whether normalization/recovery is needed"
+    );
+}
+
+/// Re-registering an adapter id is replacement, not addition. Leaving the old
+/// adapter in extension buckets makes dispatch depend on historical registry
+/// state and can select a grammar that is no longer present in `by_id`.
+#[test]
+fn adapter_registry_replacement_removes_stale_extension_candidates() {
+    let source = read(&repo_root().join("crates/lang_api/src/registry.rs"));
+    let body = function_body(&source, "register");
+    assert!(
+        body.contains("retain") && body.find("retain").is_some_and(|at| at < body.find("for ext").unwrap_or(usize::MAX)),
+        "LanguageRegistry::register must remove the replaced language id from every old extension bucket before adding its current extensions"
     );
 }

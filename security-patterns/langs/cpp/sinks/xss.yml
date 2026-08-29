@@ -1,6 +1,4 @@
 - id: cpp.xss.cpphttplib_set_content
-  aliases:
-  - cpp.info_disclosure.httplib_error_detail
   enabled: true
   language: cpp
   tag: xss
@@ -9,7 +7,6 @@
   - cpp-httplib
   cwe:
   - CWE-79
-  - CWE-209
   match:
     kind: call
     callee:
@@ -19,10 +16,18 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    character_escape:
+      value_arg_indices: [0]
+      required_mappings:
+      - {input: "&", output: "&amp;"}
+      - {input: "<", output: "&lt;"}
+      - {input: ">", output: "&gt;"}
+      - {input: '"', output: "&quot;"}
+      - {input: "'", output: "&#39;"}
   match_examples:
   - name: generated direct match
     code: |
-      #include <httplib.h>
       #include <httplib.h>
       void example(const char *arg) {
         const char *fmt = arg;
@@ -35,7 +40,7 @@
         Response::set_content("safe");
       }
     expect_no_match: true
-  description: "cpp-httplib Response::set_content(tainted, \"text/html\") - reflected XSS. Also covers merged aliases: cpp.info_disclosure.httplib_error_detail."
+  description: "cpp-httplib Response::set_content(tainted, \"text/html\") - reflected XSS."
   imports:
   - httplib.h
   - httplib
@@ -72,6 +77,60 @@
       }
     expect_no_match: true
   description: "crow res.body = tainted - reflected XSS if Content-Type is HTML."
+
+- id: cpp.xss.crow_response_constructor
+  enabled: true
+  language: cpp
+  tag: xss
+  severity: high
+  packages: [crow]
+  imports: [crow.h, crow]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [crow, response]
+      binding_origin: imported
+  constraints:
+  - arg_tainted:
+      index: 0
+  - arg_matches_regex:
+      index: 0
+      regex: '<[A-Za-z!/][^>]*>'
+  match_examples:
+  - name: Crow response constructed from explicit HTML
+    code: |
+      #include <crow.h>
+      crow::response emit(const std::string& value) {
+        return crow::response("<p>" + value + "</p>");
+      }
+    expect_match_text: ["crow::response"]
+  - name: raw dynamic Crow response has no proven HTML execution context
+    code: |
+      #include <crow.h>
+      crow::response emit(const std::string& body) {
+        return crow::response(body);
+      }
+    expect_no_match: true
+  - name: constant Crow response body is not tainted
+    code: |
+      #include <crow.h>
+      crow::response emit() {
+        return crow::response("<p>safe</p>");
+      }
+    expect_no_match: true
+  - name: local value named crow is not the imported framework API
+    code: |
+      #include <crow.h>
+      struct LocalResponder {
+        int response(const std::string& value) { return value.size(); }
+      };
+      int emit(LocalResponder& crow, const std::string& body) {
+        return crow.response(body);
+      }
+    expect_no_match: true
+  description: "Crow's imported response constructor is an XSS boundary only when the exact argument syntax contains HTML markup; a raw dynamic byte/string response has no compiler-proven HTML execution context."
+
 - id: cpp.xss.drogon_response_setbody
   enabled: true
   language: cpp
@@ -106,24 +165,6 @@
       }
     expect_no_match: true
   description: "Drogon HttpResponse::setBody(tainted) - reflected XSS when content-type is HTML."
-- id: cpp.xss.drogon_newhttpresponse
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: xss
-  severity: medium
-  packages:
-  - drogon
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - HttpResponse
-      - newHttpResponse
-  description: "Disabled - newHttpResponse is a factory; the actual sink is setBody on the returned object."
 - id: cpp.xss.pistache_setbody
   enabled: true
   language: cpp
@@ -177,7 +218,6 @@
   - name: generated direct match
     code: |
       #include <QtCore/Qt>
-      #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example(const char *arg) {
         const char *fmt = arg;
@@ -213,7 +253,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      #include <QtCore/Qt>
       #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example(const char *arg) {
@@ -253,7 +292,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      #include <QtCore/Qt>
       #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example(const char *arg) {

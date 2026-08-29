@@ -230,36 +230,12 @@
       }
     expect_no_match: true
   description: "mbedtls_ssl_read(ssl, buf, len) writes TLS peer bytes to output buffer argument 1."
-- id: c.input.bio_read
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
-  language: c
-  trust: remote
-  tag: network-input
-  payload_types: [binary]
-  packages: [openssl]
-  match:
-    kind: call
-    callee:
-      name: BIO_read
-  taint_semantics:
-    source_output_args: [1]
-  match_examples:
-  - name: BIO_read output buffer
-    code: |
-      #include <openssl/bio.h>
-      void handle(BIO *bio) {
-        char buf[4096];
-        BIO_read(bio, buf, sizeof(buf));
-      }
-    expect_match_text: [BIO_read]
-  description: "Disabled - BIO_read may consume socket, file, memory, filter, or chained BIO data. Re-enable as a remote source only after compiler facts prove network-backed BIO construction/lineage."
 - id: c.input.mhd_lookup_connection_value
   enabled: true
   language: c
   trust: remote
-  tag: network-input
+  tag: http-input
+  category: http-input
   payload_types: [text]
   packages: [libmicrohttpd]
   match:
@@ -403,39 +379,386 @@
 # The Heartbleed (CVE-2014-0160) shape: a 16-bit length pulled from
 # the heartbeat request reaches memcpy and reads server memory back.
 # Param-name regex covers the OpenSSL / GnuTLS / mbedTLS conventions.
-- id: c.input.tls_record_payload_len
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: c.source.civetweb_request_metadata
+  enabled: true
   language: c
   trust: remote
-  tag: network-input
-  payload_types: [binary]
-  packages: [openssl, libssl, gnutls, mbedtls]
+  tag: http-input
+  category: http-input
+  payload_types: [query, path, header, text]
+  packages: [civetweb]
   match:
-    kind: param
-    target:
-      regex: "^(payload_length|payload_len|hbtype|hblen|record_length|frag_len)$"
-  description: "Disabled - a length-like parameter in a project using TLS does not prove it was parsed from a peer record. Socket/read sources and compiler propagation must establish that flow instead."
+    kind: call
+    callee:
+      regex: "^(mg_get_header|mg_get_request_info)$"
+  match_examples:
+  - name: civetweb request header
+    code: |
+      #include <civetweb.h>
+      const char *header(struct mg_connection *conn) { return mg_get_header(conn, "X-Value"); }
+    expect_match_text: [mg_get_header]
+  - name: unrelated local getter negative
+    code: |
+      #include <civetweb.h>
+      const char *get_header(void *object, const char *name) { return 0; }
+      const char *header(void *object) { return get_header(object, "X-Value"); }
+    expect_no_match: true
+  description: "CivetWeb request header and request-info accessors; the returned request metadata originates at the connected HTTP client."
 
-# Generic untrusted-input parameter for shell-handling / path-handling
-# C entry points. Names are deliberately narrow (the more aggressive
-# wider list - user/arg/cmd/name/path/host/url/query/body - reports
-# ordinary construct parameters as duplicate sources). Tightened to
-# obviously-untrusted nouns:
-# `user_input`, `untrusted`, `attacker_input` plus the specific
-# `cshell` shape `user`-prefix patterns. Disabled by default; flip
-# in projects that want the broader audit hint.
-- id: c.input.untrusted_string_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: c.source.civetweb_form_value_output
+  enabled: true
   language: c
   trust: remote
-  tag: cli-input
-  payload_types: [text]
+  tag: http-input
+  category: http-input
+  payload_types: [query, form, text]
+  match:
+    kind: call
+    callee:
+      name: mg_get_var
+      binding_origin: runtime-global
+  taint_semantics:
+    source_output_args: [3]
+  constraints:
+  - arg_count: 5
+  match_examples:
+  - name: civetweb decoded form value output
+    code: |
+      #include <civetweb.h>
+      void value(const char *data, size_t len) {
+        char out[128]; mg_get_var(data, len, "name", out, sizeof(out));
+      }
+    expect_match_text: [mg_get_var]
+  - name: civetweb call without destination negative
+    code: |
+      #include <civetweb.h>
+      void value(const char *data, size_t len) { mg_get_var(data, len, "name"); }
+    expect_no_match: true
+  - name: workspace mg_get_var collision negative
+    code: |
+      int mg_get_var(const char *data, unsigned long len, const char *name,
+                     char *destination, unsigned long capacity) { return 0; }
+      void value(const char *data, unsigned long len) {
+        char out[128]; mg_get_var(data, len, "name", out, sizeof(out));
+      }
+    expect_no_match: true
+  description: "CivetWeb mg_get_var(data,len,name,dst,dst_len) decodes request form/query data into output buffer argument 3; its integer return is only a status/length."
+
+- id: c.source.civetweb_request_body_output
+  enabled: true
+  language: c
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [binary, text]
+  packages: [civetweb]
+  match:
+    kind: call
+    callee: {name: mg_read}
+  taint_semantics:
+    source_output_args: [1]
+  constraints:
+  - arg_count: 3
+  match_examples:
+  - name: civetweb request body output
+    code: |
+      #include <civetweb.h>
+      void body(struct mg_connection *conn) { char buf[128]; mg_read(conn, buf, sizeof(buf)); }
+    expect_match_text: [mg_read]
+  - name: civetweb read without output buffer negative
+    code: |
+      #include <civetweb.h>
+      void body(struct mg_connection *conn) { mg_read(conn); }
+    expect_no_match: true
+  description: "CivetWeb mg_read(conn,buf,len) writes remote request-body bytes into output buffer argument 1."
+
+- id: c.source.civetweb_handler_body_param
+  enabled: true
+  language: c
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [binary, text]
+  packages: [civetweb]
   match:
     kind: param
     target:
-      regex: "^(user_input|untrusted|attacker_input|tainted)$"
-  description: "Disabled by default - narrow audit hint for C entry-point functions whose parameter name explicitly states that the value is attacker-controlled. Broader generic identifier lists overmatch ordinary parameters; enable per project."
+      param_index_in: [1]
+      param_type_in: [char]
+      param_count_in: [3]
+      signature_param_types:
+      - index: 0
+        type_in: [mg_connection, "struct mg_connection"]
+      - index: 2
+        type_in: [size_t]
+  match_examples:
+  - name: typed CivetWeb body callback parameter
+    code: |
+      #include <civetweb.h>
+      void handle(struct mg_connection *connection, char *payload, size_t payload_size) {
+        consume(payload, payload_size);
+      }
+    expect_match_text: [payload]
+  - name: same payload position with an application context negative
+    code: |
+      #include <civetweb.h>
+      struct local_context;
+      void handle(struct local_context *connection, char *payload, size_t payload_size) {
+        consume(payload, payload_size);
+      }
+    expect_no_match: true
+  - name: CivetWeb metadata parameter is not the body negative
+    code: |
+      #include <civetweb.h>
+      void handle(struct mg_connection *connection, const char *metadata, char *payload) {
+        consume(metadata);
+      }
+    expect_no_match: true
+  description: "The body byte parameter of a typed CivetWeb request callback. Exact parameter position, arity, and sibling parameter types identify the externally delivered body independently of callback or binding names."
+
+- id: c.source.ulfius_request_map_value
+  enabled: true
+  language: c
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, path, header, cookie, form, text]
+  packages: [ulfius]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [_u_request, "struct _u_request"]
+  match_examples:
+  - name: ulfius request URL parameter
+    code: |
+      #include <ulfius.h>
+      const char *value(const struct _u_request *request) { return u_map_get(request->map_url, "id"); }
+    expect_match_text: [request]
+  - name: ulfius response map negative
+    code: |
+      #include <ulfius.h>
+      const char *value(const struct _u_response *response) { return u_map_get(response->map_header, "Server"); }
+    expect_no_match: true
+  description: "A typed Ulfius _u_request parameter carries inbound URL/header/form/cookie/body data. Sourcing the carrier distinguishes the structurally similar _u_response maps and preserves field flow through u_map_get."
+
+- id: c.source.kore_http_argument_output
+  enabled: true
+  language: c
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, form, header, text]
+  packages: [kore]
+  match:
+    kind: call
+    callee:
+      regex: "^(http_request_header|http_argument_get_(string|byte|u?int(16|32|64)|float|double))$"
+  taint_semantics:
+    source_output_args: [2]
+  constraints:
+  - arg_count: 3
+  match_examples:
+  - name: kore request argument output
+    code: |
+      #include <kore/kore.h>
+      #include <kore/http.h>
+      void value(struct http_request *req) { char *out = 0; http_argument_get_string(req, "q", &out); }
+    expect_match_text: [http_argument_get_string]
+  - name: kore response header negative
+    code: |
+      #include <kore/kore.h>
+      #include <kore/http.h>
+      void value(struct http_request *req) { http_response_header(req, "X-Value", "fixed"); }
+    expect_no_match: true
+  description: "Kore request argument/header getters write client-controlled values through output argument 2; their integer returns are status codes."
+
+- id: c.source.kore_http_body_output
+  enabled: true
+  language: c
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [binary, text]
+  packages: [kore]
+  match:
+    kind: call
+    callee: {name: http_body_read}
+  taint_semantics:
+    source_output_args: [1]
+  constraints:
+  - arg_count: 3
+  match_examples:
+  - name: kore request body output
+    code: |
+      #include <kore/kore.h>
+      #include <kore/http.h>
+      void body(struct http_request *req) { char out[128]; http_body_read(req, out, sizeof(out)); }
+    expect_match_text: [http_body_read]
+  - name: kore file read is not request body
+    code: |
+      #include <kore/kore.h>
+      #include <kore/http.h>
+      void body(struct http_file *file) { char out[128]; http_file_read(file, out, sizeof(out)); }
+    expect_no_match: true
+  description: "Kore http_body_read(req,out,len) writes remote HTTP body bytes into output argument 1."
+
+- id: c.source.onion_request_value
+  enabled: true
+  language: c
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, path, header, form, text]
+  packages: [onion]
+  match:
+    kind: call
+    callee:
+      regex: "^onion_request_get_(query|post|header|path)$"
+  constraints:
+  - arg_count: 2
+  match_examples:
+  - name: onion request query value
+    code: |
+      #include <onion/onion.h>
+      const char *value(onion_request *request) { return onion_request_get_query(request, "q"); }
+    expect_match_text: [onion_request_get_query]
+  - name: onion response call negative
+    code: |
+      #include <onion/onion.h>
+      void value(onion_response *response) { onion_response_set_header(response, "X-Value", "fixed"); }
+    expect_no_match: true
+  description: "Onion request query, form, header, and path accessors return client-controlled request values."
+
+- id: c.source.lwan_request_value
+  enabled: true
+  language: c
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, header, form, text]
+  packages: [lwan]
+  match:
+    kind: call
+    callee:
+      regex: "^lwan_request_get_(query_param|post_param|header)$"
+  constraints:
+  - arg_count: 2
+  match_examples:
+  - name: lwan request query parameter
+    code: |
+      #include <lwan.h>
+      const char *value(struct lwan_request *request) { return lwan_request_get_query_param(request, "q"); }
+    expect_match_text: [lwan_request_get_query_param]
+  - name: unrelated lwan response negative
+    code: |
+      #include <lwan.h>
+      void value(struct lwan_response *response) { lwan_response_set_header(response, "X-Value", "fixed"); }
+    expect_no_match: true
+  description: "Lwan request query, post, and header accessors return client-controlled request values."
+
+- id: c.source.cgi_environment
+  enabled: true
+  language: c
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, path, header, text]
+  match:
+    kind: call
+    callee: {name: getenv}
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"(QUERY_STRING|PATH_INFO|REQUEST_URI|HTTP_[A-Z0-9_]+)"$'
+  - arg_count: 1
+  match_examples:
+  - name: CGI query environment
+    code: |
+      #include <stdlib.h>
+      const char *query(void) { return getenv("QUERY_STRING"); }
+    expect_match_text: [getenv]
+  - name: local process environment negative
+    code: |
+      #include <stdlib.h>
+      const char *home(void) { return getenv("HOME"); }
+    expect_no_match: true
+  description: "CGI request metadata read from an exact standard request-controlled process-environment key; no package guess is required."
+
+- id: c.source.fastcgi_param
+  enabled: true
+  language: c
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, path, header, text]
+  packages: [fcgiapp]
+  match:
+    kind: call
+    callee: {name: FCGX_GetParam}
+  constraints:
+  - arg_count: 2
+  match_examples:
+  - name: FastCGI request parameter
+    code: |
+      #include <fcgiapp.h>
+      char *query(FCGX_ParamArray envp) { return FCGX_GetParam("QUERY_STRING", envp); }
+    expect_match_text: [FCGX_GetParam]
+  - name: incomplete FastCGI call negative
+    code: |
+      #include <fcgiapp.h>
+      void query(void) { FCGX_GetParam("QUERY_STRING"); }
+    expect_no_match: true
+  description: "FastCGI FCGX_GetParam(name,envp) returns a request parameter from the per-request environment."
+
+- id: c.source.libevent_request_uri
+  enabled: true
+  language: c
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [url, path, query]
+  packages: [event2]
+  match:
+    kind: call
+    callee: {name: evhttp_request_get_uri}
+  constraints:
+  - arg_count: 1
+  match_examples:
+  - name: libevent inbound request URI
+    code: |
+      #include <event2/http.h>
+      const char *uri(struct evhttp_request *request) { return evhttp_request_get_uri(request); }
+    expect_match_text: [evhttp_request_get_uri]
+  - name: libevent response sender negative
+    code: |
+      #include <event2/http.h>
+      void reply(struct evhttp_request *request) { evhttp_send_reply(request, 200, "OK", 0); }
+    expect_no_match: true
+  description: "libevent evhttp_request_get_uri(request) returns the URI supplied on an inbound HTTP request."
+
+- id: c.source.libsoup_server_request_uri
+  enabled: true
+  language: c
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [url, path, query]
+  packages: [libsoup]
+  match:
+    kind: call
+    callee: {name: soup_server_message_get_uri}
+  constraints:
+  - arg_count: 1
+  match_examples:
+  - name: libsoup inbound server URI
+    code: |
+      #include <libsoup/soup.h>
+      GUri *uri(SoupServerMessage *message) { return soup_server_message_get_uri(message); }
+    expect_match_text: [soup_server_message_get_uri]
+  - name: libsoup response status negative
+    code: |
+      #include <libsoup/soup.h>
+      void reply(SoupServerMessage *message) { soup_server_message_set_status(message, 200, 0); }
+    expect_no_match: true
+  description: "libsoup soup_server_message_get_uri(message) returns the URI from an inbound server request."

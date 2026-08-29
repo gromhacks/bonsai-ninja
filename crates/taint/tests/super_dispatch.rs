@@ -29,13 +29,6 @@ fn ws(adapter: Arc<dyn LanguageAdapter>, files: &[(&str, &str)]) -> AnalyzerDb {
     db
 }
 
-fn func(db: &AnalyzerDb, name: &str) -> FuncId {
-    let g = db.global_index();
-    let matches = bonsai_resolve::resolve_callable(&g, name);
-    assert!(!matches.is_empty(), "expected `{name}` resolvable");
-    matches[0]
-}
-
 fn seed(names: &[&str]) -> TokenSet {
     names.iter().map(|n| (*n).to_string()).collect()
 }
@@ -230,7 +223,7 @@ class Child(Parent):
         Arc::new(bonsai_lang_python::PythonAdapter::new()),
         &[("a.py", src)],
     );
-    let entry = func(&db, "handle");
+    let entry = func_in_class(&db, "handle", "Child");
     let result = interprocedural_taint(entry, &seed(&["data"]), &config(&[]), &db);
     assert!(
         super_target_in_chain(&result, &db, "handle"),

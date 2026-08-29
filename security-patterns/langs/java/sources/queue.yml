@@ -105,21 +105,6 @@
     expect_no_match: true
   description: "Azure Functions Java @EventHubTrigger parameter - event supplied by Azure Event Hubs."
 
-- id: java.source.kafka_consumer_record
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: java.source.kafka_record_value
-  language: java
-  trust: service
-  tag: queue-input
-  packages: [org.apache.kafka.clients.consumer]
-  match:
-    kind: call
-    callee:
-      attribute: [ConsumerRecord, value]
-  description: "Subsumed by java.source.kafka_record_value, which already matches `attribute: [ConsumerRecord, value]` via receiver-type resolution."
-
 - id: java.source.kafka_listener_annot
   enabled: true
   language: java
@@ -277,51 +262,6 @@
     expect_no_match: true
   description: "Spring Messaging @Payload parameter - explicit broker or messaging payload boundary shared by Kafka, AMQP, JMS, and related listener adapters."
 
-- id: java.source.jms_textmessage_gettext
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: java.source.jms_message_gettext_local
-  language: java
-  trust: service
-  tag: queue-input
-  packages: ["javax.jms", "jakarta.jms"]
-  match:
-    kind: call
-    callee:
-      attribute: [TextMessage, getText]
-  description: "Subsumed by java.source.jms_message_gettext_local, which already matches `TextMessage.getText` via the receiver-type-resolved attribute form."
-
-- id: java.source.jms_bytesmessage_readbytes
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: java.source.jms_bytesmessage_readbytes_local
-  language: java
-  trust: service
-  tag: queue-input
-  packages: ["javax.jms", "jakarta.jms"]
-  match:
-    kind: call
-    callee:
-      attribute: [BytesMessage, readBytes]
-  description: "Subsumed by java.source.jms_bytesmessage_readbytes_local."
-
-- id: java.source.jms_message_getbody
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: java.source.jms_message_getbody_local
-  language: java
-  trust: service
-  tag: queue-input
-  packages: ["javax.jms", "jakarta.jms"]
-  match:
-    kind: call
-    callee:
-      attribute: [Message, getBody]
-  description: "Subsumed by java.source.jms_message_getbody_local."
-
 - id: java.source.rabbitmq_basicdeliver_body
   enabled: true
   language: java
@@ -356,21 +296,6 @@
       }
     expect_no_match: true
   description: "RabbitMQ DefaultConsumer.handleDelivery body parameter - broker-delivered message bytes at the callback's fixed fourth parameter."
-
-- id: java.source.pubsub_message_getdata
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: java.source.pubsub_message_getdata_local
-  language: java
-  trust: service
-  tag: queue-input
-  packages: ["com.google.cloud.pubsub"]
-  match:
-    kind: call
-    callee:
-      attribute: [PubsubMessage, getData]
-  description: "Subsumed by java.source.pubsub_message_getdata_local."
 
 - id: java.source.kafka_record_value
   enabled: true

@@ -1,59 +1,41 @@
 # Dart cloud / serverless handler sources (Firebase, AWS Lambda Dart runtime).
-- id: dart.cloud.firebase_functions_request
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: dart.cloud.lambda_registered_handler_event
+  enabled: true
   language: dart
   trust: service
   tag: cloud-input
-  frameworks: [firebase_functions]
-  packages: [firebase_functions_interop, cloud_functions]
-  match:
-    kind: param
-    target:
-      name: request
-  description: "Disabled - bare `param name: request` taints any function with that param name. Re-enable after the adapter can prove a Firebase HttpsFunction override or registered handler callback."
-
-- id: dart.cloud.firebase_functions_data
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: dart
-  trust: service
-  tag: cloud-input
-  frameworks: [firebase_functions]
-  packages: [firebase_functions_interop, cloud_functions]
-  match:
-    kind: param
-    target:
-      name: data
-  description: "Disabled - FP-prone. Bare param name 'data' is ubiquitous. Re-enable with context constraint."
-
-- id: dart.cloud.lambda_event_param
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: dart
-  trust: service
-  tag: cloud-input
+  payload_types: [event, json]
   frameworks: [aws_lambda_dart_runtime]
   packages: [aws_lambda_dart_runtime]
   match:
-    kind: param
-    target:
-      name: event
-  description: "Disabled - a bare `event` parameter in a file importing aws_lambda_dart_runtime does not prove it is the registered handler payload. Re-enable with callback-registration or exact runtime event-type evidence."
-- id: dart.cloud.lambda_context_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  trust: service
-  tag: cloud-input
-  frameworks: [aws_lambda_dart_runtime]
-  packages: [aws_lambda_dart_runtime]
-  match:
-    kind: param
-    target:
-      name: context
-  description: "Disabled - bare `param name: context` is FP-prone; no canonical exists. Lambda event payload is covered by dart.cloud.lambda_event_param. Re-enable when adapter supports class-scoped Lambda Context param matching."
+    kind: call
+    callee:
+      name: registerHandler
+  constraints:
+  - receiver_type_in: [Runtime]
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [1]
+  match_examples:
+  - name: AWS Lambda registered event handler
+    code: |
+      import 'package:aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart';
+      void configure(Runtime runtime) {
+        runtime.registerHandler<AwsApiGatewayEvent>('hello', (context, event) async {
+          sink(event);
+          return InvocationResult(context.requestId, 'ok');
+        });
+      }
+    expect_match_text: [runtime.registerHandler]
+  - name: unrelated handler registry is not Lambda
+    code: |
+      import 'package:aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart';
+      class Registry { void registerHandler(String name, Function callback) {} }
+      void configure(Registry registry) {
+        registry.registerHandler('local', (context, event) => sink(event));
+      }
+    expect_no_match: true
+  description: "aws_lambda_dart_runtime Runtime.registerHandler callback parameter one is the decoded invocation event; context and the registration result remain clean."

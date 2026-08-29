@@ -242,8 +242,6 @@
   - name: generated direct match
     code: |
       #include <Python.h>
-      #include <Python.h>
-      #include <python3.10/Python.h>
       #include <python3.10/Python.h>
       void example(char *arg) {
         char *fmt = arg;
@@ -280,8 +278,6 @@
   - name: generated direct match
     code: |
       #include <Python.h>
-      #include <Python.h>
-      #include <python3.10/Python.h>
       #include <python3.10/Python.h>
       void example(char *arg) {
         char *fmt = arg;

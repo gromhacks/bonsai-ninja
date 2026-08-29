@@ -803,6 +803,7 @@ mod tests {
     fn operand(name: Option<&str>, literal: Option<&str>) -> ConditionOperandFact {
         ConditionOperandFact {
             span: span(0, 1),
+            direct_call_span: None,
             value_flow: name
                 .map(bonsai_lang_api::ExpressionFlow::from_place)
                 .unwrap_or_default(),

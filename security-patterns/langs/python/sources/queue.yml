@@ -90,33 +90,228 @@
   description: "Parameter of a Huey @task function - argument deserialized from a queued task."
 
 - id: python.celery.shared_task_param
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: python
   trust: service
   tag: queue-input
+  payload_types: [event, json, text, binary]
   packages: [celery]
   match:
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
   constraints:
-  - enclosing_decorator_in: [shared_task]
-  description: "Disabled - Celery @shared_task may use bind=True, where parameter zero is the worker Task instance rather than message data. Enable when generic decorator keyword facts can exclude the bound receiver without guessing parameter names."
+  - enclosing_decorator_in: [shared_task, celery.shared_task]
+  - enclosing_decorator_not_in: [shared_task.bind, celery.shared_task.bind]
+  match_examples:
+  - name: unbound shared task arguments
+    code: |
+      from celery import shared_task
+      @shared_task
+      def process(payload, tenant):
+          return payload
+    expect_match_text: [payload, tenant]
+  - name: bound receiver collision negative
+    code: |
+      from celery import shared_task
+      @shared_task(bind=True)
+      def process(self):
+          return self.request.id
+    expect_no_match: true
+  - name: imported alias preserves the task identity
+    code: |
+      from celery import shared_task as job
+      @job
+      def process(payload):
+          return payload
+    expect_match_text: [payload]
+  - name: runtime-unknown bind contract fails closed
+    code: |
+      from celery import shared_task
+      @shared_task(bind=runtime_flag)
+      def process(first, payload):
+          return payload
+    expect_no_match: true
+  description: "Parameters of a bare Celery @shared_task function - arguments deserialized from a queued task. Any explicit bind option is handled by a value-specific rule or fails closed when its value is not static."
+
+- id: python.celery.shared_task_explicit_unbound_param
+  enabled: true
+  language: python
+  trust: service
+  tag: queue-input
+  payload_types: [event, json, text, binary]
+  packages: [celery]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+  constraints:
+  - enclosing_decorator_in: [shared_task.bind=false, celery.shared_task.bind=false]
+  match_examples:
+  - name: explicitly unbound shared task arguments
+    code: |
+      from celery import shared_task
+      @shared_task(bind=False)
+      def process(payload, tenant):
+          return payload
+    expect_match_text: [payload, tenant]
+  - name: runtime-unknown bind contract is not explicitly unbound
+    code: |
+      from celery import shared_task
+      @shared_task(bind=runtime_flag)
+      def process(first, payload):
+          return payload
+    expect_no_match: true
+  description: "Parameters of a Celery @shared_task function whose parsed bind option is the literal false - queued arguments are the complete runtime signature."
+
+- id: python.celery.shared_task_bound_param
+  enabled: true
+  language: python
+  trust: service
+  tag: queue-input
+  payload_types: [event, json, text, binary]
+  packages: [celery]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_index_not_in: [0]
+  constraints:
+  - enclosing_decorator_in: [shared_task.bind=true, celery.shared_task.bind=true]
+  match_examples:
+  - name: bound shared task skips runtime receiver
+    code: |
+      from celery import shared_task
+      @shared_task(bind=True)
+      def process(self, payload, tenant):
+          return payload
+    expect_match_text: [payload, tenant]
+  - name: bound receiver only negative
+    code: |
+      from celery import shared_task
+      @shared_task(bind=True)
+      def inspect(self):
+          return self.request.id
+    expect_no_match: true
+  - name: imported bound alias skips its runtime receiver
+    code: |
+      from celery import shared_task as job
+      @job(bind=True)
+      def process(self, payload):
+          return payload
+    expect_match_text: [payload]
+  description: "Parameters after position zero of a statically bound Celery @shared_task function - position zero is the worker Task receiver, while later arguments are queued payload values."
 
 - id: python.celery.app_task_param
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: python
   trust: service
   tag: queue-input
+  payload_types: [event, json, text, binary]
   packages: [celery]
   match:
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
   constraints:
-  - enclosing_decorator_in: [task]
-  description: "Disabled - Celery @app.task may use bind=True, where parameter zero is the worker Task instance rather than message data. Enable when generic decorator keyword facts can exclude the bound receiver without guessing parameter names."
+  - enclosing_decorator_in: [celery.Celery.task]
+  - enclosing_decorator_not_in: [celery.Celery.task.bind]
+  match_examples:
+  - name: unbound application task arguments
+    code: |
+      from celery import Celery
+      app = Celery("jobs")
+      @app.task
+      def process(payload, tenant):
+          return payload
+    expect_match_text: [payload, tenant]
+  - name: similarly named decorator collision negative
+    code: |
+      from celery import Celery
+      app = LocalRegistry()
+      @app.task
+      def process(payload):
+          return payload
+    expect_no_match: true
+  - name: bound receiver collision negative
+    code: |
+      from celery import Celery
+      app = Celery("jobs")
+      @app.task(bind=True)
+      def process(self):
+          return self.request.id
+    expect_no_match: true
+  - name: runtime-unknown application bind contract fails closed
+    code: |
+      from celery import Celery
+      app = Celery("jobs")
+      @app.task(bind=runtime_flag)
+      def process(first, payload):
+          return payload
+    expect_no_match: true
+  description: "Parameters of a bare Celery application task - arguments deserialized from a queued task. Any explicit bind option is handled by a value-specific rule or fails closed when its value is not static."
+
+- id: python.celery.app_task_explicit_unbound_param
+  enabled: true
+  language: python
+  trust: service
+  tag: queue-input
+  payload_types: [event, json, text, binary]
+  packages: [celery]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+  constraints:
+  - enclosing_decorator_in: [celery.Celery.task.bind=false]
+  match_examples:
+  - name: explicitly unbound application task arguments
+    code: |
+      from celery import Celery
+      app = Celery("jobs")
+      @app.task(bind=False)
+      def process(payload, tenant):
+          return payload
+    expect_match_text: [payload, tenant]
+  - name: runtime-unknown bind contract is not explicitly unbound
+    code: |
+      from celery import Celery
+      app = Celery("jobs")
+      @app.task(bind=runtime_flag)
+      def process(first, payload):
+          return payload
+    expect_no_match: true
+  description: "Parameters of a Celery application task whose parsed bind option is the literal false - queued arguments are the complete runtime signature."
+
+- id: python.celery.app_task_bound_param
+  enabled: true
+  language: python
+  trust: service
+  tag: queue-input
+  payload_types: [event, json, text, binary]
+  packages: [celery]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_index_not_in: [0]
+  constraints:
+  - enclosing_decorator_in: [celery.Celery.task.bind=true]
+  match_examples:
+  - name: bound application task skips runtime receiver
+    code: |
+      from celery import Celery
+      app = Celery("jobs")
+      @app.task(bind=True)
+      def process(self, payload):
+          return payload
+    expect_match_text: [payload]
+  - name: bound receiver only negative
+    code: |
+      from celery import Celery
+      app = Celery("jobs")
+      @app.task(bind=True)
+      def inspect(self):
+          return self.request.id
+    expect_no_match: true
+  description: "Parameters after position zero of a statically bound Celery application task - position zero is the worker Task receiver, while later arguments are queued payload values."

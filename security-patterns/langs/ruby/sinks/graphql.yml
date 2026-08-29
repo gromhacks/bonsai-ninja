@@ -9,8 +9,7 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
-      base_name_in: [schema]
+      regex: '^(?:[A-Z][A-Za-z0-9_]*::)*[A-Z][A-Za-z0-9_]*\.execute$'
   constraints:
   - arg_tainted:
       index: 0
@@ -18,15 +17,22 @@
   - name: schema execute
     code: |
       require "graphql"
-      def example(schema, query, context)
-        schema.execute(query, context: context)
+      def example(query, context)
+        ArbitrarySchema.execute(query, context: context)
       end
-    expect_match_text: [schema.execute]
+    expect_match_text: [ArbitrarySchema.execute]
   - name: ruby.graphql.schema_execute literal negative
     code: |
       require "graphql"
-      def example(schema, query, context)
-        schema.execute("{ viewer { id } }", context: context)
+      def example(query, context)
+        ArbitrarySchema.execute("{ viewer { id } }", context: context)
+      end
+    expect_no_match: true
+  - name: ordinary object execute is not a GraphQL schema class
+    code: |
+      require "graphql"
+      def example(executor, query)
+        executor.execute(query)
       end
     expect_no_match: true
   description: "schema.execute(query, context:) - tainted GraphQL document or context reaches resolver execution."
@@ -138,8 +144,7 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.multiplex$
-      base_name_in: [schema]
+      regex: '^(?:[A-Z][A-Za-z0-9_]*::)*[A-Z][A-Za-z0-9_]*\.multiplex$'
   constraints:
   - arg_tainted:
       index: 0
@@ -147,15 +152,22 @@
   - name: schema multiplex tainted
     code: |
       require "graphql"
-      def example(schema, queries)
-        schema.multiplex(queries)
+      def example(queries)
+        ArbitrarySchema.multiplex(queries)
       end
-    expect_match_text: [schema.multiplex]
+    expect_match_text: [ArbitrarySchema.multiplex]
   - name: schema multiplex literal negative
     code: |
       require "graphql"
-      def example(schema)
-        schema.multiplex([{ query: "{ viewer { id } }" }])
+      def example
+        ArbitrarySchema.multiplex([{ query: "{ viewer { id } }" }])
+      end
+    expect_no_match: true
+  - name: ordinary object multiplex is not a GraphQL schema class
+    code: |
+      require "graphql"
+      def example(executor, queries)
+        executor.multiplex(queries)
       end
     expect_no_match: true
   description: "schema.multiplex(tainted_queries) - graphql-ruby batched execution; attacker-controlled query bodies enter resolver chain."

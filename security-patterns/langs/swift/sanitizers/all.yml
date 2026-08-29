@@ -6,18 +6,6 @@
 # inventory (regressed `per_lang_cli_matrix::swift_matrix` which pins the
 # micro fixture to zero sanitizer matches). A safe fix needs a narrower
 # mechanism than a callee-name rule; left as a known minor gap.
-- id: swift.sanitizer.url_query_allowed
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: swift.sanitizer.adding_percent_encoding
-  language: swift
-  tag: url-encode
-  match:
-    kind: call
-    callee:
-      attribute: [URLComponents, addingPercentEncoding]
-  description: "Disabled - `URLComponents.addingPercentEncoding` is not a real method (it lives on `String`); covered by swift.sanitizer.adding_percent_encoding."
 - id: swift.sanitizer.adding_percent_encoding
   enabled: true
   language: swift
@@ -183,46 +171,6 @@
       func test() { let input = "x"; let amount = 1; executeQueryWithArgumentsInArray(input) }
     expect_match_text: [executeQueryWithArgumentsInArray]
   description: "FMDB bound-argument query variants."
-- id: swift.sanitizer.int_coerce
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: numeric-coerce
-  match:
-    kind: call
-    callee:
-      name: Int
-  description: "Disabled - bare `Int(...)` fires on every numeric literal/type conversion (Int(x), Int(exactly:)); would over-sanitize.
-    Enable only with kwarg-presence filter for Int(String-var)."
-- id: swift.sanitizer.uuid_coerce
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: numeric-coerce
-  match:
-    kind: call
-    callee:
-      name: UUID
-  description: "Disabled - bare `UUID()` is the common no-arg random-UUID form; the tainted-string form `UUID(uuidString:)`
-    isn't distinguishable without kwarg-presence filter."
-- id: swift.sanitizer.resolving_symlinks
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: path-sanitize
-  match:
-    kind: call
-    callee:
-      name: resolvingSymlinksInPath
-  description: "Disabled - path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
-    traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer
-    must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component).
-    Marking these as sanitizers produced false negatives on attacker-controlled paths."
-
-# --- URL build sanitizers --------------------------------------------------
 - id: swift.sanitizer.urlcomponents_query_items
   enabled: true
   language: swift
@@ -300,7 +248,6 @@
   - name: declared shape
     code: |
       import SQLite // SQLite.swift
-      import SQLite // SQLite.swift
       func test() { let input = "x"; let amount = 1; Connection.prepare(input) }
     expect_match_text: [Connection.prepare]
   description: "SQLite.swift Connection.prepare(sql, bindings...) - when called with the bindings overload, parameters are
@@ -327,18 +274,6 @@
     expect_match_text: [safeCompare]
   description: "CryptoKit / common helper `safeCompare(_:_:)` - constant-time byte comparison built on SymmetricKey.withUnsafeBytes
     + memcmp_constant_time / timingsafe_bcmp; mitigates CWE-208 timing leaks on MAC/hash equality."
-- id: swift.sanitizer.hashed_authentication_code_equality
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: constant-time-compare
-  packages: [CryptoKit]
-  match:
-    kind: call
-    callee:
-      attribute: [HashedAuthenticationCode, ==]
-  description: "CryptoKit HashedAuthenticationCode `==` - Apple's overload performs a constant-time compare; safe MAC verification."
 - id: swift.sanitizer.hmac_is_valid_authentication_code
   enabled: true
   language: swift
@@ -470,25 +405,6 @@
   description: "String.hasPrefix(\"/...\") - slash-rooted local path prefix check used to keep redirects and path routing
     same-origin."
 
-- id: swift.sanitizer.set_contains_allowlist
-  enabled: false
-  language: swift
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      regex: "^(allowed|allowlist|whitelist|safeValues|safePaths)\\.contains$"
-  match_examples:
-  - name: finite set contains
-    code: |
-      func test(input: String) { allowed.contains(input) }
-    expect_match_text: [allowed.contains]
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    Allowlist-named Set/Dictionary membership check - validates a tainted value against a finite accepted set before dispatch,
-    redirects, or queries."
-
-  disabled_reason:
-    code: over-broad
 - id: swift.sanitizer.regex_whole_match
   enabled: true
   language: swift
@@ -608,7 +524,6 @@
   - name: declared shape
     code: |
       import vapor
-      import Vapor // vapor
       import Vapor // vapor
       func test() { let input = "x"; let amount = 1; Cookie.isHttpOnly(true) }
     expect_match_text: [Cookie.isHttpOnly]

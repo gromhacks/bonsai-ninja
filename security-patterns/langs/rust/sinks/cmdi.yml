@@ -1,20 +1,3 @@
-- id: rust.cmdi.std_command_new
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: rust
-  tag: command-injection
-  severity: critical
-  category: process-exec
-  packages:
-  - std
-  cwe:
-  - CWE-78
-  match:
-    kind: call
-    callee:
-      regex: ^Command::new$
-  description: "Disabled - bare Command::new with no arg constraint fires on every process spawn. The real RCE sinks are rust.cmdi.std_command_new_shell and rust.cmdi.std_command_new_bash (argv-form without a shell wrapper is safe)."
 - id: rust.cmdi.std_command_new_shell
   enabled: true
   language: rust
@@ -22,17 +5,14 @@
   severity: critical
   packages:
   - std
-  - tokio
-  - async_process
-  - async_std
+  imports:
+  - std::process::Command
   cwe:
   - CWE-78
   match:
     kind: call
     callee:
-      attribute:
-      - Command
-      - new
+      attribute: [std, process, Command, new]
   constraints:
   - arg_tainted:
       index: 0
@@ -50,43 +30,268 @@
           Command::new("true");
       }
     expect_no_match: true
-  description: "Command::new(tainted) - attacker-controlled program names select arbitrary binaries. Shell-wrapper command strings are covered by tainted Command.arg(...) calls. Merged collision aliases: rust.cmdi.tokio_command_new, rust.cmdi.async_process_command, rust.cmdi.async_std_command_new."
-  aliases:
-  - rust.cmdi.tokio_command_new
-  - rust.cmdi.async_process_command
-  - rust.cmdi.async_std_command_new
-- id: rust.cmdi.command_arg
+  - name: locally shadowed Command is not std process execution
+    code: |
+      use std::process::Command as StdCommand;
+      struct Command;
+      impl Command { fn new(_: &str) -> Self { Self } }
+      fn example(target: &str) { Command::new(target); }
+    expect_no_match: true
+  description: "std::process::Command::new(tainted) lets attacker-controlled program names select arbitrary binaries."
+
+- id: rust.cmdi.std_command_shell_wrapper_output
   enabled: true
   language: rust
   tag: command-injection
   severity: critical
   category: process-exec
-  packages:
-  - std
-  cwe:
-  - CWE-78
+  packages: [std]
+  imports: ["std::process::Command"]
+  cwe: [CWE-78]
   match:
     kind: call
     callee:
-      name: arg
+      attribute: [Command, new, arg, arg, output]
+      binding_origin: imported
+  constraints:
+  - receiver_matches_regex: '^Command::new\("(?:/bin/)?(?:sh|bash)"\)\.arg\("-c"\)\.arg\(.+\)$'
+  - receiver_tainted: true
+  match_examples:
+  - name: executed shell wrapper receives a dynamic command
+    code: |
+      use std::process::Command;
+      fn example(input: &str) {
+          let _ = Command::new("sh").arg("-c").arg(input).output();
+      }
+    expect_match_text: ['Command::new("sh").arg("-c").arg(input).output']
+  - name: direct argv execution is not shell command injection
+    code: |
+      use std::process::Command;
+      fn example(input: &str) {
+          let _ = Command::new("ping").arg("-c").arg(input).output();
+      }
+    expect_no_match: true
+  - name: a configured but unexecuted shell builder is not an execution sink
+    code: |
+      use std::process::Command;
+      fn example(input: &str) {
+          let _ = Command::new("sh").arg("-c").arg(input);
+      }
+    expect_no_match: true
+  - name: local Command builder is not std process execution
+    code: |
+      use std::process::Command as StdCommand;
+      struct Command;
+      impl Command {
+          fn new(_: &str) -> Self { Self }
+          fn arg(self, _: &str) -> Self { self }
+          fn output(self) {}
+      }
+      fn example(input: &str) {
+          Command::new("sh").arg("-c").arg(input).output();
+      }
+    expect_no_match: true
+  description: "An imported std::process::Command fluent chain that executes sh/bash with -c interprets its dynamic final argument as shell syntax. The complete compiler call identity keeps direct argv execution and unexecuted builders out of scope."
+
+- id: rust.cmdi.std_command_shell_builder_execute
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [std]
+  imports: ["std::process::Command"]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: '^(?:[A-Za-z_][A-Za-z0-9_]*\.)?(?:status|output|spawn)$'
+  constraints:
+  - receiver_type_in: [StdProcessCommand]
+  - receiver_tainted: true
+  - arg_count: 0
+  - receiver_factory_arguments_equal:
+      factory: {attribute: [Command, new]}
+      items:
+      - index: 0
+        accepted_values:
+        - {kind: string, value: sh}
+        - {kind: string, value: /bin/sh}
+        - {kind: string, value: bash}
+        - {kind: string, value: /bin/bash}
+  - requires_prior_receiver_call:
+      call: {name: arg}
+      static_string_args_regex: '^-c$'
+  match_examples:
+  - name: variable std process shell builder executes a dynamic command
+    code: |
+      use std::process::Command;
+      fn example(input: &str) {
+          let mut command = Command::new("sh");
+          command.arg("-c");
+          command.arg(input);
+          let _ = command.status();
+      }
+    expect_match_text: [command.status]
+  - name: direct argv execution does not interpret shell syntax
+    code: |
+      use std::process::Command;
+      fn example(input: &str) {
+          let mut command = Command::new("echo");
+          command.arg(input);
+          let _ = command.status();
+      }
+    expect_no_match: true
+  - name: shell builder without command mode is not command injection
+    code: |
+      use std::process::Command;
+      fn example(input: &str) {
+          let mut command = Command::new("sh");
+          command.arg(input);
+          let _ = command.status();
+      }
+    expect_no_match: true
+  - name: branch-only command mode does not establish unconditional state
+    code: |
+      use std::process::Command;
+      fn example(input: &str, mode: bool) {
+          let mut command = Command::new("sh");
+          if mode { command.arg("-c"); }
+          command.arg(input);
+          let _ = command.status();
+      }
+    expect_no_match: true
+  - name: configured but unexecuted shell builder is not a sink
+    code: |
+      use std::process::Command;
+      fn example(input: &str) {
+          let mut command = Command::new("sh");
+          command.arg("-c");
+          command.arg(input);
+      }
+    expect_no_match: true
+  - name: locally shadowed Command builder is not std process execution
+    code: |
+      use std::process::Command as StdCommand;
+      struct Command;
+      impl Command {
+          fn new(_: &str) -> Self { Self }
+          fn arg(&mut self, _: &str) {}
+          fn status(&mut self) {}
+      }
+      fn example(input: &str) {
+          let mut command = Command::new("sh");
+          command.arg("-c");
+          command.arg(input);
+          command.status();
+      }
+    expect_no_match: true
+  description: "A typed imported std-process builder created for sh/bash, unconditionally configured with `-c`, populated with tainted receiver state, and then executed interprets that state as shell syntax. Factory, configuration, and execution spellings remain entirely in rule data."
+
+- id: rust.cmdi.tokio_command_new
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: critical
+  packages: [tokio]
+  imports: ["tokio::process::Command"]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [tokio, process, Command, new]
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
-  - name: tainted command argument
+  - name: Tokio command with tainted program
     code: |
-      use std::process::Command;
-      fn example(target: &str) {
-          c.arg(target);
-      }
-  - name: literal command argument negative
+      use tokio::process::Command;
+      fn example(target: &str) { Command::new(target); }
+    expect_match_text: ["Command::new"]
+  - name: Tokio command with literal program negative
     code: |
-      use std::process::Command;
-      fn example() {
-          c.arg("safe");
-      }
+      use tokio::process::Command;
+      fn example() { Command::new("true"); }
     expect_no_match: true
-  description: "Command.arg(tainted) - argument added to a shell-backed std::process::Command."
+  - name: locally shadowed Command is not Tokio process execution
+    code: |
+      use tokio::process::Command as TokioCommand;
+      struct Command;
+      impl Command { fn new(_: &str) -> Self { Self } }
+      fn example(target: &str) { Command::new(target); }
+    expect_no_match: true
+  description: "tokio::process::Command::new(tainted) lets attacker-controlled program names select arbitrary binaries."
+
+- id: rust.cmdi.async_process_command
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: critical
+  packages: [async_process]
+  imports: ["async_process::Command"]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [async_process, Command, new]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: async-process command with tainted program
+    code: |
+      use async_process::Command;
+      fn example(target: &str) { Command::new(target); }
+    expect_match_text: ["Command::new"]
+  - name: async-process command with literal program negative
+    code: |
+      use async_process::Command;
+      fn example() { Command::new("true"); }
+    expect_no_match: true
+  - name: locally shadowed Command is not async-process execution
+    code: |
+      use async_process::Command as AsyncCommand;
+      struct Command;
+      impl Command { fn new(_: &str) -> Self { Self } }
+      fn example(target: &str) { Command::new(target); }
+    expect_no_match: true
+  description: "async_process::Command::new(tainted) lets attacker-controlled program names select arbitrary binaries."
+
+- id: rust.cmdi.async_std_command_new
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: critical
+  packages: [async_std]
+  imports: ["async_std::process::Command"]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [async_std, process, Command, new]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: async-std command with tainted program
+    code: |
+      use async_std::process::Command;
+      fn example(target: &str) { Command::new(target); }
+    expect_match_text: ["Command::new"]
+  - name: async-std command with literal program negative
+    code: |
+      use async_std::process::Command;
+      fn example() { Command::new("true"); }
+    expect_no_match: true
+  - name: locally shadowed Command is not async-std process execution
+    code: |
+      use async_std::process::Command as AsyncCommand;
+      struct Command;
+      impl Command { fn new(_: &str) -> Self { Self } }
+      fn example(target: &str) { Command::new(target); }
+    expect_no_match: true
+  description: "async_std::process::Command::new(tainted) lets attacker-controlled program names select arbitrary binaries."
 - id: rust.cmdi.duct_cmd
   enabled: true
   language: rust

@@ -106,59 +106,6 @@
 
   imports:
   - software.amazon.awssdk.secretsmanager
-- id: java.access.azure_blob_download_content
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: access-control
-  severity: high
-  packages: ["com.azure.storage.blob"]
-  cwe: [CWE-284, CWE-639]
-  match:
-    kind: call
-    callee:
-      attribute: [BlobClient, downloadContent]
-  match_examples:
-  - name: generated shape example
-    code: |
-      import com.azure.storage.blob.*;
-      class App {
-        void handle(String input) throws Exception {
-          BlobClient.downloadContent(input);
-        }
-      }
-  description: "Disabled - BlobClient.downloadContent() carries the container/blob selector in receiver state, not a call argument."
-
-  imports:
-  - com.azure.storage.blob
-- id: java.access.azure_blob_upload
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: access-control
-  severity: high
-  packages: ["com.azure.storage.blob"]
-  cwe: [CWE-284, CWE-639]
-  match:
-    kind: call
-    callee:
-      attribute: [BlobClient, upload]
-  match_examples:
-  - name: generated shape example
-    code: |
-      import com.azure.storage.blob.*;
-      class App {
-        void handle(String input) throws Exception {
-          BlobClient.upload(input);
-        }
-      }
-  description: "Disabled - BlobClient.upload(...) carries the container/blob selector in receiver state; the argument is upload content/options, not the target selector."
-
-  imports:
-  - com.azure.storage.blob
-
 - id: java.access.azure_keyvault_get_secret
   enabled: true
   language: java
@@ -337,35 +284,6 @@
     expect_no_match: true
   description: "javax.naming.InitialContext.lookup(tainted) - Log4Shell-style remote class load and deserialization (LDAP/RMI/CORBA URI). Instance calls require semantic receiver-type facts for InitialContext."
 
-- id: java.access.jndi_initialcontext_lookup_local
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: jndi-injection
-  severity: critical
-  packages: ["javax.naming"]
-  cwe: [CWE-074, CWE-94, CWE-502]
-  match:
-    kind: call
-    callee:
-      name: lookup
-  match_examples:
-  - name: local initial context lookup
-    code: |
-      import javax.naming.*;
-      class App {
-        Object handle(InitialContext initialContext, String name) throws Exception {
-          return initialContext.lookup(name);
-        }
-      }
-      class InitialContext {
-        Object lookup(Object... args) { return null; }
-      }
-    expect_match_text: [initialContext.lookup]
-  description: "InitialContext.lookup(name) on a local naming context - attacker-controlled JNDI name can trigger remote lookup and deserialization."
-  imports:
-  - javax.naming
 - id: java.access.jndi_context_lookup
   enabled: true
   language: java

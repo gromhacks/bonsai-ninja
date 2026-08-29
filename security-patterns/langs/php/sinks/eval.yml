@@ -18,7 +18,6 @@
     code: |
       <?php
       use predis\predis;
-      use predis\predis;
       function example($input, $url, $id, $payload, $request) {
         eval($input);
       }
@@ -30,9 +29,7 @@
         eval("return 1;");
       }
     expect_no_match: true
-  description: 'eval() - arbitrary PHP code. Merged collision aliases: php.nosql.redis_eval.'
-  aliases:
-  - php.nosql.redis_eval
+  description: 'eval() - arbitrary PHP code. Redis EVAL is a distinct qualified API and is not an alias of the language builtin.'
   packages:
   - predis/predis
   imports:
@@ -101,20 +98,6 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  preg_replace(\"/x/e\", \"safe\", \"x\");\n}\n"
     expect_no_match: true
   description: preg_replace() with /e (PREG_REPLACE_EVAL) modifier - replacement string is eval()'d as PHP code. Removed in PHP 7 but still appears in legacy code paths and PHP <7 deployments. Constraint matches a quoted regex literal whose trailing modifier flags include `e`.
-- id: php.eval.preg_replace_callback
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: code-injection
-  severity: medium
-  cwe:
-  - CWE-94
-  match:
-    kind: call
-    callee:
-      name: preg_replace_callback
-  description: Disabled - callback variant is safe unless callback tainted.
 - id: php.eval.include_tainted
   enabled: true
   language: php
@@ -203,76 +186,6 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  require_once \"safe.php\";\n}\n"
     expect_no_match: true
   description: 'require_once(tainted). Limitation: language construct (include_expression); adapter must normalise as call. `top_level: true` excludes method-name decoys.'
-- id: php.eval.call_user_func
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: code-injection
-  severity: medium
-  cwe:
-  - CWE-94
-  match:
-    kind: call
-    callee:
-      name: call_user_func
-  description: Disabled - benign unless callable tainted.
-- id: php.eval.call_user_func_array
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: code-injection
-  severity: medium
-  cwe:
-  - CWE-94
-  match:
-    kind: call
-    callee:
-      name: call_user_func_array
-  description: Disabled - benign unless callable tainted.
-- id: php.eval.usort_callback
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: code-injection
-  severity: medium
-  cwe:
-  - CWE-94
-  match:
-    kind: call
-    callee:
-      name: usort
-  description: Disabled - flag only when comparator callable is tainted.
-- id: php.eval.array_map_callback
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: code-injection
-  severity: medium
-  cwe:
-  - CWE-94
-  match:
-    kind: call
-    callee:
-      name: array_map
-  description: Disabled - flag only when callback is tainted.
-- id: php.eval.array_filter_callback
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: code-injection
-  severity: medium
-  cwe:
-  - CWE-94
-  match:
-    kind: call
-    callee:
-      name: array_filter
-  description: Disabled - flag only when callback tainted.
 - id: php.eval.call_user_func_dynamic
   enabled: true
   language: php

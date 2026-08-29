@@ -3,51 +3,75 @@
   enabled: true
   language: csharp
   tag: html-encode
+  imports: [System.Text.Encodings.Web]
   match:
     kind: call
     callee:
-      attribute: [HtmlEncoder, Encode]
-  taint_semantics:
-    call_result_passthrough_args: [0]
+      attribute: [HtmlEncoder, Default, Encode]
+      binding_origin: imported
   match_examples:
-  - name: declared shape
+  - name: imported default HTML encoder
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HtmlEncoder.Encode(input); } }
-    expect_match_text: [HtmlEncoder.Encode]
-  description: "HtmlEncoder.Default.Encode."
+      using System.Text.Encodings.Web;
+      class App { string Render(string input) => HtmlEncoder.Default.Encode(input); }
+    expect_match_text: [HtmlEncoder.Default.Encode]
+  - name: local HtmlEncoder collision
+    code: |
+      using System.Text.Encodings.Web;
+      class HtmlEncoder {
+        public static HtmlEncoder Default { get; } = new HtmlEncoder();
+        public string Encode(string input) => input;
+      }
+      class App { string Render(string input) => HtmlEncoder.Default.Encode(input); }
+    expect_no_match: true
+  description: "System.Text.Encodings.Web.HtmlEncoder.Default.Encode returns context-safe HTML text."
 
 - id: csharp.sanitizer.webutility_htmlencode
   enabled: true
   language: csharp
   tag: html-encode
+  imports: [System.Net]
   match:
     kind: call
     callee:
       attribute: [WebUtility, HtmlEncode]
-  taint_semantics:
-    call_result_passthrough_args: [0]
+      binding_origin: imported
   match_examples:
-  - name: declared shape
+  - name: imported web utility encoder
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; WebUtility.HtmlEncode(input); } }
+      using System.Net;
+      class App { string Render(string input) => WebUtility.HtmlEncode(input); }
     expect_match_text: [WebUtility.HtmlEncode]
+  - name: local WebUtility collision
+    code: |
+      using System.Net;
+      class WebUtility { public static string HtmlEncode(string input) => input; }
+      class App { string Render(string input) => WebUtility.HtmlEncode(input); }
+    expect_no_match: true
   description: "WebUtility.HtmlEncode."
 
 - id: csharp.sanitizer.httputility_htmlencode
   enabled: true
   language: csharp
   tag: html-encode
+  imports: [System.Web]
   match:
     kind: call
     callee:
       attribute: [HttpUtility, HtmlEncode]
-  taint_semantics:
-    call_result_passthrough_args: [0]
+      binding_origin: imported
   match_examples:
-  - name: declared shape
+  - name: imported HTTP utility encoder
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpUtility.HtmlEncode(input); } }
+      using System.Web;
+      class App { string Render(string input) => HttpUtility.HtmlEncode(input); }
     expect_match_text: [HttpUtility.HtmlEncode]
+  - name: local HttpUtility collision
+    code: |
+      using System.Web;
+      class HttpUtility { public static string HtmlEncode(string input) => input; }
+      class App { string Render(string input) => HttpUtility.HtmlEncode(input); }
+    expect_no_match: true
   description: "HttpUtility.HtmlEncode."
 
 - id: csharp.sanitizer.httputility_urlencode
@@ -169,19 +193,6 @@
     code: "class App { void Test() { AddWithValue(); } }\n"
     expect_no_match: true
   description: "SqlCommand.Parameters.AddWithValue(name, value) - parameterised SQL. `min_args: 2` rejects 0/1-arg decoys that cannot be the bound name+value form."
-
-- id: csharp.sanitizer.parameter_add
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: sql-parameter
-  match:
-    kind: call
-    callee:
-      name: Add
-  description: "Disabled - bare Add matches every .Add() in the codebase; rely on AddWithValue/Parameters.Add via attribute
-    chain."
 
 - id: csharp.sanitizer.parameters_add
   enabled: true
@@ -389,18 +400,6 @@
     expect_match_text: [Path.GetFileNameWithoutExtension]
   description: "Path.GetFileNameWithoutExtension - strips directory components (and extension), preventing traversal segments in a downstream filename."
 
-- id: csharp.sanitizer.path_getfullpath
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: path-sanitize
-  match:
-    kind: call
-    callee:
-      attribute: [Path, GetFullPath]
-  description: "Disabled - Path.GetFullPath canonicalizes but does not by itself enforce trusted-root containment."
-
 - id: csharp.sanitizer.regex_escape
   enabled: true
   language: csharp
@@ -460,24 +459,6 @@
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Guid.Parse(input); } }
     expect_match_text: [Guid.Parse]
   description: "Guid.Parse - validates GUID shape."
-
-- id: csharp.sanitizer.sqlparameter_ctor
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: sql-parameter
-  match:
-    kind: new
-    callee:
-      name: SqlParameter
-  match_examples:
-  - name: declared shape
-    code: |
-      class SqlParameter { public SqlParameter(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new SqlParameter(input); } }
-    expect_match_text: [SqlParameter]
-  description: "Disabled duplicate - csharp.sanitizer.sqlparameter_constructor is the canonical constrained SqlParameter(name,
-    value) binding rule."
 
 - id: csharp.sanitizer.npgsql_parameter_ctor
   enabled: true
@@ -619,37 +600,43 @@
   description: "TokenValidationParameters used with ValidateToken - full signature/issuer/audience verification; canonical
     jwt-verify anchor."
 
-- id: csharp.sanitizer.xmlresolver_null_assign
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: xxe-sanitizer
-  match:
-    kind: write
-    target:
-      name: XmlResolver
-  match_examples:
-  - name: declared shape
-    code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; XmlResolver = input; } }
-    expect_match_text: [XmlResolver]
-  description: "Disabled duplicate - csharp.sanitizer.xmlreadersettings_xmlresolver_null is the precise enabled XmlResolver=null
-    rule for v1 matching."
-
 - id: csharp.sanitizer.dtd_processing_prohibit
   enabled: true
   language: csharp
   tag: xxe-sanitizer
+  imports: [System.Xml]
   match:
     kind: write
     target:
-      name: DtdProcessing
+      regex: ^[^\.\s]+\.DtdProcessing$
+      receiver_type_in: [XmlReaderSettings, System.Xml.XmlReaderSettings]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:DtdProcessing\.)?(?:Prohibit|Ignore)$'
   match_examples:
-  - name: declared shape
+  - name: typed XML reader settings prohibit DTDs
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DtdProcessing = input; } }
-    expect_match_text: [DtdProcessing]
+      using System.Xml;
+      class App { void Configure(XmlReaderSettings settings) { settings.DtdProcessing = DtdProcessing.Prohibit; } }
+    expect_match_text: [settings.DtdProcessing]
+  - name: parse mode is not a sanitizer negative
+    code: |
+      using System.Xml;
+      class App { void Configure(XmlReaderSettings settings) { settings.DtdProcessing = DtdProcessing.Parse; } }
+    expect_no_match: true
+  - name: unrelated member with the same terminal name negative
+    code: |
+      using System.Xml;
+      class LocalSettings { public DtdProcessing DtdProcessing { get; set; } }
+      class App { void Configure(LocalSettings settings) { settings.DtdProcessing = DtdProcessing.Prohibit; } }
+    expect_no_match: true
+  - name: local XML reader settings collision negative
+    code: |
+      using System.Xml;
+      class XmlReaderSettings { public DtdProcessing DtdProcessing { get; set; } }
+      class App { void Configure(XmlReaderSettings settings) { settings.DtdProcessing = DtdProcessing.Prohibit; } }
+    expect_no_match: true
   description: "XmlReaderSettings.DtdProcessing = Prohibit/Ignore - blocks DTD/XXE."
 
 - id: csharp.sanitizer.ldap_filter_encode
@@ -685,20 +672,6 @@
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Encoder.LdapDistinguishedNameEncode(input); } }
     expect_match_text: [Encoder.LdapDistinguishedNameEncode]
   description: "AntiXSS Encoder.LdapDistinguishedNameEncode - escapes LDAP DN metacharacters."
-
-- id: csharp.sanitizer.authorize_filter
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: auth-sanitizer
-  packages: [Microsoft.AspNetCore.Mvc]
-  match:
-    kind: call
-    callee:
-      name: Authorize
-  description: "Disabled - bare Authorize() call matching is too broad for ASP.NET Core authorization evidence; prefer attribute/decorator
-    or middleware-specific rules that prove a protected endpoint or policy guard."
 
 - id: csharp.sanitizer.bcrypt_verify
   enabled: true
@@ -789,23 +762,6 @@
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AntiXssEncoder.JavaScriptStringEncode(input); } }
     expect_match_text: [AntiXssEncoder.JavaScriptStringEncode]
   description: "AntiXssEncoder.JavaScriptStringEncode."
-
-- id: csharp.sanitizer.encoders_web_html
-  enabled: true
-  language: csharp
-  tag: html-encode
-  packages: [System.Text.Encodings.Web]
-  match:
-    kind: call
-    callee:
-      attribute: [HtmlEncoder, Default]
-  match_examples:
-  - name: declared shape
-    code: |
-      using System.Text.Encodings.Web;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HtmlEncoder.Default(input); } }
-    expect_match_text: [HtmlEncoder.Default]
-  description: "HtmlEncoder.Default - canonical reference to default HTML encoder used with .Encode."
 
 - id: csharp.sanitizer.htmlsanitizer_sanitizedocument
   enabled: true
@@ -913,22 +869,6 @@
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AddAntiforgery(input); } }
     expect_match_text: [AddAntiforgery]
   description: "ASP.NET Core services.AddAntiforgery() - registers anti-forgery token services."
-- id: csharp.csrf.validate_antiforgery_token_attr
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: csrf-protect
-  match:
-    kind: read
-    target:
-      name: ValidateAntiForgeryToken
-  description: "[ValidateAntiForgeryToken] attribute - controller/action-scoped CSRF check."
-
-# Cookie-secure sanitizers (T402). Cookie-set calls with
-# httpOnly + secure flags are the SAFE shape; reviewer
-# enumerates with `security sanitizers --tag cookie-secure`
-# and audits routes that set cookies WITHOUT them.
 - id: csharp.cookie.cookie_options_httponly_secure
   enabled: true
   language: csharp
@@ -992,70 +932,6 @@
   description: "Same-origin redirect path guard paired with a second StartsWith call on the same receiver for the `!path.StartsWith(\"\
     //\")` scheme-relative rejection shape."
 
-- id: csharp.sanitizer.same_origin_path_reject_scheme_relative
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: same-origin-path
-  match:
-    kind: call
-    callee:
-      name: StartsWith
-  constraints:
-  - arg_equals:
-      index: 0
-      value: '"//"'
-  match_examples:
-  - name: reject scheme-relative redirect target
-    code: |
-      class App { bool Allow(string next) { return next.StartsWith("/") && !next.StartsWith("//"); } }
-    expect_match_text: [next.StartsWith]
-  - name: reject scheme-relative redirect target negative constraint boundary
-    code: "class App { bool Allow(string next) { return next.StartsWith(\"/\") && !next.StartsWith(\"http://\"); } }\n"
-    expect_no_match: true
-  description: "Disabled - same-receiver StartsWith(\"/\") + StartsWith(\"//\") is modeled by csharp.sanitizer.same_origin_path_startswith_slash."
-
-- id: csharp.sanitizer.allowlist_contains
-  enabled: false
-  language: csharp
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      name: Contains
-  constraints:
-  - arg_count: 1
-  match_examples:
-  - name: hashset allowlist contains
-    code: |
-      class App { bool Allow(string role) { dynamic allowed = null; return allowed.Contains(role); } }
-    expect_match_text: [allowed.Contains]
-  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. HashSet/List
-    allowlist membership check on explicitly allowlist-named receivers."
-
-  disabled_reason:
-    code: over-broad
-- id: csharp.sanitizer.dictionary_getvalueordefault_allowlist
-  enabled: false
-  language: csharp
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      name: GetValueOrDefault
-  constraints:
-  - arg_count: 2
-  match_examples:
-  - name: dictionary default allowlist
-    code: |
-      class App { string Allow(string key) { dynamic allowed = null; return allowed.GetValueOrDefault(key, "/"); } }
-    expect_match_text: [allowed.GetValueOrDefault]
-  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Dictionary.GetValueOrDefault
-    on an allowlist-named mapping bounds attacker input to known values or a safe default."
-
-  disabled_reason:
-    code: over-broad
 - id: csharp.sanitizer.enum_tryparse_allowlist
   enabled: true
   language: csharp
@@ -1122,81 +998,6 @@
     expect_no_match: true
   description: "Regex.Replace with a negated safe character class and empty replacement strips characters outside the allowlist."
 
-- id: csharp.sanitizer.uri_host_allowlist
-  enabled: false
-  language: csharp
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      name: Contains
-  constraints:
-  - arg_matches_regex:
-      index: 0
-      regex: 'Host'
-  match_examples:
-  - name: uri host allowlist
-    code: |
-      class App { void Test() { dynamic uri = "x"; dynamic allowedHosts = "x"; allowedHosts.Contains(uri.Host); } }
-    expect_match_text: [allowedHosts.Contains]
-  - name: uri host allowlist negative constraint boundary
-    code: "class App { void Test() { dynamic uri = \"x\"; dynamic allowedHosts = \"x\"; allowedHosts.Contains(); } }\n"
-    expect_no_match: true
-  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI host
-    allowlist check - validates the parsed host against a trusted set before SSRF-sensitive use."
-
-  disabled_reason:
-    code: over-broad
-- id: csharp.sanitizer.uri_scheme_allowlist
-  enabled: false
-  language: csharp
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      name: Contains
-  constraints:
-  - arg_matches_regex:
-      index: 0
-      regex: 'Scheme'
-  match_examples:
-  - name: uri scheme allowlist
-    code: |
-      class App { void Test() { dynamic uri = "x"; dynamic allowedSchemes = "x"; allowedSchemes.Contains(uri.Scheme); } }
-    expect_match_text: [allowedSchemes.Contains]
-  - name: uri scheme allowlist negative constraint boundary
-    code: "class App { void Test() { dynamic uri = \"x\"; dynamic allowedSchemes = \"x\"; allowedSchemes.Contains(); } }\n"
-    expect_no_match: true
-  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI scheme
-    allowlist check - only explicitly permitted schemes are allowed before redirect or outbound request use."
-
-  disabled_reason:
-    code: over-broad
-- id: csharp.sanitizer.path_fullpath_startswith_root
-  enabled: false
-  language: csharp
-  tag: path-sanitize
-  match:
-    kind: call
-    callee:
-      name: StartsWith
-  constraints:
-  - arg_matches_regex:
-      index: 0
-      regex: 'root|base|allowed|uploadDir|safeDir'
-  match_examples:
-  - name: full path containment
-    code: |
-      class App { void Test() { dynamic fullPath = "x"; dynamic root = "x"; fullPath.StartsWith(root); } }
-    expect_match_text: [fullPath.StartsWith]
-  - name: full path containment negative constraint boundary
-    code: "class App { void Test() { dynamic fullPath = \"x\"; dynamic root = \"x\"; fullPath.StartsWith(); } }\n"
-    expect_no_match: true
-  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Full-path
-    containment check - a normalized absolute path is accepted only if it remains under a trusted root."
-
-  disabled_reason:
-    code: over-broad
 - id: csharp.sanitizer.urlhelper_islocalurl
   enabled: true
   language: csharp

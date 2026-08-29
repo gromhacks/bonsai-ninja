@@ -81,6 +81,16 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {attribute: [Path, GetFullPath]}
+      base_canonicalizer: {attribute: [Path, GetFullPath]}
+      path_constructor: {attribute: [Path, Combine]}
+      containment_check: {name: StartsWith}
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: [Path.DirectorySeparatorChar]
   match_examples:
   - name: declared shape
     code: |
@@ -438,21 +448,6 @@
       class App { void Test() { PhysicalFile("wwwroot/safe.txt"); } }
     expect_no_match: true
   description: "ASP.NET Core Controller.PhysicalFile(tainted)."
-
-- id: csharp.path.aspnet_file_returntype
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: path-traversal
-  severity: medium
-  packages: [Microsoft.AspNetCore.Mvc]
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      name: File
-  description: "Disabled - bare File collides with System.IO.File; overload-dependent. Enable only with strict controller-context constraint."
 
 - id: csharp.path.zipfile_extract_to_directory
   enabled: true

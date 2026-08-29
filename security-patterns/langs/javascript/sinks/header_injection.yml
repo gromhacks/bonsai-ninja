@@ -8,7 +8,6 @@
   - restify
   cwe:
   - CWE-113
-  - CWE-601
   match:
     kind: call
     callee:
@@ -42,9 +41,7 @@
         return res.set("Content-Disposition", "attachment; filename=safe.txt");
       }
     expect_no_match: true
-  description: 'Express/Restify res.set(name, tainted). Merged aliases: javascript.open_redirect.express_res_set_location.'
-  aliases:
-  - javascript.open_redirect.express_res_set_location
+  description: Express/Restify res.set(name, tainted).
 - id: javascript.header.express_response_set_object
   enabled: true
   language: javascript
@@ -55,7 +52,6 @@
   - restify
   cwe:
   - CWE-113
-  - CWE-601
   match:
     kind: call
     callee:
@@ -125,9 +121,7 @@
         return res.header("Content-Disposition", "attachment; filename=safe.txt");
       }
     expect_no_match: true
-  description: "Express/Restify res.header(name, tainted) - alias of set. Merged collision aliases: javascript.open_redirect.express_res_header_location."
-  aliases:
-  - javascript.open_redirect.express_res_header_location
+  description: "Express/Restify res.header(name, tainted) - alias of set."
 - id: javascript.header.node_content_disposition_setheader
   enabled: true
   language: javascript
@@ -136,8 +130,6 @@
   packages: [http, express, fastify, '@hapi/hapi', koa]
   cwe:
   - CWE-113
-  - CWE-601
-  - CWE-444
   match:
     kind: call
     callee:
@@ -167,11 +159,9 @@
         return res.setHeader("Content-Disposition", "attachment; filename=safe.txt");
       }
     expect_no_match: true
-  description: "Node <res>.setHeader(name, tainted) - header value can inject response headers. Receiver-agnostic; the taint engine narrows by argument flow. Merged aliases: javascript.open_redirect.node_setheader_location."
+  description: "Node <res>.setHeader(name, tainted) - header value can inject response headers."
   aliases:
-  - javascript.open_redirect.node_setheader_location
   - javascript.header.express_setheader
-  - javascript.smuggle.set_dual_cl_te_headers
 - id: javascript.header.express_response_cookie
   enabled: true
   language: javascript
@@ -249,7 +239,6 @@
   - koa
   cwe:
   - CWE-113
-  - CWE-601
   match:
     kind: call
     callee:
@@ -275,9 +264,7 @@
         return ctx.set("Content-Disposition", "attachment; filename=safe.txt");
       }
     expect_no_match: true
-  description: 'Koa ctx.set(name, tainted). Koa''s `ctx.set(field, val)` is the 2-arg overload (or `ctx.set(obj)` 1-arg). `min_args: 2` rejects unrelated `ctx.set(x)` decoys (Map.set, custom-context single-arg setters). Merged aliases: javascript.open_redirect.koa_set_location.'
-  aliases:
-  - javascript.open_redirect.koa_set_location
+  description: 'Koa ctx.set(name, tainted). Koa''s `ctx.set(field, val)` is the 2-arg overload (or `ctx.set(obj)` 1-arg).'
 - id: javascript.header.koa_set_object
   enabled: true
   language: javascript
@@ -287,7 +274,6 @@
   - koa
   cwe:
   - CWE-113
-  - CWE-601
   match:
     kind: call
     callee:
@@ -348,9 +334,7 @@
         return reply.header("Content-Disposition", "attachment; filename=safe.txt");
       }
     expect_no_match: true
-  description: 'Fastify reply.header(name, tainted). Merged aliases: javascript.open_redirect.fastify_header_location.'
-  aliases:
-  - javascript.open_redirect.fastify_header_location
+  description: Fastify reply.header(name, tainted).
 - id: javascript.header.bun_response_content_disposition
   enabled: true
   language: javascript
@@ -361,8 +345,6 @@
   - next
   cwe:
   - CWE-113
-  - CWE-79
-  - CWE-601
   match:
     kind: new
     callee:
@@ -370,6 +352,9 @@
   constraints:
   - arg_tainted:
       index: 1
+  - arg_matches_regex:
+      index: 1
+      regex: '(?i)content-disposition'
   match_examples:
   - name: bun response content disposition
     code: |
@@ -386,10 +371,7 @@
         return new Response("ok", { headers: { "Content-Disposition": "attachment; filename=safe.txt" } });
       }
     expect_no_match: true
-  description: "Bun/fetch Response headers Content-Disposition value - tainted filename can inject response headers. Merged aliases: javascript.xss.bun_response_html_body."
-  aliases:
-  - javascript.xss.bun_response_html_body
-  - javascript.open_redirect.fetch_response_location
+  description: "Bun/fetch Response headers Content-Disposition value - tainted filename can inject response headers."
 - id: javascript.header.hapi_content_disposition
   enabled: true
   language: javascript
@@ -399,8 +381,6 @@
   - '@hapi/hapi'
   cwe:
   - CWE-113
-  - CWE-601
-  - CWE-79
   match:
     kind: call
     callee:
@@ -413,9 +393,20 @@
   constraints:
   - arg_tainted:
       index: 1
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:"Content-Disposition"|''Content-Disposition'')$'
   analysis_semantics:
     character_constraint:
       required_excluded_characters: ["\r", "\n"]
+      accepted_providers:
+      - operation: {regex: '^replace$'}
+      - factory: {name: String}
+        operation: {regex: '^String\.replace$'}
+      - factory: {name: map}
+        operation: {regex: '^map\.join$'}
+      - factory: {regex: '^charCodeAt\.toString\.padStart$'}
+        operation: {regex: '^(?:replace|String\.replace)$'}
   match_examples:
   - name: hapi response content disposition
     code: |
@@ -442,7 +433,4 @@
         return h.response("ok").header("Content-Disposition", "attachment; filename=safe.txt");
       }
     expect_no_match: true
-  description: "Hapi <h>.response(...).header('Content-Disposition', tainted) - filename/header value can inject response headers. The bare `response.header(...)` shape (where the framework passes a `response` object directly) is intentionally not matched here to avoid colliding with express/fastify; rely on the response()-prefixed shape and the package gate. Merged aliases: javascript.open_redirect.hapi_response_header_location, javascript.xss.hapi_response_html_body."
-  aliases:
-  - javascript.open_redirect.hapi_response_header_location
-  - javascript.xss.hapi_response_html_body
+  description: "Hapi <h>.response(...).header('Content-Disposition', tainted) - filename/header value can inject response headers."

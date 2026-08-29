@@ -470,20 +470,6 @@
     expect_match_text: [joiSchema.validate]
   description: "Joi schema.validate - validates and coerces input against a declared schema."
 
-- id: typescript.sanitizer.class_validator_validate
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: validation
-  packages: [class-validator]
-  match:
-    kind: call
-    callee:
-      name: validate
-  description: "Disabled - bare validate overmatches unrelated functions; enable when import-aware matching can prove class-validator."
-
-# -- JWT ---------------------------------------------------------------------
 - id: typescript.sanitizer.jwt_verify
   enabled: true
   language: typescript
@@ -543,19 +529,6 @@
   description: "crypto.timingSafeEqual - constant-time buffer comparison (anti-timing-oracle)."
 
 # -- Path --------------------------------------------------------------------
-- id: typescript.sanitizer.path_normalize
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: typescript
-  tag: path-sanitize
-  packages: [path]
-  match:
-    kind: call
-    callee:
-      attribute: [path, normalize]
-  description: "Disabled - path.normalize alone does NOT prevent traversal; requires path.resolve + prefix check."
-
 - id: typescript.sanitizer.path_basename
   enabled: true
   language: typescript
@@ -597,22 +570,6 @@
     expect_match_text: [mongoSanitize]
   description: "mongo-sanitize - strips top-level $-prefixed and dot-containing keys, neutralising operator injection."
 
-- id: typescript.sanitizer.express_mongo_sanitize
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: typescript.sanitizer.mongo_sanitize
-  language: typescript
-  tag: nosql-sanitize
-  packages: [express-mongo-sanitize]
-  match:
-    kind: call
-    callee:
-      name: mongoSanitize
-  description: "Disabled duplicate - same `mongoSanitize()` call shape is covered by typescript.sanitizer.mongo_sanitize with
-    express-mongo-sanitize package metadata merged."
-
-# -- Schema validation gates ------------------------------------------------
 - id: typescript.sanitizer.iots_decode
   enabled: true
   language: typescript
@@ -835,112 +792,6 @@
   description: "js-yaml YAML.load with JSON/CORE/FAILSAFE schema disables custom JavaScript object/function tags."
 
 # -- Focused allowlist / regex / SQL binding validators -----------------------
-- id: typescript.sanitizer.allowlist_set_has
-  enabled: false
-  language: typescript
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      regex: "^(allowed|allowlist|allowedValues|allowedNames|allowedRoles|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)\\\
-        .has$"
-  constraints:
-  - min_args: 1
-  match_examples:
-  - name: named Set allowlist has
-    code: |
-      const allowedRoles = new Set(["user", "admin"]);
-      function ok(role: string): boolean {
-        return allowedRoles.has(role);
-      }
-    expect_match_text: [allowedRoles.has]
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    Named Set.has allowlists - boolean finite-set validation, limited to allowlist-named receivers."
-
-  disabled_reason:
-    code: over-broad
-- id: typescript.sanitizer.allowlist_array_includes
-  enabled: false
-  language: typescript
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      regex: "^(allowed|allowlist|allowedValues|allowedNames|allowedRoles|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)\\\
-        .includes$"
-  constraints:
-  - min_args: 1
-  match_examples:
-  - name: named array allowlist includes
-    code: |
-      const allowedRoutes = ["/home", "/profile"];
-      function ok(next: string): boolean {
-        return allowedRoutes.includes(next);
-      }
-    expect_match_text: [allowedRoutes.includes]
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    Named Array.includes allowlists - validates that input is one of a finite literal set."
-
-  disabled_reason:
-    code: over-broad
-- id: typescript.sanitizer.allowlist_object_hasown
-  enabled: false
-  language: typescript
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      regex: "^Object\\.(hasOwn|hasOwnProperty)$|^Object\\.prototype\\.hasOwnProperty\\.call$"
-  constraints:
-  - arg_matches_regex:
-      index: 0
-      regex: "^(allowed|allowlist|allowedMap|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)$"
-  - min_args: 2
-  match_examples:
-  - name: object map allowlist hasOwn
-    code: |
-      const allowedRoutes: Record<string, string> = { home: "/home", profile: "/profile" };
-      function pick(name: string): string {
-        if (Object.hasOwn(allowedRoutes, name)) {
-          return allowedRoutes[name];
-        }
-        return "/";
-      }
-    expect_match_text: [Object.hasOwn]
-  - name: object map allowlist hasOwn negative constraint boundary
-    code: "const allowedRoutes: Record<string, string> = { home: \"/home\", profile: \"/profile\" };\nfunction pick(name:
-      string): string {\n  if (Object.hasOwn()) {\n    return allowedRoutes[name];\n  }\n  return \"/\";\n}\n"
-    expect_no_match: true
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    Object.hasOwn/Object.prototype.hasOwnProperty.call over allowlist-named maps - validates finite object-map keys before
-    selecting a trusted mapped value."
-
-  disabled_reason:
-    code: over-broad
-- id: typescript.sanitizer.named_regex_test
-  enabled: false
-  language: typescript
-  tag: regex-validate
-  match:
-    kind: call
-    callee:
-      regex: "^(uuid(Re|Regex|Pattern)|slug(Re|Regex|Pattern)|id(Re|Regex|Pattern)|safe(Re|Regex|Pattern)|allowed(Re|Regex|Pattern))\\\
-        .test$"
-  constraints:
-  - min_args: 1
-  match_examples:
-  - name: safe named regex test
-    code: |
-      const uuidRe = /^[0-9a-f-]{36}$/i;
-      function ok(id: string): boolean {
-        return uuidRe.test(id);
-      }
-    expect_match_text: [uuidRe.test]
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    Named allowlist regex .test validators - constrained to receivers named for UUID/slug/id/safe/allowed validation."
-
-  disabled_reason:
-    code: over-broad
 - id: typescript.sanitizer.db_placeholder_query
   enabled: true
   language: typescript
@@ -1039,110 +890,6 @@
     expect_match_text: [escapeHtml]
   description: "escape-html module - returns an HTML-encoded copy of the input."
 
-- id: typescript.sanitizer.named_regex_match
-  enabled: false
-  language: typescript
-  tag: regex-validate
-  match:
-    kind: call
-    callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.match$"
-  constraints:
-  - arg_matches_regex:
-      index: 0
-      regex: "^(uuid(Re|Regex|Pattern)|slug(Re|Regex|Pattern)|id(Re|Regex|Pattern)|safe(Re|Regex|Pattern)|allowed(Re|Regex|Pattern))$"
-  match_examples:
-  - name: input match slug regex
-    code: |
-      function ok(input: string, slugRe: RegExp) {
-        return input.match(slugRe);
-      }
-    expect_match_text: [input.match]
-  - name: value match allowed pattern
-    code: |
-      function ok(value: string, allowedPattern: RegExp) {
-        return value.match(allowedPattern);
-      }
-    expect_match_text: [value.match]
-  - name: input match slug regex negative constraint boundary
-    code: "function ok(input: string, slugRe: RegExp) {\n  return input.match();\n}\n"
-    expect_no_match: true
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    String.match(named allowlist regex) gates - regex object must be named for safe/id/slug/uuid/allowed validation."
-
-  disabled_reason:
-    code: over-broad
-- id: typescript.sanitizer.path_containment_startswith
-  enabled: false
-  language: typescript
-  tag: path-sanitize
-  packages: [path]
-  match:
-    kind: call
-    callee:
-      regex: "^(resolved|resolvedPath|fullPath|candidate|targetPath|filePath)\\.startsWith$"
-  constraints:
-  - arg_matches_regex:
-      index: 0
-      regex: "^(root|base|baseDir|uploadDir|publicDir|safeRoot|allowedRoot)"
-  match_examples:
-  - name: resolved path startsWith uploadDir
-    code: |
-      const _u = require("path");
-      function ok(resolved: string, uploadDir: string) {
-        return resolved.startsWith(uploadDir);
-      }
-    expect_match_text: [resolved.startsWith]
-  - name: fullPath startsWith safeRoot
-    code: |
-      const _u = require("path");
-      function ok(fullPath: string, safeRoot: string) {
-        return fullPath.startsWith(safeRoot);
-      }
-    expect_match_text: [fullPath.startsWith]
-  - name: resolved path startsWith uploadDir negative constraint boundary
-    code: "const _u = require(\"path\");\nfunction ok(resolved: string, uploadDir: string) {\n  return resolved.startsWith();\n\
-      }\n"
-    expect_no_match: true
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    Canonical path containment guard after path.resolve/normalize - validates the resolved candidate remains under a trusted
-    root."
-
-  disabled_reason:
-    code: over-broad
-- id: typescript.sanitizer.url_origin_host_allowlist
-  enabled: false
-  language: typescript
-  tag: open-redirect-sanitize
-  match:
-    kind: call
-    callee:
-      regex: "^(allowedOrigins|allowedHosts|allowedRedirectHosts|trustedOrigins|trustedHosts|ALLOWED_(ORIGINS|HOSTS))\\.(has|includes)$"
-  constraints:
-  - arg_matches_regex:
-      index: 0
-      regex: "^(url\\.)?(origin|host|hostname)|parsed\\.(origin|host|hostname)$"
-  match_examples:
-  - name: allowed origins has url origin
-    code: |
-      function ok(url: URL, allowedOrigins: Set<string>) {
-        return allowedOrigins.has(url.origin);
-      }
-    expect_match_text: [allowedOrigins.has]
-  - name: allowed hosts includes parsed hostname
-    code: |
-      function ok(parsed: URL, allowedHosts: string[]) {
-        return allowedHosts.includes(parsed.hostname);
-      }
-    expect_match_text: [allowedHosts.includes]
-  - name: allowed origins has url origin negative constraint boundary
-    code: "function ok(url: URL, allowedOrigins: Set<string>) {\n  return allowedOrigins.has();\n}\n"
-    expect_no_match: true
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    URL origin/host allowlist membership - credits finite allowlists over parsed URL origin/host/hostname values."
-
-  disabled_reason:
-    code: over-broad
 - id: typescript.sanitizer.prisma_tagged_raw_query
   enabled: true
   language: typescript
@@ -1418,6 +1165,44 @@
       }
     expect_match_text: [decodeURI]
   description: "decodeURI(s) - preserves taint."
+
+- id: typescript.passthrough.string_replace_receiver
+  enabled: true
+  language: typescript
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: replace
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: typed string replace preserves receiver-controlled content
+    code: |
+      function stripPrefix(input: string): string {
+        return input.replace(/^#?/, "");
+      }
+    expect_match_text: [input.replace]
+  description: "ECMAScript receiver.replace(...) returns text derived from the receiver. This passthrough preserves taint; sanitizer credit is handled only by separate replacement/character-constraint rules."
+
+- id: typescript.passthrough.string_split_receiver
+  enabled: true
+  language: typescript
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: split
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: typed string split preserves receiver-controlled elements
+    code: |
+      function pairs(input: string): string[] {
+        return input.split("&");
+      }
+    expect_match_text: [input.split]
+  description: "ECMAScript receiver.split(...) returns collection elements derived from the receiver; preserve taint into the returned collection."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink

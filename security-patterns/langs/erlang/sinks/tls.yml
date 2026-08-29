@@ -25,17 +25,3 @@
           ssl:listen(4443, []).
       expect_no_match: true
   description: "ssl:connect - flag when options include {verify, verify_none}; no cert chain validation -> MITM."
-
-- id: erlang.tls.httpc_request_no_verify
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: erlang
-  tag: weak-tls
-  severity: medium
-  cwe: [CWE-295]
-  match:
-    kind: call
-    callee:
-      regex: "^httpc:request"
-  description: "Disabled - duplicates erlang.ssrf.httpc_request regex; tls check needs [{ssl,[{verify,verify_none}]}] constraint support."

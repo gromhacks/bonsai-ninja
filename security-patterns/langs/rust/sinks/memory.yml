@@ -217,26 +217,6 @@
     expect_no_match: true
   description: "std::mem::transmute(value) - attacker-controlled bytes can forge invalid values, references, or fat-pointer metadata."
 
-- id: rust.memory.ptr_offset
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: memory-safety
-  severity: high
-  category: memory
-  packages: [std, core]
-  cwe: [CWE-823, CWE-125]
-  match:
-    kind: call
-    callee:
-      name: offset
-  description: "Disabled - bare `offset` overmatches Vec/Iterator helpers; enable for unsafe-block audits where the receiver is known to be a raw pointer."
-
-# Double-drop on `ManuallyDrop` is a documented unsoundness shape:
-# `ManuallyDrop::drop(&mut x)` runs Drop manually, and a second call
-# on the same value re-invokes Drop on freed memory (CWE-415).
-# Engine same-call-site clustering surfaces double-call cases.
 - id: rust.memory.manuallydrop_drop
   enabled: true
   language: rust

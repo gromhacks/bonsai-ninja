@@ -1,13 +1,13 @@
 //! JavaScript language adapter.
 use bonsai_common::{FileId, SymbolId};
 use bonsai_lang_api::{
-    decl_index_with_handler, extract_imports_via,
+    decl_index_from_tree_with_handler, extract_imports_via,
     kit::{
         call_arg_from_nodes_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
         node_text, normalize_call_name_whitespace, parse_with, span_of,
     },
-    AdapterContext, AdapterError, CallTargetExtraction, CharacterSubstitutionDomain,
-    CharacterSubstitutionFact, ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclIndex,
+    AdapterContext, AdapterError, CallTargetExtraction, CharacterConstraintDomain, CharacterConstraintFact,
+    CharacterConstraintOutput, ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclIndex,
     DynamicKeyFilterFact, FiniteLiteralSelectionFact, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
     LanguageAdapter, LanguageCapabilities, LanguageId, SameOriginPathConstraintFact,
     SourceFileRepresentation, StaticScalarValue, StaticStringMapEntry, StaticStringMapFact,
@@ -41,9 +41,119 @@ fn javascript_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
         .flatten()
 }
 
+/// Classify ECMAScript expressions whose complete value role is proven by the
+/// CST. Calls remain call results: the callback sees the complete RHS node, so
+/// `file.name.trim()` is not confused with the `file.name` receiver nested
+/// inside it.
+#[must_use]
+pub fn ecmascript_expression_value_kind(
+    node: Node<'_>,
+    src: &[u8],
+) -> Option<bonsai_lang_api::AssignValueKind> {
+    match node.kind() {
+        "member_expression" | "subscript_expression" => Some(bonsai_lang_api::AssignValueKind::PropertyRead),
+        // JavaScript conditional expressions evaluate exactly one branch and
+        // preserve that branch's complete value identity.
+        "ternary_expression" => Some(bonsai_lang_api::AssignValueKind::WholeValueSelection),
+        "binary_expression" => {
+            let left = node.child_by_field_name("left")?;
+            let right = node.child_by_field_name("right")?;
+            let mut cursor = node.walk();
+            let is_selection = node
+                .children(&mut cursor)
+                .filter(|child| {
+                    child.start_byte() >= left.end_byte() && child.end_byte() <= right.start_byte()
+                })
+                .map(|child| node_text(&child, src).trim())
+                .any(|operator| matches!(operator, "||" | "&&" | "??"));
+            is_selection.then_some(bonsai_lang_api::AssignValueKind::WholeValueSelection)
+        }
+        _ => None,
+    }
+}
+
 pub const LANG_ID: LanguageId = LanguageId::new("javascript");
 pub const JS_TS_MODULE_RESOLUTION_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
 const PACK_NAME: &str = "javascript";
+
+// ECMAScript CST spellings inspected by adapter-owned lowering outside the
+// shared handler.  TypeScript reuses much of this lowering and declares the
+// corresponding extended-grammar inventory in its own adapter.
+const ADDITIONAL_GRAMMAR_NODE_KINDS: &[(&str, &str)] = &[
+    ("adapter_postprocessor", "arguments"),
+    ("adapter_postprocessor", "array"),
+    ("adapter_postprocessor", "arrow_function"),
+    ("adapter_postprocessor", "assignment_expression"),
+    ("adapter_postprocessor", "assignment_pattern"),
+    ("adapter_postprocessor", "augmented_assignment_expression"),
+    ("adapter_postprocessor", "binary_expression"),
+    ("adapter_postprocessor", "call_expression"),
+    ("adapter_postprocessor", "catch_clause"),
+    ("adapter_postprocessor", "class"),
+    ("adapter_postprocessor", "class_declaration"),
+    ("adapter_postprocessor", "class_heritage"),
+    ("adapter_postprocessor", "const"),
+    ("adapter_postprocessor", "continue_statement"),
+    ("adapter_postprocessor", "default"),
+    ("adapter_postprocessor", "delete"),
+    ("adapter_postprocessor", "export_specifier"),
+    ("adapter_postprocessor", "export_statement"),
+    ("adapter_postprocessor", "expression_statement"),
+    ("adapter_postprocessor", "false"),
+    ("adapter_postprocessor", "for_in_statement"),
+    ("adapter_postprocessor", "for_statement"),
+    ("adapter_postprocessor", "formal_parameters"),
+    ("adapter_postprocessor", "function_declaration"),
+    ("adapter_postprocessor", "function_expression"),
+    ("adapter_postprocessor", "generator_function"),
+    ("adapter_postprocessor", "generator_function_declaration"),
+    ("adapter_postprocessor", "identifier"),
+    ("adapter_postprocessor", "if_statement"),
+    ("adapter_postprocessor", "import_clause"),
+    ("adapter_postprocessor", "import_specifier"),
+    ("adapter_postprocessor", "import_statement"),
+    ("adapter_postprocessor", "jsx_attribute"),
+    ("adapter_postprocessor", "jsx_namespace_name"),
+    ("adapter_postprocessor", "jsx_opening_element"),
+    ("adapter_postprocessor", "jsx_self_closing_element"),
+    ("adapter_postprocessor", "lexical_declaration"),
+    ("adapter_postprocessor", "member_expression"),
+    ("adapter_postprocessor", "method_definition"),
+    ("adapter_postprocessor", "named_imports"),
+    ("adapter_postprocessor", "namespace_import"),
+    ("adapter_postprocessor", "new_expression"),
+    ("adapter_postprocessor", "null"),
+    ("adapter_postprocessor", "number"),
+    ("adapter_postprocessor", "object"),
+    ("adapter_postprocessor", "object_assignment_pattern"),
+    ("adapter_postprocessor", "object_pattern"),
+    ("adapter_postprocessor", "pair"),
+    ("adapter_postprocessor", "pair_pattern"),
+    ("adapter_postprocessor", "parenthesized_expression"),
+    ("adapter_postprocessor", "private_property_identifier"),
+    ("adapter_postprocessor", "program"),
+    ("adapter_postprocessor", "property_identifier"),
+    ("adapter_postprocessor", "regex"),
+    ("adapter_postprocessor", "rest_pattern"),
+    ("adapter_postprocessor", "return_statement"),
+    ("adapter_postprocessor", "shorthand_property_identifier"),
+    ("adapter_postprocessor", "shorthand_property_identifier_pattern"),
+    ("adapter_postprocessor", "spread_element"),
+    ("adapter_postprocessor", "statement_block"),
+    ("adapter_postprocessor", "string"),
+    ("adapter_postprocessor", "string_fragment"),
+    ("adapter_postprocessor", "subscript_expression"),
+    ("adapter_postprocessor", "switch_body"),
+    ("adapter_postprocessor", "template_string"),
+    ("adapter_postprocessor", "template_substitution"),
+    ("adapter_postprocessor", "ternary_expression"),
+    ("adapter_postprocessor", "this"),
+    ("adapter_postprocessor", "true"),
+    ("adapter_postprocessor", "unary_expression"),
+    ("adapter_postprocessor", "undefined"),
+    ("adapter_postprocessor", "update_expression"),
+    ("adapter_postprocessor", "variable_declarator"),
+];
 
 /// ECMAScript bundle naming is frontend policy, not a shared-workspace
 /// language guess. Source shape is deliberately irrelevant: a maintained
@@ -60,21 +170,21 @@ pub fn ecmascript_source_file_representation(path: &std::path::Path) -> SourceFi
         })
 }
 const HANDLER: GrammarHandler = GrammarHandler {
-    expression_value_kind_extractor: None,
+    expression_value_kind_extractor: Some(ecmascript_expression_value_kind),
     literal_value_kinds: &["null", "number", "true", "false"],
     string_literal_kinds: &["string", "template_string"],
     comment_kinds: &["comment", "hash_bang_line"],
     doc_comment_prefixes: &["/**"],
     decorator_kinds: &["decorator"],
     parameter_container_kinds: &["formal_parameters"],
-    parameter_kinds: &["identifier", "required_parameter", "optional_parameter"],
+    parameter_kinds: &["identifier"],
     parameter_annotation_kinds: &["decorator"],
-    variadic_parameter_kinds: &["rest_pattern", "rest_parameter"],
+    variadic_parameter_kinds: &["rest_pattern"],
     destructured_parameter_kinds: &["object_pattern", "array_pattern"],
     binding_identifier_kinds: &["identifier", "shorthand_property_identifier_pattern"],
     binding_lhs_pattern_kinds: &["assignment_pattern"],
     binding_pattern_field_names: &["left"],
-    non_binding_pattern_field_names: &["type", "key", "property"],
+    non_binding_pattern_field_names: &["key", "property"],
     identifier_kinds: &["identifier", "shorthand_property_identifier", "this", "super"],
     aggregate_pattern_kinds: &["array_pattern", "object_pattern"],
     named_aggregate_kinds: &["object"],
@@ -92,7 +202,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "parenthesized_expression",
         "await_expression",
     ],
-    single_expression_group_kinds: &["expressions"],
+    single_expression_group_kinds: &[],
     assignment_target_wrapper_kinds: &["variable_declarator"],
     binding_declaration_keyword_spellings: &["var", "let", "const"],
     fn_kinds: &[
@@ -110,14 +220,21 @@ const HANDLER: GrammarHandler = GrammarHandler {
     branch_then_field_names: &["consequence", "body"],
     branch_else_field_names: &["alternative"],
     branch_condition_field_names: &["condition", "value"],
+    condition_group_kinds: &["parenthesized_expression"],
+    condition_all_operators: &["&&"],
+    condition_any_operators: &["||"],
+    condition_not_operators: &["!"],
     loop_body_field_names: &["body"],
     loop_body_kinds: &["statement_block", "expression_statement"],
+    loop_update_field_names: &["increment"],
     branch_arm_kinds: &[
         "statement_block",
         "expression_statement",
         "switch_case",
         "switch_default",
     ],
+    exclusive_branch_arm_kinds: &["switch_case", "switch_default"],
+    fallthrough_branch_arm_kinds: &["switch_case", "switch_default"],
     for_kinds: &["for_statement"],
     foreach_kinds: &["for_in_statement"],
     foreach_binding_extractor: Some(javascript_foreach_binding),
@@ -197,11 +314,7 @@ pub fn extract_ecmascript_pseudo_call(
         let name = node.named_children(&mut cursor).find(|child| {
             matches!(
                 child.kind(),
-                "identifier"
-                    | "nested_identifier"
-                    | "member_expression"
-                    | "jsx_namespace_name"
-                    | "jsx_member_expression"
+                "identifier" | "member_expression" | "jsx_namespace_name"
             )
         });
         name
@@ -298,13 +411,29 @@ impl LanguageAdapter for JavaScriptAdapter {
             ..LanguageCapabilities::partial_baseline()
         }
     }
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        Some(&HANDLER)
+    }
+    fn additional_grammar_node_kinds(&self) -> &'static [(&'static str, &'static str)] {
+        ADDITIONAL_GRAMMAR_NODE_KINDS
+    }
+
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
-        let mut decl_index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+        let parsed = parse_with(PACK_NAME, file, ctx);
+        let mut decl_index = parsed.as_ref().map_or_else(
+            || DeclIndex {
+                file,
+                ..Default::default()
+            },
+            |(snapshot, tree)| {
+                decl_index_from_tree_with_handler(file, snapshot.text.as_bytes(), tree, &HANDLER)
+            },
+        );
+        if let Some((snapshot, tree)) = parsed.as_ref() {
             let src = snapshot.text.as_bytes();
-            populate_ecmascript_compiler_facts(&mut decl_index, &tree, file, src);
-            apply_ecmascript_assigned_member_callable_owners(&mut decl_index, &tree, file, src);
-            apply_js_ts_commonjs_named_export_aliases(&mut decl_index, &tree, src, file);
+            populate_ecmascript_compiler_facts(&mut decl_index, tree, file, src);
+            apply_ecmascript_assigned_member_callable_owners(&mut decl_index, tree, file, src);
+            apply_js_ts_commonjs_named_export_aliases(&mut decl_index, tree, src, file);
         }
         // Module identity = workspace-relative path with the JS/TS extension stripped.
         let module_segments = ctx
@@ -317,8 +446,8 @@ impl LanguageAdapter for JavaScriptAdapter {
             // Fall back to the file stem when the workspace root is unknown.
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
         }
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
-            apply_js_ts_default_export_aliases(&mut decl_index, &tree, snapshot.text.as_bytes(), file);
+        if let Some((snapshot, tree)) = parsed.as_ref() {
+            apply_js_ts_default_export_aliases(&mut decl_index, tree, snapshot.text.as_bytes(), file);
         }
         // ECMAScript private fields/methods are syntactically marked by a leading `#`.
         for decl in &mut decl_index.defs {
@@ -328,9 +457,9 @@ impl LanguageAdapter for JavaScriptAdapter {
         }
         // Populate `bases` from `class_heritage > extends_clause` so the resolver
         // can narrow virtual-dispatch candidates consistently with TypeScript.
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+        if let Some((snapshot, tree)) = parsed.as_ref() {
             let src = snapshot.text.as_bytes();
-            let bases_by_span = collect_javascript_class_bases(&tree, file, src);
+            let bases_by_span = collect_javascript_class_bases(tree, file, src);
             for decl in &mut decl_index.defs {
                 if let Some(bases) = bases_by_span
                     .iter()
@@ -340,25 +469,25 @@ impl LanguageAdapter for JavaScriptAdapter {
                 }
             }
             rewrite_javascript_super_constructor_invocations(&mut decl_index);
-            apply_javascript_getter_property_sources(&mut decl_index, &tree, src, file);
+            apply_javascript_getter_property_sources(&mut decl_index, tree, src, file);
         }
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
         }
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+        if let Some((snapshot, tree)) = parsed.as_ref() {
             rewrite_javascript_object_destructuring_sources(
                 &mut decl_index,
-                &tree,
+                tree,
                 snapshot.text.as_bytes(),
                 file,
             );
             inject_javascript_object_literal_field_assigns(
                 &mut decl_index,
-                &tree,
+                tree,
                 snapshot.text.as_bytes(),
                 file,
             );
-            apply_javascript_array_literal_types(&mut decl_index, &tree, snapshot.text.as_bytes(), file);
+            apply_javascript_array_literal_types(&mut decl_index, tree, snapshot.text.as_bytes(), file);
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
@@ -400,7 +529,7 @@ pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, fi
         fact.expression = Some(lower_ecmascript_condition_expression(condition, file, src));
     }
 
-    for node in collect_kinds(tree, &["string", "string_literal"]) {
+    for node in collect_kinds(tree, &["string"]) {
         let span = span_of(file, &node);
         let Some(value) = ecmascript_static_string_literal(node, src) else {
             continue;
@@ -411,10 +540,12 @@ pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, fi
     }
     index.static_string_maps = ecmascript_static_string_maps(index, tree, file, src);
     index.finite_literal_selections = ecmascript_finite_literal_selections(index, tree, file, src);
-    index.character_substitutions = ecmascript_character_substitutions(&index.defs, tree, file, src);
-    index.character_constraints = bonsai_lang_api::character_constraints_from_substitutions(
+    index.character_constraints = ecmascript_provider_bound_character_constraints(
         &index.defs,
-        &index.character_substitutions,
+        &index.static_string_maps,
+        tree,
+        file,
+        src,
     );
     index.string_compositions = ecmascript_string_compositions(tree, file, src);
     index.same_origin_path_constraints = ecmascript_same_origin_path_constraints(index, tree, file, src);
@@ -699,6 +830,7 @@ fn ecmascript_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<
                 container_span: span_of(file, &declarator),
                 value_span: span_of(file, &value),
                 target: Some(node_text(&name, src).trim().to_string()),
+                dynamic_anchor_span: None,
                 parts,
             });
         }
@@ -713,6 +845,7 @@ fn ecmascript_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<
                 container_span: span_of(file, &return_node),
                 value_span: span_of(file, &value),
                 target: None,
+                dynamic_anchor_span: None,
                 parts,
             });
         }
@@ -729,6 +862,7 @@ fn ecmascript_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<
                 container_span: value_span,
                 value_span,
                 target: None,
+                dynamic_anchor_span: None,
                 parts,
             });
         }
@@ -1584,6 +1718,7 @@ fn ecmascript_static_string_maps(
         maps.push(StaticStringMapFact {
             assignment_span,
             target: target.to_string(),
+            target_is_immutable: false,
             entries,
         });
     }
@@ -1636,8 +1771,10 @@ fn ecmascript_finite_literal_selections(
         let Some(binding) = bindings.resolve(map_target, object.start_byte(), object.end_byte()) else {
             continue;
         };
-        if binding.finite_map.is_none()
-            || binding.initializer.end_byte() > node.start_byte()
+        if !matches!(
+            binding.finite_map,
+            Some(EcmascriptFiniteMapKind::Object | EcmascriptFiniteMapKind::Map)
+        ) || binding.initializer.end_byte() > node.start_byte()
             || bindings.unsafe_bindings.contains(&binding.declaration.id())
         {
             continue;
@@ -1653,14 +1790,109 @@ fn ecmascript_finite_literal_selections(
         };
         selections.push(fact);
     }
+    // A conditional returning the exact membership subject only when it
+    // belongs to an immutable literal Set is also a finite selection. The
+    // adapter proves the binding, branch direction, subject identity, and
+    // fallback from syntax; shared security analysis consumes only the
+    // resulting generic compiler fact.
+    for conditional in collect_kinds(tree, &["ternary_expression"]) {
+        if !ecmascript_exact_set_membership_selection(conditional, src, &bindings) {
+            continue;
+        }
+        let selection_span = span_of(file, &conditional);
+        let Some(fact) = bonsai_lang_api::kit::finite_literal_selection_fact_for_span(
+            index,
+            tree,
+            selection_span,
+            |value_node| {
+                value_node.id() == conditional.id()
+                    || ecmascript_expression_contains_node(value_node, conditional)
+            },
+        ) else {
+            continue;
+        };
+        selections.push(fact);
+    }
     bonsai_lang_api::kit::sort_dedup_finite_literal_selections(&mut selections);
     selections
+}
+
+fn ecmascript_exact_set_membership_selection(
+    conditional: Node<'_>,
+    src: &[u8],
+    bindings: &EcmascriptBindings<'_>,
+) -> bool {
+    let Some(condition) = conditional.child_by_field_name("condition") else {
+        return false;
+    };
+    let condition = unwrap_ecmascript_expression(condition);
+    let Some((collection, operation)) = ecmascript_member_call(condition, src) else {
+        return false;
+    };
+    if operation != "has" {
+        return false;
+    }
+    let membership_args = ecmascript_call_arguments(condition);
+    let [subject] = membership_args.as_slice() else {
+        return false;
+    };
+    let Some(collection_node) = condition
+        .child_by_field_name("function")
+        .and_then(|function| function.child_by_field_name("object"))
+        .filter(|node| node.kind() == "identifier")
+    else {
+        return false;
+    };
+    let Some(binding) = bindings.resolve(
+        collection,
+        collection_node.start_byte(),
+        collection_node.end_byte(),
+    ) else {
+        return false;
+    };
+    if binding.finite_map != Some(EcmascriptFiniteMapKind::Set)
+        || binding.initializer.end_byte() > condition.start_byte()
+        || bindings.unsafe_bindings.contains(&binding.declaration.id())
+    {
+        return false;
+    }
+    let Some(consequence) = conditional.child_by_field_name("consequence") else {
+        return false;
+    };
+    let Some(alternative) = conditional.child_by_field_name("alternative") else {
+        return false;
+    };
+    ecmascript_same_expression(*subject, consequence, src)
+        && ecmascript_is_literal_value_at(alternative, src, bindings)
+}
+
+fn ecmascript_same_expression(left: Node<'_>, right: Node<'_>, src: &[u8]) -> bool {
+    let left = unwrap_ecmascript_expression(left);
+    let right = unwrap_ecmascript_expression(right);
+    left.kind() == right.kind() && node_text(&left, src).trim() == node_text(&right, src).trim()
+}
+
+fn ecmascript_expression_contains_node(mut outer: Node<'_>, inner: Node<'_>) -> bool {
+    while matches!(
+        outer.kind(),
+        "parenthesized_expression" | "as_expression" | "satisfies_expression" | "type_assertion"
+    ) {
+        let Some(next) = outer
+            .child_by_field_name("expression")
+            .or_else(|| outer.named_child(0))
+        else {
+            return false;
+        };
+        outer = next;
+    }
+    outer.id() == inner.id()
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum EcmascriptFiniteMapKind {
     Object,
     Map,
+    Set,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -1817,11 +2049,20 @@ fn ecmascript_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> Ecmascript
     }
     let map_intrinsic_unshadowed =
         !by_name.contains_key("Map") && !ecmascript_declares_static_name(tree, src, "Map");
+    let set_intrinsic_unshadowed =
+        !by_name.contains_key("Set") && !ecmascript_declares_static_name(tree, src, "Set");
     let object_intrinsic_unshadowed =
         !by_name.contains_key("Object") && !ecmascript_declares_static_name(tree, src, "Object");
     if !map_intrinsic_unshadowed {
         for binding in &mut bindings {
             if binding.finite_map == Some(EcmascriptFiniteMapKind::Map) {
+                binding.finite_map = None;
+            }
+        }
+    }
+    if !set_intrinsic_unshadowed {
+        for binding in &mut bindings {
+            if binding.finite_map == Some(EcmascriptFiniteMapKind::Set) {
                 binding.finite_map = None;
             }
         }
@@ -1957,12 +2198,7 @@ fn ecmascript_binding_scope(mut node: Node<'_>) -> Option<Node<'_>> {
     while let Some(parent) = node.parent() {
         if matches!(
             parent.kind(),
-            "for_statement"
-                | "for_in_statement"
-                | "for_of_statement"
-                | "statement_block"
-                | "switch_body"
-                | "program"
+            "for_statement" | "for_in_statement" | "statement_block" | "switch_body" | "program"
         ) {
             return Some(parent);
         }
@@ -2004,14 +2240,36 @@ fn ecmascript_finite_literal_map_kind(mut node: Node<'_>, src: &[u8]) -> Option<
         return None;
     }
     let constructor = node.child_by_field_name("constructor")?;
-    if constructor.kind() != "identifier" || node_text(&constructor, src).trim() != "Map" {
+    if constructor.kind() != "identifier" {
         return None;
     }
+    let kind = match node_text(&constructor, src).trim() {
+        "Map" => EcmascriptFiniteMapKind::Map,
+        "Set" => EcmascriptFiniteMapKind::Set,
+        _ => return None,
+    };
     let arguments = node.child_by_field_name("arguments")?;
     let mut cursor = arguments.walk();
     let values: Vec<_> = arguments.named_children(&mut cursor).collect();
-    (values.len() == 1 && ecmascript_is_literal_map_entries(values[0], src))
-        .then_some(EcmascriptFiniteMapKind::Map)
+    (values.len() == 1
+        && match kind {
+            EcmascriptFiniteMapKind::Map => ecmascript_is_literal_map_entries(values[0], src),
+            EcmascriptFiniteMapKind::Set => ecmascript_is_literal_set_entries(values[0], src),
+            EcmascriptFiniteMapKind::Object => false,
+        })
+    .then_some(kind)
+}
+
+fn ecmascript_is_literal_set_entries(node: Node<'_>, src: &[u8]) -> bool {
+    if node.kind() != "array" {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let values = node.named_children(&mut cursor).collect::<Vec<_>>();
+    !values.is_empty()
+        && values
+            .into_iter()
+            .all(|value| ecmascript_is_literal_value(value, src))
 }
 
 fn ecmascript_is_literal_map_entries(node: Node<'_>, src: &[u8]) -> bool {
@@ -2075,6 +2333,9 @@ fn ecmascript_identifier_is_read_only_map_use(
             property,
             "get" | "has" | "entries" | "keys" | "values" | "forEach"
         ),
+        EcmascriptFiniteMapKind::Set => {
+            matches!(property, "has" | "entries" | "keys" | "values" | "forEach")
+        }
         EcmascriptFiniteMapKind::Object => false,
     }
 }
@@ -2219,7 +2480,7 @@ fn ecmascript_is_literal_value(mut node: Node<'_>, src: &[u8]) -> bool {
         node = inner;
     }
     match node.kind() {
-        "string" | "string_literal" => ecmascript_static_string_literal(node, src).is_some(),
+        "string" => ecmascript_static_string_literal(node, src).is_some(),
         "number" | "true" | "false" | "null" => true,
         "array" => {
             let mut cursor = node.walk();
@@ -2271,12 +2532,26 @@ fn ecmascript_static_property_name(node: Node<'_>, src: &[u8]) -> Option<String>
     })
 }
 
-fn ecmascript_character_substitutions(
+#[derive(Clone, Debug)]
+struct EcmascriptProviderBoundCharacterCandidate {
+    input_param_index: usize,
+    factory_call: String,
+    operation_call: String,
+    mappings: Vec<StaticStringMapEntry>,
+    transform_span: bonsai_common::Span,
+}
+
+/// Lower exact, finite character-mapping shapes without assigning runtime or
+/// security meaning to any call name. Each fact retains the operation parsed
+/// from the member call and, when present, the parsed unshadowed factory. Rule
+/// data decides which provider actually implements the candidate transform.
+fn ecmascript_provider_bound_character_constraints(
     defs: &[bonsai_lang_api::Decl],
+    static_maps: &[StaticStringMapFact],
     tree: &Tree,
     file: FileId,
     src: &[u8],
-) -> Vec<CharacterSubstitutionFact> {
+) -> Vec<CharacterConstraintFact> {
     let bindings = ecmascript_bindings(tree, src);
     let mut facts = Vec::new();
     for return_node in collect_kinds(tree, &["return_statement"]) {
@@ -2297,19 +2572,17 @@ fn ecmascript_character_substitutions(
         let Some(expression) = return_node.named_child(0) else {
             continue;
         };
-        let Some((input_param_index, table, exact_mappings, domain, transform_span)) =
-            ecmascript_character_substitution(expression, &decl.params, &bindings, file, src)
-        else {
+        let Some(candidate) = ecmascript_provider_bound_character_candidate(
+            expression,
+            &decl.params,
+            static_maps,
+            &bindings,
+            file,
+            src,
+        ) else {
             continue;
         };
-        facts.push(CharacterSubstitutionFact {
-            function_span: decl.span,
-            transform_span,
-            input_param_index,
-            exact_mappings,
-            table,
-            domain,
-        });
+        facts.extend(ecmascript_character_candidate_facts(decl, candidate));
     }
     // Expression-bodied arrows have no `return_statement`, but their body is
     // the function's sole return path by language definition.
@@ -2332,48 +2605,89 @@ fn ecmascript_character_substitutions(
         else {
             continue;
         };
-        let Some((input_param_index, table, exact_mappings, domain, transform_span)) =
-            ecmascript_character_substitution(body, &decl.params, &bindings, file, src)
-        else {
+        let Some(candidate) = ecmascript_provider_bound_character_candidate(
+            body,
+            &decl.params,
+            static_maps,
+            &bindings,
+            file,
+            src,
+        ) else {
             continue;
         };
-        facts.push(CharacterSubstitutionFact {
-            function_span: decl.span,
-            transform_span,
-            input_param_index,
-            exact_mappings,
-            table,
-            domain,
-        });
+        facts.extend(ecmascript_character_candidate_facts(decl, candidate));
     }
-    facts.sort_by_key(|fact| (fact.function_span.start, fact.transform_span.start));
+    facts.sort_by_key(|fact| {
+        (
+            fact.function_span.start,
+            fact.transform_span.start,
+            match &fact.domain {
+                CharacterConstraintDomain::ProviderBound { domain, .. } => {
+                    matches!(domain.as_ref(), CharacterConstraintDomain::ExcludesExact { .. })
+                }
+                _ => false,
+            },
+        )
+    });
     facts.dedup();
     facts
 }
 
-fn ecmascript_character_substitution(
+fn ecmascript_character_candidate_facts(
+    decl: &bonsai_lang_api::Decl,
+    candidate: EcmascriptProviderBoundCharacterCandidate,
+) -> Vec<CharacterConstraintFact> {
+    let Some(input_place) = decl.params.get(candidate.input_param_index).cloned() else {
+        return Vec::new();
+    };
+    let wrap_domain = |domain| CharacterConstraintDomain::ProviderBound {
+        factory_call: candidate.factory_call.clone(),
+        operation_call: candidate.operation_call.clone(),
+        domain: Box::new(domain),
+    };
+    let mut facts = vec![CharacterConstraintFact {
+        function_span: decl.span,
+        transform_span: candidate.transform_span,
+        input_place: input_place.clone(),
+        input_param_index: Some(candidate.input_param_index),
+        proof: bonsai_lang_api::CharacterConstraintProof::ExactRuntimeSemantics,
+        output: CharacterConstraintOutput::Return,
+        domain: wrap_domain(CharacterConstraintDomain::SubstitutesExact {
+            mappings: candidate.mappings.clone(),
+        }),
+    }];
+    let mut excluded = candidate
+        .mappings
+        .iter()
+        .filter(|mapping| !mapping.value.contains(&mapping.key))
+        .map(|mapping| mapping.key.clone())
+        .collect::<Vec<_>>();
+    excluded.sort();
+    excluded.dedup();
+    if !excluded.is_empty() {
+        facts.push(CharacterConstraintFact {
+            function_span: decl.span,
+            transform_span: candidate.transform_span,
+            input_place,
+            input_param_index: Some(candidate.input_param_index),
+            proof: bonsai_lang_api::CharacterConstraintProof::ExactRuntimeSemantics,
+            output: CharacterConstraintOutput::Return,
+            domain: wrap_domain(CharacterConstraintDomain::ExcludesExact { characters: excluded }),
+        });
+    }
+    facts
+}
+
+fn ecmascript_provider_bound_character_candidate(
     expression: Node<'_>,
     params: &[String],
+    static_maps: &[StaticStringMapFact],
     bindings: &EcmascriptBindings<'_>,
     file: FileId,
     src: &[u8],
-) -> Option<(
-    usize,
-    String,
-    Vec<StaticStringMapEntry>,
-    CharacterSubstitutionDomain,
-    bonsai_common::Span,
-)> {
-    if let Some((input_param_index, mappings, characters, transform_span)) =
-        ecmascript_inline_replace_chain(expression, params, bindings, file, src)
-    {
-        return Some((
-            input_param_index,
-            String::new(),
-            mappings,
-            CharacterSubstitutionDomain::ExactCharacters { characters },
-            transform_span,
-        ));
+) -> Option<EcmascriptProviderBoundCharacterCandidate> {
+    if let Some(candidate) = ecmascript_inline_static_mapping_chain(expression, params, bindings, file, src) {
+        return Some(candidate);
     }
     let call = unwrap_ecmascript_expression(expression);
     if call.kind() != "call_expression" {
@@ -2386,10 +2700,14 @@ fn ecmascript_character_substitution(
     let receiver = function.child_by_field_name("object")?;
     let method = function.child_by_field_name("property")?;
     let method = node_text(&method, src).trim();
+    if method.is_empty() {
+        return None;
+    }
     let arguments = ecmascript_call_arguments(call);
 
-    if method == "replace" {
-        let input_param_index = ecmascript_transform_input_param_index(receiver, params, bindings, src)?;
+    if arguments.len() == 2 {
+        let (input_param_index, factory_call) =
+            ecmascript_transform_input_provider(receiver, params, bindings, src)?;
         let pattern = arguments.first().copied()?;
         let callback = arguments.get(1).copied()?;
         let characters = ecmascript_exact_regex_characters(pattern, src)?;
@@ -2397,25 +2715,32 @@ fn ecmascript_character_substitution(
             if callback_parameter.is_empty() {
                 return None;
             }
-            return Some((
-                input_param_index,
-                table,
-                Vec::new(),
-                CharacterSubstitutionDomain::ExactCharacters { characters },
+            let mappings = ecmascript_static_map_mappings_for_characters(
+                static_maps,
+                &table,
+                &characters,
                 span_of(file, &call),
-            ));
+            )?;
+            return Some(EcmascriptProviderBoundCharacterCandidate {
+                input_param_index,
+                operation_call: ecmascript_provider_operation(&factory_call, method),
+                factory_call,
+                mappings,
+                transform_span: span_of(file, &call),
+            });
         }
-        let exact_mappings = ecmascript_numeric_hex_escape_mappings(callback, &characters, src)?;
-        return Some((
+        let (mappings, callback_factory) =
+            ecmascript_numeric_hex_escape_mappings(callback, &characters, src)?;
+        return Some(EcmascriptProviderBoundCharacterCandidate {
             input_param_index,
-            String::new(),
-            exact_mappings,
-            CharacterSubstitutionDomain::ExactCharacters { characters },
-            span_of(file, &call),
-        ));
+            operation_call: ecmascript_provider_operation(&factory_call, method),
+            factory_call: callback_factory,
+            mappings,
+            transform_span: span_of(file, &call),
+        });
     }
 
-    if method != "join" || receiver.kind() != "call_expression" {
+    if receiver.kind() != "call_expression" {
         return None;
     }
     let join_separator = arguments.first().copied()?;
@@ -2423,12 +2748,12 @@ fn ecmascript_character_substitution(
         return None;
     }
     let map_function = receiver.child_by_field_name("function")?;
-    if map_function.kind() != "member_expression"
-        || map_function
-            .child_by_field_name("property")
-            .map(|property| node_text(&property, src).trim() == "map")
-            != Some(true)
-    {
+    if map_function.kind() != "member_expression" {
+        return None;
+    }
+    let factory = map_function.child_by_field_name("property")?;
+    let factory = node_text(&factory, src).trim();
+    if factory.is_empty() {
         return None;
     }
     let iterated = map_function.child_by_field_name("object")?;
@@ -2439,26 +2764,27 @@ fn ecmascript_character_substitution(
     if callback_parameter.is_empty() {
         return None;
     }
-    Some((
+    let mappings = ecmascript_static_map_mappings_before(static_maps, &table, span_of(file, &call))?;
+    Some(EcmascriptProviderBoundCharacterCandidate {
         input_param_index,
-        table,
-        Vec::new(),
-        CharacterSubstitutionDomain::TableKeysWithIdentityFallback,
-        span_of(file, &call),
-    ))
+        factory_call: factory.to_string(),
+        operation_call: ecmascript_provider_operation(factory, method),
+        mappings,
+        transform_span: span_of(file, &call),
+    })
 }
 
-fn ecmascript_inline_replace_chain(
+fn ecmascript_inline_static_mapping_chain(
     expression: Node<'_>,
     params: &[String],
     bindings: &EcmascriptBindings<'_>,
     file: FileId,
     src: &[u8],
-) -> Option<(usize, Vec<StaticStringMapEntry>, Vec<String>, bonsai_common::Span)> {
+) -> Option<EcmascriptProviderBoundCharacterCandidate> {
     let transform_span = span_of(file, &expression);
     let mut current = unwrap_ecmascript_expression(expression);
     let mut mappings = Vec::new();
-    let mut characters = Vec::new();
+    let mut operation_call: Option<String> = None;
     while current.kind() == "call_expression" {
         let function = current.child_by_field_name("function")?;
         if function.kind() != "member_expression" {
@@ -2466,8 +2792,14 @@ fn ecmascript_inline_replace_chain(
         }
         let receiver = function.child_by_field_name("object")?;
         let method = function.child_by_field_name("property")?;
-        if node_text(&method, src).trim() != "replace" {
-            break;
+        let method = node_text(&method, src).trim();
+        if method.is_empty() {
+            return None;
+        }
+        match operation_call.as_deref() {
+            Some(operation) if operation != method => return None,
+            Some(_) => {}
+            None => operation_call = Some(method.to_string()),
         }
         let args = ecmascript_call_arguments(current);
         let [pattern, replacement] = args.as_slice() else {
@@ -2484,7 +2816,6 @@ fn ecmascript_inline_replace_chain(
                 return None;
             }
             if !mappings.iter().any(|entry| entry.key == input) {
-                characters.push(input.clone());
                 mappings.push(StaticStringMapEntry {
                     key: input,
                     value: output.clone(),
@@ -2496,55 +2827,43 @@ fn ecmascript_inline_replace_chain(
     if mappings.is_empty() {
         return None;
     }
-    let input = if current.kind() == "identifier" {
-        node_text(&current, src).trim()
-    } else if current.kind() == "call_expression" {
-        let function = current.child_by_field_name("function")?;
-        if function.kind() != "identifier"
-            || node_text(&function, src).trim() != "String"
-            || bindings
-                .resolve("String", function.start_byte(), function.end_byte())
-                .is_some()
-        {
-            return None;
-        }
-        let args = ecmascript_call_arguments(current);
-        let [input] = args.as_slice() else {
-            return None;
-        };
-        if input.kind() != "identifier" {
-            return None;
-        }
-        node_text(input, src).trim()
-    } else {
-        return None;
-    };
-    let input_param_index = params.iter().position(|param| param == input)?;
-    characters.sort();
-    characters.dedup();
+    let (input_param_index, factory_call) =
+        ecmascript_transform_input_provider(current, params, bindings, src)?;
     mappings.sort_by(|left, right| left.key.cmp(&right.key));
-    Some((input_param_index, mappings, characters, transform_span))
+    Some(EcmascriptProviderBoundCharacterCandidate {
+        input_param_index,
+        operation_call: ecmascript_provider_operation(&factory_call, operation_call.as_deref()?),
+        factory_call,
+        mappings,
+        transform_span,
+    })
 }
 
-fn ecmascript_transform_input_param_index(
+fn ecmascript_transform_input_provider(
     receiver: Node<'_>,
     params: &[String],
     bindings: &EcmascriptBindings<'_>,
     src: &[u8],
-) -> Option<usize> {
+) -> Option<(usize, String)> {
     let receiver = unwrap_ecmascript_expression(receiver);
     if receiver.kind() == "identifier" {
         let input = node_text(&receiver, src).trim();
-        return params.iter().position(|parameter| parameter == input);
+        return params
+            .iter()
+            .position(|parameter| parameter == input)
+            .map(|index| (index, String::new()));
     }
     if receiver.kind() != "call_expression" {
         return None;
     }
     let function = receiver.child_by_field_name("function")?;
-    if function.kind() != "identifier"
-        || node_text(&function, src).trim() != "String"
+    if function.kind() != "identifier" {
+        return None;
+    }
+    let factory = node_text(&function, src).trim();
+    if factory.is_empty()
         || bindings
-            .resolve("String", function.start_byte(), function.end_byte())
+            .resolve(factory, function.start_byte(), function.end_byte())
             .is_some()
     {
         return None;
@@ -2557,7 +2876,54 @@ fn ecmascript_transform_input_param_index(
         return None;
     }
     let input = node_text(input, src).trim();
-    params.iter().position(|parameter| parameter == input)
+    params
+        .iter()
+        .position(|parameter| parameter == input)
+        .map(|index| (index, factory.to_string()))
+}
+
+fn ecmascript_provider_operation(factory: &str, operation: &str) -> String {
+    if factory.is_empty() {
+        operation.to_string()
+    } else {
+        format!("{factory}.{operation}")
+    }
+}
+
+fn ecmascript_static_map_mappings_for_characters(
+    static_maps: &[StaticStringMapFact],
+    table: &str,
+    characters: &[String],
+    before: bonsai_common::Span,
+) -> Option<Vec<StaticStringMapEntry>> {
+    let entries = ecmascript_static_map_mappings_before(static_maps, table, before)?;
+    let mut mappings = Vec::with_capacity(characters.len());
+    for character in characters {
+        let mut matching = entries.iter().filter(|entry| entry.key == *character);
+        let mapping = matching.next()?.clone();
+        if matching.next().is_some() {
+            return None;
+        }
+        mappings.push(mapping);
+    }
+    mappings.sort_by(|left, right| left.key.cmp(&right.key));
+    Some(mappings)
+}
+
+fn ecmascript_static_map_mappings_before(
+    static_maps: &[StaticStringMapFact],
+    table: &str,
+    before: bonsai_common::Span,
+) -> Option<Vec<StaticStringMapEntry>> {
+    static_maps
+        .iter()
+        .filter(|map| {
+            map.target == table
+                && map.assignment_span.file == before.file
+                && map.assignment_span.end <= before.start
+        })
+        .max_by_key(|map| (map.assignment_span.start, map.assignment_span.end))
+        .map(|map| map.entries.clone())
 }
 
 /// Apply the context-free subset of ECMAScript replacement-string runtime
@@ -2643,7 +3009,7 @@ fn ecmascript_global_regex_characters<'tree>(
 
 fn unwrap_ecmascript_expression(mut node: Node<'_>) -> Node<'_> {
     loop {
-        if matches!(node.kind(), "parenthesized_expression" | "expression") && node.named_child_count() == 1 {
+        if node.kind() == "parenthesized_expression" && node.named_child_count() == 1 {
             node = node.named_child(0).expect("single named child");
             continue;
         }
@@ -2692,7 +3058,7 @@ fn ecmascript_numeric_hex_escape_mappings(
     callback: Node<'_>,
     characters: &[String],
     src: &[u8],
-) -> Option<Vec<StaticStringMapEntry>> {
+) -> Option<(Vec<StaticStringMapEntry>, String)> {
     let (parameter, body) = ecmascript_arrow_parts(callback, src)?;
     let body = unwrap_ecmascript_expression(body);
     if body.kind() != "binary_expression" {
@@ -2710,7 +3076,7 @@ fn ecmascript_numeric_hex_escape_mappings(
     }
     let prefix = ecmascript_static_string_literal(left, src)?;
     let (pad_receiver, pad_method, pad_args) = ecmascript_nested_member_call(right, src)?;
-    if pad_method != "padStart" || pad_args.len() != 2 {
+    if pad_method.is_empty() || pad_args.len() != 2 {
         return None;
     }
     let width = ecmascript_static_usize(pad_args[0], src)?;
@@ -2719,14 +3085,14 @@ fn ecmascript_numeric_hex_escape_mappings(
         return None;
     }
     let (string_receiver, string_method, string_args) = ecmascript_nested_member_call(pad_receiver, src)?;
-    if string_method != "toString"
+    if string_method.is_empty()
         || string_args.len() != 1
         || ecmascript_static_usize(string_args[0], src)? != 16
     {
         return None;
     }
     let (code_receiver, code_method, code_args) = ecmascript_nested_member_call(string_receiver, src)?;
-    if code_method != "charCodeAt"
+    if code_method.is_empty()
         || code_args.len() != 1
         || ecmascript_static_usize(code_args[0], src)? != 0
         || code_receiver.kind() != "identifier"
@@ -2735,7 +3101,7 @@ fn ecmascript_numeric_hex_escape_mappings(
         return None;
     }
 
-    characters
+    let mappings = characters
         .iter()
         .map(|input| {
             let mut utf16 = input.encode_utf16();
@@ -2756,7 +3122,8 @@ fn ecmascript_numeric_hex_escape_mappings(
                 value: encoded,
             })
         })
-        .collect()
+        .collect::<Option<Vec<_>>>()?;
+    Some((mappings, format!("{code_method}.{string_method}.{pad_method}")))
 }
 
 fn ecmascript_nested_member_call<'tree>(
@@ -3027,6 +3394,7 @@ fn merge_ecmascript_condition_junction(
 fn ecmascript_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
     ConditionOperandFact {
         span: span_of(file, &node),
+        direct_call_span: (node.kind() == "call_expression").then(|| span_of(file, &node)),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER),
         static_string: ecmascript_static_string_literal(node, src),
         static_value: ecmascript_static_scalar(node, src),
@@ -3034,7 +3402,7 @@ fn ecmascript_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> Con
 }
 
 fn ecmascript_static_string_literal(node: Node<'_>, src: &[u8]) -> Option<String> {
-    if !matches!(node.kind(), "string" | "string_literal") {
+    if node.kind() != "string" {
         return None;
     }
     let text = node_text(&node, src);
@@ -3046,12 +3414,12 @@ fn ecmascript_static_string_literal(node: Node<'_>, src: &[u8]) -> Option<String
     decode_ecmascript_string_contents(inner, quote as char)
 }
 
-fn ecmascript_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
+pub fn ecmascript_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
     match node.kind() {
         "true" => Some(StaticScalarValue::Boolean(true)),
         "false" => Some(StaticScalarValue::Boolean(false)),
         "null" => Some(StaticScalarValue::Null),
-        "string" | "string_literal" => Some(StaticScalarValue::String(ecmascript_static_string_literal(
+        "string" => Some(StaticScalarValue::String(ecmascript_static_string_literal(
             node, src,
         )?)),
         _ => None,
@@ -3061,7 +3429,7 @@ fn ecmascript_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarVa
 pub fn ecmascript_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {
     match ecmascript_static_scalar(node, src)? {
         StaticScalarValue::String(value) => Some(value),
-        StaticScalarValue::Boolean(_) | StaticScalarValue::Null => None,
+        StaticScalarValue::Boolean(_) | StaticScalarValue::Integer(_) | StaticScalarValue::Null => None,
     }
 }
 
@@ -4179,7 +4547,8 @@ fn spans_overlap_or_contain(left: bonsai_common::Span, right: bonsai_common::Spa
 /// form from silently bypassing package gates and alias-based callee
 /// rewrites. Non-builtin specifiers (relative paths, scoped packages)
 /// are returned unchanged.
-fn normalize_node_builtin_scheme(module: &str) -> String {
+#[must_use]
+pub fn normalize_node_builtin_scheme(module: &str) -> String {
     module.strip_prefix("node:").unwrap_or(module).to_string()
 }
 

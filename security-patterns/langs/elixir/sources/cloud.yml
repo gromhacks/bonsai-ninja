@@ -1,30 +1,51 @@
-# Cloud runtime event sources. Lambda/CloudEvents invocation payloads
-# are `trust: service` - a cloud service forwards data that frequently
-# originated from an attacker (API Gateway -> Lambda, SNS -> Lambda).
-- id: elixir.aws_lambda.handler_event
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+# Cloud-service response sources. The Elixir Lambda runtimes configure their
+# handler identity outside ordinary Elixir source, so a bare `event`/`payload`
+# parameter is not a compiler-proven boundary. Exact SDK response calls are:
+# their module owner and execution point are present in the parsed program.
+- id: elixir.cloud.ex_aws_response
+  enabled: true
   language: elixir
   trust: service
   tag: cloud-input
-  payload_types: [json]
+  category: cloud-input
+  payload_types: [json, binary]
+  frameworks: [ex_aws]
+  packages: [ex_aws]
+  imports: [ExAws]
   match:
-    kind: param
-    target:
-      name: event
-  description: "Disabled - `handle(event)` is ordinary Elixir syntax and the rule has no runtime package, behavior, or callback-registration evidence tying it to Lambda."
-
-- id: elixir.aws_lambda.handler_event_alt
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: elixir
-  trust: service
-  tag: cloud-input
-  payload_types: [json]
-  match:
-    kind: param
-    target:
-      name: payload
-  description: "Disabled - a bare `payload` parameter has no Lambda runtime, behavior, or callback-registration evidence. Phoenix channel payloads are modeled separately by their exact handle_in/3 signature."
+    kind: call
+    callee:
+      regex: '^ExAws\.(request|request!|stream|stream!)$'
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: ExAws service response
+    code: |
+      alias ExAws
+      defmodule CloudReader do
+        def load(operation), do: ExAws.request!(operation)
+      end
+    expect_match_text: [ExAws.request!]
+  - name: aliased ExAws response in a pipeline
+    code: |
+      alias ExAws, as: Cloud
+      defmodule CloudReader do
+        def load(operation), do: operation |> Cloud.request!()
+      end
+    expect_match_text: [Cloud.request!]
+  - name: ExAws operation constructor is not a response
+    code: |
+      alias ExAws
+      defmodule CloudReader do
+        def build(bucket, key), do: ExAws.S3.get_object(bucket, key)
+      end
+    expect_no_match: true
+  - name: same tail on an unrelated module is not cloud input
+    code: |
+      alias ExAws
+      defmodule CloudReader do
+        def load(operation), do: LocalStore.request(operation)
+      end
+    expect_no_match: true
+  description: "ExAws request/request!/stream/stream! - response data returned across an authenticated cloud-service boundary; operation constructors remain clean until executed."

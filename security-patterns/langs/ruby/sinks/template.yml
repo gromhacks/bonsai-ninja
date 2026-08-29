@@ -22,20 +22,6 @@
     code: "def example(input, url, id, payload, request, params)\n  ERB.new(\"hello <%= user %>\")\nend\n"
     expect_no_match: true
   description: "ERB.new(tainted) - Ruby code execution via templates."
-- id: ruby.template.erb_result_with_hash
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: ssti
-  severity: medium
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      name: result_with_hash
-  description: "Disabled - execution risk is in the template body compiled by ERB.new, not result_with_hash itself."
 - id: ruby.template.liquid_template_parse
   enabled: true
   language: ruby
@@ -173,64 +159,6 @@
       end
     expect_no_match: true
   description: "Tilt.new(tainted_template_path) - loads and compiles a template by path."
-- id: ruby.template.actionview_render_inline
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: ssti
-  severity: critical
-  packages:
-  - actionview
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      name: render
-  description: "Disabled - render() fires on every controller action. Enable only with LLM-assisted per-call review of the inline: kwarg."
-- id: ruby.template.html_safe
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: ruby
-  tag: xss
-  severity: high
-  packages:
-  - actionview
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - String
-      - html_safe
-  match_examples:
-  - name: ruby.template.html_safe example
-    code: |
-      require "actionview"
-      def example(input, url, id, payload, request, params)
-        String.html_safe("{{ user }}")
-      end
-  description: "Disabled duplicate - same html_safe surface as ruby.xss.html_safe, but receiver typing / receiver-taint support is not available in YAML yet."
-- id: ruby.template.raw_helper
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: ruby
-  tag: xss
-  severity: high
-  packages:
-  - actionview
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: raw
-  description: "Disabled - bare `raw` is too ambiguous (collides with local variables named `raw`); enable with a Rails view-context constraint when one becomes available."
-
 - id: ruby.template.tilt_new_with_block
   enabled: true
   language: ruby

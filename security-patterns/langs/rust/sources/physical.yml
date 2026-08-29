@@ -14,7 +14,6 @@
   - name: generated direct match
     code: |
       use embedded_hal;
-      use embedded_hal;
       use embedded_hal::dummy;
       fn example() {
           let target = "tainted";
@@ -46,7 +45,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      use embedded_hal;
       use embedded_hal;
       use embedded_hal::dummy;
       fn example() {
@@ -143,7 +141,7 @@
     callee:
       regex: "\\.transfer_in_place$"
   constraints:
-  - receiver_type_in: [SpiBus, SpiDevice]
+  - receiver_type_in: [SpiBus, "embedded_hal::spi::SpiBus", SpiDevice, "embedded_hal::spi::SpiDevice"]
   - min_args: 1
   - max_args: 1
   taint_semantics:
@@ -165,7 +163,7 @@
     expect_no_match: true
   description: "embedded-hal SpiBus/SpiDevice transfer_in_place overwrites output buffer argument 0 with peripheral response bytes."
   imports:
-  - embedded_hal
+  - "embedded_hal::spi"
 
 - id: rust.physical.serialport_read
   enabled: true
@@ -175,12 +173,13 @@
   category: hardware-io
   payload_types: [binary]
   packages: [serialport]
+  imports: [serialport]
   match:
     kind: call
     callee:
       regex: "\\.read$"
   constraints:
-  - receiver_type_in: [SerialPort]
+  - receiver_type_in: [SerialPort, "serialport::SerialPort"]
   - min_args: 1
   - max_args: 1
   taint_semantics:

@@ -89,18 +89,3 @@
       end
     expect_no_match: true
   description: "ActiveStorage attach - user-controlled attachment metadata."
-
-- id: ruby.upload.paperclip_assign
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: ruby
-  tag: file-upload
-  severity: medium
-  packages: [paperclip]
-  cwe: [CWE-434]
-  match:
-    kind: write
-    target:
-      name: avatar
-  description: "Disabled - Paperclip has-attached-file assignment requires per-model shape to avoid noise."

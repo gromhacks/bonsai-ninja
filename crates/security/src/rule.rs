@@ -5,7 +5,7 @@
 //! fields are rejected by the loader so rulepacks catch typos at load time
 //! instead of silently failing to match.
 
-use bonsai_lang_api::{DeclKind, StaticScalarValue, Visibility};
+use bonsai_lang_api::{AssignValueKind, DeclKind, StaticScalarValue, Visibility};
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 /// Which of the four rule families a rule belongs to. Derived from the
@@ -193,6 +193,20 @@ pub enum MatchKind {
     Missing,
 }
 
+/// Compiler binding evidence required by an exact call target.
+///
+/// This is provider-neutral: the owning rule supplies the callable spelling,
+/// while shared matching only checks import aliases or lexical absence.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuleBindingOrigin {
+    /// The call root must be an adapter-emitted import alias.
+    Imported,
+    /// The call root is supplied by the language runtime/host environment and
+    /// therefore must have no competing lexical binding.
+    RuntimeGlobal,
+}
+
 /// The match target — either a callee (for `call` / `new`) or a place/value
 /// target (for `read` / `write` / `param` and optionally `return`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,6 +221,12 @@ pub struct RuleTarget {
     /// Regex on the qualified callee / target name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regex: Option<String>,
+    /// Exact compiler binding origin required for this callable or write
+    /// target. Imported identities must resolve through an adapter-emitted
+    /// import alias; runtime globals must have no compiler-proven lexical
+    /// collision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_origin: Option<RuleBindingOrigin>,
     /// Optional receiver/base identifier filter for receiver-agnostic
     /// regexes. Example: `regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.execute$"`
     /// plus `base_name_in: [conn, db]` matches `conn.execute(...)` and
@@ -243,6 +263,19 @@ pub struct RuleTarget {
     /// matched exactly against the class decl's `name` or `bases`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub in_class: Vec<String>,
+    /// Restrict a rule match to declarations whose enclosing class name or
+    /// one of its adapter-emitted base names ends with a declared suffix.
+    /// This models generated base-class families without treating a
+    /// conventional method or parameter name as semantic evidence. The
+    /// suffix itself remains rule data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub in_class_suffix: Vec<String>,
+    /// Restrict a declaration to an adapter-owned lexical owner that declares
+    /// one of these direct bases, interfaces, traits, or runtime behaviours.
+    /// Unlike `in_class`, this accepts any explicit owner kind (including a
+    /// language module) and checks only its parsed base/behaviour inventory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub in_owner_base: Vec<String>,
     /// Restrict a rule match to declarations whose own name equals
     /// one of the given values (`on_message`, `resolve_field`,
     /// `dispatch`). Combined with `in_class`, this lets framework
@@ -261,12 +294,37 @@ pub struct RuleTarget {
     /// name alone is common, e.g. GraphQL resolver `(parent, args, ...)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_index_in: Vec<u32>,
+    /// Exclude exact zero-based parameter positions. This complements
+    /// `param_index_in` for callback contracts with one syntax-proven
+    /// receiver slot followed by an open-ended payload signature.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_index_not_in: Vec<u32>,
     /// Restrict a `kind: param` rule to declarations with one of these
     /// adapter-emitted parameter types at the matched index. The matcher
     /// reads `Decl.type_aliases`; it never infers a type from the parameter
     /// spelling. Both qualified and short type names are accepted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_type_in: Vec<String>,
+    /// Restrict a `kind: param` rule to an exact adapter-emitted qualified
+    /// parameter type. Unlike `param_type_in`, this never falls back to the
+    /// terminal type segment, so independently owned types such as
+    /// `left::Request` and `right::Request` cannot collide. Adapters must
+    /// preserve the qualified compiler spelling in `Decl.type_aliases` for
+    /// rules that use this constraint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_type_exact_in: Vec<String>,
+    /// Additional typed positions required in the enclosing declaration's
+    /// complete parameter signature. This is useful when the matched payload
+    /// type is generated or application-specific, but a sibling runtime
+    /// context parameter has a stable external type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signature_param_types: Vec<SignatureParamTypeRequirement>,
+    /// Exact adapter-emitted parameter annotations required at sibling
+    /// positions in the enclosing declaration. This completes compound
+    /// selector/callback signatures whose individual parameter name and type
+    /// are not sufficient to identify the boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signature_param_annotations: Vec<SignatureParamAnnotationRequirement>,
     /// Restrict a `kind: param` rule to declarations with one of these
     /// grammar-declared parameter counts. This models runtime entry
     /// signatures without depending on conventional names such as `args`
@@ -315,10 +373,16 @@ impl RuleTarget {
             && self.base_name_in.is_empty()
             && self.base_name_not_in.is_empty()
             && self.in_class.is_empty()
+            && self.in_class_suffix.is_empty()
+            && self.in_owner_base.is_empty()
             && self.in_method.is_empty()
             && self.in_method_prefix.is_empty()
             && self.param_index_in.is_empty()
+            && self.param_index_not_in.is_empty()
             && self.param_type_in.is_empty()
+            && self.param_type_exact_in.is_empty()
+            && self.signature_param_types.is_empty()
+            && self.signature_param_annotations.is_empty()
             && self.param_count_in.is_empty()
             && self.base_param_index_in.is_empty()
             && self.receiver_type_in.is_empty()
@@ -326,6 +390,26 @@ impl RuleTarget {
             && self.visibility_in.is_empty()
             && self.call_kind_in.is_empty()
     }
+}
+
+/// One exact parameter-position/type requirement on an enclosing declaration.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignatureParamTypeRequirement {
+    pub index: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub type_in: Vec<String>,
+}
+
+/// One exact parameter-position/annotation requirement on an enclosing
+/// declaration. Annotation strings come only from adapter-emitted compiler
+/// facts; provider-specific selector/decorator names remain rulepack data.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignatureParamAnnotationRequirement {
+    pub index: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotation_in: Vec<String>,
 }
 
 /// Full match specification — the `match:` block in YAML.
@@ -339,17 +423,21 @@ pub struct MatchSpec {
     /// Place/value target. Required for read/write/param, optional for return.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<RuleTarget>,
-    /// Resolved-call depth for `kind: missing`. `0` (default) is
-    /// intra-procedural; higher values walk reachable callees to the exact
-    /// rule-declared depth. Ignored for other kinds.
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
-    pub search_depth: u32,
 }
 
-// `&u32` is the signature serde expects for `skip_serializing_if`.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_zero_u32(value: &u32) -> bool {
-    *value == 0
+/// Positional roles for a rule-matched selector whose receiver may be a
+/// compiler-proven finite string map. The rule's ordinary `match.callee`
+/// owns the selector spelling; this structure assigns only generic value
+/// roles to the exact matcher-approved call span.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FiniteLiteralMapSelectorSemantics {
+    /// Positional argument carrying the finite map for namespace/static
+    /// selectors. Omit for receiver-method selectors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_argument_index: Option<usize>,
+    pub key_argument_index: usize,
+    pub fallback_argument_index: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -357,6 +445,19 @@ fn is_zero_u32(value: &u32) -> bool {
 pub struct TaintSemantics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean_output_overwrite: Option<CleanOutputOverwriteSemantics>,
+    /// Sanitizer rules only: the matched call mutates its receiver into a
+    /// clean value. The security matcher compiles the complete rule to exact
+    /// call spans before IDG construction, so constraints remain authoritative
+    /// and unrelated calls with the same operator/method spelling are never
+    /// granted this transfer.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clean_receiver_overwrite: bool,
+    /// Sanitizer rules only: the matched call returns either one value from a
+    /// complete local static string map or an exact literal fallback. The
+    /// finding-time proof joins the exact matched call span to compiler facts
+    /// and rejects ambiguous bindings, writes, aliases, and nonliteral values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finite_literal_map_selector: Option<FiniteLiteralMapSelectorSemantics>,
     /// Source rules only: argument indices that receive attacker-
     /// controlled output from the call. This covers C-style APIs such
     /// as `recv(fd, buf, len, flags)` and `SSL_read(ssl, buf, len)`
@@ -387,6 +488,18 @@ pub struct TaintSemantics {
     /// APIs that preserve attacker control while changing representation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub call_result_passthrough_args: Vec<usize>,
+    /// Sanitizer/passthrough rules only: the first argument in a variadic
+    /// input tail whose actual values all flow to the call result. Expansion
+    /// uses the compiler-observed call arity, so the rule never needs an
+    /// arbitrary maximum argument list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_result_passthrough_args_from: Option<usize>,
+    /// Typing rules only: the matched runtime/library call invokes one
+    /// compiler-resolved callable argument. Argument and return positions are
+    /// structural roles; the owning rule supplies the callable identity and
+    /// is compiled to exact call spans before graph construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_invocation: Option<CallbackInvocationSemantics>,
     /// Sanitizer/passthrough rules only: the method receiver flows
     /// unchanged to the call result. This covers receiver transforms
     /// such as `value.removingPercentEncoding`.
@@ -519,6 +632,11 @@ pub struct SanitizerGuardSemantics {
     pub argument_indices: Vec<usize>,
     #[serde(default)]
     pub require_terminal_rejection: bool,
+    /// Value the matched predicate must have on the accepted path after a
+    /// terminal rejection branch. `None` preserves the validator convention
+    /// that a true predicate is safe; rejection predicates declare `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_predicate_value: Option<bool>,
 }
 
 /// Rulepack-owned callable roles used by the structured path-containment
@@ -532,11 +650,39 @@ pub struct PathContainmentGuardSemantics {
     /// Receiver call used to prove that the canonical path stays below the
     /// configured base directory.
     pub containment_check: RuleTarget,
+    /// Positional argument that carries the canonical candidate when the
+    /// containment API is a namespace/static function. When omitted, the
+    /// candidate remains the call receiver for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containment_check_candidate_arg_index: Option<usize>,
+    /// Positional argument that carries the trusted base.
+    #[serde(default)]
+    pub containment_check_base_arg_index: usize,
     /// Argument on the matched sink call that denotes the trusted base path.
     pub sink_base_arg_index: usize,
     /// AST-derived place operands that must accompany the base argument in
     /// the containment check (for example a platform path separator).
     pub boundary_places: Vec<String>,
+}
+
+/// Rule-owned construction of a boundary-safe containment operand.
+///
+/// Some APIs express `base + separator` as a method call rather than as a
+/// compiler string-composition place (for example a receiver method taking a
+/// literal separator). The frontend supplies the exact nested call, receiver,
+/// argument place, and decoded scalar; this descriptor assigns those generic
+/// facts their path-boundary meaning without embedding API names or separator
+/// values in shared analysis.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathBoundaryBuilderSemantics {
+    pub call: RuleTarget,
+    #[serde(default)]
+    pub base_from_receiver: bool,
+    #[serde(default)]
+    pub base_arg_index: usize,
+    pub boundary_arg_index: usize,
+    pub accepted_boundary_values: Vec<StaticScalarValue>,
 }
 
 /// Rulepack-owned roles for proving that a value consumed by a later path
@@ -546,20 +692,69 @@ pub struct PathContainmentGuardSemantics {
 #[serde(deny_unknown_fields)]
 pub struct PathConsumerContainmentGuardSemantics {
     pub canonicalizer: RuleTarget,
+    /// The canonicalizer consumes the value through its exact compiler
+    /// receiver rather than positional argument zero.
+    #[serde(default)]
+    pub canonicalizer_input_from_receiver: bool,
     /// Canonicalizer used to establish the trusted base. When omitted, the
     /// candidate canonicalizer is used for both roles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_canonicalizer: Option<RuleTarget>,
-    pub path_constructor: RuleTarget,
+    /// Call that combines a trusted base with an untrusted child path.
+    /// Omitted only when [`Self::path_constructor_is_string_composition`]
+    /// selects the adapter's exact ordered string-composition fact instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_constructor: Option<RuleTarget>,
+    /// The canonicalizer input is an adapter-lowered ordered string
+    /// composition whose leading component is the trusted base and whose
+    /// next component is a rule-declared segment boundary.
+    #[serde(default)]
+    pub path_constructor_is_string_composition: bool,
     /// Some runtimes model the trusted base as the path-constructor receiver
     /// (`base.resolve(child)`) rather than as a positional argument.
     #[serde(default)]
     pub path_constructor_base_from_receiver: bool,
     pub containment_check: RuleTarget,
+    /// Optional runtime precondition whose selected argument must evaluate
+    /// truthy for execution to continue. The frontend lowers the exact
+    /// predicate expression; rule data owns the runtime call identity and
+    /// continuation contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_guard: Option<RuleTarget>,
+    /// Predicate argument on [`Self::acceptance_guard`].
+    #[serde(default)]
+    pub acceptance_guard_condition_arg_index: usize,
+    /// Optional value projection applied to the canonical candidate before
+    /// the containment predicate consumes it (for example a path object's
+    /// string-valued property). The projection identity remains rule-owned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containment_candidate_projection: Option<RuleTarget>,
+    /// Optional value projection applied to the trusted base before it is
+    /// used in the containment operand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containment_base_projection: Option<RuleTarget>,
+    /// Positional argument that carries the canonical candidate when the
+    /// containment API is a namespace/static function. When omitted, the
+    /// candidate remains the call receiver for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containment_check_candidate_arg_index: Option<usize>,
+    /// Positional argument that carries the trusted base.
+    #[serde(default)]
+    pub containment_check_base_arg_index: usize,
+    /// Exact compiler-decoded return values for which the containment check
+    /// accepts the candidate. An empty list means the check itself is a
+    /// boolean predicate and must evaluate truthy. This keeps APIs such as a
+    /// numeric prefix/index routine entirely rule-owned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_containment_results: Vec<StaticScalarValue>,
     /// Factories whose result is a trusted base only when every argument is
     /// an exact compiler-decoded scalar. Runtime/API names stay in rule data.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub static_base_factories: Vec<RuleTarget>,
+    /// The matched consumer receives the guarded path through its compiler
+    /// receiver rather than a positional argument.
+    #[serde(default)]
+    pub sink_path_from_receiver: bool,
     pub sink_path_arg_index: usize,
     pub path_constructor_base_arg_index: usize,
     /// The containment predicate is path-segment aware by runtime contract
@@ -567,6 +762,15 @@ pub struct PathConsumerContainmentGuardSemantics {
     #[serde(default)]
     pub containment_check_is_segment_aware: bool,
     pub boundary_places: Vec<String>,
+    /// Exact call shapes that construct a boundary operand from the trusted
+    /// base and an adapter-decoded static separator.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boundary_builders: Vec<PathBoundaryBuilderSemantics>,
+    /// Exact compiler-decoded literal suffixes that may be composed directly
+    /// with the trusted base to form a segment boundary. Values and path API
+    /// identities remain entirely rule-owned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_boundary_values: Vec<StaticScalarValue>,
 }
 
 /// Rulepack-owned roles for a canonical relative-path containment proof.
@@ -695,6 +899,11 @@ pub struct ReceiverFactoryGuardSemantics {
     /// engine any constructor or API spellings.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_nested_factories: Vec<RuleTarget>,
+    /// Exact scalar arguments required on the receiver's reaching factory
+    /// assignment.  The frontend decodes the complete ordered argument
+    /// vector; rule data owns argument roles and accepted values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_arguments: Vec<RequiredSequenceItemSpec>,
 }
 
 /// One exact argument-place requirement on a receiver configuration call.
@@ -756,6 +965,32 @@ pub struct ConfiguredArgumentReceiverGuardSemantics {
     pub required_calls: Vec<RequiredReceiverCallSemantics>,
 }
 
+/// Rulepack-owned safe state configured by an immediately-invoked callback
+/// whose implicit receiver is the value returned by a factory call.
+///
+/// Some languages expose standard-library scope/configuration calls whose
+/// callback body invokes receiver methods without spelling the receiver. The
+/// compiler supplies the exact assignment, nested provider call, callback
+/// span, callback declaration, and unconditional call/argument facts. Rule
+/// data owns every API identity and the callback/runtime role; shared analysis
+/// never guesses a provider or method from source text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiverCallbackConfigurationGuardSemantics {
+    /// Call whose return value is configured and retained by the wrapper.
+    pub provider_factory: RuleTarget,
+    /// Immediately-invoked wrapper that executes the callback with the
+    /// provider result as its implicit receiver.
+    pub wrapper_call: RuleTarget,
+    /// Positional wrapper argument containing the exact inline callback.
+    pub callback_argument_index: usize,
+    /// Call that derives the eventual sink receiver from the configured
+    /// factory value.
+    pub sink_receiver_builder: RuleTarget,
+    /// Unconditional implicit-receiver calls required inside the callback.
+    pub required_calls: Vec<RequiredReceiverCallSemantics>,
+}
+
 /// One exact named argument required on a configured factory call.
 ///
 /// The owning language frontend decodes the scalar value from the parsed
@@ -781,7 +1016,31 @@ pub struct RequiredNamedArgumentSemantics {
 pub struct ConfiguredArgumentFactoryGuardSemantics {
     pub sink_argument_index: usize,
     pub factory: RuleTarget,
+    /// Exact positional factory arguments required directly on the factory
+    /// call. This supports factory-produced collections whose first element
+    /// has security meaning while later elements may remain dynamic.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_arguments: Vec<RequiredCallArgumentSemantics>,
+    /// Exact named arguments required directly on the factory call.
+    /// Empty is permitted when [`Self::required_aggregate_argument`] carries
+    /// the complete configuration proof instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_named_arguments: Vec<RequiredNamedArgumentSemantics>,
+    /// Exact fields required on one aggregate-valued factory argument. The
+    /// frontend may carry these fields through a latest preceding local
+    /// assignment, but only as compiler-owned structure; provider names,
+    /// argument roles, field paths, and values remain rulepack data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_aggregate_argument: Option<ConfiguredFactoryAggregateArgumentSemantics>,
+}
+
+/// One aggregate configuration argument required on a factory call whose
+/// result is later consumed by a sink.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfiguredFactoryAggregateArgumentSemantics {
+    pub argument_index: usize,
+    pub required_fields: Vec<RequiredAggregateFieldSemantics>,
 }
 
 /// One exact aggregate field required on a configuration argument.
@@ -804,6 +1063,17 @@ pub struct ReceiverFactoryArgumentFieldsSpec {
     pub factory: RuleTarget,
     pub configuration_argument_index: usize,
     pub required_fields: Vec<RequiredAggregateFieldSemantics>,
+}
+
+/// Exact scalar constructor/factory arguments required for the latest
+/// reaching assignment of a matched receiver. The frontend owns scalar
+/// decoding and assignment identity; the rulepack owns the factory and
+/// accepted values.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiverFactoryArgumentsSpec {
+    pub factory: RuleTarget,
+    pub items: Vec<RequiredSequenceItemSpec>,
 }
 
 /// Rulepack-owned safe configuration for a direct sink call.
@@ -839,6 +1109,11 @@ pub struct CharacterEscapeSemantics {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub value_arg_indices: Vec<usize>,
     pub required_mappings: Vec<ExactStringMapping>,
+    /// Accepted runtime providers for provider-bound compiler facts. Legacy
+    /// language-native substitution facts remain provider-independent; a
+    /// provider-bound fact receives security meaning only through this list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_providers: Vec<CharacterConstraintProviderSemantics>,
 }
 
 /// Security-specific forbidden characters for a compiler-proven local
@@ -866,12 +1141,22 @@ pub struct CharacterConstraintSemantics {
     /// required runtime semantics.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepted_providers: Vec<CharacterConstraintProviderSemantics>,
+    /// Source payload domains that may complete a compiler fact whose
+    /// transform is exact but whose dynamic predicate receiver type is not.
+    /// This vocabulary is rulepack policy: adapters never name frameworks or
+    /// infer security meaning from source APIs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_untyped_source_payload_types: Vec<PayloadType>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CharacterConstraintProviderSemantics {
-    pub factory: RuleTarget,
+    /// Optional factory identity for two-stage transforms such as a compiled
+    /// regular expression or configured replacer. Direct language-runtime
+    /// operations have no separate factory and bind only `operation`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub factory: Option<RuleTarget>,
     pub operation: RuleTarget,
 }
 
@@ -911,6 +1196,12 @@ pub struct StaticContextArgumentSemantics {
 pub enum UrlGuardRootSemantics {
     SinkReceiver,
     SinkAssignmentTarget,
+    /// The sink consumes a parsed URL value directly. The exact argument
+    /// place must be the target of a preceding assignment containing the
+    /// rule-declared parser call; component guards are proven on that place.
+    SinkArgumentParsedValue {
+        argument_index: usize,
+    },
     /// The sink consumes the original URL value while a preceding parser
     /// assignment validates that same value. Both argument roles and parser
     /// identity are rulepack data.
@@ -1017,7 +1308,12 @@ pub struct UrlNetworkGuardSemantics {
     pub parser: RuleTarget,
     pub scheme: UrlSchemeGuardSemantics,
     pub host_allowlist: UrlHostAllowlistSemantics,
-    pub dns: UrlDnsGuardSemantics,
+    /// Optional DNS-address rejection proof. Rules for arbitrary caller-
+    /// controlled hosts require this. A rule whose finite host allowlist is
+    /// itself the declared trust boundary may omit it; the engine still
+    /// requires exact parser, scheme, finite-membership, and redirect facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns: Option<UrlDnsGuardSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect: Option<UrlRedirectGuardSemantics>,
 }
@@ -1175,6 +1471,8 @@ pub struct AnalysisSemantics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configured_argument_receiver_guard: Option<ConfiguredArgumentReceiverGuardSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_callback_configuration_guard: Option<ReceiverCallbackConfigurationGuardSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configured_call_argument_guard: Option<ConfiguredCallArgumentGuardSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_escape: Option<CharacterEscapeSemantics>,
@@ -1227,6 +1525,11 @@ impl AnalysisSemantics {
             if current.accepted_providers.is_empty() {
                 current.accepted_providers.clone_from(&default.accepted_providers);
             }
+            if current.accepted_untyped_source_payload_types.is_empty() {
+                current
+                    .accepted_untyped_source_payload_types
+                    .clone_from(&default.accepted_untyped_source_payload_types);
+            }
         }
         if self.character_constraint.is_none() {
             self.character_constraint
@@ -1266,6 +1569,7 @@ impl AnalysisSemantics {
             receiver_configuration_guard,
             configured_argument_factory_guard,
             configured_argument_receiver_guard,
+            receiver_callback_configuration_guard,
             configured_call_argument_guard,
             character_escape,
             same_origin_path_constraint,
@@ -1293,7 +1597,52 @@ pub enum NonTaintEvaluation {
 #[serde(deny_unknown_fields)]
 pub struct SourceCallbackArgSemantics {
     pub callback_arg_index: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_param_indices: Vec<usize>,
+    /// Every callback parameter at or after this index receives source data.
+    /// The compiler-declared callback arity supplies the finite range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_param_indices_from: Option<usize>,
+}
+
+/// Language-neutral value roles for a call that invokes a callable argument.
+///
+/// This models runtime helpers such as protected-call APIs without teaching
+/// the shared IDG any provider or language-specific name. The matcher proves
+/// the outer call, while the compiler callgraph proves the callback binding.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackInvocationSemantics {
+    /// Positional argument containing the invoked callable.
+    pub callback_arg_index: usize,
+    /// Exact field path beneath `callback_arg_index` whose value is a static
+    /// callback map. When present, every compiler-proven callback stored in
+    /// that complete map is invoked by the matched external API. Field/API
+    /// spelling remains rule data; shared graph code receives only compiled
+    /// callback identities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callback_map_field_path: Vec<String>,
+    /// Exact field path beneath `callback_arg_index` whose value is forwarded
+    /// into `forwarded_callback_param_index` for each callback-map entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forwarded_argument_field_path: Vec<String>,
+    /// Callback parameter receiving the forwarded aggregate field. Required
+    /// for callback-map invocation and absent for direct callable arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarded_callback_param_index: Option<usize>,
+    /// First outer-call argument forwarded into callback parameter zero.
+    /// Omit when the callback is invoked without forwarded arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarded_args_from: Option<usize>,
+    /// Callback parameter receiving the outer method receiver's value.
+    /// This models collection/runtime APIs whose callable argument is invoked
+    /// with one element from the receiver. The matched call span and callback
+    /// identity remain compiler-proven; the API role lives only in rule data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_to_callback_param: Option<usize>,
+    /// Positional slot in the outer call's tuple/multi-result that receives
+    /// callback return zero. Later callback return fields retain this offset.
+    pub callback_return_result_offset: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1307,6 +1656,11 @@ pub struct CleanOutputOverwriteSemantics {
 #[serde(deny_unknown_fields)]
 pub struct OutputArgFlowSemantics {
     pub output_arg_index: usize,
+    /// The compiler-emitted method/operator receiver flows into the output.
+    /// The owning rule is matched to exact call spans before IDG lowering, so
+    /// this generic value role carries no provider or API-name knowledge.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub value_receiver: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_start_arg_index: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1343,6 +1697,20 @@ pub enum ConstraintKind {
     UnlessPriorReceiverCall {
         unless_prior_receiver_call: Box<UnlessPriorReceiverCallSpec>,
     },
+    /// Require a guaranteed earlier call on the same compiler receiver with
+    /// exact frontend-decoded static string arguments. This is the positive
+    /// counterpart to `unless_prior_receiver_call`; API and literal meaning
+    /// remain entirely in rule data.
+    RequiresPriorReceiverCall {
+        requires_prior_receiver_call: Box<UnlessPriorReceiverCallSpec>,
+    },
+    /// Require the reaching definition of a rule-declared member on the same
+    /// compiler receiver to be one of the exact frontend-decoded scalar
+    /// values.  The matcher proves control-flow dominance and receiver
+    /// identity; member and value meaning remain entirely in rule data.
+    RequiresPriorReceiverWrite {
+        requires_prior_receiver_write: Box<RequiresPriorReceiverWriteSpec>,
+    },
     SecondArgEquals {
         second_arg_equals: String,
     },
@@ -1375,6 +1743,11 @@ pub enum ConstraintKind {
     /// ambiguous state fails closed.
     ReceiverFactoryArgumentFieldsEqual {
         receiver_factory_argument_fields_equal: Box<ReceiverFactoryArgumentFieldsSpec>,
+    },
+    /// Require the matched receiver's latest reaching assignment to be an
+    /// exact declared factory call with selected static scalar arguments.
+    ReceiverFactoryArgumentsEqual {
+        receiver_factory_arguments_equal: Box<ReceiverFactoryArgumentsSpec>,
     },
     FormatArgIndex {
         format_arg_index: u32,
@@ -1409,10 +1782,48 @@ pub enum ConstraintKind {
     ArgValueNotAggregate {
         arg_value_not_aggregate: u32,
     },
+    /// Require an exact adapter-emitted value-shape kind for one argument.
+    /// The frontend proves syntax/type identity; the rule assigns any API or
+    /// security meaning to that generic role.
+    ArgValueKind {
+        arg_value_kind: ArgValueKindSpec,
+    },
+    /// Require an exact compiler-lowered string composition whose first
+    /// component is the declared literal. Rendered argument text is never
+    /// parsed by this constraint.
+    ArgStringCompositionStartsWith {
+        arg_string_composition_starts_with: ArgStringCompositionPrefixSpec,
+    },
+    /// Reject only the exact compiler-lowered composition prefix selected by
+    /// the rule. Absence of a complete composition satisfies this inverse.
+    ArgStringCompositionNotStartsWith {
+        arg_string_composition_not_starts_with: ArgStringCompositionPrefixSpec,
+    },
+    /// Require the selected call argument to be an inline callback whose
+    /// parameter bindings were emitted by the owning language adapter.
+    /// This is a pure syntax/capability fact: provider meaning and the
+    /// callback position remain rulepack data.
+    ArgIsInlineCallback {
+        arg_is_inline_callback: u32,
+    },
+    /// Require one inline callback argument whose complete normal return is
+    /// an exact adapter-decoded scalar. Provider/API identity and callback
+    /// position remain rulepack data; named, mixed, or ambiguous callbacks
+    /// fail closed.
+    ArgInlineCallbackReturnsStatic {
+        arg_inline_callback_returns_static: ArgInlineCallbackStaticReturnSpec,
+    },
     /// Require exact adapter-decoded scalar values at selected positions in
     /// one complete positional aggregate argument.
     ArgSequenceItemsEqual {
         arg_sequence_items_equal: ArgSequenceItemsSpec,
+    },
+    /// Require exact adapter-decoded scalar fields on one complete aggregate
+    /// call argument. Provider/API identity and field paths remain rule data;
+    /// dynamic spreads, missing fields, and non-aggregate arguments fail
+    /// closed.
+    ArgAggregateFieldsEqual {
+        arg_aggregate_fields_equal: ArgAggregateFieldsSpec,
     },
     SameReceiverCallCountAtLeast {
         same_receiver_call_count_at_least: u32,
@@ -1448,6 +1859,11 @@ pub enum ConstraintKind {
     /// must carry at least one decorator whose tail matches.
     EnclosingDecoratorIn {
         enclosing_decorator_in: Vec<String>,
+    },
+    /// None of the exact adapter-emitted decorator facts may equal a listed
+    /// value. This is an absence check over compiler facts, not source text.
+    EnclosingDecoratorNotIn {
+        enclosing_decorator_not_in: Vec<String>,
     },
     /// `enclosing_modifier_in: [static, ...]` — the enclosing declaration
     /// must carry at least one requested modifier token in its parsed AST.
@@ -1485,6 +1901,8 @@ impl ConstraintKind {
             Self::ReceiverMatchesRegex { .. } => "receiver_matches_regex",
             Self::ReceiverNotMatchesRegex { .. } => "receiver_not_matches_regex",
             Self::UnlessPriorReceiverCall { .. } => "unless_prior_receiver_call",
+            Self::RequiresPriorReceiverCall { .. } => "requires_prior_receiver_call",
+            Self::RequiresPriorReceiverWrite { .. } => "requires_prior_receiver_write",
             Self::SecondArgEquals { .. } => "second_arg_equals",
             Self::ArgEquals { .. } => "arg_equals",
             Self::KeywordArgEquals { .. } => "keyword_arg_equals",
@@ -1495,6 +1913,7 @@ impl ConstraintKind {
                 "receiver_origin_callback_param_reaches_call"
             }
             Self::ReceiverFactoryArgumentFieldsEqual { .. } => "receiver_factory_argument_fields_equal",
+            Self::ReceiverFactoryArgumentsEqual { .. } => "receiver_factory_arguments_equal",
             Self::FormatArgIndex { .. } => "format_arg_index",
             Self::Namespace { .. } => "namespace",
             Self::TopLevel { .. } => "top_level",
@@ -1505,7 +1924,13 @@ impl ConstraintKind {
             Self::ArgNotMatchesRegex { .. } => "arg_not_matches_regex",
             Self::AnyArgMatchesRegex { .. } => "any_arg_matches_regex",
             Self::ArgValueNotAggregate { .. } => "arg_value_not_aggregate",
+            Self::ArgValueKind { .. } => "arg_value_kind",
+            Self::ArgStringCompositionStartsWith { .. } => "arg_string_composition_starts_with",
+            Self::ArgStringCompositionNotStartsWith { .. } => "arg_string_composition_not_starts_with",
+            Self::ArgIsInlineCallback { .. } => "arg_is_inline_callback",
+            Self::ArgInlineCallbackReturnsStatic { .. } => "arg_inline_callback_returns_static",
             Self::ArgSequenceItemsEqual { .. } => "arg_sequence_items_equal",
+            Self::ArgAggregateFieldsEqual { .. } => "arg_aggregate_fields_equal",
             Self::SameReceiverCallCountAtLeast { .. } => "same_receiver_call_count_at_least",
             Self::ArgLt { .. } => "arg_lt",
             Self::ArgLe { .. } => "arg_le",
@@ -1513,6 +1938,7 @@ impl ConstraintKind {
             Self::ArgGe { .. } => "arg_ge",
             Self::RequiresRuntimeType { .. } => "requires_runtime_type",
             Self::EnclosingDecoratorIn { .. } => "enclosing_decorator_in",
+            Self::EnclosingDecoratorNotIn { .. } => "enclosing_decorator_not_in",
             Self::EnclosingModifierIn { .. } => "enclosing_modifier_in",
             Self::SinkTagIn { .. } => "sink_tag_in",
             Self::MustAlias { .. } => "must_alias",
@@ -1541,7 +1967,13 @@ impl ConstraintKind {
                 | Self::ArgNotMatchesRegex { .. }
                 | Self::AnyArgMatchesRegex { .. }
                 | Self::ArgValueNotAggregate { .. }
+                | Self::ArgValueKind { .. }
+                | Self::ArgStringCompositionStartsWith { .. }
+                | Self::ArgStringCompositionNotStartsWith { .. }
+                | Self::ArgIsInlineCallback { .. }
+                | Self::ArgInlineCallbackReturnsStatic { .. }
                 | Self::ArgSequenceItemsEqual { .. }
+                | Self::ArgAggregateFieldsEqual { .. }
                 | Self::FormatArgIndex { .. }
                 | Self::ArgLt { .. }
                 | Self::ArgLe { .. }
@@ -1567,6 +1999,32 @@ impl ConstraintKind {
 pub struct UnlessPriorReceiverCallSpec {
     pub call: RuleTarget,
     pub static_string_args_regex: String,
+}
+
+/// Declarative reaching-definition constraint for a receiver member.
+///
+/// Values are compared with adapter-decoded scalar facts, never rendered
+/// source.  A branch, loop, exception path, dynamic write, or ambiguous
+/// receiver definition therefore fails closed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiresPriorReceiverWriteSpec {
+    pub target: RuleTarget,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_values: Vec<StaticScalarValue>,
+    /// Exact call-shaped values accepted for the reaching write. The
+    /// frontend owns callable identity and scalar argument decoding; rule
+    /// data owns the allowed factory and values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_calls: Vec<ExactCallArgumentsSpec>,
+}
+
+/// One exact call result accepted as the value of a reaching receiver write.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExactCallArgumentsSpec {
+    pub call: RuleTarget,
+    pub items: Vec<RequiredSequenceItemSpec>,
 }
 
 /// Compiler proof for a callback extension on a factory-created receiver.
@@ -1719,6 +2177,27 @@ pub struct ArgEqualsSpec {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ArgValueKindSpec {
+    pub index: u32,
+    pub kind: AssignValueKind,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArgStringCompositionPrefixSpec {
+    pub index: u32,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArgInlineCallbackStaticReturnSpec {
+    pub index: u32,
+    pub value: StaticScalarValue,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeywordArgEqualsSpec {
     pub name: String,
     pub value: String,
@@ -1731,7 +2210,7 @@ pub struct ArgRegexSpec {
     pub regex: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequiredSequenceItemSpec {
     pub index: usize,
@@ -1743,6 +2222,13 @@ pub struct RequiredSequenceItemSpec {
 pub struct ArgSequenceItemsSpec {
     pub argument_index: usize,
     pub items: Vec<RequiredSequenceItemSpec>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArgAggregateFieldsSpec {
+    pub argument_index: usize,
+    pub required_fields: Vec<RequiredAggregateFieldSemantics>,
 }
 
 /// Convenience: a rule's `constraints:` block is a list of keyed maps, each
@@ -1995,6 +2481,12 @@ pub struct Rule {
     pub callback_param_types: Vec<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback_arg_index: Option<u32>,
+    /// Static aggregate-field path beneath `callback_arg_index` when the
+    /// callback is stored in a configuration object rather than passed as
+    /// the complete argument. Field spelling is rulepack-owned; the compiler
+    /// contributes only exact parsed aggregate/callback facts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callback_field_path: Vec<String>,
     #[serde(default, skip_serializing_if = "RuleConstraint::is_empty")]
     pub constraints: RuleConstraint,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

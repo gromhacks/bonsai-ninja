@@ -27,21 +27,46 @@
   language: csharp
   tag: xxe
   severity: high
+  imports: [System.Xml]
   cwe: [CWE-611]
   match:
     kind: call
     callee:
       attribute: [XmlDocument, Load]
   constraints:
+  - receiver_type_in:
+    - XmlDocument
+    - System.Xml.XmlDocument
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    configured_argument_factory_guard:
+      sink_argument_index: 0
+      factory:
+        attribute: [XmlReader, Create]
+      required_aggregate_argument:
+        argument_index: 1
+        required_fields:
+        - path: [XmlResolver]
+          value: {kind: null}
   match_examples:
-  - name: declared shape
+  - name: imported XML document load
     code: |
-      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; XmlDocument.Load(input); } }
+      using System.Xml;
+      class App {
+        void Parse(XmlDocument document, XmlReader input) { document.Load(input); }
+      }
+    expect_match_text: [document.Load]
   - name: literal xmldocument load negative
     code: |
-      class App { void Test() { XmlDocument.Load("safe.xml"); } }
+      using System.Xml;
+      class App { void Test(XmlDocument document) { document.Load("safe.xml"); } }
+    expect_no_match: true
+  - name: local XML document collision
+    code: |
+      using System.Xml;
+      class XmlDocument { public void Load(dynamic value) {} }
+      class App { void Test(XmlDocument document, dynamic input) { document.Load(input); } }
     expect_no_match: true
   description: "XmlDocument.Load - file/stream loader."
 
@@ -67,20 +92,6 @@
       class XmlTextReader { public XmlTextReader(dynamic input) { } } class App { void Test() { var result = new XmlTextReader("safe.xml"); } }
     expect_no_match: true
   description: "new XmlTextReader - ProhibitDtd defaults to false on .NET Framework <4.0."
-
-- id: csharp.xxe.xmlreader_create_default
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: xxe
-  severity: medium
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [XmlReader, Create]
-  description: "Disabled - XmlReader.Create is safe by default; flag only with DtdProcessing=Parse."
 
 - id: csharp.xxe.xpathdocument_ctor
   enabled: true
@@ -128,20 +139,6 @@
     expect_no_match: true
   description: "XslCompiledTransform.Load - XSLT can run scripts and load entities."
 
-- id: csharp.xxe.xdocument_load_with_resolver
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: xxe
-  severity: medium
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [XDocument, Load]
-  description: "Disabled - XDocument.Load is safe by default."
-
 - id: csharp.xxe.dataset_readxml
   enabled: true
   language: csharp
@@ -188,20 +185,6 @@
     expect_no_match: true
   description: "DataTable.ReadXml - same XXE path as DataSet.ReadXml."
 
-- id: csharp.xxe.xmldictionaryreader_create
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: xxe
-  severity: medium
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [XmlDictionaryReader, CreateTextReader]
-  description: "Disabled - XmlDictionaryReader.CreateTextReader is safe by default in modern frameworks; flag with explicit unsafe quotas."
-
 - id: csharp.xxe.dtd_processing_parse
   enabled: true
   language: csharp
@@ -209,17 +192,38 @@
   category: source-independent
   severity: high
   cwe: [CWE-611]
+  imports: [System.Xml]
   match:
     kind: write
     target:
       regex: ^[^\.\s]+\.DtdProcessing$
+      receiver_type_in: [XmlReaderSettings, System.Xml.XmlReaderSettings]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:DtdProcessing\.)?Parse$'
   match_examples:
-  - name: xml reader settings dtd processing member write
+  - name: typed XML reader settings parse DTDs
     code: |
-      class App { void Test(dynamic input) { settings.DtdProcessing = input; } }
-  - name: local dtdprocessing variable negative
+      using System.Xml;
+      class App { void Configure(XmlReaderSettings settings) { settings.DtdProcessing = DtdProcessing.Parse; } }
+    expect_match_text: [settings.DtdProcessing]
+  - name: typed XML reader settings prohibit DTDs
     code: |
-      class App { void Test(dynamic input) { var DtdProcessing = input; } }
+      using System.Xml;
+      class App { void Configure(XmlReaderSettings settings) { settings.DtdProcessing = DtdProcessing.Prohibit; } }
+    expect_no_match: true
+  - name: unrelated dtd processing member
+    code: |
+      using System.Xml;
+      class LocalSettings { public DtdProcessing DtdProcessing { get; set; } }
+      class App { void Configure(LocalSettings settings) { settings.DtdProcessing = DtdProcessing.Parse; } }
+    expect_no_match: true
+  - name: local XML reader settings collision
+    code: |
+      using System.Xml;
+      class XmlReaderSettings { public DtdProcessing DtdProcessing { get; set; } }
+      class App { void Configure(XmlReaderSettings settings) { settings.DtdProcessing = DtdProcessing.Parse; } }
     expect_no_match: true
   description: "XmlReaderSettings.DtdProcessing = Parse - explicitly re-enables DTD/XXE parsing on otherwise-safe XmlReader."
 
@@ -230,16 +234,37 @@
   category: source-independent
   severity: high
   cwe: [CWE-611]
+  imports: [System.Xml]
   match:
     kind: write
     target:
       regex: ^[^\.\s]+\.ProhibitDtd$
+      receiver_type_in: [XmlReaderSettings, System.Xml.XmlReaderSettings]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^false$'
   match_examples:
-  - name: xml reader prohibitdtd member write
+  - name: typed XML reader settings permit DTDs
     code: |
-      class App { void Test(dynamic input) { reader.ProhibitDtd = input; } }
-  - name: local prohibitdtd variable negative
+      using System.Xml;
+      class App { void Configure(XmlReaderSettings settings) { settings.ProhibitDtd = false; } }
+    expect_match_text: [settings.ProhibitDtd]
+  - name: typed XML reader settings prohibit DTDs
     code: |
-      class App { void Test(dynamic input) { var ProhibitDtd = input; } }
+      using System.Xml;
+      class App { void Configure(XmlReaderSettings settings) { settings.ProhibitDtd = true; } }
+    expect_no_match: true
+  - name: unrelated prohibit DTD member
+    code: |
+      using System.Xml;
+      class LocalSettings { public bool ProhibitDtd { get; set; } }
+      class App { void Configure(LocalSettings settings) { settings.ProhibitDtd = false; } }
+    expect_no_match: true
+  - name: local XML reader settings collision
+    code: |
+      using System.Xml;
+      class XmlReaderSettings { public bool ProhibitDtd { get; set; } }
+      class App { void Configure(XmlReaderSettings settings) { settings.ProhibitDtd = false; } }
     expect_no_match: true
   description: "XmlReaderSettings.ProhibitDtd = false (legacy .NET) - re-enables DTD parsing."

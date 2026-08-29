@@ -49,20 +49,54 @@
   language: scala
   tag: path-traversal
   severity: high
+  packages: [java.nio.file]
+  imports: [java.nio.file.Files]
   cwe:
   - CWE-22
   match:
     kind: call
     callee:
-      regex: ^Files\.readAllBytes$
+      attribute: [Files, readAllBytes]
+      binding_origin: imported
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {name: normalize}
+      canonicalizer_input_from_receiver: true
+      base_canonicalizer: {regex: "(?:^|\\.)(?:normalize|toAbsolutePath)$"}
+      path_constructor: {name: resolve}
+      path_constructor_base_from_receiver: true
+      containment_check: {name: startsWith}
+      static_base_factories:
+      - {attribute: [Path, of]}
+      - {attribute: [Paths, get]}
+      containment_check_is_segment_aware: true
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: []
   match_examples:
-  - name: generated shape example
-    code: "object App {\n  def handle(input: String): Unit = {\n    Files.readAllBytes(input)\n  }\n}\n"
-  - name: arg tainted literal negative
-    code: "object App {\n  def handle(input: String): Unit = {\n    Files.readAllBytes(\"safe.txt\")\n  }\n}\n"
+  - name: imported java nio file read
+    code: |
+      import java.nio.file.{Files, Paths}
+      object App {
+        def handle(input: String): Array[Byte] = Files.readAllBytes(Paths.get(input))
+      }
+    expect_match_text: [Files.readAllBytes]
+  - name: literal path is not tainted
+    code: |
+      import java.nio.file.{Files, Paths}
+      object App {
+        def handle(): Array[Byte] = Files.readAllBytes(Paths.get("safe.txt"))
+      }
+    expect_no_match: true
+  - name: local Files provider does not inherit java nio identity
+    code: |
+      import java.nio.file.Files
+      object Files { def readAllBytes(value: String): Array[Byte] = value.getBytes }
+      object App { def handle(input: String): Array[Byte] = Files.readAllBytes(input) }
     expect_no_match: true
   description: "java.nio.file.Files.readAllBytes(path) - tainted path enables arbitrary-file read."
 - id: scala.path.files_readalllines
@@ -314,11 +348,7 @@
         }
       }
     expect_no_match: true
-  description: "java.nio.file.Paths.get(tainted) - early indicator of user-controlled path. Merged collision aliases: scala.ssrf.play_wsrequest_get, scala.ssrf.http4s_client_get, scala.ssrf.sttp_basic_request_url."
-  aliases:
-  - scala.ssrf.play_wsrequest_get
-  - scala.ssrf.http4s_client_get
-  - scala.ssrf.sttp_basic_request_url
+  description: "java.nio.file.Paths.get(tainted) - early indicator of user-controlled path."
   packages:
   - com.typesafe.play
   - play.api.libs.ws
@@ -688,45 +718,3 @@
     code: "object App {\n  def handle(input: String): Unit = {\n    new FileOutputStream(\"safe.txt\")\n  }\n}\nclass FileOutputStream(args: Any*)\n"
     expect_no_match: true
   description: "new FileOutputStream(tainted) - opens tainted path for write; traversal enables arbitrary-file overwrite."
-- id: scala.path.zipinputstream_get_next_entry
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: scala
-  tag: zip-slip
-  severity: high
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      regex: ^ZipInputStream\.getNextEntry$
-  match_examples:
-  - name: generated shape example
-    code: "object App {\n  def handle(input: String): Unit = {\n    ZipInputStream.getNextEntry(input)\n  }\n}\n"
-  description: "Disabled - ZipInputStream.getNextEntry() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."
-- id: scala.path.commons_compress_archive_input_get_next_entry
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: scala
-  tag: zip-slip
-  severity: high
-  packages:
-  - org.apache.commons.compress
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      regex: ^ArchiveInputStream\.getNextEntry$
-  match_examples:
-  - name: generated shape example
-    code: |
-      import org.apache.commons.compress._
-      object App {
-        def handle(input: String): Unit = {
-          ArchiveInputStream.getNextEntry(input)
-        }
-      }
-  description: "Disabled - ArchiveInputStream.getNextEntry() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."

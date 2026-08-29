@@ -90,6 +90,39 @@ fn decl_type_alias(db: &AnalyzerDb, fn_name: &str, var: &str) -> Option<String> 
     panic!("missing declaration `{fn_name}`")
 }
 
+#[test]
+fn qualified_parameter_annotation_preserves_its_provider_identity() {
+    let db = python_db(
+        r#"
+import provider
+def execute(connection: provider.Connection, value):
+    connection.execute(value)
+"#,
+    );
+
+    assert_eq!(
+        decl_type_alias(&db, "execute", "connection").as_deref(),
+        Some("provider.Connection")
+    );
+}
+
+#[test]
+fn qualified_payload_inside_typing_wrapper_preserves_its_provider_identity() {
+    let db = python_db(
+        r#"
+import typing
+import provider
+def execute(connection: typing.Optional[provider.Connection], value):
+    connection.execute(value)
+"#,
+    );
+
+    assert_eq!(
+        decl_type_alias(&db, "execute", "connection").as_deref(),
+        Some("provider.Connection")
+    );
+}
+
 fn decl_param_default_calls(db: &AnalyzerDb, fn_name: &str, param: &str) -> Vec<String> {
     let global = db.global_index();
     for file in global.all_files() {

@@ -3,11 +3,15 @@
 //! Lower-level crates remain public for advanced integrations. This crate
 //! gives application code one obvious entry point:
 //!
-//! ```ignore
+//! ```no_run
+//! # fn main() -> anyhow::Result<()> {
 //! let bonsai = bonsai_sdk::Bonsai::new().with_rulepack("security-patterns")?;
-//! let project = bonsai.index("examples/python/micro")?;
+//! let project = bonsai.index("test-fixtures/languages/python/micro")?;
 //! let findings = project.security().taint_analysis(Default::default())?;
 //! let export = project.export().native_json(Default::default())?;
+//! # let _ = (findings, export);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! The facade owns no independent analysis semantics. Each method delegates to
@@ -221,6 +225,7 @@ pub struct Bonsai {
     rulepack: Option<Arc<Rulepack>>,
     parse_timeout_ms: Option<u64>,
     include_minified_sources: bool,
+    persistent_semantic_cache: bool,
 }
 
 struct RetrievalCandidateScope {
@@ -244,6 +249,7 @@ impl Bonsai {
             rulepack: None,
             parse_timeout_ms: None,
             include_minified_sources: false,
+            persistent_semantic_cache: true,
         }
     }
 
@@ -270,6 +276,16 @@ impl Bonsai {
     #[must_use]
     pub fn with_minified_sources(mut self, include: bool) -> Self {
         self.include_minified_sources = include;
+        self
+    }
+
+    /// Allow projects opened by this facade to load and publish reusable
+    /// semantic sidecars. Disabling persistence changes storage only:
+    /// requested compiler, callgraph, and IDG facts are still computed
+    /// exactly and retained for the lifetime of the project.
+    #[must_use]
+    pub fn with_persistent_semantic_cache(mut self, enabled: bool) -> Self {
+        self.persistent_semantic_cache = enabled;
         self
     }
 
@@ -418,6 +434,9 @@ impl Bonsai {
         queries: &[&str],
         filters: SearchFilters<'_>,
     ) -> Result<Option<RetrievalCandidateScope>> {
+        if !self.persistent_semantic_cache {
+            return Ok(None);
+        }
         if filters.regex || queries.is_empty() || queries.iter().any(|query| query.trim().len() < 3) {
             return Ok(None);
         }
@@ -1019,6 +1038,9 @@ impl Bonsai {
             options.parse_timeout_ms = Some(ms);
         }
         options.include_minified_sources = self.include_minified_sources;
+        if !self.persistent_semantic_cache {
+            options.disable_persistent_semantic_cache();
+        }
         options
     }
 
@@ -5405,7 +5427,9 @@ impl Security<'_> {
     }
 
     fn refresh_cache_manifest_best_effort(&self) {
-        if !self.project.workspace.is_complete_workspace_index() {
+        if !self.project.refresh_options.persistent_semantic_cache
+            || !self.project.workspace.is_complete_workspace_index()
+        {
             return;
         }
         let _ = self.project.cache().write_manifest();

@@ -1,54 +1,161 @@
-- id: perl.source.dbi_fetchrow_array
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+# Perl database-result sources. Receiver types are supplied by the paired
+# typing/factory_returns.yml models; importing DBI alone never authorizes an
+# arbitrary object's fetch/select method.
+- id: perl.source.dbi_statement_fetchrow
+  enabled: true
   language: perl
   trust: database
   category: db-input
   tag: db-input
   payload_types: [db-row]
   packages: [DBI]
+  imports: [DBI]
   match:
     kind: call
     callee:
-      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.fetchrow_(array|arrayref)$'
+      regex: '(?:^|->)fetchrow_(?:array|arrayref)$'
   constraints:
+  - receiver_type_in: ["DBI::st"]
   - max_args: 0
-  description: "Disabled - DBI fetchrow_array/fetchrow_arrayref is a real database carrier, but a `use DBI` import does not prove that an arbitrary dynamic receiver is a DBI statement handle. Requires factory/handle lineage."
+  match_examples:
+  - name: DBI statement list-row result
+    code: |
+      use DBI;
+      sub load_row {
+        my $dbh = DBI->connect('dbi:SQLite:dbname=app.db');
+        my $sth = $dbh->prepare('select name, role from users');
+        $sth->execute();
+        my $row = $sth->fetchrow_arrayref();
+        return $row;
+      }
+    expect_match_text: [sth->fetchrow_arrayref]
+  - name: unrelated fetchrow method is not database input
+    code: |
+      use DBI;
+      package LocalCursor;
+      sub fetchrow_arrayref { return ['local'] }
+      package main;
+      sub load_row {
+        my $cursor = LocalCursor->new();
+        return $cursor->fetchrow_arrayref();
+      }
+    expect_no_match: true
+  description: "DBI statement-handle fetch/fetchrow_array/fetchrow_arrayref returns database row values on a compiler-typed DBI::st receiver."
 
-- id: perl.source.dbi_fetchrow_hashref
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+- id: perl.source.dbi_statement_fetchrow_hashref
+  enabled: true
   language: perl
   trust: database
   category: db-input
   tag: db-input
   payload_types: [db-row]
   packages: [DBI]
+  imports: [DBI]
   match:
     kind: call
     callee:
-      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.fetchrow_hashref$'
+      name: fetchrow_hashref
   constraints:
+  - receiver_type_in: ["DBI::st"]
   - max_args: 1
-  description: "Disabled - DBI fetchrow_hashref is a real database carrier, but a `use DBI` import does not prove that an arbitrary dynamic receiver is a DBI statement handle. Requires factory/handle lineage."
+  match_examples:
+  - name: DBI statement hash-row result
+    code: |
+      use DBI;
+      sub load_row {
+        my $dbh = DBI->connect('dbi:SQLite:dbname=app.db');
+        my $sth = $dbh->prepare('select name, role from users');
+        $sth->execute();
+        return $sth->fetchrow_hashref('NAME_lc');
+      }
+    expect_match_text: [sth->fetchrow_hashref]
+  - name: unrelated hash-row method is not database input
+    code: |
+      use DBI;
+      package LocalCursor;
+      sub fetchrow_hashref { return { name => 'local' } }
+      package main;
+      sub load_row {
+        my $cursor = LocalCursor->new();
+        return $cursor->fetchrow_hashref();
+      }
+    expect_no_match: true
+  description: "DBI statement-handle fetchrow_hashref([name]) returns a database row on a compiler-typed DBI::st receiver."
 
-- id: perl.source.dbi_fetchall_rows
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+- id: perl.source.dbi_statement_fetchall
+  enabled: true
   language: perl
   trust: database
   category: db-input
   tag: db-input
   payload_types: [db-row]
   packages: [DBI]
+  imports: [DBI]
   match:
     kind: call
     callee:
-      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.fetchall_(arrayref|hashref)$'
+      regex: '(?:^|->)fetchall_(?:arrayref|hashref)$'
   constraints:
-  - min_args: 1
+  - receiver_type_in: ["DBI::st"]
   - max_args: 2
-  description: "Disabled - DBI fetchall_arrayref/fetchall_hashref are real database carriers, but a `use DBI` import does not prove that an arbitrary dynamic receiver is a DBI statement handle. Requires factory/handle lineage."
+  match_examples:
+  - name: DBI statement all-row result
+    code: |
+      use DBI;
+      sub load_rows {
+        my $dbh = DBI->connect('dbi:SQLite:dbname=app.db');
+        my $sth = $dbh->prepare('select name, role from users');
+        $sth->execute();
+        return $sth->fetchall_arrayref({}, 100);
+      }
+    expect_match_text: [sth->fetchall_arrayref]
+  - name: unrelated fetchall method is not database input
+    code: |
+      use DBI;
+      package LocalCursor;
+      sub fetchall_arrayref { return [] }
+      package main;
+      sub load_rows {
+        my $cursor = LocalCursor->new();
+        return $cursor->fetchall_arrayref();
+      }
+    expect_no_match: true
+  description: "DBI statement-handle fetchall_arrayref/fetchall_hashref returns database result rows on a compiler-typed DBI::st receiver."
+
+- id: perl.source.dbi_database_select_rows
+  enabled: true
+  language: perl
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [DBI]
+  imports: [DBI]
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|->)(?:selectrow_(?:array|arrayref|hashref)|selectall_(?:arrayref|hashref)|selectcol_arrayref)$'
+  constraints:
+  - receiver_type_in: ["DBI::db"]
+  - min_args: 1
+  match_examples:
+  - name: DBI database-handle select result
+    code: |
+      use DBI;
+      sub load_row {
+        my $dbh = DBI->connect('dbi:SQLite:dbname=app.db');
+        return $dbh->selectrow_hashref('select name from users where id = ?', undef, 7);
+      }
+    expect_match_text: [dbh->selectrow_hashref]
+  - name: unrelated select helper is not database input
+    code: |
+      use DBI;
+      package LocalStore;
+      sub selectrow_hashref { return { name => 'local' } }
+      package main;
+      sub load_row {
+        my $store = LocalStore->new();
+        return $store->selectrow_hashref('local');
+      }
+    expect_no_match: true
+  description: "DBI database-handle selectrow/selectall/selectcol helpers return database values on a compiler-typed DBI::db receiver."

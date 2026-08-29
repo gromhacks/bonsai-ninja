@@ -1,7 +1,7 @@
 //! End-to-end integration tests for every browse subcommand.
 //!
 //! Each test invokes the compiled `bonsai-ninja` binary against the
-//! checked-in Python micro example (`examples/python/micro`) and asserts
+//! checked-in Python micro example (`test-fixtures/languages/python/micro`) and asserts
 //! on either the pretty text table or the JSON shape. These tests lock in
 //! the visible column contract — so a regression in header labels,
 //! filter handling, or JSON field names will fail here loudly.
@@ -19,7 +19,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn ws_path() -> PathBuf {
-    repo_root().join("examples/python/micro")
+    repo_root().join("test-fixtures/languages/python/micro")
 }
 
 fn bin_path() -> Option<PathBuf> {
@@ -1087,7 +1087,8 @@ fn trace_default_is_themed_text() {
     );
     assert!(
         !out.contains("/Users/")
-            || out.matches("examples/python/micro/").count() > out.matches("/Users/").count() / 2,
+            || out.matches("test-fixtures/languages/python/micro/").count()
+                > out.matches("/Users/").count() / 2,
         "trace should use workspace-relative paths in most lines:\n{out}"
     );
 }
@@ -1999,7 +2000,7 @@ fn classes_kind_and_has_method_filter() {
         p.push("../..");
         p.canonicalize().expect("repo root")
     };
-    let ws = repo_root.join("examples/java/micro");
+    let ws = repo_root.join("test-fixtures/languages/java/micro");
     let Some(out) = run(&["classes", ws.to_str().unwrap(), "--kind", "class"]) else {
         return;
     };
@@ -2198,7 +2199,7 @@ def wrapper(
 }
 
 #[test]
-fn symbol_summary_reports_unresolved_parameter_dispatch_for_every_language() {
+fn symbol_summary_reports_or_resolves_parameter_dispatch_for_every_language() {
     const CASES: &[(&str, &str)] = &[
         ("c", "run_cb"),
         ("cpp", "run_cb"),
@@ -2223,7 +2224,10 @@ fn symbol_summary_reports_unresolved_parameter_dispatch_for_every_language() {
     ];
 
     for &(language, symbol) in CASES {
-        let workspace = repo_root().join("examples").join(language).join("callback_flow");
+        let workspace = repo_root()
+            .join("test-fixtures/languages")
+            .join(language)
+            .join("callback_flow");
         let Some(out) = run(&[
             "symbol-summary",
             workspace.to_str().expect("UTF-8 fixture path"),
@@ -2240,24 +2244,35 @@ fn symbol_summary_reports_unresolved_parameter_dispatch_for_every_language() {
         let row = rows
             .first()
             .unwrap_or_else(|| panic!("{language}: missing `{symbol}` summary"));
-        assert_eq!(
-            row["analysis_complete"], false,
-            "{language}: parameter-dispatched call must remain explicitly unresolved: {out}"
-        );
+        let resolved_from_callable_value = row["direct_callees"].as_array().is_some_and(|callees| {
+            callees.iter().any(|callee| {
+                callee["resolver_stage"] == "callable_value" && callee["evidence_kind"] == "resolved"
+            })
+        });
+        let unresolved_calls = row["unresolved_calls"]
+            .as_array()
+            .is_some_and(|calls| !calls.is_empty());
+        let explains_unresolved_parameter_dispatch = row["analysis_incomplete_reasons"]
+            .as_array()
+            .is_some_and(|reasons| {
+                reasons.iter().any(|reason| {
+                    reason
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("parameter-dispatched call"))
+                })
+            });
+
         assert!(
-            row["unresolved_calls"]
-                .as_array()
-                .is_some_and(|calls| !calls.is_empty()),
-            "{language}: missing unresolved parameter-dispatch evidence: {out}"
+            resolved_from_callable_value
+                || (unresolved_calls && explains_unresolved_parameter_dispatch),
+            "{language}: callable-parameter dispatch must be compiler-resolved or retained as explicit unresolved evidence: {out}"
         );
-        assert!(
-            row["analysis_incomplete_reasons"]
-                .as_array()
-                .is_some_and(|reasons| reasons.iter().any(|reason| reason
-                    .as_str()
-                    .is_some_and(|reason| reason.contains("parameter-dispatched call")))),
-            "{language}: missing parameter-dispatch explanation: {out}"
-        );
+        if resolved_from_callable_value {
+            assert!(
+                row["unresolved_calls"].as_array().is_some_and(Vec::is_empty),
+                "{language}: an exactly compiler-bound callback must not also be reported unresolved: {out}"
+            );
+        }
     }
 }
 
@@ -2316,7 +2331,7 @@ fn inspect_from_to_markers_work_on_kotlin() {
         p.push("../..");
         p.canonicalize().expect("repo root")
     };
-    let ws = repo_root.join("examples/kotlin/micro");
+    let ws = repo_root.join("test-fixtures/languages/kotlin/micro");
     assert_semantic_corridor("kotlin", &ws, "updateUser", "runAdminCommand");
 }
 
@@ -2327,7 +2342,7 @@ fn inspect_from_to_markers_work_on_javascript() {
         p.push("../..");
         p.canonicalize().expect("repo root")
     };
-    let ws = repo_root.join("examples/javascript/micro");
+    let ws = repo_root.join("test-fixtures/languages/javascript/micro");
     // JS fixture: gateway.js calls updateUser which calls runAdminCommand
     // which calls execSync.
     assert_semantic_corridor("javascript", &ws, "updateUser", "runAdminCommand");
@@ -2340,7 +2355,7 @@ fn inspect_from_to_markers_work_on_java() {
         p.push("../..");
         p.canonicalize().expect("repo root")
     };
-    let ws = repo_root.join("examples/java/micro");
+    let ws = repo_root.join("test-fixtures/languages/java/micro");
     assert_semantic_corridor("java", &ws, "updateUser", "runAdminCommand");
 }
 
@@ -2426,12 +2441,12 @@ fn inspect_from_to_filters_are_case_insensitive() {
         p.push("../..");
         p.canonicalize().expect("repo root")
     };
-    let ws = repo_root.join("examples/java/micro");
+    let ws = repo_root.join("test-fixtures/languages/java/micro");
 
     assert_semantic_corridor("java", &ws, "UPDATEUSER", "RUNADMINCOMMAND");
 
     // Same check on Python with mixed case.
-    let py_ws = repo_root.join("examples/python/micro");
+    let py_ws = repo_root.join("test-fixtures/languages/python/micro");
     assert_semantic_corridor("python", &py_ws, "UPDATE_USER", "RUN_ADMIN_COMMAND");
 }
 
@@ -3714,7 +3729,7 @@ fn read_file_compact_text_marks_incomplete_when_body_context_truncated() {
         return;
     };
     assert!(
-        out.contains("semantic-only view incomplete"),
+        out.contains("compiler-proven view incomplete"),
         "compact read-file output must surface incomplete semantic context:\n{out}"
     );
     assert!(
@@ -4037,7 +4052,7 @@ fn diagnostics_points_at_specific_error_node() {
         p.push("../..");
         p.canonicalize().expect("repo root")
     };
-    let ws = repo_root.join("examples/cpp/micro");
+    let ws = repo_root.join("test-fixtures/languages/cpp/micro");
     let Some(out) = run(&["diagnostics", ws.to_str().unwrap()]) else {
         return;
     };
@@ -4131,7 +4146,10 @@ const LANG_MICROS: &[&str] = &[
 ];
 
 fn lang_ws(lang: &str) -> PathBuf {
-    repo_root().join("examples").join(lang).join("micro")
+    repo_root()
+        .join("test-fixtures/languages")
+        .join(lang)
+        .join("micro")
 }
 
 /// Pick a `--query` needle that exists in every micro fixture. `token`
@@ -4576,6 +4594,17 @@ fn run_on_inspect_graph(lang: &str, args_after_ws: &[&str]) -> Option<String> {
     run_inspect_graph(&ws, args_after_ws)
 }
 
+fn executable_entry_selector(expectation: &LangExpect) -> String {
+    match expectation.lang {
+        // The Objective-C fixture intentionally contains both an interface
+        // prototype and its implementation. Diagnostic commands preserve
+        // both compiler declarations, so select the executable syntax site
+        // explicitly instead of depending on ingestion order.
+        "objc" => format!("Gateway.m:9:{}", expectation.entry),
+        _ => expectation.entry.to_string(),
+    }
+}
+
 fn assert_contains(lang: &str, cmd_desc: &str, out: &str, expect: &str) {
     assert!(
         out.contains(expect),
@@ -4677,7 +4706,8 @@ fn cli_search_content_correct_for_every_lang() {
 #[test]
 fn cli_trace_content_correct_for_every_lang() {
     for e in lang_expectations() {
-        let Some(out) = run_on(e.lang, &["trace", e.entry]) else {
+        let selector = executable_entry_selector(&e);
+        let Some(out) = run_on(e.lang, &["trace", selector.as_str()]) else {
             return;
         };
         assert_contains(e.lang, "trace", &out, e.entry);
@@ -4728,7 +4758,8 @@ fn cli_dump_callgraph_content_correct_for_every_lang() {
 #[test]
 fn cli_dump_hir_content_correct_for_every_lang() {
     for e in lang_expectations() {
-        let Some(out) = run_on(e.lang, &["dump-hir", e.entry]) else {
+        let selector = executable_entry_selector(&e);
+        let Some(out) = run_on(e.lang, &["dump-hir", selector.as_str()]) else {
             return;
         };
         let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("dump-hir output is JSON");
@@ -4745,7 +4776,8 @@ fn cli_dump_hir_content_correct_for_every_lang() {
 #[test]
 fn cli_dump_cfg_content_correct_for_every_lang() {
     for e in lang_expectations() {
-        let Some(out) = run_on(e.lang, &["dump-cfg", e.entry]) else {
+        let selector = executable_entry_selector(&e);
+        let Some(out) = run_on(e.lang, &["dump-cfg", selector.as_str()]) else {
             return;
         };
         let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("dump-cfg output is JSON");
@@ -6829,13 +6861,13 @@ fn every_lang_micro_symbol_evidence_has_stable_id() {
 }
 
 /// `--view auto` on a query that crosses the threshold must flip to
-/// grouped mode. Uses the larger `examples/python` tree (complex +
-/// micro combined) with the `execute` query which produces well
-/// over the threshold — plenty of flows to trigger auto-grouped.
+/// grouped mode. Build the fan-in explicitly so the threshold contract does
+/// not depend on how checked-in examples are organized.
 #[test]
 fn auto_view_flips_to_grouped_above_threshold() {
-    let ws = repo_root().join("examples/python");
-    let Some(out) = run_inspect_graph(&ws, &["--query", "execute", "--view", "auto"]) else {
+    let ws = tempdir_for_test("bonsai_inspect_auto_grouped");
+    write_fan_in_python_workspace(&ws, 20);
+    let Some(out) = run_inspect_graph(&ws, &["--query", "sink", "--view", "auto"]) else {
         return;
     };
     assert!(
@@ -6846,6 +6878,7 @@ fn auto_view_flips_to_grouped_above_threshold() {
         out.contains("GROUP 1"),
         "auto view in grouped mode should emit GROUP blocks; got:\n{out}",
     );
+    let _ = std::fs::remove_dir_all(ws);
 }
 
 /// `--compact` retains the selected symbol identity while omitting its body.

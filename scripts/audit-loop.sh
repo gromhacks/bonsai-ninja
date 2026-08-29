@@ -8,8 +8,8 @@
 # Layers (each runs independently; failures don't short-circuit):
 #
 #   1. pack-validate     — rule schema + match-example owners agree
-#   2. mega-cli          — engine emits the expected per-lang finding
-#                          counts on the mega_flow fixture
+#   2. language-gauntlets — engine emits the expected per-language finding
+#                          counts on the language_gauntlet fixture
 #   3. sanitizer-credit  — sanitizer tag vocabulary in YAML matches the
 #                          rulepack sanitizer-credit metadata
 #   4. logic-alignment   — cross-rule logic checks: identical
@@ -64,9 +64,9 @@ section_pack_validate() {
     python3 "$SCRIPT_DIR/validate-pattern-pack.py" --binary "$BIN"
 }
 
-section_mega_cli() {
+section_language_gauntlets() {
     require_release_binary || return 1
-    python3 "$SCRIPT_DIR/validate-mega-cli.py" --bin "$BIN" --skip-realworld
+    python3 "$SCRIPT_DIR/validate-language-gauntlets.py" --bin "$BIN" --skip-realworld
 }
 
 section_sanitizer_credit() {
@@ -126,7 +126,7 @@ restore_release_binary() {
 }
 
 run_section "pack-validate"     section_pack_validate
-run_section "mega-cli"          section_mega_cli
+run_section "language-gauntlets" section_language_gauntlets
 run_section "sanitizer-credit"  section_sanitizer_credit
 run_section "logic-alignment"   section_logic_alignment
 run_section "duplication"       section_duplication

@@ -1,0 +1,9 @@
+[package]
+name = "bonsai-language-gauntlet-rust"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[dependencies]
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }

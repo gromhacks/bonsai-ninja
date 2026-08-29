@@ -1,59 +1,5 @@
 # Rust file-upload sinks - attacker-chosen filename flowing into a
 # filesystem path without allowlist / basename stripping.
-- id: rust.upload.actix_multipart_filename
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: rust.actix.multipart_field_filename
-  language: rust
-  tag: file-upload
-  severity: medium
-  packages: [actix_multipart]
-  cwe: [CWE-434]
-  match:
-    kind: call
-    callee:
-      attribute: [ContentDisposition, get_filename]
-  match_examples:
-  - name: generated direct match
-    code: |
-      use actix_multipart;
-      use actix_multipart;
-      use actix_multipart::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          ContentDisposition::get_filename(target);
-      }
-  description: "Disabled - ContentDisposition::get_filename is a client-controlled filename source; file-write/path sinks report the unsafe use."
-
-  imports:
-  - actix_multipart
-- id: rust.upload.axum_multipart_filename
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: rust.axum.multipart_field_file_name
-  language: rust
-  tag: file-upload
-  severity: medium
-  packages: [axum]
-  cwe: [CWE-434]
-  match:
-    kind: call
-    callee:
-      attribute: [Field, file_name]
-  match_examples:
-  - name: generated direct match
-    code: |
-      use axum::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          Field::file_name(target);
-      }
-  description: "Disabled - Field::file_name is already modeled as rust.axum.multipart_field_file_name. Report only when the returned filename reaches a write/path sink."
-
 - id: rust.upload.rocket_tempfile_persist_to
   enabled: true
   language: rust
@@ -75,7 +21,7 @@
       fn example(target: &str) {
           TempFile::persist_to(target);
       }
-    expect_match_text: [TempFile::persist_to]
+    expect_match_text: ["TempFile::persist_to"]
   - name: literal rocket tempfile persist path negative
     code: |
       use rocket::dummy;

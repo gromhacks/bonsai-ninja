@@ -32,6 +32,7 @@ import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 PACK = REPO / "security-patterns" / "langs"
+METADATA = REPO / "security-patterns" / "metadata.yml"
 
 CATEGORIES = ("sources", "sinks", "sanitizers")
 
@@ -62,29 +63,35 @@ UniqueKeyLoader.add_constructor(
     _construct_unique_mapping,
 )
 
-# Canonical sink families tracked by `security pack --audit`. Each entry is the
-# canonical name plus any in-pack aliases used in rule ids.
-CANONICAL_SINK_FAMILIES: dict[str, tuple[str, ...]] = {
-    "cmdi": ("cmdi",),
-    "sqli": ("sqli",),
-    "nosql": ("nosql",),
-    "path": ("path",),
-    "ssrf": ("ssrf",),
-    "xss": ("xss",),
-    "eval": ("eval",),
-    "deserialization": ("deserialization", "deser"),
-    "xxe": ("xxe",),
-    "ldap": ("ldap",),
-    "jwt": ("jwt",),
-    "crypto": ("crypto",),
-    "tls": ("tls",),
-    "template": ("template", "ssti", "tmpl"),
-    "open_redirect": ("open_redirect", "oredr"),
-    "file_upload": ("file_upload", "upload", "upld"),
-    "header_injection": ("header_injection", "header", "hdr"),
-}
+def load_taxonomy() -> tuple[dict[str, tuple[str, ...]], set[tuple[str, str]]]:
+    """Load canonical families and applicability from rulepack-owned metadata."""
+    payload = yaml.safe_load(METADATA.read_text(encoding="utf-8")) or {}
+    canonical = payload.get("canonical_sink_families") or []
+    aliases = payload.get("sink_family_aliases") or {}
+    languages = payload.get("languages") or {}
+    if not isinstance(canonical, list) or not isinstance(aliases, dict):
+        raise ValueError("security-patterns/metadata.yml has invalid sink taxonomy")
 
-FAMILY_NOT_APPLICABLE = {("c", "deserialization")}
+    families = {
+        str(family): tuple(
+            sorted(
+                str(alias)
+                for alias, target in aliases.items()
+                if str(target) == str(family)
+            )
+        )
+        for family in canonical
+    }
+    not_applicable = {
+        (str(language), str(family))
+        for language, metadata in languages.items()
+        if isinstance(metadata, dict)
+        for family in metadata.get("not_applicable_sink_families", [])
+    }
+    return families, not_applicable
+
+
+CANONICAL_SINK_FAMILIES, FAMILY_NOT_APPLICABLE = load_taxonomy()
 
 FAMILY_FILE_ALIASES: dict[str, tuple[str, ...]] = {
     "cache_poisoning": ("cache",),
@@ -161,6 +168,9 @@ REVIEWED_BARE_NAME_RULES = {
     "erlang.memory.gen_server_stop",
     "perl.cmdi.exec",
     "perl.eval.builtin_eval",
+    # Perl's three-argument open is a language builtin. The rule additionally
+    # proves the exact read-mode scalar and tainted path argument positions.
+    "perl.path.open_read",
     "php.path.copy",
     "php.path.copy_dest",
     "python.eval.builtin_exec",
@@ -495,7 +505,16 @@ def is_fragile(rule: dict) -> tuple[bool, str | None]:
         )
         for constraint in constraints
     )
-    if has_declared_scope or has_typed_scope:
+    taint_semantics = rule.get("taint_semantics") or {}
+    has_compiler_value_proof = isinstance(taint_semantics, dict) and any(
+        key in taint_semantics
+        for key in (
+            "finite_literal_map_selector",
+            "configured_receiver",
+            "character_constraint",
+        )
+    )
+    if has_declared_scope or has_typed_scope or has_compiler_value_proof:
         return False, None
     return True, (
         f"bare-name '{bare}' without package/import/framework or "

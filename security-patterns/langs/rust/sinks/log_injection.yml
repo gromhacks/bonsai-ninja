@@ -4,7 +4,7 @@
 - id: rust.log_injection.log_info_newline
   enabled: true
   language: rust
-  tag: header-injection
+  tag: log-injection
   severity: medium
   packages: [log]
   cwe: [CWE-117]

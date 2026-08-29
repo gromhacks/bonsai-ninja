@@ -52,6 +52,16 @@ package-path component becomes a local call qualifier. Shared matching applies
 these values without a language-id branch, and changes participate in cache
 fingerprints.
 
+Package evidence retains its compiler provenance. An exact import in the
+matched file, a dependency-manifest declaration, and an external import in a
+compiler-resolved local module component are distinct facts. Manifests may
+support inherited/runtime-owned APIs when the rule also carries an exact
+owner, type, or qualified target. Component evidence may support an exact
+receiver/member target in a connected wrapper module. An import in an
+unrelated sibling file never authorizes a bare or same-named call. This keeps
+split framework and database modules usable without turning workspace package
+presence into API identity.
+
 Tag defaults reduce repeated guard policy without moving security meaning into
 an adapter. A sink's explicit `analysis_semantics` wins; missing fields inherit
 from its language/tag entry in `metadata.yml`.
@@ -135,10 +145,46 @@ Sinks also need `cwe` and `severity`. Sources need `trust`.
 Typing models may declare `returns_type`, a callback signature, or transfer
 semantics. Callback signatures use `callback_param_types` in parameter order.
 For `kind: call`, `callback_arg_index` selects the inline callback argument;
+an optional `callback_field_path` selects a callback nested beneath exact
+static aggregate fields in that argument (for example `[onrequest]`). Dynamic
+keys, spreads, duplicate paths, and different fields fail closed and provide
+no type evidence. This is compiler-lowered structure rather than source-text
+matching. For callbacks passed as the complete argument, omit the field path.
 for `kind: type`, the target selects the explicitly declared callable type and
 the argument index must be absent. The compiler contributes exact call,
 argument, parameter, import, and declared-type facts; provider names and
 external types stay in YAML.
+
+Context-sensitive parameter rules can constrain the complete compiler
+signature without relying on conventional binding names. Use
+`param_index_in`, `param_type_in`, and `param_count_in` for the selected
+parameter. `param_type_in` accepts either the complete type or its terminal
+segment. Use `param_type_exact_in` when two providers can expose the same
+terminal type name; it requires the complete adapter-emitted qualified type
+and fails closed when the compiler has only an unqualified alias.
+`signature_param_types` requires types at sibling positions;
+`signature_param_annotations` likewise requires adapter-emitted selector or
+annotation facts at sibling positions. Each annotation requirement has an
+`index` and non-empty `annotation_in` list. Missing type/annotation facts fail
+closed, and provider-specific values remain in rule YAML.
+
+For a call or exact write whose spelling is meaningful only because its root
+is imported or provided by the runtime, declare the binding origin explicitly:
+
+```yaml
+match:
+  kind: call
+  callee:
+    name: getQuery
+    binding_origin: imported
+```
+
+Use `runtime-global` for host-provided objects such as browser globals. Both
+forms reject exact local, parameter, file-scope, same-scope callable, and
+workspace callable collisions; `imported` additionally requires an
+adapter-emitted import alias and rejects a workspace-local module with the
+same identity. Do not substitute a package-presence check or a receiver-name
+guess for this compiler binding proof.
 
 **Attribute path** - preferred for `Type.method` calls:
 
@@ -399,20 +445,38 @@ Receiver regexes run on the adapter-normalized receiver expression, not raw
 file text. A call with no receiver cannot satisfy either receiver-regex
 constraint.
 
-### Prior receiver calls
+### Prior receiver state
 
 ```yaml
 - unless_prior_receiver_call:
     call: { name: set_header }
     static_string_args_regex: "(?i)^content-type\\x1ftext/plain$"
+- requires_prior_receiver_call:
+    call: { name: enable_mode }
+    static_string_args_regex: "^strict$"
+- requires_prior_receiver_write:
+    target: { name: mode }
+    accepted_values:
+      - { kind: string, value: strict }
+- requires_prior_receiver_write:
+    target: { name: executable }
+    accepted_calls:
+      - call: { name: Path }
+        items:
+          - index: 0
+            accepted_values:
+              - { kind: string, value: /bin/sh }
 ```
 
-This keeps a sink active unless the compiler proves a guaranteed earlier call
-on the same receiver whose rule-owned target and decoded static string
-arguments match. Static arguments are joined with the ASCII unit separator
-(`\x1f`). Calls seen on only
-one branch, dynamic arguments, and missing structural evidence do not suppress
-the sink.
+The call forms suppress or require a guaranteed earlier call on the same
+receiver whose rule-owned target and decoded static string arguments match.
+Static arguments are joined with the ASCII unit separator (`\x1f`). The write
+form requires the exact reaching definition of a rule-declared member on that
+receiver to equal one of the adapter-decoded scalar values or an explicitly
+declared call result whose required scalar arguments match. Calls or writes
+seen on only one branch, loop-dependent state, conflicting exception paths,
+dynamic values, receiver collisions, and missing structural evidence all fail
+closed.
 
 ### Callback extension proof
 
@@ -430,6 +494,22 @@ The matcher proves factory origin, tainted factory input, receiver-member
 assignment, callback parameter binding, and the declared callback call
 argument from compiler facts. Every API identity and argument role remains in
 the rule.
+
+### Inline callback constraints
+
+```yaml
+- arg_is_inline_callback: 1
+- arg_inline_callback_returns_static:
+    index: 1
+    value: { kind: boolean, value: true }
+```
+
+`arg_is_inline_callback` requires the selected argument to be an adapter-
+lowered inline closure or lambda with compiler-emitted parameter bindings.
+`arg_inline_callback_returns_static` additionally requires every ordinary
+return from that callback to produce the declared frontend-decoded scalar.
+Named callbacks, dynamic or mixed return values, incomplete callback bodies,
+and missing syntax facts fail closed.
 
 ### `format_arg_index`
 
@@ -460,7 +540,12 @@ the qualified form.
 | `namespace: java.security` | Require the callee's normalized qualified prefix. |
 | `second_arg_equals: "True"` | Compatibility shorthand for exact arg 1 text; prefer `arg_equals` in new rules. |
 | `arg_value_not_aggregate: 0` | Reject a compiler-proven object/list/array/spread at arg 0; unknown shape keeps the dangerous rule active. |
+| `arg_value_kind` | Require one argument's exact adapter-emitted `AssignValueKind`; missing or different compiler evidence fails closed. |
+| `arg_string_composition_starts_with` | Require a multi-part compiler-lowered string composition whose first part is the declared literal and whose remainder contains a dynamic part. |
+| `arg_string_composition_not_starts_with` | Reject that exact compiler-lowered prefix shape; incomplete or absent composition evidence does not invent a prefix. |
 | `arg_sequence_items_equal` | Require typed scalar values at selected positions in one completely decoded positional sequence. |
+| `arg_aggregate_fields_equal` | Require typed scalar values at selected static field paths in one complete, spread-free aggregate argument. |
+| `receiver_factory_arguments_equal` | Require the receiver's exact reaching assignment to call a declared factory with selected frontend-decoded scalar arguments. |
 
 ```yaml
 - arg_sequence_items_equal:
@@ -474,6 +559,53 @@ the qualified form.
         accepted_values:
           - { kind: string, value: -c }
 ```
+
+```yaml
+- arg_aggregate_fields_equal:
+    argument_index: 0
+    required_fields:
+      - path: [transport, verify]
+        value: { kind: boolean, value: false }
+```
+
+The aggregate form consumes adapter-decoded field paths and scalar values.
+Dynamic required values, spreads, computed keys, duplicate paths, and missing
+fields fail closed; unrelated dynamic sibling fields do not erase an exact
+required field.
+
+```yaml
+- arg_value_kind:
+    index: 0
+    kind: address_of_aggregate
+- arg_string_composition_starts_with:
+    index: 1
+    value: "sh"
+- arg_string_composition_not_starts_with:
+    index: 0
+    value: "safe:"
+```
+
+`arg_value_kind` consumes the owning adapter's complete-expression
+classification (`literal`, `call_result`, `property_read`, `yield_result`,
+`destructure`, `callable_reference`, `address_of_aggregate`, `compound`,
+`whole_value_selection`, or `unknown`). The string-composition constraints
+consume ordered `StringCompositionFact` parts from the compiler IR; they never
+parse rendered argument text. The positive form requires at least two parts,
+an exact first literal equal to `value`, and a later non-literal part. The
+inverse rejects only that fully proven shape.
+
+```yaml
+- receiver_factory_arguments_equal:
+    factory: { name: compile }
+    items:
+      - index: 1
+        value: { kind: boolean, value: true }
+```
+
+The receiver-factory form uses the compiler's reaching assignment and static
+argument facts. Factory identity, positions, and values belong to the rule;
+mutable, ambiguous, indirect, or dynamically configured receivers fail
+closed.
 
 ### `in_class` / `in_method` / `decl_kind_in` / `visibility_in`
 
@@ -550,6 +682,16 @@ matches one of the listed names. Useful for scoping `kind: missing`
 rules to handler decls (`@app.route`) without firing on every
 helper. Splits dotted decorator names so `@app.route` matches
 both `route` and `app`.
+
+### `enclosing_decorator_not_in`
+
+```yaml
+- enclosing_decorator_not_in: [task.bind]
+```
+
+The enclosing declaration must have no exact adapter-emitted decorator equal
+to a listed value. This is a compiler-fact exclusion, not a source-text or
+substring check; missing decorator evidence does not invent an exclusion.
 
 ### `enclosing_modifier_in`
 
@@ -681,12 +823,26 @@ structured callback parameter carries its complete incoming value into exact
 field reads, while a later field assignment remains a normal taint-killing
 definition.
 
+For callbacks whose complete tail is externally delivered, use
+`source_param_indices_from: N` instead of guessing a maximum position. The
+compiler-declared callback arity expands the finite range `N..arity`; explicit
+`source_param_indices` and the tail may be combined, deduplicated, and are
+always clipped to the exact signature. Parameters outside that declared set
+retain ordinary callback argument semantics.
+
 ## Output Argument Flows
 
 Use `taint_semantics.output_arg_flows` for APIs that copy or format
 value-bearing inputs into a caller-owned output argument. This is a
 transfer fact, not a source by itself: it only fires when one of the
 configured value inputs is already tainted.
+
+For an in-place sanitizer that replaces or constrains its receiver, declare
+`taint_semantics.clean_receiver_overwrite: true`. The rule must be a sanitizer
+`kind: call` with a callee target and enough AST constraints to distinguish the
+safe operation. The matcher compiles approved call spans; only those calls
+commit a fresh clean receiver definition. Do not use this for an API that
+returns a cleaned copy while leaving the receiver unchanged.
 
 ```yaml
 - id: c.format.sprintf_tainted
@@ -847,9 +1003,9 @@ sentinel argument index:
 
 ## Receiver-State Mutators
 
-Use `taint_semantics.taint_receiver_from_args: true` when a tainted
-argument mutates the receiver and a later receiver-only sink consumes that
-state.
+Use `taint_semantics.taint_receiver_from_args: true` when a tainted call
+argument or property-write value mutates the receiver and a later
+receiver-only sink consumes that state.
 
 ```yaml
 - id: java.sqli.statement_executebatch
@@ -871,6 +1027,12 @@ Pair it with a later sink such as `Statement.executeBatch` using
 from the structured callee target; there is no global list of mutator
 method names.
 
+For a property mutation, use `match.kind: write` with an exact target plus
+`receiver_type_in`. The matcher compiles the complete rule to assignment
+spans; the IDG receives only those spans and the generic
+`receiver.member = value` flow shape. Provider, type, and member spellings
+remain in YAML.
+
 ## `kind: missing` walker
 
 ```yaml
@@ -878,40 +1040,29 @@ match:
   kind: missing
   callee:
     attribute: [csrf, validate]
-  search_depth: 0   # default: intra-procedural only
 constraints:
   - enclosing_decorator_in: [route, post, get]
 ```
 
 Inverse-match: fires on every function-shaped decl that does
-*not* contain a call to the declared target. `search_depth > 0`
-opts this rule predicate into a resolved-callee traversal up to the
-declared depth (capped at 4); use sparingly. This is not taint
-propagation and does not cap the semantic IDG fixed point. Prefer the
-intra-procedural default plus `enclosing_decorator_in` or package gates
-when that expresses the rule accurately.
+*not* contain a call to the declared target in that declaration's exact
+compiler facts. The matcher does not infer whole-program absence from a
+bounded callgraph prefix. Use `enclosing_decorator_in`, signature constraints,
+or package gates to describe the exact local contract.
 
-## Subsumption / disabling
+## Bundled rule lifecycle
 
-Disabled rules must declare a reason:
+The checked-in pack contains executable rules only. Do not preserve a
+duplicate, broad name guess, or matcher proposal as `enabled: false` YAML:
 
-```yaml
-- id: python.deprecated.foo
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: python.canonical.foo
-```
+- add a historical identifier to the enabled canonical rule's `aliases` when
+  the match surface is genuinely identical;
+- declare a genuinely inapplicable canonical family in `metadata.yml`;
+- keep an unimplemented proposal in an issue or design note until the compiler
+  fact, precise rule, positive example, and collision-negative example exist.
 
-`code` is one of:
-
-- `subsumed` - covered by another (more general) rule. Requires
-  `subsumed_by`.
-- `over-broad` - original pattern was too permissive.
-- `requires-constraint` - needs an extra constraint arm to fire cleanly.
-- `pending-adapter-fact` - needs an adapter capability not yet exposed.
-
-The `subsumed_by` chain must terminate at an enabled rule.
+Workspace-local overlays may still replace an enabled bundled rule with a
+disabled entry as an explicit project policy; see [Custom Rules](custom-rules.mdx).
 
 ## Merged Families And Aliases
 
@@ -1003,8 +1154,8 @@ bonsai-ninja security . pack --validate --rules-dir path/
 bonsai-ninja security . pack --audit --rules-dir path/
 ```
 
-The validator catches missing examples, broken `subsumed_by` chains,
-severity/CWE typos, and match shapes that would not fire on their own
-examples. Audit mode adds per-language source-boundary and sink-family
-coverage matrices; every zero remains visible until rule data covers it or
-metadata explicitly declares it inapplicable.
+The validator catches missing examples, disabled entries in the bundled pack,
+severity/CWE typos, and match shapes that would not fire on their own examples.
+Audit mode adds per-language source-boundary and sink-family coverage matrices;
+every zero remains visible until rule data covers it or metadata explicitly
+declares it inapplicable.

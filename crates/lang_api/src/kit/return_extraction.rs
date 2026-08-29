@@ -332,53 +332,65 @@ pub fn extract_catch_param(try_node: &Node<'_>, src: &[u8]) -> Option<String> {
         {
             continue;
         }
-        // Try every field name known to wrap the binding.
-        if let Some(parameter_node) = catch_arm
-            .child_by_field_name("parameter")
-            .or_else(|| catch_arm.child_by_field_name("catch_parameter"))
-            .or_else(|| catch_arm.child_by_field_name("exception_parameter"))
-            .or_else(|| catch_arm.child_by_field_name("name"))
-            .or_else(|| catch_arm.child_by_field_name("variable"))
-        {
-            let binding_identifier = catch_binding_identifier(parameter_node).or_else(|| {
-                first_identifier_descendant(parameter_node).or_else(|| {
-                    if looks_like_identifier(parameter_node.kind()) {
-                        Some(parameter_node)
-                    } else {
-                        None
-                    }
-                })
-            });
-            if let Some(identifier) = binding_identifier {
-                return Some(node_text(&identifier, src).trim().to_string());
-            }
+        if let Some(parameter) = extract_catch_arm_param(&catch_arm, src) {
+            return Some(parameter);
         }
-        // Python: catch parameter wrapped under a `value` field.
-        if let Some(value_node) = catch_arm.child_by_field_name("value") {
-            if let Some(identifier) = catch_binding_identifier(value_node) {
-                return Some(node_text(&identifier, src).trim().to_string());
-            }
-        }
-        // Python `except E as e` — walk for the alias subtree directly.
-        let mut inner_cursor = catch_arm.walk();
-        for inner_child in catch_arm.named_children(&mut inner_cursor) {
-            let inner_kind = inner_child.kind();
-            if inner_kind == "as_pattern" || inner_kind == "as_pattern_target" || inner_kind == "alias" {
-                if let Some(identifier) =
-                    catch_binding_identifier(inner_child).or_else(|| first_identifier_descendant(inner_child))
-                {
-                    return Some(node_text(&identifier, src).trim().to_string());
+    }
+    None
+}
+
+/// Extract the explicit exception binding from one adapter-proven catch arm.
+///
+/// This is the arm-local counterpart to [`extract_catch_param`]. It does not
+/// search sibling arms, so callers can retain the binding's exact handler
+/// identity when lowering multiple catches.
+pub fn extract_catch_arm_param(catch_arm: &Node<'_>, src: &[u8]) -> Option<String> {
+    // Try every field name known to wrap the binding.
+    if let Some(parameter_node) = catch_arm
+        .child_by_field_name("parameter")
+        .or_else(|| catch_arm.child_by_field_name("catch_parameter"))
+        .or_else(|| catch_arm.child_by_field_name("exception_parameter"))
+        .or_else(|| catch_arm.child_by_field_name("name"))
+        .or_else(|| catch_arm.child_by_field_name("variable"))
+    {
+        let binding_identifier = catch_binding_identifier(parameter_node).or_else(|| {
+            first_identifier_descendant(parameter_node).or_else(|| {
+                if looks_like_identifier(parameter_node.kind()) {
+                    Some(parameter_node)
+                } else {
+                    None
                 }
-            }
-        }
-        // Fallback: first identifier descendant of the catch-arm itself —
-        // covers compact forms like Ruby `rescue => e`. Note: for shapes
-        // where the type identifier appears before the variable, the
-        // fallback returns the type instead. Adapter post-processing
-        // (e.g. `collect_java_catch_param_name`) corrects that.
-        if let Some(identifier) = first_identifier_descendant(catch_arm) {
+            })
+        });
+        if let Some(identifier) = binding_identifier {
             return Some(node_text(&identifier, src).trim().to_string());
         }
+    }
+    // Python: catch parameter wrapped under a `value` field.
+    if let Some(value_node) = catch_arm.child_by_field_name("value") {
+        if let Some(identifier) = catch_binding_identifier(value_node) {
+            return Some(node_text(&identifier, src).trim().to_string());
+        }
+    }
+    // Python `except E as e` — walk for the alias subtree directly.
+    let mut inner_cursor = catch_arm.walk();
+    for inner_child in catch_arm.named_children(&mut inner_cursor) {
+        let inner_kind = inner_child.kind();
+        if inner_kind == "as_pattern" || inner_kind == "as_pattern_target" || inner_kind == "alias" {
+            if let Some(identifier) =
+                catch_binding_identifier(inner_child).or_else(|| first_identifier_descendant(inner_child))
+            {
+                return Some(node_text(&identifier, src).trim().to_string());
+            }
+        }
+    }
+    // Fallback: first identifier descendant of the catch-arm itself —
+    // covers compact forms like Ruby `rescue => e`. Note: for shapes
+    // where the type identifier appears before the variable, the
+    // fallback returns the type instead. Adapter post-processing
+    // (e.g. `collect_java_catch_param_name`) corrects that.
+    if let Some(identifier) = first_identifier_descendant(*catch_arm) {
+        return Some(node_text(&identifier, src).trim().to_string());
     }
     None
 }

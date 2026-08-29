@@ -122,6 +122,14 @@
         const b = message.Body;
         return b;
       }
+  - name: body field on an unrelated receiver type
+    code: |
+      import { Message } from "@aws-sdk/client-sqs";
+      interface Envelope { Body?: string }
+      function handle(message: Envelope): string | undefined {
+        return message.Body;
+      }
+    expect_no_match: true
   description: "SQS Message.Body - queue message body read on a typed Message receiver."
 
 - id: typescript.source.pubsub_message_data

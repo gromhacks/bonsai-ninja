@@ -276,6 +276,23 @@ fn relation_callers(
     edges
 }
 
+fn relation_callable_arguments(
+    relation: &dyn bonsai_idg::workspace_adapter::CallGraphRelation,
+    callers: &AHashSet<FuncId>,
+) -> Vec<bonsai_callgraph::CallGraphCallableArgument> {
+    let mut arguments = Vec::new();
+    let mut ordered = callers.iter().copied().collect::<Vec<_>>();
+    ordered.sort_unstable_by_key(|func| func.raw());
+    for caller in ordered {
+        relation.visit_callable_arguments(caller, &mut |span, target| {
+            arguments.push(bonsai_callgraph::CallGraphCallableArgument { caller, span, target });
+        });
+    }
+    arguments.sort_unstable();
+    arguments.dedup();
+    arguments
+}
+
 fn insert_scoped_call_edge(
     edges: &mut Vec<bonsai_callgraph::CallEdge>,
     seen: &mut AHashSet<ScopedCallEdgeKey>,
@@ -300,7 +317,19 @@ fn source_reachable_call_graph_from_relation(
     on_relation_unit: &dyn Fn(),
 ) -> SourceReachableCallGraph {
     let target_set: AHashSet<FuncId> = target_funcs.iter().copied().collect();
+    let source_set: AHashSet<FuncId> = source_funcs.iter().copied().collect();
     let mut reached_funcs: AHashSet<FuncId> = source_funcs.iter().copied().collect();
+    // Callable arguments passed directly at a source site are exact compiler
+    // values, but they are not execution edges. Keep their declarations and
+    // outgoing graph region available so a later consumer can join a
+    // rule-declared external callback contract to the exact argument span.
+    // Merely retaining this scope does not execute or taint the callback.
+    let source_callable_arguments = relation_callable_arguments(relation, &source_set);
+    let mut source_callable_scope_funcs = source_set.clone();
+    for callable in &source_callable_arguments {
+        source_callable_scope_funcs.insert(callable.target);
+        reached_funcs.insert(callable.target);
+    }
     let mut reverse_output_funcs: AHashSet<FuncId> = source_funcs
         .iter()
         .copied()
@@ -407,6 +436,7 @@ fn source_reachable_call_graph_from_relation(
         reached_funcs.intersection(&can_reach_target).copied().collect()
     };
     relevant_funcs.extend(return_corridor_funcs);
+    relevant_funcs.extend(source_callable_scope_funcs);
 
     // Retain output providers connected by already-admitted semantic edges.
     let mut provider_stack: Vec<FuncId> = relevant_funcs.iter().copied().collect();
@@ -439,6 +469,7 @@ fn source_reachable_call_graph_from_relation(
         .collect();
     files.sort_unstable_by_key(|file| file.raw());
     files.dedup();
+    let callable_arguments = relation_callable_arguments(relation, &relevant_funcs);
     let mut funcs: Vec<FuncId> = relevant_funcs.into_iter().collect();
     funcs.sort_unstable_by_key(|func| func.raw());
     let nodes = funcs
@@ -464,6 +495,7 @@ fn source_reachable_call_graph_from_relation(
             nodes,
             filtered.edges,
             Vec::new(),
+            callable_arguments,
             Vec::new(),
         )),
         linkage_index: global,
@@ -784,6 +816,10 @@ struct Inner {
     /// `dump callgraph` share the same instance instead of each
     /// rebuilding from scratch. Cleared on file edits.
     resolved_call_graph: parking_lot::RwLock<Option<Arc<bonsai_callgraph::ResolvedCallGraph>>>,
+    /// Single-flight construction gate for the complete resolved call graph.
+    /// The RwLock above protects publication and reads; this mutex prevents
+    /// concurrent misses from independently lowering the entire workspace.
+    resolved_call_graph_construction: Mutex<()>,
     /// File-partitioned persisted graph reader for scoped semantic queries.
     /// It owns only the compact callable table and mmapped factstore; exact
     /// adjacency partitions are decoded on demand.
@@ -873,6 +909,13 @@ struct Inner {
     complete_workspace_index: Mutex<bool>,
     /// Immutable compiler-input policy for this workspace generation.
     include_minified_sources: bool,
+    /// Whether this workspace may consume or publish reusable semantic
+    /// sidecars. Command-local exact memoization remains available when false.
+    persistent_semantic_cache: bool,
+    /// Whether an on-demand semantic phase may automatically publish a
+    /// missing compiler-object generation. Explicit cache/index operations
+    /// can still request publication through the public save methods.
+    publish_compiler_object_generation: bool,
 }
 
 type SidecarSourceInputs = Arc<Vec<(u32, String, u64)>>;
@@ -1034,6 +1077,18 @@ const fn cache_status_for_entries(entries: usize) -> WorkspaceCacheStatus {
 /// or dataflow prewarm.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceOpenOptions {
+    /// Allow automatic reuse and publication of persistent semantic sidecars.
+    /// Disabling this changes storage only: requested compiler/graph work is
+    /// still computed exactly and may be memoized for this process.
+    #[serde(default = "default_persistent_semantic_cache")]
+    pub persistent_semantic_cache: bool,
+    /// Attach a compatible persisted compiler-object generation. Disabling
+    /// this forces exact Tree-sitter lowering for the current process.
+    #[serde(default = "default_load_compiler_object_sidecar")]
+    pub load_compiler_object_sidecar: bool,
+    /// Publish complete compiler-object generations after exact lowering.
+    #[serde(default = "default_save_compiler_object_sidecar")]
+    pub save_compiler_object_sidecar: bool,
     /// Load the resolved callgraph sidecar before queries run. This is
     /// independent of dataflow: disabling dataflow prewarm must not
     /// accidentally force every query command to rebuild the callgraph.
@@ -1089,6 +1144,18 @@ const fn default_load_idg_sidecar() -> bool {
     true
 }
 
+const fn default_persistent_semantic_cache() -> bool {
+    true
+}
+
+const fn default_load_compiler_object_sidecar() -> bool {
+    true
+}
+
+const fn default_save_compiler_object_sidecar() -> bool {
+    true
+}
+
 const fn default_load_callgraph_sidecar() -> bool {
     true
 }
@@ -1104,6 +1171,23 @@ impl Default for WorkspaceOpenOptions {
 }
 
 impl WorkspaceOpenOptions {
+    /// Disable every reusable semantic sidecar for this workspace open.
+    /// Requested analysis remains exact and resident; only cross-process
+    /// loading/publication and the presentation-only flow-id prewarm are
+    /// disabled.
+    pub fn disable_persistent_semantic_cache(&mut self) {
+        self.persistent_semantic_cache = false;
+        self.load_compiler_object_sidecar = false;
+        self.save_compiler_object_sidecar = false;
+        self.load_callgraph_sidecar = false;
+        self.load_dataflow_sidecar = false;
+        self.save_dataflow_sidecar = false;
+        self.load_value_flow_sidecar = false;
+        self.save_value_flow_sidecar = false;
+        self.prewarm_flow_ids = false;
+        self.load_idg_sidecar = false;
+    }
+
     /// Parse and index, load the sidecar if present, but do not
     /// precompute missing taint facts. Commands can query
     /// [`Workspace::dataflow`] and pay only for the entries they
@@ -1111,6 +1195,9 @@ impl WorkspaceOpenOptions {
     #[must_use]
     pub const fn query_only() -> Self {
         Self {
+            persistent_semantic_cache: true,
+            load_compiler_object_sidecar: true,
+            save_compiler_object_sidecar: true,
             load_callgraph_sidecar: true,
             load_dataflow_sidecar: true,
             prewarm_dataflow: false,
@@ -1137,6 +1224,9 @@ impl WorkspaceOpenOptions {
     #[must_use]
     pub const fn lazy_query() -> Self {
         Self {
+            persistent_semantic_cache: true,
+            load_compiler_object_sidecar: true,
+            save_compiler_object_sidecar: true,
             load_callgraph_sidecar: false,
             load_dataflow_sidecar: false,
             prewarm_dataflow: false,
@@ -1159,6 +1249,9 @@ impl WorkspaceOpenOptions {
     #[must_use]
     pub const fn parse_only() -> Self {
         Self {
+            persistent_semantic_cache: true,
+            load_compiler_object_sidecar: true,
+            save_compiler_object_sidecar: true,
             load_callgraph_sidecar: false,
             load_dataflow_sidecar: false,
             prewarm_dataflow: false,
@@ -1193,6 +1286,9 @@ impl WorkspaceOpenOptions {
     #[must_use]
     pub const fn sidecar_validation_only() -> Self {
         Self {
+            persistent_semantic_cache: true,
+            load_compiler_object_sidecar: true,
+            save_compiler_object_sidecar: false,
             load_callgraph_sidecar: false,
             load_dataflow_sidecar: false,
             prewarm_dataflow: false,
@@ -1222,6 +1318,9 @@ impl WorkspaceOpenOptions {
     #[must_use]
     pub const fn full_prewarm() -> Self {
         Self {
+            persistent_semantic_cache: true,
+            load_compiler_object_sidecar: true,
+            save_compiler_object_sidecar: true,
             load_callgraph_sidecar: true,
             load_dataflow_sidecar: true,
             prewarm_dataflow: true,
@@ -1263,6 +1362,7 @@ impl Workspace {
                 value_flow: ValueFlowCache::new(),
                 inter_taint: Arc::new(InterTaintCaches::default()),
                 resolved_call_graph: parking_lot::RwLock::new(None),
+                resolved_call_graph_construction: Mutex::new(()),
                 callgraph_query: Mutex::new(None),
                 sidecar_source_inputs: Mutex::new(None),
                 compiler_linkage: parking_lot::RwLock::new(None),
@@ -1282,8 +1382,15 @@ impl Workspace {
                 idg_sidecar_root: Mutex::new(None),
                 complete_workspace_index: Mutex::new(false),
                 include_minified_sources: options.include_minified_sources,
+                persistent_semantic_cache: options.persistent_semantic_cache,
+                publish_compiler_object_generation: options.save_compiler_object_sidecar,
             }),
         }
+    }
+
+    #[inline]
+    fn persistent_semantic_cache_enabled(&self) -> bool {
+        self.inner.persistent_semantic_cache
     }
 
     /// Workspace-wide taint-connected dataflow cache. Explicit
@@ -1414,6 +1521,9 @@ impl Workspace {
     /// Persist the complete generation of relocatable, adapter-lowered file
     /// objects consumed by later compiler phases.
     pub fn save_compiler_object_sidecar(&self, root: &Path) -> std::io::Result<usize> {
+        if !self.persistent_semantic_cache_enabled() {
+            return Ok(0);
+        }
         if !self.is_complete_workspace_index() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1433,6 +1543,9 @@ impl Workspace {
     where
         F: Fn() + Sync,
     {
+        if !self.persistent_semantic_cache_enabled() {
+            return Ok(0);
+        }
         if !self.is_complete_workspace_index() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1455,6 +1568,9 @@ impl Workspace {
     /// every source independently. Failure to publish is a performance/cache
     /// failure only: callers retain the canonical syntax fallback.
     fn ensure_complete_compiler_object_generation(&self, root: &Path) {
+        if !self.inner.publish_compiler_object_generation {
+            return;
+        }
         if self.compiler_object_generation_matches_current_snapshot() {
             return;
         }
@@ -1500,6 +1616,11 @@ impl Workspace {
     /// Seed the slot from a sidecar with [`Self::seed_resolved_call_graph`]
     /// at workspace open time to skip the initial build entirely.
     pub fn seed_resolved_call_graph(&self, graph: Arc<bonsai_callgraph::ResolvedCallGraph>) {
+        let _construction_lock = self.inner.resolved_call_graph_construction.lock();
+        self.publish_resolved_call_graph(graph);
+    }
+
+    fn publish_resolved_call_graph(&self, graph: Arc<bonsai_callgraph::ResolvedCallGraph>) {
         self.inner.dataflow.seed_call_graph(graph.clone());
         *self.inner.resolved_call_graph.write() = Some(graph);
     }
@@ -1515,6 +1636,12 @@ impl Workspace {
     /// Load and seed the conventional callgraph sidecar while preserving the
     /// exact validation/decode error for compiler phase orchestration.
     pub fn load_callgraph_sidecar_checked(&self, root: &Path) -> std::io::Result<()> {
+        if !self.persistent_semantic_cache_enabled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "persistent semantic cache disabled",
+            ));
+        }
         let path = callgraph_sidecar::callgraph_sidecar_path(root);
         let graph = callgraph_sidecar::load_callgraph_sidecar_checked(&path, &self.inner.db)?;
         self.seed_resolved_call_graph(Arc::new(graph));
@@ -1527,6 +1654,9 @@ impl Workspace {
     /// call [`Self::load_callgraph_sidecar`] before consuming edges.
     #[must_use]
     pub fn callgraph_sidecar_is_current(&self, root: &Path) -> bool {
+        if !self.persistent_semantic_cache_enabled() {
+            return false;
+        }
         let path = callgraph_sidecar::callgraph_sidecar_path(root);
         callgraph_sidecar::validate_callgraph_sidecar_for_db(&path, &self.inner.db).is_ok()
     }
@@ -1535,6 +1665,9 @@ impl Workspace {
     /// sidecar path for `root`. Builds the graph on-demand if it
     /// hasn't been built yet.
     pub fn save_callgraph_sidecar(&self, root: &Path) -> std::io::Result<()> {
+        if !self.persistent_semantic_cache_enabled() {
+            return Ok(());
+        }
         if !self.is_complete_workspace_index() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1559,6 +1692,9 @@ impl Workspace {
     where
         F: Fn() + Sync,
     {
+        if !self.persistent_semantic_cache_enabled() {
+            return Ok(());
+        }
         if !self.is_complete_workspace_index() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1583,6 +1719,9 @@ impl Workspace {
     /// current VFS identity and semantic ABI without decoding its payload.
     #[must_use]
     pub fn compiler_linkage_sidecar_is_current(&self, root: &Path) -> bool {
+        if !self.persistent_semantic_cache_enabled() {
+            return false;
+        }
         let path = linkage_sidecar::linkage_sidecar_path(root);
         linkage_sidecar::validate_linkage_sidecar_for_db(&path, &self.inner.db).is_ok()
     }
@@ -1591,6 +1730,12 @@ impl Workspace {
     /// sidecar. The caller receives the concrete validation/decode error so a
     /// compiler orchestration phase can rebuild rather than weakening facts.
     pub fn load_compiler_linkage_sidecar_checked(&self, root: &Path) -> std::io::Result<()> {
+        if !self.persistent_semantic_cache_enabled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "persistent semantic cache disabled",
+            ));
+        }
         if self.inner.compiler_linkage.read().is_some() {
             return Ok(());
         }
@@ -1624,6 +1769,9 @@ impl Workspace {
     where
         F: Fn(CompilerLinkageProgress) + Sync,
     {
+        if !self.persistent_semantic_cache_enabled() {
+            return Ok(());
+        }
         if !self.is_complete_workspace_index() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1714,7 +1862,10 @@ impl Workspace {
                 return linkage;
             }
         }
-        if let Some(root) = self.root_path().filter(|_| self.is_complete_workspace_index()) {
+        if let Some(root) = self
+            .root_path()
+            .filter(|_| self.is_complete_workspace_index() && self.persistent_semantic_cache_enabled())
+        {
             let path = linkage_sidecar::linkage_sidecar_path(&root);
             if let Ok(linkage) = linkage_sidecar::load_linkage_sidecar_checked(&path, &self.inner.db) {
                 let linkage = Arc::new(linkage);
@@ -1731,7 +1882,10 @@ impl Workspace {
         });
         *slot = Some(linkage.clone());
         drop(slot);
-        if let Some(root) = self.root_path().filter(|_| self.is_complete_workspace_index()) {
+        if let Some(root) = self
+            .root_path()
+            .filter(|_| self.is_complete_workspace_index() && self.persistent_semantic_cache_enabled())
+        {
             let path = linkage_sidecar::linkage_sidecar_path(&root);
             on_progress(CompilerLinkageProgress::Persisting {
                 declarations: linkage.len(),
@@ -1777,7 +1931,10 @@ impl Workspace {
         if let Some(headers) = slot.as_ref() {
             return headers.clone();
         }
-        if let Some(root) = self.root_path().filter(|_| self.is_complete_workspace_index()) {
+        if let Some(root) = self
+            .root_path()
+            .filter(|_| self.is_complete_workspace_index() && self.persistent_semantic_cache_enabled())
+        {
             let path = linkage_sidecar::linkage_sidecar_path(&root);
             match linkage_sidecar::load_header_sidecar_checked(&path, &self.inner.db) {
                 Ok(headers) => {
@@ -1811,7 +1968,10 @@ impl Workspace {
         if self.is_complete_workspace_index() {
             return self.compiler_header_index();
         }
-        if let Some(root) = self.root_path() {
+        if let Some(root) = self
+            .root_path()
+            .filter(|_| self.persistent_semantic_cache_enabled())
+        {
             let path = linkage_sidecar::linkage_sidecar_path(&root);
             if let Ok(headers) = self.sidecar_source_inputs().and_then(|inputs| {
                 linkage_sidecar::load_header_sidecar_checked_with_source_inputs(&path, inputs.as_slice())
@@ -1869,7 +2029,10 @@ impl Workspace {
         };
         files.sort_unstable_by_key(|file| file.raw());
         files.dedup();
-        if let Some(root) = self.root_path() {
+        if let Some(root) = self
+            .root_path()
+            .filter(|_| self.persistent_semantic_cache_enabled())
+        {
             let path = linkage_sidecar::linkage_sidecar_path(&root);
             let loaded = if self.is_complete_workspace_index() {
                 linkage_sidecar::load_header_partitions_checked(&path, &self.inner.db, &files)
@@ -1922,7 +2085,10 @@ impl Workspace {
     where
         F: Fn() + Sync,
     {
-        if let Some(root) = self.root_path() {
+        if let Some(root) = self
+            .root_path()
+            .filter(|_| self.persistent_semantic_cache_enabled())
+        {
             let path = linkage_sidecar::linkage_sidecar_path(&root);
             if let Ok(ancestry) =
                 linkage_sidecar::load_receiver_ancestry_sidecar_checked(&path, &self.inner.db)
@@ -2038,7 +2204,18 @@ impl Workspace {
                 return *hash;
             }
         }
-        let hash = idg_workspace_pipeline_hash(&self.inner.db, root);
+        // Exact query/open paths already retain the immutable compiler input
+        // table used to validate every semantic sidecar. Reuse those content
+        // hashes when present instead of reading and hashing every resident
+        // source body again. A workspace that has not produced that table
+        // keeps the legacy VFS fingerprint path, so this optimization never
+        // creates a second source-inventory or freshness model.
+        let source_inputs = self.inner.sidecar_source_inputs.lock().clone();
+        let content_fingerprint = workspace_content_fingerprint_from_cached_inputs(
+            &self.inner.db,
+            source_inputs.as_ref().map(|inputs| inputs.as_slice()),
+        );
+        let hash = idg_workspace_pipeline_hash_with_content(&self.inner.db, root, content_fingerprint);
         *cached = Some((root_key, hash));
         hash
     }
@@ -2052,6 +2229,7 @@ impl Workspace {
     /// control, not a graph or traversal limit: a later consumer reloads or
     /// rebuilds the complete graph on demand.
     pub fn release_resolved_call_graph_cache(&self) {
+        let _construction_lock = self.inner.resolved_call_graph_construction.lock();
         *self.inner.resolved_call_graph.write() = None;
         *self.inner.callgraph_query.lock() = None;
         self.inner.dataflow.release_call_graph();
@@ -2203,32 +2381,24 @@ impl Workspace {
         if let Some(service) = self.inner.db.idg_service() {
             return Ok(Some(service.segment_count()));
         }
+        if !self.persistent_semantic_cache_enabled() {
+            return Ok(None);
+        }
         let sidecar = bonsai_idg::workspace::idg_sidecar_path(root);
         if !sidecar.exists() {
             return Ok(None);
         }
         let pipeline_hash = self.cached_idg_workspace_pipeline_hash(Some(root));
-        // Reject a stale/corrupt generation before constructing the compiler
-        // linkage table it would need if it were reusable. The prior order
-        // made a cheap cache miss trigger a complete streamed linkage build,
-        // so every fresh CLI process could compile the workspace merely to
-        // discover that the graph header did not match.
-        if let Err(error) = bonsai_idg::workspace::IdgWorkspace::validate_sidecar_layout_with_pipeline(
-            &sidecar,
-            pipeline_hash,
-        ) {
-            bonsai_diagnostics::debug_log!(
-                "idg-build",
-                "workspace IDG sidecar rejected before linkage hydration: {}",
-                error
-            );
-            return Ok(None);
-        }
         // A persisted IDG already contains exact call/return relations. Query
         // rendering needs stable declaration/type headers, not the complete
-        // AST resolver-linkage payload that built those relations.
-        let global = self.compiler_header_index();
-        let Some(service) = bonsai_idg::IdgQueryService::load_from_disk(&sidecar, pipeline_hash, global)?
+        // AST resolver-linkage payload that built those relations. Keep that
+        // header projection lazy until the query loader has validated the
+        // complete sidecar layout once; a stale/corrupt cache therefore
+        // remains a cheap miss without a duplicate valid-cache scan.
+        let Some(service) =
+            bonsai_idg::IdgQueryService::load_from_disk_with_global(&sidecar, pipeline_hash, || {
+                self.compiler_header_index()
+            })?
         else {
             return Ok(None);
         };
@@ -2247,6 +2417,9 @@ impl Workspace {
     /// use [`Self::load_idg_sidecar`], which validates the complete layout,
     /// scans segment headers once, and decodes exact relation pages on demand.
     pub fn validate_idg_sidecar_layout(&self, root: &Path) -> bonsai_idg::IdgResult<Option<usize>> {
+        if !self.persistent_semantic_cache_enabled() {
+            return Ok(None);
+        }
         let sidecar = bonsai_idg::workspace::idg_sidecar_path(root);
         if !sidecar.exists() {
             return Ok(None);
@@ -2265,36 +2438,30 @@ impl Workspace {
         if let Some(hit) = cached {
             return hit;
         }
-        let complete_root = self.root_path().filter(|_| self.is_complete_workspace_index());
+        // Build the complete graph once. Re-check after acquiring the
+        // construction lock because a peer may have populated either the
+        // memory slot or sidecar while this caller was waiting.
+        let _construction_lock = self.inner.resolved_call_graph_construction.lock();
+        if let Some(hit) = self.inner.resolved_call_graph.read().as_ref().cloned() {
+            return hit;
+        }
+        let complete_root = self
+            .root_path()
+            .filter(|_| self.is_complete_workspace_index() && self.persistent_semantic_cache_enabled());
         if let Some(root) = complete_root.as_deref() {
             if let Ok(graph) = callgraph_sidecar::load_callgraph_sidecar_checked(
                 &callgraph_sidecar::callgraph_sidecar_path(root),
                 &self.inner.db,
             ) {
                 let graph = Arc::new(graph);
-                self.seed_resolved_call_graph(graph.clone());
+                self.publish_resolved_call_graph(graph.clone());
                 return graph;
             }
             self.ensure_complete_compiler_object_generation(root);
         }
         let built = self.build_resolved_call_graph();
         let arc = Arc::new(built);
-        let mut slot = self.inner.resolved_call_graph.write();
-        if let Some(existing) = slot.as_ref().cloned() {
-            // Another thread populated the cache while we built —
-            // discard our copy and return the established singleton
-            // so downstream pointer-equality checks remain stable.
-            drop(slot);
-            self.inner.dataflow.seed_call_graph(existing.clone());
-            return existing;
-        }
-        // Publish the shared consumers before exposing the workspace slot.
-        // A concurrent caller that can observe the canonical graph must never
-        // race into rebuilding the same complete graph in DataFlowCache or
-        // FlowIdCache.
-        self.inner.dataflow.seed_call_graph(arc.clone());
-        *slot = Some(arc.clone());
-        drop(slot);
+        self.publish_resolved_call_graph(arc.clone());
         if let Some(root) = complete_root.as_deref() {
             let path = callgraph_sidecar::callgraph_sidecar_path(root);
             if let Err(error) = callgraph_sidecar::save_callgraph_sidecar(&path, &self.inner.db, arc.clone())
@@ -2311,6 +2478,9 @@ impl Workspace {
     }
 
     fn callgraph_query_service(&self) -> Option<Arc<callgraph_sidecar::CallgraphQueryService>> {
+        if !self.persistent_semantic_cache_enabled() {
+            return None;
+        }
         if let Some(service) = self.inner.callgraph_query.lock().as_ref().cloned() {
             return Some(service);
         }
@@ -2453,14 +2623,12 @@ impl Workspace {
                     .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported)
             },
         );
+        let (aliases_for_file, alias_targets_for_file) =
+            bonsai_taint::callgraph_alias_projection_callbacks(&self.inner.db);
         bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_streaming_with_context(
             global.as_ref(),
-            |file| bonsai_resolve::alias_map_for_file(&self.inner.db.imports_for_uncached(file)),
-            |file| {
-                bonsai_lang_api::alias_map_from_import_specs(&self.inner.db.imports_for_uncached(file))
-                    .into_iter()
-                    .collect()
-            },
+            aliases_for_file,
+            alias_targets_for_file,
             files,
             &context,
             |file| {
@@ -2728,6 +2896,8 @@ impl Workspace {
         };
         let mut scoped_linkage: AHashMap<SymbolId, bonsai_index::FunctionLinkageFacts> = AHashMap::new();
         let target_set: AHashSet<FuncId> = target_funcs.iter().copied().collect();
+        let source_set: AHashSet<FuncId> = source_funcs.iter().copied().collect();
+        let mut source_callable_scope_funcs = source_set.clone();
         let mut reached_funcs: AHashSet<FuncId> = source_funcs.iter().copied().collect();
         let mut reverse_output_funcs: AHashSet<FuncId> = source_funcs
             .iter()
@@ -2762,6 +2932,8 @@ impl Workspace {
         // highly connected workspace that was quadratic and also overlapped
         // one unbounded batch graph with the complete retained graph.
         let mut known_edges: Vec<bonsai_callgraph::CallEdge> = Vec::new();
+        let mut known_callable_arguments: Vec<bonsai_callgraph::CallGraphCallableArgument> = Vec::new();
+        let mut callback_execution = bonsai_callgraph::CallbackExecutionAccumulator::default();
         let mut outgoing_edge_ids: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
         let mut incoming_edge_ids: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
         let mut admitted_edge_ids: AHashSet<usize> = AHashSet::new();
@@ -2882,13 +3054,8 @@ impl Workspace {
             // a thread pool for every batch. Continuous scheduling changes
             // neither the worklist nor resolver semantics.
             let funcs = requested_funcs;
-            let aliases_for_file =
-                |file| bonsai_resolve::alias_map_for_file(&self.inner.db.imports_for_uncached(file));
-            let alias_targets_for_file = |file| {
-                bonsai_lang_api::alias_map_from_import_specs(&self.inner.db.imports_for_uncached(file))
-                    .into_iter()
-                    .collect()
-            };
+            let (aliases_for_file, alias_targets_for_file) =
+                bonsai_taint::callgraph_alias_projection_callbacks(&self.inner.db);
             let projected_linkage = parking_lot::Mutex::new(Vec::new());
             let body_for_file = |file| {
                 let index = self
@@ -2926,7 +3093,22 @@ impl Workspace {
                 )
             };
             scoped_linkage.extend(projected_linkage.into_inner());
-            for edge in &batch_graph.inner().edges {
+            for relation in batch_graph.callable_argument_records() {
+                known_callable_arguments.push(*relation);
+                if source_set.contains(&relation.caller) {
+                    source_callable_scope_funcs.insert(relation.target);
+                    if reached_funcs.insert(relation.target) {
+                        pending_reached.push(relation.target);
+                    }
+                }
+            }
+            let cross_partition_callback_edges = callback_execution.extend(&batch_graph);
+            for edge in batch_graph
+                .inner()
+                .edges
+                .iter()
+                .chain(cross_partition_callback_edges.iter())
+            {
                 if max_precision.is_some_and(|max| edge.precision > max) {
                     continue;
                 }
@@ -3058,6 +3240,7 @@ impl Workspace {
         };
         let mut relevant_funcs = relevant_funcs;
         relevant_funcs.extend(return_corridor_funcs);
+        relevant_funcs.extend(source_callable_scope_funcs);
         let mut edges_by_from: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
         for (edge_id, edge) in merged.edges.iter().enumerate() {
             if reached_funcs.contains(&edge.to) {
@@ -3092,6 +3275,12 @@ impl Workspace {
             max_precision,
         );
         let semantic_funcs = relevant_funcs;
+
+        known_callable_arguments.retain(|argument| {
+            semantic_funcs.contains(&argument.caller) && semantic_funcs.contains(&argument.target)
+        });
+        known_callable_arguments.sort_unstable();
+        known_callable_arguments.dedup();
 
         let mut filtered = bonsai_callgraph::CallGraph::new();
         for edge in &merged.edges {
@@ -3147,6 +3336,7 @@ impl Workspace {
                 nodes,
                 filtered.edges,
                 Vec::new(),
+                known_callable_arguments,
                 Vec::new(),
             )),
             linkage_index: global,
@@ -3192,7 +3382,7 @@ impl Workspace {
         // latency; the sidecar reduces it to a single mmap + decode
         // for subsequent invocations against the same content-hashed
         // workspace.
-        let use_idg_sidecar = self.is_complete_workspace_index();
+        let use_idg_sidecar = self.is_complete_workspace_index() && self.persistent_semantic_cache_enabled();
         if use_idg_sidecar {
             if let Some(root) = root_path.as_deref() {
                 match self.load_idg_sidecar(root) {
@@ -3336,6 +3526,9 @@ impl Workspace {
     where
         F: Fn(IdgPersistenceProgress),
     {
+        if !self.persistent_semantic_cache_enabled() {
+            return Ok(None);
+        }
         if !self.is_complete_workspace_index() {
             tracing::debug!("skipping workspace IDG persistence because the workspace index is scoped");
             return Ok(None);
@@ -3467,7 +3660,7 @@ impl Workspace {
         let global = self.compiler_linkage_index();
         let root_path = self.root_path();
         let pipeline_hash = self.cached_idg_transfer_pipeline_hash(root_path.as_deref(), transfer_hash);
-        let use_idg_sidecar = self.is_complete_workspace_index();
+        let use_idg_sidecar = self.is_complete_workspace_index() && self.persistent_semantic_cache_enabled();
         if use_idg_sidecar {
             if let Some(root) = root_path.as_deref() {
                 let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, transfer_hash);
@@ -3585,7 +3778,11 @@ impl Workspace {
         let global = self.compiler_linkage_index();
         let root_path = self.root_path();
         let pipeline_hash = self.cached_idg_transfer_pipeline_hash(root_path.as_deref(), scoped_hash);
-        if let Some(root) = root_path.as_deref() {
+        let use_idg_sidecar = self.persistent_semantic_cache_enabled();
+        if use_idg_sidecar {
+            let Some(root) = root_path.as_deref() else {
+                unreachable!("persistent scoped IDG requested without a workspace root")
+            };
             let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
             if let Ok(Some(service)) =
                 bonsai_idg::IdgQueryService::load_from_disk(&sidecar, pipeline_hash, global.clone())
@@ -3595,7 +3792,10 @@ impl Workspace {
                 return service;
             }
         }
-        let persistence = root_path.as_deref().and_then(|root| {
+        let persistence = use_idg_sidecar
+            .then_some(())
+            .and(root_path.as_deref())
+            .and_then(|root| {
             let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
             match IdgSidecarWriteGuard::acquire(&sidecar) {
                 Ok(guard) => {
@@ -3618,7 +3818,7 @@ impl Workspace {
                     None
                 }
             }
-        });
+            });
         if let Some(service) = self.inner.db.idg_service_for_semantics(scoped_hash) {
             return service;
         }
@@ -3729,6 +3929,17 @@ impl Workspace {
         );
         if let Some(service) = self.inner.db.idg_service_for_semantics(scoped_hash) {
             return service;
+        }
+
+        if !self.persistent_semantic_cache_enabled() {
+            on_progress(IdgPersistenceProgress::ResidentFallbackStarted);
+            let service = self.build_idg_service_with_transfer_options_for_files_and_call_graph(
+                &transfer_options,
+                included_files,
+                included_funcs,
+                call_graph,
+            );
+            return self.inner.db.set_idg_service_for_semantics(scoped_hash, service);
         }
 
         let _build_guard = self.inner.idg_build_serial.lock();
@@ -3985,7 +4196,9 @@ impl Workspace {
     /// Called by the `open*` family once the root path is known.
     fn set_idg_sidecar_root(&self, root: &std::path::Path) -> std::io::Result<()> {
         let canonical_root = canonical_workspace_root(root);
-        cache_fingerprint::register_workspace_cache_root(&canonical_root)?;
+        if self.persistent_semantic_cache_enabled() {
+            cache_fingerprint::register_workspace_cache_root(&canonical_root)?;
+        }
         *self.inner.idg_sidecar_root.lock() = Some(canonical_root);
         Ok(())
     }
@@ -4008,6 +4221,9 @@ impl Workspace {
     /// best-effort cleanup only reclaims disk and must never unlink another
     /// process's active publication target.
     fn delete_idg_sidecar(&self) {
+        if !self.persistent_semantic_cache_enabled() {
+            return;
+        }
         if let Some(root) = self.root_path() {
             let remove_if_unowned = |path: &Path| match IdgSidecarWriteGuard::try_acquire(path) {
                 Ok(_guard) => {
@@ -4071,6 +4287,10 @@ impl Workspace {
     /// let a concurrent compiler build observe a mixture of old indexes and
     /// new source text.
     fn invalidate_after_file_change_locked(&self, file: FileId) {
+        // Wait for an in-flight complete callgraph build before invalidating
+        // its publication slot. No stale pre-edit graph can be installed
+        // after this point.
+        let _callgraph_construction_lock = self.inner.resolved_call_graph_construction.lock();
         self.inner.db.invalidate_file(file);
         // Dataflow tracks per-entry transitive file dependencies, so
         // retain unrelated in-memory facts while evicting entries that
@@ -4440,7 +4660,8 @@ impl Workspace {
                 if !source_path_is_admitted(&ws.inner.registry, &path, ws.inner.include_minified_sources) {
                     return Err(WorkspaceError::NoAdapter(path.display().to_string()));
                 }
-                let text = std::fs::read_to_string(&path).map_err(WorkspaceError::Io)?;
+                let text =
+                    read_supported_source_text(&path, &ws.inner.registry).map_err(WorkspaceError::Io)?;
                 on_event(WorkspaceOpenEvent::IngestFileRead);
                 Ok(SourceFileContent {
                     path,
@@ -4843,6 +5064,9 @@ impl Workspace {
 
     /// Load the canonical factstore dataflow sidecar for `root`.
     pub fn load_dataflow_sidecar(&self, root: &Path) -> std::io::Result<usize> {
+        if !self.persistent_semantic_cache_enabled() {
+            return Ok(0);
+        }
         let factstore = DataFlowCache::factstore_sidecar_path(root);
         self.inner.dataflow.load_factstore_sidecar(&factstore, self.db())
     }
@@ -4850,6 +5074,9 @@ impl Workspace {
     /// Persist the complete current dataflow cache to the canonical,
     /// streaming factstore sidecar for `root`.
     pub fn save_dataflow_sidecar(&self, root: &Path) -> std::io::Result<()> {
+        if !self.persistent_semantic_cache_enabled() {
+            return Ok(());
+        }
         self.inner
             .dataflow
             .save_factstore(&DataFlowCache::factstore_sidecar_path(root), self.db())?;
@@ -4864,6 +5091,9 @@ impl Workspace {
     /// Load the conventional value-flow sidecar for `root`. Returns
     /// the number of per-entry graphs the snapshot restored.
     pub fn load_value_flow_sidecar(&self, root: &Path) -> std::io::Result<usize> {
+        if !self.persistent_semantic_cache_enabled() {
+            return Ok(0);
+        }
         self.inner
             .value_flow
             .load_from_disk(&ValueFlowCache::sidecar_path(root), self.db())
@@ -4872,6 +5102,9 @@ impl Workspace {
     /// Save the current value-flow cache to the conventional sidecar
     /// path for `root`.
     pub fn save_value_flow_sidecar(&self, root: &Path) -> std::io::Result<()> {
+        if !self.persistent_semantic_cache_enabled() {
+            return Ok(());
+        }
         self.inner
             .value_flow
             .save_to_disk(&ValueFlowCache::sidecar_path(root), self.db())
@@ -4893,7 +5126,9 @@ impl Workspace {
         *self.inner.root_label.lock() = root.display().to_string();
         self.set_complete_workspace_index(true);
         let canonical_root = canonical_workspace_root(root);
-        cache_fingerprint::register_workspace_cache_root(&canonical_root)?;
+        if self.persistent_semantic_cache_enabled() {
+            cache_fingerprint::register_workspace_cache_root(&canonical_root)?;
+        }
         self.inner.db.set_workspace_root(canonical_root.clone());
         let mut ingested = Vec::new();
         stream_supported_source_files(
@@ -4988,7 +5223,7 @@ impl Workspace {
         if !source_path_is_admitted(&self.inner.registry, path, self.inner.include_minified_sources) {
             return Err(WorkspaceError::NoAdapter(path.display().to_string()));
         }
-        let text = match std::fs::read_to_string(path) {
+        let text = match read_supported_source_text(path, &self.inner.registry) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
                 return Err(WorkspaceError::Io(error));
@@ -6073,6 +6308,7 @@ fn dedup_symbol_decl_candidates(candidates: &mut Vec<(SymbolId, Decl)>) {
 fn db_options_from_open_options(options: WorkspaceOpenOptions) -> AnalyzerDbOptions {
     AnalyzerDbOptions {
         parse_timeout_ms: options.parse_timeout_ms,
+        load_compiler_object_sidecar: options.load_compiler_object_sidecar,
     }
 }
 
@@ -6260,7 +6496,30 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // cannot install graph writers or callback edges at local lookalikes.
     // Callback delivery also reaches only the named parameter's unshadowed
     // compiler field reads; ordinary projected overwrites still win.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 80;
+    // v81 (2026-08-26): explicit aggregate arguments retain their exact
+    // expression-evaluation span through symbolic field stitching, so
+    // callee-token spans cannot misclassify those compiler writes as later
+    // mutations while unrelated post-call writes remain excluded.
+    // v82 (2026-08-26): exact shared-binding projected state has distinct
+    // interprocedural provenance and contributes non-renderable field-state
+    // lineage across only one unambiguous resolved call target.
+    // v83 (2026-08-26): shared-binding state anchored to an exact resolved
+    // invocation remains non-positional but now contributes a call-lineage
+    // record. Allocation-insensitive field state remains non-renderable.
+    // v86: aggregate fields whose values are compiler-known objects retain
+    // exact descendant paths through local/return lowering.
+    // v87: a lexical-capture write returns through the exact host invocation
+    // before reaching post-call consumers. This preserves call ordering and
+    // clean-overwrite semantics instead of emitting a direct callback-to-sink
+    // shared-state edge.
+    // v88: non-aggregate root compound assignments are complete-value
+    // writers, so exact projected reads inherit their reaching definition
+    // while later field-specific overwrites still cut the flow.
+    // v89: direct call-result assignments join to the adapter's exact
+    // AssignmentValueFact call span even when the Call event is nested under
+    // try/await/control regions. This removes duplicate assignment-wide call
+    // identities and keeps receiver slots disjoint from literal arguments.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 89;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
@@ -6291,20 +6550,49 @@ pub fn analyzer_build_fingerprint() -> &'static str {
     )
 }
 
-fn idg_workspace_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>) -> u64 {
+fn workspace_content_fingerprint_from_cached_inputs(
+    db: &AnalyzerDb,
+    source_inputs: Option<&[(u32, String, u64)]>,
+) -> u64 {
+    source_inputs.map_or_else(
+        || crate::cache_fingerprint::workspace_content_fingerprint(db),
+        |source_inputs| {
+            crate::cache_fingerprint::workspace_content_fingerprint_from_paths(
+                source_inputs
+                    .iter()
+                    .map(|(_, path, content_hash)| (Path::new(path), *content_hash)),
+            )
+        },
+    )
+}
+
+fn idg_workspace_pipeline_hash_with_content(
+    db: &AnalyzerDb,
+    root: Option<&Path>,
+    content_fingerprint: u64,
+) -> u64 {
     let mut pipeline_hash = idg_pipeline_hash()
         // The IDG is lowered from immutable compiler objects. Any frontend
         // ABI bump can change declaration, call, assignment, or FlowEvent
         // facts even when every source byte and the on-disk IDG layout stay
         // unchanged, so an older graph must never survive that bump.
         ^ compiler_frontend_cache_fingerprint(COMPILER_OBJECT_CACHE_VERSION)
-        ^ crate::cache_fingerprint::workspace_content_fingerprint(db)
+        ^ content_fingerprint
         ^ default_workspace_idg_transfer_options(db).semantic_fingerprint()
         ^ u64::from(callgraph_sidecar::CALLGRAPH_CACHE_VERSION).wrapping_mul(0x9E37_79B1_85EB_CA87);
     if let Some(root) = root {
         pipeline_hash ^= crate::cache_fingerprint::dependency_metadata_fingerprint(root);
     }
     pipeline_hash
+}
+
+#[cfg(test)]
+fn idg_workspace_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>) -> u64 {
+    idg_workspace_pipeline_hash_with_content(
+        db,
+        root,
+        crate::cache_fingerprint::workspace_content_fingerprint(db),
+    )
 }
 
 fn compiler_frontend_cache_fingerprint(version: u32) -> u64 {
@@ -6382,9 +6670,11 @@ fn idg_call_graph_fingerprint(call_graph: &bonsai_callgraph::ResolvedCallGraph) 
     bindings.sort_unstable_by(|left, right| {
         (left.0.raw(), left.1, left.2.raw()).cmp(&(right.0.raw(), right.1, right.2.raw()))
     });
+    let mut callable_arguments = call_graph.callable_argument_records().to_vec();
+    callable_arguments.sort_unstable();
 
     let mut hasher = StableHasher::new();
-    hasher.absorb(b"bonsai-idg-call-graph-v1");
+    hasher.absorb(b"bonsai-idg-call-graph-v2");
     hasher.absorb_separator();
     hasher.absorb(&(edges.len() as u64).to_le_bytes());
     hasher.absorb_separator();
@@ -6404,6 +6694,16 @@ fn idg_call_graph_fingerprint(call_graph: &bonsai_callgraph::ResolvedCallGraph) 
         hasher.absorb(&(name.len() as u64).to_le_bytes());
         hasher.absorb(name.as_bytes());
         hasher.absorb(&target.raw().to_le_bytes());
+        hasher.absorb_separator();
+    }
+    hasher.absorb(&(callable_arguments.len() as u64).to_le_bytes());
+    hasher.absorb_separator();
+    for argument in callable_arguments {
+        hasher.absorb(&argument.caller.raw().to_le_bytes());
+        hasher.absorb(&argument.span.file.raw().to_le_bytes());
+        hasher.absorb(&argument.span.start.to_le_bytes());
+        hasher.absorb(&argument.span.end.to_le_bytes());
+        hasher.absorb(&argument.target.raw().to_le_bytes());
         hasher.absorb_separator();
     }
     hasher.finish()
@@ -6607,6 +6907,148 @@ fn source_path_is_admitted(registry: &LanguageRegistry, path: &Path, include_min
         })
 }
 
+/// Read one compiler input without changing its byte coordinate system.
+///
+/// Source facts use UTF-8 text throughout the VFS, while Tree-sitter itself
+/// accepts arbitrary bytes. A small number of otherwise valid source trees
+/// contain legacy-encoded punctuation in comments. Rejecting the complete
+/// file loses real code; decoding it lossily changes byte offsets. Instead,
+/// parse the raw bytes with every grammar that claims the path and admit an
+/// invalid UTF-8 range only when the grammar proves that the complete range
+/// belongs to a comment node. Replacing those comment bytes with ASCII spaces
+/// preserves source length and every AST span. Invalid bytes in executable
+/// syntax, strings, or an ambiguous grammar interpretation still fail closed.
+fn read_supported_source_text(path: &Path, registry: &LanguageRegistry) -> std::io::Result<String> {
+    let bytes = std::fs::read(path)?;
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(error) => normalize_grammar_proven_comment_bytes(path, registry, error.into_bytes()),
+    }
+}
+
+fn normalize_grammar_proven_comment_bytes(
+    path: &Path,
+    registry: &LanguageRegistry,
+    mut bytes: Vec<u8>,
+) -> std::io::Result<String> {
+    let invalid_ranges = invalid_utf8_ranges(&bytes);
+    let extension = path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "invalid UTF-8 in source without an adapter extension: {}",
+                    path.display()
+                ),
+            )
+        })?;
+    let adapters = registry.adapters_for_extension(extension);
+    if adapters.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid UTF-8 in unsupported source: {}", path.display()),
+        ));
+    }
+
+    for adapter in adapters {
+        let handler = adapter.grammar_handler_for_path(path).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "invalid UTF-8 cannot be attributed to grammar-owned comments in {}",
+                    path.display()
+                ),
+            )
+        })?;
+        let language = adapter.tree_sitter_language_for_path(path).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("cannot configure source grammar for {}: {error}", path.display()),
+            )
+        })?;
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("cannot configure source grammar for {}: {error}", path.display()),
+            )
+        })?;
+        let tree = parser.parse(bytes.as_slice(), None).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("raw source parse did not complete for {}", path.display()),
+            )
+        })?;
+        if invalid_ranges.iter().any(|range| {
+            !byte_range_is_grammar_comment(tree.root_node(), range.clone(), handler.comment_kinds)
+        }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "invalid UTF-8 occurs outside a grammar-proven comment in {}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+
+    for range in invalid_ranges {
+        bytes[range].fill(b' ');
+    }
+    String::from_utf8(bytes).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "comment-byte normalization failed for {}: {error}",
+                path.display()
+            ),
+        )
+    })
+}
+
+fn invalid_utf8_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        match std::str::from_utf8(&bytes[cursor..]) {
+            Ok(_) => break,
+            Err(error) => {
+                let start = cursor + error.valid_up_to();
+                let end = error
+                    .error_len()
+                    .map_or(bytes.len(), |length| start.saturating_add(length));
+                ranges.push(start..end);
+                cursor = end;
+            }
+        }
+    }
+    ranges
+}
+
+fn byte_range_is_grammar_comment(
+    root: tree_sitter::Node<'_>,
+    range: std::ops::Range<usize>,
+    comment_kinds: &[&str],
+) -> bool {
+    let Some(mut node) = root.descendant_for_byte_range(range.start, range.end) else {
+        return false;
+    };
+    loop {
+        if node.start_byte() <= range.start
+            && node.end_byte() >= range.end
+            && comment_kinds.contains(&node.kind())
+        {
+            return true;
+        }
+        let Some(parent) = node.parent() else {
+            return false;
+        };
+        node = parent;
+    }
+}
+
 fn stream_supported_source_files<F>(
     canonical_root: &Path,
     registry: &LanguageRegistry,
@@ -6647,7 +7089,7 @@ where
             .par_iter()
             .map(|entry| {
                 let path = entry.path();
-                std::fs::read_to_string(path).map(|text| {
+                read_supported_source_text(path, registry).map(|text| {
                     on_file_read();
                     SourceFileContent {
                         path: path.to_path_buf(),
@@ -6745,7 +7187,7 @@ fn read_supported_source_file_at_path(
         return Err(WorkspaceError::NoAdapter(path.display().to_string()));
     }
 
-    let text = match std::fs::read_to_string(&path) {
+    let text = match read_supported_source_text(&path, registry) {
         Ok(text) => text,
         Err(error) => return Err(WorkspaceError::Io(error)),
     };
@@ -6871,7 +7313,7 @@ fn read_supported_source_files_impl(
         .into_par_iter()
         .map(|(file, entry)| {
             let path = entry.path();
-            let text = match std::fs::read_to_string(path) {
+            let text = match read_supported_source_text(path, registry) {
                 Ok(text) => {
                     on_event(WorkspaceOpenEvent::IngestFileRead);
                     text

@@ -97,7 +97,7 @@ object Storage {
 }
 
 #[test]
-fn parameterless_member_selection_is_not_invented_as_a_call() {
+fn ambiguous_member_selection_remains_an_exact_value_projection() {
     let db = db_with(
         r#"
 object Transformer {
@@ -108,17 +108,33 @@ object Transformer {
 }
 "#,
     );
-    let global = db.global_index();
-    let transform = global
-        .all_files()
-        .flat_map(|file| global.decls_in(file))
+    let file = db.vfs().all_files()[0];
+    let index = db.decl_index(file).expect("Scala declaration index");
+    let transform = index
+        .defs
+        .iter()
         .find(|decl| decl.name == "transform")
         .expect("transform declaration");
     let mut calls = Vec::new();
     collect_calls(&transform.flow_events, &mut calls);
     assert!(
         calls.iter().all(|(name, _)| name != "value.toUpperCase"),
-        "a field_expression is ambiguous and must not gain call semantics without resolution: {calls:?}"
+        "Scala syntax alone cannot prove whether a member selection is a field or a parameterless method: {calls:?}"
+    );
+    let value = index
+        .assignment_values
+        .iter()
+        .find(|fact| fact.target.as_deref() == Some("upper"))
+        .expect("upper assignment value fact");
+    assert_eq!(
+        value
+            .value_flow
+            .projection
+            .as_ref()
+            .map(bonsai_lang_api::ExpressionProjection::canonical_place)
+            .as_deref(),
+        Some("value.toUpperCase"),
+        "the compiler must retain the exact member-value projection for rule or declaration-aware interpretation"
     );
 }
 
@@ -196,6 +212,7 @@ object App {
     Logger.info(message = input)
   }
 }
+
 "#,
     );
     let global = db.global_index();
@@ -234,6 +251,53 @@ object App {
 }
 
 #[test]
+fn direct_call_receiver_retains_the_exact_nested_factory_call_span() {
+    let db = db_with(
+        r#"
+import java.sql.Connection
+object Query {
+  def execute(db: Connection, sql: String): Unit = {
+    db.createStatement().executeQuery(sql)
+  }
+}
+"#,
+    );
+    let file = db.vfs().all_files()[0];
+    let index = db.decl_index(file).expect("Scala declaration index");
+    let execute = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "execute")
+        .expect("execute declaration");
+    let outer_span = execute
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { span, name, .. } if name.ends_with("executeQuery") => Some(*span),
+            _ => None,
+        })
+        .expect("outer executeQuery call");
+    let inner_span = execute
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { span, name, .. } if name.ends_with("createStatement") => Some(*span),
+            _ => None,
+        })
+        .expect("nested createStatement call");
+    let receiver = bonsai_lang_api::call_receiver_fact_for_span(&index.call_receivers, outer_span)
+        .expect("outer call receiver fact");
+    assert!(
+        receiver.receiver_span.start == inner_span.start && inner_span.end <= receiver.receiver_span.end,
+        "receiver must contain the exact nested callee: receiver={receiver:?}, inner={inner_span:?}"
+    );
+    assert!(
+        receiver.value_flow.call_sites.contains(&receiver.receiver_span),
+        "the receiver value projection must identify the complete nested call: {receiver:?}"
+    );
+}
+
+#[test]
 fn constructor_val_property_types_accessor_receiver_from_ast() {
     let db = db_with(
         r#"
@@ -257,5 +321,46 @@ abstract class BaseRepository(val data: Envelope) {
         projected_place.is_some_and(|place| place == "this.data.cmd"),
         "constructor `val data: Envelope` must keep the implicit-this compiler place on the exact projected field read: {:?}",
         command.flow_events
+    );
+}
+
+#[test]
+fn captured_plain_constructor_parameter_types_method_calls_without_leaking_through_shadows() {
+    let db = db_with(
+        r#"
+class Service { def run(value: String): Unit = () }
+class LocalService { def run(value: String): Unit = () }
+class Controller(service: Service) {
+  def handle(value: String): Unit = service.run(value)
+  def shadow(service: LocalService, value: String): Unit = service.run(value)
+}
+"#,
+    );
+    let global = db.global_index();
+    let calls_for = |method: &str| {
+        let decl = global
+            .all_files()
+            .flat_map(|file| global.decls_in(file))
+            .find(|decl| decl.name == method)
+            .unwrap_or_else(|| panic!("missing {method}"));
+        let mut calls = Vec::new();
+        collect_calls(&decl.flow_events, &mut calls);
+        calls
+    };
+
+    let handle = calls_for("handle");
+    assert!(
+        handle
+            .iter()
+            .any(|(name, types)| name == "service.run" && types.as_slice() == ["Service"]),
+        "captured constructor receiver must retain its parsed type: {handle:?}"
+    );
+
+    let shadow = calls_for("shadow");
+    assert!(
+        shadow
+            .iter()
+            .any(|(name, types)| name == "service.run" && types.as_slice() == ["LocalService"]),
+        "method parameter must shadow the captured constructor receiver exactly: {shadow:?}"
     );
 }

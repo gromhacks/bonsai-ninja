@@ -177,7 +177,7 @@ fn matches_shape(event: &FlowEvent, shape: CanonicalShape, c: &Conformance) -> b
                 source_name: Some(src),
                 ..
             },
-        ) => sigil_strip(target) == "y" && sigil_strip(src) == "x",
+        ) => binding_matches(c, target, "y") && binding_matches(c, src, "x"),
         (
             CanonicalShape::LiteralWrite,
             FlowEvent::Assign {
@@ -189,7 +189,7 @@ fn matches_shape(event: &FlowEvent, shape: CanonicalShape, c: &Conformance) -> b
                 ..
             },
         ) => {
-            sigil_strip(target) == "lit"
+            binding_matches(c, target, "lit")
                 && literal_source_metadata_is_valid(c, source_name.as_deref())
                 && source_call.is_none()
                 && source_names.is_empty()
@@ -204,7 +204,7 @@ fn matches_shape(event: &FlowEvent, shape: CanonicalShape, c: &Conformance) -> b
                 ..
             },
         ) => {
-            sigil_strip(target) == "z"
+            binding_matches(c, target, "z")
                 && call_member_name(callee) == "f"
                 && source_name.is_none()
                 && source_names.is_empty()
@@ -214,30 +214,32 @@ fn matches_shape(event: &FlowEvent, shape: CanonicalShape, c: &Conformance) -> b
             FlowEvent::Branch {
                 condition,
                 then_events,
+                else_events,
                 ..
             },
         ) => {
             // Adapters may render `x` or `(x)` or `x != null` etc.; only
             // assert that condition exists (or is omitted but body has F).
             let cond_ok = condition.as_deref().map(|c| !c.trim().is_empty()).unwrap_or(true);
-            cond_ok && body_contains_call(then_events, c.branch_callee)
+            cond_ok
+                && (body_contains_call(then_events, c.branch_callee, c)
+                    || body_contains_call(else_events, c.branch_callee, c))
         }
         (
             CanonicalShape::CatchBind,
             FlowEvent::Try {
                 catch_param: Some(p), ..
             },
-        ) => sigil_strip(p) == "e",
-        (CanonicalShape::LoopBody, FlowEvent::Loop { body, .. }) => body_contains_call(body, c.loop_callee),
+        ) => binding_matches(c, p, "e"),
+        (CanonicalShape::LoopBody, FlowEvent::Loop { body, .. }) => {
+            body_contains_call(body, c.loop_callee, c)
+        }
         (
             CanonicalShape::BareReturn,
             FlowEvent::Return {
                 value_name: Some(v), ..
             },
-        ) => {
-            let stripped = sigil_strip(v);
-            stripped == "y" || stripped == "z"
-        }
+        ) => binding_matches(c, v, "y") || binding_matches(c, v, "z"),
         _ => false,
     }
 }
@@ -268,11 +270,29 @@ fn sigil_strip(s: &str) -> &str {
         .unwrap_or(s)
 }
 
-fn body_contains_call(body: &[FlowEvent], callee: &str) -> bool {
-    walk_events(
-        body,
-        &|e| matches!(e, FlowEvent::Call { name, .. } if call_member_name(name) == callee),
-    )
+fn binding_matches(c: &Conformance, actual: &str, expected: &str) -> bool {
+    let actual = sigil_strip(actual);
+    if c.lang == "erlang" {
+        actual.eq_ignore_ascii_case(expected)
+    } else {
+        actual == expected
+    }
+}
+
+fn body_contains_call(body: &[FlowEvent], callee: &str, c: &Conformance) -> bool {
+    walk_events(body, &|e| {
+        matches!(e, FlowEvent::Call { name, .. }
+                if callable_matches(c, call_member_name(name), callee))
+    })
+}
+
+fn callable_matches(c: &Conformance, actual: &str, expected: &str) -> bool {
+    let actual = actual.trim_matches('\'');
+    if c.lang == "erlang" {
+        actual.eq_ignore_ascii_case(expected.trim_matches('\''))
+    } else {
+        actual == expected
+    }
 }
 
 /// Compare the callable member rather than its surface spelling. Adapters may
@@ -451,11 +471,11 @@ class Shape {
         "rust" => Conformance {
             lang: "rust",
             fixture_path: "shape.rs",
-            fixture_source: r#"fn shapes(x: &str, items: Vec<&str>, t: &str) -> String {
+            fixture_source: r#"fn shapes(x: String, items: Vec<&str>, t: &str) -> String {
     let y = x;
     let lit = "abc";
-    let z = f(x);
-    if !x.is_empty() {
+    let z = f(&y);
+    if !y.is_empty() {
         F(t);
     }
     for it in items {
@@ -463,7 +483,7 @@ class Shape {
     }
     let _ = lit;
     let _ = z;
-    y.to_string()
+    y
 }
 fn f(a: &str) -> &str { a }
 fn F(_a: &str) {}
@@ -472,11 +492,8 @@ fn G(_a: &str) {}
             function_name: "shapes",
             branch_callee: "F",
             loop_callee: "G",
-            // Rust expression returns bind through the final-expr rule;
-            // adapter-level `Return` events are emitted for explicit
-            // `return EXPR` only. Skip the BareReturn assertion.
             // Rust has no `try`/`catch` keyword form for this fixture.
-            skip: &[CanonicalShape::CatchBind, CanonicalShape::BareReturn],
+            skip: &[CanonicalShape::CatchBind],
         },
         "go" => Conformance {
             lang: "go",
@@ -788,22 +805,9 @@ f(A) -> A.
             function_name: "shapes",
             branch_callee: "F",
             loop_callee: "G",
-            // Erlang has no `for` loop — uses `lists:foreach`. Skip
-            // LoopBody. Also no explicit Return event for tail expr.
-            // Erlang uses `case` for branching — adapter may map case
-            // arms to a Branch, but condition is not a single bare
-            // expression. Skip SingleConditionBranch.
-            // Capitalised idents follow Erlang variable rules so use
-            // `X`/`Y`/`Z` LHS — adapter lowercases names; check below.
-            skip: &[
-                CanonicalShape::BareReturn,
-                CanonicalShape::LoopBody,
-                CanonicalShape::SingleConditionBranch,
-                CanonicalShape::BareRename,
-                CanonicalShape::LiteralWrite,
-                CanonicalShape::DirectCall,
-                CanonicalShape::CatchBind,
-            ],
+            // Erlang has no native loop construct; lists:foreach is an
+            // ordinary higher-order call rather than a Loop event.
+            skip: &[CanonicalShape::LoopBody],
         },
         "c" => Conformance {
             lang: "c",

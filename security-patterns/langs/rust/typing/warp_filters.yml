@@ -1,0 +1,291 @@
+- id: rust.typing.warp_filter_query
+  enabled: true
+  language: rust
+  packages: [warp]
+  imports: [warp]
+  returns_type: WarpFilter
+  match: { kind: call, callee: { attribute: [warp, query] } }
+  match_examples:
+  - name: warp query filter factory
+    code: |
+      use std::collections::HashMap;
+      use warp::Filter;
+      fn route() { let input = warp::query::<HashMap<String, String>>(); consume(input); }
+      fn consume<T>(_: T) {}
+  - name: local query factory collision
+    code: |
+      use warp::Filter;
+      mod local { pub fn query<T>() -> T { panic!() } }
+      fn route() { let input: String = local::query(); consume(input); }
+      fn consume<T>(_: T) {}
+    expect_no_match: true
+  description: "warp::query returns a filter descriptor; the compiler keeps generic arguments separate from the exact callable identity."
+
+- id: rust.typing.warp_filter_header
+  enabled: true
+  language: rust
+  packages: [warp]
+  imports: [warp]
+  returns_type: WarpFilter
+  match: { kind: call, callee: { attribute: [warp, header] } }
+  match_examples:
+  - name: warp header filter factory
+    code: |
+      use warp::Filter;
+      fn route() { let input = warp::header::<String>("x-trace"); consume(input); }
+      fn consume<T>(_: T) {}
+  - name: local header factory collision
+    code: |
+      use warp::Filter;
+      mod local { pub fn header<T>(_: &str) -> T { panic!() } }
+      fn route() { let input: String = local::header("x"); consume(input); }
+      fn consume<T>(_: T) {}
+    expect_no_match: true
+  description: "warp::header returns a filter descriptor."
+
+- id: rust.typing.warp_filter_cookie
+  enabled: true
+  language: rust
+  packages: [warp]
+  imports: [warp]
+  returns_type: WarpFilter
+  match: { kind: call, callee: { attribute: [warp, cookie] } }
+  match_examples:
+  - name: warp cookie filter factory
+    code: |
+      use warp::Filter;
+      fn route() { let input = warp::cookie("session"); consume(input); }
+      fn consume<T>(_: T) {}
+  - name: local cookie factory collision
+    code: |
+      use warp::Filter;
+      mod local { pub fn cookie(_: &str) -> String { String::new() } }
+      fn route() { let input = local::cookie("x"); consume(input); }
+      fn consume<T>(_: T) {}
+    expect_no_match: true
+  description: "warp::cookie returns a filter descriptor."
+
+- id: rust.typing.warp_filter_path_param
+  enabled: true
+  language: rust
+  packages: [warp]
+  imports: [warp]
+  returns_type: WarpFilter
+  match: { kind: call, callee: { attribute: [warp, path, param] } }
+  match_examples:
+  - name: warp path parameter filter factory
+    code: |
+      use warp::Filter;
+      fn route() { let input = warp::path::param::<String>(); consume(input); }
+      fn consume<T>(_: T) {}
+  - name: local path parameter factory collision
+    code: |
+      use warp::Filter;
+      mod local { pub mod path { pub fn param<T>() -> T { panic!() } } }
+      fn route() { let input: String = local::path::param(); consume(input); }
+      fn consume<T>(_: T) {}
+    expect_no_match: true
+  description: "warp::path::param returns a filter descriptor."
+
+- id: rust.typing.warp_filter_path
+  enabled: true
+  language: rust
+  packages: [warp]
+  imports: [warp]
+  returns_type: WarpFilter
+  match: { kind: call, callee: { attribute: [warp, path] } }
+  match_examples:
+  - name: warp literal path filter factory
+    code: |
+      use warp::Filter;
+      fn route() { let input = warp::path("items"); consume(input); }
+      fn consume<T>(_: T) {}
+  - name: local path factory collision
+    code: |
+      use warp::Filter;
+      mod local { pub fn path(_: &str) -> String { String::new() } }
+      fn route() { let input = local::path("items"); consume(input); }
+      fn consume<T>(_: T) {}
+    expect_no_match: true
+  description: "warp::path returns a literal route filter descriptor; it is typing metadata, not a source by itself."
+
+- id: rust.typing.warp_filter_body_json
+  enabled: true
+  language: rust
+  packages: [warp]
+  imports: [warp]
+  returns_type: WarpFilter
+  match: { kind: call, callee: { attribute: [warp, body, json] } }
+  match_examples:
+  - name: warp JSON body filter factory
+    code: |
+      use warp::Filter;
+      fn route() { let input = warp::body::json::<String>(); consume(input); }
+      fn consume<T>(_: T) {}
+  - name: local JSON factory collision
+    code: |
+      use warp::Filter;
+      mod local { pub mod body { pub fn json<T>() -> T { panic!() } } }
+      fn route() { let input: String = local::body::json(); consume(input); }
+      fn consume<T>(_: T) {}
+    expect_no_match: true
+  description: "warp::body::json returns a filter descriptor."
+
+- id: rust.typing.warp_filter_body_form
+  enabled: true
+  language: rust
+  packages: [warp]
+  imports: [warp]
+  returns_type: WarpFilter
+  match: { kind: call, callee: { attribute: [warp, body, form] } }
+  match_examples:
+  - name: warp form body filter factory
+    code: |
+      use warp::Filter;
+      fn route() { let input = warp::body::form::<String>(); consume(input); }
+      fn consume<T>(_: T) {}
+  - name: local form factory collision
+    code: |
+      use warp::Filter;
+      mod local { pub mod body { pub fn form<T>() -> T { panic!() } } }
+      fn route() { let input: String = local::body::form(); consume(input); }
+      fn consume<T>(_: T) {}
+    expect_no_match: true
+  description: "warp::body::form returns a filter descriptor."
+
+- id: rust.typing.warp_filter_body_bytes
+  enabled: true
+  language: rust
+  packages: [warp]
+  imports: [warp]
+  returns_type: WarpFilter
+  match: { kind: call, callee: { attribute: [warp, body, bytes] } }
+  match_examples:
+  - name: warp byte body filter factory
+    code: |
+      use warp::Filter;
+      fn route() { let input = warp::body::bytes(); consume(input); }
+      fn consume<T>(_: T) {}
+  - name: local byte factory collision
+    code: |
+      use warp::Filter;
+      mod local { pub mod body { pub fn bytes() -> String { String::new() } } }
+      fn route() { let input = local::body::bytes(); consume(input); }
+      fn consume<T>(_: T) {}
+    expect_no_match: true
+  description: "warp::body::bytes returns a filter descriptor."
+
+- id: rust.typing.warp_filter_and
+  enabled: true
+  language: rust
+  packages: [warp]
+  imports: [warp]
+  returns_type: WarpFilter
+  match: { kind: call, callee: { name: and } }
+  constraints: [{ receiver_type_in: [WarpFilter] }]
+  match_examples:
+  - name: typed warp and composition
+    code: |
+      use warp::Filter;
+      fn route() { let input = warp::body::bytes(); let combined = input.and(warp::path::param::<String>()); consume(combined); }
+      fn consume<T>(_: T) {}
+  - name: local and method collision
+    code: |
+      use warp::Filter;
+      struct Local;
+      impl Local { fn and(self, _: Local) -> Local { self } }
+      fn route(local: Local) { let _ = local.and(Local); }
+    expect_no_match: true
+  description: "Filter::and preserves the rulepack-owned WarpFilter descriptor type; the compiler-proven receiver type excludes unrelated methods."
+
+- id: rust.typing.warp_filter_or
+  enabled: true
+  language: rust
+  packages: [warp]
+  imports: [warp]
+  returns_type: WarpFilter
+  match: { kind: call, callee: { name: or } }
+  constraints: [{ receiver_type_in: [WarpFilter] }]
+  match_examples:
+  - name: typed warp or composition
+    code: |
+      use warp::Filter;
+      fn route() { let input = warp::body::bytes(); let combined = input.or(warp::path::param::<String>()); consume(combined); }
+      fn consume<T>(_: T) {}
+  - name: local or method collision
+    code: |
+      use warp::Filter;
+      struct Local;
+      impl Local { fn or(self, _: Local) -> Local { self } }
+      fn route(local: Local) { let _ = local.or(Local); }
+    expect_no_match: true
+  description: "Filter::or preserves the rulepack-owned WarpFilter descriptor type."
+
+- id: rust.typing.warp_filter_unify
+  enabled: true
+  language: rust
+  packages: [warp]
+  imports: [warp]
+  returns_type: WarpFilter
+  match: { kind: call, callee: { name: unify } }
+  constraints: [{ receiver_type_in: [WarpFilter] }]
+  match_examples:
+  - name: typed warp unify composition
+    code: |
+      use warp::Filter;
+      fn route() { let input = warp::body::bytes(); let combined = input.unify(); consume(combined); }
+      fn consume<T>(_: T) {}
+  - name: local unify method collision
+    code: |
+      use warp::Filter;
+      struct Local;
+      impl Local { fn unify(self) -> Local { self } }
+      fn route(local: Local) { let _ = local.unify(); }
+    expect_no_match: true
+  description: "Filter::unify preserves the rulepack-owned WarpFilter descriptor type."
+
+- id: rust.typing.warp_filter_boxed
+  enabled: true
+  language: rust
+  packages: [warp]
+  imports: [warp]
+  returns_type: WarpFilter
+  match: { kind: call, callee: { name: boxed } }
+  constraints: [{ receiver_type_in: [WarpFilter] }]
+  match_examples:
+  - name: typed warp boxed composition
+    code: |
+      use warp::Filter;
+      fn route() { let input = warp::body::bytes(); let combined = input.boxed(); consume(combined); }
+      fn consume<T>(_: T) {}
+  - name: local boxed method collision
+    code: |
+      use warp::Filter;
+      struct Local;
+      impl Local { fn boxed(self) -> Local { self } }
+      fn route(local: Local) { let _ = local.boxed(); }
+    expect_no_match: true
+  description: "Filter::boxed preserves the rulepack-owned WarpFilter descriptor type."
+
+- id: rust.typing.warp_filter_recover
+  enabled: true
+  language: rust
+  packages: [warp]
+  imports: [warp]
+  returns_type: WarpFilter
+  match: { kind: call, callee: { name: recover } }
+  constraints: [{ receiver_type_in: [WarpFilter] }]
+  match_examples:
+  - name: typed warp recover composition
+    code: |
+      use warp::Filter;
+      fn route() { let input = warp::body::bytes(); let combined = input.recover(|_| async { Ok(()) }); consume(combined); }
+      fn consume<T>(_: T) {}
+  - name: local recover method collision
+    code: |
+      use warp::Filter;
+      struct Local;
+      impl Local { fn recover<F>(self, _: F) -> Local { self } }
+      fn route(local: Local) { let _ = local.recover(|_| ()); }
+    expect_no_match: true
+  description: "Filter::recover preserves the rulepack-owned WarpFilter descriptor type."

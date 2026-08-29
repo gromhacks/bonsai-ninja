@@ -187,10 +187,9 @@
         }
       }
     expect_no_match: true
-  description: "ResponseEntity.header(name, tainted) - CRLF response header injection. Merged aliases: scala.header.spring_responseentity_content_disposition, scala.open_redirect.spring_responseentity_header_location."
+  description: "ResponseEntity.header(name, tainted) - CRLF response header injection."
   aliases:
   - scala.header.spring_responseentity_content_disposition
-  - scala.open_redirect.spring_responseentity_header_location
   imports:
   - org.springframework.web
 - id: scala.header.webflux_serverresponse_header
@@ -234,9 +233,7 @@
         }
       }
     expect_no_match: true
-  description: "Spring WebFlux ServerResponse.header(name, tainted) - CRLF response header injection. Merged aliases: scala.open_redirect.webflux_serverresponse_header_location."
-  aliases:
-  - scala.open_redirect.webflux_serverresponse_header_location
+  description: "Spring WebFlux ServerResponse.header(name, tainted) - CRLF response header injection."
 - id: scala.header.vertx_response_putheader
   enabled: true
   language: scala
@@ -280,6 +277,4 @@
         def putHeader(args: Any*): Unit = {}
       }
     expect_no_match: true
-  description: "Vert.x HttpServerResponse.putHeader(name, tainted) - CRLF response header injection. Merged aliases: scala.open_redirect.vertx_response_putheader_location."
-  aliases:
-  - scala.open_redirect.vertx_response_putheader_location
+  description: "Vert.x HttpServerResponse.putHeader(name, tainted) - CRLF response header injection."

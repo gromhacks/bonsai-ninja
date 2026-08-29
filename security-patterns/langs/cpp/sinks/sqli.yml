@@ -511,7 +511,6 @@
   - name: tainted qsqlquery exec sql
     code: |
       #include <QtCore/Qt>
-      #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example(const char *arg) {
         const char *fmt = arg;

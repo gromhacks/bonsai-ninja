@@ -40,18 +40,3 @@
   description: "requests_oauthlib OAuth2Session.fetch_token without state parameter validation."
   imports:
   - requestsoauthlib
-
-- id: python.oauth.fastapi_oauth2_no_scope
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: python
-  tag: oauth
-  severity: medium
-  packages: [fastapi]
-  cwe: [CWE-862]
-  match:
-    kind: new
-    callee:
-      name: OAuth2PasswordBearer
-  description: "Disabled - FastAPI OAuth2PasswordBearer needs missing-scopes / token-validation constraint to flag risky configurations precisely."

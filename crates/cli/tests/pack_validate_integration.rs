@@ -70,7 +70,7 @@ fn write_python_sink_pack(root: &Path, yaml: &str) {
 
 fn run_pack_validate(rules_dir: &Path) -> Option<Output> {
     let bin = bin_path()?;
-    let workspace = repo_root().join("examples/python/micro");
+    let workspace = repo_root().join("test-fixtures/languages/python/micro");
     Some(
         Command::new(bin)
             .args([

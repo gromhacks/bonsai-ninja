@@ -31,9 +31,6 @@
   - name: tainted xml document
     code: |
       import 'package:xml/xml.dart';
-      import 'package:xml/xml.dart';
-      import 'package:xml/xml.dart';
-      import 'package:xml/xml.dart';
       import 'package:xml/xml.dart'; // xml
       // uses xml
       void test(String input) { XmlDocument.parse(input); }
@@ -64,9 +61,6 @@
   - name: tainted xml parse events
     code: |
       import 'package:xml/xml.dart';
-      import 'package:xml/xml.dart';
-      import 'package:xml/xml.dart';
-      import 'package:xml/xml.dart';
       import 'package:xml/xml.dart'; // xml
       void test(String input) { XmlDocument.parseEvents(input); }
   - name: literal xml parse events negative
@@ -96,9 +90,6 @@
   - name: tainted xml fragment
     code: |
       import 'package:xml/xml.dart';
-      import 'package:xml/xml.dart';
-      import 'package:xml/xml.dart';
-      import 'package:xml/xml.dart';
       import 'package:xml/xml.dart'; // xml
       // uses xml
       void test(String input) { XmlDocumentFragment.parse(input); }
@@ -111,21 +102,6 @@
 
   imports:
   - xml/xml.dart
-- id: dart.xxe.xml_parse_events_fn
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: xxe
-  severity: low
-  packages: [xml]
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      name: parseEvents
-  description: "Disabled - bare parseEvents() without receiver context is too broad; the XmlDocument.parseEvents rule above is the narrower form."
-
 - id: dart.xxe.xml2json_parse
   enabled: true
   language: dart
@@ -144,9 +120,6 @@
   - name: tainted xml2json parse
     code: |
       import 'package:xml2json/xml2json.dart';
-      import 'package:xml2json/xml2json.dart';
-      import 'package:xml2json/xml2json.dart';
-      import 'package:xml2json/xml2json.dart';
       import 'package:xml2json/xml2json.dart'; // xml2json
       // uses xml2json
       void test(String input) { Xml2Json.parse(input); }
@@ -159,17 +132,3 @@
 
   imports:
   - xml2json/xml2json.dart
-- id: dart.xxe.libxml_bindings_parse
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  tag: xxe
-  severity: high
-  packages: [libxml]
-  cwe: [CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [LibXml, parse]
-  description: "Disabled placeholder - enable when the codebase calls dart:ffi libxml2 bindings that expand entities by default; the real danger lives in native-library shims."

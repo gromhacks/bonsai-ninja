@@ -114,41 +114,6 @@
       '
     expect_no_match: true
   description: ProcessStartInfo.FileName = tainted.
-- id: csharp.cmdi.process_start_use_shell
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: command-injection
-  severity: critical
-  category: process-exec
-  cwe:
-  - CWE-78
-  match:
-    kind: write
-    target:
-      name: UseShellExecute
-  match_examples:
-  - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; UseShellExecute = input; } }
-
-      '
-  description: "Disabled - UseShellExecute is only dangerous with receiver FileName/Arguments state; enable when receiver-state constraints can join those writes."
-- id: csharp.cmdi.cmd_exe_runtime
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: command-injection
-  severity: critical
-  category: process-exec
-  cwe:
-  - CWE-78
-  match:
-    kind: call
-    callee:
-      name: ExecuteCommand
-  description: "Disabled - too generic; rely on Process.Start patterns."
 - id: csharp.cmdi.medallion_shell_run
   enabled: true
   language: csharp
@@ -284,32 +249,6 @@
       '
     expect_no_match: true
   description: "PowerShell.AddCommand(tainted) - cmdlet name / path injection."
-- id: csharp.cmdi.runspace_invoke
-  enabled: false
-  language: csharp
-  tag: command-injection
-  severity: high
-  category: process-exec
-  packages:
-  - System.Management.Automation
-  cwe:
-  - CWE-78
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Pipeline
-      - Invoke
-  match_examples:
-  - name: declared shape
-    code: 'using System.Management.Automation;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Pipeline.Invoke(input); } }
-
-      '
-  description: "Pipeline.Invoke - PowerShell pipeline executes queued commands."
-  disabled_reason:
-    code: over-broad
 - id: csharp.cmdi.process_start_info_ctor
   enabled: true
   language: csharp

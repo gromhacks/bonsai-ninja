@@ -4,173 +4,304 @@
   tag: weak-tls
   category: source-independent
   severity: high
-  packages:
-  - openssl
-  cwe:
-  - CWE-295
+  packages: [openssl]
+  imports: [openssl/ssl.h, openssl]
+  cwe: [CWE-295]
   match:
     kind: call
     callee:
       name: SSL_CTX_set_verify
+      binding_origin: runtime-global
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '^(SSL_VERIFY_NONE|0)$'
   match_examples:
-  - name: generated direct match
-    code: "#include <openssl/evp.h>\nvoid example() {\n  const char *arg = \"tainted\"\
-      ;\n  const char *fmt = arg;\n  const char *query = arg;\n  SSL_CTX_set_verify(arg,\
-      \ SSL_VERIFY_NONE);\n}\n"
-  description: "OpenSSL SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL) - no cert\
-    \ verification."
+  - name: OpenSSL context verification disabled
+    code: |
+      #include <openssl/ssl.h>
+      void configure(SSL_CTX *context) {
+        SSL_CTX_set_verify(context, SSL_VERIFY_NONE, nullptr);
+      }
+    expect_match_text: [SSL_CTX_set_verify]
+  - name: OpenSSL context peer verification negative
+    code: |
+      #include <openssl/ssl.h>
+      void configure(SSL_CTX *context) {
+        SSL_CTX_set_verify(context, SSL_VERIFY_PEER, nullptr);
+      }
+    expect_no_match: true
+  - name: local OpenSSL context setter collision negative
+    code: |
+      #include <openssl/evp.h>
+      static void SSL_CTX_set_verify(void *, int, void *) {}
+      void configure(void *context) {
+        SSL_CTX_set_verify(context, SSL_VERIFY_NONE, nullptr);
+      }
+    expect_no_match: true
+  description: "OpenSSL SSL_CTX_set_verify with the exact no-verification mode disables certificate-chain verification for the context."
+
 - id: cpp.tls.openssl_set_verify_none
   enabled: true
   language: cpp
   tag: weak-tls
   category: source-independent
   severity: high
-  packages:
-  - openssl
-  cwe:
-  - CWE-295
+  packages: [openssl]
+  imports: [openssl/ssl.h, openssl]
+  cwe: [CWE-295]
   match:
     kind: call
     callee:
       name: SSL_set_verify
+      binding_origin: runtime-global
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '^(SSL_VERIFY_NONE|0)$'
   match_examples:
-  - name: generated direct match
-    code: "#include <openssl/evp.h>\nvoid example() {\n  const char *arg = \"tainted\"\
-      ;\n  const char *fmt = arg;\n  const char *query = arg;\n  SSL_set_verify(arg,\
-      \ SSL_VERIFY_NONE);\n}\n"
-  description: "OpenSSL SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL) - per-connection\
-    \ no verify."
+  - name: OpenSSL connection verification disabled
+    code: |
+      #include <openssl/ssl.h>
+      void configure(SSL *connection) {
+        SSL_set_verify(connection, SSL_VERIFY_NONE, nullptr);
+      }
+    expect_match_text: [SSL_set_verify]
+  - name: OpenSSL connection peer verification negative
+    code: |
+      #include <openssl/ssl.h>
+      void configure(SSL *connection) {
+        SSL_set_verify(connection, SSL_VERIFY_PEER, nullptr);
+      }
+    expect_no_match: true
+  - name: local OpenSSL connection setter collision negative
+    code: |
+      #include <openssl/evp.h>
+      static void SSL_set_verify(void *, int, void *) {}
+      void configure(void *connection) {
+        SSL_set_verify(connection, SSL_VERIFY_NONE, nullptr);
+      }
+    expect_no_match: true
+  description: "OpenSSL SSL_set_verify with the exact no-verification mode disables certificate-chain verification for one connection."
+
 - id: cpp.tls.boost_asio_verify_none
   enabled: true
   language: cpp
   tag: weak-tls
   category: source-independent
   severity: high
-  packages:
-  - boost.asio
-  cwe:
-  - CWE-295
+  packages: [boost.asio]
+  imports: [boost/asio/ssl.hpp, boost]
+  cwe: [CWE-295]
   match:
     kind: call
     callee:
-      attribute:
-      - context
-      - set_verify_mode
+      name: set_verify_mode
+  constraints:
+  - receiver_type_in: [context, "boost::asio::ssl::context"]
+  - arg_matches_regex:
+      index: 0
+      regex: '^(boost::asio::ssl::)?verify_none$'
   match_examples:
-  - name: generated direct match
-    code: "#include <boost/asio.hpp>\n#include <boost/asio.hpp>\n#include <boost/asio.hpp>\n\
-      void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n\
-      \  const char *query = arg;\n  context::set_verify_mode(verify_none);\n}\n"
-  description: "boost::asio::ssl::context::set_verify_mode(verify_none). Arg-shape\
-    \ constraint requires the verify-none enumerator literal - `set_verify_mode(verify_peer)`\
-    \ does NOT fire."
-  imports:
-  - boost
-  - boost/asio.hpp
+  - name: Boost Asio verification disabled
+    code: |
+      #include <boost/asio/ssl.hpp>
+      void configure(boost::asio::ssl::context &context) {
+        context.set_verify_mode(boost::asio::ssl::verify_none);
+      }
+    expect_match_text: [context.set_verify_mode]
+  - name: Boost Asio peer verification negative
+    code: |
+      #include <boost/asio/ssl.hpp>
+      void configure(boost::asio::ssl::context &context) {
+        context.set_verify_mode(boost::asio::ssl::verify_peer);
+      }
+    expect_no_match: true
+  - name: unrelated Boost verify-mode receiver negative
+    code: |
+      #include <boost/asio/ssl.hpp>
+      namespace local { struct context { void set_verify_mode(int); }; }
+      void configure(local::context &context) {
+        context.set_verify_mode(boost::asio::ssl::verify_none);
+      }
+    expect_no_match: true
+  description: "boost::asio::ssl::context::set_verify_mode with the exact verify_none enumerator disables peer verification."
+
 - id: cpp.tls.qt_qssl_setpeerverifymode
   enabled: true
   language: cpp
   tag: weak-tls
   category: source-independent
   severity: high
-  packages:
-  - Qt
-  cwe:
-  - CWE-295
+  packages: [Qt]
+  imports: [QtNetwork/QSslConfiguration, QtNetwork/QSslSocket, Qt]
+  cwe: [CWE-295]
   match:
     kind: call
     callee:
-      regex: ^QSslConfiguration::setPeerVerifyMode$
+      name: setPeerVerifyMode
+  constraints:
+  - receiver_type_in: [QSslConfiguration]
+  - arg_matches_regex:
+      index: 0
+      regex: '^(QSslSocket::)?VerifyNone$'
   match_examples:
-  - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt\
-      \ */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt\
-      \ = arg;\n  const char *query = arg;\n  QSslConfiguration::setPeerVerifyMode(arg);\n\
-      }\n"
-  description: "Qt QSslConfiguration::setPeerVerifyMode(VerifyNone) - disables\
-    \ cert check."
-  imports:
-  - QtCore
-  - QtCore/Qt
+  - name: Qt SSL configuration verification disabled
+    code: |
+      #include <QtNetwork/QSslConfiguration>
+      #include <QtNetwork/QSslSocket>
+      void configure(QSslConfiguration &configuration) {
+        configuration.setPeerVerifyMode(QSslSocket::VerifyNone);
+      }
+    expect_match_text: [configuration.setPeerVerifyMode]
+  - name: Qt SSL configuration peer verification negative
+    code: |
+      #include <QtNetwork/QSslConfiguration>
+      #include <QtNetwork/QSslSocket>
+      void configure(QSslConfiguration &configuration) {
+        configuration.setPeerVerifyMode(QSslSocket::VerifyPeer);
+      }
+    expect_no_match: true
+  - name: unrelated Qt configuration receiver negative
+    code: |
+      #include <QtNetwork/QSslConfiguration>
+      #include <QtNetwork/QSslSocket>
+      namespace local { struct QSslConfiguration { void setPeerVerifyMode(QSslSocket::PeerVerifyMode); }; }
+      void configure(local::QSslConfiguration &configuration) {
+        configuration.setPeerVerifyMode(QSslSocket::VerifyNone);
+      }
+    expect_no_match: true
+  description: "QSslConfiguration::setPeerVerifyMode with the exact VerifyNone enumerator disables peer verification."
+
 - id: cpp.tls.qt_qsslsocket_setpeerverifymode
   enabled: true
   language: cpp
   tag: weak-tls
   category: source-independent
   severity: high
-  packages:
-  - Qt
-  cwe:
-  - CWE-295
+  packages: [Qt]
+  imports: [QtNetwork/QSslSocket, Qt]
+  cwe: [CWE-295]
   match:
     kind: call
     callee:
-      regex: ^QSslSocket::setPeerVerifyMode$
+      name: setPeerVerifyMode
+  constraints:
+  - receiver_type_in: [QSslSocket]
+  - arg_matches_regex:
+      index: 0
+      regex: '^(QSslSocket::)?VerifyNone$'
   match_examples:
-  - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt\
-      \ */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt\
-      \ = arg;\n  const char *query = arg;\n  QSslSocket::setPeerVerifyMode(arg);\n\
-      }\n"
-  description: Qt QSslSocket::setPeerVerifyMode(VerifyNone).
-  imports:
-  - QtCore
-  - QtCore/Qt
+  - name: Qt SSL socket verification disabled
+    code: |
+      #include <QtNetwork/QSslSocket>
+      void configure(QSslSocket &socket) {
+        socket.setPeerVerifyMode(QSslSocket::VerifyNone);
+      }
+    expect_match_text: [socket.setPeerVerifyMode]
+  - name: Qt SSL socket peer verification negative
+    code: |
+      #include <QtNetwork/QSslSocket>
+      void configure(QSslSocket &socket) {
+        socket.setPeerVerifyMode(QSslSocket::VerifyPeer);
+      }
+    expect_no_match: true
+  - name: unrelated Qt socket receiver negative
+    code: |
+      #include <QtNetwork/QSslSocket>
+      namespace local { struct QSslSocket { void setPeerVerifyMode(::QSslSocket::PeerVerifyMode); }; }
+      void configure(local::QSslSocket &socket) {
+        socket.setPeerVerifyMode(QSslSocket::VerifyNone);
+      }
+    expect_no_match: true
+  description: "QSslSocket::setPeerVerifyMode with the exact VerifyNone enumerator disables peer verification."
+
 - id: cpp.tls.poco_context_verify_none
   enabled: true
   language: cpp
   tag: weak-tls
   category: source-independent
   severity: high
-  packages:
-  - Poco
-  cwe:
-  - CWE-295
+  packages: [Poco]
+  imports: [Poco/Net/Context.h, Poco]
+  cwe: [CWE-295]
   match:
     kind: new
     callee:
-      name: Context
+      attribute: [Poco, Net, Context]
+  constraints:
+  - min_args: 5
+  - arg_matches_regex:
+      index: 4
+      regex: '^(Poco::Net::Context::|Context::)?VERIFY_NONE$'
   match_examples:
-  - name: generated direct match
-    code: "#include <Poco/Net/Context.h>\nusing Poco::Net::Context;\nvoid example() {\n  const char *arg = \"tainted\"\
-      ;\n  auto *x = new Context(arg);\n}\n"
-  description: "Poco::Net::Context(...) - flag when constructed with VERIFY_NONE\
-    \ verification mode."
+  - name: Poco TLS context verification disabled
+    code: |
+      #include <Poco/Net/Context.h>
+      void configure() {
+        auto *context = new Poco::Net::Context(
+            Poco::Net::Context::CLIENT_USE, "", "", "",
+            Poco::Net::Context::VERIFY_NONE);
+      }
+    expect_match_text: ["Poco::Net::Context"]
+  - name: Poco TLS context relaxed verification negative
+    code: |
+      #include <Poco/Net/Context.h>
+      void configure() {
+        auto *context = new Poco::Net::Context(
+            Poco::Net::Context::CLIENT_USE, "", "", "",
+            Poco::Net::Context::VERIFY_RELAXED);
+      }
+    expect_no_match: true
+  - name: local Poco context collision negative
+    code: |
+      #include <Poco/Foundation.h>
+      namespace Local { struct Context { Context(int, const char *, const char *, const char *, int); }; }
+      void configure() {
+        auto *context = new Local::Context(0, "", "", "", 0);
+      }
+    expect_no_match: true
+  description: "Poco::Net::Context constructed with the exact VERIFY_NONE mode disables peer certificate verification."
+
 - id: cpp.tls.cpphttplib_server_verify_off
   enabled: true
   language: cpp
   tag: weak-tls
   category: source-independent
   severity: high
-  packages:
-  - cpp-httplib
-  cwe:
-  - CWE-295
+  packages: [cpp-httplib]
+  imports: [httplib.h, httplib]
+  cwe: [CWE-295]
   match:
     kind: call
     callee:
-      attribute:
-      - Client
-      - enable_server_certificate_verification
+      name: enable_server_certificate_verification
   constraints:
+  - receiver_type_in: [Client, "httplib::Client"]
   - arg_equals:
       index: 0
       value: "false"
   match_examples:
-  - name: cpp-httplib verification disabled
-    code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char\
-      \ *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n\
-      \  Client::enable_server_certificate_verification(false);\n}\n"
-  - name: cpp-httplib verification enabled negative
+  - name: cpp-httplib server verification disabled
     code: |
       #include <httplib.h>
-      void example() {
-        Client::enable_server_certificate_verification(true);
+      void configure(httplib::Client &client) {
+        client.enable_server_certificate_verification(false);
+      }
+    expect_match_text: [client.enable_server_certificate_verification]
+  - name: cpp-httplib server verification enabled negative
+    code: |
+      #include <httplib.h>
+      void configure(httplib::Client &client) {
+        client.enable_server_certificate_verification(true);
       }
     expect_no_match: true
-  description: "cpp-httplib Client::enable_server_certificate_verification(false)\
-    \ - disables verification. Arg-equals constraint scopes the rule to the disabling\
-    \ form; the `(true)` call does NOT fire."
-  imports:
-  - httplib.h
-  - httplib
+  - name: unrelated cpp-httplib method collision negative
+    code: |
+      #include <httplib.h>
+      namespace local { struct Client { void enable_server_certificate_verification(bool); }; }
+      void configure(local::Client &client) {
+        client.enable_server_certificate_verification(false);
+      }
+    expect_no_match: true
+  description: "cpp-httplib Client::enable_server_certificate_verification(false) disables server certificate verification."

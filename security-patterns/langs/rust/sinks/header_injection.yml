@@ -20,7 +20,6 @@
   - name: generated direct match
     code: |
       use actix_web;
-      use actix_web;
       use actix_web::dummy;
       fn example(target: &str) {
           let query = "user";
@@ -57,7 +56,6 @@
   - name: generated direct match
     code: |
       use actix_web;
-      use actix_web;
       use actix_web::dummy;
       fn example(target: &str) {
           let query = "user";
@@ -82,7 +80,6 @@
   - http
   cwe:
   - CWE-113
-  - CWE-444
   match:
     kind: call
     callee:
@@ -106,9 +103,7 @@
           HeaderMap::insert("X-Trace", "safe");
       }
     expect_no_match: true
-  description: "http HeaderMap::insert(name, tainted) - used by axum / hyper response builders; tainted value = CRLF header-injection. Merged collision aliases: rust.smuggle.headers_insert_dual."
-  aliases:
-  - rust.smuggle.headers_insert_dual
+  description: "http HeaderMap::insert(name, tainted) - used by axum / hyper response builders; a tainted value permits CRLF header injection."
 - id: rust.header.axum_headers_append
   enabled: true
   language: rust

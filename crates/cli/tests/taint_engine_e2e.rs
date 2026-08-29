@@ -8,8 +8,8 @@
 //!
 //! The suite is organised into four layers:
 //!
-//!  1. **mega_flow full-chain equivalence** — for the Python
-//!     `mega_flow` fixture, where the README specifies the exact
+//!  1. **language_gauntlet full-chain equivalence** — for the Python
+//!     `language_gauntlet` fixture, where the README specifies the exact
 //!     hop sequence from `handle_request` to `os.system`, the
 //!     engine must produce a `security taint-analysis` finding, an
 //!     `inspect --query execute` FLOW block, a `dump-taint` record
@@ -20,7 +20,7 @@
 //!
 //!  2. **Every construct threads through** — per-construct tests
 //!     that pin each of the 30+ flow-oriented Python constructs
-//!     mega_flow exercises (decorator factory, async for, yield
+//!     language_gauntlet exercises (decorator factory, async for, yield
 //!     from, walrus, reduce + lambda, match/case, super, property,
 //!     classmethod, staticmethod, context-manager class, `__call__`,
 //!     iterator protocol, …). Each test asserts inspect + export +
@@ -92,17 +92,18 @@ fn rows_of(v: &serde_json::Value) -> Vec<serde_json::Value> {
 }
 
 fn ws(lang: &str, fixture: &str) -> String {
-    repo_root()
-        .join("examples")
-        .join(lang)
-        .join(fixture)
-        .to_string_lossy()
-        .into_owned()
+    let root = repo_root();
+    let path = if fixture == "language_gauntlet" {
+        root.join("examples").join(lang).join(fixture)
+    } else {
+        root.join("test-fixtures/languages").join(lang).join(fixture)
+    };
+    path.to_string_lossy().into_owned()
 }
 
-/// Every hop the mega_flow README pins as being on the canonical
+/// Every hop the language_gauntlet README pins as being on the canonical
 /// source→sink chain.
-const MEGA_FLOW_CHAIN: &[&str] = &[
+const LANGUAGE_GAUNTLET_CHAIN: &[&str] = &[
     "handle_request",
     "run_pipeline",
     "orchestrate",
@@ -116,17 +117,17 @@ const MEGA_FLOW_CHAIN: &[&str] = &[
 ];
 
 // =============================================================================
-// Layer 1 — mega_flow full-chain equivalence
+// Layer 1 — language_gauntlet full-chain equivalence
 // =============================================================================
 
 /// `security taint-analysis` must prove the actual Flask
 /// `request.args.get("cmd")` source reaches the `os.system(cmd)` sink
-/// through the mega-flow pipeline. This pins the high-level semantic
+/// through the language-gauntlet pipeline. This pins the high-level semantic
 /// path, not just isolated construct behavior.
 #[test]
-fn mega_flow_security_flows_produces_finding_with_full_chain_cover() {
+fn language_gauntlet_security_flows_produces_finding_with_full_chain_cover() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, code)) = run(&[
         "security",
         &w,
@@ -143,10 +144,10 @@ fn mega_flow_security_flows_produces_finding_with_full_chain_cover() {
     ]) else {
         return;
     };
-    assert_eq!(code, 0, "mega_flow security taint-analysis ec={code}");
+    assert_eq!(code, 0, "language_gauntlet security taint-analysis ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
     let rows = rows_of(&parsed);
-    assert!(!rows.is_empty(), "mega_flow produced 0 security findings");
+    assert!(!rows.is_empty(), "language_gauntlet produced 0 security findings");
 
     // Each finding must carry stable ids + non-empty source / sink
     // metadata.
@@ -174,7 +175,7 @@ fn mega_flow_security_flows_produces_finding_with_full_chain_cover() {
             == Some("python.flask.request_args_get")
     });
     let Some(finding) = finding else {
-        panic!("mega_flow missing request.args.get finding; got {rows:?}");
+        panic!("language_gauntlet missing request.args.get finding; got {rows:?}");
     };
     let chain: Vec<&str> = finding
         .get("chain_display")
@@ -191,7 +192,10 @@ fn mega_flow_security_flows_produces_finding_with_full_chain_cover() {
         "perform",
         "execute",
     ] {
-        assert!(chain.contains(&hop), "mega_flow chain missing `{hop}`: {chain:?}");
+        assert!(
+            chain.contains(&hop),
+            "language_gauntlet chain missing `{hop}`: {chain:?}"
+        );
     }
 }
 
@@ -201,21 +205,24 @@ fn mega_flow_security_flows_produces_finding_with_full_chain_cover() {
 /// transforms like `list(map(... cmd.split()))` look clean even
 /// though findings are correct.
 #[test]
-fn mega_flow_dump_taint_uses_rulepack_transfer_semantics() {
+fn language_gauntlet_dump_taint_uses_rulepack_transfer_semantics() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, code)) = run(&["dump-taint", &w, "--source", "handle_request", "--format", "json"])
     else {
         return;
     };
-    assert_eq!(code, 0, "mega_flow dump-taint ec={code}");
+    assert_eq!(code, 0, "language_gauntlet dump-taint ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
     let records = parsed
         .get("records")
         .and_then(|r| r.as_array())
         .cloned()
         .unwrap_or_default();
-    assert!(!records.is_empty(), "mega_flow dump-taint produced no records");
+    assert!(
+        !records.is_empty(),
+        "language_gauntlet dump-taint produced no records"
+    );
 
     let mut edge_args: std::collections::HashMap<
         (String, String),
@@ -278,9 +285,9 @@ fn mega_flow_dump_taint_uses_rulepack_transfer_semantics() {
 /// Discovery stays bounded to one evidence unit per matching callable, while
 /// `symbol-summary` exposes its exact direct compiler-resolved neighbors.
 #[test]
-fn mega_flow_inspect_and_symbol_summary_stay_bounded() {
+fn language_gauntlet_inspect_and_symbol_summary_stay_bounded() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, code)) = run(&[
         "inspect",
         &w,
@@ -292,7 +299,7 @@ fn mega_flow_inspect_and_symbol_summary_stay_bounded() {
     ]) else {
         return;
     };
-    assert_eq!(code, 0, "mega_flow inspect ec={code}");
+    assert_eq!(code, 0, "language_gauntlet inspect ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
     let mut any_flow = false;
     for hit in parsed
@@ -344,20 +351,20 @@ fn mega_flow_inspect_and_symbol_summary_stay_bounded() {
     );
 }
 
-/// `export` on mega_flow must:
+/// `export` on language_gauntlet must:
 ///   - list every hop in `taint_graph.functions`
 ///   - produce call_edges that connect consecutive hops (modulo
 ///     async-call edges the resolver sometimes skips)
 ///   - keep every FuncId in edges resolvable through `functions`
 #[test]
 #[allow(clippy::many_single_char_names)]
-fn mega_flow_export_connects_consecutive_hops() {
+fn language_gauntlet_export_connects_consecutive_hops() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, code)) = run(&["export", &w]) else {
         return;
     };
-    assert_eq!(code, 0, "mega_flow export ec={code}");
+    assert_eq!(code, 0, "language_gauntlet export ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
     let tg = parsed.get("taint_graph").expect("export missing taint_graph");
 
@@ -367,7 +374,7 @@ fn mega_flow_export_connects_consecutive_hops() {
         .iter()
         .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
         .collect();
-    for hop in MEGA_FLOW_CHAIN {
+    for hop in LANGUAGE_GAUNTLET_CHAIN {
         assert!(
             names.iter().any(|n| n == hop),
             "export.functions missing hop `{hop}`"
@@ -397,7 +404,7 @@ fn mega_flow_export_connects_consecutive_hops() {
 
     // At least 5 of the 9 hop-to-hop consecutive edges must resolve.
     let mut found = 0;
-    for window in MEGA_FLOW_CHAIN.windows(2) {
+    for window in LANGUAGE_GAUNTLET_CHAIN.windows(2) {
         let (a, b) = (window[0], window[1]);
         let has = edges.iter().any(|e| {
             let fa = id_to_name
@@ -422,13 +429,13 @@ fn mega_flow_export_connects_consecutive_hops() {
 // Layer 2 — every construct threads through
 // =============================================================================
 //
-// Each construct from the mega_flow README gets one test that drives
+// Each construct from the language_gauntlet README gets one test that drives
 // `inspect --query <construct>` + `trace --from handle_request --to
 // <construct>` + `export`'s taint_graph and asserts at least one of
 // the three surfaces picks up the hop with taint context.
 
 fn assert_construct_picked_up(construct: &str) {
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     // 1. inspect must surface the construct by name.
     let Some((inspect_out, _, _)) = run(&["inspect", &w, "--query", construct]) else {
         return;
@@ -851,7 +858,7 @@ fn finding_chain_fits_compressed_path_corridor() {
 #[test]
 fn export_contains_exact_path_corridor_edges() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, _)) = run(&["export", &w]) else {
         return;
     };
@@ -978,7 +985,7 @@ fn finding_ids_deterministic_across_runs() {
 #[test]
 fn export_deterministic_across_runs() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out1, _, _)) = run(&["export", &w]) else {
         return;
     };
@@ -1032,7 +1039,7 @@ fn export_deterministic_across_runs() {
 #[test]
 fn propagation_records_have_complete_shape() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, _)) = run(&["export", &w, "--full-propagations"]) else {
         return;
     };
@@ -1062,7 +1069,7 @@ fn propagation_records_have_complete_shape() {
 #[test]
 fn intra_taint_pass_propagates_across_blocks() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, _)) = run(&["export", &w]) else {
         return;
     };
@@ -1117,7 +1124,7 @@ fn intra_taint_pass_propagates_across_blocks() {
 #[test]
 fn function_summaries_include_return_taint_entries() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, _)) = run(&["export", &w]) else {
         return;
     };
@@ -1140,7 +1147,7 @@ fn function_summaries_include_return_taint_entries() {
 #[test]
 fn assign_chain_pass_expands_seed_set() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, _)) = run(&["export", &w]) else {
         return;
     };

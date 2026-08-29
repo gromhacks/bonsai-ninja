@@ -1,45 +1,3 @@
-- id: java.deser.object_input_stream
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: insecure-deserialization
-  severity: critical
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      regex: "^ObjectInputStream\\.readObject$"
-  description: "Disabled - ObjectInputStream.readObject() has no tainted argument; needs receiver state showing the stream wraps untrusted bytes. Merged aliases: java.deser.object_input_stream_local."
-  aliases:
-  - java.deser.object_input_stream_local
-
-- id: java.deser.object_input_stream_local
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: insecure-deserialization
-  severity: critical
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: readObject
-  match_examples:
-  - name: local object input stream read object
-    code: |
-      class App {
-        Object handle(ObjectInputStream ois) throws Exception {
-          return ois.readObject();
-        }
-      }
-      class ObjectInputStream {
-        Object readObject(Object... args) { return null; }
-      }
-    expect_match_text: [ois.readObject]
-  description: "ObjectInputStream.readObject() on a local stream variable - classic Java deserialization RCE."
-
 - id: java.deser.object_input_stream_tainted_receiver
   enabled: true
   language: java
@@ -136,70 +94,34 @@
     expect_no_match: true
   description: XStream.fromXML - CVE-2021-39140 family.
 
-- id: java.deser.xstream_fromxml_local
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: insecure-deserialization
-  severity: critical
-  packages: ["com.thoughtworks.xstream"]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: fromXML
-  match_examples:
-  - name: local xstream from xml
-    code: |
-      import com.thoughtworks.xstream.*;
-      class App {
-        Object handle(XStream xstream, String xml) {
-          return xstream.fromXML(xml);
-        }
-      }
-      class XStream {
-        Object fromXML(Object... args) { return null; }
-      }
-    expect_match_text: [xstream.fromXML]
-  description: "XStream.fromXML(...) on a local XStream instance - unsafe XML deserialization."
-  imports:
-  - com
 - id: java.deser.jackson_enable_default_typing
   enabled: true
   language: java
   tag: insecure-deserialization
   category: source-independent
   severity: critical
-  packages: ["com.fasterxml.jackson.core"]
+  packages: ["com.fasterxml.jackson.databind"]
+  imports: [com.fasterxml.jackson.databind]
   cwe: [CWE-502]
   match:
     kind: call
     callee:
-      attribute: [ObjectMapper, enableDefaultTyping]
+      name: enableDefaultTyping
+      receiver_type_in: [ObjectMapper, com.fasterxml.jackson.databind.ObjectMapper]
   match_examples:
-  - name: generated shape example
+  - name: typed Jackson mapper enables legacy default typing
     code: |
-      import com.fasterxml.jackson.core.*;
+      import com.fasterxml.jackson.databind.ObjectMapper;
       class App {
-        void handle(String input) throws Exception {
-          ObjectMapper.enableDefaultTyping(input);
-        }
+        void configure(ObjectMapper mapper) { mapper.enableDefaultTyping(); }
       }
+    expect_match_text: [mapper.enableDefaultTyping]
+  - name: unrelated mapper collision
+    code: |
+      class LocalMapper { void enableDefaultTyping() {} }
+      class App { void configure(LocalMapper mapper) { mapper.enableDefaultTyping(); } }
+    expect_no_match: true
   description: Jackson enableDefaultTyping - gadget-chain RCE.
-- id: java.deser.xmldecoder
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: insecure-deserialization
-  severity: critical
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      regex: "^XMLDecoder\\.readObject$"
-  description: "Disabled - XMLDecoder.readObject() executes data supplied to the decoder constructor; needs receiver state tying the decoder to tainted XML."
 - id: java.deser.snake_yaml
   enabled: true
   language: java
@@ -252,35 +174,6 @@
     expect_no_match: true
   description: SnakeYAML Yaml.load - constructor chain RCE.
 
-- id: java.deser.snake_yaml_local
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: insecure-deserialization
-  severity: critical
-  packages: ["org.yaml"]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: load
-  match_examples:
-  - name: local snakeyaml load
-    code: |
-      import org.yaml.*;
-      class App {
-        Object handle(Yaml yaml, String data) {
-          return yaml.load(data);
-        }
-      }
-      class Yaml {
-        Object load(Object... args) { return null; }
-      }
-    expect_match_text: [yaml.load]
-  description: "SnakeYAML Yaml.load(...) on a local Yaml instance - constructor-chain deserialization risk."
-  imports:
-  - org
 - id: java.deser.kryo_readclassandobject
   enabled: true
   language: java
@@ -314,44 +207,6 @@
       }
     expect_no_match: true
   description: Kryo readClassAndObject - unsafe with untrusted input.
-- id: java.deser.hessian_readobject
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: insecure-deserialization
-  severity: critical
-  packages: ["com.caucho"]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      regex: "^HessianInput\\.readObject$"
-  description: "Disabled - HessianInput.readObject() has no data argument; needs receiver state showing the HessianInput wraps untrusted bytes."
-
-- id: java.deser.jackson_activate_default_typing
-  enabled: true
-  language: java
-  tag: insecure-deserialization
-  category: source-independent
-  severity: critical
-  packages: ["com.fasterxml.jackson.databind"]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [ObjectMapper, activateDefaultTyping]
-  match_examples:
-  - name: generated shape example
-    code: |
-      import com.fasterxml.jackson.databind.*;
-      class App {
-        void handle(String input) throws Exception {
-          ObjectMapper.activateDefaultTyping(input);
-        }
-      }
-  description: Jackson activateDefaultTyping - polymorphic deser gadget-chain RCE.
-
 - id: java.deser.jackson_readvalue
   enabled: true
   language: java
@@ -405,83 +260,6 @@
       }
     expect_no_match: true
   description: "ObjectMapper.readValue(...) after default typing or polymorphic type handling - gadget-chain deserialization risk when fed untrusted JSON."
-
-- id: java.deser.apache_poi_xssfworkbook_inputstream
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: insecure-deserialization
-  severity: high
-  packages: ["org.apache.poi"]
-  cwe: [CWE-502]
-  match:
-    kind: new
-    callee:
-      name: XSSFWorkbook
-  match_examples:
-  - name: apache poi xssf workbook input stream
-    code: |
-      import org.apache.poi.*;
-      class App {
-        Object handle(InputStream stream) throws Exception {
-          return new XSSFWorkbook(stream);
-        }
-      }
-      class InputStream {}
-      class XSSFWorkbook {
-        XSSFWorkbook(Object... args) {}
-      }
-    expect_match_text: [XSSFWorkbook]
-  description: "Disabled - XSSFWorkbook(InputStream) is not a generic object-deserialization boundary; archive resource exhaustion requires a separate version/config-aware rule."
-
-  imports:
-  - org
-- id: java.deser.jaxb_unmarshaller_unmarshal
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: java.xxe.unmarshaller_unmarshal
-  language: java
-  tag: insecure-deserialization
-  severity: high
-  packages: ["javax.xml.bind", "jakarta.xml.bind"]
-  cwe: [CWE-502, CWE-611]
-  match:
-    kind: call
-    callee:
-      attribute: [Unmarshaller, unmarshal]
-  match_examples:
-  - name: jaxb unmarshaller unmarshal
-    code: |
-      import javax.xml.bind.*;
-      class App {
-        Object handle(Unmarshaller unmarshaller, Object source) throws Exception {
-          return unmarshaller.unmarshal(source);
-        }
-      }
-      class Unmarshaller {
-        Object unmarshal(Object... args) { return null; }
-      }
-    expect_match_text: [unmarshaller.unmarshal]
-  description: "Disabled - duplicate of java.xxe.unmarshaller_unmarshal; JAXB XML parsing is classified once as XXE."
-
-  imports:
-  - javax
-- id: java.deser.objectmessage_getobject
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: insecure-deserialization
-  severity: critical
-  packages: ["javax.jms", "jakarta.jms"]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      regex: "^ObjectMessage\\.getObject$"
-  description: "Disabled - ObjectMessage.getObject() deserializes message body state; needs tainted/untrusted JMS message provenance."
 
 - id: java.deser.snake_yaml_loadall
   enabled: true

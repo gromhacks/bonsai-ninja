@@ -5,8 +5,6 @@
   severity: medium
   cwe:
   - CWE-200
-  - CWE-134
-  - CWE-117
   match:
     kind: call
     callee:
@@ -29,10 +27,7 @@
         log.Printf("user value", username)
       }
     expect_no_match: true
-  description: "log.Printf(secret/token/password) - secret-shaped data written to application logs. Merged aliases: go.log_injection.log_printf_format, go.log_injection.log_printf_constant_format_arg."
-  aliases:
-  - go.log_injection.log_printf_format
-  - go.log_injection.log_printf_constant_format_arg
+  description: "log.Printf with a secret-shaped format/message writes sensitive material to application logs. Log-forging rules remain independent because they require tainted line content rather than secret vocabulary."
 - id: go.info_disclosure.http_error_exception
   enabled: true
   language: go

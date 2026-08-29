@@ -23,8 +23,7 @@
       filter_arg_index: 0
       literal_value_operators: ["$eq"]
       safe_scalar_runtime_types: [string]
-    character_escape:
-      value_arg_indices: [0]
+    character_constraint:
       required_mappings:
       - {input: '.', output: '\.'}
       - {input: '*', output: '\*'}
@@ -40,6 +39,14 @@
       - {input: '[', output: '\['}
       - {input: ']', output: '\]'}
       - {input: '\', output: '\\'}
+      accepted_providers:
+      - operation: {regex: '^replace$'}
+      - factory: {name: String}
+        operation: {regex: '^String\.replace$'}
+      - factory: {name: map}
+        operation: {regex: '^map\.join$'}
+      - factory: {regex: '^charCodeAt\.toString\.padStart$'}
+        operation: {regex: '^(?:replace|String\.replace)$'}
   match_examples:
   - name: mongo find
     code: |
@@ -329,51 +336,6 @@
       }
     expect_no_match: true
   description: "mongodb db.command runs an arbitrary command document - tainted input can invoke admin commands."
-- id: javascript.nosql.mongoose_find
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.nosql.mongo_find
-  language: javascript
-  tag: nosql-injection
-  severity: high
-  packages:
-  - mongoose
-  - nedb
-  - '@seald-io/nedb'
-  cwe:
-  - CWE-943
-  match:
-    kind: call
-    callee:
-      regex: ^Model\.find(?:One)?$
-  match_examples:
-  - name: mongoose find
-    code: |
-      const _u = require("mongoose");
-      function demo(input, req, obj) {
-        return Model.find(input, { "$where": input });
-      }
-  - name: mongoose findOne destructured shorthand
-    code: |
-      const _u = require("mongoose");
-      function login(Model, req) {
-        const { username, password } = req.body;
-        return Model.findOne({ username, password });
-      }
-    expect_match_text:
-    - Model.findOne
-  description: "Disabled duplicate - covered by canonical javascript.nosql.mongo_find generic Mongo-style find/findOne sink."
-  aliases:
-  - javascript.nosql.mongoose_findone
-  - javascript.nosql.mongoose_credential_object_filter
-  - javascript.nosql.mongoose_caller_controlled_filter_value
-  - javascript.nosql.mongoose_shorthand_credential_filter
-  - javascript.nosql.mongoose_findoneandupdate
-  - javascript.nosql.mongoose_findoneanddelete
-  - javascript.nosql.mongoose_findoneandreplace
-  - javascript.nosql.nedb_find
-  - javascript.nosql.mongoose_model_findone_body_spread
 - id: javascript.nosql.mongoose_where
   enabled: true
   language: javascript
@@ -442,50 +404,6 @@
       }
     expect_no_match: true
   description: "elasticsearch Client.search with a tainted `body` DSL - attacker controls query shape."
-- id: javascript.nosql.couchdb_find
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.nosql.mongo_find
-  language: javascript
-  tag: nosql-injection
-  severity: high
-  packages:
-  - nano
-  cwe:
-  - CWE-943
-  match:
-    kind: call
-    callee:
-      attribute:
-      - db
-      - find
-  match_examples:
-  - name: couchdb find
-    code: |
-      const _u = require("nano");
-      function demo(input, req, obj) {
-        return db.find(input, { "$where": input });
-      }
-  description: "Disabled duplicate - covered by canonical javascript.nosql.mongo_find generic Mongo-style find/findOne sink."
-- id: javascript.nosql.dynamodb_scan
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: nosql-injection
-  severity: medium
-  packages:
-  - '@aws-sdk/client-dynamodb'
-  cwe:
-  - CWE-943
-  match:
-    kind: call
-    callee:
-      attribute:
-      - DynamoDBClient
-      - send
-  description: "Disabled - DynamoDB scan/query runs via generic .send(Command); flag only when the FilterExpression is string-built."
 - id: javascript.nosql.dynamodb_scan_command
   enabled: true
   language: javascript

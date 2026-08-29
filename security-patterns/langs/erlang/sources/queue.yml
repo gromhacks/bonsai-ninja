@@ -1,34 +1,4 @@
 # Erlang queue/broker message sources (trust: service).
-- id: erlang.source.amqp_basic_deliver
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: erlang
-  trust: service
-  tag: queue-message
-  packages: [amqp_client]
-  match:
-    kind: call
-    callee:
-      regex: "^amqp_channel:call$"
-  match_examples:
-  - name: declared shape
-    code: |
-      -module(example).
-      -include_lib("amqp_client/include/amqp_client.hrl").
-      -export([test/1]).
-      test(Input) ->
-        amqp_channel:call(Input).
-  - name: amqp_channel close negative
-    code: |
-      -module(example).
-      -include_lib("amqp_client/include/amqp_client.hrl").
-      -export([test/1]).
-      test(Input) ->
-        amqp_channel:close(Input).
-    expect_no_match: true
-  description: "Disabled - amqp_channel:call is a generic client RPC and its result is not necessarily a broker-delivered payload. Model the consumer callback parameter once record-pattern facts can prove a #'basic.deliver'/#amqp_msg delivery."
-
 - id: erlang.source.brod_consume
   enabled: true
   language: erlang
@@ -88,40 +58,8 @@
     expect_no_match: true
   description: "Third parameter of brod_group_subscriber_v2 handle_message/4 - Kafka message payload proven by callback name, arity, position, and brod package evidence."
 
-- id: erlang.source.amqp_basic_get
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: erlang
-  trust: service
-  tag: queue-message
-  packages: [amqp_client]
-  match:
-    kind: call
-    callee:
-      regex: "^amqp_channel:cast$"
-  match_examples:
-  - name: declared shape
-    code: |
-      -module(example).
-      -include_lib("amqp_client/include/amqp_client.hrl").
-      -export([test/1]).
-      test(Input) ->
-        amqp_channel:cast(Input).
-  - name: amqp_channel close negative
-    code: |
-      -module(example).
-      -include_lib("amqp_client/include/amqp_client.hrl").
-      -export([test/1]).
-      test(Input) ->
-        amqp_channel:close(Input).
-    expect_no_match: true
-  description: "Disabled - amqp_channel:cast sends a command or publication and does not return broker input. Consumer delivery must be modeled at the receiving callback."
-
 - id: erlang.source.gen_server_handle_call
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: erlang
   trust: local
   tag: ipc-message
@@ -132,6 +70,7 @@
       in_method: [handle_call]
       param_index_in: [0]
       param_count_in: [3]
+      in_owner_base: [gen_server]
   match_examples:
   - name: gen server request
     code: |
@@ -146,12 +85,17 @@
       helper(Request, From, State) ->
         Request.
     expect_no_match: true
-  description: "Disabled - handle_call/3 name and arity do not prove the enclosing module declares the gen_server behaviour. Re-enable when the Erlang adapter emits generic module-behaviour facts."
+  - name: same callback signature without gen_server behaviour negative
+    code: |
+      -module(example).
+      -export([handle_call/3]).
+      handle_call(Request, From, State) ->
+        {reply, Request, State}.
+    expect_no_match: true
+  description: "gen_server handle_call/3 request parameter 0 - local IPC input proven by parsed module behaviour ownership, callback arity, and parameter position."
 
 - id: erlang.source.gen_server_handle_cast
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: erlang
   trust: local
   tag: ipc-message
@@ -162,6 +106,7 @@
       in_method: [handle_cast]
       param_index_in: [0]
       param_count_in: [2]
+      in_owner_base: [gen_server]
   match_examples:
   - name: gen server cast request
     code: |
@@ -176,4 +121,10 @@
       handle_cast(Request, From, State) ->
         Request.
     expect_no_match: true
-  description: "Disabled - handle_cast/2 is an IPC boundary only in a module proven to implement gen_server; callback spelling alone is insufficient."
+  - name: same callback without behaviour negative
+    code: |
+      -module(example).
+      handle_cast(Request, State) ->
+        {noreply, State}.
+    expect_no_match: true
+  description: "gen_server handle_cast/2 request parameter 0 - local IPC input proven by parsed module behaviour ownership, callback arity, and parameter position."

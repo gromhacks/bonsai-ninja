@@ -1,0 +1,132 @@
+---
+title: "Compiler Conformance"
+description: "Release-blocking parser, adapter, CFG, IDG, and cache invariants for every supported language."
+---
+
+# Compiler Conformance
+
+The compiler test suite checks semantic contracts, not just whether a fixture
+parses or whether a call name appears somewhere in output. A flattened switch,
+for example, still contains all of its calls while inventing impossible paths.
+Presence-only tests cannot detect that failure.
+
+No finite test suite proves that a static analyzer is perfect. This suite makes
+the supported contract explicit and exhaustive across the registered language
+set: every language must be classified for every cross-language construct, and
+an unclassified new adapter fails the gate.
+
+## Required layers
+
+Every adapter invokes the shared `run_language_suite!` gate exactly once. It
+checks:
+
+- valid Tree-sitter parsing without recovery diagnostics;
+- every shared and adapter-specific CST node kind consumed by lowering exists
+  in the adapter's current Tree-sitter grammar. Multi-grammar adapters expose
+  a path-specific inventory, so representation-only nodes (for example TSX
+  JSX nodes) are checked only against the grammar that can emit them. Grammar
+  dependency upgrades therefore fail on stale node spellings instead of
+  silently dropping facts;
+- stable adapter and grammar selection across repeated parses;
+- deterministic declaration and import lowering;
+- unique symbols, aligned parameter metadata, and valid receiver indices;
+- every serialized compiler span against the exact file, byte range, and UTF-8
+  boundaries of the parsed source snapshot;
+- lossless compiler-fact serialization;
+- dense CFG block identities, valid successors, source-backed block/event
+  spans, and complete CFG metadata;
+- trace entry, dense step identities, valid trace edges, and valid state
+  references.
+
+The shared replay check wraps the real adapter and counts its two canonical
+lowering entry points. Publishing the compiler object may lower declarations
+and imports once; reopening the exact content-addressed generation and deriving
+headers, linkage, callgraph, and IDG facts must not call the adapter again.
+This catches accidental reparsing and parallel lowering paths as correctness
+and scale regressions, not merely as benchmark noise.
+
+The same suite invokes declaration and import lowering through a counting
+Tree-sitter provider. Each entry point must acquire exactly one immutable tree
+per file, even on a cache hit. Adapter-specific declarations, fields, selector
+facts, callbacks, and control-flow projections must reuse that retained tree;
+hidden helper calls cannot reopen it for a later pass.
+
+Lua participates in the same adapter-local gate as every other bundled language.
+The architecture invariant rejects a bundled adapter without this test.
+
+The cross-language semantic suites add path and phase assertions:
+
+- `runtime_evaluation_conformance` treats each frontend like an evaluator:
+  straight-line calls retain source order and calls after an unconditional
+  return or language-level exception/panic are unreachable in the CFG;
+- `condition_expression_conformance` requires every adapter to lower
+  conjunction, disjunction, and negation to typed boolean IR with
+  source-ordered operands instead of leaving shared analysis to parse text;
+- `multi_arm_path_conformance` requires every multi-arm marker to exist and
+  proves that mutually exclusive arms cannot co-occur on one compiler path;
+- `multi_catch_path_conformance` proves that sibling exception handlers are
+  alternatives, with explicit reasons for languages without multi-catch
+  syntax;
+- `compiler_semantic_regressions` seeds the IDG directly, without security
+  rules, to reject sibling-arm taint and prove that a C-style loop update runs
+  after the first body iteration; it also proves captured values reach calls
+  inside first-class closures in every registered language that supports
+  capture (C function pointers are explicitly classified as non-capturing);
+- `loop_control_conformance` proves `break` and `continue` terminate the rest
+  of the loop body while preserving the correct loop-exit/header edges;
+- `cleanup_semantics_conformance` proves `finally`/`ensure`/`after` cleanup is
+  downstream of the protected body and that Go/Swift `defer` runs at scope
+  exit rather than at its declaration;
+- `async_runtime_conformance` exhaustively partitions the language registry
+  for grammar-owned await/yield syntax and exercises every applicable form,
+  including C++ coroutines and PHP generators;
+- `parser_error_conformance` requires malformed source in every grammar to
+  produce syntax damage and bounded diagnostics;
+- the parser unit gate enumerates nested `ERROR` and `MISSING` nodes rather
+  than hiding damage below an outer recovery node.
+
+Architecture tests pin scale-sensitive compiler boundaries: IDG queries cannot
+materialize the whole body index, cold IDG construction reuses one linkage
+generation, callgraph/header work uses continuous caller-owned scheduling,
+workspace semantic caches are single-flight, the ordinary parser path avoids a
+full source clone, and adapter replacement cannot leave stale extension
+candidates.
+
+`runtime_semantics_manifest` prevents a whole semantic family from being
+silently deleted while leaving a large but misleading test count. It pins
+behavioral gates for parsing, lowering, evaluation order, boolean guards,
+branches, loops, exceptions, cleanup, call binding, closures, suspension,
+aggregates, object state, dispatch, modules, IDG parity, security joins, and
+cache/scheduler scale. The manifest is a retention check; the named executable
+tests remain the behavioral truth.
+
+## Commands
+
+Run the focused compiler gates while developing:
+
+```bash
+cargo test -p bonsai-ninja-conformance --test multi_arm_path_conformance
+cargo test -p bonsai-ninja-conformance --test multi_catch_path_conformance
+cargo test -p bonsai-ninja-conformance --test runtime_evaluation_conformance
+cargo test -p bonsai-ninja-conformance --test condition_expression_conformance
+cargo test -p bonsai-ninja-conformance --test loop_control_conformance
+cargo test -p bonsai-ninja-conformance --test cleanup_semantics_conformance
+cargo test -p bonsai-ninja-conformance --test async_runtime_conformance
+cargo test -p bonsai-ninja-conformance --test runtime_semantics_manifest
+cargo test -p bonsai-ninja-conformance --test parser_error_conformance
+cargo test -p bonsai-ninja-taint --test compiler_semantic_regressions
+cargo test -p bonsai-ninja-parser syntax_diagnostics_cover_nested_error_and_missing_nodes
+cargo test -p bonsai-ninja-lang-api collect_kinds_is_true_source_order_preorder
+cargo test -p bonsai-ninja-conformance --test architecture_invariants
+```
+
+Before release, run the compact exhaustive profile:
+
+```bash
+cargo test --workspace
+```
+
+Do not ignore, cap, or mark a failing semantic cell as not applicable merely to
+make the gate green. `NotApplicable` is allowed only when the language cannot
+express the construct, and the table must carry a concrete language-semantic
+rationale. Fix compiler behavior first, then retain the reproducer permanently.

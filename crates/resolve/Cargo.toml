@@ -21,6 +21,7 @@ bonsai_common = { workspace = true }
 bonsai_index = { workspace = true }
 bonsai_lang_api = { workspace = true }
 ahash = { workspace = true }
+rayon = { workspace = true }
 
 [lints]
 workspace = true

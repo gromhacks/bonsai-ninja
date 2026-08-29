@@ -72,26 +72,72 @@
   match:
     kind: write
     target:
-      name: requiresSecureCoding
+      regex: '^[^\.\s]+\.requiresSecureCoding$'
+      receiver_type_in: [NSKeyedUnarchiver]
+  constraints:
+  - arg_equals: {index: 0, value: "false"}
   match_examples:
-  - name: declared shape
+  - name: secure coding disabled on keyed unarchiver
     code: |
-      func test() { let input = "x"; let amount = 1; requiresSecureCoding = input }
-  description: "NSKeyedUnarchiver.requiresSecureCoding = false - disables secure coding enforcement."
+      import Foundation
+      func configure(_ unarchiver: NSKeyedUnarchiver) {
+        unarchiver.requiresSecureCoding = false
+      }
+  - name: secure coding enabled on keyed unarchiver negative
+    code: |
+      import Foundation
+      func configure(_ unarchiver: NSKeyedUnarchiver) {
+        unarchiver.requiresSecureCoding = true
+      }
+    expect_no_match: true
+  - name: local requires-secure-coding collision negative
+    code: |
+      func configure() {
+        var requiresSecureCoding = false
+        _ = requiresSecureCoding
+      }
+    expect_no_match: true
+  description: "`NSKeyedUnarchiver.requiresSecureCoding = false` disables secure coding; exact member and scalar-value constraints reject secure settings and local collisions."
 
-- id: swift.deser.nskeyedunarchiver_unarchivedobject_class
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+- id: swift.deser.nskeyedunarchiver_decode_insecure_state
+  enabled: true
   language: swift
   tag: insecure-deserialization
-  severity: medium
+  severity: critical
+  packages: [Foundation]
+  imports: [Foundation]
   cwe: [CWE-502]
   match:
     kind: call
     callee:
-      name: unarchivedObject
-  description: "Disabled - class-bounded unarchive; flag with [Any].self constraint."
+      name: decodeObject
+  constraints:
+  - receiver_type_in: [NSKeyedUnarchiver]
+  - receiver_tainted: true
+  - requires_prior_receiver_write:
+      target: {name: requiresSecureCoding}
+      accepted_values:
+      - {kind: boolean, value: false}
+  match_examples:
+  - name: decode tainted archive after disabling secure coding
+    code: |
+      import Foundation
+      func decode(_ data: Data) {
+          let unarchiver = NSKeyedUnarchiver(forReadingFrom: data)
+          unarchiver.requiresSecureCoding = false
+          _ = unarchiver.decodeObject(forKey: "root")
+      }
+    expect_match_text: [unarchiver.decodeObject]
+  - name: secure decoding state is not insecure
+    code: |
+      import Foundation
+      func decode(_ data: Data) {
+          let unarchiver = NSKeyedUnarchiver(forReadingFrom: data)
+          unarchiver.requiresSecureCoding = true
+          _ = unarchiver.decodeObject(forKey: "root")
+      }
+    expect_no_match: true
+  description: "Decoding from a tainted NSKeyedUnarchiver after a dominating requiresSecureCoding=false write is unsafe; typed receiver state and the exact scalar write distinguish secure decoding and unrelated APIs."
 
 - id: swift.deser.propertylist_serialization
   enabled: true
@@ -115,20 +161,6 @@
       func test() { PropertyListSerialization.propertyList("safe") }
     expect_no_match: true
   description: "PropertyListSerialization.propertyList(from:) with MutableContainers allows object substitution."
-
-- id: swift.deser.propertylistdecoder_decode
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: insecure-deserialization
-  severity: low
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [PropertyListDecoder, decode]
-  description: "Disabled - type-bounded decoder; not directly exploitable."
 
 - id: swift.deser.yams_load
   enabled: true

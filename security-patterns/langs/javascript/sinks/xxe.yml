@@ -110,87 +110,11 @@
   description: 'libxmljs.parseXmlString. Merged aliases: javascript.xxe.libxmljs_parsexmlstring_noent.'
   aliases:
   - javascript.xxe.libxmljs_parsexmlstring_noent
-- id: javascript.xxe.xmldom_parser
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: xxe
-  severity: high
-  packages:
-  - xmldom
-  - '@xmldom/xmldom'
-  cwe:
-  - CWE-611
-  match:
-    kind: new
-    callee:
-      name: DOMParser
-  match_examples:
-  - name: xmldom parser
-    code: |
-      const { DOMParser } = require("xmldom");
-      function demo(input, req, obj) {
-        return new DOMParser(input);
-      }
-  description: "Disabled - `new DOMParser()` constructs a parser, not a tainted XML parse. Re-enable with a parseFromString/source-data rule or version-aware package fact."
-- id: javascript.xxe.xml2js_parsestring
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: xxe
-  severity: low
-  packages:
-  - xml2js
-  cwe:
-  - CWE-611
-  match:
-    kind: call
-    callee:
-      attribute:
-      - xml2js
-      - parseString
-  description: "Disabled - xml2js is safe by default."
-- id: javascript.xxe.fast_xml_parser
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: xxe
-  severity: low
-  packages:
-  - fast-xml-parser
-  cwe:
-  - CWE-611
-  match:
-    kind: new
-    callee:
-      name: XMLParser
-  description: "Disabled - fast-xml-parser doesn't resolve entities."
-- id: javascript.xxe.sax_parser_strict
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: xxe
-  severity: low
-  packages:
-  - sax
-  cwe:
-  - CWE-611
-  match:
-    kind: call
-    callee:
-      attribute:
-      - sax
-      - parser
-  description: "Disabled - sax has limited entity resolution."
 - id: javascript.xxe.fast_xml_parser_entities_enabled
   enabled: true
   language: javascript
   tag: xxe
-  severity: medium
+  severity: high
   imports:
   - fast-xml-parser
   cwe:
@@ -220,7 +144,7 @@
         return parser.parse(xml);
       }
     expect_no_match: true
-  description: "Tainted XML reaches an immutable fast-xml-parser receiver configured with processEntities=true. The compiler-proven configuration and consumption path is an entity-expansion resource-exhaustion hazard (CWE-776), not a claim that the parser resolves external SYSTEM entities."
+  description: "Remotely tainted XML reaches an immutable fast-xml-parser receiver configured with processEntities=true. The compiler-proven configuration and consumption path permits exponential entity expansion and availability loss (CWE-776); this is not a claim that the parser resolves external SYSTEM entities."
 - id: javascript.xxe.libxmljs_loadxml
   enabled: true
   language: javascript

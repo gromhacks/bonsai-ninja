@@ -419,21 +419,6 @@
       }
   description: "std::mt19937_64 - 64-bit Mersenne Twister; not crypto-secure."
 
-- id: cpp.crypto.qt_qrandomgenerator_global
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: weak-randomness
-  severity: medium
-  packages: [Qt]
-  cwe: [CWE-338]
-  match:
-    kind: call
-    callee:
-      attribute: [QRandomGenerator, global]
-  description: "Disabled - QRandomGenerator::global() uses system CSPRNG; flag QRandomGenerator(seed) or bounded() on auth paths."
-
 - id: cpp.crypto.botan_des
   enabled: true
   language: cpp
@@ -523,8 +508,6 @@
   description: "Crypto++ CryptoPP::DES - 56-bit single-DES block cipher."
 
 - id: cpp.crypto.botan_hash_md5
-  aliases:
-  - cpp.crypto.botan_hash_sha1
   enabled: true
   language: cpp
   tag: weak-crypto
@@ -536,6 +519,10 @@
     kind: call
     callee:
       attribute: [HashFunction, create]
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"MD5"'
   match_examples:
   - name: generated direct match
     code: |
@@ -546,4 +533,44 @@
         const char *query = arg;
         HashFunction::create("MD5");
       }
-  description: 'Botan HashFunction::create("MD5") - instantiates broken MD5 hash. Also covers merged aliases: cpp.crypto.botan_hash_sha1.'
+  - name: SHA-256 selection negative
+    code: |
+      #include <botan/hash.h>
+      void example() {
+        Botan::HashFunction::create("SHA-256");
+      }
+    expect_no_match: true
+  description: 'Botan HashFunction::create("MD5") instantiates the collision-broken MD5 hash.'
+
+- id: cpp.crypto.botan_hash_sha1
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  category: source-independent
+  severity: low
+  packages: [botan]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [HashFunction, create]
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"SHA-1"'
+  match_examples:
+  - name: Botan SHA-1 hash selection
+    code: |
+      #include <botan/hash.h>
+      void example() {
+        Botan::HashFunction::create("SHA-1");
+      }
+    expect_match_text: ["Botan::HashFunction::create"]
+  - name: SHA-256 selection negative
+    code: |
+      #include <botan/hash.h>
+      void example() {
+        Botan::HashFunction::create("SHA-256");
+      }
+    expect_no_match: true
+  description: 'Botan HashFunction::create("SHA-1") instantiates the collision-broken SHA-1 hash.'

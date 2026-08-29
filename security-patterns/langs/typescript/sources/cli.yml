@@ -337,6 +337,12 @@
         return await fsp.readFile(path, "utf8");
       }
     expect_match_text: [fsp.readFile]
+  - name: same chain on a local object is not filesystem input
+    code: |
+      const realFs = require("fs");
+      const local = { promises: { readFile(path: string) { return "fixed"; } } };
+      function demo(path: string) { return local.promises.readFile(path); }
+    expect_no_match: true
   description: "fs.promises.readFile(path[, options]) - promise resolving to local file bytes/text."
 
 - id: typescript.source.fs_readfile_callback

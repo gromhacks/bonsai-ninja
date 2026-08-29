@@ -12,6 +12,181 @@ fn conformance_traced() {
 }
 
 #[test]
+fn ternary_call_argument_retains_the_dynamic_branch_as_compiler_flow() {
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_java::JavaAdapter::new())],
+        &[(
+            "Ternary.java",
+            r#"
+class Ternary {
+  String escape(String q) {
+    String safe = HtmlUtils.htmlEscape(q == null ? "" : q);
+    String body = "<p>" + safe + "</p>";
+    return ResponseEntity.ok(body);
+  }
+}
+"#,
+        )],
+    );
+    let file = workspace.db().vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Java compiler index");
+    let escape = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "escape")
+        .expect("escape declaration");
+    let (call_span, argument) = escape
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            bonsai_lang_api::FlowEvent::Call { name, span, args, .. } if name == "HtmlUtils.htmlEscape" => {
+                args.first().map(|argument| (*span, argument))
+            }
+            _ => None,
+        })
+        .expect("HtmlUtils call argument");
+    assert!(
+        argument.source_names.iter().any(|source| source == "q"),
+        "the dynamic ternary branch must reach the call argument: {argument:#?}"
+    );
+    let value = bonsai_lang_api::call_argument_value_fact(&index.call_argument_values, call_span, 0)
+        .expect("exact call-argument value fact");
+    assert!(
+        value.value_flow.source_names.iter().any(|source| source == "q")
+            || value.value_flow.place.as_deref() == Some("q"),
+        "the parsed ternary value must retain its dynamic branch: {value:#?}"
+    );
+    let body_assignment = escape
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            bonsai_lang_api::FlowEvent::Assign {
+                target, source_names, ..
+            } if target == "body" => Some(source_names),
+            _ => None,
+        })
+        .expect("body assignment");
+    assert!(
+        body_assignment.iter().any(|source| source == "safe"),
+        "string composition must retain the sanitized binding: {body_assignment:#?}"
+    );
+    let response_argument = escape
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            bonsai_lang_api::FlowEvent::Call { name, args, .. } if name == "ResponseEntity.ok" => {
+                args.first()
+            }
+            _ => None,
+        })
+        .expect("ResponseEntity.ok argument");
+    assert!(
+        response_argument
+            .source_names
+            .iter()
+            .any(|source| source == "body")
+            || response_argument.place.as_deref() == Some("body"),
+        "the response call must read the composed body: {response_argument:#?}"
+    );
+}
+
+#[test]
+fn inline_callbacks_expose_only_complete_exact_scalar_returns() {
+    use bonsai_lang_api::StaticScalarValue;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_java::JavaAdapter::new())],
+        &[(
+            "Callbacks.java",
+            r#"
+interface Check { boolean test(boolean value); }
+class Consumer { static void use(Check check) {} }
+class App {
+  static boolean named(boolean value) { return true; }
+  void configure() {
+    Consumer.use(value -> true);
+    Consumer.use(value -> false);
+    Consumer.use(value -> { return true; });
+    Consumer.use(value -> { if (value) return true; return false; });
+    Consumer.use(value -> value ? true : false);
+    Consumer.use(App::named);
+  }
+}
+"#,
+        )],
+    );
+    let file = workspace.db().vfs().all_files()[0];
+    let source = workspace.db().vfs().snapshot(file).expect("fixture source");
+    let index = workspace.db().decl_index(file).expect("Java compiler index");
+    let callback_return = |needle: &str| {
+        index
+            .call_argument_values
+            .iter()
+            .find(|fact| {
+                &source.text[fact.argument_span.start as usize..fact.argument_span.end as usize] == needle
+            })
+            .map(|fact| fact.inline_callback_static_return.clone())
+    };
+
+    assert_eq!(
+        callback_return("value -> true"),
+        Some(Some(StaticScalarValue::Boolean(true)))
+    );
+    assert_eq!(
+        callback_return("value -> false"),
+        Some(Some(StaticScalarValue::Boolean(false)))
+    );
+    assert_eq!(
+        callback_return("value -> { return true; }"),
+        Some(Some(StaticScalarValue::Boolean(true)))
+    );
+    assert_eq!(
+        callback_return("value -> { if (value) return true; return false; }"),
+        Some(None)
+    );
+    assert_eq!(callback_return("value -> value ? true : false"), Some(None));
+    assert_eq!(
+        callback_return("App::named"),
+        Some(None),
+        "method references require a separate exact summary"
+    );
+}
+
+#[test]
+fn annotated_parameter_fact_does_not_confuse_an_identifier_with_the_annotation() {
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let workspace = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Controller.java",
+            r#"
+import org.springframework.web.bind.annotation.RequestParam;
+class Controller {
+  void annotated(@RequestParam("q") String value) {}
+  void ordinary(String RequestParam) {}
+}
+"#,
+        )],
+    );
+    let global = workspace.db().global_index();
+    let annotated = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "annotated")
+        .expect("annotated method");
+    assert_eq!(annotated.params, ["value"]);
+    assert_eq!(annotated.param_annotations, [vec!["RequestParam".to_string()]]);
+
+    let ordinary = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "ordinary")
+        .expect("ordinary method");
+    assert_eq!(ordinary.params, ["RequestParam"]);
+    assert_eq!(ordinary.param_annotations, [Vec::<String>::new()]);
+}
+
+#[test]
 fn instanceof_pattern_binds_the_declared_name_not_the_type() {
     use bonsai_lang_api::FlowEvent;
 
@@ -717,6 +892,9 @@ fn replacement_helpers_emit_exact_escape_and_constraint_summaries() {
         &[(
             "Escapes.java",
             r#"
+class Text {
+  String replace(String pattern, String replacement) { return replacement; }
+}
 class Escapes {
   static String html(String value) {
     return value.replace("&", "&amp;").replace("<", "&lt;");
@@ -727,6 +905,9 @@ class Escapes {
   static String incomplete(String value) {
     return value.replaceAll("[\\r\\n]", value);
   }
+  static String collision(Text value) {
+    return value.replace("<", "&lt;");
+  }
 }
 "#,
         )],
@@ -735,15 +916,59 @@ class Escapes {
     let index = ws.db().decl_index(file).expect("Java declaration index");
     assert_eq!(
         index.character_substitutions.len(),
-        2,
-        "{:#?}",
+        0,
+        "runtime calls must remain provider-bound constraints: {:#?}",
         index.character_substitutions
     );
     assert!(index.character_constraints.iter().any(|fact| matches!(
         &fact.domain,
-        CharacterConstraintDomain::ExcludesExact { characters }
-            if characters.contains(&"\r".to_string()) && characters.contains(&"\n".to_string())
+        CharacterConstraintDomain::ProviderBound {
+            factory_call,
+            operation_call,
+            domain,
+        } if factory_call.is_empty()
+            && operation_call == "String.replace#single-character-string|String.replace#single-character-string"
+            && matches!(domain.as_ref(), CharacterConstraintDomain::SubstitutesExact { mappings }
+                if mappings.iter().any(|mapping| mapping.key == "&" && mapping.value == "&amp;")
+                    && mappings.iter().any(|mapping| mapping.key == "<" && mapping.value == "&lt;"))
+    )),
+    "typed direct operations retain exact provider and mapping identity: {:#?}",
+        index.character_constraints
+    );
+    assert!(index.character_constraints.iter().any(|fact| matches!(
+        &fact.domain,
+        CharacterConstraintDomain::ProviderBound {
+            operation_call,
+            domain,
+            ..
+        } if operation_call == "String.replaceAll#regex-character-class"
+            && matches!(domain.as_ref(), CharacterConstraintDomain::ExcludesExact { characters }
+                if characters.contains(&"\r".to_string()) && characters.contains(&"\n".to_string()))
     )));
+    assert!(
+        index.character_constraints.iter().any(|fact| matches!(
+            &fact.domain,
+            CharacterConstraintDomain::ProviderBound { operation_call, .. }
+                if operation_call == "workspace.Text.replace#single-character-string"
+        )),
+        "same-spelled local operations retain a non-runtime provider identity"
+    );
+    assert_eq!(
+        index
+            .character_constraints
+            .iter()
+            .filter(|fact| fact.function_span
+                == index
+                    .defs
+                    .iter()
+                    .find(|decl| decl.name == "incomplete")
+                    .unwrap()
+                    .span)
+            .count(),
+        0,
+        "a dynamic replacement cannot produce an exact transform summary: {:#?}",
+        index.character_constraints
+    );
 }
 
 #[test]
@@ -836,8 +1061,40 @@ class Command {
 }
 
 #[test]
-fn compiled_pattern_constraints_resolve_the_exact_immutable_binding() {
+fn nested_inline_callbacks_preserve_exact_parameter_bindings() {
     use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Callbacks.java",
+            r#"
+class Callbacks {
+  void configure(Server server) {
+    server.requestHandler(request -> {
+      request.bodyHandler(buffer -> consume(buffer));
+    });
+  }
+  void consume(Object value) {}
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+    let body_callback = index
+        .call_argument_values
+        .iter()
+        .find(|fact| fact.inline_callback_params == ["buffer"])
+        .expect("nested body callback argument fact");
+    assert_eq!(body_callback.argument_index, 0);
+    assert!(body_callback.inline_callback_span.is_some());
+}
+
+#[test]
+fn compiled_pattern_constraints_resolve_the_exact_immutable_binding() {
+    use bonsai_lang_api::{CharacterConstraintDomain, LanguageAdapter};
 
     let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
     let ws = bonsai_testkit::workspace_with(
@@ -845,18 +1102,23 @@ fn compiled_pattern_constraints_resolve_the_exact_immutable_binding() {
         &[(
             "Patterns.java",
             r#"
-class Pattern {
-  static Pattern compile(String value) { return new Pattern(); }
-  PatternMatcher matcher(String value) { return new PatternMatcher(); }
+import java.util.regex.Pattern;
+class LocalPattern {
+  static LocalPattern compile(String value) { return new LocalPattern(); }
+  LocalMatcher matcher(String value) { return new LocalMatcher(); }
 }
-class PatternMatcher { String replaceAll(String value) { return ""; } }
+class LocalMatcher { String replaceAll(String value) { return ""; } }
 class Patterns {
   private static final Pattern CONTROL = Pattern.compile("\\p{Cntrl}");
+  private static final LocalPattern LOCAL = LocalPattern.compile("\\p{Cntrl}");
   static String safe(String value) {
     return CONTROL.matcher(value).replaceAll("_");
   }
+  static String collision(String value) {
+    return LOCAL.matcher(value).replaceAll("_");
+  }
   static String shadowed(String value) {
-    Pattern CONTROL = Pattern.compile(".*");
+    final Pattern CONTROL = Pattern.compile(".*");
     return CONTROL.matcher(value).replaceAll("_");
   }
 }
@@ -865,18 +1127,55 @@ class Patterns {
     );
     let file = ws.db().vfs().all_files()[0];
     let index = ws.db().decl_index(file).expect("Java declaration index");
-    assert_eq!(
-        index.character_constraints.len(),
-        1,
-        "a shadowing mutable binding must not inherit the field's proof: {:#?}",
-        index.character_constraints
-    );
     let safe = index
         .defs
         .iter()
         .find(|decl| decl.name == "safe")
         .expect("safe method");
-    assert_eq!(index.character_constraints[0].function_span, safe.span);
+    let collision = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "collision")
+        .expect("collision method");
+    let safe_fact = index
+        .character_constraints
+        .iter()
+        .find(|fact| fact.function_span == safe.span)
+        .expect("import-bound compiled pattern constraint");
+    assert!(matches!(
+        &safe_fact.domain,
+        CharacterConstraintDomain::ProviderBound {
+            factory_call,
+            operation_call,
+            domain,
+        } if factory_call == "java.util.regex.Pattern.compile"
+            && operation_call == "matcher|replaceAll"
+            && matches!(domain.as_ref(), CharacterConstraintDomain::ExcludesExact { characters }
+                if characters.contains(&"\r".to_string()) && characters.contains(&"\n".to_string()))
+    ));
+    let collision_fact = index
+        .character_constraints
+        .iter()
+        .find(|fact| fact.function_span == collision.span)
+        .expect("local provider remains a distinct candidate");
+    assert!(matches!(
+        &collision_fact.domain,
+        CharacterConstraintDomain::ProviderBound { factory_call, .. }
+            if factory_call == "workspace.LocalPattern.compile"
+    ));
+    let shadowed = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "shadowed")
+        .expect("shadowed method");
+    assert!(
+        index
+            .character_constraints
+            .iter()
+            .all(|fact| fact.function_span != shadowed.span),
+        "a shadowing binding with a dynamic pattern must not inherit the field proof: {:#?}",
+        index.character_constraints
+    );
 }
 
 #[test]

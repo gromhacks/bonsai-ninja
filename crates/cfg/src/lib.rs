@@ -18,7 +18,9 @@
 // `builder` is internal; consumers use `bonsai_cfg::build_cfg_from_flow`.
 pub(crate) mod builder;
 
-pub use builder::build_cfg_from_flow;
+pub use builder::{
+    build_cfg_from_flow, build_cfg_from_flow_in_span, normalize_deferred_scopes, normalize_executable_flow,
+};
 
 use bonsai_common::{BasicBlockId, Span};
 use bonsai_lang_api::FlowEvent;
@@ -95,6 +97,8 @@ pub struct BasicBlock {
     /// Span covering the first event in the block (or the whole
     /// function when the block is empty). Used by `dump-cfg` for
     /// location rendering and by `abstract_interp` for trace spans.
+    /// First real event span, or the exact owning declaration span for an
+    /// empty compiler-created structural block.
     pub span: Span,
 }
 

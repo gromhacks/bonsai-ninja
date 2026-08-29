@@ -444,6 +444,7 @@ fn semantic_path_graph(
         base.nodes().to_vec(),
         graph.edges,
         base.local_binding_records().to_vec(),
+        base.callable_argument_records().to_vec(),
         base.unresolved_workspace_site_records().to_vec(),
     )
     .between(starts, targets, Some(bonsai_common::Precision::Narrowed));

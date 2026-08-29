@@ -20,10 +20,21 @@ pub(crate) const BUNDLED_RULEPACK_ID: &str = bonsai_rulepack::IDENTITY;
 /// build. The first call publishes it atomically in the OS cache; later calls
 /// reuse the content-addressed generation from any current working directory.
 pub fn bundled_rulepack_root() -> Result<PathBuf> {
-    let cache_root = dirs::cache_dir()
+    let preferred = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("bonsai-ninja")
         .join("rulepacks");
+    let cache_root = if bonsai_common::ensure_cache_directory_writable(&preferred) {
+        preferred
+    } else {
+        let fallback = std::env::temp_dir().join("bonsai-ninja").join("rulepacks");
+        if !bonsai_common::ensure_cache_directory_writable(&fallback) {
+            return Err(anyhow!(
+                "neither the OS cache nor temporary bundled-rulepack directory is writable"
+            ));
+        }
+        fallback
+    };
     materialize_bundled_rulepack_at(&cache_root)
 }
 

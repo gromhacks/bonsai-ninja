@@ -13,19 +13,21 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_common::{qualified_names_match, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
-    collect_return_spans, AliasTarget, AssignValueKind, CallArg, CallKind, CallableDeclarationFamily, Decl,
-    DeclKind, FlowEvent, LanguageCapabilities, ModulePath, ModulePathSyntax,
+    collect_return_spans, AliasTarget, AssignValueKind, CallArg, CallArgumentValueFact, CallKind,
+    CallableDeclarationFamily, Decl, DeclKind, FlowEvent, LanguageCapabilities, ModulePath, ModulePathSyntax,
 };
 use bonsai_resolve::{
-    build_shared_peer_class_index, callee_without_call_args, class_symbols_share_semantic_identity,
+    build_shared_interface_descendant_index, build_shared_peer_class_index, callee_without_call_args,
+    class_symbols_share_semantic_identity, collect_interface_descendants_cached,
     collect_method_candidates_for_class_cached, enclosing_class_for_decl, export_name_variants,
     extend_alias_targets_with_declared_types, is_super_receiver_with_tokens, module_path_parts,
     module_target_exactly_matches_decl_module_path_with_syntax,
     module_target_matches_decl_module_path_with_syntax, module_target_matches_path, module_target_parts,
     module_target_parts_match_path_parts, namespace_alias_target_tail,
     prune_receiver_type_names_for_dispatch, push_unique_func, push_unique_string,
-    qualified_module_alias_call, resolve_callable_with_context, resolve_class, split_qualified_head_tail,
-    strip_module_path_prefix, visibility_allows, MethodCandidateCache, PeerClassIndex, ResolveContext,
+    qualified_module_alias_call, resolve_callable_with_context, resolve_class,
+    resolve_declared_receiver_class, split_qualified_head_tail, strip_module_path_prefix, visibility_allows,
+    InterfaceDescendantIndex, MethodCandidateCache, PeerClassIndex, ResolveContext,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -1028,6 +1030,20 @@ pub struct ResolvedCallGraph {
     /// retaining every assignment event in every function body.
     #[serde(default)]
     local_bindings: Vec<CallGraphLocalBinding>,
+    /// Compiler-proven callable values passed at exact argument spans.
+    ///
+    /// This is deliberately not part of `cg`: passing a callable is not an
+    /// invocation.  IDG callback binding consumes this relation only after a
+    /// workspace callee actually invokes the corresponding formal, or after
+    /// a rule declares an external callback-delivery boundary.
+    #[serde(default)]
+    callable_arguments: Vec<CallGraphCallableArgument>,
+    /// Exact formal-callback facts retained by scoped/streaming builds until
+    /// their caller partitions have been joined. A complete callgraph already
+    /// contains the materialized execution edges, so persisted sidecars do not
+    /// need to duplicate these transient fixed-point inputs.
+    #[serde(skip)]
+    callback_execution_facts: CallbackExecutionFacts,
     /// Call expressions or callable arguments for which the compiler found
     /// workspace candidates but could not select a semantically justified
     /// edge. Unknown external calls are intentionally absent: a coincidental
@@ -1060,6 +1076,18 @@ pub struct CallGraphLocalBinding {
     pub target: FuncId,
 }
 
+/// Exact callable-value relationship at one source-level call argument.
+///
+/// `span` is the adapter-emitted argument span.  The target is resolved from
+/// callable syntax/bindings while the file body is resident; it carries no
+/// execution semantics by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CallGraphCallableArgument {
+    pub caller: FuncId,
+    pub span: Span,
+    pub target: FuncId,
+}
+
 /// Exact workspace call site for which candidates existed but no semantic
 /// edge could be selected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1078,7 +1106,29 @@ pub struct ResolvedCallGraphBuildContext {
     file_languages: AHashMap<FileId, Option<&'static str>>,
     file_capabilities: AHashMap<FileId, LanguageCapabilities>,
     peer_class_index: Arc<PeerClassIndex>,
+    interface_descendant_index: Arc<InterfaceDescendantIndex>,
+    class_ancestor_index: Arc<ClassAncestorIndex>,
     constructor_index: Arc<ConstructorIndex>,
+}
+
+/// Immutable exact ancestor closures for every compiler-declared class-like
+/// symbol in the workspace.
+///
+/// Receiver narrowing asks for the same hierarchy closure at every method
+/// call. Resolving each declaration's parsed bases on every call site turns
+/// otherwise linear callgraph construction into repeated global resolver
+/// work. This index performs the identical context-aware base resolution once
+/// per declaration, then materializes every transitive closure without adding
+/// language or API-name semantics.
+#[derive(Debug, Default)]
+struct ClassAncestorIndex {
+    closures: AHashMap<SymbolId, Vec<SymbolId>>,
+}
+
+impl ClassAncestorIndex {
+    fn ancestors(&self, class: SymbolId) -> &[SymbolId] {
+        self.closures.get(&class).map(Vec::as_slice).unwrap_or_default()
+    }
 }
 
 struct FileCallgraphInfo {
@@ -1127,16 +1177,88 @@ impl<F, T, P, G, C> CallGraphFileSemantics<F, T, P, G, C> {
 
 type ConstructorIndex = AHashMap<SymbolId, Vec<FuncId>>;
 
-fn build_constructor_index(global: &GlobalIndex) -> Arc<ConstructorIndex> {
+fn build_class_ancestor_index(global: &GlobalIndex) -> Arc<ClassAncestorIndex> {
+    use rayon::prelude::*;
+
+    let class_symbols = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
+            )
+        })
+        .map(|decl| decl.symbol)
+        .collect::<Vec<_>>();
+    let direct_pairs = class_symbols
+        .par_iter()
+        .map(|&class| {
+            let mut bases = Vec::new();
+            if let (Some(decl), Some(file)) = (global.decl_of(class), global.declaring_file(class)) {
+                let ctx = ResolveContext::new(file, &decl.module_path);
+                for base in &decl.bases {
+                    for base_class in resolve_class(global, base, &ctx) {
+                        if !bases.contains(&base_class) {
+                            bases.push(base_class);
+                        }
+                    }
+                }
+            }
+            (class, bases)
+        })
+        .collect::<Vec<_>>();
+    let direct = direct_pairs.into_iter().collect::<AHashMap<_, _>>();
+    let closures = class_symbols
+        .par_iter()
+        .map(|&class| {
+            let mut seen = AHashSet::new();
+            let mut stack = vec![class];
+            while let Some(current) = stack.pop() {
+                if !seen.insert(current) {
+                    continue;
+                }
+                if let Some(bases) = direct.get(&current) {
+                    stack.extend(bases.iter().copied());
+                }
+            }
+            let mut ancestors = seen.into_iter().collect::<Vec<_>>();
+            ancestors.sort_unstable_by_key(|symbol| symbol.raw());
+            (class, ancestors)
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect();
+    Arc::new(ClassAncestorIndex { closures })
+}
+
+fn build_constructor_index(global: &GlobalIndex, peer_classes: &PeerClassIndex) -> Arc<ConstructorIndex> {
     let mut index = ConstructorIndex::new();
     for file in global.all_files() {
         for decl in global.decls_in(file) {
             if matches!(decl.kind, DeclKind::Constructor) {
                 if let Some(parent) = decl.parent {
-                    index
-                        .entry(parent)
-                        .or_default()
-                        .push(FuncId::new(decl.symbol.raw()));
+                    let constructor = FuncId::new(decl.symbol.raw());
+                    let mut owners = vec![parent];
+                    if let Some(parent_decl) = global.decl_of(parent) {
+                        if let Some(peers) =
+                            peer_classes.get(&(parent_decl.name.clone(), parent_decl.module_path.clone()))
+                        {
+                            for peer in peers {
+                                if class_symbols_share_semantic_identity(global, parent, *peer)
+                                    && !owners.contains(peer)
+                                {
+                                    owners.push(*peer);
+                                }
+                            }
+                        }
+                    }
+                    for owner in owners {
+                        let constructors = index.entry(owner).or_default();
+                        if !constructors.contains(&constructor) {
+                            constructors.push(constructor);
+                        }
+                    }
                 }
             }
         }
@@ -1158,6 +1280,8 @@ impl ResolvedCallGraph {
             cg,
             nodes: Vec::new(),
             local_bindings: Vec::new(),
+            callable_arguments: Vec::new(),
+            callback_execution_facts: CallbackExecutionFacts::default(),
             unresolved_workspace_sites: Vec::new(),
         }
     }
@@ -1170,18 +1294,23 @@ impl ResolvedCallGraph {
         mut nodes: Vec<CallGraphNode>,
         edges: Vec<CallEdge>,
         mut local_bindings: Vec<CallGraphLocalBinding>,
+        mut callable_arguments: Vec<CallGraphCallableArgument>,
         mut unresolved_workspace_sites: Vec<UnresolvedWorkspaceCallSite>,
     ) -> Self {
         nodes.sort_unstable_by_key(|node| node.func.raw());
         nodes.dedup_by_key(|node| node.func.raw());
         local_bindings.sort();
         local_bindings.dedup();
+        callable_arguments.sort_unstable();
+        callable_arguments.dedup();
         unresolved_workspace_sites.sort_unstable();
         unresolved_workspace_sites.dedup();
         Self {
             cg: CallGraph::from_unique_edges(edges),
             nodes,
             local_bindings,
+            callable_arguments,
+            callback_execution_facts: CallbackExecutionFacts::default(),
             unresolved_workspace_sites,
         }
     }
@@ -1252,13 +1381,25 @@ impl ResolvedCallGraph {
             .filter(|binding| included.contains(&binding.caller) && included.contains(&binding.target))
             .cloned()
             .collect();
+        let callable_arguments = self
+            .callable_arguments
+            .iter()
+            .filter(|argument| included.contains(&argument.caller) && included.contains(&argument.target))
+            .copied()
+            .collect();
         let unresolved_workspace_sites = self
             .unresolved_workspace_sites
             .iter()
             .filter(|site| included.contains(&site.caller))
             .copied()
             .collect();
-        Self::from_persisted_parts(nodes, edges, local_bindings, unresolved_workspace_sites)
+        Self::from_persisted_parts(
+            nodes,
+            edges,
+            local_bindings,
+            callable_arguments,
+            unresolved_workspace_sites,
+        )
     }
 
     /// Build the workspace's resolved call graph from every decl's
@@ -1458,8 +1599,22 @@ impl ResolvedCallGraph {
         G: Fn(FileId) -> Option<&'static str>,
         C: Fn(FileId) -> LanguageCapabilities,
     {
+        let total_started = std::time::Instant::now();
+        let stage_started = std::time::Instant::now();
         let alias_index = WorkspaceAliasIndex::build(global);
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "context alias index elapsed seconds {:.3}",
+            stage_started.elapsed().as_secs_f64()
+        );
+        let stage_started = std::time::Instant::now();
         let callable_index = WorkspaceCallableBindingIndex::build(global);
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "context callable index elapsed seconds {:.3}",
+            stage_started.elapsed().as_secs_f64()
+        );
+        let stage_started = std::time::Instant::now();
         let all_files = global.all_files().collect::<Vec<_>>();
         let file_paths: AHashMap<FileId, String> = all_files
             .iter()
@@ -1477,6 +1632,12 @@ impl ResolvedCallGraph {
             .iter()
             .map(|&file| (file, capabilities_for_file(file)))
             .collect();
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "context file facts elapsed seconds {:.3}",
+            stage_started.elapsed().as_secs_f64()
+        );
+        let stage_started = std::time::Instant::now();
         let build_targets = BuildTargetIndex::from_file_paths(
             file_paths
                 .iter()
@@ -1488,7 +1649,46 @@ impl ResolvedCallGraph {
                 .map(|(&file, path)| (file, path.clone())),
         );
         let peer_class_index = build_shared_peer_class_index(global);
-        let constructor_index = build_constructor_index(global);
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "context build targets and peer classes elapsed seconds {:.3}",
+            stage_started.elapsed().as_secs_f64()
+        );
+        let path_lookup = |file| file_paths.get(&file).cloned();
+        let module_syntax = |file| {
+            file_capabilities
+                .get(&file)
+                .map_or_else(ModulePathSyntax::none, |capabilities| {
+                    capabilities.module_path_syntax
+                })
+        };
+        let stage_started = std::time::Instant::now();
+        let interface_descendant_index =
+            build_shared_interface_descendant_index(global, &path_lookup, &module_syntax);
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "context interface descendants elapsed seconds {:.3}",
+            stage_started.elapsed().as_secs_f64()
+        );
+        let stage_started = std::time::Instant::now();
+        let class_ancestor_index = build_class_ancestor_index(global);
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "context class ancestors elapsed seconds {:.3}",
+            stage_started.elapsed().as_secs_f64()
+        );
+        let stage_started = std::time::Instant::now();
+        let constructor_index = build_constructor_index(global, &peer_class_index);
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "context constructors elapsed seconds {:.3}",
+            stage_started.elapsed().as_secs_f64()
+        );
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "context total elapsed seconds {:.3}",
+            total_started.elapsed().as_secs_f64()
+        );
         ResolvedCallGraphBuildContext {
             alias_index,
             callable_index,
@@ -1498,6 +1698,8 @@ impl ResolvedCallGraph {
             file_languages,
             file_capabilities,
             peer_class_index,
+            interface_descendant_index,
+            class_ancestor_index,
             constructor_index,
         }
     }
@@ -1531,15 +1733,27 @@ impl ResolvedCallGraph {
             })
             .collect::<Vec<_>>();
         let resolve_file = |info: &FileCallgraphInfo| {
-            resolve_file_call_edges(global, context, info, global.decls_in(info.file))
+            resolve_file_call_edges(
+                global,
+                context,
+                info,
+                global.decls_in(info.file),
+                global
+                    .file_index(info.file)
+                    .map_or(&[][..], |index| index.call_argument_values.as_slice()),
+                None,
+            )
         };
-        let resolution = collect_resolved_file_edges(&file_infos, resolve_file, || {});
-        let cg = CallGraph::from_unique_edges(resolution.edges);
+        let mut resolution = collect_resolved_file_edges(&file_infos, resolve_file, || {});
+        let callback_execution_facts = resolution.take_callback_execution_facts();
+        let cg = CallGraph::from_unique_edges(std::mem::take(&mut resolution.edges));
         let nodes = callgraph_nodes(global, &cg);
         Self {
             cg,
             nodes,
             local_bindings: resolution.local_bindings,
+            callable_arguments: resolution.callable_arguments,
+            callback_execution_facts,
             unresolved_workspace_sites: resolution.unresolved_workspace_sites,
         }
     }
@@ -1714,6 +1928,8 @@ impl ResolvedCallGraph {
         D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
         Q: Fn() + Sync,
     {
+        let total_started = std::time::Instant::now();
+        let stage_started = std::time::Instant::now();
         let mut files = scope.files.to_vec();
         files.sort_by_key(|file| file.raw());
         files.dedup();
@@ -1731,21 +1947,80 @@ impl ResolvedCallGraph {
                     .unwrap_or_else(LanguageCapabilities::unsupported),
             })
             .collect::<Vec<_>>();
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "stream file headers elapsed seconds {:.3}",
+            stage_started.elapsed().as_secs_f64()
+        );
+        let detailed_timing = bonsai_diagnostics::debug::is_enabled("callgraph-build");
+        let decode_nanos = std::sync::atomic::AtomicU64::new(0);
+        let resolution_nanos = std::sync::atomic::AtomicU64::new(0);
+        let resolution_timings = CallgraphResolutionTimings::default();
         let resolve_file = |info: &FileCallgraphInfo| {
-            body_for_file(info.file).map_or_else(FileCallgraphResolution::default, |mut index| {
+            let decode_started = std::time::Instant::now();
+            let body = body_for_file(info.file);
+            if detailed_timing {
+                decode_nanos.fetch_add(
+                    u64::try_from(decode_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            let resolution_started = std::time::Instant::now();
+            let result = body.map_or_else(FileCallgraphResolution::default, |mut index| {
                 if let Some(included) = scope.symbols {
                     index.defs.retain(|decl| included.contains(&decl.symbol));
                 }
-                resolve_file_call_edges(global, context, info, &index.defs)
-            })
+                resolve_file_call_edges(
+                    global,
+                    context,
+                    info,
+                    &index.defs,
+                    &index.call_argument_values,
+                    detailed_timing.then_some(&resolution_timings),
+                )
+            });
+            if detailed_timing {
+                resolution_nanos.fetch_add(
+                    u64::try_from(resolution_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            result
         };
-        let resolution = collect_resolved_file_edges(&file_infos, resolve_file, on_file);
-        let cg = CallGraph::from_unique_edges(resolution.edges);
+        let stage_started = std::time::Instant::now();
+        let mut resolution = collect_resolved_file_edges(&file_infos, resolve_file, on_file);
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "stream body decode and resolution elapsed seconds {:.3}",
+            stage_started.elapsed().as_secs_f64()
+        );
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "stream aggregate worker seconds decode {:.3} resolve {:.3}",
+            decode_nanos.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000_000.0,
+            resolution_nanos.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000_000.0
+        );
+        resolution_timings.debug_log();
+        let stage_started = std::time::Instant::now();
+        let callback_execution_facts = resolution.take_callback_execution_facts();
+        let cg = CallGraph::from_unique_edges(std::mem::take(&mut resolution.edges));
         let nodes = callgraph_nodes(global, &cg);
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "stream canonical graph elapsed seconds {:.3}",
+            stage_started.elapsed().as_secs_f64()
+        );
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "stream total elapsed seconds {:.3}",
+            total_started.elapsed().as_secs_f64()
+        );
         Self {
             cg,
             nodes,
             local_bindings: resolution.local_bindings,
+            callable_arguments: resolution.callable_arguments,
+            callback_execution_facts,
             unresolved_workspace_sites: resolution.unresolved_workspace_sites,
         }
     }
@@ -1824,6 +2099,13 @@ impl ResolvedCallGraph {
         &self.local_bindings
     }
 
+    /// Exact callable values passed as arguments, kept separate from
+    /// executable call edges.
+    #[must_use]
+    pub fn callable_argument_records(&self) -> &[CallGraphCallableArgument] {
+        &self.callable_arguments
+    }
+
     /// Exact unresolved workspace call sites in canonical order.
     #[must_use]
     pub fn unresolved_workspace_site_records(&self) -> &[UnresolvedWorkspaceCallSite] {
@@ -1836,6 +2118,12 @@ impl ResolvedCallGraph {
         self.local_bindings
             .iter()
             .map(|binding| (binding.caller, binding.name.as_ref(), binding.target))
+    }
+
+    /// Iterate compiler-proven callable argument relationships in canonical
+    /// `(caller, span, target)` order.
+    pub fn callable_arguments(&self) -> impl Iterator<Item = CallGraphCallableArgument> + '_ {
+        self.callable_arguments.iter().copied()
     }
 
     /// Iterate exact resolver gaps in deterministic caller/span order.
@@ -1856,23 +2144,39 @@ fn resolve_file_call_edges(
     context: &ResolvedCallGraphBuildContext,
     info: &FileCallgraphInfo,
     decls: &[Decl],
+    call_argument_values: &[CallArgumentValueFact],
+    timings: Option<&CallgraphResolutionTimings>,
 ) -> FileCallgraphResolution {
+    let _file_timing = DebugTimingGuard::new(timings.map(|timing| &timing.files));
     let path_lookup = |file| context.file_paths.get(&file).cloned();
     let language_lookup = |file| context.file_languages.get(&file).copied().flatten();
-    let class_field_types = resolved_class_field_types(
-        global,
-        info.file,
-        &info.alias_targets,
-        &path_lookup,
-        info.capabilities,
+    let class_field_types = {
+        let _timing = DebugTimingGuard::new(timings.map(|timing| &timing.class_fields));
+        resolved_class_field_types(
+            global,
+            info.file,
+            &info.alias_targets,
+            &path_lookup,
+            info.capabilities,
+        )
+    };
+    let mut method_candidate_cache = MethodCandidateCache::with_shared_indexes(
+        context.peer_class_index.clone(),
+        context.interface_descendant_index.clone(),
     );
-    let mut method_candidate_cache =
-        MethodCandidateCache::with_peer_class_index(context.peer_class_index.clone());
     let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
     let mut callable_target_cache = CallableTargetCache::default();
     let mut local_cg = CallGraph::new();
     let mut resolved_bindings = Vec::new();
+    let mut callable_arguments = Vec::new();
     let mut unresolved_workspace_sites = Vec::new();
+    let inline_callable_targets_by_arg_span =
+        inline_callable_targets_by_argument_span(decls, call_argument_values);
+    let callable_reference_argument_spans: AHashSet<Span> = call_argument_values
+        .iter()
+        .filter(|fact| fact.value_kind == Some(AssignValueKind::CallableReference))
+        .map(|fact| fact.argument_span)
+        .collect();
     for decl in decls {
         if !matches!(
             decl.kind,
@@ -1881,17 +2185,24 @@ fn resolve_file_call_edges(
             continue;
         }
         let from = FuncId::new(decl.symbol.raw());
-        let mut alias_targets = alias_targets_for_decl(&info.alias_targets, decl);
-        extend_alias_targets_with_resolved_class_fields(&mut alias_targets, decl, &class_field_types);
-        let local_bindings = collect_local_callable_bindings_with_alias_index(
-            &decl.flow_events,
-            global,
-            decl,
-            &alias_targets,
-            &context.alias_index,
-            Some(&context.callable_index),
-            info.capabilities,
-        );
+        let alias_targets = {
+            let _timing = DebugTimingGuard::new(timings.map(|timing| &timing.alias_targets));
+            let mut aliases = alias_targets_for_decl(global, &info.alias_targets, decl);
+            extend_alias_targets_with_resolved_class_fields(&mut aliases, decl, &class_field_types);
+            aliases
+        };
+        let local_bindings = {
+            let _timing = DebugTimingGuard::new(timings.map(|timing| &timing.local_bindings));
+            collect_local_callable_bindings_with_alias_index(
+                &decl.flow_events,
+                global,
+                decl,
+                &alias_targets,
+                &context.alias_index,
+                Some(&context.callable_index),
+                info.capabilities,
+            )
+        };
         resolved_bindings.extend(
             local_bindings
                 .iter()
@@ -1901,6 +2212,10 @@ fn resolve_file_call_edges(
                     target,
                 }),
         );
+        let flow_lookup = {
+            let _timing = DebugTimingGuard::new(timings.map(|timing| &timing.flow_lookup));
+            DeclFlowLookup::build(&decl.flow_events)
+        };
         let resolution = CallResolutionContext {
             from,
             caller_decl: decl,
@@ -1908,6 +2223,8 @@ fn resolve_file_call_edges(
             aliases: &info.aliases,
             alias_targets: &alias_targets,
             local_bindings: &local_bindings,
+            inline_callable_targets_by_arg_span: &inline_callable_targets_by_arg_span,
+            callable_reference_argument_spans: &callable_reference_argument_spans,
             path_for_file: &path_lookup,
             file_path_parts: &context.file_path_parts,
             caller_language: info.language,
@@ -1916,6 +2233,8 @@ fn resolve_file_call_edges(
             alias_index: &context.alias_index,
             build_targets: &context.build_targets,
             constructor_index: &context.constructor_index,
+            class_ancestor_index: &context.class_ancestor_index,
+            flow_lookup: &flow_lookup,
         };
         add_resolved_call_edges(
             &decl.flow_events,
@@ -1925,15 +2244,50 @@ fn resolve_file_call_edges(
                 workspace_module_cache: &mut workspace_module_cache,
                 callable_target_cache: &mut callable_target_cache,
                 graph: &mut local_cg,
+                callable_arguments: &mut callable_arguments,
                 unresolved_workspace_sites: &mut unresolved_workspace_sites,
+                timings,
             },
         );
     }
     unresolved_workspace_sites.sort_unstable();
     unresolved_workspace_sites.dedup();
+    callable_arguments.sort_unstable();
+    callable_arguments.dedup();
+    let mut callback_invocations = Vec::new();
+    let mut callback_bindings = Vec::new();
+    let mut callback_forwards = Vec::new();
+    for decl in decls.iter().filter(|decl| {
+        matches!(
+            decl.kind,
+            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+        )
+    }) {
+        let context = CallbackFormalFactsContext {
+            global,
+            graph: &local_cg,
+            callable_arguments: &callable_arguments,
+        };
+        let mut output = CallbackFormalFactsOutput {
+            invocations: &mut callback_invocations,
+            bindings: &mut callback_bindings,
+            forwards: &mut callback_forwards,
+        };
+        collect_callback_formal_facts(decl, &decl.flow_events, &context, &mut output);
+    }
+    callback_invocations.sort_unstable();
+    callback_invocations.dedup();
+    callback_bindings.sort_unstable();
+    callback_bindings.dedup();
+    callback_forwards.sort_unstable();
+    callback_forwards.dedup();
     FileCallgraphResolution {
         edges: local_cg.edges,
         local_bindings: resolved_bindings,
+        callable_arguments,
+        callback_invocations,
+        callback_bindings,
+        callback_forwards,
         unresolved_workspace_sites,
     }
 }
@@ -1965,7 +2319,7 @@ fn resolved_class_field_types(
         let Some(parent) = decl.parent else {
             continue;
         };
-        let alias_targets = alias_targets_for_decl(file_alias_targets, decl);
+        let alias_targets = alias_targets_for_decl(global, file_alias_targets, decl);
         let Some(file) = caller_decl_file(global, decl) else {
             continue;
         };
@@ -2131,7 +2485,387 @@ fn decl_binding_shadows_name(decl: &Decl, name: &str) -> bool {
 struct FileCallgraphResolution {
     edges: Vec<CallEdge>,
     local_bindings: Vec<CallGraphLocalBinding>,
+    callable_arguments: Vec<CallGraphCallableArgument>,
+    callback_invocations: Vec<CallbackFormalInvocation>,
+    callback_bindings: Vec<CallbackFormalBinding>,
+    callback_forwards: Vec<CallbackFormalForward>,
     unresolved_workspace_sites: Vec<UnresolvedWorkspaceCallSite>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct CallbackFormalInvocation {
+    host: FuncId,
+    param_index: u32,
+    span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct CallbackFormalBinding {
+    host: FuncId,
+    param_index: u32,
+    target: FuncId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct CallbackFormalForward {
+    caller: FuncId,
+    caller_param_index: u32,
+    host: FuncId,
+    host_param_index: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CallbackExecutionFacts {
+    invocations: Vec<CallbackFormalInvocation>,
+    bindings: Vec<CallbackFormalBinding>,
+    forwards: Vec<CallbackFormalForward>,
+}
+
+impl FileCallgraphResolution {
+    fn take_callback_execution_facts(&mut self) -> CallbackExecutionFacts {
+        CallbackExecutionFacts {
+            invocations: std::mem::take(&mut self.callback_invocations),
+            bindings: std::mem::take(&mut self.callback_bindings),
+            forwards: std::mem::take(&mut self.callback_forwards),
+        }
+    }
+}
+
+type CallbackFormalKey = (FuncId, u32);
+
+/// Incremental exact fixed point for callable values passed through workspace
+/// formals and invoked in another compiler partition.
+///
+/// A scoped callgraph build may discover the concrete callback binding before
+/// it decodes the host body (or the reverse). This accumulator joins those
+/// typed facts without depending on batch order and emits each proven
+/// execution edge once. It has no depth or iteration cap: each finite
+/// `(formal, target)` fact is admitted at most once.
+#[derive(Debug, Default)]
+pub struct CallbackExecutionAccumulator {
+    seen_invocations: AHashSet<CallbackFormalInvocation>,
+    seen_bindings: AHashSet<CallbackFormalBinding>,
+    seen_forwards: AHashSet<CallbackFormalForward>,
+    invocations: AHashMap<CallbackFormalKey, Vec<Span>>,
+    forwards: AHashMap<CallbackFormalKey, Vec<CallbackFormalKey>>,
+    targets: AHashMap<CallbackFormalKey, AHashSet<FuncId>>,
+    emitted: AHashSet<(FuncId, FuncId, Span)>,
+}
+
+impl CallbackExecutionAccumulator {
+    /// Add one independently resolved compiler partition and return only the
+    /// newly proven callback-execution edges.
+    #[must_use]
+    pub fn extend(&mut self, graph: &ResolvedCallGraph) -> Vec<CallEdge> {
+        let mut edges = self.extend_facts(&graph.callback_execution_facts);
+        // A standalone partition already materializes facts that are wholly
+        // local to that partition. Return only cross-partition discoveries so
+        // a streaming owner can append the batch graph and these edges without
+        // manufacturing duplicate adjacency rows.
+        edges.retain(|candidate| {
+            !graph.cg.edges.iter().any(|existing| {
+                existing.from == candidate.from
+                    && existing.to == candidate.to
+                    && existing.span.file == candidate.span.file
+                    && existing.span.start == candidate.span.start
+                    && existing.kind == candidate.kind
+                    && existing.precision == candidate.precision
+            })
+        });
+        edges
+    }
+
+    fn extend_facts(&mut self, facts: &CallbackExecutionFacts) -> Vec<CallEdge> {
+        self.extend_parts(&facts.invocations, &facts.bindings, &facts.forwards)
+    }
+
+    fn extend_parts(
+        &mut self,
+        invocations: &[CallbackFormalInvocation],
+        bindings: &[CallbackFormalBinding],
+        forwards: &[CallbackFormalForward],
+    ) -> Vec<CallEdge> {
+        let mut newly_proven = Vec::new();
+        let mut pending = Vec::new();
+
+        for invocation in invocations {
+            if !self.seen_invocations.insert(*invocation) {
+                continue;
+            }
+            let key = (invocation.host, invocation.param_index);
+            self.invocations.entry(key).or_default().push(invocation.span);
+            let targets = self
+                .targets
+                .get(&key)
+                .map_or_else(Vec::new, |targets| targets.iter().copied().collect());
+            for target in targets {
+                self.push_execution_edge(key.0, target, invocation.span, &mut newly_proven);
+            }
+        }
+
+        for forward in forwards {
+            if !self.seen_forwards.insert(*forward) {
+                continue;
+            }
+            let source = (forward.caller, forward.caller_param_index);
+            let destination = (forward.host, forward.host_param_index);
+            self.forwards.entry(source).or_default().push(destination);
+            let targets = self
+                .targets
+                .get(&source)
+                .map_or_else(Vec::new, |targets| targets.iter().copied().collect());
+            pending.extend(targets.into_iter().map(|target| (destination, target)));
+        }
+
+        for binding in bindings {
+            if self.seen_bindings.insert(*binding) {
+                pending.push(((binding.host, binding.param_index), binding.target));
+            }
+        }
+
+        while let Some((key, target)) = pending.pop() {
+            if !self.targets.entry(key).or_default().insert(target) {
+                continue;
+            }
+            let spans = self.invocations.get(&key).cloned().unwrap_or_default();
+            for span in spans {
+                self.push_execution_edge(key.0, target, span, &mut newly_proven);
+            }
+            let destinations = self.forwards.get(&key).cloned().unwrap_or_default();
+            pending.extend(destinations.into_iter().map(|destination| (destination, target)));
+        }
+
+        newly_proven.sort_unstable_by_key(|edge| {
+            (
+                edge.from.raw(),
+                edge.to.raw(),
+                edge.span.file.raw(),
+                edge.span.start,
+                edge.span.end,
+            )
+        });
+        newly_proven
+    }
+
+    fn push_execution_edge(&mut self, host: FuncId, target: FuncId, span: Span, out: &mut Vec<CallEdge>) {
+        if !self.emitted.insert((host, target, span)) {
+            return;
+        }
+        out.push(CallEdge {
+            from: host,
+            to: target,
+            span,
+            kind: EdgeKind::Indirect,
+            precision: Precision::Narrowed,
+            provenance: EdgeProvenance::callable_value(
+                "formal invocation resolved from compiler-bound callable argument",
+            ),
+        });
+    }
+}
+
+/// Bind each compiler-emitted direct inline callback argument to its exact
+/// callable declaration. The relation is derived solely from the adapter's
+/// callback span and declaration span; rendered lambda text and API names are
+/// never interpreted here.
+fn inline_callable_targets_by_argument_span(
+    decls: &[Decl],
+    facts: &[CallArgumentValueFact],
+) -> AHashMap<Span, Vec<FuncId>> {
+    let mut by_span: AHashMap<Span, Vec<FuncId>> = AHashMap::new();
+    for fact in facts {
+        let Some(callback_span) = fact.inline_callback_span else {
+            continue;
+        };
+        let mut candidates = decls
+            .iter()
+            .filter(|decl| {
+                decl.span == callback_span
+                    && matches!(
+                        decl.kind,
+                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                    )
+            })
+            .map(|decl| FuncId::new(decl.symbol.raw()))
+            .collect::<Vec<_>>();
+        candidates.sort_unstable_by_key(|func| func.raw());
+        candidates.dedup();
+        // Multiple semantic declarations on one callback span are ambiguous;
+        // fail closed instead of selecting by declaration order or name.
+        if candidates.len() == 1 {
+            by_span.entry(fact.argument_span).or_default().push(candidates[0]);
+        }
+    }
+    for candidates in by_span.values_mut() {
+        candidates.sort_unstable_by_key(|func| func.raw());
+        candidates.dedup();
+    }
+    by_span
+}
+
+fn callback_formal_param_index(params: &[String], name: &str, receiver: Option<&str>) -> Option<u32> {
+    params.iter().enumerate().find_map(|(index, param)| {
+        call_invokes_parameter(std::slice::from_ref(param), name, receiver)
+            .then(|| u32::try_from(index).ok())
+            .flatten()
+    })
+}
+
+struct CallbackFormalFactsContext<'a> {
+    global: &'a GlobalIndex,
+    graph: &'a CallGraph,
+    callable_arguments: &'a [CallGraphCallableArgument],
+}
+
+struct CallbackFormalFactsOutput<'a> {
+    invocations: &'a mut Vec<CallbackFormalInvocation>,
+    bindings: &'a mut Vec<CallbackFormalBinding>,
+    forwards: &'a mut Vec<CallbackFormalForward>,
+}
+
+fn collect_callback_formal_facts(
+    caller: &Decl,
+    events: &[FlowEvent],
+    context: &CallbackFormalFactsContext<'_>,
+    output: &mut CallbackFormalFactsOutput<'_>,
+) {
+    let caller_id = FuncId::new(caller.symbol.raw());
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                args,
+                ..
+            } => {
+                if let Some(param_index) =
+                    callback_formal_param_index(&caller.params, name, receiver.as_deref())
+                {
+                    output.invocations.push(CallbackFormalInvocation {
+                        host: caller_id,
+                        param_index,
+                        span: *span,
+                    });
+                }
+                let hosts = context
+                    .graph
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.from == caller_id && edge.span == *span)
+                    .map(|edge| edge.to)
+                    .collect::<AHashSet<_>>();
+                for host in hosts {
+                    let Some(host_decl) = context.global.decl_of(SymbolId::new(host.raw())) else {
+                        continue;
+                    };
+                    for (argument_index, argument) in args.iter().enumerate() {
+                        let Ok(host_param_index) = u32::try_from(argument_index) else {
+                            continue;
+                        };
+                        if argument_index >= host_decl.params.len() {
+                            continue;
+                        }
+                        for relation in context
+                            .callable_arguments
+                            .iter()
+                            .filter(|relation| relation.caller == caller_id && relation.span == argument.span)
+                        {
+                            output.bindings.push(CallbackFormalBinding {
+                                host,
+                                param_index: host_param_index,
+                                target: relation.target,
+                            });
+                        }
+                        let Some(place) = argument.place.as_deref() else {
+                            continue;
+                        };
+                        let Some(caller_param_index) =
+                            callback_formal_param_index(&caller.params, place, None)
+                        else {
+                            continue;
+                        };
+                        output.forwards.push(CallbackFormalForward {
+                            caller: caller_id,
+                            caller_param_index,
+                            host,
+                            host_param_index,
+                        });
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_callback_formal_facts(caller, then_events, context, output);
+                collect_callback_formal_facts(caller, else_events, context, output);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_callback_formal_facts(caller, body, context, output);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_callback_formal_facts(caller, body, context, output);
+                collect_callback_formal_facts(caller, catch_events, context, output);
+                collect_callback_formal_facts(caller, finally_events, context, output);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Counted admission on the process-wide Rayon scheduler. This bounds the
+/// measured per-file resolver working set without creating a nested pool or
+/// changing the complete file worklist.
+struct CallgraphResolverPermits {
+    available: std::sync::Mutex<usize>,
+    ready: std::sync::Condvar,
+}
+
+impl CallgraphResolverPermits {
+    fn new(permits: usize) -> Self {
+        Self {
+            available: std::sync::Mutex::new(permits.max(1)),
+            ready: std::sync::Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> CallgraphResolverPermit<'_> {
+        let mut available = self
+            .available
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *available == 0 {
+            available = self
+                .ready
+                .wait(available)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *available -= 1;
+        CallgraphResolverPermit { pool: self }
+    }
+}
+
+struct CallgraphResolverPermit<'a> {
+    pool: &'a CallgraphResolverPermits,
+}
+
+impl Drop for CallgraphResolverPermit<'_> {
+    fn drop(&mut self) {
+        let mut available = self
+            .pool
+            .available
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *available += 1;
+        self.pool.ready.notify_one();
+    }
 }
 
 fn collect_resolved_file_edges<R, Q>(
@@ -2143,33 +2877,47 @@ where
     R: Fn(&FileCallgraphInfo) -> FileCallgraphResolution + Sync,
     Q: Fn() + Sync,
 {
-    let workers = callgraph_resolver_worker_count();
+    let worker_count = callgraph_resolver_worker_count();
+    bonsai_diagnostics::debug_log!(
+        "callgraph-build",
+        "resolver worklist files {} workers {}",
+        file_infos.len(),
+        worker_count
+    );
+    let permits = CallgraphResolverPermits::new(worker_count);
     let resolve_and_report = |info: &FileCallgraphInfo| {
+        let _permit = permits.acquire();
         let result = resolve_file(info);
         on_file();
         result
     };
-    let file_results = if rayon::current_thread_index().is_some() {
-        // A cold semantic service may be requested by several workers in an
-        // existing Rayon batch. Building and synchronously joining a nested
-        // pool there can form a lock cycle with the service's single-flight
-        // guard. Resolve serially on that worker instead; the fact set is
-        // identical and nested concurrency remains bounded by the caller's
-        // compiler scheduler.
-        file_infos.iter().map(&resolve_and_report).collect()
-    } else {
-        match rayon::ThreadPoolBuilder::new().num_threads(workers).build() {
-            Ok(pool) => pool.install(|| {
-                use rayon::prelude::*;
-                file_infos.par_iter().map(&resolve_and_report).collect::<Vec<_>>()
-            }),
-            Err(_) => file_infos.iter().map(resolve_and_report).collect(),
-        }
-    };
+    // File resolution is one continuous worklist on the process compiler
+    // scheduler. Never create a nested pool: doing so can deadlock a
+    // single-flight semantic build and repeatedly pays thread construction
+    // on broad commands. Indexed parallel iteration preserves canonical
+    // input order in the collected vector while every file is still exact.
+    use rayon::prelude::*;
+    let file_results = file_infos.par_iter().map(&resolve_and_report).collect::<Vec<_>>();
     let edge_count = file_results.iter().map(|result| result.edges.len()).sum();
     let binding_count = file_results
         .iter()
         .map(|result| result.local_bindings.len())
+        .sum();
+    let callable_argument_count = file_results
+        .iter()
+        .map(|result| result.callable_arguments.len())
+        .sum();
+    let callback_invocation_count = file_results
+        .iter()
+        .map(|result| result.callback_invocations.len())
+        .sum();
+    let callback_binding_count = file_results
+        .iter()
+        .map(|result| result.callback_bindings.len())
+        .sum();
+    let callback_forward_count = file_results
+        .iter()
+        .map(|result| result.callback_forwards.len())
         .sum();
     let unresolved_count = file_results
         .iter()
@@ -2178,19 +2926,68 @@ where
     let mut out = FileCallgraphResolution {
         edges: Vec::with_capacity(edge_count),
         local_bindings: Vec::with_capacity(binding_count),
+        callable_arguments: Vec::with_capacity(callable_argument_count),
+        callback_invocations: Vec::with_capacity(callback_invocation_count),
+        callback_bindings: Vec::with_capacity(callback_binding_count),
+        callback_forwards: Vec::with_capacity(callback_forward_count),
         unresolved_workspace_sites: Vec::with_capacity(unresolved_count),
     };
     for result in file_results {
         out.edges.extend(result.edges);
         out.local_bindings.extend(result.local_bindings);
+        out.callable_arguments.extend(result.callable_arguments);
+        out.callback_invocations.extend(result.callback_invocations);
+        out.callback_bindings.extend(result.callback_bindings);
+        out.callback_forwards.extend(result.callback_forwards);
         out.unresolved_workspace_sites
             .extend(result.unresolved_workspace_sites);
     }
     out.local_bindings.sort();
     out.local_bindings.dedup();
+    out.callable_arguments.sort_unstable();
+    out.callable_arguments.dedup();
+    out.callback_invocations.sort_unstable();
+    out.callback_invocations.dedup();
+    out.callback_bindings.sort_unstable();
+    out.callback_bindings.dedup();
+    out.callback_forwards.sort_unstable();
+    out.callback_forwards.dedup();
     out.unresolved_workspace_sites.sort_unstable();
     out.unresolved_workspace_sites.dedup();
+    materialize_callback_execution_edges(&mut out);
     out
+}
+
+/// Compute the exact monotone relation from concrete callable arguments
+/// through forwarded formals to formal invocation sites. This is a compiler
+/// fixed point over typed facts, not a name search or depth-bounded walk.
+fn materialize_callback_execution_edges(resolution: &mut FileCallgraphResolution) {
+    let mut accumulator = CallbackExecutionAccumulator::default();
+    resolution.edges.extend(accumulator.extend_parts(
+        &resolution.callback_invocations,
+        &resolution.callback_bindings,
+        &resolution.callback_forwards,
+    ));
+}
+
+fn callgraph_resolver_worker_count() -> usize {
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .max(1);
+    let requested = std::env::var("BONSAI_CALLGRAPH_JOBS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .or_else(|| {
+            std::env::var("RAYON_NUM_THREADS")
+                .ok()
+                .and_then(|raw| raw.parse::<usize>().ok())
+        })
+        .unwrap_or(available)
+        .max(1)
+        .min(available);
+    // Concurrency only: every file remains in the exact process-wide worklist.
+    bonsai_common::callgraph_worker_count(requested)
 }
 
 fn callgraph_nodes(global: &GlobalIndex, _graph: &CallGraph) -> Vec<CallGraphNode> {
@@ -2221,29 +3018,6 @@ fn callgraph_nodes(global: &GlobalIndex, _graph: &CallGraph) -> Vec<CallGraphNod
     nodes
 }
 
-fn callgraph_resolver_worker_count() -> usize {
-    let available = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
-        .max(1);
-    let requested = std::env::var("BONSAI_CALLGRAPH_JOBS")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .or_else(|| {
-            std::env::var("RAYON_NUM_THREADS")
-                .ok()
-                .and_then(|raw| raw.parse::<usize>().ok())
-        })
-        .unwrap_or(available)
-        .max(1)
-        .min(available);
-    // Resolver workers share immutable compiler indexes and own only one
-    // file's candidate/callable-binding caches. Use their measured resource
-    // profile instead of the heavier parser/lowering profile; scheduling
-    // changes concurrency only and every caller is still resolved.
-    bonsai_common::callgraph_worker_count(requested)
-}
-
 /// Walk one decl's `flow_events` and emit a [`CallEdge`] per resolved
 /// call site. Recurses through every structural variant (`Branch`,
 /// `Loop`, `Try`, `Defer`, `Using`).
@@ -2255,6 +3029,8 @@ struct CallResolutionContext<'a> {
     aliases: &'a AHashMap<String, String>,
     alias_targets: &'a AHashMap<String, AliasTarget>,
     local_bindings: &'a AHashMap<String, FuncId>,
+    inline_callable_targets_by_arg_span: &'a AHashMap<Span, Vec<FuncId>>,
+    callable_reference_argument_spans: &'a AHashSet<Span>,
     path_for_file: &'a dyn Fn(FileId) -> Option<String>,
     file_path_parts: &'a AHashMap<FileId, Vec<String>>,
     caller_language: Option<&'static str>,
@@ -2263,6 +3039,8 @@ struct CallResolutionContext<'a> {
     alias_index: &'a WorkspaceAliasIndex,
     build_targets: &'a BuildTargetIndex,
     constructor_index: &'a ConstructorIndex,
+    class_ancestor_index: &'a ClassAncestorIndex,
+    flow_lookup: &'a DeclFlowLookup<'a>,
 }
 
 impl<'a> CallResolutionContext<'a> {
@@ -2277,12 +3055,260 @@ impl<'a> CallResolutionContext<'a> {
     }
 }
 
+/// Declaration-local lookup tables derived once from adapter-lowered flow IR.
+///
+/// Call resolution asks whether a preceding value assignment shadows a bare
+/// callable and whether an assignment's `source_call` duplicates an explicit
+/// call event. Walking the complete declaration for every call site makes
+/// large functions quadratic. These indexes preserve the exact prior
+/// semantics—source order is carried by spans and qualified-call equality by
+/// the shared callable-tail normalization—while making each query constant
+/// time plus the small set of same-name call spans.
+#[derive(Debug, Default)]
+struct DeclFlowLookup<'a> {
+    earliest_assignment_end: AHashMap<String, u64>,
+    explicit_call_spans: AHashMap<String, Vec<Span>>,
+    assignments: Vec<&'a FlowEvent>,
+    assignments_by_target: AHashMap<String, Vec<&'a FlowEvent>>,
+    calls_by_file: AHashMap<FileId, Vec<&'a FlowEvent>>,
+    call_argument_spans: AHashMap<Span, Vec<Span>>,
+}
+
+impl<'a> DeclFlowLookup<'a> {
+    fn build(events: &'a [FlowEvent]) -> Self {
+        let mut lookup = Self::default();
+        lookup.record(events);
+        for spans in lookup.explicit_call_spans.values_mut() {
+            spans.sort_unstable_by_key(|span| (span.file.raw(), span.start, span.end));
+            spans.dedup();
+        }
+        for calls in lookup.calls_by_file.values_mut() {
+            calls.sort_by_key(|event| {
+                let span = event.span();
+                (span.start, span.end)
+            });
+        }
+        lookup
+    }
+
+    fn record(&mut self, events: &'a [FlowEvent]) {
+        for event in events {
+            match event {
+                FlowEvent::Assign { target, span, .. } => {
+                    let name = normalize_receiver_alias_text(target);
+                    if !name.is_empty() {
+                        self.earliest_assignment_end
+                            .entry(name.clone())
+                            .and_modify(|end| *end = (*end).min(span.end))
+                            .or_insert(span.end);
+                        self.assignments_by_target.entry(name).or_default().push(event);
+                    }
+                    self.assignments.push(event);
+                }
+                FlowEvent::Call { name, span, args, .. } => {
+                    self.explicit_call_spans
+                        .entry(name.clone())
+                        .or_default()
+                        .push(*span);
+                    let tail = short_callee(name);
+                    if !tail.is_empty() && tail != name {
+                        self.explicit_call_spans
+                            .entry(tail.to_string())
+                            .or_default()
+                            .push(*span);
+                    }
+                    self.calls_by_file.entry(span.file).or_default().push(event);
+                    self.call_argument_spans
+                        .entry(*span)
+                        .or_default()
+                        .extend(args.iter().map(|arg| arg.span));
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    self.record(then_events);
+                    self.record(else_events);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => self.record(body),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    self.record(body);
+                    self.record(catch_events);
+                    self.record(finally_events);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn value_binding_shadows_callable(&self, name: &str, call_span: Span) -> bool {
+        let target_name = normalize_receiver_alias_text(short_callee(name));
+        !target_name.is_empty()
+            && self
+                .earliest_assignment_end
+                .get(&target_name)
+                .is_some_and(|end| *end <= call_span.start)
+    }
+
+    fn assignment_has_explicit_call(&self, source_call: &str, assign_span: Span) -> bool {
+        let tail = short_callee(source_call);
+        [source_call, tail]
+            .into_iter()
+            .filter(|key| !key.is_empty())
+            .any(|key| {
+                self.explicit_call_spans
+                    .get(key)
+                    .is_some_and(|spans| spans.iter().any(|span| spans_overlap(assign_span, *span)))
+            })
+    }
+
+    fn assignments_for_receiver(&self, receiver: &str) -> &[&'a FlowEvent] {
+        if receiver.is_empty() {
+            &self.assignments
+        } else {
+            self.assignments_by_target
+                .get(receiver)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+        }
+    }
+
+    fn calls_strictly_inside(&self, outer: Span) -> Vec<&'a FlowEvent> {
+        let Some(calls) = self.calls_by_file.get(&outer.file) else {
+            return Vec::new();
+        };
+        let first = calls.partition_point(|event| event.span().start < outer.start);
+        let after = calls.partition_point(|event| event.span().start <= outer.end);
+        calls[first..after]
+            .iter()
+            .copied()
+            .filter(|event| {
+                let span = event.span();
+                span.end <= outer.end && span != outer
+            })
+            .collect()
+    }
+
+    fn argument_spans_at_call(&self, site: Span) -> &[Span] {
+        self.call_argument_spans
+            .get(&site)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
+
 struct CallGraphBuildState<'a> {
     method_candidate_cache: &'a mut MethodCandidateCache,
     workspace_module_cache: &'a mut WorkspaceModuleTargetCache,
     callable_target_cache: &'a mut CallableTargetCache,
     graph: &'a mut CallGraph,
+    callable_arguments: &'a mut Vec<CallGraphCallableArgument>,
     unresolved_workspace_sites: &'a mut Vec<UnresolvedWorkspaceCallSite>,
+    timings: Option<&'a CallgraphResolutionTimings>,
+}
+
+#[derive(Debug, Default)]
+struct CallgraphResolutionTimings {
+    files: std::sync::atomic::AtomicU64,
+    class_fields: std::sync::atomic::AtomicU64,
+    alias_targets: std::sync::atomic::AtomicU64,
+    local_bindings: std::sync::atomic::AtomicU64,
+    flow_lookup: std::sync::atomic::AtomicU64,
+    call_events: std::sync::atomic::AtomicU64,
+    callback_args: std::sync::atomic::AtomicU64,
+    candidate_discovery: std::sync::atomic::AtomicU64,
+    candidate_narrowing: std::sync::atomic::AtomicU64,
+    narrow_type_object: std::sync::atomic::AtomicU64,
+    narrow_scope: std::sync::atomic::AtomicU64,
+    narrow_assigned_receiver: std::sync::atomic::AtomicU64,
+    narrow_semantic_receiver: std::sync::atomic::AtomicU64,
+    semantic_receiver_calls: std::sync::atomic::AtomicU64,
+    semantic_class_symbols: std::sync::atomic::AtomicU64,
+    semantic_dispatch_closure: std::sync::atomic::AtomicU64,
+    semantic_candidate_retain: std::sync::atomic::AtomicU64,
+    narrow_signature: std::sync::atomic::AtomicU64,
+    narrow_finalize: std::sync::atomic::AtomicU64,
+    assignment_events: std::sync::atomic::AtomicU64,
+}
+
+impl CallgraphResolutionTimings {
+    fn seconds(value: &std::sync::atomic::AtomicU64) -> f64 {
+        value.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000_000.0
+    }
+
+    fn debug_log(&self) {
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "resolution aggregate worker seconds files {:.3} class-fields {:.3} aliases {:.3} local-bindings {:.3} flow-lookups {:.3}",
+            Self::seconds(&self.files),
+            Self::seconds(&self.class_fields),
+            Self::seconds(&self.alias_targets),
+            Self::seconds(&self.local_bindings),
+            Self::seconds(&self.flow_lookup)
+        );
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "resolution aggregate worker seconds calls {:.3} callbacks {:.3} discovery {:.3} narrowing {:.3} assignment-calls {:.3}",
+            Self::seconds(&self.call_events),
+            Self::seconds(&self.callback_args),
+            Self::seconds(&self.candidate_discovery),
+            Self::seconds(&self.candidate_narrowing),
+            Self::seconds(&self.assignment_events)
+        );
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "narrowing aggregate worker seconds type-object {:.3} scope {:.3} assigned-receiver {:.3} semantic-receiver {:.3} signature {:.3} finalize {:.3}",
+            Self::seconds(&self.narrow_type_object),
+            Self::seconds(&self.narrow_scope),
+            Self::seconds(&self.narrow_assigned_receiver),
+            Self::seconds(&self.narrow_semantic_receiver),
+            Self::seconds(&self.narrow_signature),
+            Self::seconds(&self.narrow_finalize)
+        );
+        bonsai_diagnostics::debug_log!(
+            "callgraph-build",
+            "semantic receiver calls {} aggregate worker seconds class-symbols {:.3} dispatch-closure {:.3} candidate-retain {:.3}",
+            self.semantic_receiver_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            Self::seconds(&self.semantic_class_symbols),
+            Self::seconds(&self.semantic_dispatch_closure),
+            Self::seconds(&self.semantic_candidate_retain)
+        );
+    }
+}
+
+struct DebugTimingGuard<'a> {
+    target: Option<&'a std::sync::atomic::AtomicU64>,
+    started: Option<std::time::Instant>,
+}
+
+impl<'a> DebugTimingGuard<'a> {
+    fn new(target: Option<&'a std::sync::atomic::AtomicU64>) -> Self {
+        Self {
+            target,
+            started: target.map(|_| std::time::Instant::now()),
+        }
+    }
+}
+
+impl Drop for DebugTimingGuard<'_> {
+    fn drop(&mut self) {
+        let (Some(target), Some(started)) = (self.target, self.started) else {
+            return;
+        };
+        target.fetch_add(
+            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
 }
 
 /// Adapter-emitted syntax facts for one call site plus the receiver identity
@@ -2324,23 +3350,26 @@ fn add_call_event_edges(
     else {
         return;
     };
+    let _call_timing = DebugTimingGuard::new(state.timings.map(|timing| &timing.call_events));
     // Operator applications are compiler-known expression flow, not
     // workspace call targets. Their operand -> result edges live in the IDG.
     if matches!(call_kind, CallKind::Operator | CallKind::IndexWrite) {
         return;
     }
-    // Callback arguments are independent callgraph facts. Resolve
-    // them before the outer callee pipeline so an ambiguous or
-    // unresolved external API cannot suppress a compiler-resolved
-    // local callback edge via an early `continue` below.
-    add_callback_arg_edges(
-        args,
-        context,
-        state.method_candidate_cache,
-        state.callable_target_cache,
-        state.graph,
-        state.unresolved_workspace_sites,
-    );
+    // Callable arguments are independent compiler relations, not callgraph
+    // execution edges. Resolve them before the outer callee pipeline so an
+    // ambiguous or external host call cannot suppress the exact value fact.
+    {
+        let _timing = DebugTimingGuard::new(state.timings.map(|timing| &timing.callback_args));
+        add_callback_arg_edges(
+            args,
+            context,
+            state.method_candidate_cache,
+            state.callable_target_cache,
+            state.callable_arguments,
+            state.unresolved_workspace_sites,
+        );
+    }
     let short = short_callee(name);
     let alias_qualified = qualified_module_alias_call(name, context.aliases)
         || module_alias_target_qualified_name(name, context.alias_targets);
@@ -2363,7 +3392,7 @@ fn add_call_event_edges(
         alias_qualified,
         lexical_value_shadow: semantic_receiver.is_none()
             && (call_invokes_parameter(&context.caller_decl.params, name, None)
-                || local_value_binding_shadows_callable(&context.caller_decl.flow_events, short, *span)),
+                || context.flow_lookup.value_binding_shadows_callable(short, *span)),
         explicit_ancestor_constructor: *call_kind == CallKind::Constructor
             && semantic_receiver.is_some_and(|receiver| {
                 is_super_receiver_with_tokens(
@@ -2461,10 +3490,16 @@ fn collect_ast_bound_call_candidates(
             facts.span,
             context.caller_capabilities.effective_super_receiver_tokens(),
             context.caller_capabilities.module_path_syntax,
+            context.flow_lookup,
             state.method_candidate_cache,
         );
     }
-    if values.is_empty() {
+    if values.is_empty() && facts.semantic_receiver.is_none() {
+        // A receiverless qualified callable can denote `Type.member`. An
+        // adapter-proven instance receiver cannot: if typed dispatch above
+        // failed closed, reinterpreting `object.member` as a type-qualified
+        // call would discard the receiver binding and reintroduce same-name
+        // fanout.
         values = collect_type_qualified_method_targets(
             context.global,
             context.caller_decl,
@@ -2717,9 +3752,14 @@ fn resolve_and_emit_call_site(
     context: &CallResolutionContext<'_>,
     state: &mut CallGraphBuildState<'_>,
 ) {
-    let Some(candidate_set) = discover_call_site_candidates(facts, context, state) else {
+    let candidate_set = {
+        let _timing = DebugTimingGuard::new(state.timings.map(|timing| &timing.candidate_discovery));
+        discover_call_site_candidates(facts, context, state)
+    };
+    let Some(candidate_set) = candidate_set else {
         return;
     };
+    let _narrowing_timing = DebugTimingGuard::new(state.timings.map(|timing| &timing.candidate_narrowing));
     let CallCandidateSet {
         values: mut candidates,
         from_callable_binding: candidates_from_callable_binding,
@@ -2751,67 +3791,108 @@ fn resolve_and_emit_call_site(
         unresolved_workspace_sites,
         ..
     } = state;
-    if !candidates.is_empty() {
-        retain_same_language_candidates(global, caller_language, language_for_file, &mut candidates);
-    }
-    if !candidates.is_empty() {
-        retain_local_scope_candidates_when_present(global, caller_decl, path_for_file, &mut candidates);
-    }
-    if caller_capabilities.build_target_linkage && !candidates.is_empty() {
-        build_targets.retain_candidates_linked_with(global, caller_decl.name_span.file, &mut candidates);
-    }
-    if !candidates.is_empty() && !candidates_from_callable_binding {
-        let assigned_receiver_context = AssignedReceiverNarrowingContext {
-            global,
-            caller_decl,
-            alias_targets,
-            universal_type_names: caller_capabilities.universal_type_names,
-        };
-        retain_assigned_receiver_method_candidates(
-            &assigned_receiver_context,
-            semantic_receiver,
-            span,
-            method_candidate_cache,
-            &mut candidates,
-        );
-    }
-    if !candidates.is_empty() && !candidates_from_callable_binding && !candidates_from_dynamic_param_receiver
+    let exact_declared_type_receiver = {
+        let _timing = DebugTimingGuard::new(state.timings.map(|timing| &timing.narrow_type_object));
+        semantic_receiver.is_some_and(|receiver| {
+            let Some(caller_file) = caller_decl_file(global, caller_decl) else {
+                return false;
+            };
+            let ctx = ResolveContext::new(caller_file, &caller_decl.module_path)
+                .with_alias_map(alias_targets)
+                .with_file_path_lookup(path_for_file)
+                .with_module_path_syntax(caller_capabilities.module_path_syntax);
+            receiver_is_unshadowed_declared_type_object(
+                global,
+                caller_decl,
+                &ctx,
+                facts.name,
+                receiver,
+                span,
+                context.flow_lookup,
+            )
+        })
+    };
     {
-        retain_semantic_receiver_evidenced_candidates(
-            global,
-            caller_decl,
-            alias_targets,
-            semantic_receiver,
-            receiver_types,
-            call_kind,
-            span,
-            alias_qualified_call,
-            path_for_file,
-            caller_capabilities.effective_super_receiver_tokens(),
-            caller_capabilities.module_path_syntax,
-            method_candidate_cache,
-            &mut candidates,
-        );
+        let _timing = DebugTimingGuard::new(state.timings.map(|timing| &timing.narrow_scope));
+        if !candidates.is_empty() {
+            retain_same_language_candidates(global, caller_language, language_for_file, &mut candidates);
+        }
+        if !candidates.is_empty() {
+            retain_local_scope_candidates_when_present(global, caller_decl, path_for_file, &mut candidates);
+        }
+        if caller_capabilities.build_target_linkage && !candidates.is_empty() {
+            build_targets.retain_candidates_linked_with(global, caller_decl.name_span.file, &mut candidates);
+        }
     }
-    if !candidates.is_empty() {
-        // A namespace/package qualifier is syntax ownership, not an instance
-        // argument. Go `extract.UnpackTar(src, base)`, Rust
-        // `store::persist(value)`, and equivalent module calls may be lowered
-        // with a receiver-shaped qualifier by their grammar, but the imported
-        // module does not consume parameter zero. Alias-target evidence is the
-        // compiler distinction; spelling/capitalisation is deliberately not.
-        let receiver_supplied = !candidates_from_callable_binding
-            && !alias_qualified_call
-            && (semantic_receiver.is_some() || call_kind == CallKind::Method);
-        retain_signature_compatible_candidates(
-            global,
-            caller_decl,
-            &mut candidates,
-            args,
-            receiver_supplied,
-            caller_capabilities.universal_type_names,
-        );
+    {
+        let _timing = DebugTimingGuard::new(state.timings.map(|timing| &timing.narrow_assigned_receiver));
+        if !candidates.is_empty() && !candidates_from_callable_binding {
+            let assigned_receiver_context = AssignedReceiverNarrowingContext {
+                global,
+                caller_decl,
+                alias_targets,
+                universal_type_names: caller_capabilities.universal_type_names,
+            };
+            retain_assigned_receiver_method_candidates(
+                &assigned_receiver_context,
+                context.flow_lookup,
+                semantic_receiver,
+                span,
+                method_candidate_cache,
+                &mut candidates,
+            );
+        }
     }
+    {
+        let _timing = DebugTimingGuard::new(state.timings.map(|timing| &timing.narrow_semantic_receiver));
+        if !candidates.is_empty()
+            && !candidates_from_callable_binding
+            && !candidates_from_dynamic_param_receiver
+        {
+            retain_semantic_receiver_evidenced_candidates(
+                global,
+                caller_decl,
+                alias_targets,
+                semantic_receiver,
+                receiver_types,
+                call_kind,
+                span,
+                alias_qualified_call,
+                path_for_file,
+                caller_capabilities.effective_super_receiver_tokens(),
+                caller_capabilities.module_path_syntax,
+                context.flow_lookup,
+                context.class_ancestor_index,
+                state.timings,
+                method_candidate_cache,
+                &mut candidates,
+            );
+        }
+    }
+    {
+        let _timing = DebugTimingGuard::new(state.timings.map(|timing| &timing.narrow_signature));
+        if !candidates.is_empty() {
+            // A namespace/package qualifier is syntax ownership, not an instance
+            // argument. Go `extract.UnpackTar(src, base)`, Rust
+            // `store::persist(value)`, and equivalent module calls may be lowered
+            // with a receiver-shaped qualifier by their grammar, but the imported
+            // module does not consume parameter zero. Alias-target evidence is the
+            // compiler distinction; spelling/capitalisation is deliberately not.
+            let receiver_supplied = !candidates_from_callable_binding
+                && !alias_qualified_call
+                && !exact_declared_type_receiver
+                && (semantic_receiver.is_some() || call_kind == CallKind::Method);
+            retain_signature_compatible_candidates(
+                global,
+                caller_decl,
+                &mut candidates,
+                args,
+                receiver_supplied,
+                caller_capabilities.universal_type_names,
+            );
+        }
+    }
+    let _finalize_timing = DebugTimingGuard::new(state.timings.map(|timing| &timing.narrow_finalize));
     let candidates_are_constructors = !candidates.is_empty()
         && candidates.iter().all(|func| {
             global
@@ -2819,7 +3900,7 @@ fn resolve_and_emit_call_site(
                 .is_some_and(|decl| decl.kind == DeclKind::Constructor)
         });
     let exact_qualified_constructor = candidates_are_constructors
-        && semantic_receiver.is_none()
+        && (semantic_receiver.is_none() || exact_declared_type_receiver)
         && bonsai_common::qualified_name_owner(facts.name).is_some();
     let adapter_bare_constructor = candidates_are_constructors
         && caller_capabilities.bare_call_constructor_syntax
@@ -2896,7 +3977,6 @@ fn emit_call_site_candidate_edges(
 }
 
 fn add_assignment_call_edges(
-    events: &[FlowEvent],
     event: &FlowEvent,
     context: &CallResolutionContext<'_>,
     state: &mut CallGraphBuildState<'_>,
@@ -2911,6 +3991,7 @@ fn add_assignment_call_edges(
     else {
         return;
     };
+    let _assignment_timing = DebugTimingGuard::new(state.timings.map(|timing| &timing.assignment_events));
     // A YieldResult assignment binds a Ruby/block-style yielded value to the
     // block parameter. The outer Call event already represents the one real
     // invocation. Treating this binding as another call fabricates a second
@@ -2938,8 +4019,9 @@ fn add_assignment_call_edges(
         callable_target_cache,
         graph: cg,
         unresolved_workspace_sites,
+        ..
     } = state;
-    if assign_source_call_shadowed_by_explicit_call(events, name, *span) {
+    if context.flow_lookup.assignment_has_explicit_call(name, *span) {
         return;
     }
     let source_call_from_callable_binding = !collect_local_callable_binding_targets(
@@ -2959,6 +4041,7 @@ fn add_assignment_call_edges(
         file_path_parts,
         caller_capabilities,
         *span,
+        context.flow_lookup,
         method_candidate_cache,
         workspace_module_cache,
         callable_target_cache,
@@ -2973,12 +4056,16 @@ fn add_assignment_call_edges(
         build_targets.retain_candidates_linked_with(global, caller_decl.name_span.file, &mut candidates);
     }
     if !candidates.is_empty() {
-        retain_assigned_receiver_constructor_candidates(
+        let assigned_receiver_context = AssignedReceiverNarrowingContext {
             global,
             caller_decl,
             alias_targets,
+            universal_type_names: caller_capabilities.universal_type_names,
+        };
+        retain_assigned_receiver_constructor_candidates(
+            &assigned_receiver_context,
             span,
-            caller_capabilities.universal_type_names,
+            context.flow_lookup,
             method_candidate_cache,
             &mut candidates,
         );
@@ -2998,6 +4085,9 @@ fn add_assignment_call_edges(
             path_for_file,
             caller_capabilities.effective_super_receiver_tokens(),
             caller_capabilities.module_path_syntax,
+            context.flow_lookup,
+            context.class_ancestor_index,
+            state.timings,
             method_candidate_cache,
             &mut candidates,
         );
@@ -3051,25 +4141,9 @@ fn add_assignment_call_edges(
             });
         }
     }
-    let args = source_call_args
-        .iter()
-        .map(|value_text| CallArg {
-            passing_mode: Default::default(),
-            span: *span,
-            name: None,
-            value_text: value_text.clone(),
-            place: None,
-            source_names: Vec::new(),
-        })
-        .collect::<Vec<_>>();
-    add_callback_arg_edges(
-        &args,
-        context,
-        method_candidate_cache,
-        callable_target_cache,
-        cg,
-        unresolved_workspace_sites,
-    );
+    // Assignment-only summaries do not retain source-level argument spans.
+    // They therefore cannot prove a callable-argument relationship. Adapters
+    // must emit the corresponding Call event when callback identity matters.
 }
 
 fn add_resolved_call_edges(
@@ -3082,7 +4156,7 @@ fn add_resolved_call_edges(
             FlowEvent::Call { .. } => add_call_event_edges(event, context, state),
             FlowEvent::Assign {
                 source_call: Some(_), ..
-            } => add_assignment_call_edges(events, event, context, state),
+            } => add_assignment_call_edges(event, context, state),
             FlowEvent::Branch {
                 then_events,
                 else_events,
@@ -3117,7 +4191,7 @@ fn add_callback_arg_edges(
     context: &CallResolutionContext<'_>,
     method_candidate_cache: &mut MethodCandidateCache,
     callable_target_cache: &mut CallableTargetCache,
-    cg: &mut CallGraph,
+    callable_arguments: &mut Vec<CallGraphCallableArgument>,
     unresolved_workspace_sites: &mut Vec<UnresolvedWorkspaceCallSite>,
 ) {
     let CallResolutionContext {
@@ -3126,11 +4200,14 @@ fn add_callback_arg_edges(
         global,
         alias_targets,
         local_bindings,
+        inline_callable_targets_by_arg_span,
+        callable_reference_argument_spans,
         caller_language,
         caller_capabilities,
         language_for_file,
         path_for_file,
         file_path_parts,
+        flow_lookup,
         ..
     } = *context;
     let mut resolver = CallableArgResolutionContext {
@@ -3145,12 +4222,16 @@ fn add_callback_arg_edges(
         module_path_syntax: caller_capabilities.module_path_syntax,
         path_for_file,
         file_path_parts,
+        flow_lookup,
         method_candidate_cache,
         callable_target_cache,
     };
     let mut seen = AHashSet::new();
     for arg in args {
-        let targets = resolver.resolve(arg);
+        let targets = inline_callable_targets_by_arg_span
+            .get(&arg.span)
+            .cloned()
+            .unwrap_or_else(|| resolver.resolve(arg, callable_reference_argument_spans.contains(&arg.span)));
         let [to] = targets.as_slice() else {
             if targets.len() > 1 {
                 unresolved_workspace_sites.push(UnresolvedWorkspaceCallSite {
@@ -3167,13 +4248,10 @@ fn add_callback_arg_edges(
         if !seen.insert(to) {
             continue;
         }
-        cg.add_edge(CallEdge {
-            from,
-            to,
+        callable_arguments.push(CallGraphCallableArgument {
+            caller: from,
             span: arg.span,
-            kind: EdgeKind::Indirect,
-            precision: Precision::Narrowed,
-            provenance: EdgeProvenance::callable_value("call argument resolved as callable reference"),
+            target: to,
         });
     }
 }
@@ -3227,6 +4305,7 @@ fn collect_assign_source_call_targets(
     file_path_parts: &AHashMap<FileId, Vec<String>>,
     caller_capabilities: LanguageCapabilities,
     call_span: Span,
+    flow_lookup: &DeclFlowLookup<'_>,
     method_candidate_cache: &mut MethodCandidateCache,
     workspace_module_cache: &mut WorkspaceModuleTargetCache,
     callable_target_cache: &mut CallableTargetCache,
@@ -3238,7 +4317,7 @@ fn collect_assign_source_call_targets(
     let member_like = assign_source_call_member_like(trimmed);
     let lexical_value_shadow = !member_like
         && (call_invokes_parameter(&caller_decl.params, trimmed, None)
-            || local_value_binding_shadows_callable(&caller_decl.flow_events, trimmed, call_span));
+            || flow_lookup.value_binding_shadows_callable(trimmed, call_span));
     let receiver = receiver_name_from_call_name(trimmed);
     let short = short_callee(trimmed);
     let lookup_semantics = CallableLookupSemantics {
@@ -3720,12 +4799,27 @@ fn type_names_for_binding(global: &GlobalIndex, decl: &Decl, binding: &str) -> V
     }
     let tail = short_callee(binding);
     let mut out = Vec::new();
-    for alias in &decl.type_aliases {
-        let alias_name = normalize_receiver_alias_text(&alias.name);
-        if alias_name == binding || alias_name == tail {
-            push_unique_type_name(&mut out, &alias.type_name);
-            collect_declared_supertypes(global, decl, &alias.type_name, &mut out);
+    let mut scope = Some(decl);
+    let mut seen = AHashSet::new();
+    while let Some(current) = scope {
+        if !seen.insert(current.symbol) {
+            break;
         }
+        let mut matched_in_scope = false;
+        for alias in &current.type_aliases {
+            let alias_name = normalize_receiver_alias_text(&alias.name);
+            if alias_name == binding || alias_name == tail {
+                matched_in_scope = true;
+                push_unique_type_name(&mut out, &alias.type_name);
+                collect_declared_supertypes(global, current, &alias.type_name, &mut out);
+            }
+        }
+        // Lexical capture observes the nearest binding. An inner declaration
+        // shadows the same name in its parent even when the types differ.
+        if matched_in_scope {
+            break;
+        }
+        scope = current.parent.and_then(|parent| global.decl_of(parent));
     }
     out.sort_unstable();
     out.dedup();
@@ -3739,7 +4833,7 @@ fn type_names_for_call_arg(global: &GlobalIndex, caller_decl: &Decl, arg: &CallA
             push_unique_type_name(&mut out, &type_name);
         }
     }
-    let alias_targets = alias_targets_for_decl(&AHashMap::new(), caller_decl);
+    let alias_targets = alias_targets_for_decl(global, &AHashMap::new(), caller_decl);
     let mut nested_calls = Vec::new();
     collect_call_events_within(&caller_decl.flow_events, arg.span, &mut nested_calls);
     for event in nested_calls {
@@ -3876,12 +4970,13 @@ struct CallableArgResolutionContext<'a> {
     module_path_syntax: bonsai_lang_api::ModulePathSyntax,
     path_for_file: &'a dyn Fn(FileId) -> Option<String>,
     file_path_parts: &'a AHashMap<FileId, Vec<String>>,
+    flow_lookup: &'a DeclFlowLookup<'a>,
     method_candidate_cache: &'a mut MethodCandidateCache,
     callable_target_cache: &'a mut CallableTargetCache,
 }
 
 impl CallableArgResolutionContext<'_> {
-    fn resolve(&mut self, arg: &CallArg) -> Vec<FuncId> {
+    fn resolve(&mut self, arg: &CallArg, compiler_callable_reference: bool) -> Vec<FuncId> {
         let Self {
             global,
             alias_targets,
@@ -3894,6 +4989,7 @@ impl CallableArgResolutionContext<'_> {
             module_path_syntax,
             path_for_file,
             file_path_parts,
+            flow_lookup,
             method_candidate_cache,
             callable_target_cache,
         } = self;
@@ -3902,11 +4998,24 @@ impl CallableArgResolutionContext<'_> {
         }
         let raw = arg.value_text.as_str();
         let arg_span = arg.span;
-        let variants = bonsai_lang_api::callable_reference_variants(
+        let mut variants = bonsai_lang_api::callable_reference_variants(
             raw,
             *callable_reference_syntax,
             *quoted_callable_literals,
         );
+        // A dotted/scoped ordinary value (for example an enum member) is not
+        // a callable merely because its final segment collides with a method
+        // elsewhere in the workspace. Keep only its exact spelling unless
+        // the owning adapter classified the parsed argument as callable
+        // syntax. Module aliases and typed static members still resolve from
+        // that exact qualified identity; no short-name guess is required.
+        if !compiler_callable_reference {
+            let raw = bonsai_common::trim_leading_name_punctuation(raw.trim());
+            if short_callee(raw) != raw {
+                variants
+                    .retain(|variant| bonsai_common::trim_leading_name_punctuation(variant.trim()) == raw);
+            }
+        }
         let Some(first) = variants.first() else {
             return Vec::new();
         };
@@ -3954,7 +5063,7 @@ impl CallableArgResolutionContext<'_> {
             // earlier value assignments stop global callable lookup here.
             if !alias_qualified_reference
                 && (caller_decl.params.iter().any(|param| param == trimmed)
-                    || local_value_binding_shadows_callable(&caller_decl.flow_events, trimmed, arg_span))
+                    || flow_lookup.value_binding_shadows_callable(trimmed, arg_span))
             {
                 continue;
             }
@@ -3966,7 +5075,11 @@ impl CallableArgResolutionContext<'_> {
                 callable_target_cache,
                 method_candidate_cache,
             );
-            if targets.is_empty() && short != trimmed && !alias_qualified_reference {
+            if targets.is_empty()
+                && compiler_callable_reference
+                && short != trimmed
+                && !alias_qualified_reference
+            {
                 targets = collect_callable_targets_with_context_aliases_paths_and_method_cache(
                     global,
                     short,
@@ -4045,7 +5158,7 @@ pub fn collect_local_callable_bindings(
     global: &GlobalIndex,
     caller_decl: &Decl,
 ) -> AHashMap<String, FuncId> {
-    let alias_targets = alias_targets_for_decl(&AHashMap::new(), caller_decl);
+    let alias_targets = alias_targets_for_decl(global, &AHashMap::new(), caller_decl);
     collect_local_callable_bindings_with_aliases(events, global, caller_decl, &alias_targets)
 }
 
@@ -4097,7 +5210,7 @@ pub fn collect_workspace_local_callable_bindings(
             {
                 continue;
             }
-            let alias_targets = alias_targets_for_decl(&empty_file_alias_targets, decl);
+            let alias_targets = alias_targets_for_decl(global, &empty_file_alias_targets, decl);
             let bindings = collect_local_callable_bindings_with_alias_index(
                 &decl.flow_events,
                 global,
@@ -4292,6 +5405,16 @@ fn collect_local_callable_binding_uses(
                     if call_arg_can_be_callable_reference(arg, false) {
                         insert_local_callable_binding_use(out, &arg.value_text, capabilities);
                     }
+                    if let Some(place) = arg.place.as_deref() {
+                        // `CallArg::place` is already the adapter's exact proof
+                        // that this argument is one lexical storage identity.
+                        // Callable-literal syntax rules must not filter that
+                        // identity: grammars may spell local variables in forms
+                        // (for example capitalized variables) that are not valid
+                        // declaration references. The later assignment-to-
+                        // callable resolution still has to prove a unique target.
+                        insert_exact_local_callable_binding_use(out, place);
+                    }
                     for source_name in &arg.source_names {
                         insert_local_callable_binding_use(out, source_name, capabilities);
                     }
@@ -4327,6 +5450,22 @@ fn collect_local_callable_binding_uses(
             }
             _ => {}
         }
+    }
+}
+
+fn insert_exact_local_callable_binding_use(out: &mut AHashSet<String>, raw: &str) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    out.insert(trimmed.to_string());
+    let canonical = bonsai_common::normalize_qualified_name(trimmed);
+    if canonical != trimmed {
+        out.insert(canonical.clone());
+    }
+    let short = short_callee(&canonical);
+    if !short.is_empty() && short != canonical {
+        out.insert(short.to_string());
     }
 }
 
@@ -4880,6 +6019,7 @@ fn collect_receiver_method_targets(
     call_span: Span,
     super_receiver_tokens: &[&str],
     module_path_syntax: ModulePathSyntax,
+    flow_lookup: &DeclFlowLookup<'_>,
     method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<FuncId> {
     if call_kind != CallKind::Method {
@@ -4888,7 +6028,7 @@ fn collect_receiver_method_targets(
     let Some(receiver) = receiver else {
         return Vec::new();
     };
-    let method_name = short_callee(call_name);
+    let method_name = receiver_member_callee(call_name, receiver);
     if is_super_receiver_with_tokens(receiver, super_receiver_tokens) {
         return collect_super_method_targets(
             global,
@@ -4914,6 +6054,7 @@ fn collect_receiver_method_targets(
             global,
             caller_decl,
             alias_targets,
+            flow_lookup,
             receiver,
             Some(call_span),
             method_candidate_cache,
@@ -4928,21 +6069,39 @@ fn collect_receiver_method_targets(
             global,
             caller_decl,
             alias_targets,
-            receiver,
+            flow_lookup,
             Some(call_span),
             method_candidate_cache,
         ) {
             push_unique_string(&mut receiver_type_names, type_name);
         }
     }
-    if receiver_type_names.is_empty() {
-        return Vec::new();
-    }
     receiver_type_names = prune_receiver_type_names_for_dispatch(receiver_type_names, global, &ctx);
     let mut seen = AHashSet::new();
     let mut class_candidates = Vec::new();
     for receiver_type in receiver_type_names {
-        for class_sym in resolve_class(global, &receiver_type, &ctx) {
+        for class_sym in resolve_declared_receiver_class(global, &receiver_type, &ctx) {
+            if seen.insert(class_sym) {
+                class_candidates.push(class_sym);
+            }
+        }
+    }
+    if class_candidates.is_empty()
+        && receiver_is_unshadowed_declared_type_object(
+            global,
+            caller_decl,
+            &ctx,
+            call_name,
+            receiver,
+            call_span,
+            flow_lookup,
+        )
+    {
+        // A grammar may lower `Type.member(...)` through ordinary member
+        // call syntax even when `member` is a class-side factory or named
+        // constructor. The helper admits the receiver only after the complete
+        // compiler declaration index proves one unambiguous type identity.
+        for class_sym in resolve_declared_receiver_class(global, receiver, &ctx) {
             if seen.insert(class_sym) {
                 class_candidates.push(class_sym);
             }
@@ -4960,8 +6119,53 @@ fn collect_receiver_method_targets(
             &mut targets,
             method_candidate_cache,
         );
+        for implementation in
+            collect_interface_descendants_cached(global, class_sym, &ctx, method_candidate_cache)
+        {
+            collect_method_candidates_for_class_cached(
+                global,
+                implementation,
+                method_name,
+                &ctx,
+                &mut seen,
+                &mut targets,
+                method_candidate_cache,
+            );
+        }
     }
     targets
+}
+
+fn receiver_is_unshadowed_declared_type_object(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    ctx: &ResolveContext<'_>,
+    call_name: &str,
+    receiver: &str,
+    call_span: Span,
+    flow_lookup: &DeclFlowLookup<'_>,
+) -> bool {
+    let Some((owner, _)) = type_qualified_method_tail(call_name) else {
+        return false;
+    };
+    if normalize_receiver_alias_text(owner) != normalize_receiver_alias_text(receiver) {
+        return false;
+    }
+    let receiver_root = bonsai_common::qualified_name_segments(receiver)
+        .first()
+        .copied()
+        .map(normalize_receiver_alias_text)
+        .unwrap_or_default();
+    if receiver_root.is_empty()
+        || caller_decl
+            .params
+            .iter()
+            .any(|param| normalized_receiver_alias_matches(param, &receiver_root))
+        || flow_lookup.value_binding_shadows_callable(&receiver_root, call_span)
+    {
+        return false;
+    }
+    !resolve_declared_receiver_class(global, receiver, ctx).is_empty()
 }
 
 fn collect_super_method_targets(
@@ -5118,7 +6322,11 @@ fn collect_constructor_targets_for_class_call(
     }
     if class_candidates.is_empty() {
         for type_name in receiver_types {
-            for class_sym in resolve_class(global, type_name, &ctx) {
+            // Adapter-emitted receiver types are declaration facts, not
+            // name-search guesses. They may name a type supplied through a
+            // transitive header/interface, so use the ambiguity-safe declared
+            // receiver resolver shared with ordinary typed dispatch.
+            for class_sym in resolve_declared_receiver_class(global, type_name, &ctx) {
                 if seen_classes.insert(class_sym) {
                     class_candidates.push(class_sym);
                 }
@@ -5206,7 +6414,7 @@ fn declared_constructor_targets(
     class_symbols: &[SymbolId],
     constructor_index: Option<&ConstructorIndex>,
 ) -> Vec<FuncId> {
-    if let Some(index) = constructor_index {
+    let mut out = if let Some(index) = constructor_index {
         let mut out = Vec::new();
         for class_symbol in class_symbols {
             if let Some(constructors) = index.get(class_symbol) {
@@ -5215,20 +6423,44 @@ fn declared_constructor_targets(
                 }
             }
         }
-        return out;
-    }
-    let class_symbols: AHashSet<SymbolId> = class_symbols.iter().copied().collect();
-    let mut out = Vec::new();
-    for file in global.all_files() {
-        for decl in global.decls_in(file) {
-            if matches!(decl.kind, DeclKind::Constructor)
-                && decl.parent.is_some_and(|parent| class_symbols.contains(&parent))
-            {
-                push_unique_func(&mut out, FuncId::new(decl.symbol.raw()));
+        out
+    } else {
+        let class_symbols: AHashSet<SymbolId> = class_symbols.iter().copied().collect();
+        let mut out = Vec::new();
+        for file in global.all_files() {
+            for decl in global.decls_in(file) {
+                if matches!(decl.kind, DeclKind::Constructor)
+                    && decl.parent.is_some_and(|parent| class_symbols.contains(&parent))
+                {
+                    push_unique_func(&mut out, FuncId::new(decl.symbol.raw()));
+                }
             }
         }
+        out
+    };
+
+    // A compiler may expose both a bodyless constructor declaration and its
+    // executable definition (for example a header/interface plus an
+    // implementation). The declaration remains valuable when it is the only
+    // available target, but it must not make an otherwise exact call site
+    // ambiguous or replace the body that owns transfer facts.
+    let mut definitions = out
+        .iter()
+        .copied()
+        .filter(|func| {
+            global
+                .decl_of(SymbolId::new(func.raw()))
+                .is_some_and(callable_decl_has_executable_body)
+        })
+        .collect::<Vec<_>>();
+    if !definitions.is_empty() {
+        std::mem::swap(&mut out, &mut definitions);
     }
     out
+}
+
+fn callable_decl_has_executable_body(decl: &Decl) -> bool {
+    decl.body_span.is_some() || !decl.flow_events.is_empty()
 }
 
 fn type_qualified_method_tail(call_name: &str) -> Option<(&str, &str)> {
@@ -5245,7 +6477,7 @@ fn receiver_call_return_type_names(
     global: &GlobalIndex,
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
-    _receiver: &str,
+    flow_lookup: &DeclFlowLookup<'_>,
     call_span: Option<Span>,
     method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<String> {
@@ -5256,10 +6488,8 @@ fn receiver_call_return_type_names(
         return Vec::new();
     };
     let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
-    let mut inner_calls = Vec::new();
-    collect_call_events_strictly_inside(&caller_decl.flow_events, call_span, &mut inner_calls);
-    let mut argument_spans = Vec::new();
-    collect_call_argument_spans_at_site(&caller_decl.flow_events, call_span, &mut argument_spans);
+    let mut inner_calls = flow_lookup.calls_strictly_inside(call_span);
+    let argument_spans = flow_lookup.argument_spans_at_call(call_span);
     inner_calls.retain(|event| {
         let span = event.span();
         !argument_spans
@@ -5326,79 +6556,6 @@ fn receiver_call_return_type_names(
         }
     }
     out
-}
-
-fn collect_call_argument_spans_at_site(events: &[FlowEvent], site: Span, out: &mut Vec<Span>) {
-    for event in events {
-        match event {
-            FlowEvent::Call { span, args, .. } if *span == site => {
-                out.extend(args.iter().map(|arg| arg.span));
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_call_argument_spans_at_site(then_events, site, out);
-                collect_call_argument_spans_at_site(else_events, site, out);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_call_argument_spans_at_site(body, site, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_call_argument_spans_at_site(body, site, out);
-                collect_call_argument_spans_at_site(catch_events, site, out);
-                collect_call_argument_spans_at_site(finally_events, site, out);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn collect_call_events_strictly_inside<'a>(
-    events: &'a [FlowEvent],
-    outer: Span,
-    out: &mut Vec<&'a FlowEvent>,
-) {
-    for event in events {
-        match event {
-            FlowEvent::Call { span, .. }
-                if span.file == outer.file
-                    && outer.start <= span.start
-                    && span.end <= outer.end
-                    && *span != outer =>
-            {
-                out.push(event);
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_call_events_strictly_inside(then_events, outer, out);
-                collect_call_events_strictly_inside(else_events, outer, out);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_call_events_strictly_inside(body, outer, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_call_events_strictly_inside(body, outer, out);
-                collect_call_events_strictly_inside(catch_events, outer, out);
-                collect_call_events_strictly_inside(finally_events, outer, out);
-            }
-            _ => {}
-        }
-    }
 }
 
 fn collect_call_events_within<'a>(events: &'a [FlowEvent], outer: Span, out: &mut Vec<&'a FlowEvent>) {
@@ -5763,6 +6920,7 @@ fn assigned_receiver_type_names(
     global: &GlobalIndex,
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
+    flow_lookup: &DeclFlowLookup<'_>,
     receiver: &str,
     call_span: Option<Span>,
     method_candidate_cache: &mut MethodCandidateCache,
@@ -5770,17 +6928,56 @@ fn assigned_receiver_type_names(
     let receiver = normalize_receiver_alias_text(receiver);
     let mut out = Vec::new();
     let mut best_distance = None;
-    collect_assigned_receiver_type_names(
-        global,
-        caller_decl,
-        alias_targets,
-        &caller_decl.flow_events,
-        &receiver,
-        call_span,
-        method_candidate_cache,
-        &mut out,
-        &mut best_distance,
-    );
+    for event in flow_lookup.assignments_for_receiver(&receiver) {
+        let FlowEvent::Assign {
+            source_call,
+            source_name,
+            source_names,
+            span,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        if call_span.is_some_and(|call_span| span.start > call_span.start) {
+            continue;
+        }
+        let distance = call_span.map(|call_span| call_span.start.saturating_sub(span.start));
+        if let Some(source_call) = source_call {
+            for type_name in receiver_call_return_type_names(
+                global,
+                caller_decl,
+                alias_targets,
+                flow_lookup,
+                Some(*span),
+                method_candidate_cache,
+            ) {
+                push_assigned_receiver_type(&mut out, &mut best_distance, type_name, distance);
+            }
+            // Some adapters encode a direct class construction only on the
+            // assignment (`x = DeclaredType(...)`) without a nested Call
+            // event. Exact class identity proves the assigned result type.
+            for type_name in constructor_type_names_from_call_fact(
+                global,
+                caller_decl,
+                alias_targets,
+                source_call,
+                None,
+                std::iter::empty::<&str>(),
+            ) {
+                push_assigned_receiver_type(&mut out, &mut best_distance, type_name, distance);
+            }
+        }
+        for candidate in source_call
+            .iter()
+            .chain(source_name.iter())
+            .chain(source_names.iter())
+        {
+            for type_name in type_names_for_binding(global, caller_decl, candidate) {
+                push_assigned_receiver_type(&mut out, &mut best_distance, type_name, distance);
+            }
+        }
+    }
     out
 }
 
@@ -5793,6 +6990,7 @@ struct AssignedReceiverNarrowingContext<'a> {
 
 fn retain_assigned_receiver_method_candidates(
     context: &AssignedReceiverNarrowingContext<'_>,
+    flow_lookup: &DeclFlowLookup<'_>,
     receiver: Option<&str>,
     call_span: Span,
     method_candidate_cache: &mut MethodCandidateCache,
@@ -5808,6 +7006,7 @@ fn retain_assigned_receiver_method_candidates(
         context.global,
         context.caller_decl,
         context.alias_targets,
+        flow_lookup,
         receiver,
         Some(call_span),
         method_candidate_cache,
@@ -5848,11 +7047,19 @@ fn retain_semantic_receiver_evidenced_candidates(
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     super_receiver_tokens: &[&str],
     module_path_syntax: bonsai_lang_api::ModulePathSyntax,
+    flow_lookup: &DeclFlowLookup<'_>,
+    class_ancestor_index: &ClassAncestorIndex,
+    timings: Option<&CallgraphResolutionTimings>,
     method_candidate_cache: &mut MethodCandidateCache,
     candidates: &mut Vec<FuncId>,
 ) {
     if candidates.is_empty() || call_kind != CallKind::Method || alias_qualified_call {
         return;
+    }
+    if let Some(timings) = timings {
+        timings
+            .semantic_receiver_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     let Some(receiver) = receiver
         .map(normalize_receiver_alias_text)
@@ -5871,39 +7078,57 @@ fn retain_semantic_receiver_evidenced_candidates(
         .with_alias_map(alias_targets)
         .with_file_path_lookup(path_for_file)
         .with_module_path_syntax(module_path_syntax);
-    let mut receiver_class_symbols = semantic_receiver_class_symbols(
-        global,
-        caller_decl,
-        alias_targets,
-        &ctx,
-        &receiver,
-        receiver_types,
-        call_span,
-        method_candidate_cache,
-    );
+    let mut receiver_class_symbols = {
+        let _timing = DebugTimingGuard::new(timings.map(|timing| &timing.semantic_class_symbols));
+        semantic_receiver_class_symbols(
+            global,
+            caller_decl,
+            alias_targets,
+            &ctx,
+            &receiver,
+            receiver_types,
+            call_span,
+            flow_lookup,
+            method_candidate_cache,
+        )
+    };
     dedup_symbols(&mut receiver_class_symbols);
-    let receiver_parent_symbols: AHashSet<SymbolId> = receiver_class_symbols
-        .iter()
-        .flat_map(|class_sym| receiver_class_ancestors(global, *class_sym))
-        .collect();
-    candidates.retain(|func| {
-        let sym = SymbolId::new(func.raw());
-        let Some(decl) = global.decl_of(sym) else {
-            return false;
-        };
-        let Some(file) = global.declaring_file(sym) else {
-            return false;
-        };
-        if decl.parent.is_some_and(|method_parent| {
-            receiver_parent_symbols.contains(&method_parent)
-                || receiver_parent_symbols.iter().any(|receiver_parent| {
-                    class_symbols_share_semantic_identity(global, *receiver_parent, method_parent)
-                })
-        }) {
-            return true;
+    let receiver_dispatch_symbols = {
+        let _timing = DebugTimingGuard::new(timings.map(|timing| &timing.semantic_dispatch_closure));
+        let mut receiver_dispatch_symbols: AHashSet<SymbolId> = receiver_class_symbols
+            .iter()
+            .flat_map(|class_sym| class_ancestor_index.ancestors(*class_sym).iter().copied())
+            .collect();
+        for receiver_class in &receiver_class_symbols {
+            for implementation in
+                collect_interface_descendants_cached(global, *receiver_class, &ctx, method_candidate_cache)
+            {
+                receiver_dispatch_symbols.extend(class_ancestor_index.ancestors(implementation));
+            }
         }
-        receiver_matches_decl_module(&receiver, decl, file, path_for_file, module_path_syntax)
-    });
+        receiver_dispatch_symbols
+    };
+    {
+        let _timing = DebugTimingGuard::new(timings.map(|timing| &timing.semantic_candidate_retain));
+        candidates.retain(|func| {
+            let sym = SymbolId::new(func.raw());
+            let Some(decl) = global.decl_of(sym) else {
+                return false;
+            };
+            let Some(file) = global.declaring_file(sym) else {
+                return false;
+            };
+            if decl.parent.is_some_and(|method_parent| {
+                receiver_dispatch_symbols.contains(&method_parent)
+                    || receiver_dispatch_symbols.iter().any(|receiver_parent| {
+                        class_symbols_share_semantic_identity(global, *receiver_parent, method_parent)
+                    })
+            }) {
+                return true;
+            }
+            receiver_matches_decl_module(&receiver, decl, file, path_for_file, module_path_syntax)
+        });
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // Semantic narrowing carries caller, alias, type, span, and cache context.
@@ -5915,12 +7140,14 @@ fn semantic_receiver_class_symbols(
     receiver: &str,
     receiver_types: &[String],
     call_span: Span,
+    flow_lookup: &DeclFlowLookup<'_>,
     method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<SymbolId> {
     let mut type_names = assigned_receiver_type_names(
         global,
         caller_decl,
         alias_targets,
+        flow_lookup,
         receiver,
         Some(call_span),
         method_candidate_cache,
@@ -5938,7 +7165,7 @@ fn semantic_receiver_class_symbols(
         global,
         caller_decl,
         alias_targets,
-        receiver,
+        flow_lookup,
         Some(call_span),
         method_candidate_cache,
     ) {
@@ -5968,37 +7195,10 @@ fn receiver_matches_decl_module(
     })
 }
 
-fn receiver_class_ancestors(global: &GlobalIndex, receiver_class: SymbolId) -> AHashSet<SymbolId> {
-    let mut out = AHashSet::new();
-    let mut seen = AHashSet::new();
-    let mut stack = vec![receiver_class];
-    while let Some(class_sym) = stack.pop() {
-        if !seen.insert(class_sym) {
-            continue;
-        }
-        out.insert(class_sym);
-        let Some(class_decl) = global.decl_of(class_sym) else {
-            continue;
-        };
-        let Some(class_file) = global.declaring_file(class_sym) else {
-            continue;
-        };
-        let base_ctx = ResolveContext::new(class_file, &class_decl.module_path);
-        for base in &class_decl.bases {
-            for base_sym in resolve_class(global, base, &base_ctx) {
-                stack.push(base_sym);
-            }
-        }
-    }
-    out
-}
-
 fn retain_assigned_receiver_constructor_candidates(
-    global: &GlobalIndex,
-    caller_decl: &Decl,
-    alias_targets: &AHashMap<String, AliasTarget>,
+    context: &AssignedReceiverNarrowingContext<'_>,
     assign_span: &Span,
-    universal_type_names: &[&str],
+    flow_lookup: &DeclFlowLookup<'_>,
     method_candidate_cache: &mut MethodCandidateCache,
     candidates: &mut Vec<FuncId>,
 ) {
@@ -6006,9 +7206,10 @@ fn retain_assigned_receiver_constructor_candidates(
         return;
     }
     let assigned = assigned_receiver_type_names(
-        global,
-        caller_decl,
-        alias_targets,
+        context.global,
+        context.caller_decl,
+        context.alias_targets,
+        flow_lookup,
         "",
         Some(*assign_span),
         method_candidate_cache,
@@ -6018,176 +7219,24 @@ fn retain_assigned_receiver_constructor_candidates(
     }
     let mut narrowed = Vec::new();
     for func in candidates.iter().copied() {
-        let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+        let Some(decl) = context.global.decl_of(SymbolId::new(func.raw())) else {
             continue;
         };
         if !matches!(decl.kind, DeclKind::Constructor) {
             continue;
         }
-        let Some(class_decl) = enclosing_class_for_decl(global, decl) else {
+        let Some(class_decl) = enclosing_class_for_decl(context.global, decl) else {
             continue;
         };
         if assigned
             .iter()
-            .any(|type_name| type_name_matches(type_name, &class_decl.name, universal_type_names))
+            .any(|type_name| type_name_matches(type_name, &class_decl.name, context.universal_type_names))
         {
             narrowed.push(func);
         }
     }
     if !narrowed.is_empty() {
         *candidates = narrowed;
-    }
-}
-
-#[allow(clippy::too_many_arguments)] // Recursive flow-event walk carries shared receiver-search state.
-fn collect_assigned_receiver_type_names(
-    global: &GlobalIndex,
-    caller_decl: &Decl,
-    alias_targets: &AHashMap<String, AliasTarget>,
-    events: &[FlowEvent],
-    receiver: &str,
-    call_span: Option<Span>,
-    method_candidate_cache: &mut MethodCandidateCache,
-    out: &mut Vec<String>,
-    best_distance: &mut Option<u64>,
-) {
-    for event in events {
-        match event {
-            FlowEvent::Assign {
-                target,
-                source_call,
-                source_name,
-                source_names,
-                span,
-                ..
-            } => {
-                if call_span.is_some_and(|call_span| span.start > call_span.start) {
-                    continue;
-                }
-                if !receiver.is_empty() && !normalized_receiver_alias_matches(target, receiver) {
-                    continue;
-                }
-                let distance = call_span.map(|call_span| call_span.start.saturating_sub(span.start));
-                if let Some(source_call) = source_call {
-                    for type_name in receiver_call_return_type_names(
-                        global,
-                        caller_decl,
-                        alias_targets,
-                        &format!("{source_call}()"),
-                        Some(*span),
-                        method_candidate_cache,
-                    ) {
-                        push_assigned_receiver_type(out, best_distance, type_name, distance);
-                    }
-                    // Some adapters encode a direct class construction only
-                    // on the assignment (`x = DeclaredType(...)`) without a
-                    // nested Call event. Resolve the source call against the
-                    // global class index; exact declaration identity, not
-                    // spelling or casing, proves the result type.
-                    for type_name in constructor_type_names_from_call_fact(
-                        global,
-                        caller_decl,
-                        alias_targets,
-                        source_call,
-                        None,
-                        std::iter::empty::<&str>(),
-                    ) {
-                        push_assigned_receiver_type(out, best_distance, type_name, distance);
-                    }
-                }
-                for candidate in source_call
-                    .iter()
-                    .chain(source_name.iter())
-                    .chain(source_names.iter())
-                {
-                    for type_name in type_names_for_binding(global, caller_decl, candidate) {
-                        push_assigned_receiver_type(out, best_distance, type_name, distance);
-                    }
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_assigned_receiver_type_names(
-                    global,
-                    caller_decl,
-                    alias_targets,
-                    then_events,
-                    receiver,
-                    call_span,
-                    method_candidate_cache,
-                    out,
-                    best_distance,
-                );
-                collect_assigned_receiver_type_names(
-                    global,
-                    caller_decl,
-                    alias_targets,
-                    else_events,
-                    receiver,
-                    call_span,
-                    method_candidate_cache,
-                    out,
-                    best_distance,
-                );
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_assigned_receiver_type_names(
-                    global,
-                    caller_decl,
-                    alias_targets,
-                    body,
-                    receiver,
-                    call_span,
-                    method_candidate_cache,
-                    out,
-                    best_distance,
-                );
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_assigned_receiver_type_names(
-                    global,
-                    caller_decl,
-                    alias_targets,
-                    body,
-                    receiver,
-                    call_span,
-                    method_candidate_cache,
-                    out,
-                    best_distance,
-                );
-                collect_assigned_receiver_type_names(
-                    global,
-                    caller_decl,
-                    alias_targets,
-                    catch_events,
-                    receiver,
-                    call_span,
-                    method_candidate_cache,
-                    out,
-                    best_distance,
-                );
-                collect_assigned_receiver_type_names(
-                    global,
-                    caller_decl,
-                    alias_targets,
-                    finally_events,
-                    receiver,
-                    call_span,
-                    method_candidate_cache,
-                    out,
-                    best_distance,
-                );
-            }
-            _ => {}
-        }
     }
 }
 
@@ -6214,11 +7263,24 @@ fn push_assigned_receiver_type(
 }
 
 fn alias_targets_for_decl(
+    global: &GlobalIndex,
     file_alias_targets: &AHashMap<String, AliasTarget>,
     decl: &Decl,
 ) -> AHashMap<String, AliasTarget> {
     let mut map = file_alias_targets.clone();
-    extend_alias_targets_with_declared_types(&mut map, &decl.type_aliases);
+    let mut scope = Some(decl);
+    let mut seen = AHashSet::new();
+    while let Some(current) = scope {
+        if !seen.insert(current.symbol) {
+            break;
+        }
+        // `extend_alias_targets_with_declared_types` is first-wins. Walking
+        // inner-to-outer therefore implements ordinary lexical shadowing
+        // while making captured, adapter-proven parent types available to a
+        // nested callable without copying them into its compiler object.
+        extend_alias_targets_with_declared_types(&mut map, &current.type_aliases);
+        scope = current.parent.and_then(|parent| global.decl_of(parent));
+    }
     bonsai_lang_api::extend_alias_map_with_flow_events(&mut map, &decl.flow_events);
     map
 }
@@ -6857,11 +7919,18 @@ fn collect_dynamic_param_receiver_method_target(
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
         return Vec::new();
     };
-    let method_name = short_callee(name);
+    let method_name = receiver_member_callee(name, &receiver);
     let mut candidates = global
         .decls_in(caller_file)
         .iter()
-        .filter(|decl| decl.name == method_name && matches!(decl.kind, DeclKind::Method))
+        .filter(|decl| {
+            matches!(decl.kind, DeclKind::Method)
+                && (decl.name == method_name
+                    || decl.qualified_name.as_deref().is_some_and(|qualified| {
+                        bonsai_common::declaration_qualified_suffix(&decl.name, qualified)
+                            == Some(method_name)
+                    }))
+        })
         .map(|decl| FuncId::new(decl.symbol.raw()))
         .collect::<Vec<_>>();
     dedup_func_ids(&mut candidates);
@@ -6971,12 +8040,13 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
         folded_call_name_receiver_is_instance(candidate, caller_decl, caller_super_receiver_tokens)
     });
     let semantic_receiver = receiver.or(folded_receiver);
+    let flow_lookup = DeclFlowLookup::build(&caller_decl.flow_events);
     let explicit_ancestor_constructor = call_kind == CallKind::Constructor
         && semantic_receiver
             .is_some_and(|receiver| is_super_receiver_with_tokens(receiver, caller_super_receiver_tokens));
     let lexical_value_shadow = semantic_receiver.is_none()
         && (call_invokes_parameter(&caller_decl.params, name, None)
-            || local_value_binding_shadows_callable(&caller_decl.flow_events, name, call_span));
+            || flow_lookup.value_binding_shadows_callable(name, call_span));
     let mut targets = if semantic_receiver.is_none() && !lexical_value_shadow {
         collect_nested_local_callable_targets(global, caller_decl, name, call_span)
     } else {
@@ -7026,6 +8096,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             call_span,
             caller_super_receiver_tokens,
             caller_capabilities.module_path_syntax,
+            &flow_lookup,
             &mut method_candidate_cache,
         );
     }
@@ -7137,6 +8208,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
         };
         retain_assigned_receiver_method_candidates(
             &assigned_receiver_context,
+            &flow_lookup,
             semantic_receiver,
             call_span,
             &mut method_candidate_cache,
@@ -7187,6 +8259,27 @@ fn collect_callable_targets_exact(global: &GlobalIndex, name: &str) -> Vec<FuncI
 #[must_use]
 pub fn short_callee(name: &str) -> &str {
     short_qualified_tail(name)
+}
+
+/// Recover the complete member identity from an adapter-lowered receiver and
+/// call name. The receiver is an exact compiler fact, so removing that prefix
+/// preserves any remaining grammar syntax without teaching shared callgraph
+/// code what that syntax means. Ordinary qualified calls retain the canonical
+/// short-name fallback.
+fn receiver_member_callee<'a>(call_name: &'a str, receiver: &str) -> &'a str {
+    let call_name = call_name.trim();
+    let receiver = receiver.trim();
+    if !receiver.is_empty() {
+        if let Some(suffix) = call_name.strip_prefix(receiver) {
+            if bonsai_common::starts_at_qualified_name_boundary(suffix) {
+                let member = suffix.trim_start_matches(bonsai_common::is_name_punctuation);
+                if !member.is_empty() {
+                    return member;
+                }
+            }
+        }
+    }
+    short_callee(call_name)
 }
 
 /// Return whether an adapter-lowered call is dispatched through one of the

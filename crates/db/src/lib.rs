@@ -9,7 +9,7 @@
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_abstract_interp::{run_entry, RawTrace, TraceLimits};
-use bonsai_cfg::{build_cfg_from_flow, Cfg};
+use bonsai_cfg::{build_cfg_from_flow_in_span, Cfg};
 use bonsai_common::{FileId, FuncId, SymbolId};
 use bonsai_diagnostics::{Diagnostic, DiagnosticSink};
 use bonsai_idg::IdgQueryService;
@@ -89,6 +89,9 @@ struct DbInner {
     /// before use; a changed file simply falls through to exact Tree-sitter
     /// lowering while unchanged objects remain reusable.
     compiler_object_store: RwLock<Option<Arc<compiler_object::CompilerObjectStore>>>,
+    /// Whether this database may attach a persisted compiler-object
+    /// generation. Exact Tree-sitter lowering remains available when false.
+    load_compiler_object_sidecar: bool,
     /// Set when an object in an otherwise current generation fails payload
     /// validation. The active compiler falls back to exact Tree-sitter
     /// lowering; complete workspace orchestration then republishes the
@@ -148,12 +151,23 @@ struct Caches {
     global_index: Option<Arc<GlobalIndex>>,
 }
 
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct AnalyzerDbOptions {
     /// Optional per-file tree-sitter parse timeout in milliseconds.
     /// `None` uses `BONSAI_PARSE_TIMEOUT_MS`, then the uncapped default;
     /// `Some(0)` explicitly selects uncapped parsing.
     pub parse_timeout_ms: Option<u64>,
+    /// Attach compatible persisted compiler objects on workspace open.
+    pub load_compiler_object_sidecar: bool,
+}
+
+impl Default for AnalyzerDbOptions {
+    fn default() -> Self {
+        Self {
+            parse_timeout_ms: None,
+            load_compiler_object_sidecar: true,
+        }
+    }
 }
 
 impl AnalyzerDb {
@@ -166,7 +180,12 @@ impl AnalyzerDb {
     /// Build a database with explicit options (parse timeout, etc).
     #[must_use]
     pub fn with_options(vfs: Arc<Vfs>, registry: Arc<LanguageRegistry>, options: AnalyzerDbOptions) -> Self {
-        Self::with_parser_options(vfs, registry, parser_options_from_db_options(options))
+        Self::with_parser_options(
+            vfs,
+            registry,
+            parser_options_from_db_options(options),
+            options.load_compiler_object_sidecar,
+        )
     }
 
     #[must_use]
@@ -174,6 +193,7 @@ impl AnalyzerDb {
         vfs: Arc<Vfs>,
         registry: Arc<LanguageRegistry>,
         parser_options: ParserOptions,
+        load_compiler_object_sidecar: bool,
     ) -> Self {
         Self {
             inner: Arc::new(DbInner {
@@ -185,6 +205,7 @@ impl AnalyzerDb {
                 global_index_build: Mutex::new(()),
                 workspace_root: RwLock::new(None),
                 compiler_object_store: RwLock::new(None),
+                load_compiler_object_sidecar,
                 compiler_object_store_requires_repair: AtomicBool::new(false),
                 compiler_object_generation_build: Mutex::new(()),
                 parser_diagnostics: RwLock::new(AHashMap::new()),
@@ -200,16 +221,20 @@ impl AnalyzerDb {
     /// workspace-relative module paths. Called by `Workspace` at
     /// open/index time. No-op when called twice with the same value.
     pub fn set_workspace_root(&self, root: std::path::PathBuf) {
-        let store = match compiler_object::CompilerObjectStore::open_reusable(&root) {
-            Ok(store) => Some(Arc::new(store)),
-            Err(error) => {
-                bonsai_diagnostics::debug_log!(
-                    "compiler-object",
-                    "compiler object generation unavailable at {}: {}",
-                    root.display(),
-                    error
-                );
-                None
+        let store = if !self.inner.load_compiler_object_sidecar {
+            None
+        } else {
+            match compiler_object::CompilerObjectStore::open_reusable(&root) {
+                Ok(store) => Some(Arc::new(store)),
+                Err(error) => {
+                    bonsai_diagnostics::debug_log!(
+                        "compiler-object",
+                        "compiler object generation unavailable at {}: {}",
+                        root.display(),
+                        error
+                    );
+                    None
+                }
             }
         };
         *self.inner.workspace_root.write() = Some(root);
@@ -582,6 +607,7 @@ impl AnalyzerDb {
             bonsai_lang_api::apply_constructor_result_type_aliases(&mut index);
             bonsai_lang_api::apply_expression_value_kinds(&mut index);
             bonsai_lang_api::apply_assign_call_result_types(&mut index);
+            bonsai_lang_api::apply_assignment_type_aliases(&mut index);
             bonsai_lang_api::apply_call_receiver_types_with_language_syntax(
                 &mut index,
                 capabilities.effective_super_receiver_tokens(),
@@ -589,6 +615,7 @@ impl AnalyzerDb {
                 capabilities.effective_constructor_method_names(),
                 capabilities.receiver_type_syntax,
             );
+            bonsai_lang_api::normalize_decl_event_evaluation_order(&mut index);
             index.compact_storage();
             index
         }))
@@ -784,7 +811,7 @@ impl AnalyzerDb {
 
     /// Build the complete linkage table while reporting each compiler file
     /// after its exact adapter-lowered header is ready. The callback is
-    /// observational and does not affect batching, ordering, or admitted
+    /// observational and does not affect scheduling, ordering, or admitted
     /// syntax facts.
     #[must_use]
     pub fn build_global_linkage_index_with_progress<F>(&self, on_file: F) -> Arc<GlobalIndex>
@@ -815,49 +842,18 @@ impl AnalyzerDb {
                     .unwrap_or(0)
             })
             .collect::<Vec<_>>();
-        let batches = bonsai_common::compiler_weighted_batches(&source_bytes, global_index_cpu_workers());
-        let parallel_width = batches.iter().map(std::ops::Range::len).max().unwrap_or(1);
-        if parallel_width <= 1 || files.len() <= 1 {
-            for file in files {
-                if let Some(index) = self.decl_index_uncached(file) {
+        stream_decl_indexes_in_order(
+            &files,
+            &source_bytes,
+            global_index_worker_count(),
+            |file| self.decl_index_uncached(file),
+            |index| {
+                if let Some(index) = index {
                     insert(&mut global, index);
                 }
                 on_file();
-            }
-        } else {
-            match rayon::ThreadPoolBuilder::new()
-                .num_threads(parallel_width)
-                .stack_size(global_index_worker_stack_bytes())
-                .build()
-            {
-                Ok(pool) => {
-                    for range in batches {
-                        let indexes = pool.install(|| {
-                            use rayon::prelude::*;
-                            files[range]
-                                .par_iter()
-                                .map(|&file| {
-                                    let index = self.decl_index_uncached(file);
-                                    on_file();
-                                    index
-                                })
-                                .collect::<Vec<_>>()
-                        });
-                        for index in indexes.into_iter().flatten() {
-                            insert(&mut global, index);
-                        }
-                    }
-                }
-                Err(_) => {
-                    for file in files {
-                        if let Some(index) = self.decl_index_uncached(file) {
-                            insert(&mut global, index);
-                        }
-                        on_file();
-                    }
-                }
-            }
-        }
+            },
+        );
         global.finalize_semantic_facts();
         Arc::new(global)
     }
@@ -912,42 +908,28 @@ impl AnalyzerDb {
         files: &[FileId],
         workers: usize,
     ) {
-        if workers <= 1 || files.len() <= 1 {
-            for &file in files {
-                if let Some(idx) = self.take_decl_index_for_global(file) {
-                    gi.insert_preprocessed(idx);
+        let source_bytes = files
+            .iter()
+            .map(|file| {
+                self.inner
+                    .vfs
+                    .snapshot(*file)
+                    .ok()
+                    .and_then(|snapshot| u64::try_from(snapshot.text.len()).ok())
+                    .unwrap_or(0)
+            })
+            .collect::<Vec<_>>();
+        stream_decl_indexes_in_order(
+            files,
+            &source_bytes,
+            workers,
+            |file| self.take_decl_index_for_global(file),
+            |index| {
+                if let Some(index) = index {
+                    gi.insert_preprocessed(index);
                 }
-            }
-            return;
-        }
-        let chunk_size = (workers * 8).max(16);
-        match rayon::ThreadPoolBuilder::new()
-            .num_threads(workers)
-            .stack_size(global_index_worker_stack_bytes())
-            .build()
-        {
-            Ok(pool) => {
-                for chunk in files.chunks(chunk_size) {
-                    let indexes = pool.install(|| {
-                        use rayon::prelude::*;
-                        chunk
-                            .par_iter()
-                            .map(|&file| self.take_decl_index_for_global(file))
-                            .collect::<Vec<_>>()
-                    });
-                    for idx in indexes.into_iter().flatten() {
-                        gi.insert_preprocessed(idx);
-                    }
-                }
-            }
-            Err(_) => {
-                for &file in files {
-                    if let Some(idx) = self.take_decl_index_for_global(file) {
-                        gi.insert_preprocessed(idx);
-                    }
-                }
-            }
-        }
+            },
+        );
     }
 
     fn take_decl_index_for_global(&self, file: FileId) -> Option<DeclIndex> {
@@ -988,7 +970,7 @@ impl AnalyzerDb {
             return v;
         }
         let cfg = decl
-            .map(|d| build_cfg_from_flow(&d.name, &d.flow_events))
+            .map(|d| build_cfg_from_flow_in_span(&d.name, Some(d.span), &d.flow_events))
             .unwrap_or_default();
         let arc = Arc::new(cfg);
         let mut cache = self.inner.cache.write();
@@ -1154,6 +1136,167 @@ fn should_consume_decl_index_cache_for_global() -> bool {
         return !keep_cache;
     }
     true
+}
+
+/// Lower exact per-file declaration/linkage objects as one bounded continuous
+/// work stream while publishing them in canonical file order.
+///
+/// Stable symbol allocation requires ordered publication, but it does not
+/// require phase barriers. A fixed look-ahead window lets workers continue
+/// past a temporarily slow file; the reorder map can never exceed that
+/// window. Source-weighted permits are acquired in input order and remain
+/// attached to completed objects until publication, so scheduling changes
+/// memory residency only and can neither skip nor cap compiler facts.
+fn stream_decl_indexes_in_order<F, V>(
+    files: &[FileId],
+    source_bytes: &[u64],
+    requested_workers: usize,
+    lower: F,
+    mut visit: V,
+) where
+    F: Fn(FileId) -> Option<DeclIndex> + Sync,
+    V: FnMut(Option<DeclIndex>),
+{
+    assert_eq!(files.len(), source_bytes.len());
+    if files.is_empty() {
+        return;
+    }
+    let worker_count = requested_workers.max(1).min(files.len());
+    if worker_count == 1 {
+        for &file in files {
+            visit(lower(file));
+        }
+        return;
+    }
+
+    // The window bounds queued, executing, and completed-but-unpublished
+    // units together. It is deliberately larger than the worker count so a
+    // single large head does not turn continuous lowering back into a batch
+    // barrier.
+    let window = worker_count.saturating_mul(4).max(worker_count).min(files.len());
+    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
+    let next_admission = std::sync::Mutex::new(0usize);
+    let admission_ready = std::sync::Condvar::new();
+    let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<usize>(window);
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(worker_count);
+    let work_rx = std::sync::Mutex::new(work_rx);
+
+    std::thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(worker_count);
+        for worker in 0..worker_count {
+            let worker_result_tx = result_tx.clone();
+            let work_rx = &work_rx;
+            let next_admission = &next_admission;
+            let admission_ready = &admission_ready;
+            let memory_permits = &memory_permits;
+            let lower = &lower;
+            let handle = std::thread::Builder::new()
+                .name(format!("bonsai-header-{worker}"))
+                .stack_size(global_index_worker_stack_bytes())
+                .spawn_scoped(scope, move || loop {
+                    let index = {
+                        let receiver = work_rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        match receiver.recv() {
+                            Ok(index) => index,
+                            Err(_) => break,
+                        }
+                    };
+
+                    // Canonical admission prevents a later completed object
+                    // from consuming the entire memory budget while an
+                    // earlier unit is still waiting to start.
+                    let mut admitted = next_admission
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    while *admitted != index {
+                        admitted = admission_ready
+                            .wait(admitted)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    }
+                    let permit = memory_permits.acquire(source_bytes[index]);
+                    *admitted += 1;
+                    admission_ready.notify_all();
+                    drop(admitted);
+
+                    let result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lower(files[index])));
+                    if worker_result_tx.send((index, result, permit)).is_err() {
+                        break;
+                    }
+                });
+            match handle {
+                Ok(handle) => workers.push(handle),
+                Err(error) if workers.is_empty() => {
+                    // A host unable to create even one dedicated compiler
+                    // worker still performs every unit exactly, serially.
+                    bonsai_diagnostics::debug_log!(
+                        "compiler-headers",
+                        "worker creation failed; using exact serial fallback: {error}"
+                    );
+                    drop(work_tx);
+                    for &file in files {
+                        visit(lower(file));
+                    }
+                    return;
+                }
+                Err(error) => {
+                    bonsai_diagnostics::debug_log!(
+                        "compiler-headers",
+                        "worker creation reduced concurrency: {error}"
+                    );
+                    break;
+                }
+            }
+        }
+        drop(result_tx);
+
+        let active_workers = workers.len();
+        let window = window.max(active_workers).min(files.len());
+        let mut next_to_schedule = 0usize;
+        while next_to_schedule < window {
+            work_tx
+                .send(next_to_schedule)
+                .expect("compiler header workers must receive initial work");
+            next_to_schedule += 1;
+        }
+
+        let mut next_to_publish = 0usize;
+        let mut reorder = std::collections::BTreeMap::new();
+        while next_to_publish < files.len() {
+            let (index, result, permit) = result_rx
+                .recv()
+                .expect("compiler header worker exited without reporting its unit");
+            let index = match result {
+                Ok(value) => {
+                    reorder.insert(index, (value, permit));
+                    index
+                }
+                Err(payload) => {
+                    drop(permit);
+                    drop(work_tx);
+                    std::panic::resume_unwind(payload);
+                }
+            };
+            debug_assert!(index >= next_to_publish);
+
+            while let Some((value, _permit)) = reorder.remove(&next_to_publish) {
+                visit(value);
+                next_to_publish += 1;
+                if next_to_schedule < files.len() {
+                    work_tx
+                        .send(next_to_schedule)
+                        .expect("compiler header workers must receive continuous work");
+                    next_to_schedule += 1;
+                }
+            }
+        }
+        drop(work_tx);
+        for worker in workers {
+            if let Err(payload) = worker.join() {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    });
 }
 
 fn global_index_worker_count() -> usize {

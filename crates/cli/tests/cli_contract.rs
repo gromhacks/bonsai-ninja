@@ -20,7 +20,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn workspace() -> PathBuf {
-    repo_root().join("examples/python/micro")
+    repo_root().join("test-fixtures/languages/python/micro")
 }
 
 fn run(args: &[&str]) -> Output {
@@ -52,6 +52,69 @@ fn temp_path(label: &str) -> PathBuf {
         "bonsai-cli-contract-{label}-{}-{nanos}.json",
         std::process::id()
     ))
+}
+
+#[test]
+fn no_cache_taint_analysis_computes_exact_flow_without_persistent_artifacts() {
+    let workspace = temp_path("no-cache-workspace");
+    let cache = temp_path("no-cache-sidecars");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    std::fs::write(
+        workspace.join("app.py"),
+        concat!(
+            "import os\n",
+            "from flask import request\n\n",
+            "def execute(value):\n",
+            "    return os.system(value)\n\n",
+            "def endpoint():\n",
+            "    command = request.args.get('command', '')\n",
+            "    return execute(command)\n",
+        ),
+    )
+    .expect("write taint fixture");
+
+    let output = Command::new(binary())
+        .args([
+            "security",
+            workspace.to_str().expect("UTF-8 workspace"),
+            "taint-analysis",
+            "--profile",
+            "all",
+            "--no-cache",
+            "--format",
+            "json",
+            "--all",
+            "--no-color",
+            "--no-progress",
+        ])
+        .env("BONSAI_WORKSPACE_DIR", &cache)
+        .output()
+        .expect("run uncached taint analysis");
+    assert!(
+        output.status.success(),
+        "uncached taint analysis failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON taint report");
+    assert_eq!(report["analysis_complete"], true);
+    assert!(
+        report["rows"]
+            .as_array()
+            .is_some_and(|findings| !findings.is_empty()),
+        "requested source-to-sink analysis must still be exact: {report:#}"
+    );
+    assert!(
+        !cache.exists()
+            || std::fs::read_dir(&cache)
+                .expect("read cache directory")
+                .next()
+                .is_none(),
+        "--no-cache must not publish reusable sidecars under {}",
+        cache.display()
+    );
+
+    let _ = std::fs::remove_dir_all(&cache);
+    let _ = std::fs::remove_dir_all(&workspace);
 }
 
 #[test]

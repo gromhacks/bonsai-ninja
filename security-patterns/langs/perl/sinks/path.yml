@@ -1,8 +1,6 @@
 # Perl path-traversal sinks. Tainted filename = traversal to ../ or /etc/passwd.
 - id: perl.path.open_read
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: perl
   tag: path-traversal
   severity: high
@@ -11,7 +9,52 @@
     kind: call
     callee:
       name: open
-  description: "Disabled - bare `name: open` is FP-prone; no canonical exists. Without a mode-string constraint we cannot distinguish path (`<path`) from cmdi (`|cmd`) or other open() shapes. Re-enable when adapter supports mode-string argument inspection. perl.path.file_slurp_read covers the safer File::Slurp call shape."
+  constraints:
+  - arg_equals:
+      index: 1
+      value: "'<'"
+  - arg_tainted:
+      index: 2
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {name: abs_path}
+      base_canonicalizer: {name: abs_path}
+      path_constructor: {regex: "^(?:File::Spec->)?catfile$"}
+      containment_check: {name: index}
+      containment_check_candidate_arg_index: 0
+      containment_check_base_arg_index: 1
+      accepted_containment_results:
+      - {kind: boolean, value: false}
+      static_base_factories:
+      - {name: abs_path}
+      sink_path_arg_index: 2
+      path_constructor_base_arg_index: 0
+      boundary_places: []
+      accepted_boundary_values:
+      - {kind: string, value: "/"}
+  match_examples:
+  - name: three argument lexical filehandle read
+    code: |
+      sub read_file {
+        my ($path) = @_;
+        open(my $fh, '<', $path);
+      }
+    expect_match_text: [open]
+  - name: command pipe open is not a path read
+    code: |
+      sub run_command {
+        my ($command) = @_;
+        open(my $fh, '|-', $command);
+      }
+    expect_no_match: true
+  - name: literal input path is not tainted
+    code: |
+      sub read_config {
+        open(my $fh, '<', 'config/app.ini');
+      }
+    expect_no_match: true
+  description: "Perl three-argument open(handle, '<', tainted_path) reads an attacker-selected file. Exact parsed mode and argument positions exclude pipe opens and output modes."
 
 - id: perl.path.unlink
   enabled: true
@@ -162,8 +205,6 @@
   description: "File::Path::make_path - tainted path lets attacker create directories outside the intended root (prep step for write-what-where)."
 
 - id: perl.path.file_copy
-  aliases:
-  - perl.upload_file_copy_to_client_filename
   enabled: true
   language: perl
   tag: path-traversal
@@ -192,10 +233,8 @@
         copy("tmp/input.txt", "tmp/output.txt")
       }
     expect_no_match: true
-  description: "File::Copy::copy - tainted source/dest path reads or overwrites arbitrary files. Also covers merged aliases: perl.upload_file_copy_to_client_filename."
+  description: "File::Copy::copy - tainted source/dest path reads or overwrites arbitrary files. Upload provenance requires a separate boundary proof."
 - id: perl.path.file_copy_dest
-  aliases:
-  - perl.upload_file_copy_to_client_filename_dest
   enabled: true
   language: perl
   tag: path-traversal
@@ -385,28 +424,6 @@
       }
     expect_no_match: true
   description: "Archive::Zip member->extractToFileNamed(tainted dest) - destination derived from archive entry name is Zip Slip."
-- id: perl.path.archive_zip_extract_member
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: perl
-  tag: zip-slip
-  severity: high
-  packages: ["Archive::Zip"]
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      name: extractMember
-  match_examples:
-  - name: perl.path.archive_zip_extract_member example
-    code: |
-      use Archive::Zip;
-      sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        extractMember($input)
-      }
-  description: "Disabled - extractMember(member [, dest]) is only a Zip Slip sink when dest/member state is archive-entry-derived; use extractToFileNamed(dest) until state tracking exists."
 - id: perl.path.archive_extract_extract
   enabled: true
   language: perl

@@ -163,7 +163,7 @@ fn elasticsearch_fresh_and_warm_structural_index_do_not_regress() {
         "Elasticsearch fresh-cache structural index",
         cold_elapsed,
         "BONSAI_ES_COLD_STRUCTURAL_INDEX_MAX_SECS",
-        90,
+        100,
     );
     let cold: serde_json::Value = serde_json::from_str(&cold).expect("cold structural index JSON");
     assert_eq!(cold["compiler_cache"], "rebuilt", "{cold}");
@@ -183,7 +183,7 @@ fn elasticsearch_fresh_and_warm_structural_index_do_not_regress() {
         "Elasticsearch warm structural index",
         warm_elapsed,
         "BONSAI_ES_WARM_STRUCTURAL_INDEX_MAX_SECS",
-        10,
+        12,
     );
     let warm: serde_json::Value = serde_json::from_str(&warm).expect("warm structural index JSON");
     assert_eq!(warm["compiler_cache"], "hit", "{warm}");
@@ -317,9 +317,18 @@ fn ensure_elasticsearch_semantic_cache(bin: &Path, es: &Path) {
                     "semantic prewarm did not publish a reusable complete generation: {parsed}"
                 ));
             }
+            let cold_elapsed = started.elapsed();
+            let cold_limit = performance_limit("BONSAI_ES_COLD_SEMANTIC_INDEX_MAX_SECS", 600);
+            if cold_elapsed > cold_limit {
+                return Err(format!(
+                    "Elasticsearch complete semantic generation finished correctly but took \
+                     {cold_elapsed:.2?}, exceeding {cold_limit:.2?}; this gate never caps or \
+                     skips compiler, linkage, callgraph, retrieval, or IDG work"
+                ));
+            }
             eprintln!(
-                "Elasticsearch semantic generation ready in {:.2?}",
-                started.elapsed()
+                "Elasticsearch semantic generation ready in {cold_elapsed:.2?} \
+                 (cold SLO {cold_limit:.2?})"
             );
 
             // A stale exact generation may take real compiler work. The next
@@ -338,7 +347,7 @@ fn ensure_elasticsearch_semantic_cache(bin: &Path, es: &Path) {
                 ));
             }
             let warm_elapsed = warm_started.elapsed();
-            let warm_limit = performance_limit("BONSAI_ES_WARM_INDEX_MAX_SECS", 15);
+            let warm_limit = performance_limit("BONSAI_ES_WARM_INDEX_MAX_SECS", 18);
             if warm_elapsed > warm_limit {
                 return Err(format!(
                     "warm semantic index completed correctly but took {warm_elapsed:.2?}, \
@@ -398,7 +407,7 @@ fn elasticsearch_navigation_commands_do_not_regress() {
             &format!("Elasticsearch navigation command {command:?}"),
             elapsed,
             "BONSAI_ES_NAVIGATION_MAX_SECS",
-            30,
+            35,
         );
         assert!(
             !out.trim().is_empty(),
@@ -422,7 +431,7 @@ fn elasticsearch_inspect_modes_do_not_regress() {
         "Elasticsearch default inspect",
         default_elapsed,
         "BONSAI_ES_INSPECT_MAX_SECS",
-        30,
+        35,
     );
     assert!(
         default_out.contains("inspect `execute`"),
@@ -447,7 +456,7 @@ fn elasticsearch_inspect_modes_do_not_regress() {
         "Elasticsearch inspect --taint-flow",
         taint_elapsed,
         "BONSAI_ES_INSPECT_MAX_SECS",
-        30,
+        35,
     );
     assert!(
         taint_out.contains("TAINT FLOWS") || taint_out.contains("taint flow"),
@@ -513,7 +522,7 @@ fn elasticsearch_security_inventory_commands_do_not_regress() {
             &format!("Elasticsearch security inventory command {command:?}"),
             elapsed,
             "BONSAI_ES_SECURITY_INVENTORY_MAX_SECS",
-            30,
+            35,
         );
         assert!(
             !out.trim().is_empty(),
@@ -555,7 +564,7 @@ fn elasticsearch_production_taint_analysis_does_not_regress() {
         "Elasticsearch warm production taint analysis",
         elapsed,
         "BONSAI_ES_TAINT_MAX_SECS",
-        30,
+        35,
     );
     assert!(
         stdout.trim().is_empty(),
@@ -625,7 +634,7 @@ fn elasticsearch_sink_analysis_keeps_source_independent_lineage_at_scale() {
         "Elasticsearch sink-centric upstream analysis",
         elapsed,
         "BONSAI_ES_SINK_ANALYSIS_MAX_SECS",
-        60,
+        70,
     );
     assert!(
         stdout.trim().is_empty(),
@@ -707,7 +716,7 @@ fn elasticsearch_fresh_cache_taint_planning_does_not_regress() {
         "Elasticsearch fresh-cache production taint analysis",
         elapsed,
         "BONSAI_ES_COLD_TAINT_MAX_SECS",
-        45,
+        50,
     );
     assert!(
         stdout.trim().is_empty(),

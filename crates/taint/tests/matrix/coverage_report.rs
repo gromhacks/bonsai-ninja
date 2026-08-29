@@ -70,7 +70,8 @@ fn render() -> String {
     out.push_str("  them gate taint analysis.\n\n");
     out.push_str("If a cell here passes but a sister-doc cell shows `Partial` /\n");
     out.push_str("`-`, the user-facing contract is still one level of accuracy:\n");
-    out.push_str("only exact/narrowed semantic evidence is reported. Lower-quality\n");
+    out.push_str("only compiler-proven evidence is reported. The `exact` and `narrowed`\n");
+    out.push_str("labels record proof provenance; they are not analysis modes. Guessed\n");
     out.push_str("over-approximate or unknown facts remain diagnostic-only.\n\n");
 
     out.push_str("## Legend\n\n");

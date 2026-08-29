@@ -1,9 +1,40 @@
 use super::*;
-use bonsai_lang_api::{AdapterContext, DeclIndex, ImportIndex, LanguageAdapter, LanguageCapabilities};
+
+#[test]
+fn recovery_order_prioritizes_fewer_failed_grammar_productions() {
+    assert!(recovery_ordering_key((31_310, 1_301)) < recovery_ordering_key((29_009, 2_007)));
+    assert!(recovery_ordering_key((20, 3)) < recovery_ordering_key((40, 3)));
+}
+use bonsai_lang_api::{
+    AdapterContext, DeclIndex, GrammarHandler, ImportIndex, LanguageAdapter, LanguageCapabilities,
+    EMPTY_HANDLER,
+};
 
 struct TestPythonAdapter;
 
 struct TestCAdapter;
+
+struct TestTypeScriptAdapter;
+
+const TEST_C_HANDLER: GrammarHandler = GrammarHandler {
+    parameter_container_kinds: &["parameter_list"],
+    parameter_kinds: &["parameter_declaration"],
+    fn_kinds: &["function_definition"],
+    call_kinds: &["call_expression"],
+    assignment_kinds: &["assignment_expression", "init_declarator"],
+    return_kinds: &["return_statement"],
+    if_kinds: &["if_statement"],
+    for_kinds: &["for_statement"],
+    while_kinds: &["while_statement"],
+    do_kinds: &["do_statement"],
+    ..EMPTY_HANDLER
+};
+
+const TEST_TYPESCRIPT_HANDLER: GrammarHandler = GrammarHandler {
+    class_kinds: &["interface_declaration"],
+    call_kinds: &["call_expression"],
+    ..EMPTY_HANDLER
+};
 
 impl LanguageAdapter for TestPythonAdapter {
     fn language_id(&self) -> LanguageId {
@@ -91,6 +122,10 @@ impl LanguageAdapter for TestCAdapter {
         LanguageCapabilities::unsupported()
     }
 
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        Some(&TEST_C_HANDLER)
+    }
+
     fn extract_declarations(&self, file: FileId, _ctx: &AdapterContext<'_>) -> DeclIndex {
         DeclIndex {
             file,
@@ -108,6 +143,46 @@ impl LanguageAdapter for TestCAdapter {
 
 fn test_c_adapter() -> AdapterArc {
     Arc::new(TestCAdapter)
+}
+
+impl LanguageAdapter for TestTypeScriptAdapter {
+    fn language_id(&self) -> LanguageId {
+        LanguageId::new("typescript")
+    }
+
+    fn display_name(&self) -> &'static str {
+        "test TypeScript"
+    }
+
+    fn file_extensions(&self) -> &'static [&'static str] {
+        &["ts"]
+    }
+
+    fn tree_sitter_language(&self) -> Result<tree_sitter::Language, AdapterError> {
+        bonsai_lang_api::kit::language_from_pack("typescript")
+    }
+
+    fn capabilities(&self) -> LanguageCapabilities {
+        LanguageCapabilities::unsupported()
+    }
+
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        Some(&TEST_TYPESCRIPT_HANDLER)
+    }
+
+    fn extract_declarations(&self, file: FileId, _ctx: &AdapterContext<'_>) -> DeclIndex {
+        DeclIndex {
+            file,
+            ..DeclIndex::default()
+        }
+    }
+
+    fn extract_imports(&self, file: FileId, _ctx: &AdapterContext<'_>) -> ImportIndex {
+        ImportIndex {
+            file,
+            imports: Vec::new(),
+        }
+    }
 }
 
 #[test]
@@ -331,6 +406,174 @@ fn replacement_edit_uses_utf8_boundaries_and_exact_points() {
     assert_eq!(edit.start_position, point_at_byte(old, edit.start_byte));
     assert_eq!(edit.old_end_position, point_at_byte(old, edit.old_end_byte));
     assert_eq!(edit.new_end_position, point_at_byte(new, edit.new_end_byte));
+}
+
+#[test]
+fn recovery_candidate_cannot_trade_away_a_clean_compiler_construct() {
+    let language = bonsai_lang_api::kit::language_from_pack("c").expect("C grammar");
+    let parse = |source: &str| {
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("set C grammar");
+        parser.parse(source, None).expect("parse monotonicity fixture")
+    };
+
+    let current_source = "int retained(void) { return 1; }\n@\n";
+    let retained_candidate = "int retained(void) { return 1; }\n \n";
+    let displaced_candidate = " ".repeat(current_source.len());
+    assert_eq!(current_source.len(), retained_candidate.len());
+    assert_eq!(current_source.len(), displaced_candidate.len());
+
+    let current = parse(current_source);
+    let retained = parse(retained_candidate);
+    let displaced = parse(&displaced_candidate);
+    let adapter = TestCAdapter;
+    let path = std::path::Path::new("fixture.c");
+
+    assert!(recovery_preserves_clean_compiler_nodes(
+        &adapter,
+        path,
+        &current,
+        &retained,
+        &[]
+    ));
+    assert!(
+        !recovery_preserves_clean_compiler_nodes(&adapter, path, &current, &displaced, &[]),
+        "a lower-damage parse that deletes an existing clean function is not a valid recovery"
+    );
+}
+
+#[test]
+fn explicit_damaged_descendant_replacement_owns_only_its_exact_subtree() {
+    let language = bonsai_lang_api::kit::language_from_pack("typescript").expect("TypeScript grammar");
+    let parse = |source: &str| {
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("set TypeScript grammar");
+        parser.parse(source, None).expect("parse recovery fixture")
+    };
+
+    let source = "interface Store { get: () => import('pkg').Value[]; keep: string; }\nkeep();";
+    let replacement = "interface Store { get: () => IMPORTTYPE   .Value[]; keep: string; }\nkeep();";
+    let displaced = "interface Store { get: () => IMPORTTYPE   .Value[]; keep: string; }\n       ";
+    assert_eq!(source.len(), replacement.len());
+    assert_eq!(source.len(), displaced.len());
+    let current = parse(source);
+    let candidate = parse(replacement);
+    let displaced = parse(displaced);
+    assert!(current.root_node().has_error());
+    assert!(!candidate.root_node().has_error());
+
+    let object = {
+        let mut pending = vec![current.root_node()];
+        loop {
+            let node = pending.pop().expect("damaged import-type call");
+            if node.kind() == "call_expression"
+                && source.as_bytes().get(node.start_byte()..node.end_byte()) == Some(b"import('pkg')")
+            {
+                break node;
+            }
+            let mut cursor = node.walk();
+            pending.extend(node.named_children(&mut cursor));
+        }
+    };
+    let edit = bonsai_lang_api::ParseRecoveryEdit::replace_damaged_descendant_ascii(
+        object.start_byte(),
+        object.end_byte(),
+        b"IMPORTTYPE",
+    );
+    let adapter = TestTypeScriptAdapter;
+    assert!(recovery_preserves_clean_compiler_nodes(
+        &adapter,
+        std::path::Path::new("fixture.ts"),
+        &current,
+        &candidate,
+        &[edit],
+    ));
+    assert!(
+        !recovery_preserves_clean_compiler_nodes(
+            &adapter,
+            std::path::Path::new("fixture.ts"),
+            &current,
+            &displaced,
+            &[edit],
+        ),
+        "explicit ownership of the damaged import-type subtree must not permit a disjoint call to disappear"
+    );
+}
+
+#[test]
+fn syntax_diagnostics_cover_nested_error_and_missing_nodes() {
+    use std::collections::BTreeMap;
+
+    fn error_spans(tree: &Tree) -> (BTreeMap<(u64, u64), usize>, bool) {
+        let mut spans = BTreeMap::new();
+        let mut nested = false;
+        let mut stack = vec![(tree.root_node(), false)];
+        while let Some((node, inside_error)) = stack.pop() {
+            let is_error = node.is_error() || node.is_missing();
+            if is_error {
+                *spans
+                    .entry((node.start_byte() as u64, node.end_byte() as u64))
+                    .or_insert(0) += 1;
+                nested |= inside_error;
+            }
+            let mut cursor = node.walk();
+            stack.extend(
+                node.children(&mut cursor)
+                    .map(|child| (child, inside_error || is_error)),
+            );
+        }
+        (spans, nested)
+    }
+
+    // Tree-sitter recovery shape changes across grammar releases. Select the
+    // first deliberately malformed fixture that actually contains a nested
+    // ERROR/MISSING relationship rather than pinning the test to one grammar
+    // version's concrete recovery tree.
+    let candidates = [
+        ("nested.py", "def outer(\n    if (\n        value = [1, {\n"),
+        (
+            "nested.py",
+            "class Broken(\n    def method(self, :\n        return (\n",
+        ),
+        ("nested.c", "void broken( { if (value { call( ; }\n"),
+        ("nested.c", "struct S { int x[; void f( { return ( ; }\n"),
+    ];
+    let cache = ParserCache::with_options(ParserOptions::with_parse_timeout(None));
+    let vfs = Vfs::new();
+    let mut selected = None;
+    for (path, source) in candidates {
+        let file = vfs.write(path, source);
+        let adapter = if std::path::Path::new(path)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+        {
+            test_python_adapter()
+        } else {
+            test_c_adapter()
+        };
+        let parsed = cache
+            .parse(file, &adapter, &vfs)
+            .expect("malformed input still parses");
+        let (expected, has_nested) = error_spans(&parsed.tree);
+        if has_nested {
+            selected = Some((path, expected, parsed.diagnostics.clone()));
+            break;
+        }
+    }
+    let (path, expected, diagnostics) =
+        selected.expect("at least one malformed fixture must exercise nested parser recovery");
+    let mut actual = BTreeMap::new();
+    for diagnostic in diagnostics {
+        if diagnostic.code.as_deref() == Some("syntax-error") {
+            *actual
+                .entry((diagnostic.span.start, diagnostic.span.end))
+                .or_insert(0) += 1;
+        }
+    }
+    assert_eq!(
+        actual, expected,
+        "{path}: parser diagnostics must enumerate every ERROR/MISSING node, including descendants"
+    );
 }
 
 fn first_node_text(tree: &Tree, source: &str, kind: &str) -> Option<String> {

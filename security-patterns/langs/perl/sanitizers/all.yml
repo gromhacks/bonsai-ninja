@@ -198,38 +198,6 @@
     escape its slot. Only fires when the SQL literal contains a `?`, so raw concat into prepare still falls through to the
     SQLi sink."
 
-- id: perl.sanitizer.dbi_execute
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  tag: sql-parameter
-  packages: [DBI]
-  match:
-    kind: call
-    callee:
-      name: execute
-  description: "Disabled - bare `execute` overmatches unrelated method calls; sanitization fact already attached at the prepare(?)
-    site above."
-
-- id: perl.sanitizer.dbi_quote
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  tag: sql-parameter
-  packages: [DBI]
-  match:
-    kind: call
-    callee:
-      name: quote
-  description: "Disabled - bare `quote` overmatches and DBI quote is only an escape helper; prefer prepare(?) placeholders."
-
-# -- Path ------------------------------------------------------------
-# Heuristic untaint: `if ($input =~ m/^([\w-]+)$/) { $clean = $1 }`. The
-# capture-into-$1 idiom is how Perl taint mode launders strings. We
-# match the regex-match call shape; the taint engine treats the captured
-# value as untainted on the success path.
 - id: perl.sanitizer.taint_untaint_regex_capture
   enabled: true
   language: perl
@@ -255,35 +223,6 @@
     tainted strings under -T. Heuristic: matches anchored single-capture patterns. Only sanitises when the captured group
     is what flows on."
 
-- id: perl.sanitizer.file_spec_canonpath
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: perl
-  tag: path-sanitize
-  packages: ["File::Spec"]
-  match:
-    kind: call
-    callee:
-      name: canonpath
-  description: "Disabled - File::Spec->canonpath collapses redundant separators/.. segments but still needs a trusted-root
-    prefix check."
-
-- id: perl.sanitizer.cwd_abs_path
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: perl
-  tag: path-sanitize
-  packages: [Cwd]
-  match:
-    kind: call
-    callee:
-      name: abs_path
-  description: "Disabled - Cwd::abs_path resolves symlinks/relative segments but still requires a trusted-root containment
-    check."
-
-# -- Numeric coerce --------------------------------------------------
 - id: perl.sanitizer.scalar_util_looks_like_number
   enabled: true
   language: perl
@@ -372,29 +311,6 @@
       }
     expect_match_text: ["verify_password"]
   description: "Crypt::Passphrase::verify_password - constant-time password verification against a stored hash (Argon2/bcrypt backends)."
-
-- id: perl.sanitizer.plack_util_secure_compare
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  tag: constant-time
-  packages: ["Plack::Util"]
-  match:
-    kind: call
-    callee:
-      name: secure_compare
-  match_examples:
-  - name: perl.sanitizer.plack_util_secure_compare example
-    code: |
-      use Plack::Util;
-      sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        secure_compare($input)
-      }
-    expect_match_text: ["secure_compare"]
-  description: "Disabled duplicate - perl.sanitizer.bytes_random_secure_compare carries the same `secure_compare` call shape
-    and includes Plack::Util package metadata."
 
 - id: perl.sanitizer.crypt_bcrypt_check
   enabled: true
@@ -627,48 +543,6 @@
     expect_no_match: true
   description: "m{^/} - same-origin redirect/path guard for root-relative targets."
 
-- id: perl.sanitizer.list_util_any_allowlist
-  enabled: false
-  language: perl
-  tag: allowlist-validate
-  packages: ["List::Util"]
-  match:
-    kind: call
-    callee:
-      name: any
-  constraints:
-  - any_arg_matches_regex: "(?i)allow(ed|list)|permitted|valid"
-  match_examples:
-  - name: perl.sanitizer.list_util_any_allowlist example
-    code: |
-      use List::Util;
-      sub example {
-        my ($role) = @_;
-        List::Util::any { $_ eq $role } @ALLOWED_ROLES;
-      }
-    expect_match_text: [List::Util::any]
-  - name: perl.sanitizer.list_util_any_allowlist example negative constraint boundary
-    code: "sub example {\n  List::Util::any();\n}\n"
-    expect_no_match: true
-  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    List::Util::any { $_ eq $value } @ALLOWED_* - explicit enum/set allowlist membership check."
-
-  disabled_reason:
-    code: over-broad
-- id: perl.sanitizer.hash_exists_allowlist
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: perl
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      name: exists
-  description: "Disabled - `exists $allowed{$value}` validates `$value` only on the successful control-flow branch and only
-    when the hash is a trusted finite allowlist. Re-enable when the rule vocabulary can prove both collection provenance and
-    guard dominance; a bare `exists` call/read fact is not sufficient sanitizer evidence."
-
 - id: perl.sanitizer.regex_full_string_shape
   enabled: true
   language: perl
@@ -721,9 +595,7 @@
   description: "DBI statement execute($value, ...) - binds values to placeholders from a prepared statement."
 
 - id: perl.sanitizer.substitution_char_allowlist
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: perl
   tag: char-allowlist
   match:
@@ -731,9 +603,57 @@
     callee:
       name: s
   constraints:
-  - any_arg_matches_regex: "\\[\\^"
-  description: "Disabled - Perl `s/[^safe]//g` is the desired char-allowlist strip shape, but the current adapter does not
-    emit substitution operators as call facts."
+  - max_args: 2
+  - arg_matches_regex:
+      index: 0
+      regex: '^\[\^A-Za-z0-9_(?:-| -)?\]$'
+  - arg_matches_regex:
+      index: 1
+      regex: '^[A-Za-z]*g[A-Za-z]*$'
+  taint_semantics:
+    clean_receiver_overwrite: true
+  match_examples:
+  - name: global negated-class deletion constrains the mutated receiver
+    code: |
+      sub clean {
+        my ($value) = @_;
+        $value =~ s/[^A-Za-z0-9_-]//g;
+        return $value;
+      }
+    expect_match_text: [s]
+  - name: nonempty replacement is not an allowlist deletion
+    code: |
+      sub clean {
+        my ($value) = @_;
+        $value =~ s/[^A-Za-z0-9_-]/_/g;
+        return $value;
+      }
+    expect_no_match: true
+  - name: single replacement does not constrain the complete value
+    code: |
+      sub clean {
+        my ($value) = @_;
+        $value =~ s/[^A-Za-z0-9_-]//;
+        return $value;
+      }
+    expect_no_match: true
+  - name: ordinary substitution remains taint preserving
+    code: |
+      sub clean {
+        my ($value) = @_;
+        $value =~ s/foo/bar/g;
+        return $value;
+      }
+    expect_no_match: true
+  - name: unsafe retained alphabet is not a sanitizer
+    code: |
+      sub clean {
+        my ($value) = @_;
+        $value =~ s/[^<]//g;
+        return $value;
+      }
+    expect_no_match: true
+  description: "Perl global `s/[^safe]//g` deletion constrains the mutated receiver to the retained character alphabet."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an

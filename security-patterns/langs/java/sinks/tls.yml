@@ -6,15 +6,63 @@
   severity: critical
   cwe:
   - CWE-295
+  imports: [javax.net.ssl.HttpsURLConnection]
   match:
     kind: call
     callee:
       attribute:
       - HttpsURLConnection
       - setDefaultHostnameVerifier
+      binding_origin: imported
+  constraints:
+  - arg_inline_callback_returns_static:
+      index: 0
+      value: {kind: boolean, value: true}
   match_examples:
-  - name: generated shape example
-    code: "class App {\n  void handle(String input) throws Exception {\n    HttpsURLConnection.setDefaultHostnameVerifier(ALLOW_ALL);\n  }\n}\n"
+  - name: imported inline hostname verifier always accepts
+    code: |
+      import javax.net.ssl.HttpsURLConnection;
+      class App {
+        void configure() { HttpsURLConnection.setDefaultHostnameVerifier((host, session) -> true); }
+      }
+    expect_match_text: [HttpsURLConnection.setDefaultHostnameVerifier]
+  - name: rejecting hostname verifier
+    code: |
+      import javax.net.ssl.HttpsURLConnection;
+      class App {
+        void configure() { HttpsURLConnection.setDefaultHostnameVerifier((host, session) -> false); }
+      }
+    expect_no_match: true
+  - name: mixed hostname verifier result
+    code: |
+      import javax.net.ssl.HttpsURLConnection;
+      class App {
+        void configure(boolean allow) {
+          HttpsURLConnection.setDefaultHostnameVerifier((host, session) -> {
+            if (allow) return true;
+            return false;
+          });
+        }
+      }
+    expect_no_match: true
+  - name: named hostname verifier remains unproven
+    code: |
+      import javax.net.ssl.HttpsURLConnection;
+      class App {
+        boolean verify(String host, Object session) { return true; }
+        void configure() { HttpsURLConnection.setDefaultHostnameVerifier(this::verify); }
+      }
+    expect_no_match: true
+  - name: local connection type collision
+    code: |
+      import javax.net.ssl.HttpsURLConnection;
+      class HttpsURLConnection {
+        static void setDefaultHostnameVerifier(Object value) {}
+      }
+      class App {
+        void configure() { HttpsURLConnection.setDefaultHostnameVerifier((Object value) -> true); }
+      }
+    expect_no_match: true
   description: "HttpsURLConnection.setDefaultHostnameVerifier((h,s) -> true) - global bypass."
 - id: java.tls.set_hostname_verifier_allow
   enabled: true
@@ -24,52 +72,45 @@
   severity: critical
   cwe:
   - CWE-295
+  imports: [javax.net.ssl.HttpsURLConnection]
   match:
     kind: call
     callee:
-      attribute:
-      - HttpsURLConnection
-      - setHostnameVerifier
+      name: setHostnameVerifier
+      receiver_type_in: [javax.net.ssl.HttpsURLConnection]
+  constraints:
+  - arg_inline_callback_returns_static:
+      index: 0
+      value: {kind: boolean, value: true}
   match_examples:
-  - name: generated shape example
-    code: "class App {\n  void handle(String input) throws Exception {\n    HttpsURLConnection.setHostnameVerifier(input);\n  }\n}\n"
+  - name: typed connection inline verifier always accepts
+    code: |
+      import javax.net.ssl.HttpsURLConnection;
+      class App {
+        void configure(HttpsURLConnection connection) {
+          connection.setHostnameVerifier((host, session) -> true);
+        }
+      }
+    expect_match_text: [connection.setHostnameVerifier]
+  - name: same method on unrelated receiver
+    code: |
+      class LocalConnection { void setHostnameVerifier(Object value) {} }
+      class App {
+        void configure(LocalConnection connection) {
+          connection.setHostnameVerifier((Object value) -> true);
+        }
+      }
+    expect_no_match: true
+  - name: typed connection rejecting verifier
+    code: |
+      import javax.net.ssl.HttpsURLConnection;
+      class App {
+        void configure(HttpsURLConnection connection) {
+          connection.setHostnameVerifier((host, session) -> false);
+        }
+      }
+    expect_no_match: true
   description: "HttpsURLConnection.setHostnameVerifier - accepts any."
-- id: java.tls.set_default_ssl_socket_factory_trustall
-  enabled: true
-  language: java
-  tag: weak-tls
-  category: source-independent
-  severity: critical
-  cwe:
-  - CWE-295
-  match:
-    kind: call
-    callee:
-      attribute:
-      - HttpsURLConnection
-      - setDefaultSSLSocketFactory
-  match_examples:
-  - name: generated shape example
-    code: "class App {\n  void handle(String input) throws Exception {\n    HttpsURLConnection.setDefaultSSLSocketFactory(input);\n  }\n}\n"
-  description: HttpsURLConnection.setDefaultSSLSocketFactory with TrustAll.
-- id: java.tls.sslcontext_init_trustallcerts
-  enabled: true
-  language: java
-  tag: weak-tls
-  category: source-independent
-  severity: critical
-  cwe:
-  - CWE-295
-  match:
-    kind: call
-    callee:
-      attribute:
-      - SSLContext
-      - init
-  match_examples:
-  - name: generated shape example
-    code: "class App {\n  void handle(String input) throws Exception {\n    SSLContext.init(input);\n  }\n}\n"
-  description: "SSLContext.init(km, [TrustAllCerts], rng) - accept-any X509TrustManager."
 - id: java.tls.okhttp_hostnameverifier_allow
   enabled: true
   language: java
@@ -77,51 +118,51 @@
   category: source-independent
   severity: critical
   packages:
-  - okhttp
+  - okhttp3
+  imports: [okhttp3.OkHttpClient]
   cwe:
   - CWE-295
   match:
     kind: call
     callee:
-      attribute:
-      - Builder
-      - hostnameVerifier
+      name: hostnameVerifier
+      receiver_type_in: [okhttp3.OkHttpClient.Builder]
+  constraints:
+  - arg_inline_callback_returns_static:
+      index: 0
+      value: {kind: boolean, value: true}
   match_examples:
-  - name: generated shape example
+  - name: typed builder inline verifier always accepts
     code: |
-      import okhttp.*;
+      import okhttp3.OkHttpClient;
       class App {
-        void handle(String input) throws Exception {
-          Builder.hostnameVerifier(input);
+        void configure(OkHttpClient.Builder builder) {
+          builder.hostnameVerifier((host, session) -> true);
         }
       }
+    expect_match_text: [builder.hostnameVerifier]
+  - name: unrelated builder collision
+    code: |
+      import okhttp3.Call;
+      class OkHttpClient {
+        static class Builder { void hostnameVerifier(Object value) {} }
+      }
+      class App {
+        void configure(OkHttpClient.Builder builder, Call call) {
+          builder.hostnameVerifier((Object value) -> true);
+        }
+      }
+    expect_no_match: true
+  - name: typed builder rejecting verifier
+    code: |
+      import okhttp3.OkHttpClient;
+      class App {
+        void configure(OkHttpClient.Builder builder) {
+          builder.hostnameVerifier((host, session) -> false);
+        }
+      }
+    expect_no_match: true
   description: OkHttp OkHttpClient.Builder.hostnameVerifier((h,s) -> true).
-- id: java.tls.okhttp_socketfactory
-  enabled: true
-  language: java
-  tag: weak-tls
-  category: source-independent
-  severity: critical
-  packages:
-  - okhttp
-  cwe:
-  - CWE-295
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Builder
-      - sslSocketFactory
-  match_examples:
-  - name: generated shape example
-    code: |
-      import okhttp.*;
-      class App {
-        void handle(String input) throws Exception {
-          Builder.sslSocketFactory(input);
-        }
-      }
-  description: "OkHttp Builder.sslSocketFactory(trustAll, ...)."
 - id: java.tls.apache_httpclient_noopverifier
   enabled: true
   language: java
@@ -130,21 +171,30 @@
   severity: critical
   packages:
   - org.apache.http
+  imports: [org.apache.http.conn.ssl.NoopHostnameVerifier]
   cwe:
   - CWE-295
   match:
     kind: new
     callee:
       name: NoopHostnameVerifier
+      binding_origin: imported
   match_examples:
-  - name: generated shape example
+  - name: imported no-op hostname verifier
     code: |
       import org.apache.http.conn.ssl.NoopHostnameVerifier;
       class App {
-        void handle(String input) throws Exception {
-          new NoopHostnameVerifier(input);
-        }
+        Object verifier() { return new NoopHostnameVerifier(); }
       }
+    expect_match_text: [NoopHostnameVerifier]
+  - name: same constructor name on a local type
+    code: |
+      import org.apache.http.HttpHost;
+      class NoopHostnameVerifier { NoopHostnameVerifier() {} }
+      class App {
+        Object verifier(HttpHost host) { return new NoopHostnameVerifier(); }
+      }
+    expect_no_match: true
   description: Apache HttpClient new NoopHostnameVerifier().
 - id: java.tls.apache_httpclient_trustself
   enabled: true
@@ -154,38 +204,51 @@
   severity: high
   packages:
   - org.apache.http
+  imports: [org.apache.http.ssl.SSLContextBuilder, org.apache.http.ssl.TrustSelfSignedStrategy]
   cwe:
   - CWE-295
   match:
     kind: call
     callee:
-      attribute:
-      - SSLContextBuilder
-      - loadTrustMaterial
+      name: loadTrustMaterial
+      receiver_type_in: [org.apache.http.ssl.SSLContextBuilder]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:TrustSelfSignedStrategy\.)?INSTANCE$'
   match_examples:
-  - name: generated shape example
+  - name: imported self-signed trust strategy
     code: |
-      import org.apache.http.ssl.*;
+      import org.apache.http.ssl.SSLContextBuilder;
+      import org.apache.http.ssl.TrustSelfSignedStrategy;
       class App {
-        void handle(String input) throws Exception {
-          SSLContextBuilder.loadTrustMaterial(input);
+        void configure(SSLContextBuilder builder) throws Exception {
+          builder.loadTrustMaterial(TrustSelfSignedStrategy.INSTANCE);
         }
       }
+    expect_match_text: [builder.loadTrustMaterial]
+  - name: ordinary trust material strategy
+    code: |
+      import org.apache.http.ssl.SSLContextBuilder;
+      class App {
+        void configure(SSLContextBuilder builder, Object strategy) throws Exception {
+          builder.loadTrustMaterial(strategy);
+        }
+      }
+    expect_no_match: true
+  - name: local builder with the same method is not Apache HttpClient
+    code: |
+      import org.apache.http.ssl.TrustSelfSignedStrategy;
+      class SSLContextBuilder {
+        void loadTrustMaterial(Object strategy) {}
+      }
+      class App {
+        void configure(SSLContextBuilder builder) {
+          builder.loadTrustMaterial(TrustSelfSignedStrategy.INSTANCE);
+        }
+      }
+    expect_no_match: true
   description: Apache HttpClient loadTrustMaterial(TrustSelfSignedStrategy).
-- id: java.tls.trust_all_custom_manager
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: weak-tls
-  severity: high
-  cwe:
-  - CWE-295
-  match:
-    kind: new
-    callee:
-      name: X509TrustManager
-  description: "Disabled - too broad; real risk is anonymous X509TrustManager subclass with empty checkServerTrusted/checkClientTrusted. Flag via body inspection."
 - id: java.tls.sslcontext_getinstance_ssl
   enabled: true
   language: java
@@ -221,50 +284,3 @@
   - java.tls.sslcontext_getinstance_sslv3
   - java.tls.sslcontext_getinstance_tlsv10
   - java.tls.sslcontext_getinstance_tlsv11
-- id: java.tls.disable_verify_hostname_verifier
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: weak-tls
-  severity: high
-  packages:
-  - javax.net.ssl
-  cwe:
-  - CWE-295
-  match:
-    kind: call
-    callee:
-      attribute:
-      - HttpsURLConnection
-      - setDefaultHostnameVerifier
-  match_examples:
-  - name: generated shape example
-    code: |
-      import javax.net.ssl.*;
-      class App {
-        void handle(String input) throws Exception {
-          HttpsURLConnection.setDefaultHostnameVerifier(ALLOW_ALL);
-        }
-      }
-  description: "HttpsURLConnection.setDefaultHostnameVerifier(ALLOW_ALL) - accepts any TLS hostname."
-  imports:
-  - javax
-- id: java.tls.disable_verify_trust_all_x509
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: weak-tls
-  severity: high
-  packages:
-  - javax.net.ssl
-  cwe:
-  - CWE-295
-  match:
-    kind: call
-    callee:
-      attribute:
-      - X509TrustManager
-      - checkServerTrusted
-  description: "Custom X509TrustManager.checkServerTrusted - when override is empty, accepts any cert (trust-all manager pattern)."

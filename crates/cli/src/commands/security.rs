@@ -46,25 +46,14 @@ use std::path::{Path, PathBuf};
 fn source_analysis_json_incomplete_reasons(
     command: &str,
     info: &paging::PageInfo,
-    rows: &[CombinedSourceAnalysisFlow],
+    _rows: &[CombinedSourceAnalysisFlow],
     report_reasons: &[String],
 ) -> Vec<String> {
     let mut reasons = report_reasons.to_vec();
     reasons.extend(paged_json_incomplete_reasons(command, info));
-    for row in rows {
-        if row.analysis_complete {
-            continue;
-        }
-        if row.analysis_incomplete_reasons.is_empty() {
-            reasons.push("source-analysis row incomplete: unknown reason".to_string());
-        } else {
-            reasons.extend(
-                row.analysis_incomplete_reasons
-                    .iter()
-                    .map(|reason| format!("source-analysis row incomplete: {reason}")),
-            );
-        }
-    }
+    // A row can intentionally carry a bounded representative lineage while
+    // the compiler analysis that produced it is complete. Row-level lineage
+    // status remains serialized on the row; it is not an analysis failure.
     reasons.sort();
     reasons.dedup();
     reasons
@@ -570,6 +559,14 @@ fn cmd_security_with_profile_default(
             output: _,
         } => {
             let mut exclude_tests = false;
+            // The review profile's default trust boundary constrains source
+            // proofs only after the user requests that optional enrichment.
+            // A plain sink-centric query must not run a workspace-wide source
+            // matcher merely because the profile supplies `trust: remote`;
+            // its source-independent upstream compiler lineage is complete
+            // without that second analysis product.
+            let security_source_flows_requested =
+                source.is_some() || trust.is_some() || category.is_some() || inferred_sources;
             apply_profile(
                 &pack.metadata,
                 selected_security_profile(&pack.metadata, profile.as_deref(), apply_default_profile),
@@ -581,6 +578,9 @@ fn cmd_security_with_profile_default(
                     context: &mut context,
                 },
             )?;
+            if !security_source_flows_requested {
+                trust = None;
+            }
             let severity = parse_severity_flag(severity.as_deref())?;
             let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             cmd_sink_analysis(
@@ -1126,7 +1126,6 @@ fn cmd_flows(
     explain: bool,
 ) -> Result<()> {
     let sev_floor = parse_severity_flag(severity.as_deref())?;
-    let max_precision = Some(Precision::Narrowed);
     if summary_only && matches!(format, SecurityFormat::Sarif) {
         bail!("`security taint-analysis --summary` supports text or json output, not sarif");
     }
@@ -1171,7 +1170,6 @@ fn cmd_flows(
         ("inferred_sources", if inferred_sources { "1" } else { "0" }),
         ("exclude_tests", if exclude_tests { "1" } else { "0" }),
         ("show_sanitized", if show_sanitized { "1" } else { "0" }),
-        ("precision", "semantic"),
         (
             "include_pattern_only",
             if include_pattern_only { "1" } else { "0" },
@@ -1266,7 +1264,6 @@ fn cmd_flows(
             include_inferred_sources: inferred_sources,
             include_pattern_only,
             show_sanitized,
-            max_precision,
             exclude_tests,
             attach_flow_evidence: false,
             taint_graph_resident_cache_entries: Some(0),
@@ -3343,7 +3340,7 @@ fn render_source_analysis_text_page(
             lineage_summary.max_hops,
             lineage_summary.max_paths,
         );
-        for line in u.wrapped_warn_labeled_lines("lineage incomplete", &reason) {
+        for line in u.wrapped_warn_labeled_lines("lineage view truncated", &reason) {
             cli_println!("{line}");
         }
     }

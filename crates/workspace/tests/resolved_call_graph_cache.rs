@@ -210,6 +210,73 @@ fn source_reachable_target_return_corridor_reaches_order_independent_fixed_point
 }
 
 #[test]
+fn source_reachable_callback_forwarding_matches_cold_and_warm_compiler_graphs() {
+    let root = tempdir("callback-forwarding-parity");
+    std::fs::write(
+        root.join("app.py"),
+        concat!(
+            "def executor(value):\n",
+            "    return sink(value)\n\n",
+            "def run(callback, value):\n",
+            "    return callback(value)\n\n",
+            "def forward(callback, value):\n",
+            "    return run(callback, value)\n\n",
+            "def entry(value):\n",
+            "    return forward(executor, value)\n",
+        ),
+    )
+    .expect("write callback fixture");
+
+    let check = |workspace: &Workspace| {
+        let global = workspace.compiler_linkage_index();
+        let func = |name: &str| {
+            let symbol = global
+                .find_by_name(name)
+                .first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing {name}"));
+            bonsai_common::FuncId::new(symbol.raw())
+        };
+        let entry = func("entry");
+        let run = func("run");
+        let executor = func("executor");
+        let reachable = workspace.source_reachable_resolved_call_graph(
+            &[entry],
+            &[],
+            Some(bonsai_common::Precision::Narrowed),
+        );
+        assert!(
+            reachable.funcs.contains(&executor),
+            "the callback target must enter the exact source-reachable scope"
+        );
+        assert!(
+            reachable
+                .graph
+                .callees_of(run)
+                .any(|edge| { edge.to == executor && edge.kind == bonsai_callgraph::EdgeKind::Indirect }),
+            "formal forwarding must converge to run -> executor: {:#?}",
+            reachable.graph.inner().edges
+        );
+        assert!(
+            reachable.graph.callees_of(entry).all(|edge| edge.to != executor),
+            "passing executor through entry must not claim that entry executes it"
+        );
+    };
+
+    let cold = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::lazy_query())
+        .expect("open cold callback workspace");
+    check(&cold);
+    cold.save_callgraph_sidecar(&root)
+        .expect("persist complete callback graph");
+    drop(cold);
+
+    let warm = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::lazy_query())
+        .expect("reopen warm callback workspace");
+    check(&warm);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn source_reachable_progress_counts_each_compiled_caller_file_once() {
     let ws = ws_with(
         "app.py",
@@ -683,6 +750,45 @@ fn complete_lazy_semantic_miss_publishes_reusable_compiler_phases() {
     assert_eq!(second.cached_resolved_call_graph().inner().edges.len(), 1);
     assert_eq!(second.compiler_linkage_index().find_by_name("main").len(), 1);
 
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn persistent_cache_opt_out_keeps_exact_graphs_resident_only() {
+    let root = tempdir("resident-only-semantic");
+    std::fs::write(
+        root.join("app.py"),
+        "def helper(value):\n    return value\n\ndef main(value):\n    return helper(value)\n",
+    )
+    .expect("write app");
+
+    // Resolve the external cache path before opening the workspace. The path
+    // helper may create the final directory while probing writability; the
+    // semantic run below must not add any payload beneath it.
+    let cache_dir = bonsai_common::workspace_bonsai_dir(&root);
+    let _ = std::fs::remove_dir_all(&cache_dir);
+    std::fs::create_dir_all(&cache_dir).expect("create empty cache sentinel");
+
+    let mut options = WorkspaceOpenOptions::lazy_query();
+    options.disable_persistent_semantic_cache();
+
+    let workspace =
+        Workspace::open_with_options(&root, registry(), options).expect("open resident-only workspace");
+    let graph = workspace.cached_resolved_call_graph();
+    assert_eq!(graph.inner().edges.len(), 1, "requested callgraph remains exact");
+    let idg = workspace.build_and_seed_idg_service();
+    assert!(idg.segment_count() >= 1, "requested IDG remains exact");
+
+    let entries = std::fs::read_dir(&cache_dir)
+        .expect("read empty cache sentinel")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("enumerate cache sentinel");
+    assert!(
+        entries.is_empty(),
+        "resident-only analysis must neither load nor publish persistent semantic artifacts: {entries:?}"
+    );
+
+    std::fs::remove_dir_all(&cache_dir).ok();
     std::fs::remove_dir_all(&root).ok();
 }
 

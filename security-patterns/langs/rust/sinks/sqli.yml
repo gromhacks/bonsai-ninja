@@ -161,14 +161,12 @@
   - name: tainted tokio postgres query string
     code: |
       use tokio_postgres;
-      use tokio_postgres;
       use tokio_postgres::dummy;
       fn example(target: &str) {
           Client::query(target, &[]);
       }
   - name: literal tokio postgres query string negative
     code: |
-      use tokio_postgres;
       use tokio_postgres;
       use tokio_postgres::dummy;
       fn example() {
@@ -184,6 +182,7 @@
   tag: sql-injection
   severity: high
   packages: [rusqlite]
+  imports: [rusqlite]
   cwe: [CWE-89]
   match:
     kind: call
@@ -213,28 +212,37 @@
   tag: sql-injection
   severity: high
   packages: [rusqlite]
+  imports: [rusqlite]
   cwe: [CWE-89]
   match:
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.prepare$
-      base_name_in: [conn, con, db, database, connection]
+      receiver_type_in: [rusqlite.Connection]
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: tainted rusqlite prepare string
     code: |
-      use rusqlite::Connection;
-      fn example(conn: &Connection, target: &str) {
+      use rusqlite::Connection as SqliteConnection;
+      fn example(conn: &SqliteConnection, target: &str) {
           conn.prepare(target);
       }
     expect_match_text: [conn.prepare]
   - name: literal rusqlite prepare string negative
     code: |
-      use rusqlite::Connection;
-      fn example(conn: &Connection) {
+      use rusqlite::Connection as SqliteConnection;
+      fn example(conn: &SqliteConnection) {
           conn.prepare("select * from users where id = ?1");
+      }
+    expect_no_match: true
+  - name: local Connection with same method is not rusqlite
+    code: |
+      use rusqlite::Connection as SqliteConnection;
+      struct Connection;
+      fn example(conn: &Connection, target: &str) {
+          conn.prepare(target);
       }
     expect_no_match: true
   description: "rusqlite Connection::prepare with a tainted SQL string - placeholders protect values, but the SQL program itself must not be user-controlled."
@@ -343,14 +351,12 @@
   - name: tainted sea orm statement string
     code: |
       use sea_orm;
-      use sea_orm;
       use sea_orm::dummy;
       fn example(target: &str) {
           Statement::from_string(DbBackend::Postgres, target);
       }
   - name: literal sea orm statement string negative
     code: |
-      use sea_orm;
       use sea_orm;
       use sea_orm::dummy;
       fn example() {

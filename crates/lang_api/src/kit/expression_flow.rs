@@ -7,7 +7,9 @@ use crate::{ExpressionField, ExpressionFlow, ExpressionProjection};
 
 #[cfg(test)]
 use super::GENERIC_HANDLER;
-use super::{argument_place, extract_rhs_expr_operands, node_text, span_of, GrammarHandler};
+use super::{
+    argument_place, extract_param_names, extract_rhs_expr_operands, node_text, span_of, GrammarHandler,
+};
 
 /// Lower one parsed value expression into compiler-owned flow facts.
 #[must_use]
@@ -325,6 +327,33 @@ pub(super) fn static_field_name(node: Node<'_>, src: &[u8], handler: &GrammarHan
     (!name.is_empty()).then_some(name)
 }
 
+/// Decode a field name only when the adapter proves the key node itself is
+/// static. The more permissive [`static_field_name`] helper deliberately
+/// unwraps grammar containers for ordinary field-flow lowering; exact
+/// configuration facts must not use that fallback because a computed key
+/// such as `{ [name]: value }` may contain one identifier while remaining a
+/// dynamic property name.
+fn exact_static_field_name(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
+    if let Some(name) = handler
+        .static_subscript_key_extractor
+        .and_then(|extract| extract(node, src))
+    {
+        return Some(name);
+    }
+    if handler.shorthand_field_kinds.contains(&node.kind()) {
+        let name = handler
+            .reference_name_extractor
+            .and_then(|extract| extract(node, src))
+            .unwrap_or_else(|| node_text(&node, src).trim().to_string());
+        return (!name.is_empty()).then_some(name);
+    }
+    handler
+        .static_field_name_kinds
+        .contains(&node.kind())
+        .then(|| static_field_name(node, src, handler))
+        .flatten()
+}
+
 fn is_spread_node(kind: &str, handler: &GrammarHandler) -> bool {
     handler.spread_kinds.contains(&kind)
 }
@@ -393,7 +422,7 @@ pub(super) fn exact_static_aggregate_fields(
         let direct_pairs = field_pair_nodes(node, handler);
         if !direct_pairs.is_empty() {
             for (key, value) in direct_pairs {
-                let name = static_field_name(key, src, handler)?;
+                let name = exact_static_field_name(key, src, handler)?;
                 saw_field = true;
                 path.push(name);
                 if !seen.insert(path.clone()) {
@@ -418,6 +447,16 @@ pub(super) fn exact_static_aggregate_fields(
             }
             let pairs = field_pair_nodes(child, handler);
             if pairs.is_empty() {
+                if handler.shorthand_field_kinds.contains(&child.kind()) {
+                    let name = exact_static_field_name(child, src, handler)?;
+                    saw_field = true;
+                    path.push(name);
+                    if !seen.insert(path.clone()) {
+                        return None;
+                    }
+                    path.pop();
+                    continue;
+                }
                 // Comments and grammar-owned punctuation are not named
                 // members. Any other named aggregate child is unsupported
                 // and therefore cannot prove a complete configuration.
@@ -427,7 +466,7 @@ pub(super) fn exact_static_aggregate_fields(
                 continue;
             }
             for (key, value) in pairs {
-                let name = static_field_name(key, src, handler)?;
+                let name = exact_static_field_name(key, src, handler)?;
                 saw_field = true;
                 path.push(name);
                 if !seen.insert(path.clone()) {
@@ -453,6 +492,109 @@ pub(super) fn exact_static_aggregate_fields(
         src,
         handler,
         decode,
+        &mut Vec::new(),
+        &mut out,
+        &mut std::collections::HashSet::new(),
+    )?;
+    Some(out)
+}
+
+/// Collect inline callbacks stored beneath exact, statically named aggregate
+/// fields. Dynamic keys, spreads, and duplicate paths make the relationship
+/// ambiguous and reject the complete fact. This is compiler structure only:
+/// rules decide whether a particular call argument/field is an external
+/// callback contract and what types its parameters carry.
+pub(super) fn exact_inline_aggregate_callbacks(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<Vec<crate::InlineAggregateCallbackFact>> {
+    fn collect(
+        node: Node<'_>,
+        file: FileId,
+        src: &[u8],
+        handler: &GrammarHandler,
+        path: &mut Vec<String>,
+        out: &mut Vec<crate::InlineAggregateCallbackFact>,
+        seen: &mut std::collections::HashSet<Vec<String>>,
+    ) -> Option<()> {
+        if !is_nested_aggregate(node.kind(), handler) {
+            return None;
+        }
+        let mut saw_field = false;
+        let direct_pairs = field_pair_nodes(node, handler);
+        if !direct_pairs.is_empty() {
+            for (key, value) in direct_pairs {
+                let name = exact_static_field_name(key, src, handler)?;
+                saw_field = true;
+                path.push(name);
+                if !seen.insert(path.clone()) {
+                    return None;
+                }
+                if handler.is_lambda(value.kind()) {
+                    out.push(crate::InlineAggregateCallbackFact {
+                        callback_span: span_of(file, &value),
+                        path: path.clone(),
+                        params: extract_param_names(&value, src, handler),
+                    });
+                } else if is_nested_aggregate(value.kind(), handler) {
+                    collect(value, file, src, handler, path, out, seen)?;
+                }
+                path.pop();
+            }
+            return saw_field.then_some(());
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if is_spread_node(child.kind(), handler) {
+                return None;
+            }
+            let pairs = field_pair_nodes(child, handler);
+            if pairs.is_empty() {
+                if handler.shorthand_field_kinds.contains(&child.kind()) {
+                    let name = exact_static_field_name(child, src, handler)?;
+                    saw_field = true;
+                    path.push(name);
+                    if !seen.insert(path.clone()) {
+                        return None;
+                    }
+                    path.pop();
+                    continue;
+                }
+                if !handler.comment_kinds.contains(&child.kind()) {
+                    return None;
+                }
+                continue;
+            }
+            for (key, value) in pairs {
+                let name = exact_static_field_name(key, src, handler)?;
+                saw_field = true;
+                path.push(name);
+                if !seen.insert(path.clone()) {
+                    return None;
+                }
+                if handler.is_lambda(value.kind()) {
+                    out.push(crate::InlineAggregateCallbackFact {
+                        callback_span: span_of(file, &value),
+                        path: path.clone(),
+                        params: extract_param_names(&value, src, handler),
+                    });
+                } else if is_nested_aggregate(value.kind(), handler) {
+                    collect(value, file, src, handler, path, out, seen)?;
+                }
+                path.pop();
+            }
+        }
+        saw_field.then_some(())
+    }
+
+    let mut out = Vec::new();
+    collect(
+        node,
+        file,
+        src,
+        handler,
         &mut Vec::new(),
         &mut out,
         &mut std::collections::HashSet::new(),

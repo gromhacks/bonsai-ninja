@@ -6,25 +6,94 @@
   severity: high
   packages:
   - guzzlehttp/guzzle
+  imports:
+  - GuzzleHttp\Client
   cwe:
   - CWE-295
   match:
-    kind: write
-    target:
-      name: verify
+    kind: new
+    callee:
+      attribute: [GuzzleHttp, Client]
+      binding_origin: imported
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 0
+      required_fields:
+      - path: [verify]
+        value: {kind: boolean, value: false}
   match_examples:
-  - name: php.tls.guzzle_verify_false example
+  - name: Guzzle client disables certificate verification
     code: |
       <?php
-      use guzzlehttp\guzzle;
-      use guzzlehttp\guzzle;
-      function example($input, $url, $id, $payload, $request) {
-        $verify = false;;
+      use GuzzleHttp\Client;
+      function configure() {
+        return new Client(['verify' => false]);
       }
-  description: Guzzle 'verify' => false.
-  imports:
-  - guzzlehttp\guzzle
-  - guzzlehttp
+  - name: Guzzle client keeps certificate verification enabled negative
+    code: |
+      <?php
+      use GuzzleHttp\Client;
+      function configure() {
+        return new Client(['verify' => true]);
+      }
+    expect_no_match: true
+  - name: same named local Client negative
+    code: |
+      <?php
+      namespace Local;
+      use GuzzleHttp\Client as GuzzleClient;
+      class Client { public function __construct(array $options) {} }
+      function configure() {
+        return new Client(['verify' => false]);
+      }
+    expect_no_match: true
+  description: Guzzle Client construction with an exact `verify => false` option disables certificate verification; compiler import identity and aggregate field facts reject secure values and local constructors.
+- id: php.tls.guzzle_request_verify_false
+  enabled: true
+  language: php
+  tag: weak-tls
+  category: source-independent
+  severity: high
+  packages: [guzzlehttp/guzzle]
+  imports: [GuzzleHttp\Client]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      regex: '^[^\.\s]+\.request$'
+      receiver_type_in: [GuzzleHttp\Client]
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 2
+      required_fields:
+      - path: [verify]
+        value: {kind: boolean, value: false}
+  match_examples:
+  - name: Guzzle request disables certificate verification
+    code: |
+      <?php
+      use GuzzleHttp\Client;
+      function fetch(Client $client, string $url) {
+        return $client->request('GET', $url, ['verify' => false]);
+      }
+  - name: Guzzle request verification enabled negative
+    code: |
+      <?php
+      use GuzzleHttp\Client;
+      function fetch(Client $client, string $url) {
+        return $client->request('GET', $url, ['verify' => true]);
+      }
+    expect_no_match: true
+  - name: same request method on local type negative
+    code: |
+      <?php
+      use GuzzleHttp\Client as GuzzleClient;
+      class LocalClient { public function request($method, $url, $options) {} }
+      function fetch(LocalClient $client, string $url) {
+        return $client->request('GET', $url, ['verify' => false]);
+      }
+    expect_no_match: true
+  description: A typed Guzzle Client request with an exact `verify => false` options field disables certificate verification; unrelated request methods and secure options stay quiet.
 - id: php.tls.stream_context_verify_peer_off
   enabled: true
   language: php
@@ -34,13 +103,40 @@
   cwe:
   - CWE-295
   match:
-    kind: write
-    target:
-      name: verify_peer
+    kind: call
+    callee:
+      name: stream_context_create
+      binding_origin: runtime-global
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 0
+      required_fields:
+      - path: [ssl, verify_peer]
+        value: {kind: boolean, value: false}
   match_examples:
-  - name: php.tls.stream_context_verify_peer_off example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $verify_peer = false;;\n}\n"
-  description: stream context 'verify_peer' => false.
+  - name: stream context peer verification disabled
+    code: |
+      <?php
+      function configure() {
+        return stream_context_create(['ssl' => ['verify_peer' => false]]);
+      }
+  - name: stream context peer verification enabled negative
+    code: |
+      <?php
+      function configure() {
+        return stream_context_create(['ssl' => ['verify_peer' => true]]);
+      }
+    expect_no_match: true
+  - name: namespaced helper with the same spelling is not the runtime function
+    code: |
+      <?php
+      namespace Application;
+      function stream_context_create(array $options) { return $options; }
+      function configure() {
+        return stream_context_create(['ssl' => ['verify_peer' => false]]);
+      }
+    expect_no_match: true
+  description: "`stream_context_create` with exact nested `ssl.verify_peer => false` disables certificate verification; compiler aggregate facts reject secure or unrelated option arrays."
 - id: php.tls.stream_context_verify_peer_name_off
   enabled: true
   language: php
@@ -50,13 +146,40 @@
   cwe:
   - CWE-295
   match:
-    kind: write
-    target:
-      name: verify_peer_name
+    kind: call
+    callee:
+      name: stream_context_create
+      binding_origin: runtime-global
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 0
+      required_fields:
+      - path: [ssl, verify_peer_name]
+        value: {kind: boolean, value: false}
   match_examples:
-  - name: php.tls.stream_context_verify_peer_name_off example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $verify_peer_name = false;;\n}\n"
-  description: stream context 'verify_peer_name' => false.
+  - name: stream context peer-name verification disabled
+    code: |
+      <?php
+      function configure() {
+        return stream_context_create(['ssl' => ['verify_peer_name' => false]]);
+      }
+  - name: stream context peer-name verification enabled negative
+    code: |
+      <?php
+      function configure() {
+        return stream_context_create(['ssl' => ['verify_peer_name' => true]]);
+      }
+    expect_no_match: true
+  - name: namespaced helper does not configure the PHP stream runtime
+    code: |
+      <?php
+      namespace Application;
+      function stream_context_create(array $options) { return $options; }
+      function configure() {
+        return stream_context_create(['ssl' => ['verify_peer_name' => false]]);
+      }
+    expect_no_match: true
+  description: "`stream_context_create` with exact nested `ssl.verify_peer_name => false` disables hostname verification; compiler aggregate facts reject secure or unrelated option arrays."
 - id: php.tls.allow_self_signed
   enabled: true
   language: php
@@ -66,10 +189,37 @@
   cwe:
   - CWE-295
   match:
-    kind: write
-    target:
-      name: allow_self_signed
+    kind: call
+    callee:
+      name: stream_context_create
+      binding_origin: runtime-global
+  constraints:
+  - arg_aggregate_fields_equal:
+      argument_index: 0
+      required_fields:
+      - path: [ssl, allow_self_signed]
+        value: {kind: boolean, value: true}
   match_examples:
-  - name: php.tls.allow_self_signed example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $allow_self_signed = false;;\n}\n"
-  description: stream context 'allow_self_signed' => true.
+  - name: stream context accepts self-signed certificates
+    code: |
+      <?php
+      function configure() {
+        return stream_context_create(['ssl' => ['allow_self_signed' => true]]);
+      }
+  - name: stream context rejects self-signed certificates negative
+    code: |
+      <?php
+      function configure() {
+        return stream_context_create(['ssl' => ['allow_self_signed' => false]]);
+      }
+    expect_no_match: true
+  - name: namespaced helper does not change stream certificate policy
+    code: |
+      <?php
+      namespace Application;
+      function stream_context_create(array $options) { return $options; }
+      function configure() {
+        return stream_context_create(['ssl' => ['allow_self_signed' => true]]);
+      }
+    expect_no_match: true
+  description: "`stream_context_create` with exact nested `ssl.allow_self_signed => true` accepts untrusted certificates; compiler aggregate facts reject the secure setting."

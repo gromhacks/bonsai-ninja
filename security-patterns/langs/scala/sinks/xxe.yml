@@ -102,7 +102,8 @@
   match:
     kind: call
     callee:
-      attribute: [DocumentBuilder, parse]
+      name: parse
+      receiver_type_in: [DocumentBuilder]
   constraints:
   - arg_tainted:
       index: 0
@@ -110,23 +111,34 @@
   - name: generated shape example
     code: |
       import javax.xml.parsers._
-      // uses javax.xml.parsers
       object App {
         def handle(input: String): Unit = {
-          DocumentBuilder.parse(input)
+          val factory = DocumentBuilderFactory.newInstance()
+          val builder = factory.newDocumentBuilder()
+          builder.parse(input)
         }
       }
+    expect_match_text: [builder.parse]
   - name: arg tainted literal negative
     code: |
       import javax.xml.parsers._
-      // uses javax.xml.parsers
       object App {
-        def handle(input: String): Unit = {
-          DocumentBuilder.parse("safe.xml")
+        def handle(): Unit = {
+          val factory = DocumentBuilderFactory.newInstance()
+          val builder = factory.newDocumentBuilder()
+          builder.parse("safe.xml")
         }
       }
     expect_no_match: true
-  description: "javax.xml.parsers.DocumentBuilder.parse - unsafe unless FEATURE_SECURE_PROCESSING is set."
+  - name: local parser is not a document builder
+    code: |
+      import javax.xml.parsers._
+      class LocalParser { def parse(value: String): Unit = () }
+      object App {
+        def handle(parser: LocalParser, input: String): Unit = parser.parse(input)
+      }
+    expect_no_match: true
+  description: "Compiler-typed javax.xml.parsers.DocumentBuilder.parse - unsafe unless FEATURE_SECURE_PROCESSING is set."
 
 - id: scala.xxe.sax_parser_parse
   enabled: true
@@ -251,44 +263,3 @@
       }
     expect_no_match: true
   description: "JAXB Unmarshaller.unmarshal - wraps SAX parser; same XXE rules apply."
-
-- id: scala.xxe.apache_poi_xssfworkbook_inputstream
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: scala
-  tag: xxe
-  severity: high
-  packages: ["org.apache.poi"]
-  cwe: [CWE-611]
-  match:
-    kind: new
-    callee:
-      name: XSSFWorkbook
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: apache poi xssf workbook input stream
-    code: |
-      import org.apache.poi._
-      object App {
-        def handle(stream: InputStream): Any = {
-          new XSSFWorkbook(stream)
-        }
-      }
-      class InputStream
-      class XSSFWorkbook(args: Any*)
-    expect_match_text: [XSSFWorkbook]
-  - name: arg tainted literal negative
-    code: |
-      import org.apache.poi._
-      object App {
-        def handle(stream: InputStream): Any = {
-          new XSSFWorkbook("safe.xlsx")
-        }
-      }
-      class InputStream
-      class XSSFWorkbook(args: Any*)
-    expect_no_match: true
-  description: "Disabled - XSSFWorkbook(InputStream) is not itself an external-entity boundary. Apache POI's historical XXE affected XSSFExportToXml before 4.1.1; archive resource exhaustion requires a separate, version/config-aware rule."

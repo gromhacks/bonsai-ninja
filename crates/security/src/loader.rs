@@ -47,6 +47,11 @@ pub struct RulepackMetadata {
     /// are source YAML basenames; the analyzer treats them as data.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub canonical_source_families: Vec<String>,
+    /// Canonical source-boundary tags. Source rules may extend this
+    /// vocabulary only by updating pack metadata; shared Rust code does not
+    /// own ecosystem or trust-boundary spellings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canonical_source_tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub canonical_sink_families: Vec<String>,
     #[serde(default, skip_serializing_if = "map_is_empty")]
@@ -482,6 +487,9 @@ impl Rulepack {
         if !overlay.metadata.canonical_source_families.is_empty() {
             self.metadata.canonical_source_families = overlay.metadata.canonical_source_families.clone();
         }
+        if !overlay.metadata.canonical_source_tags.is_empty() {
+            self.metadata.canonical_source_tags = overlay.metadata.canonical_source_tags.clone();
+        }
         self.metadata
             .sink_family_short_labels
             .extend(overlay.metadata.sink_family_short_labels);
@@ -695,6 +703,12 @@ pub enum LoadError {
         id: String,
         path: String,
         kind: MatchKind,
+    },
+    #[error("rule `{id}` in `{path}`: invalid target context: {detail}")]
+    InvalidTargetContext {
+        id: String,
+        path: String,
+        detail: &'static str,
     },
     #[error("rule `{id}` in `{path}`: invalid typing declaration: {detail}")]
     InvalidTypingDeclaration {
@@ -1070,11 +1084,13 @@ fn validate_rule(rule: &Rule) -> Result<(), LoadError> {
     if rule.match_spec.kind == MatchKind::Type && rule.kind != RuleKind::Typing {
         return Err(typing_error("match.kind type is valid only in typing rules"));
     }
-    if (!rule.callback_param_types.is_empty() || rule.callback_arg_index.is_some())
+    if (!rule.callback_param_types.is_empty()
+        || rule.callback_arg_index.is_some()
+        || !rule.callback_field_path.is_empty())
         && rule.kind != RuleKind::Typing
     {
         return Err(typing_error(
-            "callback_param_types and callback_arg_index are valid only in typing rules",
+            "callback_param_types, callback_arg_index, and callback_field_path are valid only in typing rules",
         ));
     }
     if rule.kind == RuleKind::Typing && !rule.callback_param_types.is_empty() {
@@ -1102,6 +1118,20 @@ fn validate_rule(rule: &Rule) -> Result<(), LoadError> {
         }
     } else if rule.callback_arg_index.is_some() {
         return Err(typing_error("callback_arg_index requires callback_param_types"));
+    } else if !rule.callback_field_path.is_empty() {
+        return Err(typing_error("callback_field_path requires callback_param_types"));
+    }
+    if rule.match_spec.kind != MatchKind::Call && !rule.callback_field_path.is_empty() {
+        return Err(typing_error("callback_field_path requires match.kind call"));
+    }
+    if rule
+        .callback_field_path
+        .iter()
+        .any(|segment| segment.trim().is_empty())
+    {
+        return Err(typing_error(
+            "callback_field_path segments must be non-empty exact field names",
+        ));
     }
     if rule.kind == RuleKind::Typing
         && rule.match_spec.kind == MatchKind::Type
@@ -1170,6 +1200,70 @@ fn validate_rule(rule: &Rule) -> Result<(), LoadError> {
         .as_ref()
         .or(rule.match_spec.target.as_ref())
     {
+        if rule_target
+            .in_class_suffix
+            .iter()
+            .any(|suffix| suffix.trim().is_empty())
+        {
+            return Err(LoadError::InvalidTargetContext {
+                id: rule.id.clone(),
+                path: rule.source_path.clone(),
+                detail: "in_class_suffix entries must be non-empty",
+            });
+        }
+        if rule_target
+            .in_owner_base
+            .iter()
+            .any(|base| base.trim().is_empty())
+        {
+            return Err(LoadError::InvalidTargetContext {
+                id: rule.id.clone(),
+                path: rule.source_path.clone(),
+                detail: "in_owner_base entries must be non-empty",
+            });
+        }
+        if rule_target
+            .param_type_exact_in
+            .iter()
+            .any(|type_name| type_name.trim().is_empty())
+        {
+            return Err(LoadError::InvalidTargetContext {
+                id: rule.id.clone(),
+                path: rule.source_path.clone(),
+                detail: "param_type_exact_in entries must be non-empty",
+            });
+        }
+        let mut signature_indices = std::collections::BTreeSet::new();
+        if rule_target.signature_param_types.iter().any(|requirement| {
+            requirement.type_in.is_empty()
+                || requirement
+                    .type_in
+                    .iter()
+                    .any(|type_name| type_name.trim().is_empty())
+                || !signature_indices.insert(requirement.index)
+        }) {
+            return Err(LoadError::InvalidTargetContext {
+                id: rule.id.clone(),
+                path: rule.source_path.clone(),
+                detail: "signature_param_types requires unique indexes and non-empty type_in entries",
+            });
+        }
+        let mut annotation_indices = std::collections::BTreeSet::new();
+        if rule_target.signature_param_annotations.iter().any(|requirement| {
+            requirement.annotation_in.is_empty()
+                || requirement
+                    .annotation_in
+                    .iter()
+                    .any(|annotation| annotation.trim().is_empty())
+                || !annotation_indices.insert(requirement.index)
+        }) {
+            return Err(LoadError::InvalidTargetContext {
+                id: rule.id.clone(),
+                path: rule.source_path.clone(),
+                detail:
+                    "signature_param_annotations requires unique indexes and non-empty annotation_in entries",
+            });
+        }
         if !rule_target.call_kind_in.is_empty()
             && !matches!(rule.match_spec.kind, MatchKind::Call | MatchKind::Missing)
         {
@@ -1177,6 +1271,18 @@ fn validate_rule(rule: &Rule) -> Result<(), LoadError> {
                 id: rule.id.clone(),
                 path: rule.source_path.clone(),
                 kind: rule.match_spec.kind,
+            });
+        }
+        if rule_target.binding_origin.is_some()
+            && !matches!(
+                rule.match_spec.kind,
+                MatchKind::Call | MatchKind::New | MatchKind::Read | MatchKind::Write
+            )
+        {
+            return Err(LoadError::InvalidTargetContext {
+                id: rule.id.clone(),
+                path: rule.source_path.clone(),
+                detail: "binding_origin is valid only for call, new, read, and write matches",
             });
         }
         if let Some(regex) = rule_target.regex.as_deref() {

@@ -173,6 +173,13 @@ already-proven non-deferred plans. Raw workspace reads may overlap in
 memory-weighted windows, but VFS publication remains in canonical path order.
 Raw-anchor candidate tests run on that bounded pool as read-only planning;
 never rescan every file/rule pair serially while the worker pool is idle.
+Compile each language batch's literal target/package anchors into one shared
+source pass, carry its compact presence/call-shape evidence into header
+planning, and do not repeat the same source scan per rule or planning stage.
+Build per-file package evidence lazily only after an exact target survives and
+its package literal is absent. Process-local package caches use the unique VFS
+instance, stable FileId, edit-monotonic version, and exact package-context
+fingerprint; they must not hash the complete source again.
 Broad matcher headers and bodies run as continuous CPU worklists behind
 source-size-weighted memory permits; small units may overlap while a large
 unit consumes more of the same scheduling budget. Derive only the secondary
@@ -276,8 +283,9 @@ If the result reports ambiguity, add the printed `--line` and optionally
 `inspect` is rulepack-free by default and renders indexed syntax facts. Use
 `--graph-flow` to add structural source-body evidence and `--taint-flow` to
 explicitly add rulepack-free raw taint paths. These flags change output scope,
-not analysis accuracy: emitted graph facts still use the exact/narrowed static
-evidence contract. Inspect raw taint paths go through the workspace syntax-flow
+not analysis accuracy: emitted graph facts still use the single compiler-proven
+static-evidence contract. `Exact` and `Narrowed` are per-edge proof-provenance
+labels, never alternate modes. Inspect raw taint paths go through the workspace syntax-flow
 facade. Syntax discovery records exact matching Tree-sitter spans and releases
 body/callgraph caches before a persisted IDG opens. A warm query batch resolves
 those spans to typed target nodes and reuses one sparse backward demand proof;

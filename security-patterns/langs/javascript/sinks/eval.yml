@@ -31,21 +31,6 @@
     like `foo.eval(x)` (e.g. mongodb db.eval, vm.runInThisContext)
     which are covered by their own package-scoped rules.
 
-- id: javascript.eval.function_constructor
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.eval.function_constructor_call
-  language: javascript
-  tag: code-injection
-  severity: critical
-  cwe: [CWE-94]
-  match:
-    kind: new
-    callee:
-      name: Function
-  description: "Disabled duplicate - adapter also emits new Function(...) as the call-form Function fact, covered by javascript.eval.function_constructor_call."
-
 - id: javascript.eval.function_constructor_call
   aliases: [javascript.eval.function_constructor]
   enabled: true
@@ -83,48 +68,6 @@
     code: "function demo(input, req, obj) {\n  return new Function(\"safe\");\n}\n"
     expect_no_match: true
   description: "Function('...' + body) / Function(body) - call-form Function constructor compiles attacker-controlled source."
-
-- id: javascript.eval.settimeout_string
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: code-injection
-  severity: medium
-  cwe: [CWE-94]
-  match:
-    kind: call
-    callee:
-      name: setTimeout
-  description: "Disabled - setTimeout(fn, ms) is almost always called with a function; the eval-string form is uncommon and can't be distinguished without a string-type constraint we don't have."
-
-- id: javascript.eval.setinterval_string
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: code-injection
-  severity: medium
-  cwe: [CWE-94]
-  match:
-    kind: call
-    callee:
-      name: setInterval
-  description: "Disabled - same as setTimeout; enable only when first-arg-type analysis is available."
-
-- id: javascript.eval.setimmediate_string
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: javascript
-  tag: code-injection
-  severity: medium
-  cwe: [CWE-94]
-  match:
-    kind: call
-    callee:
-      name: setImmediate
-  description: "Disabled - setImmediate doesn't even accept a string form; kept as a placeholder."
 
 - id: javascript.eval.execscript
   enabled: true
@@ -337,20 +280,6 @@
       }
     expect_no_match: true
   description: new vm.Script(tainted) - compiles a Script object from attacker source.
-
-- id: javascript.eval.dynamic_import
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: code-injection
-  severity: high
-  cwe: [CWE-94, CWE-470]
-  match:
-    kind: call
-    callee:
-      name: import
-  description: "Disabled - bare `import(x)` fires on every dynamic import; dangerous only when the module specifier is tainted. Enable with source-proximity."
 
 - id: javascript.eval.require_dynamic
   enabled: true

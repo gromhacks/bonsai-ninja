@@ -5,6 +5,7 @@
   tag: header-injection
   severity: high
   packages: [vapor]
+  imports: [Vapor]
   cwe: [CWE-113]
   match:
     kind: call
@@ -18,12 +19,10 @@
     code: |
       import vapor
       import Vapor // vapor
-      import Vapor // vapor
       func test(input: String) { replaceOrAdd(name: "X-Name", value: input) }
   - name: literal vapor replace header negative
     code: |
       import vapor
-      import Vapor // vapor
       import Vapor // vapor
       func test() { replaceOrAdd(name: "X-Name", value: "safe") }
     expect_no_match: true
@@ -67,11 +66,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.add$
-      base_name_in:
-      - headers
-      - response
-      - res
-      - h
+      receiver_type_in: [HTTPHeaders]
   constraints:
   - arg_tainted:
       index: 1
@@ -80,14 +75,18 @@
     code: |
       import vapor
       import Vapor // vapor
-      import Vapor // vapor
-      func test(input: String) { headers.add(name: "X-Name", value: input) }
+      func test(headers: HTTPHeaders, input: String) { headers.add(name: "X-Name", value: input) }
   - name: literal vapor add header negative
     code: |
       import vapor
       import Vapor // vapor
-      import Vapor // vapor
-      func test() { headers.add(name: "X-Name", value: "safe") }
+      func test(headers: HTTPHeaders) { headers.add(name: "X-Name", value: "safe") }
+    expect_no_match: true
+  - name: local HTTPHeaders is not Vapor response headers
+    code: |
+      import Vapor
+      struct HTTPHeaders {}
+      func test(headers: HTTPHeaders, input: String) { headers.add(name: "X-Name", value: input) }
     expect_no_match: true
   description: "Vapor Response.headers.add(name:value:). Suffix-match via `headers.add` - reduces FP vs bare `add`."
 - id: swift.header.vapor_response_headers_add_name
@@ -96,16 +95,13 @@
   tag: header-injection
   severity: high
   packages: [vapor]
+  imports: [Vapor]
   cwe: [CWE-113]
   match:
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.add$
-      base_name_in:
-      - headers
-      - response
-      - res
-      - h
+      receiver_type_in: [HTTPHeaders]
   constraints:
   - arg_tainted:
       index: 0
@@ -114,12 +110,18 @@
     code: |
       import vapor
       import Vapor // vapor
-      func test(input: String) { headers.add(name: input, value: "safe") }
+      func test(headers: HTTPHeaders, input: String) { headers.add(name: input, value: "safe") }
   - name: literal vapor add header name negative
     code: |
       import vapor
       import Vapor // vapor
-      func test() { headers.add(name: "X-Name", value: "safe") }
+      func test(headers: HTTPHeaders) { headers.add(name: "X-Name", value: "safe") }
+    expect_no_match: true
+  - name: local HTTPHeaders name is not Vapor response headers
+    code: |
+      import Vapor
+      struct HTTPHeaders {}
+      func test(headers: HTTPHeaders, input: String) { headers.add(name: input, value: "safe") }
     expect_no_match: true
   description: "Vapor Response.headers.add(name:value:) - tainted header names can corrupt response headers."
 

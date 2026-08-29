@@ -34,6 +34,7 @@ parking_lot = { workspace = true }
 lru = { workspace = true }
 
 [dev-dependencies]
+bonsai_adapters = { package = "bonsai-ninja-adapters", path = "../adapters" }
 bonsai_lang_c = { package = "bonsai-ninja-lang-c", path = "../lang_c" }
 bonsai_lang_cpp = { package = "bonsai-ninja-lang-cpp", path = "../lang_cpp" }
 bonsai_lang_csharp = { package = "bonsai-ninja-lang-csharp", path = "../lang_csharp" }
@@ -55,6 +56,7 @@ bonsai_lang_elixir = { package = "bonsai-ninja-lang-elixir", path = "../lang_eli
 bonsai_lang_erlang = { package = "bonsai-ninja-lang-erlang", path = "../lang_erlang" }
 bonsai_lang_perl = { package = "bonsai-ninja-lang-perl", path = "../lang_perl" }
 rayon = { workspace = true }
+tree-sitter = { workspace = true }
 
 [lints]
 workspace = true

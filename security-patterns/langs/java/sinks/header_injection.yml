@@ -45,11 +45,9 @@
         }
       }
     expect_no_match: true
-  description: "HttpServletResponse.setHeader - flag tainted value (CRLF). Merged aliases: java.header.content_disposition_setheader, java.open_redirect.servlet_response_setheader_location."
+  description: "HttpServletResponse.setHeader - flag tainted value (CRLF)."
   aliases:
   - java.header.content_disposition_setheader
-  - java.open_redirect.servlet_response_setheader_location
-  - java.smuggle.set_dual_cl_te_headers
 - id: java.header.servlet_response_addheader
   enabled: true
   language: java
@@ -187,6 +185,11 @@
   analysis_semantics:
     character_constraint:
       required_excluded_characters: ["\r", "\n"]
+      accepted_providers:
+      - operation:
+          regex: '^(?:(?:java[.]lang[.])?String[.](?:replace#(?:character-literal|single-character-string|regex-meta-character-string)|replaceAll#(?:single-character-string|regex-character-class)))(?:[|](?:java[.]lang[.])?String[.](?:replace#(?:character-literal|single-character-string|regex-meta-character-string)|replaceAll#(?:single-character-string|regex-character-class)))*$'
+      - factory: {regex: '^java[.]util[.]regex[.]Pattern[.]compile$'}
+        operation: {regex: '^matcher[|]replaceAll$'}
   match_examples:
   - name: spring httpheaders set tainted value
     code: |
@@ -283,10 +286,9 @@
         }
       }
     expect_no_match: true
-  description: "ResponseEntity.header(name, tainted) - CRLF response header injection. Merged aliases: java.header.spring_responseentity_content_disposition, java.open_redirect.spring_responseentity_header_location."
+  description: "ResponseEntity.header(name, tainted) - CRLF response header injection."
   aliases:
   - java.header.spring_responseentity_content_disposition
-  - java.open_redirect.spring_responseentity_header_location
   imports:
   - org.springframework.http
 - id: java.header.webflux_serverresponse_header
@@ -346,9 +348,7 @@
         }
       }
     expect_no_match: true
-  description: "Spring WebFlux ServerResponse.header(name, tainted) - CRLF response header injection. Merged aliases: java.open_redirect.webflux_serverresponse_header_location."
-  aliases:
-  - java.open_redirect.webflux_serverresponse_header_location
+  description: "Spring WebFlux ServerResponse.header(name, tainted) - CRLF response header injection."
 - id: java.header.vertx_response_putheader
   enabled: true
   language: java
@@ -369,6 +369,11 @@
   analysis_semantics:
     character_constraint:
       required_excluded_characters: ["\r", "\n"]
+      accepted_providers:
+      - operation:
+          regex: '^(?:(?:java[.]lang[.])?String[.](?:replace#(?:character-literal|single-character-string|regex-meta-character-string)|replaceAll#(?:single-character-string|regex-character-class)))(?:[|](?:java[.]lang[.])?String[.](?:replace#(?:character-literal|single-character-string|regex-meta-character-string)|replaceAll#(?:single-character-string|regex-character-class)))*$'
+      - factory: {regex: '^java[.]util[.]regex[.]Pattern[.]compile$'}
+        operation: {regex: '^matcher[|]replaceAll$'}
   match_examples:
   - name: vertx response tainted header value
     code: |
@@ -406,6 +411,4 @@
         void putHeader(Object... args) {}
       }
     expect_no_match: true
-  description: "Vert.x HttpServerResponse.putHeader(name, tainted) - CRLF response header injection. Merged aliases: java.open_redirect.vertx_response_putheader_location."
-  aliases:
-  - java.open_redirect.vertx_response_putheader_location
+  description: "Vert.x HttpServerResponse.putHeader(name, tainted) - CRLF response header injection."

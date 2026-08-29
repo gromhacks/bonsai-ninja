@@ -304,7 +304,7 @@ pub(crate) fn bytes_to_tokens(bytes: u64) -> u64 {
 /// `--context` budgets aren't respected in practice.
 ///
 /// Calibrated against actual rendered output from
-/// `examples/python/complex`:
+/// `test-fixtures/languages/python/complex`:
 /// - `defs` 179 rows / 101 777 bytes ≈ 568 B/row
 /// - `calls` 100 rows / 45 000 bytes ≈ 450 B/row
 /// - `args` 74 rows / 23 000 bytes ≈ 310 B/row

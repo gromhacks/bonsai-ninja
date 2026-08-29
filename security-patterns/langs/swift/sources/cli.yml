@@ -80,49 +80,6 @@
         return e
       }
   description: "ProcessInfo.processInfo.environment - process environment variables read via the `environment` property."
-- id: swift.argparser_argument
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  trust: local
-  tag: local-input
-  payload_types: [text]
-  packages: [ArgumentParser]
-  match:
-    kind: read
-    target:
-      name: Argument
-  description: "Disabled - swift-argument-parser @Argument/@Option are property wrappers; not directly observable as reads without annotation support."
-
-- id: swift.ui.text_field_text
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  trust: local
-  tag: ui-input
-  payload_types: [text]
-  match:
-    kind: read
-    target:
-      name: text
-  description: "Disabled - bare `.text` read matches too broadly without receiver narrowing to UITextField."
-
-- id: swift.ui.textview_text
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  trust: local
-  tag: ui-input
-  payload_types: [text]
-  match:
-    kind: read
-    target:
-      name: string
-  description: "Disabled - NSTextView.string overlaps with every Swift String."
-
 - id: swift.ui.textfield_text
   enabled: true
   language: swift
@@ -142,6 +99,12 @@
         let t = field.text
         return t
       }
+  - name: same text property on unrelated receiver negative
+    code: |
+      import UIKit
+      struct SearchState { let text: String }
+      func run(field: SearchState) -> String { field.text }
+    expect_no_match: true
   description: "UITextField.text - user-entered text read on a typed UITextField receiver."
 
 - id: swift.ui.textview_string
@@ -163,6 +126,12 @@
         let s = view.string
         return s
       }
+  - name: same string property on unrelated receiver negative
+    code: |
+      import AppKit
+      struct Document { let string: String }
+      func run(view: Document) -> String { view.string }
+    expect_no_match: true
   description: "NSTextView.string - user-entered text read on a typed NSTextView receiver."
 
 - id: swift.ui.uitextview_text
@@ -192,9 +161,7 @@
   description: "UITextView.text returns user-entered text from a compiler-typed UITextView receiver."
 
 - id: swift.uipasteboard_value_read
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: local
   tag: clipboard-input
@@ -203,7 +170,8 @@
   match:
     kind: read
     target:
-      regex: "^(string|strings|items|url|urls)$"
+      regex: "(?:^|\\.)(?:string|strings|items|url|urls)$"
+      base_name_not_in: [UIPasteboard]
       receiver_type_in: [UIPasteboard]
   match_examples:
   - name: typed clipboard string read
@@ -217,19 +185,30 @@
       struct Document { let string: String }
       func read(document: Document) -> String { document.string }
     expect_no_match: true
-  description: "Disabled pending Swift receiver-type facts for UIPasteboard property reads. UIPasteboard.general itself is not a source, and a bare string/items/url property would overmatch."
+  description: "UIPasteboard string/strings/items/url/urls property reads return clipboard or cross-application paste content on a compiler-typed instance receiver; the imported singleton chain is modeled separately."
 
-- id: swift.swiftui.textfield_binding
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: swift.uipasteboard_general_value_read
+  enabled: true
   language: swift
   trust: local
-  tag: ui-input
-  payload_types: [text]
-  frameworks: [swiftui]
+  tag: clipboard-input
+  payload_types: [text, binary, url]
+  packages: [UIKit]
   match:
-    kind: call
-    callee:
-      attribute: [TextField, init]
-  description: "Disabled - SwiftUI TextField(_:text:) binds a local @State string; match fires on the declaration rather than the read, and property-wrapper flow isn't tracked."
+    kind: read
+    target:
+      regex: '^UIPasteboard\.general\.(?:string|strings|items|url|urls)$'
+  match_examples:
+  - name: UIKit singleton clipboard URL read
+    code: |
+      import UIKit
+      func read() -> URL? { UIPasteboard.general.url }
+    expect_match_text: [UIPasteboard.general.url]
+  - name: local singleton-shaped type negative
+    code: |
+      import UIKit
+      struct LocalPasteboard { let url: URL? }
+      struct UIPasteboard { static let general = LocalPasteboard(url: nil) }
+      func read() -> URL? { UIPasteboard.general.url }
+    expect_no_match: true
+  description: "An exact UIKit UIPasteboard.general value-property read returns clipboard or cross-application paste content; imported binding identity prevents local singleton-shaped types from matching."

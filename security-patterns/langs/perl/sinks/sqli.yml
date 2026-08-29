@@ -1,21 +1,6 @@
 # Perl SQL-injection sinks (DBI + DBIx::Class + Rose::DB).
 # Adapter note: $dbh->method(...) matches as call with callee name = method.
 # Bare-name rules are broad; rely on taint-flow + arg-shape review.
-- id: perl.sqli.dbi_do
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  tag: sql-injection
-  severity: critical
-  packages: [DBI]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      name: do
-  description: "Disabled - bare `name: do` overmatches the Perl keyword `do EXPR` and other `->do` accessors; no canonical exists. Re-enable when adapter supports receiver-type narrowing for $dbh->do."
-
 - id: perl.sqli.dbi_selectrow_array
   enabled: true
   language: perl
@@ -117,32 +102,37 @@
   language: perl
   tag: sql-injection
   severity: high
-  packages: [DBI]
   cwe: [CWE-89]
   match:
     kind: call
     callee:
       name: selectall_arrayref
+      call_kind_in: [method]
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: perl.sqli.dbi_selectall example
     code: |
-      use DBI;
       sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        selectall_arrayref($input)
+        my ($handle, $input) = @_;
+        $handle->selectall_arrayref($input)
       }
   - name: literal selectall arrayref negative
     code: |
-      use DBI;
       sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        selectall_arrayref("select 1")
+        my ($handle) = @_;
+        $handle->selectall_arrayref("select 1")
       }
     expect_no_match: true
-  description: "DBI $dbh->selectall_arrayref."
+  - name: same-spelled bare function is not the DBI method
+    code: |
+      sub example {
+        my ($input) = @_;
+        selectall_arrayref($input)
+      }
+    expect_no_match: true
+  description: "DBI method selectall_arrayref(sql) with a tainted SQL program. The compiler-proven method call kind excludes same-spelled application functions; receiver binding names have no semantic role."
 
 - id: perl.sqli.dbi_selectall_hashref
   enabled: true
@@ -208,36 +198,6 @@
     expect_no_match: true
   description: "DBI $dbh->selectcol_arrayref."
 
-- id: perl.sqli.dbi_prepare
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: perl
-  tag: sql-injection
-  severity: medium
-  packages: [DBI]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      name: prepare
-  description: "Disabled - prepare is safe when binding; flag only with concatenated SQL."
-
-- id: perl.sqli.dbi_prepare_cached
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  tag: sql-injection
-  severity: medium
-  packages: [DBI]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      name: prepare_cached
-  description: "Disabled - same as prepare."
-
 - id: perl.sqli.dbix_class_search_literal
   enabled: true
   language: perl
@@ -269,44 +229,6 @@
       }
     expect_no_match: true
   description: "DBIx::Class search_literal - raw SQL fragment."
-
-- id: perl.sqli.dbix_class_storage_dbh_do
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: perl
-  tag: sql-injection
-  severity: critical
-  packages: ["DBIx::Class"]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      name: dbh_do
-  match_examples:
-  - name: perl.sqli.dbix_class_storage_dbh_do example
-    code: |
-      use DBIx::Class;
-      sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        dbh_do($input)
-      }
-  description: "Disabled - dbh_do passes a DBI handle to a callback; raw SQL is issued inside callback state, not in a taintable dbh_do argument."
-
-- id: perl.sqli.sql_abstract_select
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: perl
-  tag: sql-injection
-  severity: medium
-  packages: ["SQL::Abstract"]
-  cwe: [CWE-89]
-  match:
-    kind: call
-    callee:
-      name: select
-  description: "Disabled - SQL::Abstract is parameterised by default."
 
 - id: perl.sqli.rose_db_object_new_from_sql
   enabled: true
@@ -340,10 +262,9 @@
     expect_no_match: true
   description: "Rose::DB::Object::Manager get_objects_from_sql - raw SQL."
 
-# Interpolation-shape DBI prepare. Distinct from perl.sqli.dbi_prepare
-# (disabled because parameterised prepare is safe). This fires only
-# when the prepare arg shows scalar interpolation (`$var`) or dot-
-# concat - i.e. inlined SQL pre-bind.
+# Interpolation-shape DBI prepare. This fires only when the prepare arg shows
+# scalar interpolation (`$var`) or dot-concat, meaning SQL is assembled before
+# binding.
 - id: perl.sqli.dbi_prepare_interp
   enabled: true
   language: perl

@@ -35,21 +35,6 @@
     expect_no_match: true
   description: "Object.assign(target, source) - shallow merge can still pollute when a tainted source object carries special keys. JS Object global has no canonical ecosystem package, so strict `['Object', 'assign']` match only."
 
-- id: typescript.proto_pollution.lodash_merge
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: typescript.proto_pollution.lodash_namespace_merge_variants
-  language: typescript
-  tag: prototype-pollution
-  severity: high
-  packages: [lodash]
-  cwe: [CWE-1321]
-  match:
-    kind: call
-    callee:
-      attribute: [_, merge]
-  description: "Disabled - `_.merge` is covered by `typescript.proto_pollution.lodash_namespace_merge_variants` whose receiver-agnostic regex `^[A-Za-z_$][A-Za-z0-9_$]*\\.(merge|defaultsDeep)$|^merge$` already includes the `_.merge` shape."
 - id: typescript.proto_pollution.lodash_set
   enabled: true
   language: typescript
@@ -281,22 +266,6 @@
       }
     expect_no_match: true
   description: "recursive-deep-merge(target, attacker_obj) - recursive merge APIs can honor __proto__/constructor.prototype keys and pollute Object.prototype."
-
-- id: typescript.proto_pollution.recursive_deep_merge_method
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: typescript.proto_pollution.lodash_namespace_merge_variants
-  language: typescript
-  tag: prototype-pollution
-  severity: high
-  packages: [recursive-deep-merge]
-  cwe: [CWE-1321]
-  match:
-    kind: call
-    callee:
-      attribute: [recursiveDeepMerge, merge]
-  description: "Disabled - `recursiveDeepMerge.merge` is covered by `typescript.proto_pollution.lodash_namespace_merge_variants` whose receiver-agnostic regex matches any `<ident>.merge`."
 
 - id: typescript.proto_pollution.deepmerge_package
   enabled: true

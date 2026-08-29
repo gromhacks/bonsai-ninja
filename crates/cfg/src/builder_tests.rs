@@ -43,6 +43,7 @@ fn try_finally(start: u32, body: Vec<FlowEvent>, finally_events: Vec<FlowEvent>)
         finally_events,
         catch_param: None,
         catch_types: Vec::new(),
+        catch_arms: Vec::new(),
     }
 }
 
@@ -249,4 +250,95 @@ fn continue_inside_try_finally_runs_cleanup_then_loop_header() {
     assert_eq!(cleanup.synthetic_kind, Some(SyntheticBlockKind::Finally));
     assert!(block_has_call(cleanup, "cleanup"));
     assert_eq!(cleanup.successors, vec![header]);
+}
+
+#[test]
+fn executable_flow_prunes_only_proven_dead_tail_events() {
+    let flow = normalize_executable_flow(&[call_event(1, "before"), return_event(2), call_event(3, "dead")]);
+    assert_eq!(flow, vec![call_event(1, "before"), return_event(2)]);
+}
+
+#[test]
+fn executable_flow_orders_nested_throw_call_before_the_abrupt_event() {
+    let outer = Span::new(FileId::new(0), 10, 45);
+    let inner = Span::new(FileId::new(0), 20, 40);
+    let dead = Span::new(FileId::new(0), 50, 60);
+    let throw = FlowEvent::Throw {
+        span: outer,
+        value_name: None,
+        thrown_type: Some("RuntimeException".to_string()),
+    };
+    let constructor = FlowEvent::Call {
+        span: inner,
+        name: "RuntimeException".to_string(),
+        receiver: None,
+        call_kind: CallKind::Constructor,
+        args: Vec::new(),
+        receiver_types: Vec::new(),
+    };
+    let unreachable = FlowEvent::Call {
+        span: dead,
+        name: "after".to_string(),
+        receiver: None,
+        call_kind: CallKind::Function,
+        args: Vec::new(),
+        receiver_types: Vec::new(),
+    };
+
+    assert_eq!(
+        normalize_executable_flow(&[throw.clone(), constructor.clone(), unreachable]),
+        vec![constructor, throw]
+    );
+}
+
+#[test]
+fn executable_flow_places_multiple_defers_at_scope_exit_in_lifo_order() {
+    let flow = normalize_executable_flow(&[
+        FlowEvent::Defer {
+            span: span(1),
+            body: vec![call_event(10, "first_cleanup")],
+        },
+        FlowEvent::Defer {
+            span: span(2),
+            body: vec![call_event(20, "second_cleanup")],
+        },
+        call_event(3, "body"),
+        return_event(4),
+        call_event(5, "dead"),
+    ]);
+
+    fn call_names(events: &[FlowEvent], out: &mut Vec<String>) {
+        for event in events {
+            match event {
+                FlowEvent::Call { name, .. } => out.push(name.clone()),
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    call_names(then_events, out);
+                    call_names(else_events, out);
+                }
+                FlowEvent::Loop { body, .. } | FlowEvent::Using { body, .. } => {
+                    call_names(body, out);
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    call_names(body, out);
+                    call_names(catch_events, out);
+                    call_names(finally_events, out);
+                }
+                FlowEvent::Defer { .. } => panic!("defer survived canonical normalization"),
+                _ => {}
+            }
+        }
+    }
+
+    let mut names = Vec::new();
+    call_names(&flow, &mut names);
+    assert_eq!(names, ["body", "second_cleanup", "first_cleanup"]);
 }

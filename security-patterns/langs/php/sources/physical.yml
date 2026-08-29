@@ -1,0 +1,46 @@
+# PHP physical-device sources. PiPHP delivers GPIO interrupt values through a
+# typed watcher callback; neither the registration result nor the pin handle is
+# itself sourced.
+- id: php.source.piphp_gpio_interrupt_value
+  enabled: true
+  language: php
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  payload_types: [sensor-frame]
+  packages: [piphp/gpio]
+  imports: [PiPHP]
+  match:
+    kind: call
+    callee:
+      name: register
+  constraints:
+  - receiver_type_in: [InterruptWatcher, InterruptWatcherInterface]
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [1]
+  match_examples:
+  - name: PiPHP GPIO interrupt value
+    code: |
+      <?php
+      use PiPHP\GPIO\Interrupt\InterruptWatcherInterface;
+      use PiPHP\GPIO\Pin\InputPinInterface;
+      function observe(InterruptWatcherInterface $watcher, InputPinInterface $pin) {
+          $watcher->register($pin, function (InputPinInterface $changed, $value) {
+              sink($value);
+          });
+      }
+    expect_match_text: [$watcher.register]
+  - name: unrelated callback registration is not hardware input
+    code: |
+      <?php
+      use PiPHP\GPIO\Interrupt\InterruptWatcherInterface;
+      class Registry { function register($key, callable $callback) {} }
+      function observe(Registry $registry) {
+          $registry->register('local', function ($key, $value) { sink($value); });
+      }
+    expect_no_match: true
+  description: "PiPHP InterruptWatcher register callback parameter one is the value sampled from the physical input pin; the callback pin object and registration result remain clean."

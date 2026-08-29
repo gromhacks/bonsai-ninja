@@ -40,7 +40,6 @@
     code: |
       import vapor
       import Vapor // vapor
-      import Vapor // vapor
       func test(error: Error) { _ = Abort(.internalServerError, reason: error.localizedDescription) }
     expect_match_text: [Abort]
   description: "Vapor Abort(reason: error.localizedDescription) - reflects exception text in HTTP error responses."

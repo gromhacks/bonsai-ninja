@@ -98,6 +98,21 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {name: weakly_canonical}
+      base_canonicalizer: {regex: '^(?:.*(?:\.|::))?(?:weakly_canonical|string)$'}
+      path_constructor: {name: "/"}
+      containment_check: {name: rfind}
+      containment_candidate_projection: {name: string}
+      accepted_containment_results:
+      - {kind: integer, value: 0}
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: []
+      accepted_boundary_values:
+      - {kind: string, value: "/"}
   match_examples:
   - name: generated direct match
     code: |
@@ -187,7 +202,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      #include <stdio.h>
       #include <stdio.h>
       void example(const char *arg) {
         const char *fmt = arg;
@@ -479,7 +493,6 @@
   - name: generated direct match
     code: |
       #include <QtCore/Qt>
-      #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example(const char *arg) {
         auto *x = new QFile(arg);
@@ -515,7 +528,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      #include <QtCore/Qt>
       #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example(const char *arg) {
@@ -555,7 +567,6 @@
   - name: generated direct match
     code: |
       #include <QtCore/Qt>
-      #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example(const char *arg) {
         const char *fmt = arg;
@@ -572,22 +583,6 @@
   imports:
   - QtCore
   - QtCore/Qt
-- id: cpp.path.std_filesystem_exists
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: path-traversal
-  severity: low
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      attribute:
-      - filesystem
-      - exists
-  description: "Disabled - std::filesystem::exists(tainted) leaks file presence; off by default (audit only)."
 - id: cpp.path.std_filesystem_read_symlink
   enabled: true
   language: cpp
@@ -647,57 +642,3 @@
       }
     expect_no_match: true
   description: "std::filesystem::directory_iterator(tainted) - enumerates an attacker-chosen directory."
-- id: cpp.path.libzip_zip_open
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: zip-slip
-  severity: medium
-  packages:
-  - libzip
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      name: zip_open
-  description: "Disabled - informational marker for libzip archive open; the Zip Slip site is the use of zip_get_name() output (paired with file open / write below)."
-- id: cpp.path.libzip_zip_get_name
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: cpp.archive.libzip_zip_get_name
-  language: cpp
-  tag: zip-slip
-  severity: high
-  packages:
-  - libzip
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      name: zip_get_name
-  match_examples:
-  - name: generated direct match
-    code: "#include <libzip.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  zip_get_name(arg);\n}\n"
-  description: "Disabled sink duplicate - zip_get_name returns an attacker-controlled archive entry name and is modeled as source cpp.archive.libzip_zip_get_name; the actual Zip Slip sink is the later path open/write."
-- id: cpp.path.minizip_unzgetcurrentfileinfo
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: cpp.archive.minizip_unzgetcurrentfileinfo_filename
-  language: cpp
-  tag: zip-slip
-  severity: high
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      name: unzGetCurrentFileInfo
-  match_examples:
-  - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  unzGetCurrentFileInfo(arg);\n}\n"
-  description: "Disabled sink duplicate - unzGetCurrentFileInfo writes an attacker-controlled archive filename into an output buffer and is modeled as source cpp.archive.minizip_unzgetcurrentfileinfo_filename; the actual Zip Slip sink is the later path open/write."

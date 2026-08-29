@@ -11,6 +11,20 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {attribute: [Path, expand]}
+      base_canonicalizer: {attribute: [Path, expand]}
+      path_constructor: {attribute: [Path, join]}
+      containment_check: {attribute: [String, "starts_with?"]}
+      containment_check_candidate_arg_index: 0
+      containment_check_base_arg_index: 1
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: []
+      accepted_boundary_values:
+      - {kind: string, value: "/"}
   match_examples:
   - name: declared shape
     code: |
@@ -41,6 +55,20 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {attribute: [Path, expand]}
+      base_canonicalizer: {attribute: [Path, expand]}
+      path_constructor: {attribute: [Path, join]}
+      containment_check: {attribute: [String, "starts_with?"]}
+      containment_check_candidate_arg_index: 0
+      containment_check_base_arg_index: 1
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: []
+      accepted_boundary_values:
+      - {kind: string, value: "/"}
   match_examples:
   - name: declared shape
     code: |
@@ -534,6 +562,20 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {attribute: [Path, expand]}
+      base_canonicalizer: {attribute: [Path, expand]}
+      path_constructor: {attribute: [Path, join]}
+      containment_check: {attribute: [String, "starts_with?"]}
+      containment_check_candidate_arg_index: 0
+      containment_check_base_arg_index: 1
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: []
+      accepted_boundary_values:
+      - {kind: string, value: "/"}
   match_examples:
   - name: declared shape
     code: |

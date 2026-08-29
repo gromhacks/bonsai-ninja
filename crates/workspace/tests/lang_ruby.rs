@@ -135,9 +135,102 @@ fn break_and_next_in_while_loop() {
 }
 
 #[test]
-fn next_in_each_block_is_continue_in_enclosing_flow() {
+fn next_in_each_block_belongs_to_callback_scope() {
     let w = make(
         "def f(items)\n  items.split(\" \").each do |item|\n    next if item.empty?\n    consume(item)\n  end\nend\n",
     );
-    assert!(has_continue(&w, "f"));
+    assert!(
+        !has_continue(&w, "f"),
+        "block-local next must not leak into the enclosing method"
+    );
+    let global = w.db().global_index();
+    let outer = decl(&w, "f").expect("outer method");
+    let index = global
+        .file_index(outer.span.file)
+        .expect("Ruby declaration index");
+    let callback_span = index
+        .call_argument_values
+        .iter()
+        .find_map(|fact| fact.inline_callback_span)
+        .expect("exact each-block callback span");
+    let callback = index
+        .defs
+        .iter()
+        .find(|candidate| candidate.span == callback_span)
+        .expect("block callback declaration");
+    assert!(has_continue(&w, &callback.name));
+    assert!(has_call(&w, &callback.name, "consume"));
+}
+
+#[test]
+fn yielded_trailing_block_is_an_exact_compiler_callgraph_edge() {
+    let registry = Arc::new(bonsai_lang_api::LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_ruby::RubyAdapter::new()));
+    let w = bonsai_workspace::Workspace::new(registry);
+    w.vfs().write(
+        "/w/store.rb".to_string(),
+        Arc::<str>::from(
+            r#"
+class AssetStore
+  BASE = "/srv/assets"
+
+  def self.with_root
+    yield BASE
+  end
+
+  def self.read(root, name)
+    File.binread(File.join(root, name))
+  end
+end
+"#,
+        ),
+    );
+    w.vfs().write(
+        "/w/controller.rb".to_string(),
+        Arc::<str>::from(
+            r#"
+def show(name)
+  AssetStore.with_root { |root| AssetStore.read(root, name) }
+end
+"#,
+        ),
+    );
+    for file in w.vfs().all_files() {
+        let _ = w.db().decl_index(file);
+    }
+    let global = w.db().global_index();
+    let with_root = w.lookup_function("with_root").expect("yielding method");
+    let callback = global
+        .all_files()
+        .filter_map(|file| global.file_index(file))
+        .flat_map(|index| index.defs.iter())
+        .find(|decl| {
+            decl.name.starts_with("<lambda@")
+                && decl.flow_events.iter().any(|event| {
+                    matches!(
+                        event,
+                        bonsai_lang_api::FlowEvent::Call { name, .. }
+                            if bonsai_common::short_qualified_tail(name) == "read"
+                    )
+                })
+        })
+        .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw()))
+        .expect("trailing block declaration");
+    let graph = w.resolved_call_graph();
+    assert!(
+        graph
+            .callees_of(with_root)
+            .any(|edge| edge.to == callback && edge.precision.is_semantic()),
+        "the formal yield invocation and exact trailing-block argument must join: {:#?}",
+        graph.inner().edges
+    );
+    let show = w.lookup_function("show").expect("source entry");
+    let read = w.lookup_function("read").expect("sink owner");
+    let reachable =
+        w.source_reachable_resolved_call_graph(&[show], &[read], Some(bonsai_common::Precision::Narrowed));
+    assert!(
+        reachable.funcs.contains(&callback) && reachable.funcs.contains(&read),
+        "the exact callback edge must survive source-reachable graph staging: {:#?}",
+        reachable.graph.inner().edges
+    );
 }

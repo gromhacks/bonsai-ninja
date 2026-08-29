@@ -977,26 +977,6 @@
     expect_no_match: true
   description: "invoke Context.run - shell-wraps the command string inside a\
     \ task. `min_args: 1` rejects 0-arg `Context.run()` decoys."
-- id: python.cmdi.plumbum_local
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: python
-  tag: command-injection
-  severity: high
-  packages:
-  - plumbum
-  cwe:
-  - CWE-78
-  match:
-    kind: call
-    callee:
-      attribute:
-      - local
-      - __getitem__
-  description: "Disabled - plumbum local[cmd] is a subscript expression; tree-sitter\
-    \ does not surface it as an attribute call so this never fires. Re-enable once\
-    \ subscript matching lands."
 - id: python.cmdi.pexpect_spawn
   enabled: true
   language: python
@@ -1048,22 +1028,6 @@
     expect_no_match: true
   description: "pexpect.run - wraps pexpect.spawn + expect; tainted cmd is shell\
     \ injection."
-- id: python.cmdi.sh_module
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: command-injection
-  severity: medium
-  packages:
-  - sh
-  cwe:
-  - CWE-78
-  match:
-    kind: call
-    callee:
-      name: sh
-  description: "Disabled - sh.<cmd>(arg) is by-arg, not shell."
 - id: python.cmdi.paramiko_exec_command
   enabled: true
   language: python

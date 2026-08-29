@@ -29,22 +29,6 @@
     expect_no_match: true
   description: "flask.redirect(tainted) - fully-qualified form; returns a 302 with a tainted Location."
 
-- id: python.open_redirect.flask_redirect_bare
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: python
-  tag: open-redirect
-  severity: high
-  packages: [flask]
-  imports: [flask]
-  cwe: [CWE-601]
-  match:
-    kind: call
-    callee:
-      name: redirect
-  description: "Disabled - bare `redirect(...)` collides with app-defined helpers. Re-enable per-project when imports of `flask.redirect` / `django.shortcuts.redirect` can be resolved and gated."
-
 - id: python.open_redirect.werkzeug_redirect
   enabled: true
   language: python

@@ -23,7 +23,7 @@ def process(value):
     let exported = native_export_json(&ws, dir.path(), false).expect("native export");
 
     assert_eq!(exported["schema"], "bonsai-native-export");
-    assert_eq!(exported["schema_version"], 7);
+    assert_eq!(exported["schema_version"], 9);
     let file = exported["files"]
         .as_array()
         .and_then(|files| {
@@ -34,7 +34,7 @@ def process(value):
         .expect("exported app.py");
     assert_eq!(
         file["path"], "app.py",
-        "native export v7 paths are portable and workspace-relative"
+        "native export v9 paths are portable and workspace-relative"
     );
     assert_portable_code_locations(&exported);
     let events = file["flow_events"].as_array().expect("flat flow event table");
@@ -81,6 +81,19 @@ def process(value):
             .as_array()
             .is_some_and(|sites| !sites.is_empty()),
         "native export must carry compiler-owned RHS flow instead of requiring consumers to parse its rendering"
+    );
+    let direct_span = &direct_call["direct_call_span"];
+    let expression_span = &direct_call["call_sites"][0];
+    assert_eq!(direct_span["file"], expression_span["file"]);
+    assert_eq!(direct_span["start"], expression_span["start"]);
+    assert!(
+        direct_span["end"].as_u64() <= expression_span["end"].as_u64(),
+        "the exact callee span must be contained by the parsed call expression"
+    );
+    assert!(
+        direct_call.get("direct_call_receiver_span").is_none()
+            && direct_call.get("direct_call_receiver_flow").is_none(),
+        "a receiver-free call must not invent receiver syntax facts"
     );
     assert_eq!(
         file["runtime_type_narrowings"].as_array().map(Vec::len),

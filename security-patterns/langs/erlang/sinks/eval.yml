@@ -167,40 +167,7 @@
           erlang:apply(example, run, []).
       expect_no_match: true
   description: "erlang:apply/3 (and bare apply/3) - tainted function atom selects attacker-controlled code to invoke."
-- id: erlang.eval.erlang_apply_args
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: erlang
-  tag: code-injection
-  severity: high
-  cwe: [CWE-94]
-  match:
-    kind: call
-    callee:
-      regex: "^(erlang:)?apply$"
-  constraints:
-  - arg_tainted:
-      index: 2
-  match_examples:
-    - name: tainted apply args
-      code: |
-        -module(example).
-        -export([test/1]).
-        test(Input) ->
-          erlang:apply(example, run, Input).
-    - name: literal apply args negative
-      code: |
-        -module(example).
-        -export([test/0]).
-        test() ->
-          erlang:apply(example, run, []).
-      expect_no_match: true
-  description: "erlang:apply/3 (and bare apply/3) - tainted argument list reaches a dynamically selected call target."
-
 - id: erlang.eval.erlang_spawn_mfa
-  aliases:
-  - erlang.cmdi.erlang_spawn_mfa
   enabled: true
   language: erlang
   tag: code-injection
@@ -230,8 +197,6 @@
   description: "erlang:spawn(Module, Function, Args) with a tainted Module operand - attacker controls dynamic dispatch. Tainted Args alone are intentionally not a sink."
 
 - id: erlang.eval.erlang_spawn_function
-  aliases:
-  - erlang.cmdi.erlang_spawn_function
   enabled: true
   language: erlang
   tag: code-injection

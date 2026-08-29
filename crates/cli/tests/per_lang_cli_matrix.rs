@@ -12,7 +12,7 @@
 //!     points at the exact (lang, command, fixture) cell.
 //!
 //!  2. **Construct-coverage tests** — every flow-oriented Python
-//!     construct that `mega_flow` threads taint through
+//!     construct that `language_gauntlet` threads taint through
 //!     (decorator factory, async generator, context manager,
 //!     match/case, walrus, comprehension, closure, etc.). A dedicated
 //!     test per construct drills inspect/security into the specific
@@ -24,12 +24,17 @@
 //!     cursor correctness, regex error reporting, compact mode,
 //!     DOT output, every `--format` variant.
 //!
-//! Each test skips gracefully (via the `bin_path()` early return)
-//! when the release binary isn't built yet, so `cargo test` before
-//! `cargo build --release` still runs cleanly.
+//! The compiler-backed CLI is a required test dependency. A missing binary is
+//! a hard failure: silently skipping this matrix would allow an adapter or
+//! command family to lose all executable coverage while the suite stayed
+//! green.
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
 fn repo_root() -> PathBuf {
     let mut p = std::env::current_dir().expect("cwd");
@@ -41,28 +46,53 @@ fn bin_path() -> Option<PathBuf> {
     if let Some(path) = option_env!("CARGO_BIN_EXE_bonsai-ninja") {
         return Some(PathBuf::from(path));
     }
-    let p = repo_root().join("target/release/bonsai-ninja");
-    if p.exists() {
-        Some(p)
-    } else {
-        eprintln!("skipping CLI matrix: release binary missing at {}", p.display());
-        None
+    let debug = repo_root().join("target/debug/bonsai-ninja");
+    if debug.exists() {
+        return Some(debug);
     }
+    let release = repo_root().join("target/release/bonsai-ninja");
+    assert!(
+        release.exists(),
+        "bonsai-ninja binary is required for the all-language CLI matrix"
+    );
+    Some(release)
 }
 
 /// Run `bonsai-ninja` with `args` (plus `--no-color --no-progress`)
 /// from the repo root so `./security-patterns/` resolves. Returns
-/// `None` when the binary isn't built — every `#[test]` exits
-/// cleanly in that case. `COLUMNS=240` so tables don't wrap in a
-/// way the string-contains checks would miss.
+/// `COLUMNS=240` keeps tables from wrapping in a way the
+/// string-contains checks would miss.
 fn run(args: &[&str]) -> Option<(String, String, i32)> {
     let bin = bin_path()?;
+    let workspace_arg = match args.first().copied() {
+        // Cache uses `cache <action> [workspace]`; every ordinary command in
+        // this matrix uses `<command> <workspace> ...`.
+        Some("cache") => args.get(2),
+        Some(_) => args.get(1),
+        None => None,
+    };
+    let workspace = workspace_arg
+        .map(|path| {
+            PathBuf::from(path)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(path))
+        })
+        .unwrap_or_else(repo_root);
+    let mut workspace_hasher = DefaultHasher::new();
+    workspace.hash(&mut workspace_hasher);
+    let workspace_cache_key = format!("{:016x}", workspace_hasher.finish());
+    let test_state_root = repo_root().join("target/test-cache/per-lang-cli-matrix");
     let mut full: Vec<&str> = args.to_vec();
     full.push("--no-color");
     full.push("--no-progress");
     let out = Command::new(&bin)
         .args(&full)
         .env("COLUMNS", "240")
+        .env(
+            "BONSAI_WORKSPACE_DIR",
+            test_state_root.join("workspaces").join(&workspace_cache_key),
+        )
+        .env("HOME", test_state_root.join("homes").join(workspace_cache_key))
         .current_dir(repo_root())
         .output()
         .expect("spawn bonsai-ninja");
@@ -122,15 +152,51 @@ fn rows_of(v: &serde_json::Value) -> Vec<serde_json::Value> {
     Vec::new()
 }
 
-/// Workspace path for a (lang, fixture). Fixture is typically
-/// "micro" or "complex".
+fn assert_security_analysis_complete(v: &serde_json::Value, lang: &str, command: &str) {
+    assert_eq!(
+        v.get("analysis_complete").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "[{lang}] {command} returned an incomplete compiler snapshot: {:?}",
+        v.get("analysis_incomplete_reasons")
+    );
+    assert!(
+        v.get("analysis_incomplete_reasons")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty),
+        "[{lang}] complete {command} retained incomplete reasons: {:?}",
+        v.get("analysis_incomplete_reasons")
+    );
+}
+
+/// Workspace path for a language contract fixture. The public example is the
+/// consolidated gauntlet; focused regression fixtures are test-only inputs.
 fn ws(lang: &str, fixture: &str) -> String {
-    repo_root()
-        .join("examples")
-        .join(lang)
-        .join(fixture)
-        .to_string_lossy()
-        .into_owned()
+    let root = repo_root();
+    let path = if fixture == "language_gauntlet" {
+        root.join("examples").join(lang).join(fixture)
+    } else {
+        root.join("test-fixtures/languages").join(lang).join(fixture)
+    };
+    path.to_string_lossy().into_owned()
+}
+
+fn copy_workspace_tree(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).expect("create isolated test workspace");
+    for entry in std::fs::read_dir(src).expect("read source workspace") {
+        let entry = entry.expect("source workspace entry");
+        let name = entry.file_name();
+        if name == std::ffi::OsStr::new(".bonsai") || name == std::ffi::OsStr::new(".bonsai-agent") {
+            continue;
+        }
+        let source = entry.path();
+        let target = dst.join(name);
+        let metadata = entry.metadata().expect("read source workspace metadata");
+        if metadata.is_dir() {
+            copy_workspace_tree(&source, &target);
+        } else if metadata.is_file() {
+            std::fs::copy(&source, &target).expect("copy isolated workspace file");
+        }
+    }
 }
 
 /// One language's expected-content signals. Names are substrings —
@@ -552,11 +618,11 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: true,
-        // 4 source matches / 4 distinct exact source-lineage chains in the
-        // ruby micro fixture (params_read@12 → get_user/update_user →
-        // verify_token, @13 → update_user, @23 module-level). Earlier
-        // floor of 6 over-counted fan-out rows now deduplicated.
-        min_sources_micro: 4,
+        // Two exact source sites (`params['token']` and `params['action']`)
+        // produce four distinct source-lineage chains through get_user,
+        // update_user, verify_token, and run_admin_command. Inventory rows
+        // count syntax sites, not the downstream fan-out of each site.
+        min_sources_micro: 2,
         min_source_flows_micro: 4,
         min_deps_micro: 2,
         min_sanitizers_micro: 0,
@@ -609,7 +675,13 @@ pub const LANGS: &[LangExp] = &[
         cmdi_sink: "task.launch",
         sqli_sink: "sqlite3_prepare_v2",
         min_findings_micro: 1,
-        min_findings_complex: 50,
+        // The precise surface excludes ordinary `print` and does not treat a
+        // tainted `Process.arguments` write as command injection unless a
+        // typed, dominating shell executable is proven. The fixture now has
+        // 44 independent exact sink sites: known-shell launches and tainted
+        // executable selection remain covered, while direct-executable argv
+        // stays data.
+        min_findings_complex: 44,
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: true,
@@ -638,12 +710,13 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: false,
-        // The TS micro fixture models 5 source matches and 11 distinct
-        // source-lineage chains after duplicate source rows collapse
-        // into `additional_sources`. Imported namespace receivers are not
-        // runtime values and therefore do not fabricate a twelfth path.
-        min_sources_micro: 5,
-        min_source_flows_micro: 11,
+        // Four exact `req.query` reads are the source syntax sites: token and
+        // action in each of the named and decorated handlers. They produce
+        // nine distinct downstream compiler paths after equivalent source
+        // rows collapse into `additional_sources`; route-registration state
+        // and imported namespaces are not runtime input values.
+        min_sources_micro: 4,
+        min_source_flows_micro: 9,
         min_deps_micro: 3,
         min_sanitizers_micro: 0,
     },
@@ -799,7 +872,8 @@ fn check_flow_id_roundtrip(ws: &str, lang: &str, query: &str) {
 
 /// Assert `trace` emits a populated summary for the handler.
 fn check_trace(ws: &str, lang: &str, handler: &str) {
-    let Some((out, _, code)) = run(&["trace", ws, handler, "--format", "json"]) else {
+    let selector = diagnostic_handler_selector(lang, handler);
+    let Some((out, _, code)) = run(&["trace", ws, selector.as_str(), "--format", "json"]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] trace ec={code}");
@@ -812,7 +886,8 @@ fn check_trace(ws: &str, lang: &str, handler: &str) {
 
 /// Assert `trace --format dot` produces valid-looking Graphviz.
 fn check_trace_dot(ws: &str, lang: &str, handler: &str) {
-    let Some((out, _, code)) = run(&["trace", ws, handler, "--format", "dot"]) else {
+    let selector = diagnostic_handler_selector(lang, handler);
+    let Some((out, _, code)) = run(&["trace", ws, selector.as_str(), "--format", "dot"]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] trace dot ec={code}");
@@ -900,7 +975,8 @@ fn check_export_taint_graph(ws: &str, lang: &str, min_functions: usize, expected
 
 /// Assert `dump-hir` emits a populated `flow_events` array.
 fn check_dump_hir(ws: &str, lang: &str, handler: &str) {
-    let Some((out, _, code)) = run(&["dump-hir", ws, handler]) else {
+    let selector = diagnostic_handler_selector(lang, handler);
+    let Some((out, _, code)) = run(&["dump-hir", ws, &selector]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] dump-hir ec={code}");
@@ -914,7 +990,8 @@ fn check_dump_hir(ws: &str, lang: &str, handler: &str) {
 
 /// Assert `dump-cfg` emits a populated `blocks` array.
 fn check_dump_cfg(ws: &str, lang: &str, handler: &str) {
-    let Some((out, _, code)) = run(&["dump-cfg", ws, handler]) else {
+    let selector = diagnostic_handler_selector(lang, handler);
+    let Some((out, _, code)) = run(&["dump-cfg", ws, &selector]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] dump-cfg ec={code}");
@@ -924,6 +1001,16 @@ fn check_dump_cfg(ws: &str, lang: &str, handler: &str) {
         .and_then(|b| b.as_array())
         .unwrap_or_else(|| panic!("[{lang}] dump-cfg missing blocks"));
     assert!(!blocks.is_empty(), "[{lang}] dump-cfg zero blocks");
+}
+
+fn diagnostic_handler_selector(lang: &str, handler: &str) -> String {
+    match lang {
+        // The Objective-C micro fixture intentionally indexes the interface
+        // prototype and implementation as distinct compiler declarations.
+        // Diagnostic commands require the documented exact syntax selector.
+        "objc" => format!("Gateway.m:9:{handler}"),
+        _ => handler.to_string(),
+    }
 }
 
 /// Assert `dump-edges` JSON has every required field and at least one
@@ -1131,7 +1218,15 @@ fn check_dump_resolve(ws: &str, lang: &str, name: &str) {
 /// Assert `dump-taint` seeded from the handler emits a valid inter-
 /// procedural result shape.
 fn check_dump_taint(ws: &str, lang: &str, handler: &str) {
-    let Some((out, _, code)) = run(&["dump-taint", ws, "--source", handler, "--format", "json"]) else {
+    let selector = diagnostic_handler_selector(lang, handler);
+    let Some((out, _, code)) = run(&[
+        "dump-taint",
+        ws,
+        "--source",
+        selector.as_str(),
+        "--format",
+        "json",
+    ]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] dump-taint ec={code}");
@@ -1183,7 +1278,7 @@ fn check_security_flows(ws: &str, lang: &str, min: usize) {
     // Inferred entry-point sources are opt-in at the CLI by default
     // (per commit 1f4922c). The min-finding expectations were authored
     // against the inferred-on surface; opt in here for test stability,
-    // matching what scripts/validate-mega-cli.py does.
+    // matching what scripts/validate-language-gauntlets.py does.
     let Some((out, _, code)) = run(&[
         "security",
         ws,
@@ -1199,12 +1294,7 @@ fn check_security_flows(ws: &str, lang: &str, min: usize) {
     };
     assert_eq!(code, 0, "[{lang}] security taint-analysis ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(
-        parsed.get("analysis_complete").and_then(|value| value.as_bool()),
-        Some(true),
-        "[{lang}] security taint-analysis incomplete: {:?}",
-        parsed.get("analysis_incomplete_reasons")
-    );
+    assert_security_analysis_complete(&parsed, lang, "security taint-analysis");
     let rows = rows_of(&parsed);
     assert!(
         rows.len() >= min,
@@ -1236,13 +1326,13 @@ fn check_security_flows(ws: &str, lang: &str, min: usize) {
     }
 }
 
-fn expected_all_profile_mega_flow_findings(lang: &str) -> usize {
+fn expected_all_profile_language_gauntlet_findings(lang: &str) -> usize {
     // Counts for the explicit `taint-analysis --profile all --all` run — concrete
     // source-rule matches only, NO `--inferred-sources`. So a language
-    // whose mega_flow source is an inferred entry-point parameter (rather
+    // whose language_gauntlet source is an inferred entry-point parameter (rather
     // than a concrete rule match) legitimately reports 0 here while
     // `--inferred-sources` shows its real flow (see the parallel
-    // `expected_mega_flow_findings_with_inferred_sources` in
+    // `expected_language_gauntlet_findings_with_inferred_sources` in
     // security_pipeline_regressions.rs). The cpp/csharp/dart/elixir/java/
     // scala/swift entries went 0→1 when d332009 closed the FN-language
     // construct gaps; objc went 2→1 when the xxe over-claim was removed;
@@ -1254,8 +1344,8 @@ fn expected_all_profile_mega_flow_findings(lang: &str) -> usize {
         "csharp" => 1,
         "dart" => 1,
         "elixir" => 1,
-        // io:get_line is a concrete CLI source and reaches os:cmd through
-        // the full mega-flow chain.
+        // cowboy_req:qs is a concrete remote source and reaches os:cmd through
+        // the full language-gauntlet chain.
         "erlang" => 1,
         "go" => 1,
         "java" => 1,
@@ -1263,26 +1353,28 @@ fn expected_all_profile_mega_flow_findings(lang: &str) -> usize {
         "kotlin" => 1,
         // The old count included LuaSQL-shaped SQLi false positives on
         // generic executor calls without LuaSQL package evidence. The
-        // default mega-flow fixture now has one real command-injection flow.
+        // default language-gauntlet fixture now has one real command-injection flow.
         "lua" => 1,
-        // One real command-injection (stdin_fgets → system). The earlier
+        // One real command-injection (GCDWebServer request text → system). The earlier
         // count of 2 included an xxe over-claim that was removed.
         "objc" => 1,
-        "perl" => 2,
-        // Two real vulns: readline → shell_exec (CWE-78) and
-        // superglobal_server → echo (CWE-79).
+        // One real CGI-param-to-system flow; the second sink in the project is
+        // the explicit clean twin and must remain absent from findings.
+        "perl" => 1,
+        // Two real vulns under the all-path profile: $_GET → shell_exec (CWE-78)
+        // and a separate remote value → echo (CWE-79).
         "php" => 2,
         "python" => 1,
-        // One distinct stdin_gets -> Kernel.system vulnerability. Older
+        // One distinct Rails-params -> Kernel.system vulnerability. Older
         // baselines counted an equivalent receiver-derived chain twice.
         "ruby" => 1,
-        // stdin.lock().read_line is a concrete CLI source and reaches the
-        // command argument sink through the full mega-flow chain.
+        // Axum Query is a concrete remote source and reaches the
+        // command argument sink through the full language-gauntlet chain.
         "rust" => 1,
         "scala" => 1,
         "swift" => 1,
         "typescript" => 1,
-        other => panic!("missing mega_flow expected finding count for {other}"),
+        other => panic!("missing language_gauntlet expected finding count for {other}"),
     }
 }
 
@@ -1603,20 +1695,7 @@ fn check_security_sink_analysis(
     };
     assert_eq!(code, 0, "[{lang}] security sink-analysis ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert!(
-        parsed
-            .get("analysis_complete")
-            .and_then(|value| value.as_bool())
-            .is_some(),
-        "[{lang}] sink-analysis missing top-level completeness: {out}"
-    );
-    assert!(
-        parsed
-            .get("analysis_incomplete_reasons")
-            .and_then(|value| value.as_array())
-            .is_some(),
-        "[{lang}] sink-analysis missing completeness reasons: {out}"
-    );
+    assert_security_analysis_complete(&parsed, lang, "security sink-analysis");
     let rows = rows_of(&parsed);
     assert!(!rows.is_empty(), "[{lang}] security sink-analysis empty");
 
@@ -1706,6 +1785,7 @@ fn check_security_sink_analysis(
         "[{lang}] negative sink-analysis ec={negative_code}"
     );
     let negative: serde_json::Value = serde_json::from_str(&negative_out).unwrap();
+    assert_security_analysis_complete(&negative, lang, "filtered security sink-analysis");
     let negative_rows = rows_of(&negative);
     assert!(
         !negative_rows.is_empty(),
@@ -1744,6 +1824,7 @@ fn check_security_source_analysis(ws: &str, lang: &str, expected_min: usize, exp
     };
     assert_eq!(code, 0, "[{lang}] security source-analysis ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_security_analysis_complete(&parsed, lang, "security source-analysis");
     let rows = rows_of(&parsed);
     if expected_min == 0 {
         assert!(
@@ -1817,8 +1898,8 @@ fn check_security_source_analysis(ws: &str, lang: &str, expected_min: usize, exp
 }
 
 /// Assert `security source-analysis` stays semantic on the construct-heavy
-/// mega_flow fixture, not just the tiny micro fixture.
-fn check_mega_flow_source_analysis(ws: &str, lang: &str) {
+/// language_gauntlet fixture, not just the tiny micro fixture.
+fn check_language_gauntlet_source_analysis(ws: &str, lang: &str) {
     let Some((out, _, code)) = run(&[
         "security",
         ws,
@@ -1830,32 +1911,33 @@ fn check_mega_flow_source_analysis(ws: &str, lang: &str) {
     ]) else {
         return;
     };
-    assert_eq!(code, 0, "[{lang}] mega_flow source-analysis ec={code}");
+    assert_eq!(code, 0, "[{lang}] language_gauntlet source-analysis ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_security_analysis_complete(&parsed, lang, "language_gauntlet source-analysis");
     let rows = rows_of(&parsed);
     assert!(
         !rows.is_empty(),
-        "[{lang}] mega_flow source-analysis returned no source flows"
+        "[{lang}] language_gauntlet source-analysis returned no source flows"
     );
     let mut has_multi_hop_semantic_flow = false;
     for row in &rows {
-        let source = row
-            .get("source")
-            .unwrap_or_else(|| panic!("[{lang}] mega_flow source-analysis row missing source: {row}"));
+        let source = row.get("source").unwrap_or_else(|| {
+            panic!("[{lang}] language_gauntlet source-analysis row missing source: {row}")
+        });
         assert!(
             source
                 .get("rule_id")
                 .and_then(|v| v.as_str())
                 .is_some_and(|rule| !rule.is_empty()),
-            "[{lang}] mega_flow source-analysis source missing rule_id: {row}"
+            "[{lang}] language_gauntlet source-analysis source missing rule_id: {row}"
         );
         let flow = row
             .get("flow")
-            .unwrap_or_else(|| panic!("[{lang}] mega_flow source-analysis row missing flow: {row}"));
+            .unwrap_or_else(|| panic!("[{lang}] language_gauntlet source-analysis row missing flow: {row}"));
         let precision = flow.get("precision").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
             matches!(precision, "exact" | "narrowed"),
-            "[{lang}] mega_flow source-analysis surfaced non-semantic precision `{precision}`: {row}"
+            "[{lang}] language_gauntlet source-analysis surfaced non-semantic precision `{precision}`: {row}"
         );
         let chain_len = flow.get("chain").and_then(|v| v.as_array()).map_or(0, Vec::len);
         if chain_len > 1 {
@@ -1863,22 +1945,22 @@ fn check_mega_flow_source_analysis(ws: &str, lang: &str) {
         }
         assert!(
             row.get("analysis_complete").is_some(),
-            "[{lang}] mega_flow source-analysis row missing analysis_complete: {row}"
+            "[{lang}] language_gauntlet source-analysis row missing analysis_complete: {row}"
         );
         assert!(
             row.get("analysis_incomplete_reasons").is_some(),
-            "[{lang}] mega_flow source-analysis row missing incomplete reasons: {row}"
+            "[{lang}] language_gauntlet source-analysis row missing incomplete reasons: {row}"
         );
     }
     assert!(
         has_multi_hop_semantic_flow,
-        "[{lang}] mega_flow source-analysis did not render any multi-hop semantic flow: {rows:?}"
+        "[{lang}] language_gauntlet source-analysis did not render any multi-hop semantic flow: {rows:?}"
     );
 }
 
 /// Assert sink-analysis retains the complex fixture's endpoints and proves at
 /// least one multi-hop upstream route through each language adapter.
-fn check_mega_flow_sink_analysis(ws: &str, lang: &str) {
+fn check_language_gauntlet_sink_analysis(ws: &str, lang: &str) {
     let Some((out, _, code)) = run(&[
         "security",
         ws,
@@ -1891,12 +1973,13 @@ fn check_mega_flow_sink_analysis(ws: &str, lang: &str) {
     ]) else {
         return;
     };
-    assert_eq!(code, 0, "[{lang}] mega_flow sink-analysis ec={code}");
+    assert_eq!(code, 0, "[{lang}] language_gauntlet sink-analysis ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_security_analysis_complete(&parsed, lang, "language_gauntlet sink-analysis");
     let rows = rows_of(&parsed);
     assert!(
         !rows.is_empty(),
-        "[{lang}] mega_flow sink-analysis returned no endpoints"
+        "[{lang}] language_gauntlet sink-analysis returned no endpoints"
     );
 
     let mut has_multi_hop_semantic_flow = false;
@@ -1905,12 +1988,12 @@ fn check_mega_flow_sink_analysis(ws: &str, lang: &str) {
             row.pointer("/sink/rule_id")
                 .and_then(|value| value.as_str())
                 .is_some_and(|rule| !rule.is_empty()),
-            "[{lang}] mega_flow sink endpoint missing rule_id: {row}"
+            "[{lang}] language_gauntlet sink endpoint missing rule_id: {row}"
         );
         let upstream = row
             .get("upstream_flows")
             .and_then(|value| value.as_array())
-            .unwrap_or_else(|| panic!("[{lang}] mega_flow sink row missing upstream_flows: {row}"));
+            .unwrap_or_else(|| panic!("[{lang}] language_gauntlet sink row missing upstream_flows: {row}"));
         for flow in upstream {
             let precision = flow
                 .get("precision")
@@ -1918,7 +2001,7 @@ fn check_mega_flow_sink_analysis(ws: &str, lang: &str) {
                 .unwrap_or("");
             assert!(
                 matches!(precision, "exact" | "narrowed"),
-                "[{lang}] mega_flow sink-analysis surfaced non-semantic precision `{precision}`: {flow}"
+                "[{lang}] language_gauntlet sink-analysis surfaced non-semantic precision `{precision}`: {flow}"
             );
             if flow
                 .get("chain_names")
@@ -1931,7 +2014,7 @@ fn check_mega_flow_sink_analysis(ws: &str, lang: &str) {
     }
     assert!(
         has_multi_hop_semantic_flow,
-        "[{lang}] mega_flow sink-analysis did not preserve a multi-hop compiler/IDG proof: {rows:?}"
+        "[{lang}] language_gauntlet sink-analysis did not preserve a multi-hop compiler/IDG proof: {rows:?}"
     );
 }
 
@@ -2441,16 +2524,16 @@ macro_rules! lang_matrix_tests {
                     check_classes(&ws(EXP.lang, "complex"), EXP.lang);
                 }
 
-                // --- mega_flow fixture ---------------------------------------
+                // --- language_gauntlet fixture ---------------------------------------
                 //
-                // mega_flow is the construct-coverage fixture — each
+                // language_gauntlet is the construct-coverage fixture — each
                 // language ships one that threads the taint through as
                 // many language-specific flow-oriented constructs as
                 // possible.
 
                 #[test]
-                fn mega_flow_security_flows_produces_finding() {
-                    let w = ws(EXP.lang, "mega_flow");
+                fn language_gauntlet_security_flows_produces_finding() {
+                    let w = ws(EXP.lang, "language_gauntlet");
                     let Some((out, _, code)) =
                         run(&[
                             "security",
@@ -2467,43 +2550,48 @@ macro_rules! lang_matrix_tests {
                     };
                     assert_eq!(
                         code, 0,
-                        "[{}] mega_flow security taint-analysis ec={code}",
+                        "[{}] language_gauntlet security taint-analysis ec={code}",
                         EXP.lang
                     );
                     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+                    assert_security_analysis_complete(
+                        &parsed,
+                        EXP.lang,
+                        "language_gauntlet security taint-analysis",
+                    );
                     let rows = rows_of(&parsed);
-                    let expected = expected_all_profile_mega_flow_findings(EXP.lang);
+                    let expected = expected_all_profile_language_gauntlet_findings(EXP.lang);
                     assert_eq!(
                         rows.len(),
                         expected,
-                        "[{}] mega_flow finding count drifted",
+                        "[{}] language_gauntlet finding count drifted",
                         EXP.lang
                     );
                 }
 
                 #[test]
-                fn mega_flow_source_analysis_uses_semantic_paths() {
-                    check_mega_flow_source_analysis(&ws(EXP.lang, "mega_flow"), EXP.lang);
+                fn language_gauntlet_source_analysis_uses_semantic_paths() {
+                    check_language_gauntlet_source_analysis(&ws(EXP.lang, "language_gauntlet"), EXP.lang);
                 }
 
                 #[test]
-                fn mega_flow_sink_analysis_uses_semantic_paths() {
-                    check_mega_flow_sink_analysis(&ws(EXP.lang, "mega_flow"), EXP.lang);
+                fn language_gauntlet_sink_analysis_uses_semantic_paths() {
+                    check_language_gauntlet_sink_analysis(&ws(EXP.lang, "language_gauntlet"), EXP.lang);
                 }
 
                 #[test]
-                fn mega_flow_export_has_interproc_edges() {
-                    let w = ws(EXP.lang, "mega_flow");
+                fn language_gauntlet_export_has_interproc_edges() {
+                    let w = ws(EXP.lang, "language_gauntlet");
                     let Some((out, _, code)) = run(&["export", &w]) else {
                         return;
                     };
-                    assert_eq!(code, 0, "[{}] mega_flow export ec={code}", EXP.lang);
+                    assert_eq!(code, 0, "[{}] language_gauntlet export ec={code}", EXP.lang);
                     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
                     let tg = parsed.get("taint_graph").unwrap();
                     let edges = tg["call_edges"].as_array().unwrap();
                     assert!(
                         !edges.is_empty(),
-                        "[{}] mega_flow export has no call_edges — cross-module resolution regressed",
+                        "[{}] language_gauntlet export has no call_edges — cross-module resolution regressed",
                         EXP.lang
                     );
                 }
@@ -2536,39 +2624,39 @@ lang_matrix_tests! {
 }
 
 // =============================================================================
-// Construct-coverage tests (Python mega_flow)
+// Construct-coverage tests (Python language_gauntlet)
 // =============================================================================
 //
-// Every construct from `examples/python/mega_flow` that should carry
+// Every construct from `examples/python/language_gauntlet` that should carry
 // taint gets a dedicated test. Failure here means the engine lost
 // precision on that specific construct — much more informative than
 // "the end-to-end finding disappeared".
 
-/// Utility: run `inspect --query` against mega_flow and return stdout.
-fn mega_flow_inspect(query: &str) -> Option<String> {
-    let w = ws("python", "mega_flow");
+/// Utility: run `inspect --query` against language_gauntlet and return stdout.
+fn language_gauntlet_inspect(query: &str) -> Option<String> {
+    let w = ws("python", "language_gauntlet");
     run(&["inspect", &w, "--query", query, "--graph-flow"]).map(|(o, _, _)| o)
 }
 
 /// Utility: run `dump-taint` seeded from the source and return stdout.
 /// Let the command infer the entry seed set so this covers the same
 /// param-less entrypoint behavior the CLI exposes to users.
-fn mega_flow_dump_taint(source: &str) -> Option<(String, String, i32)> {
-    let w = ws("python", "mega_flow");
+fn language_gauntlet_dump_taint(source: &str) -> Option<(String, String, i32)> {
+    let w = ws("python", "language_gauntlet");
     run(&["dump-taint", &w, "--source", source, "--format", "json"])
 }
 
 /// Utility: run `trace --from X --to Y` and return stdout.
-fn mega_flow_trace_window(from: &str, to: &str) -> Option<String> {
-    let w = ws("python", "mega_flow");
+fn language_gauntlet_trace_window(from: &str, to: &str) -> Option<String> {
+    let w = ws("python", "language_gauntlet");
     run(&["trace", &w, "--from", from, "--to", to]).map(|(o, _, _)| o)
 }
 
 // =============================================================================
-// Source-to-sink construct coverage (Python mega_flow)
+// Source-to-sink construct coverage (Python language_gauntlet)
 // =============================================================================
 //
-// Each construct in the mega_flow chain gets its own test. The macro
+// Each construct in the language_gauntlet chain gets its own test. The macro
 // generates one `#[test]` per construct, each asserting:
 //   (a) `inspect --query <name>` surfaces the construct
 //   (b) a flow or hit block appears in the output
@@ -2582,27 +2670,27 @@ fn mega_flow_trace_window(from: &str, to: &str) -> Option<String> {
 /// Assert `inspect --query <name>` surfaces the construct and
 /// contains at least one FLOW / hit / outgoing block.
 fn assert_construct_visible(query: &str) {
-    let Some(out) = mega_flow_inspect(query) else {
+    let Some(out) = language_gauntlet_inspect(query) else {
         return;
     };
     assert!(
         out.contains(query),
-        "mega_flow: construct `{query}` missing from inspect output"
+        "language_gauntlet: construct `{query}` missing from inspect output"
     );
     assert!(
         out.contains("FLOW ") || out.contains("hit ") || out.contains("outgoing calls"),
-        "mega_flow: construct `{query}` has no flow / hit block"
+        "language_gauntlet: construct `{query}` has no flow / hit block"
     );
 }
 
-/// Assert the given hop appears somewhere in the mega_flow
+/// Assert the given hop appears somewhere in the language_gauntlet
 /// callgraph — either as a caller of the source, a hop on the
 /// downward chain, or anywhere in `dump-callgraph` output. This
 /// catches constructs that wrap the source (decorators, wrappers,
 /// closures that sit ABOVE handle_request in the call tree) which
 /// a strict `handle_request → execute` trace would miss.
 fn assert_construct_threads_chain(hop: &str) {
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     // First try the downward trace — cheapest check.
     if let Some((out, _, 0)) = run(&["trace", &w, "--from", "handle_request", "--to", "execute"]) {
         if out.contains(hop) {
@@ -2615,7 +2703,7 @@ fn assert_construct_threads_chain(hop: &str) {
     let Some((out, _, code)) = run(&["dump-callgraph", &w, "--format", "json"]) else {
         return;
     };
-    assert_eq!(code, 0, "mega_flow dump-callgraph ec={code}");
+    assert_eq!(code, 0, "language_gauntlet dump-callgraph ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
     let rows = rows_of(&parsed);
     let found = rows.iter().any(|r| {
@@ -2627,7 +2715,7 @@ fn assert_construct_threads_chain(hop: &str) {
         let Some((out, _, code)) = run(&["defs", &w, "--format", "json"]) else {
             return;
         };
-        assert_eq!(code, 0, "mega_flow defs ec={code}");
+        assert_eq!(code, 0, "language_gauntlet defs ec={code}");
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
         let rows = rows_of(&parsed);
         if rows.iter().any(|r| {
@@ -2640,22 +2728,22 @@ fn assert_construct_threads_chain(hop: &str) {
     }
     assert!(
         found,
-        "mega_flow: construct `{hop}` neither in trace nor in callgraph — construct entirely dropped"
+        "language_gauntlet: construct `{hop}` neither in trace nor in callgraph — construct entirely dropped"
     );
 }
 
-/// Assert the given function appears in the mega_flow taint graph
+/// Assert the given function appears in the language_gauntlet taint graph
 /// (either in `reachable_facts` — which is the pattern-less view
 /// every function contributes to — or in `propagations` as a
 /// cross-function taint edge). Mirror of `assert_construct_threads_chain`
 /// but targeted at the engine's analytical output rather than its
 /// user-facing trace rendering.
 fn assert_construct_in_taint_records(func: &str) {
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, code)) = run(&["export", &w]) else {
         return;
     };
-    assert_eq!(code, 0, "mega_flow export ec={code}");
+    assert_eq!(code, 0, "language_gauntlet export ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
     let tg = &parsed["taint_graph"];
     // Check reachable_facts first — every callable's token set
@@ -2696,7 +2784,7 @@ fn assert_construct_in_taint_records(func: &str) {
         });
     assert!(
         in_classes,
-        "mega_flow: construct `{func}` not in reachable_facts, functions, nor classes — entirely invisible to engine"
+        "language_gauntlet: construct `{func}` not in reachable_facts, functions, nor classes — entirely invisible to engine"
     );
 }
 
@@ -2905,7 +2993,7 @@ visible_construct!(construct_functools_wraps_visible, "functools.wraps");
 visible_construct!(construct_functools_reduce_visible, "reduce");
 
 // =============================================================================
-// Full-chain integration (mega_flow)
+// Full-chain integration (language_gauntlet)
 // =============================================================================
 //
 // Validates that the security taint-analysis pipeline produces AT LEAST ONE
@@ -2928,9 +3016,9 @@ const FULL_CHAIN_HOPS: &[&str] = &[
 ];
 
 #[test]
-fn mega_flow_full_source_to_sink_chain_exists() {
+fn language_gauntlet_full_source_to_sink_chain_exists() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, code)) = run(&[
         "security",
         &w,
@@ -2942,10 +3030,10 @@ fn mega_flow_full_source_to_sink_chain_exists() {
     ]) else {
         return;
     };
-    assert_eq!(code, 0, "mega_flow security taint-analysis ec={code}");
+    assert_eq!(code, 0, "language_gauntlet security taint-analysis ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
     let rows = rows_of(&parsed);
-    assert!(!rows.is_empty(), "mega_flow: 0 findings (taint broken)");
+    assert!(!rows.is_empty(), "language_gauntlet: 0 findings (taint broken)");
 
     // At least one finding's chain must visit every hop.
     let any_full_chain = rows.iter().any(|r| {
@@ -2993,19 +3081,19 @@ fn mega_flow_full_source_to_sink_chain_exists() {
             .unwrap_or(0);
         assert!(
             max_coverage >= 5,
-            "mega_flow: best chain covers only {max_coverage}/9 hops — \
+            "language_gauntlet: best chain covers only {max_coverage}/9 hops — \
              construct propagation regressed"
         );
     }
 }
 
 #[test]
-fn mega_flow_dump_taint_threads_every_cross_function_hop() {
+fn language_gauntlet_dump_taint_threads_every_cross_function_hop() {
     let Some(_) = bin_path() else { return };
-    let Some((out, _, code)) = mega_flow_dump_taint("handle_request") else {
+    let Some((out, _, code)) = language_gauntlet_dump_taint("handle_request") else {
         return;
     };
-    assert_eq!(code, 0, "mega_flow dump-taint ec={code}");
+    assert_eq!(code, 0, "language_gauntlet dump-taint ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
     let records = parsed
         .get("records")
@@ -3014,7 +3102,7 @@ fn mega_flow_dump_taint_threads_every_cross_function_hop() {
         .unwrap_or_default();
     assert!(
         !records.is_empty(),
-        "mega_flow dump-taint: zero propagation records"
+        "language_gauntlet dump-taint: zero propagation records"
     );
     // Every propagation record carries a taint_id stable across runs
     // and caller_name / callee_name populated from the resolver.
@@ -3092,7 +3180,7 @@ fn mega_flow_dump_taint_threads_every_cross_function_hop() {
     ] {
         assert!(
             has_edge_arg(caller, callee, value, param),
-            "mega_flow dump-taint missing tainted arg {caller}->{callee} value={value:?} param={param}; edge args: {edge_args:?}"
+            "language_gauntlet dump-taint missing tainted arg {caller}->{callee} value={value:?} param={param}; edge args: {edge_args:?}"
         );
     }
     let has_execute = records.iter().any(|rec| {
@@ -3109,14 +3197,14 @@ fn mega_flow_dump_taint_threads_every_cross_function_hop() {
     });
     assert!(
         has_execute,
-        "mega_flow dump-taint must keep IDG-proven receiver/super flows into execute(cmd): {out}"
+        "language_gauntlet dump-taint must keep IDG-proven receiver/super flows into execute(cmd): {out}"
     );
 }
 
 #[test]
-fn mega_flow_inspect_compact_surface_is_smaller_than_full() {
+fn language_gauntlet_inspect_compact_surface_is_smaller_than_full() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((full, _, _)) = run(&["inspect", &w, "--query", "execute", "--graph-flow"]) else {
         return;
     };
@@ -3127,7 +3215,7 @@ fn mega_flow_inspect_compact_surface_is_smaller_than_full() {
     // Compact mode must drop body lines but keep FLOW / GROUP headers.
     assert!(
         compact.len() < full.len(),
-        "compact output not smaller than full on mega_flow"
+        "compact output not smaller than full on language_gauntlet"
     );
     // Sanity: at least one flow header remains.
     assert!(
@@ -3137,9 +3225,9 @@ fn mega_flow_inspect_compact_surface_is_smaller_than_full() {
 }
 
 #[test]
-fn mega_flow_export_every_hop_surfaces_in_function_list() {
+fn language_gauntlet_export_every_hop_surfaces_in_function_list() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, code)) = run(&["export", &w]) else {
         return;
     };
@@ -3153,15 +3241,15 @@ fn mega_flow_export_every_hop_surfaces_in_function_list() {
     for hop in FULL_CHAIN_HOPS {
         assert!(
             names.iter().any(|n| n == hop),
-            "mega_flow export missing hop `{hop}` in functions map"
+            "language_gauntlet export missing hop `{hop}` in functions map"
         );
     }
 }
 
 #[test]
-fn mega_flow_call_edges_connect_consecutive_hops() {
+fn language_gauntlet_call_edges_connect_consecutive_hops() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, _)) = run(&["export", &w]) else {
         return;
     };
@@ -3206,14 +3294,17 @@ fn mega_flow_call_edges_connect_consecutive_hops() {
         if *callee == "os.system" {
             continue;
         }
-        assert!(has_direct, "mega_flow call_edges missing `{caller} → {callee}`");
+        assert!(
+            has_direct,
+            "language_gauntlet call_edges missing `{caller} → {callee}`"
+        );
     }
 }
 
 #[test]
-fn mega_flow_reachable_facts_cover_every_hop_tokens() {
+fn language_gauntlet_reachable_facts_cover_every_hop_tokens() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, _)) = run(&["export", &w, "--full-propagations"]) else {
         return;
     };
@@ -3227,15 +3318,15 @@ fn mega_flow_reachable_facts_cover_every_hop_tokens() {
     for hop in FULL_CHAIN_HOPS {
         assert!(
             names_with_facts.iter().any(|n| n == hop),
-            "mega_flow export.reachable_facts missing `{hop}`"
+            "language_gauntlet export.reachable_facts missing `{hop}`"
         );
     }
 }
 
 #[test]
-fn mega_flow_export_uses_exact_compressed_callgraph_without_materialized_chains() {
+fn language_gauntlet_export_uses_exact_compressed_callgraph_without_materialized_chains() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, _)) = run(&["export", &w]) else {
         return;
     };
@@ -3258,9 +3349,9 @@ fn mega_flow_export_uses_exact_compressed_callgraph_without_materialized_chains(
 }
 
 #[test]
-fn mega_flow_propagations_span_every_hop() {
+fn language_gauntlet_propagations_span_every_hop() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, _)) = run(&["export", &w, "--full-propagations"]) else {
         return;
     };
@@ -3268,7 +3359,7 @@ fn mega_flow_propagations_span_every_hop() {
     let tg = &parsed["taint_graph"];
     assert_eq!(
         tg["propagations_complete"], true,
-        "mega_flow: --full-propagations must mark propagation records complete"
+        "language_gauntlet: --full-propagations must mark propagation records complete"
     );
     let props = tg["propagations"].as_array().unwrap();
     // Collect every (caller, callee) pair across propagations.
@@ -3302,16 +3393,16 @@ fn mega_flow_propagations_span_every_hop() {
     });
     assert!(
         any_found,
-        "mega_flow propagations didn't span ANY expected hop — \
+        "language_gauntlet propagations didn't span ANY expected hop — \
          interproc pass broke entirely. Edges seen: {} total.",
         edges.len()
     );
 }
 
 #[test]
-fn mega_flow_export_does_not_materialize_path_derived_flow_labels() {
+fn language_gauntlet_export_does_not_materialize_path_derived_flow_labels() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     let Some((out, _, _)) = run(&["export", &w]) else {
         return;
     };
@@ -3334,21 +3425,21 @@ fn mega_flow_export_does_not_materialize_path_derived_flow_labels() {
 }
 
 #[test]
-fn mega_flow_trace_window_from_source_reaches_sink() {
+fn language_gauntlet_trace_window_from_source_reaches_sink() {
     let Some(_) = bin_path() else { return };
-    let Some(out) = mega_flow_trace_window("handle_request", "execute") else {
+    let Some(out) = language_gauntlet_trace_window("handle_request", "execute") else {
         return;
     };
     assert!(
         out.contains("handle_request") && out.contains("execute"),
-        "mega_flow: trace --from handle_request --to execute lost the endpoints"
+        "language_gauntlet: trace --from handle_request --to execute lost the endpoints"
     );
 }
 
 #[test]
-fn mega_flow_inspect_from_to_filter_narrows_to_chain() {
+fn language_gauntlet_inspect_from_to_filter_narrows_to_chain() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "mega_flow");
+    let w = ws("python", "language_gauntlet");
     // Inspect's `--from/--to` are filters on top of the query set —
     // pass a regex that matches every callable so the filter has
     // chains to whittle down. At least one hit must survive.
@@ -3384,7 +3475,7 @@ fn mega_flow_inspect_from_to_filter_narrows_to_chain() {
         .unwrap_or_default();
     assert!(
         !hits.is_empty() || !other_hits.is_empty(),
-        "mega_flow: --from handle_request --to os.system produced no hits"
+        "language_gauntlet: --from handle_request --to os.system produced no hits"
     );
 }
 
@@ -3781,7 +3872,16 @@ fn cache_stats_runs_without_workspace() {
 #[test]
 fn cache_rebuild_writes_sidecar() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "micro");
+    // This test clears and rebuilds its cache. Use an isolated workspace so
+    // the all-language matrix can run in parallel without another Python test
+    // opening the same canonical-path-keyed sidecar between those operations.
+    let temp = tempfile::tempdir().expect("create isolated cache-rebuild workspace");
+    let workspace = temp.path().join("python-micro");
+    copy_workspace_tree(
+        &repo_root().join("test-fixtures/languages/python/micro"),
+        &workspace,
+    );
+    let w = workspace.to_string_lossy().into_owned();
     // Clean up any leftover sidecar first.
     let _ = run(&["cache", "clear", &w]);
     let Some((_out, _, code)) = run(&["cache", "rebuild", &w]) else {
@@ -3809,6 +3909,7 @@ fn cache_rebuild_writes_sidecar() {
         parsed["dataflow_factstore_sidecar_exists"], false,
         "cache rebuild should not run a full-workspace dataflow prewarm:\n{out}"
     );
+    let _ = run(&["cache", "clear", &w]);
 }
 
 /// `dump-taint --sink X` narrows propagation records to sinks

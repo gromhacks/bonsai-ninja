@@ -44,7 +44,6 @@ fn package_rule(package: &str) -> Rule {
                 ..Default::default()
             }),
             target: None,
-            search_depth: 0,
         },
         analysis_semantics: None,
         taint_semantics: None,
@@ -52,6 +51,7 @@ fn package_rule(package: &str) -> Rule {
         returns_type: None,
         callback_param_types: Vec::new(),
         callback_arg_index: None,
+        callback_field_path: Vec::new(),
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "test".to_string(),

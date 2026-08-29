@@ -16,6 +16,10 @@ def documented():
     value = "ordinary string"
     return value
 
+async def async_documented():
+    "async function docs"
+    return None
+
 def not_documented():
     value = "first assignment is not a docstring"
     return value
@@ -33,9 +37,10 @@ def not_documented():
         .filter(|comment| comment.kind == CommentKind::Doc)
         .map(|comment| comment.text.as_str())
         .collect();
-    assert_eq!(docs.len(), 2, "{:#?}", index.comments);
+    assert_eq!(docs.len(), 3, "{:#?}", index.comments);
     assert!(docs.iter().any(|text| text.contains("module docs")));
     assert!(docs.iter().any(|text| text.contains("single-line function docs")));
+    assert!(docs.iter().any(|text| text.contains("async function docs")));
     assert!(docs.iter().all(|text| !text.contains("ordinary string")));
     assert!(docs
         .iter()

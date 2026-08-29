@@ -78,12 +78,25 @@
   match:
     kind: write
     target:
-      name: requiresSecureCoding
+      regex: "^[^\\.\\s]+\\.requiresSecureCoding$"
+      receiver_type_in: [NSKeyedUnarchiver]
+  constraints:
+  - arg_equals: {index: 0, value: "NO"}
   match_examples:
-    - name: declared shape
+    - name: secure coding disabled on keyed unarchiver
       code: |
-        void test(id input) { id target = input; int amount = 1; NSKeyedUnarchiver.requiresSecureCoding = input; }
-  description: "NSKeyedUnarchiver .requiresSecureCoding = NO - disables NSSecureCoding enforcement, reintroducing class-substitution RCE."
+        #import <Foundation/Foundation.h>
+        void configure(NSKeyedUnarchiver *unarchiver) { unarchiver.requiresSecureCoding = NO; }
+    - name: secure coding enabled on keyed unarchiver negative
+      code: |
+        #import <Foundation/Foundation.h>
+        void configure(NSKeyedUnarchiver *unarchiver) { unarchiver.requiresSecureCoding = YES; }
+      expect_no_match: true
+    - name: local requires-secure-coding collision negative
+      code: |
+        void configure(void) { BOOL requiresSecureCoding = NO; }
+      expect_no_match: true
+  description: "`NSKeyedUnarchiver.requiresSecureCoding = NO` disables secure coding; exact member and scalar-value constraints reject secure settings and local collisions."
 
 - id: objc.deser.nspropertylist
   enabled: true

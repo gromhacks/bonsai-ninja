@@ -89,6 +89,7 @@ use crate::place::{CallSiteId, Place, TypeId};
 pub(crate) const RETURN_FIELD_BASE: &str = "__bonsai_return";
 pub(crate) const YIELD_FIELD_BASE: &str = "__bonsai_yield";
 pub(crate) const TEMPORARY_RECEIVER_BASE_PREFIX: &str = "__bonsai_receiver";
+pub(crate) const TEMPORARY_CALL_ARGUMENT_BASE_PREFIX: &str = "__bonsai_call_argument";
 
 /// Transfer-time options supplied by higher layers.
 ///
@@ -100,11 +101,16 @@ pub(crate) const TEMPORARY_RECEIVER_BASE_PREFIX: &str = "__bonsai_receiver";
 pub struct TransferOptions {
     /// Configured output-argument overwrite shapes.
     pub clean_output_overwrites: Vec<CleanOutputOverwriteSpec>,
+    /// Matcher-approved calls whose receiver is replaced by clean state.
+    pub clean_receiver_overwrites: Vec<CleanReceiverOverwriteSpec>,
     /// Configured source calls that write untrusted data into output arguments.
     pub source_output_args: Vec<SourceOutputArgSpec>,
     /// Configured source calls that deliver untrusted data to callback
     /// parameters.
     pub source_callback_args: Vec<SourceCallbackArgSpec>,
+    /// Rule-compiled calls that invoke one compiler-resolved callable
+    /// argument and project its return into the outer multi-result.
+    pub callback_invocations: Vec<CallbackInvocationSpec>,
     /// Declarative external-call summaries whose selected inputs flow to the
     /// call result. Materialized once into the IDG rather than replayed per
     /// source closure.
@@ -152,8 +158,10 @@ impl Default for TransferOptions {
     fn default() -> Self {
         Self {
             clean_output_overwrites: Vec::new(),
+            clean_receiver_overwrites: Vec::new(),
             source_output_args: Vec::new(),
             source_callback_args: Vec::new(),
+            callback_invocations: Vec::new(),
             call_result_passthroughs: Vec::new(),
             output_arg_flows: Vec::new(),
             receiver_state_propagations: Vec::new(),
@@ -199,8 +207,10 @@ impl TransferOptions {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.clean_output_overwrites.is_empty()
+            && self.clean_receiver_overwrites.is_empty()
             && self.source_output_args.is_empty()
             && self.source_callback_args.is_empty()
+            && self.callback_invocations.is_empty()
             && self.call_result_passthroughs.is_empty()
             && self.output_arg_flows.is_empty()
             && self.receiver_state_propagations.is_empty()
@@ -227,6 +237,14 @@ impl TransferOptions {
             ))
         });
         self.clean_output_overwrites.dedup();
+
+        for spec in &mut self.clean_receiver_overwrites {
+            spec.resolved_call_sites.sort();
+            spec.resolved_call_sites.dedup();
+        }
+        self.clean_receiver_overwrites
+            .sort_by(|a, b| (&a.callee, &a.resolved_call_sites).cmp(&(&b.callee, &b.resolved_call_sites)));
+        self.clean_receiver_overwrites.dedup();
 
         for spec in &mut self.source_output_args {
             spec.output_arg_indices.sort_unstable();
@@ -260,51 +278,99 @@ impl TransferOptions {
                 &a.callee,
                 a.callback_arg_index,
                 &a.source_param_indices,
+                a.source_param_indices_from,
                 &a.resolved_call_sites,
             )
                 .cmp(&(
                     &b.callee,
                     b.callback_arg_index,
                     &b.source_param_indices,
+                    b.source_param_indices_from,
                     &b.resolved_call_sites,
                 ))
         });
         self.source_callback_args.dedup();
+        for spec in &mut self.callback_invocations {
+            spec.resolved_call_sites.sort();
+            spec.resolved_call_sites.dedup();
+            spec.resolved_callback_targets
+                .sort_unstable_by_key(|(span, target)| (*span, target.raw()));
+            spec.resolved_callback_targets.dedup();
+        }
+        self.callback_invocations.sort_by(|a, b| {
+            (
+                &a.callee,
+                a.callback_arg_index,
+                &a.callback_map_field_path,
+                &a.forwarded_argument_field_path,
+                a.forwarded_callback_param_index,
+                a.forwarded_args_from,
+                a.receiver_to_callback_param,
+                a.callback_return_result_offset,
+                &a.resolved_call_sites,
+                &a.resolved_callback_targets,
+            )
+                .cmp(&(
+                    &b.callee,
+                    b.callback_arg_index,
+                    &b.callback_map_field_path,
+                    &b.forwarded_argument_field_path,
+                    b.forwarded_callback_param_index,
+                    b.forwarded_args_from,
+                    b.receiver_to_callback_param,
+                    b.callback_return_result_offset,
+                    &b.resolved_call_sites,
+                    &b.resolved_callback_targets,
+                ))
+        });
+        self.callback_invocations.dedup();
         for spec in &mut self.call_result_passthroughs {
             spec.input_arg_indices.sort_unstable();
             spec.input_arg_indices.dedup();
+            spec.resolved_call_sites.sort();
+            spec.resolved_call_sites.dedup();
         }
         self.call_result_passthroughs.sort_by(|a, b| {
             (
                 &a.callee,
                 &a.receiver_type,
                 &a.input_arg_indices,
+                a.input_arg_start_index,
                 a.input_receiver,
+                &a.resolved_call_sites,
             )
                 .cmp(&(
                     &b.callee,
                     &b.receiver_type,
                     &b.input_arg_indices,
+                    b.input_arg_start_index,
                     b.input_receiver,
+                    &b.resolved_call_sites,
                 ))
         });
         self.call_result_passthroughs.dedup();
         for spec in &mut self.output_arg_flows {
             spec.value_arg_indices.sort_unstable();
             spec.value_arg_indices.dedup();
+            spec.resolved_call_sites.sort();
+            spec.resolved_call_sites.dedup();
         }
         self.output_arg_flows.sort_by(|a, b| {
             (
                 &a.callee,
                 a.output_arg_index,
+                a.input_receiver,
                 &a.value_arg_indices,
                 a.value_start_arg_index,
+                &a.resolved_call_sites,
             )
                 .cmp(&(
                     &b.callee,
                     b.output_arg_index,
+                    b.input_receiver,
                     &b.value_arg_indices,
                     b.value_start_arg_index,
+                    &b.resolved_call_sites,
                 ))
         });
         self.output_arg_flows.dedup();
@@ -377,6 +443,15 @@ impl TransferOptions {
             absorb_u64(&mut hasher, spec.output_arg_index as u64);
             absorb_u64(&mut hasher, spec.value_start_arg_index as u64);
         }
+        absorb_u64(&mut hasher, options.clean_receiver_overwrites.len() as u64);
+        for spec in &options.clean_receiver_overwrites {
+            absorb_str(&mut hasher, "clean-receiver-overwrite");
+            absorb_str(&mut hasher, &spec.callee);
+            absorb_u64(&mut hasher, spec.resolved_call_sites.len() as u64);
+            for span in &spec.resolved_call_sites {
+                absorb_span(&mut hasher, *span);
+            }
+        }
         absorb_u64(&mut hasher, options.source_output_args.len() as u64);
         for spec in &options.source_output_args {
             absorb_str(&mut hasher, "source-output-args");
@@ -403,9 +478,52 @@ impl TransferOptions {
             for index in &spec.source_param_indices {
                 absorb_u64(&mut hasher, *index as u64);
             }
+            absorb_u64(
+                &mut hasher,
+                spec.source_param_indices_from
+                    .map_or(u64::MAX, |index| index as u64),
+            );
             absorb_u64(&mut hasher, spec.resolved_call_sites.len() as u64);
             for span in &spec.resolved_call_sites {
                 absorb_span(&mut hasher, *span);
+            }
+        }
+        absorb_u64(&mut hasher, options.callback_invocations.len() as u64);
+        for spec in &options.callback_invocations {
+            absorb_str(&mut hasher, "callback-invocation");
+            absorb_str(&mut hasher, &spec.callee);
+            absorb_u64(&mut hasher, spec.callback_arg_index as u64);
+            absorb_u64(&mut hasher, spec.callback_map_field_path.len() as u64);
+            for segment in &spec.callback_map_field_path {
+                absorb_str(&mut hasher, segment);
+            }
+            absorb_u64(&mut hasher, spec.forwarded_argument_field_path.len() as u64);
+            for segment in &spec.forwarded_argument_field_path {
+                absorb_str(&mut hasher, segment);
+            }
+            absorb_u64(
+                &mut hasher,
+                spec.forwarded_callback_param_index
+                    .map_or(u64::MAX, |index| index as u64),
+            );
+            absorb_u64(
+                &mut hasher,
+                spec.forwarded_args_from.map_or(u64::MAX, |index| index as u64),
+            );
+            absorb_u64(
+                &mut hasher,
+                spec.receiver_to_callback_param
+                    .map_or(u64::MAX, |index| index as u64),
+            );
+            absorb_u64(&mut hasher, spec.callback_return_result_offset as u64);
+            absorb_u64(&mut hasher, spec.resolved_call_sites.len() as u64);
+            for span in &spec.resolved_call_sites {
+                absorb_span(&mut hasher, *span);
+            }
+            absorb_u64(&mut hasher, spec.resolved_callback_targets.len() as u64);
+            for (span, target) in &spec.resolved_callback_targets {
+                absorb_span(&mut hasher, *span);
+                absorb_u64(&mut hasher, u64::from(target.raw()));
             }
         }
         absorb_u64(&mut hasher, options.call_result_passthroughs.len() as u64);
@@ -418,12 +536,21 @@ impl TransferOptions {
             for index in &spec.input_arg_indices {
                 absorb_u64(&mut hasher, *index as u64);
             }
+            absorb_u64(
+                &mut hasher,
+                spec.input_arg_start_index.map_or(u64::MAX, |index| index as u64),
+            );
+            absorb_u64(&mut hasher, spec.resolved_call_sites.len() as u64);
+            for span in &spec.resolved_call_sites {
+                absorb_span(&mut hasher, *span);
+            }
         }
         absorb_u64(&mut hasher, options.output_arg_flows.len() as u64);
         for spec in &options.output_arg_flows {
             absorb_str(&mut hasher, "output-arg-flow");
             absorb_str(&mut hasher, &spec.callee);
             absorb_u64(&mut hasher, spec.output_arg_index as u64);
+            absorb_u64(&mut hasher, u64::from(spec.input_receiver));
             absorb_u64(&mut hasher, spec.value_arg_indices.len() as u64);
             for index in &spec.value_arg_indices {
                 absorb_u64(&mut hasher, *index as u64);
@@ -432,6 +559,10 @@ impl TransferOptions {
                 &mut hasher,
                 spec.value_start_arg_index.map_or(u64::MAX, |index| index as u64),
             );
+            absorb_u64(&mut hasher, spec.resolved_call_sites.len() as u64);
+            for span in &spec.resolved_call_sites {
+                absorb_span(&mut hasher, *span);
+            }
         }
         absorb_u64(&mut hasher, options.receiver_state_propagations.len() as u64);
         for spec in &options.receiver_state_propagations {
@@ -462,6 +593,17 @@ pub struct CleanOutputOverwriteSpec {
     pub value_start_arg_index: usize,
 }
 
+/// Declarative, exact-site receiver overwrite. The fresh receiver writer has
+/// no incoming taint edges because the matched sanitizer rule proves the
+/// resulting alphabet/value shape independently of the original receiver.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CleanReceiverOverwriteSpec {
+    /// Exact or `regex:`-prefixed callee/operator identity from rule data.
+    pub callee: String,
+    /// Exact matcher-approved calls. An empty list installs no transfer.
+    pub resolved_call_sites: Vec<Span>,
+}
+
 /// Declarative source call shape whose output arguments receive
 /// untrusted data.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -487,8 +629,55 @@ pub struct SourceCallbackArgSpec {
     pub callback_arg_index: usize,
     /// Callback parameter indices that receive source data.
     pub source_param_indices: Vec<usize>,
+    /// Every actual callback parameter at or after this index receives source
+    /// data. The callback's compiler arity supplies the finite range.
+    pub source_param_indices_from: Option<usize>,
     /// Exact rule-matcher-approved registration calls.
     pub resolved_call_sites: Vec<Span>,
+}
+
+impl SourceCallbackArgSpec {
+    /// Resolve declarative explicit/variadic positions against one exact
+    /// compiler callback signature. Indices outside the signature are
+    /// discarded rather than guessed.
+    pub(crate) fn resolved_source_param_indices(&self, param_count: usize) -> Vec<usize> {
+        let mut indices = self.source_param_indices.clone();
+        if let Some(start) = self.source_param_indices_from {
+            indices.extend(start..param_count);
+        }
+        indices.retain(|index| *index < param_count);
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
+}
+
+/// Rule-compiled external/runtime callback invocation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallbackInvocationSpec {
+    /// Rule-owned outer callable identity.
+    pub callee: String,
+    /// Positional argument holding the invoked callback.
+    pub callback_arg_index: usize,
+    /// Exact aggregate field containing a compiler-proven static callback
+    /// map. Empty retains direct-callback invocation semantics.
+    pub callback_map_field_path: Vec<String>,
+    /// Exact aggregate field forwarded into the callback parameter.
+    pub forwarded_argument_field_path: Vec<String>,
+    /// Zero-based callback parameter receiving the forwarded field.
+    pub forwarded_callback_param_index: Option<usize>,
+    /// First outer-call argument forwarded to callback parameter zero.
+    pub forwarded_args_from: Option<usize>,
+    /// Callback parameter receiving the exact outer receiver value.
+    pub receiver_to_callback_param: Option<usize>,
+    /// Outer result position receiving callback return zero. Offset zero also
+    /// denotes the complete result of a non-tuple host call; positive offsets
+    /// select only the matching compiler-lowered tuple result.
+    pub callback_return_result_offset: usize,
+    /// Exact matcher-approved outer call spans.
+    pub resolved_call_sites: Vec<Span>,
+    /// Exact outer-call/callback pairs compiled before graph construction.
+    pub resolved_callback_targets: Vec<(Span, FuncId)>,
 }
 
 /// Declarative external-call dependency summary.
@@ -500,8 +689,27 @@ pub struct CallResultPassthroughSpec {
     pub receiver_type: Option<String>,
     /// Positional call arguments that flow into the result.
     pub input_arg_indices: Vec<usize>,
+    /// First argument in an actual-arity-expanded variadic input tail.
+    pub input_arg_start_index: Option<usize>,
     /// Whether the method receiver also flows into the result.
     pub input_receiver: bool,
+    /// Exact rule-matcher-approved calls. When present, provider/type and
+    /// package constraints are already resolved and lowering must use these
+    /// spans instead of matching a rendered callee name again.
+    pub resolved_call_sites: Vec<Span>,
+}
+
+impl CallResultPassthroughSpec {
+    fn resolved_input_arg_indices(&self, arg_count: usize) -> Vec<usize> {
+        let mut indices = self.input_arg_indices.clone();
+        if let Some(start) = self.input_arg_start_index {
+            indices.extend(start..arg_count);
+        }
+        indices.retain(|index| *index < arg_count);
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
 }
 
 /// Declarative external-call output-parameter dependency summary.
@@ -511,11 +719,17 @@ pub struct OutputArgFlowSpec {
     pub callee: String,
     /// Positional argument written by the call.
     pub output_arg_index: usize,
+    /// Whether the call receiver carries value state into the output.
+    pub input_receiver: bool,
     /// Individual value-bearing positional arguments.
     pub value_arg_indices: Vec<usize>,
     /// Optional first value-bearing argument; all later arguments flow to the
     /// output except the output argument itself.
     pub value_start_arg_index: Option<usize>,
+    /// Exact rule-matcher-approved calls. When present, provider/type
+    /// constraints have already been resolved and must not be reinterpreted
+    /// by IDG lowering.
+    pub resolved_call_sites: Vec<Span>,
 }
 
 /// Declarative external-method summary whose explicit arguments flow into
@@ -545,11 +759,16 @@ pub struct ReceiverStatePropagationSpec {
 #[derive(Debug)]
 pub(crate) struct CompiledTransferMatchers {
     call_result_passthroughs: ConfiguredNameIndex,
-    source_output_args: ConfiguredNameIndex,
-    source_callback_args: ConfiguredNameIndex,
+    resolved_call_result_passthroughs: ResolvedCallSiteIndex,
+    source_output_args: ResolvedCallSiteIndex,
+    source_callback_args: ResolvedCallSiteIndex,
+    callback_invocations: ResolvedCallSiteIndex,
     output_arg_flows: ConfiguredNameIndex,
+    resolved_output_arg_flows: ResolvedCallSiteIndex,
     receiver_state_propagations: ConfiguredNameIndex,
+    resolved_receiver_state_propagations: ResolvedCallSiteIndex,
     clean_output_overwrites: ConfiguredNameIndex,
+    clean_receiver_overwrites: ResolvedCallSiteIndex,
 }
 
 impl CompiledTransferMatchers {
@@ -561,20 +780,38 @@ impl CompiledTransferMatchers {
                     .iter()
                     .map(|shape| shape.callee.as_str()),
             ),
-            source_output_args: ConfiguredNameIndex::new(
+            resolved_call_result_passthroughs: ResolvedCallSiteIndex::new(
+                options
+                    .call_result_passthroughs
+                    .iter()
+                    .map(|shape| shape.resolved_call_sites.as_slice()),
+            ),
+            source_output_args: ResolvedCallSiteIndex::new(
                 options
                     .source_output_args
                     .iter()
-                    .map(|shape| shape.callee.as_str()),
+                    .map(|shape| shape.resolved_call_sites.as_slice()),
             ),
-            source_callback_args: ConfiguredNameIndex::new(
+            source_callback_args: ResolvedCallSiteIndex::new(
                 options
                     .source_callback_args
                     .iter()
-                    .map(|shape| shape.callee.as_str()),
+                    .map(|shape| shape.resolved_call_sites.as_slice()),
+            ),
+            callback_invocations: ResolvedCallSiteIndex::new(
+                options
+                    .callback_invocations
+                    .iter()
+                    .map(|shape| shape.resolved_call_sites.as_slice()),
             ),
             output_arg_flows: ConfiguredNameIndex::new(
                 options.output_arg_flows.iter().map(|shape| shape.callee.as_str()),
+            ),
+            resolved_output_arg_flows: ResolvedCallSiteIndex::new(
+                options
+                    .output_arg_flows
+                    .iter()
+                    .map(|shape| shape.resolved_call_sites.as_slice()),
             ),
             receiver_state_propagations: ConfiguredNameIndex::new(
                 options
@@ -582,13 +819,51 @@ impl CompiledTransferMatchers {
                     .iter()
                     .map(|shape| shape.method.as_str()),
             ),
+            resolved_receiver_state_propagations: ResolvedCallSiteIndex::new(
+                options
+                    .receiver_state_propagations
+                    .iter()
+                    .map(|shape| shape.resolved_call_sites.as_slice()),
+            ),
             clean_output_overwrites: ConfiguredNameIndex::new(
                 options
                     .clean_output_overwrites
                     .iter()
                     .map(|shape| shape.callee.as_str()),
             ),
+            clean_receiver_overwrites: ResolvedCallSiteIndex::new(
+                options
+                    .clean_receiver_overwrites
+                    .iter()
+                    .map(|shape| shape.resolved_call_sites.as_slice()),
+            ),
         }
+    }
+}
+
+/// Exact compiler-approved call spans indexed by their owning declarative
+/// transfer shape. Provider/type spellings have already been interpreted by
+/// the rule matcher before IDG construction; transfer lowering must consume
+/// that evidence rather than trying to match the adapter's rendered callee a
+/// second time.
+#[derive(Debug, Default)]
+struct ResolvedCallSiteIndex {
+    by_span: ahash::AHashMap<Span, Vec<usize>>,
+}
+
+impl ResolvedCallSiteIndex {
+    fn new<'a>(configured_sites: impl IntoIterator<Item = &'a [Span]>) -> Self {
+        let mut index = Self::default();
+        for (position, sites) in configured_sites.into_iter().enumerate() {
+            for span in sites {
+                index.by_span.entry(*span).or_default().push(position);
+            }
+        }
+        index
+    }
+
+    fn matching_indices(&self, span: Span) -> &[usize] {
+        self.by_span.get(&span).map(Vec::as_slice).unwrap_or_default()
     }
 }
 
@@ -728,6 +1003,8 @@ pub struct CallSiteRef {
     pub call_arg_names: SmallVec<[Option<String>; 4]>,
     /// Source-callback transfer specs matching this call site.
     pub source_callback_args: Vec<SourceCallbackArgSpec>,
+    /// Rule-compiled callable invocation roles matching this call site.
+    pub callback_invocations: Vec<CallbackInvocationSpec>,
     /// True when this call site arose from `target = callee(args)`
     /// (a `FlowEvent::Assign` with `source_call`). Resolution still
     /// needs an explicit semantic callee or summary before any
@@ -1143,22 +1420,32 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
     call_argument_values: &[CallArgumentValueFact],
     finite_literal_selections: &[FiniteLiteralSelectionFact],
 ) -> TransferOutput {
+    // IDG transfer consumes the same compiler control semantics as CFG.
+    // Adapter HIR intentionally retains unreachable source statements for
+    // diagnostics; lowering them into the semantic graph would manufacture
+    // impossible taint paths. The canonical normalizer also places lexical
+    // defer bodies at scope exit rather than at their declaration site.
+    let executable_flow = bonsai_cfg::normalize_executable_flow(&decl.flow_events);
     let func = FuncId::new(decl.symbol.raw());
     let mut out = TransferOutput::new(func);
     out.is_constructor = matches!(decl.kind, DeclKind::Constructor);
-    out.has_return_event = flow_events_contain_return(&decl.flow_events);
+    out.has_return_event = flow_events_contain_return(&executable_flow);
     out.params.clone_from(&decl.params);
     out.receiver_param_index = decl.receiver_param_index;
     out.receiver_names = declared_receiver_names(decl);
     out.receiver_field_bases = receiver_field_bases(decl, &out.receiver_names);
     out.implicit_receiver_bases = implicit_receiver_bases(decl, &out.receiver_names);
-    out.return_field_projections = return_field_projections(&decl.flow_events, &out.receiver_names);
-    out.return_passthrough_param_indices = return_passthrough_param_indices(&decl.flow_events, &decl.params);
-    out.flow_control = FlowControlFacts::from_events(&decl.flow_events);
-    let method_receiver_projections = collect_method_receiver_projections(&decl.flow_events);
-    let method_selector_fields = collect_method_selector_fields(&decl.flow_events);
+    out.return_field_projections = return_field_projections(&executable_flow, &out.receiver_names);
+    out.return_passthrough_param_indices = return_passthrough_param_indices(&executable_flow, &decl.params);
+    out.flow_control = FlowControlFacts::from_events(&executable_flow);
+    let method_receiver_projections = collect_method_receiver_projections(&executable_flow);
+    let method_selector_fields = collect_method_selector_fields(&executable_flow);
     let field_precise_source_projections =
-        collect_field_precise_source_projections(&decl.flow_events, &method_receiver_projections);
+        collect_field_precise_source_projections(&executable_flow, &method_receiver_projections);
+    let mut flow_call_sites = Vec::new();
+    collect_flow_call_sites(&executable_flow, &mut flow_call_sites);
+    flow_call_sites.sort_unstable_by_key(|span| (span.file.raw(), span.start, span.end));
+    flow_call_sites.dedup();
     let mut ctx = TransferCtx {
         out: &mut out,
         options,
@@ -1168,13 +1455,15 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
         descendant_writer_ids_by_base: ahash::AHashMap::new(),
         catch_projection_receivers: ahash::AHashSet::default(),
         emitted_edges: ahash::AHashSet::default(),
-        field_precise_container_assigns: collect_field_precise_container_assigns(&decl.flow_events),
+        field_precise_container_assigns: collect_field_precise_container_assigns(&executable_flow),
         method_receiver_projections,
         method_selector_fields,
         field_precise_source_projections,
-        yield_callback_names: collect_yield_callback_names(&decl.flow_events),
+        yield_callback_names: collect_yield_callback_names(&executable_flow),
         pending_expression_calls: Vec::new(),
         prebound_assignment_receivers: ahash::AHashSet::default(),
+        flow_call_sites: &flow_call_sites,
+        lowered_call_sites: ahash::AHashSet::default(),
         assignment_values,
         call_receivers,
         call_argument_values,
@@ -1226,14 +1515,10 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
     }
 
     emit_receiver_field_writes(decl, &mut ctx);
-    walk_events(&decl.flow_events, &mut ctx);
-    let mut flow_call_sites = Vec::new();
-    collect_flow_call_sites(&decl.flow_events, &mut flow_call_sites);
-    flow_call_sites.sort_unstable_by_key(|span| (span.file.raw(), span.start, span.end));
-    flow_call_sites.dedup();
+    walk_events(&executable_flow, &mut ctx);
     let mut assignment_call_sites = ahash::AHashSet::default();
     collect_assignment_call_sites(
-        &decl.flow_events,
+        &executable_flow,
         assignment_values,
         &flow_call_sites,
         &mut assignment_call_sites,
@@ -1436,6 +1721,31 @@ fn normalize_return_projection_part(part: &str, receiver_names: &[String]) -> St
     }
 }
 
+/// Canonicalize only the root of an adapter-declared implicit receiver place.
+///
+/// Some grammars retain a receiver sigil in assignment targets (`$this.x`)
+/// while their structured expression projection names the same receiver
+/// without it (`this.x`). Both are exact compiler facts for one storage
+/// location. Ordinary sigiled variables are deliberately unchanged: the
+/// receiver declaration, not punctuation, authorizes this normalization.
+fn normalize_implicit_receiver_place(place: &str, receiver_names: &[String]) -> String {
+    let place = place.trim();
+    let boundary = place
+        .char_indices()
+        .find_map(|(index, ch)| matches!(ch, '.' | '[').then_some(index))
+        .unwrap_or(place.len());
+    let (root, suffix) = place.split_at(boundary);
+    if !receiver_name_matches(root, receiver_names) {
+        return place.to_string();
+    }
+    let canonical = canonical_receiver_token(root);
+    if canonical.is_empty() {
+        place.to_string()
+    } else {
+        format!("{canonical}{suffix}")
+    }
+}
+
 pub(crate) fn declared_receiver_names(decl: &Decl) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for name in decl.implicit_receiver_names.iter().chain(
@@ -1616,7 +1926,8 @@ fn canonical_receiver_token(token: &str) -> &str {
 
 fn emit_receiver_field_writes(decl: &Decl, ctx: &mut TransferCtx<'_>) {
     for write in &decl.receiver_field_writes {
-        let target = write.target.trim();
+        let normalized_target = normalize_implicit_receiver_place(&write.target, &ctx.out.receiver_names);
+        let target = normalized_target.as_str();
         if target.is_empty() {
             continue;
         }
@@ -1783,9 +2094,11 @@ struct TransferCtx<'a> {
     /// narrower than falling back to every base writer: aggregate call
     /// arguments can carry only one tainted field into a parameter, and must
     /// not thereby taint all sibling fields.
-    /// Writers known to bind a complete value (formal parameters and whole
-    /// external/call results). Projected reads may use the nearest such
-    /// ancestor only when no exact projected writer is live.
+    /// Writers known to bind a complete external/call result. Projected reads
+    /// may use the nearest such ancestor only when no exact projected writer
+    /// is live. Formal parameters are deliberately excluded: Phase 3 can
+    /// forward one actual field into one formal field, and treating the base
+    /// parameter as a whole-value writer would collapse every sibling field.
     whole_value_writer_ids: ahash::AHashSet<NodeId>,
     /// Monotonic index from a canonical aggregate base to compiler place ids
     /// ever written below it. Entries can outlive a clean overwrite; callers
@@ -1839,6 +2152,16 @@ struct TransferCtx<'a> {
     /// source-language evaluation reads the receiver first. The exact sibling
     /// call span is the compiler join key; no method spelling is interpreted.
     prebound_assignment_receivers: ahash::AHashSet<Span>,
+    /// Every semantic call span in this declaration's normalized compiler
+    /// flow, including calls nested beneath try/await/branch regions. Direct
+    /// assignment facts join against this exact inventory so an enclosing
+    /// assignment never synthesizes a second, wider call identity.
+    flow_call_sites: &'a [Span],
+    /// Call events already lowered in the current deterministic flow walk.
+    /// This distinguishes `target = target.method()` shapes whose receiver
+    /// must be read before the assignment commits from adapters that emit the
+    /// call before its assignment event.
+    lowered_call_sites: ahash::AHashSet<Span>,
     /// Exact Tree-sitter assignment/RHS relationships for this file. The
     /// facts are sorted by assignment span, so lookups remain logarithmic and
     /// do not turn transfer into an assignments-squared pass on large files.
@@ -1954,8 +2277,8 @@ impl<'a> TransferCtx<'a> {
     }
 
     /// Resolve a compiler-normalized projection to the nearest live ancestor
-    /// whose writer binds the complete value (a formal parameter or whole
-    /// call result). Exact projected writers are checked by
+    /// whose writer binds a complete external or call result. Exact projected
+    /// writers are checked by
     /// [`Self::bridge_read`] first and therefore retain normal clean-overwrite
     /// and field-sensitive semantics.
     fn whole_value_writers_for_projection(&mut self, name: &str) -> smallvec::SmallVec<[NodeId; 4]> {
@@ -2569,7 +2892,13 @@ fn merge_writer_states(
 /// Walk a slice of FlowEvents, dispatching each to its handler.
 fn walk_events(events: &[FlowEvent], ctx: &mut TransferCtx<'_>) {
     for (index, event) in events.iter().enumerate() {
-        let assign_call_site = assign_call_site_hint(events, index);
+        let assign_call_site = assign_call_site_hint(
+            events,
+            index,
+            ctx.assignment_values,
+            ctx.flow_call_sites,
+            Some(&ctx.lowered_call_sites),
+        );
         walk_event(event, assign_call_site, ctx);
     }
 }
@@ -2586,18 +2915,40 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
             source_names,
             declares_new_binding,
             value_kind,
-        } => walk_assign(
-            *span,
-            target,
-            source_name.as_deref(),
-            source_call.as_deref(),
-            source_call_args,
-            source_names,
-            *declares_new_binding,
-            *value_kind,
-            assign_call_site,
-            ctx,
-        ),
+        } => {
+            // Generic HOF lowering conservatively models an inline closure's
+            // parameters as values derived from the registration call's
+            // receiver/arguments. Once a rule has compiled an exact external
+            // source-callback boundary at that call site, those synthetic
+            // aliases are semantically inapplicable: callback parameters are
+            // delivered by the external producer, not copied from the
+            // subscription handle or its receiver. Suppress only the exact
+            // compiler-marked callback binding; ordinary closures retain the
+            // generic HOF propagation.
+            if is_compiled_source_callback_binding(
+                *span,
+                target,
+                source_name.as_deref(),
+                source_call.as_deref(),
+                *declares_new_binding,
+                *value_kind,
+                ctx,
+            ) {
+                return;
+            }
+            walk_assign(
+                *span,
+                target,
+                source_name.as_deref(),
+                source_call.as_deref(),
+                source_call_args,
+                source_names,
+                *declares_new_binding,
+                *value_kind,
+                assign_call_site,
+                ctx,
+            );
+        }
         FlowEvent::AggregateAssign {
             span,
             target,
@@ -2709,13 +3060,17 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
             finally_events,
             catch_param,
             catch_types,
+            catch_arms,
         } => walk_try(
             *span,
             body,
             catch_events,
             finally_events,
-            catch_param.as_deref(),
-            catch_types,
+            TryCatchSpec {
+                param: catch_param.as_deref(),
+                types: catch_types,
+                arms: catch_arms,
+            },
             ctx,
         ),
         FlowEvent::Defer { span: _, body } => walk_events(body, ctx),
@@ -2766,6 +3121,42 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
     }
 }
 
+fn is_compiled_source_callback_binding(
+    span: Span,
+    target: &str,
+    source_name: Option<&str>,
+    source_call: Option<&str>,
+    declares_new_binding: bool,
+    value_kind: Option<AssignValueKind>,
+    ctx: &TransferCtx<'_>,
+) -> bool {
+    if declares_new_binding || source_name.is_some() {
+        return false;
+    }
+    ctx.call_argument_values.iter().any(|fact| {
+        let Some(target_index) = fact
+            .inline_callback_params
+            .iter()
+            .position(|param| param.strip_prefix("...").unwrap_or(param).trim() == target.trim())
+        else {
+            return false;
+        };
+        let is_lexical_callback_binding = source_call.is_none() && fact.inline_callback_span == Some(span);
+        let is_yield_delivery_binding = source_call.is_some()
+            && value_kind == Some(AssignValueKind::YieldResult)
+            && fact.call_span == span;
+        (is_lexical_callback_binding || is_yield_delivery_binding)
+            && ctx.options.source_callback_args.iter().any(|shape| {
+                shape.callback_arg_index == fact.argument_index
+                    && shape.resolved_call_sites.binary_search(&fact.call_span).is_ok()
+                    && shape
+                        .resolved_source_param_indices(fact.inline_callback_params.len())
+                        .binary_search(&target_index)
+                        .is_ok()
+            })
+    })
+}
+
 /// Materialize a named aggregate initializer as exact local field writes.
 /// Positional items are intentionally ignored here: the workspace semantic
 /// pass must first prove their field identity from a parsed type layout.
@@ -2784,6 +3175,18 @@ fn emit_local_expression_aggregate(base: &str, flow: &ExpressionFlow, span: Span
         let (write_node, _) = build_target_node(&target, span, ctx);
         if field.value.aggregate_fields.is_empty() {
             emit_expression_scalar_to_node(&field.value, write_node, field_meta, ctx);
+            // A named aggregate field may itself hold an object value.  The
+            // scalar edge above preserves whole-value flow, but it must not
+            // discard compiler-known descendants already written below the
+            // exact source base:
+            //
+            //     result = Wrapper { payload: payload }
+            //
+            // `payload.command` therefore becomes
+            // `result.payload.command`, while an unrelated sibling remains
+            // disjoint.  This is an AST-derived base/path copy; it neither
+            // promotes a field to the whole object nor invents members.
+            copy_expression_descendants_to_special_base(&target, &field.value, span, ctx);
         } else {
             emit_local_expression_aggregate(&target, &field.value, span, ctx);
         }
@@ -2824,6 +3227,11 @@ fn emit_expression_aggregate(
         let write_node = ctx.write_node(&target, span);
         if !emit_expression_aggregate(&target, &field.value, span, ctx) {
             emit_expression_scalar_to_node(&field.value, write_node, field_meta, ctx);
+            // Preserve exact descendants when an aggregate return field is
+            // another compiler-known object (`return Wrapper { payload }`).
+            // Return stitching can then rebase `payload.command` through the
+            // call result without collapsing field sensitivity.
+            copy_expression_descendants_to_special_base(&target, &field.value, span, ctx);
         }
     }
     for (index, item) in flow.tuple_items.iter().enumerate() {
@@ -2989,7 +3397,13 @@ fn copy_expression_descendants_to_special_base(
     }
 }
 
-fn assign_call_site_hint(events: &[FlowEvent], index: usize) -> Option<AssignCallSiteHint> {
+fn assign_call_site_hint(
+    events: &[FlowEvent],
+    index: usize,
+    assignment_values: &[AssignmentValueFact],
+    flow_call_sites: &[Span],
+    lowered_call_sites: Option<&ahash::AHashSet<Span>>,
+) -> Option<AssignCallSiteHint> {
     let FlowEvent::Assign {
         span: assign_span,
         target,
@@ -3002,6 +3416,52 @@ fn assign_call_site_hint(events: &[FlowEvent], index: usize) -> Option<AssignCal
     else {
         return None;
     };
+
+    // The assignment/RHS compiler fact is the canonical join for a direct
+    // value-producing call. In languages that wrap calls in `try`, `await`,
+    // or equivalent control regions, the Call event can be nested beneath a
+    // sibling FlowEvent rather than appearing directly beside the Assign.
+    // Joining by the exact adapter-emitted call span prevents a second
+    // assignment-wide CallArg identity whose broad fallback span could
+    // accidentally absorb the real nested call result.
+    let fact_key = |span: Span| (span.file.raw(), span.start, span.end);
+    let wanted = fact_key(*assign_span);
+    let start = assignment_values.partition_point(|fact| fact_key(fact.assignment_span) < wanted);
+    for fact in assignment_values.iter().skip(start) {
+        if fact_key(fact.assignment_span) != wanted {
+            break;
+        }
+        if fact
+            .target
+            .as_deref()
+            .is_some_and(|fact_target| fact_target.trim() != target.trim())
+        {
+            continue;
+        }
+        let Some(call_span) = fact.direct_call_span else {
+            continue;
+        };
+        let Some(call_name) = fact.direct_call_name.as_deref() else {
+            continue;
+        };
+        if flow_call_sites.binary_search(&call_span).is_err()
+            || !assign_sources_match_call(
+                source_call.as_deref(),
+                source_name.as_deref(),
+                source_names,
+                call_name,
+            )
+        {
+            continue;
+        }
+        let call_was_lowered = lowered_call_sites.is_some_and(|sites| sites.contains(&call_span));
+        return Some(AssignCallSiteHint {
+            site_span: call_span,
+            sibling_call_event: true,
+            prebind_target_receiver: !call_was_lowered
+                && fact.direct_call_receiver.as_deref().map(str::trim) == Some(target.trim()),
+        });
+    }
 
     // Many adapters emit `target = callee(args)` as an Assign event
     // next to the real semantic Call event. Use the Call event's
@@ -3082,7 +3542,10 @@ fn collect_assignment_call_sites(
                 value_kind,
                 ..
             } if !matches!(value_kind, Some(AssignValueKind::YieldResult)) => {
-                out.insert(assign_call_site_hint(events, index).map_or(*span, |hint| hint.site_span));
+                out.insert(
+                    assign_call_site_hint(events, index, assignment_values, flow_call_sites, None)
+                        .map_or(*span, |hint| hint.site_span),
+                );
             }
             FlowEvent::Assign { span, value_kind, .. }
                 if !matches!(value_kind, Some(AssignValueKind::CallableReference)) =>
@@ -3243,21 +3706,32 @@ fn walk_assign(
     if target.is_empty() {
         return;
     }
+    let normalized_target = normalize_implicit_receiver_place(target, &ctx.out.receiver_names);
+    let target = normalized_target.as_str();
     let rhs_is_finite_literal_selection =
         bonsai_lang_api::finite_literal_selection_for_assignment(ctx.finite_literal_selections, span)
             .is_some();
     let indexed_call_sites = assignment_call_sites_for_span(ctx.assignment_values, span);
-    let indexed_value_flow = bonsai_lang_api::assignment_value_fact_for_span(ctx.assignment_values, span)
+    let indexed_assignment_value = bonsai_lang_api::assignment_value_fact_for_span(ctx.assignment_values, span)
         // Adapter-emitted exact field writes may deliberately share the
         // enclosing aggregate statement span. The syntax fact belongs only
         // to its parsed target; replaying the complete aggregate below each
         // synthetic field would manufacture paths such as `env.cmd.user` and
         // cross-contaminate siblings.
-        .filter(|fact| fact.target.as_deref().map(str::trim) == Some(target.trim()))
-        .and_then(|fact| {
-            (!fact.value_flow.aggregate_fields.is_empty() || !fact.value_flow.spreads.is_empty())
-                .then(|| fact.value_flow.clone())
-        });
+        .filter(|fact| fact.target.as_deref().map(str::trim) == Some(target.trim()));
+    let indexed_value_flow = indexed_assignment_value.and_then(|fact| {
+        (!fact.value_flow.aggregate_fields.is_empty() || !fact.value_flow.spreads.is_empty())
+            .then(|| fact.value_flow.clone())
+    });
+    let indexed_source_call_receiver = indexed_assignment_value.and_then(|fact| {
+        (fact.direct_call_name.as_deref() == source_call)
+            .then(|| {
+                fact.direct_call_receiver
+                    .as_deref()
+                    .zip(fact.direct_call_receiver_flow.as_ref())
+            })
+            .flatten()
+    });
     let has_indexed_named_aggregate = indexed_value_flow.is_some();
     let rhs_is_literal = matches!(value_kind, Some(bonsai_lang_api::AssignValueKind::Literal));
     // Field-write detection: targets like `obj.field` or `obj["k"]`.
@@ -3273,6 +3747,17 @@ fn walk_assign(
     } else {
         build_target_node(target, span, ctx)
     };
+    // A value-only property read assigns the complete selected value to a
+    // root binding. Later projections of that binding therefore depend on
+    // this writer (`file = req.files.avatar; name = file.name`). This is
+    // adapter-owned syntax semantics, not a field-name heuristic. Field
+    // targets remain exact projected writes and never become whole roots.
+    let receiver_state_write = is_field_write
+        && !ctx
+            .matchers
+            .resolved_receiver_state_propagations
+            .matching_indices(span)
+            .is_empty();
     if let Some(flow) = indexed_value_flow
         .as_ref()
         .filter(|_| has_indexed_named_aggregate)
@@ -3311,6 +3796,22 @@ fn walk_assign(
                 .iter()
                 .any(|(field_span, base)| base == bare_target && span_contains_or_equal(span, *field_span))
         });
+    // A root binding whose complete RHS value is compiler-proven owns that
+    // complete runtime value. Exact later projections therefore inherit its
+    // writer (`body = request.payload || {}; use(body.command)`). Named
+    // aggregate literals are excluded: their adapter-emitted field writes
+    // remain field-precise and must not taint siblings. Keeping this on the
+    // writer preserves CFG clean-overwrite semantics; source seeding never
+    // widens to projected reads on its own.
+    if !is_field_write
+        && !suppress_broad_container_inputs
+        && matches!(
+            value_kind,
+            Some(AssignValueKind::PropertyRead | AssignValueKind::WholeValueSelection)
+        )
+    {
+        ctx.whole_value_writer_ids.insert(write_node);
+    }
     if is_structural_index_base_write(target, source_name, source_names, suppress_broad_container_inputs) {
         return;
     }
@@ -3389,7 +3890,8 @@ fn walk_assign(
         if let Some(src) = source_name {
             if !src.is_empty()
                 && !source_filter.is_structural_base_token(src)
-                && !direct_rhs_source_is_call_internals(src, source_call, source_call_args)
+                && (matches!(value_kind, Some(AssignValueKind::PropertyRead))
+                    || !direct_rhs_source_is_call_internals(src, source_call, source_call_args))
             {
                 ctx.bridge_read(src, write_node, edge_meta);
                 if !method_projection_has_exact_selected_source(
@@ -3404,7 +3906,8 @@ fn walk_assign(
         for src in source_names {
             if src.is_empty()
                 || source_filter.is_structural_base_token(src)
-                || direct_rhs_source_is_call_internals(src, source_call, source_call_args)
+                || (!matches!(value_kind, Some(AssignValueKind::PropertyRead))
+                    && direct_rhs_source_is_call_internals(src, source_call, source_call_args))
             {
                 continue;
             }
@@ -3426,13 +3929,21 @@ fn walk_assign(
         if !callee.is_empty() {
             let site_span = source_call_site_hint.map(|hint| hint.site_span).unwrap_or(span);
             let site = CallSiteId(site_span);
+            let sibling_call_event = source_call_site_hint.is_some_and(|hint| hint.sibling_call_event);
             let is_yield_result = matches!(value_kind, Some(AssignValueKind::YieldResult));
             let mut arg_nodes: SmallVec<[NodeId; 4]> = SmallVec::new();
             for (idx, arg) in source_call_args.iter().enumerate() {
                 let arg_idx = u32::try_from(idx).unwrap_or(u32::MAX);
                 let arg_node = ctx.intern_node(Place::CallArg { site, idx: arg_idx });
                 arg_nodes.push(arg_node);
-                if !arg.is_empty() {
+                // The sibling Call event owns argument evaluation. Replaying
+                // it here is not merely redundant: when the Call appears
+                // before this Assign, rule-declared output-argument writes
+                // have already been committed, so a second read would feed
+                // the newly produced output back into the same call and then
+                // into its scalar status/count return. Keep the assignment's
+                // sole responsibility to `CallRet -> Write(target)`.
+                if !sibling_call_event && !arg.is_empty() {
                     ctx.bridge_read(
                         arg,
                         arg_node,
@@ -3491,38 +4002,63 @@ fn walk_assign(
                 arg_places.push(arg.clone());
                 arg_values.push(arg.clone());
             }
-            if !source_call_site_hint.is_some_and(|hint| hint.sibling_call_event) {
+            if !sibling_call_event {
                 let observed_callee = ObservedCallee::new(callee);
+                let mut receiver_arg_node = None;
+                let mut receiver_storage_base = None;
+                if let Some((_, receiver_flow)) = indexed_source_call_receiver {
+                    let receiver_node = ctx.intern_node(Place::CallArg { site, idx: u32::MAX });
+                    let receiver_meta = crate::edge::EdgeMeta {
+                        precision: Precision::Exact,
+                        kind: IdgEdgeKind::IntraRead,
+                        call_kind: bonsai_callgraph::EdgeKind::Direct,
+                        via_span: site_span,
+                    };
+                    emit_expression_scalar_to_node(receiver_flow, receiver_node, receiver_meta, ctx);
+                    receiver_arg_node = Some(receiver_node);
+                    receiver_storage_base = receiver_flow.place.as_ref().and_then(|place| {
+                        (!receiver_name_matches(place, &ctx.out.receiver_names)).then(|| place.clone())
+                    });
+                }
                 apply_call_result_passthrough_edges(
                     site_span,
                     &observed_callee,
                     &[],
                     &arg_nodes,
-                    None,
+                    receiver_arg_node,
                     ret_node,
                     ctx,
                 );
+                let receiver = indexed_source_call_receiver.map(|(receiver, _)| receiver.to_string());
+                let call_kind = if receiver.is_some() {
+                    CallKind::Method
+                } else {
+                    CallKind::Function
+                };
                 ctx.out.call_sites.push(CallSiteRef {
                     site,
                     callee_name: callee.to_string(),
-                    receiver: None,
+                    receiver,
                     receiver_types: Vec::new(),
-                    receiver_storage_base: None,
-                    call_kind: CallKind::Function,
+                    receiver_storage_base,
+                    call_kind,
                     args_count: u32::try_from(source_call_args.len()).unwrap_or(u32::MAX),
                     explicit_args_count: u32::try_from(source_call_args.len()).unwrap_or(u32::MAX),
                     call_ret_node: ret_node,
                     call_arg_nodes: arg_nodes,
-                    receiver_arg_node: None,
+                    receiver_arg_node,
                     call_arg_spans: arg_spans,
                     call_arg_places: arg_places,
                     call_arg_values: arg_values,
                     call_arg_writeback_targets: arg_writeback_targets,
                     call_arg_names: arg_names,
                     source_callback_args: Vec::new(),
+                    callback_invocations: callback_invocations_for_call(site_span, ctx),
                     is_assign_rhs: true,
                     unresolved_result_passthrough: ctx.options.include_unresolved_call_result_passthrough,
-                    unresolved_receiver_result_passthrough: false,
+                    unresolved_receiver_result_passthrough: receiver_arg_node.is_some()
+                        && (ctx.options.include_unresolved_call_result_passthrough
+                            || ctx.options.include_unresolved_receiver_result_passthrough),
                 });
             }
         }
@@ -3566,6 +4102,40 @@ fn walk_assign(
         }
     }
     ctx.commit_writer(target, write_node);
+    if receiver_state_write {
+        apply_receiver_state_propagation_write(span, target, write_node, ctx);
+    }
+}
+
+/// Promote an exact rule-matched property write into post-write receiver
+/// state. The rule matcher has already proved the external property/type
+/// identity and compiled this exact assignment span; transfer lowering owns
+/// only the generic `receiver.member = value` dataflow shape.
+fn apply_receiver_state_propagation_write(
+    span: Span,
+    target: &str,
+    member_write: NodeId,
+    ctx: &mut TransferCtx<'_>,
+) {
+    let Some(receiver) = field_base_name(target) else {
+        return;
+    };
+    let receiver_write = ctx.write_node(receiver, span);
+    let meta = crate::edge::EdgeMeta {
+        precision: Precision::Narrowed,
+        kind: IdgEdgeKind::IntraAssign,
+        call_kind: bonsai_callgraph::EdgeKind::Unknown,
+        via_span: span,
+    };
+    // Property mutation extends receiver state rather than replacing it.
+    // Preserve the reaching receiver value and add the exact member value.
+    ctx.bridge_read(receiver, receiver_write, meta);
+    ctx.emit(IdgEdge {
+        from: member_write,
+        to: receiver_write,
+        meta,
+    });
+    ctx.commit_writer(receiver, receiver_write);
 }
 
 fn is_structural_index_base_write(
@@ -3676,6 +4246,7 @@ fn walk_call(
     args: &[CallArg],
     ctx: &mut TransferCtx<'_>,
 ) {
+    ctx.lowered_call_sites.insert(span);
     let site = CallSiteId(span);
     let mut arg_nodes: SmallVec<[NodeId; 4]> = SmallVec::new();
     let mut arg_places: SmallVec<[String; 4]> = SmallVec::new();
@@ -3686,7 +4257,77 @@ fn walk_call(
         let arg_idx = u32::try_from(idx).unwrap_or(u32::MAX);
         let arg_node = ctx.intern_node(Place::CallArg { site, idx: arg_idx });
         arg_nodes.push(arg_node);
-        let arg_place = call_arg_place_name(arg);
+        let mut arg_place = call_arg_place_name(arg);
+        let argument_value = call_argument_value_fact(ctx.call_argument_values, span, idx);
+        let direct_call_span = argument_value.and_then(|fact| fact.direct_call_span);
+        let property_projection = argument_value
+            .filter(|fact| {
+                matches!(
+                    fact.value_kind,
+                    Some(bonsai_lang_api::AssignValueKind::PropertyRead)
+                )
+            })
+            .and_then(|fact| fact.value_flow.projection.as_ref())
+            .map(ExpressionProjection::canonical_place);
+        let exact_projected_place = direct_call_span.and_then(|_| {
+            property_projection
+                .as_deref()
+                .or_else(|| exact_projected_argument_place(arg, &ctx.method_receiver_projections))
+        });
+        // A complete aggregate expression has no addressable caller-local
+        // place, but its statically named fields still need identities across
+        // a resolved call boundary. Materialize those compiler-owned fields
+        // under a span-derived temporary base so the ordinary field-argument
+        // stitch maps `temporary.field -> formal.field`. This consumes only
+        // adapter-lowered ExpressionFlow; provider/API spellings and rendered
+        // source text never enter the graph core.
+        if let Some(fact) = argument_value.filter(|fact| {
+            !fact.value_flow.aggregate_fields.is_empty()
+                || !fact.value_flow.tuple_items.is_empty()
+                || !fact.value_flow.spreads.is_empty()
+        }) {
+            let aggregate_base = format!(
+                "{TEMPORARY_CALL_ARGUMENT_BASE_PREFIX}_{}_{}_{}_{}",
+                span.file.raw(),
+                span.start,
+                span.end,
+                idx
+            );
+            if emit_expression_aggregate(&aggregate_base, &fact.value_flow, arg.span, ctx) {
+                arg_place = aggregate_base;
+            }
+        } else if let Some(inner_call_span) = direct_call_span.filter(|_| exact_projected_place.is_none()) {
+            // A direct call used as an argument has a scalar CallRet identity,
+            // but object/aggregate fields also need one addressable compiler
+            // identity so exact constructor and return projections can cross
+            // the outer call boundary. Materialize a span-derived temporary
+            // write fed only by that CallRet. Field closure can then map
+            // `temporary.field -> formal.field` without flattening the object
+            // or parsing the rendered call expression.
+            let result_base = format!(
+                "{TEMPORARY_CALL_ARGUMENT_BASE_PREFIX}_{}_{}_{}_{}",
+                span.file.raw(),
+                span.start,
+                span.end,
+                idx
+            );
+            let inner_ret = ctx.intern_node(Place::CallRet {
+                site: CallSiteId(inner_call_span),
+            });
+            let result_write = ctx.write_node(&result_base, arg.span);
+            ctx.emit(IdgEdge {
+                from: inner_ret,
+                to: result_write,
+                meta: crate::edge::EdgeMeta {
+                    precision: Precision::Exact,
+                    kind: IdgEdgeKind::IntraAssign,
+                    call_kind: bonsai_callgraph::EdgeKind::Direct,
+                    via_span: arg.span,
+                },
+            });
+            ctx.commit_writer(&result_base, result_write);
+            arg_place = result_base;
+        }
         if output_candidate_place_needs_field_node(&arg_place) {
             let _ = build_target_node(&arg_place, span, ctx);
         }
@@ -3710,13 +4351,69 @@ fn walk_call(
             precision: Precision::Exact,
             kind: IdgEdgeKind::IntraRead,
             call_kind: bonsai_callgraph::EdgeKind::Direct,
-            via_span: span,
+            // The call event span identifies the callee syntax, while a
+            // source/sink matcher inside an argument identifies the argument
+            // expression. Preserve the compiler-owned argument span on its
+            // value edge so exact nested reads can be anchored without
+            // widening to the whole call or reparsing source text.
+            via_span: arg.span,
         };
         let is_finite_literal_selection = ctx
             .finite_literal_selections
             .iter()
             .any(|fact| fact.call_span == Some(span) && fact.argument_index == Some(idx));
         if is_finite_literal_selection {
+            continue;
+        }
+        // When the complete argument expression is exactly one nested call,
+        // its value is the nested call result. Bridging the nested call's
+        // operand names directly into the outer argument bypasses the
+        // callee's return contract and can retain data that the callee does
+        // not return. The adapter-owned `direct_call_span` is the exact CST
+        // proof for this shape; compound and ambiguous expressions leave it
+        // absent and retain the conservative operand bridges below.
+        if let Some(inner_call_span) = direct_call_span {
+            if let Some(place) = property_projection.as_deref() {
+                // Property syntax has two compiler-proven value producers:
+                // the exact projected storage and, when workspace resolution
+                // finds a computed/custom accessor, that accessor's return.
+                // Retain both edges. An unresolved external getter therefore
+                // cannot erase local field state, while a resolved computed
+                // getter is not flattened into its receiver field.
+                ctx.bridge_read(place, arg_node, arg_meta);
+                let inner_ret = ctx.intern_node(Place::CallRet {
+                    site: CallSiteId(inner_call_span),
+                });
+                ctx.emit(IdgEdge {
+                    from: inner_ret,
+                    to: arg_node,
+                    meta: arg_meta,
+                });
+                continue;
+            }
+            if let Some(place) = exact_projected_place {
+                // Some languages spell a static projection as a builtin call.
+                // The adapter has already proved the fixed selector and
+                // normalized the complete argument to its exact storage place.
+                // Preserve that typed projection instead of treating it like
+                // an arbitrary user call whose operands require a return
+                // summary.
+                ctx.bridge_read(place, arg_node, arg_meta);
+                continue;
+            }
+            let inner_ret = ctx.intern_node(Place::CallRet {
+                site: CallSiteId(inner_call_span),
+            });
+            ctx.emit(IdgEdge {
+                from: inner_ret,
+                to: arg_node,
+                meta: crate::edge::EdgeMeta {
+                    precision: Precision::Exact,
+                    kind: IdgEdgeKind::IntraAssign,
+                    call_kind: bonsai_callgraph::EdgeKind::Direct,
+                    via_span: arg.span,
+                },
+            });
             continue;
         }
         let mut emitted: ahash::AHashSet<StrId> = ahash::AHashSet::new();
@@ -3757,10 +4454,10 @@ fn walk_call(
             .map(call_arg_place_name)
             .filter(|place| !place.is_empty())
         {
-            let value = &args[1];
             let write_node = ctx.write_node(&channel, span);
-            bridge_call_arg_sources_to_node(
-                value,
+            bridge_call_argument_value_to_node(
+                span,
+                1,
                 write_node,
                 crate::edge::EdgeMeta {
                     precision: Precision::Exact,
@@ -3888,6 +4585,7 @@ fn walk_call(
     );
     let source_callback_args = source_callback_args_for_call(span, &observed_callee, ctx);
     apply_inline_source_callback_param_bindings(span, ret_node, &source_callback_args, ctx);
+    let callback_invocations = callback_invocations_for_call(span, ctx);
     ctx.out.call_sites.push(CallSiteRef {
         site,
         callee_name: name.to_string(),
@@ -3906,6 +4604,7 @@ fn walk_call(
         call_arg_writeback_targets: arg_writeback_targets,
         call_arg_names: arg_names,
         source_callback_args,
+        callback_invocations,
         is_assign_rhs: false,
         unresolved_result_passthrough: ctx.options.include_unresolved_call_result_passthrough,
         unresolved_receiver_result_passthrough: (ctx.options.include_unresolved_call_result_passthrough
@@ -3914,9 +4613,34 @@ fn walk_call(
             && receiver.is_some(),
     });
     apply_source_output_arg_writes(span, &observed_callee, args, ctx);
-    apply_output_arg_flow_call(span, &observed_callee, args, ctx);
+    apply_output_arg_flow_call(span, &observed_callee, receiver, args, ctx);
     apply_receiver_state_propagation_call(span, &observed_callee, receiver, receiver_types, args, ctx);
     apply_clean_output_overwrite_call(span, &observed_callee, args, ctx);
+    apply_clean_receiver_overwrite_call(span, &observed_callee, receiver, ctx);
+}
+
+fn apply_clean_receiver_overwrite_call(
+    span: Span,
+    _callee: &ObservedCallee<'_>,
+    receiver: Option<&str>,
+    ctx: &mut TransferCtx<'_>,
+) {
+    let matched = ctx
+        .matchers
+        .clean_receiver_overwrites
+        .matching_indices(span)
+        .iter()
+        .copied()
+        .find_map(|index| ctx.options.clean_receiver_overwrites.get(index))
+        .is_some();
+    if !matched {
+        return;
+    }
+    let Some(receiver) = receiver.map(str::trim).filter(|receiver| !receiver.is_empty()) else {
+        return;
+    };
+    let (write_node, _) = build_target_node(receiver, span, ctx);
+    ctx.commit_writer(receiver, write_node);
 }
 
 fn apply_call_result_passthrough_edges(
@@ -3928,20 +4652,53 @@ fn apply_call_result_passthrough_edges(
     ret_node: NodeId,
     ctx: &mut TransferCtx<'_>,
 ) {
-    let selected: Vec<(Vec<usize>, bool)> = ctx
+    let mut selected_indices: SmallVec<[usize; 4]> = ctx
         .matchers
-        .call_result_passthroughs
-        .matching_indices(callee)
+        .resolved_call_result_passthroughs
+        .matching_indices(span)
+        .iter()
+        .copied()
+        .collect();
+    selected_indices.extend(
+        ctx.matchers
+            .call_result_passthroughs
+            .matching_indices(callee)
+            .into_iter()
+            .filter(|index| {
+                ctx.options
+                    .call_result_passthroughs
+                    .get(*index)
+                    .is_some_and(|shape| shape.resolved_call_sites.is_empty())
+            }),
+    );
+    selected_indices.sort_unstable();
+    selected_indices.dedup();
+    let selected: Vec<(Vec<usize>, bool)> = selected_indices
         .into_iter()
         .filter_map(|index| ctx.options.call_result_passthroughs.get(index))
         .filter(|shape| {
-            shape
-                .receiver_type
-                .as_deref()
-                .is_none_or(|expected| receiver_name_matches(expected, receiver_types))
+            !shape.resolved_call_sites.is_empty()
+                || shape
+                    .receiver_type
+                    .as_deref()
+                    .is_none_or(|expected| receiver_name_matches(expected, receiver_types))
         })
-        .map(|shape| (shape.input_arg_indices.clone(), shape.input_receiver))
+        .map(|shape| {
+            (
+                shape.resolved_input_arg_indices(arg_nodes.len()),
+                shape.input_receiver,
+            )
+        })
         .collect();
+    bonsai_diagnostics::debug_log!(
+        "idg-transfer",
+        "call_result_passthrough call={} span={:?} receiver_types={:?} configured={} selected={}",
+        callee.raw,
+        span,
+        receiver_types,
+        ctx.options.call_result_passthroughs.len(),
+        selected.len()
+    );
     if selected.is_empty() {
         return;
     }
@@ -4008,14 +4765,14 @@ fn apply_yield_callback_call(
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         via_span: span,
     };
-    for arg in args {
-        bridge_call_arg_sources_to_node(arg, yield_node, meta, ctx);
+    for (index, _) in args.iter().enumerate() {
+        bridge_call_argument_value_to_node(span, index, yield_node, meta, ctx);
     }
 }
 
 fn apply_source_output_arg_writes(
     span: Span,
-    callee: &ObservedCallee<'_>,
+    _callee: &ObservedCallee<'_>,
     args: &[CallArg],
     ctx: &mut TransferCtx<'_>,
 ) {
@@ -4023,10 +4780,10 @@ fn apply_source_output_arg_writes(
     for shape in ctx
         .matchers
         .source_output_args
-        .matching_indices(callee)
-        .into_iter()
+        .matching_indices(span)
+        .iter()
+        .copied()
         .filter_map(|index| ctx.options.source_output_args.get(index))
-        .filter(|shape| shape.resolved_call_sites.binary_search(&span).is_ok())
     {
         output_indices.extend(shape.output_arg_indices.iter().copied());
         if let Some(start) = shape.output_arg_start_index {
@@ -4055,24 +4812,44 @@ fn apply_source_output_arg_writes(
 fn apply_output_arg_flow_call(
     span: Span,
     callee: &ObservedCallee<'_>,
+    receiver: Option<&str>,
     args: &[CallArg],
     ctx: &mut TransferCtx<'_>,
 ) {
-    let selected: Vec<(usize, Vec<usize>, Option<usize>)> = ctx
+    let mut selected_indices: SmallVec<[usize; 4]> = ctx
         .matchers
-        .output_arg_flows
-        .matching_indices(callee)
+        .resolved_output_arg_flows
+        .matching_indices(span)
+        .iter()
+        .copied()
+        .collect();
+    selected_indices.extend(
+        ctx.matchers
+            .output_arg_flows
+            .matching_indices(callee)
+            .into_iter()
+            .filter(|index| {
+                ctx.options
+                    .output_arg_flows
+                    .get(*index)
+                    .is_some_and(|shape| shape.resolved_call_sites.is_empty())
+            }),
+    );
+    selected_indices.sort_unstable();
+    selected_indices.dedup();
+    let selected: Vec<(usize, bool, Vec<usize>, Option<usize>)> = selected_indices
         .into_iter()
         .filter_map(|index| ctx.options.output_arg_flows.get(index))
         .map(|shape| {
             (
                 shape.output_arg_index,
+                shape.input_receiver,
                 shape.value_arg_indices.clone(),
                 shape.value_start_arg_index,
             )
         })
         .collect();
-    for (output_arg_index, explicit_indices, value_start_arg_index) in selected {
+    for (output_arg_index, input_receiver, explicit_indices, value_start_arg_index) in selected {
         let Some(output) = args.get(output_arg_index).map(call_arg_place_name) else {
             continue;
         };
@@ -4095,10 +4872,22 @@ fn apply_output_arg_flow_call(
         let mut value_indices: Vec<usize> = value_indices.into_iter().collect();
         value_indices.sort_unstable();
         for index in value_indices {
-            if let Some(arg) = args.get(index) {
-                bridge_call_arg_sources_to_node(arg, write_node, meta, ctx);
+            if args.get(index).is_some() {
+                bridge_call_argument_value_to_node(span, index, write_node, meta, ctx);
             }
         }
+        if input_receiver {
+            if let Some(receiver) = receiver.map(str::trim).filter(|value| !value.is_empty()) {
+                ctx.bridge_read(receiver, write_node, meta);
+                ctx.bridge_descendant_reads(receiver, write_node, meta);
+            }
+        }
+        // An output-argument transfer writes the complete value represented
+        // by that addressable output place. Later exact projections inherit
+        // this writer (`copy(&record, raw)` -> `record.field`) unless a newer
+        // field-specific definition replaces it. This is storage semantics,
+        // independent of the configured callee name owned by the rulepack.
+        ctx.whole_value_writer_ids.insert(write_node);
         ctx.commit_writer(output, write_node);
     }
 }
@@ -4114,19 +4903,26 @@ fn apply_receiver_state_propagation_call(
     let Some(receiver) = receiver.map(str::trim).filter(|receiver| !receiver.is_empty()) else {
         return;
     };
-    let matches = ctx
+    let matches = !ctx
         .matchers
-        .receiver_state_propagations
-        .matching_indices(callee)
-        .into_iter()
-        .filter_map(|index| ctx.options.receiver_state_propagations.get(index))
-        .any(|shape| {
-            shape.resolved_call_sites.binary_search(&span).is_ok()
-                || shape
+        .resolved_receiver_state_propagations
+        .matching_indices(span)
+        .is_empty()
+        || ctx
+            .matchers
+            .receiver_state_propagations
+            .matching_indices(callee)
+            .into_iter()
+            .filter_map(|index| ctx.options.receiver_state_propagations.get(index))
+            // Exact rule-compiled sites are handled above. Name matching is
+            // retained only for the compiler-native typed summary form.
+            .filter(|shape| shape.resolved_call_sites.is_empty())
+            .any(|shape| {
+                shape
                     .receiver_type
                     .as_deref()
                     .is_none_or(|expected| receiver_name_matches(expected, receiver_types))
-        });
+            });
     if !matches || args.is_empty() {
         return;
     }
@@ -4141,36 +4937,34 @@ fn apply_receiver_state_propagation_call(
     // with the explicit arguments. Preserve the reaching receiver definition
     // so a later clean argument cannot erase an earlier tainted mutation.
     ctx.bridge_read(receiver, write_node, meta);
-    for arg in args {
-        bridge_call_arg_sources_to_node(arg, write_node, meta, ctx);
+    for (index, arg) in args.iter().enumerate() {
+        bridge_receiver_argument_value_to_node(span, index, arg, write_node, meta, ctx);
     }
     ctx.commit_writer(receiver, write_node);
 }
 
 fn source_callback_args_for_call(
     span: Span,
-    callee: &ObservedCallee<'_>,
+    _callee: &ObservedCallee<'_>,
     ctx: &TransferCtx<'_>,
 ) -> Vec<SourceCallbackArgSpec> {
     ctx.matchers
         .source_callback_args
-        .matching_indices(callee)
-        .into_iter()
+        .matching_indices(span)
+        .iter()
+        .copied()
         .filter_map(|index| ctx.options.source_callback_args.get(index))
-        .filter(|shape| shape.resolved_call_sites.binary_search(&span).is_ok())
         .cloned()
         .collect()
 }
 
-/// Bind a rule-declared source callback directly into an inline callback body.
+/// Bind a rule-declared source delivery into an inline callback body.
 ///
-/// Direct call-argument lambdas are intentionally owned by the enclosing
-/// declaration: the language frontend inlines their body events instead of
-/// manufacturing a second callable. The compiler object records the lambda's
-/// exact parameter bindings on the argument value fact. When a rule declares
-/// that this callback position receives source data, connect the anchored
-/// source call result to those local bindings. Named callback references keep
-/// using Phase 3's resolver-backed cross-function stitch.
+/// Inline callbacks are compiler-owned by the enclosing declaration, so
+/// there is no separate callee segment for the workspace stitcher to target.
+/// `CallArgumentValueFact` supplies both the exact callback argument and its
+/// parsed parameter bindings; the rule compiler supplies the exact approved
+/// registration-call span. Named callback references remain Phase-3 edges.
 fn apply_inline_source_callback_param_bindings(
     span: Span,
     call_ret_node: NodeId,
@@ -4187,7 +4981,8 @@ fn apply_inline_source_callback_param_bindings(
         if argument.inline_callback_params.is_empty() {
             continue;
         }
-        for &source_param_index in &shape.source_param_indices {
+        let binding_span = argument.inline_callback_span.unwrap_or(argument.argument_span);
+        for source_param_index in shape.resolved_source_param_indices(argument.inline_callback_params.len()) {
             let Some(param_name) = argument.inline_callback_params.get(source_param_index) else {
                 continue;
             };
@@ -4195,32 +4990,32 @@ fn apply_inline_source_callback_param_bindings(
             if param_name.is_empty() || !bound_names.insert(param_name.to_string()) {
                 continue;
             }
-            let binding = ctx.write_node(param_name, argument.argument_span);
+            let binding = ctx.write_node(param_name, binding_span);
             ctx.emit(IdgEdge {
                 from: call_ret_node,
                 to: binding,
                 meta: crate::edge::EdgeMeta {
                     precision: Precision::Exact,
-                    // This is an external event-delivery boundary, not an
-                    // assignment from the registration call's return value.
-                    // Keeping the provenance distinct lets source queries
-                    // seed the callback binding without tainting an assigned
-                    // subscription/task/status handle.
                     kind: IdgEdgeKind::InterSourceCallback,
                     call_kind: bonsai_callgraph::EdgeKind::Direct,
                     via_span: span,
                 },
             });
-            // The callback receives the complete source value at this
-            // parameter position. Preserve that whole-value provenance so a
-            // later exact projection (`input.column`) can inherit from the
-            // binding when no narrower projected writer exists. This is the
-            // same field-sensitive fallback used for ordinary call results;
-            // it never widens one projected field into a sibling.
             ctx.whole_value_writer_ids.insert(binding);
             ctx.commit_writer(param_name, binding);
         }
     }
+}
+
+fn callback_invocations_for_call(span: Span, ctx: &TransferCtx<'_>) -> Vec<CallbackInvocationSpec> {
+    ctx.matchers
+        .callback_invocations
+        .matching_indices(span)
+        .iter()
+        .copied()
+        .filter_map(|index| ctx.options.callback_invocations.get(index))
+        .cloned()
+        .collect()
 }
 
 fn apply_clean_output_overwrite_call(
@@ -4253,18 +5048,72 @@ fn apply_clean_output_overwrite_call(
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         via_span: span,
     };
-    for arg in args.iter().skip(value_start_arg_index) {
-        bridge_call_arg_sources_to_node(arg, write_node, meta, ctx);
+    for index in value_start_arg_index..args.len() {
+        bridge_call_argument_value_to_node(span, index, write_node, meta, ctx);
     }
     ctx.commit_writer(output, write_node);
 }
 
-fn bridge_call_arg_sources_to_node(
+fn bridge_call_argument_value_to_node(
+    call_span: Span,
+    argument_index: usize,
+    node: NodeId,
+    meta: crate::edge::EdgeMeta,
+    ctx: &mut TransferCtx<'_>,
+) {
+    let argument = ctx.intern_node(Place::CallArg {
+        site: CallSiteId(call_span),
+        idx: u32::try_from(argument_index).unwrap_or(u32::MAX),
+    });
+    ctx.emit(IdgEdge {
+        from: argument,
+        to: node,
+        meta,
+    });
+}
+
+/// Connect one exact argument value into a receiver-state mutation.
+///
+/// Receiver mutation is an intra-call transfer, so its output must retain the
+/// compiler-emitted value producers rather than depending on a later
+/// interprocedural stitch through `CallArg`. A direct nested call is still
+/// represented by its `CallRet`, and a proven finite-literal selection remains
+/// clean. The additional edge is therefore a closure-preserving shortcut, not
+/// a name-based or rule-specific widening.
+fn bridge_receiver_argument_value_to_node(
+    call_span: Span,
+    argument_index: usize,
     arg: &CallArg,
     node: NodeId,
     meta: crate::edge::EdgeMeta,
     ctx: &mut TransferCtx<'_>,
 ) {
+    if ctx
+        .finite_literal_selections
+        .iter()
+        .any(|fact| fact.call_span == Some(call_span) && fact.argument_index == Some(argument_index))
+    {
+        return;
+    }
+    if let Some(inner_call_span) =
+        call_argument_value_fact(ctx.call_argument_values, call_span, argument_index)
+            .and_then(|fact| fact.direct_call_span)
+    {
+        if let Some(place) = exact_projected_argument_place(arg, &ctx.method_receiver_projections) {
+            ctx.bridge_read(place, node, meta);
+            return;
+        }
+        let inner_ret = ctx.intern_node(Place::CallRet {
+            site: CallSiteId(inner_call_span),
+        });
+        ctx.emit(IdgEdge {
+            from: inner_ret,
+            to: node,
+            meta,
+        });
+        return;
+    }
+
     let source_filter = SemanticSourceFilter::from_sources(
         arg.place.as_deref(),
         &arg.source_names,
@@ -4272,13 +5121,14 @@ fn bridge_call_arg_sources_to_node(
         None,
         &ctx.method_selector_fields,
     );
-    let mut emitted: ahash::AHashSet<StrId> = ahash::AHashSet::new();
+    let mut emitted = ahash::AHashSet::new();
     if let Some(place) = arg.place.as_deref() {
         if !place.is_empty() && !source_filter.is_structural_base_token(place) {
             let sid = ctx.intern_name(place);
             if emitted.insert(sid) {
                 ctx.bridge_read(place, node, meta);
             }
+            ctx.bridge_descendant_reads(place, node, meta);
         }
     }
     for source in &arg.source_names {
@@ -4458,6 +5308,26 @@ fn output_candidate_place_needs_field_node(place: &str) -> bool {
     !place.is_empty() && (place.contains('.') || place.contains('['))
 }
 
+/// Return an adapter-proven static projection used as the complete value of a
+/// call argument. This is intentionally stricter than accepting any dotted
+/// text: the canonical place must be repeated in the adapter's semantic source
+/// inventory and must not denote a method receiver projection. Arbitrary
+/// nested calls therefore remain mediated by their `CallRet` contract. Source
+/// rendering is deliberately not inspected here.
+fn exact_projected_argument_place<'a>(
+    arg: &'a CallArg,
+    method_receiver_projections: &ahash::AHashSet<String>,
+) -> Option<&'a str> {
+    let place = arg.place.as_deref()?.trim();
+    if !output_candidate_place_needs_field_node(place)
+        || method_receiver_projections.contains(place)
+        || !arg.source_names.iter().any(|source| source.trim() == place)
+    {
+        return None;
+    }
+    Some(place)
+}
+
 fn normalized_call_arg_storage_place(place: &str) -> &str {
     let mut out = place.trim();
     while let Some(inner) = out.strip_prefix('&') {
@@ -4506,13 +5376,18 @@ fn walk_throw(span: Span, value_name: Option<&str>, thrown_type: Option<&str>, c
 /// edges from in-body throws of matching type, and a
 /// `Catch(ty) → Write(catch_param)` edge if the adapter named the
 /// caught binding.
+struct TryCatchSpec<'a> {
+    param: Option<&'a str>,
+    types: &'a [String],
+    arms: &'a [bonsai_lang_api::CatchArmFact],
+}
+
 fn walk_try(
     span: Span,
     body: &[FlowEvent],
     catch_events: &[FlowEvent],
     finally_events: &[FlowEvent],
-    catch_param: Option<&str>,
-    catch_types: &[String],
+    catch: TryCatchSpec<'_>,
     ctx: &mut TransferCtx<'_>,
 ) {
     // SSA-style join for try-catch: snapshot last_writer at try
@@ -4533,6 +5408,62 @@ fn walk_try(
     bridge_compound_throw_sources(body, &body_throws, ctx);
     let after_body = std::mem::replace(&mut ctx.last_writer, entry_writers);
 
+    // New compiler objects retain each handler's exact span, binding and
+    // declared types. The nested Branch shape in `catch_events` preserves
+    // mutually exclusive bodies; pair the two representations without
+    // parsing source text or interpreting language syntax here.
+    if let Some(arms) = catch_arm_event_slices(catch_events, catch.arms) {
+        let catch_entry = ctx.last_writer.clone();
+        let mut catch_exits = Vec::with_capacity(arms.len());
+        for (arm, arm_events) in arms {
+            ctx.last_writer = catch_entry.clone();
+            bind_catch_arm(
+                &body_throws,
+                &arm.types,
+                arm.parameter.as_deref(),
+                span,
+                arm.span,
+                ctx,
+            );
+            let previous_receivers = ctx.catch_projection_receivers.clone();
+            if let Some(param) = arm.parameter.as_deref().filter(|param| !param.is_empty()) {
+                let sid = ctx.intern_name(param);
+                ctx.catch_projection_receivers.insert(sid);
+            }
+            walk_events(arm_events, ctx);
+            ctx.catch_projection_receivers = previous_receivers;
+            catch_exits.push(std::mem::take(&mut ctx.last_writer));
+        }
+        ctx.last_writer = after_body;
+        for catch_exit in catch_exits {
+            merge_writer_states(&mut ctx.last_writer, catch_exit);
+        }
+        walk_events(finally_events, ctx);
+        return;
+    }
+
+    // Compatibility path for compiler objects produced before arm-local
+    // facts existed, and for custom adapter lowerings not yet carrying them.
+    bind_catch_arm(&body_throws, catch.types, catch.param, span, span, ctx);
+    let previous_catch_projection_receivers = ctx.catch_projection_receivers.clone();
+    if let Some(param) = catch.param.filter(|param| !param.is_empty()) {
+        let sid = ctx.intern_name(param);
+        ctx.catch_projection_receivers.insert(sid);
+    }
+    walk_events(catch_events, ctx);
+    ctx.catch_projection_receivers = previous_catch_projection_receivers;
+    merge_writer_states(&mut ctx.last_writer, after_body);
+    walk_events(finally_events, ctx);
+}
+
+fn bind_catch_arm(
+    body_throws: &[ThrowSite],
+    catch_types: &[String],
+    catch_param: Option<&str>,
+    try_span: Span,
+    arm_span: Span,
+    ctx: &mut TransferCtx<'_>,
+) {
     for catch_type in catch_types {
         if catch_type.is_empty() {
             continue;
@@ -4540,7 +5471,7 @@ fn walk_try(
         let catch_ty = TypeId(ctx.intern_name(catch_type));
         let catch_node = ctx.intern_node(Place::Catch { ty: catch_ty });
 
-        for throw in &body_throws {
+        for throw in body_throws {
             if let Some(precision) = thrown_type_catch_precision(throw.thrown_type, catch_ty) {
                 ctx.emit(IdgEdge {
                     from: throw.throw_node,
@@ -4557,7 +5488,7 @@ fn walk_try(
 
         if let Some(param) = catch_param {
             if !param.is_empty() {
-                let bind_target = ctx.write_node(param, span);
+                let bind_target = ctx.write_node(param, arm_span);
                 ctx.commit_writer(param, bind_target);
                 ctx.emit(IdgEdge {
                     from: catch_node,
@@ -4566,7 +5497,12 @@ fn walk_try(
                         precision: Precision::Exact,
                         kind: IdgEdgeKind::IntraAssign,
                         call_kind: bonsai_callgraph::EdgeKind::Direct,
-                        via_span: span,
+                        // The write node retains the exact handler-arm span.
+                        // The relation metadata identifies the enclosing try
+                        // region so the workspace hierarchy stitch can prove
+                        // subtype assignability without guessing from source
+                        // order or type spellings.
+                        via_span: try_span,
                     },
                 });
             }
@@ -4578,7 +5514,7 @@ fn walk_try(
     if catch_types.is_empty() && !body_throws.is_empty() {
         let any_ty = TypeId(ctx.intern_name("*"));
         let catch_node = ctx.intern_node(Place::Catch { ty: any_ty });
-        for throw in &body_throws {
+        for throw in body_throws {
             ctx.emit(IdgEdge {
                 from: throw.throw_node,
                 to: catch_node,
@@ -4592,7 +5528,7 @@ fn walk_try(
         }
         if let Some(param) = catch_param {
             if !param.is_empty() {
-                let bind_target = ctx.write_node(param, span);
+                let bind_target = ctx.write_node(param, arm_span);
                 ctx.commit_writer(param, bind_target);
                 ctx.emit(IdgEdge {
                     from: catch_node,
@@ -4601,36 +5537,51 @@ fn walk_try(
                         precision: Precision::Exact,
                         kind: IdgEdgeKind::IntraAssign,
                         call_kind: bonsai_callgraph::EdgeKind::Direct,
-                        via_span: span,
+                        via_span: try_span,
                     },
                 });
             }
         }
     }
+}
 
-    let previous_catch_projection_receivers = ctx.catch_projection_receivers.clone();
-    if let Some(param) = catch_param {
-        if !param.is_empty() {
-            let sid = ctx.intern_name(param);
-            ctx.catch_projection_receivers.insert(sid);
+fn catch_arm_event_slices<'a>(
+    events: &'a [FlowEvent],
+    facts: &'a [bonsai_lang_api::CatchArmFact],
+) -> Option<Vec<(&'a bonsai_lang_api::CatchArmFact, &'a [FlowEvent])>> {
+    fn collect<'a>(
+        events: &'a [FlowEvent],
+        facts: &'a [bonsai_lang_api::CatchArmFact],
+        out: &mut Vec<(&'a bonsai_lang_api::CatchArmFact, &'a [FlowEvent])>,
+    ) -> bool {
+        let Some((first, rest)) = facts.split_first() else {
+            return false;
+        };
+        if rest.is_empty() {
+            out.push((first, events));
+            return true;
         }
-    }
-    walk_events(catch_events, ctx);
-    ctx.catch_projection_receivers = previous_catch_projection_receivers;
-    // Merge after_body into ctx.last_writer (which now holds the
-    // post-catch state). Per-name union: each name's writer set
-    // is the union of body-end writers and catch-end writers, so
-    // post-`try` reads see the writers from whichever branch
-    // actually committed them.
-    for (name, writers) in after_body {
-        let merged = ctx.last_writer.entry(name).or_default();
-        for w in writers {
-            if !merged.contains(&w) {
-                merged.push(w);
-            }
+        let [FlowEvent::Branch {
+            span,
+            condition: None,
+            then_events,
+            else_events,
+        }] = events
+        else {
+            return false;
+        };
+        if *span != first.span {
+            return false;
         }
+        out.push((first, then_events));
+        collect(else_events, rest, out)
     }
-    walk_events(finally_events, ctx);
+
+    if facts.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(facts.len());
+    collect(events, facts, &mut out).then_some(out)
 }
 
 fn bridge_compound_throw_sources(body: &[FlowEvent], throws: &[ThrowSite], ctx: &mut TransferCtx<'_>) {
@@ -4648,9 +5599,33 @@ fn bridge_call_args_inside_throw(
     for event in events {
         match event {
             FlowEvent::Call { span, args, .. } if span_contains_or_equal(throw_span, *span) => {
-                for arg in args {
-                    bridge_call_arg_sources_to_node(
+                for (index, arg) in args.iter().enumerate() {
+                    // A nested constructor/call is evaluated before the
+                    // enclosing throw even when the adapter's hierarchical
+                    // event list records the outer Throw first. Materialize
+                    // the exact compiler argument producers here as well as
+                    // the CallArg -> Throw relation; normal call lowering may
+                    // have been pruned after the abrupt outer event.
+                    let argument = ctx.intern_node(Place::CallArg {
+                        site: CallSiteId(*span),
+                        idx: u32::try_from(index).unwrap_or(u32::MAX),
+                    });
+                    bridge_receiver_argument_value_to_node(
+                        *span,
+                        index,
                         arg,
+                        argument,
+                        crate::edge::EdgeMeta {
+                            precision: Precision::Exact,
+                            kind: IdgEdgeKind::IntraRead,
+                            call_kind: bonsai_callgraph::EdgeKind::Direct,
+                            via_span: arg.span,
+                        },
+                        ctx,
+                    );
+                    bridge_call_argument_value_to_node(
+                        *span,
+                        index,
                         throw_node,
                         crate::edge::EdgeMeta {
                             precision: Precision::Exact,

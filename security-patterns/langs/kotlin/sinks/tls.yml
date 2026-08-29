@@ -6,21 +6,64 @@
   severity: critical
   cwe:
   - CWE-295
+  imports: [javax.net.ssl.HttpsURLConnection]
   match:
     kind: call
     callee:
       attribute:
       - HttpsURLConnection
       - setDefaultHostnameVerifier
+      binding_origin: imported
+  constraints:
+  - arg_inline_callback_returns_static:
+      index: 0
+      value: {kind: boolean, value: true}
   match_examples:
-  - name: generated shape example
+  - name: imported inline hostname verifier always accepts
     code: |
-      import javax.net.ssl.*
+      import javax.net.ssl.HttpsURLConnection
       class App {
-        fun handle(input: String) {
-          HttpsURLConnection.setDefaultHostnameVerifier(input)
+        fun configure() {
+          HttpsURLConnection.setDefaultHostnameVerifier { host, session -> true }
         }
       }
+    expect_match_text: [HttpsURLConnection.setDefaultHostnameVerifier]
+  - name: rejecting hostname verifier
+    code: |
+      import javax.net.ssl.HttpsURLConnection
+      class App {
+        fun configure() {
+          HttpsURLConnection.setDefaultHostnameVerifier { host, session -> false }
+        }
+      }
+    expect_no_match: true
+  - name: conditional hostname verifier
+    code: |
+      import javax.net.ssl.HttpsURLConnection
+      class App {
+        fun configure(allow: Boolean) {
+          HttpsURLConnection.setDefaultHostnameVerifier { host, session -> if (allow) true else false }
+        }
+      }
+    expect_no_match: true
+  - name: named hostname verifier remains unproven
+    code: |
+      import javax.net.ssl.HttpsURLConnection
+      class App {
+        fun verify(host: String, session: Any): Boolean = true
+        fun configure() { HttpsURLConnection.setDefaultHostnameVerifier(::verify) }
+      }
+    expect_no_match: true
+  - name: local connection type collision
+    code: |
+      import javax.net.ssl.HttpsURLConnection
+      object HttpsURLConnection {
+        fun setDefaultHostnameVerifier(value: (Any) -> Boolean) {}
+      }
+      class App {
+        fun configure() { HttpsURLConnection.setDefaultHostnameVerifier { value -> true } }
+      }
+    expect_no_match: true
   description: "HttpsURLConnection.setDefaultHostnameVerifier((h,s) -> true) - global bypass. Merged aliases: kotlin.tls.disable_verify_hostname_verifier."
   aliases:
   - kotlin.tls.disable_verify_hostname_verifier
@@ -34,52 +77,45 @@
   severity: critical
   cwe:
   - CWE-295
+  imports: [javax.net.ssl.HttpsURLConnection]
   match:
     kind: call
     callee:
-      attribute:
-      - HttpsURLConnection
-      - setHostnameVerifier
+      name: setHostnameVerifier
+      receiver_type_in: [javax.net.ssl.HttpsURLConnection]
+  constraints:
+  - arg_inline_callback_returns_static:
+      index: 0
+      value: {kind: boolean, value: true}
   match_examples:
-  - name: generated shape example
-    code: "class App {\n  fun handle(input: String) {\n    HttpsURLConnection.setHostnameVerifier(input)\n  }\n}\n"
+  - name: typed connection inline verifier always accepts
+    code: |
+      import javax.net.ssl.HttpsURLConnection
+      class App {
+        fun configure(connection: HttpsURLConnection) {
+          connection.setHostnameVerifier { host, session -> true }
+        }
+      }
+    expect_match_text: [connection.setHostnameVerifier]
+  - name: same method on unrelated receiver
+    code: |
+      class LocalConnection { fun setHostnameVerifier(value: (Any) -> Boolean) {} }
+      class App {
+        fun configure(connection: LocalConnection) {
+          connection.setHostnameVerifier { value -> true }
+        }
+      }
+    expect_no_match: true
+  - name: typed connection rejecting verifier
+    code: |
+      import javax.net.ssl.HttpsURLConnection
+      class App {
+        fun configure(connection: HttpsURLConnection) {
+          connection.setHostnameVerifier { host, session -> false }
+        }
+      }
+    expect_no_match: true
   description: "HttpsURLConnection.setHostnameVerifier - accepts any."
-- id: kotlin.tls.set_default_ssl_socket_factory_trustall
-  enabled: true
-  language: kotlin
-  tag: weak-tls
-  category: source-independent
-  severity: critical
-  cwe:
-  - CWE-295
-  match:
-    kind: call
-    callee:
-      attribute:
-      - HttpsURLConnection
-      - setDefaultSSLSocketFactory
-  match_examples:
-  - name: generated shape example
-    code: "class App {\n  fun handle(input: String) {\n    HttpsURLConnection.setDefaultSSLSocketFactory(input)\n  }\n}\n"
-  description: HttpsURLConnection.setDefaultSSLSocketFactory with TrustAll.
-- id: kotlin.tls.sslcontext_init_trustallcerts
-  enabled: true
-  language: kotlin
-  tag: weak-tls
-  category: source-independent
-  severity: critical
-  cwe:
-  - CWE-295
-  match:
-    kind: call
-    callee:
-      attribute:
-      - SSLContext
-      - init
-  match_examples:
-  - name: generated shape example
-    code: "class App {\n  fun handle(input: String) {\n    SSLContext.init(input)\n  }\n}\n"
-  description: "SSLContext.init(km, [TrustAllCerts], rng) - accept-any X509TrustManager."
 - id: kotlin.tls.okhttp_hostnameverifier_allow
   enabled: true
   language: kotlin
@@ -87,51 +123,51 @@
   category: source-independent
   severity: critical
   packages:
-  - okhttp
+  - okhttp3
+  imports: [okhttp3.OkHttpClient]
   cwe:
   - CWE-295
   match:
     kind: call
     callee:
-      attribute:
-      - Builder
-      - hostnameVerifier
+      name: hostnameVerifier
+      receiver_type_in: [okhttp3.OkHttpClient.Builder]
+  constraints:
+  - arg_inline_callback_returns_static:
+      index: 0
+      value: {kind: boolean, value: true}
   match_examples:
-  - name: generated shape example
+  - name: typed builder inline verifier always accepts
     code: |
-      import okhttp.*
+      import okhttp3.OkHttpClient
       class App {
-        fun handle(input: String) {
-          Builder.hostnameVerifier(input)
+        fun configure(builder: OkHttpClient.Builder) {
+          builder.hostnameVerifier { host, session -> true }
         }
       }
+    expect_match_text: [builder.hostnameVerifier]
+  - name: unrelated builder collision
+    code: |
+      import okhttp3.Call
+      class OkHttpClient {
+        class Builder { fun hostnameVerifier(value: (Any) -> Boolean) {} }
+      }
+      class App {
+        fun configure(builder: OkHttpClient.Builder, call: Call) {
+          builder.hostnameVerifier { value -> true }
+        }
+      }
+    expect_no_match: true
+  - name: typed builder rejecting verifier
+    code: |
+      import okhttp3.OkHttpClient
+      class App {
+        fun configure(builder: OkHttpClient.Builder) {
+          builder.hostnameVerifier { host, session -> false }
+        }
+      }
+    expect_no_match: true
   description: OkHttp OkHttpClient.Builder.hostnameVerifier((h,s) -> true).
-- id: kotlin.tls.okhttp_socketfactory
-  enabled: true
-  language: kotlin
-  tag: weak-tls
-  category: source-independent
-  severity: critical
-  packages:
-  - okhttp
-  cwe:
-  - CWE-295
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Builder
-      - sslSocketFactory
-  match_examples:
-  - name: generated shape example
-    code: |
-      import okhttp.*
-      class App {
-        fun handle(input: String) {
-          Builder.sslSocketFactory(input)
-        }
-      }
-  description: "OkHttp Builder.sslSocketFactory(trustAll, ...)."
 - id: kotlin.tls.apache_httpclient_noopverifier
   enabled: true
   language: kotlin
@@ -139,23 +175,31 @@
   category: source-independent
   severity: critical
   packages:
-  - org.apache.httpcomponents
+  - org.apache.http
+  imports: [org.apache.http.conn.ssl.NoopHostnameVerifier]
   cwe:
   - CWE-295
   match:
     kind: new
     callee:
       name: NoopHostnameVerifier
+      binding_origin: imported
   match_examples:
-  - name: generated shape example
+  - name: imported no-op hostname verifier
     code: |
-      import org.apache.httpcomponents.NoopHostnameVerifier
+      import org.apache.http.conn.ssl.NoopHostnameVerifier
       class App {
-        fun handle(input: String) {
-          NoopHostnameVerifier(input)
-        }
+        fun verifier(): Any = NoopHostnameVerifier()
       }
-      class NoopHostnameVerifier(vararg args: Any?)
+    expect_match_text: [NoopHostnameVerifier]
+  - name: same constructor name on a local type
+    code: |
+      import org.apache.http.HttpHost
+      class NoopHostnameVerifier
+      class App {
+        fun verifier(host: HttpHost): Any = NoopHostnameVerifier()
+      }
+    expect_no_match: true
   description: Apache HttpClient new NoopHostnameVerifier().
 - id: kotlin.tls.apache_httpclient_trustself
   enabled: true
@@ -164,41 +208,52 @@
   category: source-independent
   severity: high
   packages:
-  - org.apache.httpcomponents
+  - org.apache.http
+  imports: [org.apache.http.ssl.SSLContextBuilder, org.apache.http.ssl.TrustSelfSignedStrategy]
   cwe:
   - CWE-295
   match:
     kind: call
     callee:
-      attribute:
-      - SSLContextBuilder
-      - loadTrustMaterial
+      name: loadTrustMaterial
+      receiver_type_in: [org.apache.http.ssl.SSLContextBuilder]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:TrustSelfSignedStrategy\.)?INSTANCE$'
   match_examples:
-  - name: generated shape example
+  - name: imported self-signed trust strategy
     code: |
-      import org.apache.httpcomponents.*
+      import org.apache.http.ssl.SSLContextBuilder
+      import org.apache.http.ssl.TrustSelfSignedStrategy
       class App {
-        fun handle(input: String) {
-          SSLContextBuilder.loadTrustMaterial(input)
+        fun configure(builder: SSLContextBuilder) {
+          builder.loadTrustMaterial(TrustSelfSignedStrategy.INSTANCE)
         }
       }
+    expect_match_text: [builder.loadTrustMaterial]
+  - name: ordinary trust material strategy
+    code: |
+      import org.apache.http.ssl.SSLContextBuilder
+      class App {
+        fun configure(builder: SSLContextBuilder, strategy: Any) {
+          builder.loadTrustMaterial(strategy)
+        }
+      }
+    expect_no_match: true
+  - name: local builder with the same method is not Apache HttpClient
+    code: |
+      import org.apache.http.ssl.TrustSelfSignedStrategy
+      class SSLContextBuilder {
+        fun loadTrustMaterial(strategy: Any) {}
+      }
+      class App {
+        fun configure(builder: SSLContextBuilder) {
+          builder.loadTrustMaterial(TrustSelfSignedStrategy.INSTANCE)
+        }
+      }
+    expect_no_match: true
   description: Apache HttpClient loadTrustMaterial(TrustSelfSignedStrategy).
-- id: kotlin.tls.trust_all
-  enabled: true
-  language: kotlin
-  tag: weak-tls
-  category: source-independent
-  severity: high
-  cwe:
-  - CWE-295
-  match:
-    kind: new
-    callee:
-      name: X509TrustManager
-  match_examples:
-  - name: generated shape example
-    code: "class App {\n  fun handle(input: String) {\n    X509TrustManager(input)\n  }\n}\nclass X509TrustManager(vararg args: Any?)\n"
-  description: Custom X509TrustManager may disable cert checks.
 - id: kotlin.tls.sslcontext_getinstance_ssl
   enabled: true
   language: kotlin
@@ -213,9 +268,21 @@
       attribute:
       - SSLContext
       - getInstance
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)^"(?:SSL|SSLv2|SSLv3|TLSv1|TLSv1\.1)"$'
   match_examples:
-  - name: generated shape example
-    code: "class App {\n  fun handle(input: String) {\n    SSLContext.getInstance(\"SSL\")\n  }\n}\n"
+  - name: obsolete SSL protocol literal
+    code: |
+      import javax.net.ssl.SSLContext
+      class App { fun configure() { SSLContext.getInstance("SSL") } }
+    expect_match_text: [SSLContext.getInstance]
+  - name: modern TLS protocol literal
+    code: |
+      import javax.net.ssl.SSLContext
+      class App { fun configure() { SSLContext.getInstance("TLSv1.3") } }
+    expect_no_match: true
   description: "SSLContext.getInstance(\"SSL\") - legacy SSLv3 context, vulnerable to POODLE; use \"TLSv1.2\" or \"TLSv1.3\". Merged aliases: kotlin.tls.sslcontext_getinstance_ssl_v3."
   aliases:
   - kotlin.tls.sslcontext_getinstance_ssl_v3

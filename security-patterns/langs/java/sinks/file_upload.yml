@@ -113,16 +113,3 @@
 
   imports:
   - org.apache.commons.fileupload
-- id: java.upload.transferto_generic
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  tag: file-upload
-  severity: low
-  cwe: [CWE-434]
-  match:
-    kind: call
-    callee:
-      name: transferTo
-  description: "Disabled - generic name; covered by package-scoped rule above."

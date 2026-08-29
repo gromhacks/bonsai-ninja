@@ -71,22 +71,6 @@
     expect_no_match: true
   description: "JOSESwift JWS(compactSerialization:) - flag if not subsequently verified."
 
-- id: swift.jwt.jwtdecode_decode
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: jwt
-  severity: high
-  packages: [JWTDecode]
-  cwe: [CWE-347]
-  match:
-    kind: call
-    callee:
-      attribute: [JWT, decode]
-  description: "Disabled - merged into swift.jwt.swiftjwt_decode (same `[JWT, decode]`
-    attribute chain)."
-
 - id: swift.jwt.jwtkit_verify_none
   enabled: true
   language: swift

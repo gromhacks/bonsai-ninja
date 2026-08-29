@@ -119,11 +119,12 @@ String interpolation taint comes from adapter-emitted expression operands,
 not engine text parsing. A template/f-string argument should carry the
 interpolated variable in `source_names`; literal text stays inert.
 
-## 4. Public analysis is semantic-only
+## 4. Public analysis accepts one compiler-proven evidence class
 
 Every fact crossing an analysis boundary carries a `Precision` from the lattice
-`Exact < Narrowed < OverApproximate < Unknown`, but public analysis evidence is
-semantic-only:
+`Exact < Narrowed < OverApproximate < Unknown`. This is internal proof
+provenance, not a user-selectable precision mode. Public analysis has one
+contract: admit compiler-proven evidence and reject guessed evidence.
 
 - Direct structural facts and fully resolved edges → Exact.
 - Edges narrowed by aliases, receiver types, module paths, build targets, or
@@ -140,10 +141,11 @@ semantic-only:
   chain would require `OverApproximate` or `Unknown`, the public command must not
   report it as a finding or flow.
 
-Findings and flow exports render `precision` only for proven semantic evidence
-(`exact` / `narrowed`). Diagnostic broad classes may exist internally for cache
-round-trips or debugging, but they are not acceptable as user-facing analysis
-results.
+Findings and flow exports render `precision` only to explain whether admitted
+compiler evidence was direct (`exact`) or constraint-refined (`narrowed`). The
+labels never select different work or finding sets. Diagnostic broad classes
+may exist internally for cache round-trips or debugging, but they are not
+acceptable as user-facing analysis results.
 
 ## 5. Content-addressed caching
 

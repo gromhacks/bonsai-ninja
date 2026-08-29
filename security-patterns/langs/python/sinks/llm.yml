@@ -82,49 +82,6 @@
     code: "import openai\ndef example(user_input):\n    return openai.responses.create({\"input\": \"safe\"})\n"
     expect_no_match: true
   description: "openai.responses.create - tainted input can steer model output, tool calls, or data disclosure."
-- id: python.llm.langchain_run
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: web-llm
-  severity: medium
-  cwe:
-  - CWE-74
-  - CWE-1427
-  owasp:
-  - A03-2021
-  packages:
-  - langchain
-  match:
-    kind: call
-    callee:
-      attribute:
-      - chain
-      - run
-  description: "Disabled - chain.run is too broad without receiver typing; use app-specific LangChain sink rules for concrete chains/agents."
-- id: python.llm.langchain_invoke
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: web-llm
-  severity: medium
-  cwe:
-  - CWE-74
-  - CWE-1427
-  owasp:
-  - A03-2021
-  packages:
-  - langchain
-  - langchain_core
-  match:
-    kind: call
-    callee:
-      attribute:
-      - chain
-      - invoke
-  description: "Disabled - chain.invoke is the modern LCEL entrypoint but `invoke` is too generic; enable with concrete chain typing."
 - id: python.llm.anthropic_messages_create
   enabled: true
   language: python

@@ -89,25 +89,6 @@
     code: "def example(input, url, id, payload, request, params)\n  `whoami`\nend\n"
     expect_no_match: true
   description: Backtick command execution (literal `%x{...}` is a separate AST node and needs adapter support).
-- id: ruby.cmdi.backticks_interp
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: ruby.cmdi.kernel_backtick
-  language: ruby
-  tag: command-injection
-  severity: critical
-  category: process-exec
-  cwe:
-  - CWE-78
-  match:
-    kind: call
-    callee:
-      name: '`'
-  match_examples:
-  - name: ruby.cmdi.backticks_interp example
-    code: "def example(input, url, id, payload, request, params)\n  `echo #{payload}`\nend\n"
-  description: "Disabled duplicate - ruby.cmdi.kernel_backtick owns the backtick execution fact. The adapter's backtick call fact is not currently separable enough for a second interpolation-specific sink without duplicate matches."
 - id: ruby.cmdi.io_popen
   enabled: true
   language: ruby
@@ -378,11 +359,7 @@
         open("|whoami")
       end
     expect_no_match: true
-  description: "Kernel#open with leading '|' executes a command - flag when path is tainted (also overlaps with open-uri SSRF rule). Merged collision aliases: ruby.path.file_open, ruby.path.zip_file_open, ruby.ssrf.uri_open."
-  aliases:
-  - ruby.path.file_open
-  - ruby.path.zip_file_open
-  - ruby.ssrf.uri_open
+  description: "Kernel#open with leading '|' executes a command. Ordinary file open, archive open, and URI fetches are distinct qualified/argument shapes."
   packages:
   - rubyzip
 - id: ruby.cmdi.rake_sh

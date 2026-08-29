@@ -11,18 +11,26 @@
     kind: call
     callee:
       attribute: [cors, Default]
+  constraints:
+  - arg_count: 0
   match_examples:
-  - name: generated direct match
+  - name: gin-contrib default permissive CORS policy
     code: |
-      import "github.com/gin-contrib/cors"
       package main
+      import "github.com/gin-contrib/cors"
 
       func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        cors.Default(target)
+        _ = cors.Default()
       }
+  - name: gin-contrib explicit origin policy negative
+    code: |
+      package main
+      import "github.com/gin-contrib/cors"
+
+      func example() {
+        _ = cors.New(cors.Config{AllowOrigins: []string{"https://app.example"}})
+      }
+    expect_no_match: true
   description: |-
     gin-contrib/cors cors.Default() - allows all origins.
 - id: go.cors.gorilla_handlers_allow_origin_wildcard
@@ -37,17 +45,27 @@
     kind: call
     callee:
       attribute: [handlers, AllowedOrigins]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^\[\]string\s*\{\s*"\*"\s*\}$'
   match_examples:
-  - name: generated direct match
+  - name: gorilla handlers wildcard origin policy
     code: |
-      import "github.com/gorilla/handlers"
       package main
+      import "github.com/gorilla/handlers"
 
       func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        handlers.AllowedOrigins("*")
+        _ = handlers.AllowedOrigins([]string{"*"})
       }
+  - name: gorilla handlers explicit origin policy negative
+    code: |
+      package main
+      import "github.com/gorilla/handlers"
+
+      func example() {
+        _ = handlers.AllowedOrigins([]string{"https://app.example"})
+      }
+    expect_no_match: true
   description: |-
     gorilla/handlers.AllowedOrigins([]string{'*'}) - wildcard.

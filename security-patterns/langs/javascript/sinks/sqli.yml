@@ -163,25 +163,6 @@
       }
     expect_no_match: true
   description: "sqlite3 / better-sqlite3 db.exec runs multiple statements as one raw string - no binding support."
-- id: javascript.sqli.better_sqlite3_exec
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.sqli.sqlite3_exec
-  language: javascript
-  tag: sql-injection
-  severity: high
-  packages:
-  - better-sqlite3
-  cwe:
-  - CWE-89
-  match:
-    kind: call
-    callee:
-      attribute:
-      - db
-      - exec
-  description: "Disabled duplicate - same db.exec shape is covered by javascript.sqli.sqlite3_exec with both package names."
 - id: javascript.sqli.method_query_concat
   enabled: true
   language: javascript
@@ -245,7 +226,6 @@
   category: sql-exec
   cwe:
   - CWE-89
-  - CWE-943
   match:
     kind: call
     callee:
@@ -254,9 +234,9 @@
   - arg_tainted:
       index: 0
   match_examples:
-  - name: method execute concat
+  - name: mysql execute concat
     code: |
-      const _u = require("graphql");
+      const _u = require("mysql2");
       function demo(input, req, obj) {
         return conn.execute("SELECT * FROM users WHERE id = " + input);
       }
@@ -267,16 +247,12 @@
         return conn.execute("SELECT * FROM users WHERE id = ?", [input]);
       }
     expect_no_match: true
-  description: "<recv>.execute(sql) - same shape as `query`, used by mysql2 prepared statements + several ORMs. Merged collision aliases: javascript.graphql.schema_execute, javascript.nosql.cassandra_execute, javascript.sqli.mysql_execute, javascript.sqli.mysql_execute_db, javascript.sqli.mysql2_pool_execute."
+  description: "mysql2 <recv>.execute(sql) - tainted SQL text reaches the database execution boundary."
   aliases:
-  - javascript.graphql.schema_execute
-  - javascript.nosql.cassandra_execute
   - javascript.sqli.mysql_execute
   - javascript.sqli.mysql_execute_db
   - javascript.sqli.mysql2_pool_execute
   packages:
-  - graphql
-  - cassandra-driver
   - mysql2
   imports:
   - mysql2

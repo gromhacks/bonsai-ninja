@@ -1,0 +1,12 @@
+{
+  "name": "language-gauntlet",
+  "version": "0.0.1",
+  "private": true,
+  "main": "app.js",
+  "scripts": {
+    "check": "node --check app.js && node --check cli/app.js && node --check application/pipeline.js && node --check application/storage.js && node --check domain/repository.js && node --check infrastructure/executor.js"
+  },
+  "dependencies": {
+    "express": "*"
+  }
+}

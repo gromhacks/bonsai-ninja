@@ -3,7 +3,7 @@
 
 use bonsai_common::SymbolId;
 use bonsai_lang_api::{AdapterArc, LanguageRegistry};
-use bonsai_workspace::Workspace;
+use bonsai_workspace::{enclosing_index::EnclosingSpanIndex, Workspace};
 use std::{path::Path, sync::Arc};
 
 fn registry() -> Arc<LanguageRegistry> {
@@ -16,6 +16,13 @@ fn registry() -> Arc<LanguageRegistry> {
 fn java_registry() -> Arc<LanguageRegistry> {
     let registry = Arc::new(LanguageRegistry::new());
     let adapter: AdapterArc = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    registry.register(adapter);
+    registry
+}
+
+fn c_registry() -> Arc<LanguageRegistry> {
+    let registry = Arc::new(LanguageRegistry::new());
+    let adapter: AdapterArc = Arc::new(bonsai_lang_c::CAdapter::new());
     registry.register(adapter);
     registry
 }
@@ -127,6 +134,32 @@ class Example {
         .enclosing_for(headers.as_ref(), file, after)
         .expect("outer method must remain visible after its nested lambda");
     assert_eq!(entry.name, "method");
+}
+
+#[test]
+fn local_callable_index_ignores_an_ended_local_type_before_a_call() {
+    let source = r#"
+int process(int value) {
+    struct LocalState { int mode; };
+    consume(value);
+    return value;
+}
+"#;
+    let ws = Workspace::new(c_registry());
+    ws.vfs()
+        .write("amalgamation.c".to_string(), Arc::<str>::from(source));
+    let file = ws.vfs().all_files()[0];
+    let local = ws.db().decl_index(file).expect("C declaration index");
+    assert!(
+        local.defs.iter().any(|decl| decl.name == "LocalState"),
+        "fixture must contain the local type that previously shadowed the outer callable"
+    );
+    let index = EnclosingSpanIndex::from_callable_decls(&local.defs);
+    let call = source.find("consume(value)").expect("call") as u64;
+    assert_eq!(
+        index.enclosing(call).map(|entry| entry.name),
+        Some("process".to_string())
+    );
 }
 
 #[test]

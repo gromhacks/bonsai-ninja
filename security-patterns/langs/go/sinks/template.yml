@@ -95,36 +95,6 @@
       }
     expect_no_match: true
   description: "template.ParseFiles(tainted path) - loads attacker-picked template file; combines path-traversal + SSTI."
-- id: go.template.text_template_new_parse
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  tag: ssti
-  severity: high
-  packages:
-  - text/template
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - template
-      - New
-  match_examples:
-  - name: generated direct match
-    code: |
-      import "text/template"
-      package main
-
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        template.New("{{ user }}")
-      }
-  description: "Disabled - text/template.New(name) alone does not parse attacker-controlled template source. Re-enable only with multi-call correlation that proves a later Parse/ParseFiles consumes tainted template content."
 - id: go.template.html_template_parsefiles
   enabled: true
   language: go
@@ -164,42 +134,6 @@
       }
     expect_no_match: true
   description: "html/template ParseFiles(tainted path) - tainted template source selection."
-- id: go.template.html_template_html
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: xss
-  severity: high
-  packages:
-  - html/template
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - template
-      - HTML
-  description: "Disabled duplicate - template.HTML trust-type conversion is classified in sinks/xss.yml as go.xss.html_template_html."
-- id: go.template.html_template_jsstr
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: xss
-  severity: high
-  packages:
-  - html/template
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - template
-      - JSStr
-  description: "Disabled duplicate - template.JSStr trust-type conversion is classified in sinks/xss.yml as go.xss.template_jsstr."
 - id: go.template.html_template_url
   enabled: true
   language: go
@@ -278,21 +212,3 @@
       }
     expect_no_match: true
   description: "pongo2.FromString(tainted) - Jinja-like SSTI; RCE via template sandbox escapes."
-- id: go.template.text_template_used_for_html
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: go
-  tag: xss
-  severity: high
-  packages:
-  - text/template
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - text/template
-      - New
-  description: "text/template renders attacker input without HTML escaping. Use html/template for any web response. (High-FP - flag with care.)"

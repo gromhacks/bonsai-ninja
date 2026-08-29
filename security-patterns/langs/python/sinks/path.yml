@@ -227,48 +227,6 @@
           return FileResponse("/srv/assets/report.pdf")
     expect_no_match: true
   description: "FastAPI/Starlette FileResponse opens and streams the selected filesystem path. Canonicalize a joined path and prove it remains under the intended base before constructing the response."
-- id: python.path.os_path_join
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: path-traversal
-  severity: high
-  category: file-read
-  packages:
-  - os
-  imports:
-  - os
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      attribute:
-      - os
-      - path
-      - join
-  constraints:
-  - arg_tainted:
-      index: 1
-  analysis_semantics:
-    guard_profile: python-path-containment
-    path_containment_guard:
-      canonicalizer:
-        attribute: [os, path, realpath]
-      containment_check:
-        name: startswith
-      sink_base_arg_index: 0
-      boundary_places: [os.sep]
-  match_examples:
-  - name: os path join request segment
-    code: "import os\ndef read_file(user_input):\n    path = os.path.join(\"/srv/files\", user_input)\n    return path\n"
-    expect_match_text:
-    - os.path.join
-  - name: os path join literal segment negative
-    code: "import os\ndef read_file():\n    path = os.path.join('/srv/files', 'report.txt')\n    return path\n"
-    expect_no_match: true
-  description: "Disabled as a finding: os.path.join constructs a value but performs no filesystem access. python.passthrough.os_path_join preserves its exact taint into real consumers."
 - id: python.path.pathlib_pureposixpath
   enabled: true
   language: python
@@ -791,24 +749,6 @@
     code: "import pathlib\n\ndef example():\n    return Path.rename('safe')\n"
     expect_no_match: true
   description: "pathlib Path.rename - tainted source or destination can move files outside the intended directory."
-- id: python.path.tempfile_mkstemp_tainted
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: python
-  tag: path-traversal
-  severity: medium
-  packages:
-  - tempfile
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      attribute:
-      - tempfile
-      - mkstemp
-  description: "Disabled - mkstemp generates a secure random name; enable only when `dir=` is tainted and attacker-controlled directory placement is the concern."
 - id: python.path.tempfile_mktemp
   enabled: true
   language: python

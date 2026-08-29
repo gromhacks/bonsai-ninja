@@ -27,5 +27,6 @@ workspace = true
 [dev-dependencies]
 bonsai_conformance = { package = "bonsai-ninja-conformance", path = "../conformance" }
 bonsai_diagnostics = { package = "bonsai-ninja-diagnostics", path = "../diagnostics" }
+bonsai_parser = { package = "bonsai-ninja-parser", path = "../parser" }
 bonsai_vfs = { package = "bonsai-ninja-vfs", path = "../vfs" }
 parking_lot = { workspace = true }

@@ -48,6 +48,42 @@ pub fn short_qualified_tail(name: &str) -> &str {
     qualified_boundary(name).map_or(name, |(_, tail_start)| &name[tail_start..])
 }
 
+/// Return the complete callable suffix of an adapter-emitted qualified name,
+/// anchored by the declaration's concise source name.
+///
+/// Most languages encode a callable as the final identifier segment, in which
+/// case this is equivalent to [`short_qualified_tail`]. Some grammars retain
+/// additional exact syntax after that identifier (for example, a multipart
+/// selector). Anchoring the suffix at the already-lowered declaration name
+/// preserves that syntax without teaching shared analysis what its punctuation
+/// means. Both boundaries must be non-identifier punctuation so a declaration
+/// named `run` cannot match the middle of `runner`.
+#[must_use]
+pub fn declaration_qualified_suffix<'a>(decl_name: &str, qualified_name: &'a str) -> Option<&'a str> {
+    let decl_name = decl_name.trim();
+    let qualified_name = qualified_name.trim();
+    if decl_name.is_empty() || qualified_name.is_empty() {
+        return None;
+    }
+    qualified_name
+        .match_indices(decl_name)
+        .filter_map(|(start, matched)| {
+            let end = start + matched.len();
+            let starts_at_boundary = start == 0
+                || qualified_name[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|ch| !is_name_segment_char(ch));
+            let ends_at_boundary = end == qualified_name.len()
+                || qualified_name[end..]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| !is_name_segment_char(ch));
+            (starts_at_boundary && ends_at_boundary).then_some(&qualified_name[start..])
+        })
+        .last()
+}
+
 /// True when two adapter-emitted qualified names are identical or
 /// share the same non-empty callable tail.
 ///
@@ -261,8 +297,84 @@ pub fn workspace_bonsai_dir(workspace_root: &std::path::Path) -> std::path::Path
                 workspace_root.join(path)
             }
         }
-        _ => default_workspace_bonsai_dir(workspace_root, dirs::cache_dir().as_deref()),
+        _ => writable_default_workspace_bonsai_dir(
+            workspace_root,
+            dirs::cache_dir().as_deref(),
+            &std::env::temp_dir(),
+        ),
     }
+}
+
+/// Resolve the normal OS cache path, falling back to the OS temporary root
+/// when the configured user cache is not writable (for example in a
+/// sandboxed service account). Analysis semantics and cache identity are
+/// unchanged: both paths remain keyed by the canonical workspace identity.
+///
+/// The writability probe creates only the final workspace cache directory,
+/// which every cache-producing caller would create immediately afterwards.
+/// This avoids a process-global environment override and keeps parallel
+/// workspaces isolated.
+fn writable_default_workspace_bonsai_dir(
+    workspace_root: &std::path::Path,
+    system_cache_root: Option<&std::path::Path>,
+    temporary_root: &std::path::Path,
+) -> std::path::PathBuf {
+    let preferred = default_workspace_bonsai_dir(workspace_root, system_cache_root);
+    if ensure_cache_directory_writable(&preferred) {
+        return preferred;
+    }
+    let fallback = default_workspace_bonsai_dir(workspace_root, Some(temporary_root));
+    // Let the eventual cache operation surface its normal I/O error if even
+    // the platform temporary directory is unusable. Selection itself stays
+    // infallible for compatibility with the existing path API.
+    let _ = ensure_cache_directory_writable(&fallback);
+    fallback
+}
+
+/// Create `directory` when needed and prove that it accepts an atomic
+/// create/remove operation.
+///
+/// Merely calling `create_dir_all` is not a writability test: it succeeds for
+/// an existing read-only directory. Cache clients use this helper before
+/// selecting a default OS cache so sandboxed/service-account executions can
+/// fall back without mistaking a pre-existing directory for a writable one.
+/// The short-lived probe is process/thread unique and is always removed.
+#[must_use]
+pub fn ensure_cache_directory_writable(directory: &std::path::Path) -> bool {
+    use std::io::ErrorKind;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_PROBE: AtomicU64 = AtomicU64::new(0);
+
+    let existed = directory.is_dir();
+    if std::fs::create_dir_all(directory).is_err() {
+        return false;
+    }
+    for _ in 0..4 {
+        let nonce = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
+        let probe = directory.join(format!(".bonsai-write-probe-{}-{nonce}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(file) => {
+                drop(file);
+                let cleaned = std::fs::remove_file(probe).is_ok();
+                if !existed {
+                    // Path selection must not turn a read-only command such
+                    // as `cache clear` into a cache-producing operation.
+                    // Remove only the final directory and only when it is
+                    // still empty; concurrent writers therefore win safely.
+                    let _ = std::fs::remove_dir(directory);
+                }
+                return cleaned;
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 fn default_workspace_bonsai_dir(

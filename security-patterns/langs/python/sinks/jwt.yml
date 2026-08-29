@@ -38,24 +38,6 @@
   - python.jwt.pyjwt_decode_algorithms_none
   - python.jwt.pyjwt_decode_options_verify_signature_false
   - python.jwt.alg_confusion
-- id: python.jwt.pyjwt_get_unverified_header
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: jwt
-  severity: low
-  packages:
-  - pyjwt
-  cwe:
-  - CWE-347
-  match:
-    kind: call
-    callee:
-      attribute:
-      - jwt
-      - get_unverified_header
-  description: "Disabled - get_unverified_header is informational; flag downstream trust of its claims."
 - id: python.jwt.python_jose_decode_no_verify
   enabled: true
   language: python
@@ -156,25 +138,6 @@
           return JsonWebToken.decode('safe')
     expect_no_match: true
   description: "authlib JsonWebToken.decode - flag if no algorithm whitelist."
-- id: python.jwt.django_simple_jwt_token_check
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  tag: jwt
-  severity: medium
-  packages:
-  - rest_framework_simplejwt
-  cwe:
-  - CWE-347
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Token
-      - verify
-  description: "Disabled - DRF SimpleJWT verify is normally safe; flag config drift."
-
 - id: python.jwt.pyjwt_decode_alg_none
   enabled: true
   language: python

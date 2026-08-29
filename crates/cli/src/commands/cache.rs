@@ -242,8 +242,8 @@ fn cache_stats(workspace: Option<std::path::PathBuf>, format: BrowseFormat) -> R
         "note: ",
         &ui.dim("note: "),
         "      ",
-        "in-process caches drop at process exit; use --no-cache on any command to \
-                 bypass them within a single run. The dataflow sidecar persists workspace \
+        "in-process caches drop at process exit; use --no-cache on any command for one \
+                 exact run that also bypasses reusable semantic sidecars. The dataflow sidecar persists workspace \
                  taint facts across runs, and the export sidecar persists the default export \
                  JSON — delete via `cache clear` or rebuild via `cache rebuild`.",
     ) {
@@ -376,8 +376,9 @@ fn cache_clear(workspace: Option<std::path::PathBuf>, dataflow_only: bool) -> Re
         "{}",
         ui.dim(
             "note: in-process caches are per-run and drop at exit — no \
-                     action needed there. To bypass them on the next command, \
-                     pass --no-cache or set BONSAI_NO_CACHE=1."
+                     action needed there. To bypass both those memo caches and \
+                     reusable semantic sidecars on the next exact command, pass \
+                     --no-cache or set BONSAI_NO_CACHE=1."
         )
     );
     Ok(())

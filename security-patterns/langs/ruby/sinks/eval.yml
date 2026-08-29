@@ -84,34 +84,6 @@
     code: "def example(input, url, id, payload, request, params)\n  module_eval(\"def safe; end\")\nend\n"
     expect_no_match: true
   description: Module#module_eval.
-- id: ruby.eval.send
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: ruby
-  tag: code-injection
-  severity: medium
-  cwe:
-  - CWE-94
-  match:
-    kind: call
-    callee:
-      name: send
-  description: "Disabled - send/public_send method-name flag requires per-call constraint."
-- id: ruby.eval.method_invoke
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: code-injection
-  severity: medium
-  cwe:
-  - CWE-94
-  match:
-    kind: call
-    callee:
-      name: __send__
-  description: "Disabled - same as send, ubiquitous."
 - id: ruby.eval.active_support_constantize
   enabled: true
   language: ruby

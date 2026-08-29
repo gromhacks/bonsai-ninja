@@ -53,7 +53,7 @@ views support graph tooling. These artifacts can be inputs to retrieval,
 training-data construction, evaluations, code-reasoning experiments, or
 tool-using agents; bonsai-ninja produces the evidence and does not train or
 validate a model by itself. The versioned native contract is published as
-[JSON Schema v7](schemas/bonsai-native-export-v7.schema.json).
+[JSON Schema v9](schemas/bonsai-native-export-v9.schema.json).
 
 Our small exploratory tests produced encouraging results, but they are not a
 general model-quality claim. We would love to see independent teams take the
@@ -84,15 +84,15 @@ separate the first explicit semantic index from commands run after it exists:
 
 | Cache state and operation | Measured time | Result |
 |---|---:|---|
-| Empty cache: default structural `index` | 1m 02.6s | All 30,055 sources parsed and lowered; the instrumented optimization run used 1.24 GB maximum RSS and zero swaps |
-| After structural index: default `index` | 4.2s | Exact generation validated root-only; the instrumented optimization run used 77 MB maximum RSS and reopened no source bodies |
-| Empty cache: `index --semantic` | 7m 22.8s | Complete validated reusable compiler, linkage, callgraph, retrieval, and IDG generation under the 3 GiB scheduling profile |
-| Empty analysis cache: complete production taint analysis | 31.3s | Requested analysis completed without requiring the whole semantic prewarm |
+| Empty cache: default structural `index` | 50.5s | All 30,055 sources parsed and lowered; the instrumented optimization run used 1.24 GB maximum RSS and zero swaps |
+| After structural index: default `index` | 4.3s | Compiler generation validated root-only; the instrumented optimization run used 77 MB maximum RSS and reopened no source bodies |
+| Empty cache: `index --semantic` | 5m 08.6s | Complete validated reusable compiler, linkage, callgraph, retrieval, and IDG generation under the 3 GiB scheduling profile |
+| Empty analysis cache: complete production taint analysis | 29.8s | Requested analysis completed without requiring the whole semantic prewarm |
 | After index: semantic generation reopen | 2.5s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
-| After index: search | 4.0s | Exact requested matches |
-| After index: call lookup | 3.7s | Compiler-resolved call rows |
-| After index: default inspect | 7.5s | Structural evidence for the requested target |
-| After index: complete production taint analysis | 12.1s | Requested fixed point completed without a semantic cap |
+| After index: search | 4.6s | Compiler-proven requested matches |
+| After index: call lookup | 3.9s | Compiler-resolved call rows |
+| After index: default inspect | 10.0s | Structural evidence for the requested target |
+| After index: complete production taint analysis | 15.9s | Requested fixed point completed without a semantic cap |
 | After index: default native export | 4m 05s | 4.54 GB compiler, callgraph, flow, and compiled-IDG facts |
 | After index: `--full-propagations` export | 7m 36s | 6.42 GB with the same exact propagation relation materialized as individual rows |
 
@@ -294,7 +294,7 @@ avoid whole-workspace semantic work unless their requested result requires it.
 Generated and executable coverage evidence lives in
 [Taint Coverage Matrix](docs/TAINT_COVERAGE_MATRIX.md),
 [Coverage Baseline](docs/COVERAGE_BASELINE.md), and
-[mega_flow Coverage](docs/MEGA_FLOW_COVERAGE.md). Current validation evidence
+[language_gauntlet Coverage](docs/LANGUAGE_GAUNTLETS.md). Current validation evidence
 and release commands live only in
 [Release Readiness](docs/RELEASE_READINESS.md).
 

@@ -41,6 +41,7 @@ ignore = { workspace = true }
 fs2 = { workspace = true }
 lru = { workspace = true }
 tempfile = { workspace = true }
+tree-sitter = { workspace = true }
 
 [dev-dependencies]
 bonsai_trace = { package = "bonsai-ninja-trace", path = "../trace" }

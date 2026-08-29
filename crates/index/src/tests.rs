@@ -170,6 +170,35 @@ fn compiler_headers_rebind_streamed_bodies_to_stable_symbols() {
 }
 
 #[test]
+fn compiler_headers_tolerate_recovered_outer_declaration_trivia() {
+    let file = FileId::new(22);
+    let mut header = decl(file, 0, "handler");
+    header.span = Span::new(file, 10, 80);
+    header.name_span = Span::new(file, 24, 31);
+    header.body_span = Some(Span::new(file, 40, 80));
+    let mut body = header.clone();
+    body.symbol = SymbolId::new(9);
+    body.span = Span::new(file, 17, 80);
+
+    let mut global = GlobalIndex::new();
+    global.insert_header_preprocessed(DeclIndex {
+        file,
+        defs: vec![header],
+        ..DeclIndex::default()
+    });
+    global.finalize_semantic_facts();
+
+    let stable_symbol = global.decls_in(file)[0].symbol;
+    let rebound = global.remap_file_to_existing_symbols(DeclIndex {
+        file,
+        defs: vec![body],
+        ..DeclIndex::default()
+    });
+    assert_eq!(rebound.defs[0].symbol, stable_symbol);
+    assert_eq!(rebound.defs[0].span, Span::new(file, 17, 80));
+}
+
+#[test]
 fn streamed_assignment_owners_rebind_to_stable_symbols() {
     let file = FileId::new(24);
     let local_owner = SymbolId::new(7);
@@ -186,10 +215,16 @@ fn streamed_assignment_owners_rebind_to_stable_symbols() {
             value_span: Span::new(file, 24, 30),
             call_sites: Vec::new(),
             value_flow: bonsai_lang_api::ExpressionFlow::default(),
+            static_value: None,
             exact_callable_return: None,
+            inline_callback_static_return: None,
+            inline_callback_fields: Vec::new(),
             exact_static_call_args: None,
             direct_call_name: None,
+            direct_call_span: None,
             direct_call_receiver: None,
+            direct_call_receiver_span: None,
+            direct_call_receiver_flow: None,
         }],
         ..DeclIndex::default()
     };
@@ -270,6 +305,9 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
             direct_call_span: Some(call_span),
             value_kind: None,
             inline_callback_params: Vec::new(),
+            inline_callback_span: None,
+            inline_callback_static_return: None,
+            inline_callback_fields: Vec::new(),
             value_flow: bonsai_lang_api::ExpressionFlow {
                 call_sites: vec![call_span],
                 ..Default::default()
@@ -281,6 +319,7 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
         static_string_maps: vec![bonsai_lang_api::StaticStringMapFact {
             assignment_span: Span::new(file, 1, 9),
             target: "lookup".to_string(),
+            target_is_immutable: false,
             entries: vec![bonsai_lang_api::StaticStringMapEntry {
                 key: "a".to_string(),
                 value: "b".to_string(),
@@ -676,6 +715,46 @@ fn compiler_syntax_headers_preserve_exact_receiver_ancestry_and_fail_closed_on_a
         receiver_types,
         &["Child".to_string()],
         "conflicting bare receiver identities must not invent a base relation"
+    );
+}
+
+#[test]
+fn receiver_ancestry_projection_expands_declaration_bases_transitively() {
+    let file = FileId::new(46);
+    let headers = [
+        bonsai_lang_api::CompilerSyntaxHeader {
+            receiver_types: vec![bonsai_lang_api::CompilerReceiverTypeHeader {
+                name: "ApplicationController".to_string(),
+                qualified_name: None,
+                bases: vec!["ActionController::Base".to_string()],
+            }],
+            ..bonsai_lang_api::CompilerSyntaxHeader::default()
+        },
+        bonsai_lang_api::CompilerSyntaxHeader {
+            receiver_types: vec![bonsai_lang_api::CompilerReceiverTypeHeader {
+                name: "UsersController".to_string(),
+                qualified_name: None,
+                bases: vec!["ApplicationController".to_string()],
+            }],
+            ..bonsai_lang_api::CompilerSyntaxHeader::default()
+        },
+    ];
+    let ancestry = ReceiverAncestry::from_compiler_syntax_headers(headers);
+    let mut users = decl(file, 0, "UsersController");
+    users.kind = DeclKind::Class;
+    users.bases.push("ApplicationController".to_string());
+    let mut local = DeclIndex {
+        file,
+        defs: vec![users],
+        ..DeclIndex::default()
+    };
+
+    ancestry.apply_to_decl_index(&mut local);
+
+    assert_eq!(
+        local.defs[0].bases,
+        ["ApplicationController", "ActionController::Base"],
+        "declaration-context rules must see exact transitive framework ancestry"
     );
 }
 

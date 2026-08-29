@@ -22,7 +22,6 @@
     code: |
       <?php
       use firebase\phpjwt;
-      use firebase\phpjwt;
       use firebase\php-jwt;
       function example($input, $url, $id, $payload, $request) {
         JWT::decode($input);
@@ -65,7 +64,6 @@
     code: |
       <?php
       use firebase\phpjwt;
-      use firebase\phpjwt;
       use firebase\php-jwt;
       function example($input, $url, $id, $payload, $request) {
         JWT::encode($input, $input, "none");
@@ -103,7 +101,6 @@
     code: |
       <?php
       use lcobucci\jwt;
-      use lcobucci\jwt;
       function example($input, $url, $id, $payload, $request) {
         Parser::parse($input);
       }
@@ -116,59 +113,6 @@
   imports:
   - lcobucci\jwt
   - lcobucci
-- id: php.jwt.lcobucci_validator_unverified
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: jwt
-  severity: medium
-  packages:
-  - lcobucci/jwt
-  cwe:
-  - CWE-347
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Validator
-      - validate
-  description: Disabled - Validator is the check; flag missing SignedWith
-    constraint.
-- id: php.jwt.web_token_jws_loader
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: jwt
-  severity: high
-  packages:
-  - web-token/jwt-framework
-  cwe:
-  - CWE-347
-  match:
-    kind: call
-    callee:
-      attribute:
-      - JWSLoader
-      - loadAndVerifyWithKey
-  match_examples:
-  - name: php.jwt.web_token_jws_loader example
-    code: |
-      <?php
-      use webtoken\jwtframework;
-      use webtoken\jwtframework;
-      use web-token\jwt-framework;
-      function example($input, $url, $id, $payload, $request) {
-        JWSLoader::loadAndVerifyWithKey($input);
-      }
-  description: Disabled - requires a rulepack constraint that proves the unsafe
-    JWT configuration, not just the broad API shape. web-token JWSLoader - flag
-    if no alg whitelist.
-  imports:
-  - webtoken
-  - webtoken/jwtframework
-  - webtoken\jwtframework
 - id: php.jwt.jose_php_decode
   enabled: true
   language: php
@@ -191,7 +135,6 @@
   - name: php.jwt.jose_php_decode example
     code: |
       <?php
-      use emarref\jwt;
       use emarref\jwt;
       function example($input, $url, $id, $payload, $request) {
         Token::deserialize($input);

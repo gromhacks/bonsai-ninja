@@ -96,42 +96,4 @@
         headers("X-User" => "alice")
       end
     expect_no_match: true
-  description: "Sinatra headers(hash) - flag only when hash value is tainted. Merged collision aliases: ruby.smuggle.set_dual_cl_te_headers."
-  aliases:
-  - ruby.smuggle.set_dual_cl_te_headers
-- id: ruby.header.rails_cookies_setitem
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: header-injection
-  severity: medium
-  packages:
-  - actionpack
-  cwe:
-  - CWE-113
-  match:
-    kind: call
-    callee:
-      attribute:
-      - cookies
-      - '[]='
-  description: "Disabled - cookies[name]= is aset syntax, not a named call; rule cannot fire."
-- id: ruby.header.rails_response_headers_setitem
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: header-injection
-  severity: medium
-  packages:
-  - actionpack
-  cwe:
-  - CWE-113
-  match:
-    kind: call
-    callee:
-      attribute:
-      - headers
-      - '[]='
-  description: "Disabled - response.headers[name]= is aset syntax, not a named call; use set_header/write_header rules."
+  description: "Sinatra headers(hash) - flag only when hash value is tainted. Dual Content-Length/Transfer-Encoding smuggling requires a separate header-key predicate."

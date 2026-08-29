@@ -3,8 +3,6 @@
   language: ruby
   tag: xss
   severity: high
-  packages:
-  - actionview
   cwe:
   - CWE-79
   match:
@@ -60,54 +58,6 @@
       end
     expect_no_match: true
   description: 'raw() in ERB / view helpers. Deliberately not top_level-constrained: ERB preprocessing can wrap embedded expressions in a synthetic block context, while ActionView package metadata plus taint flow gate real findings.'
-- id: ruby.xss.sanitize_helper_off
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: xss
-  severity: medium
-  packages:
-  - actionview
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: sanitize
-  description: "Disabled - sanitize is normally safe; flag only on tainted config."
-- id: ruby.xss.concat
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: xss
-  severity: medium
-  packages:
-  - actionview
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: concat
-  description: "Disabled - concat is widely used and not always XSS-relevant."
-- id: ruby.xss.content_tag
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: xss
-  severity: medium
-  packages:
-  - actionview
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: content_tag
-  description: "Disabled - content_tag escapes by default."
 - id: ruby.xss.javascript_tag
   enabled: true
   language: ruby
@@ -139,22 +89,6 @@
       end
     expect_no_match: true
   description: javascript_tag with tainted content.
-- id: ruby.xss.link_to_unescaped
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: xss
-  severity: medium
-  packages:
-  - actionview
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: link_to
-  description: "Disabled - link_to escapes by default."
 - id: ruby.xss.haml_preserve
   enabled: true
   language: ruby
@@ -186,22 +120,6 @@
       end
     expect_no_match: true
   description: "Haml#preserve - emits raw HTML."
-- id: ruby.xss.slim_html_safe
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: xss
-  severity: medium
-  packages:
-  - slim
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: html_escape
-  description: "Disabled - Slim html_escape is a sanitizer (opposite of XSS risk)."
 - id: ruby.xss.safe_concat
   enabled: true
   language: ruby

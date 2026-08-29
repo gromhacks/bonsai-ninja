@@ -37,11 +37,9 @@
         }
       }
     expect_no_match: true
-  description: 'HttpServletResponse.setHeader. Merged aliases: kotlin.header.servlet_response_content_disposition, kotlin.open_redirect.servlet_response_setheader_location.'
+  description: 'HttpServletResponse.setHeader.'
   aliases:
   - kotlin.header.servlet_response_content_disposition
-  - kotlin.open_redirect.servlet_response_setheader_location
-  - kotlin.smuggle.set_dual_cl_te_headers
 - id: kotlin.header.spring_httpheaders_add
   enabled: true
   language: kotlin
@@ -233,10 +231,9 @@
       }
       }
     expect_no_match: true
-  description: "ResponseEntity.header(name, tainted) - CRLF response header injection. Merged aliases: kotlin.header.spring_responseentity_content_disposition, kotlin.open_redirect.spring_responseentity_header_location."
+  description: "ResponseEntity.header(name, tainted) - CRLF response header injection."
   aliases:
   - kotlin.header.spring_responseentity_content_disposition
-  - kotlin.open_redirect.spring_responseentity_header_location
   imports:
   - org.springframework.web
 - id: kotlin.header.webflux_serverresponse_header
@@ -280,9 +277,7 @@
       }
       }
     expect_no_match: true
-  description: "Spring WebFlux ServerResponse.header(name, tainted) - CRLF response header injection. Merged aliases: kotlin.open_redirect.webflux_serverresponse_header_location."
-  aliases:
-  - kotlin.open_redirect.webflux_serverresponse_header_location
+  description: "Spring WebFlux ServerResponse.header(name, tainted) - CRLF response header injection."
 - id: kotlin.header.vertx_response_putheader
   enabled: true
   language: kotlin
@@ -326,6 +321,4 @@
       fun putHeader(vararg args: Any?) {}
       }
     expect_no_match: true
-  description: "Vert.x HttpServerResponse.putHeader(name, tainted) - CRLF response header injection. Merged aliases: kotlin.open_redirect.vertx_response_putheader_location."
-  aliases:
-  - kotlin.open_redirect.vertx_response_putheader_location
+  description: "Vert.x HttpServerResponse.putHeader(name, tainted) - CRLF response header injection."

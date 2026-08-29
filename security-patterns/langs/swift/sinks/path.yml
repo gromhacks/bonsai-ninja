@@ -1,54 +1,7 @@
 # Swift path-traversal sinks.
 #
-# NOTE: Swift labeled-init forms like String(contentsOfFile:),
-# FileHandle(forReadingAtPath:), URL(fileURLWithPath:), Data(contentsOf:)
-# appear as init calls keyed only on the type name. The engine has no
-# keyword-arg-presence constraint (only equals), and matching bare
-# `String(...)` / `URL(...)` fires on every stringification. Those rules
-# are therefore disabled until a presence constraint is added.
-- id: swift.path.string_contents_of_init
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: path-traversal
-  severity: high
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      name: String
-  description: "Disabled - String(contentsOfFile:) init; bare `String(...)` is ubiquitous without kwarg-presence filter."
-- id: swift.path.file_handle_init
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: swift
-  tag: path-traversal
-  severity: high
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      name: FileHandle
-  description: "Disabled - FileHandle(forReadingAtPath:) init; needs kwarg-presence constraint."
-- id: swift.path.url_fileurl_init
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: swift
-  tag: path-traversal
-  severity: medium
-  cwe: [CWE-22]
-  match:
-    kind: call
-    callee:
-      name: URL
-  description: "Disabled - URL(fileURLWithPath:) init; bare `URL(...)` is ubiquitous."
 - id: swift.path.data_init_contents
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: swift
   tag: path-traversal
   severity: high
@@ -57,7 +10,44 @@
     kind: call
     callee:
       name: Data
-  description: "Disabled - Data(contentsOf:) init; bare `Data(...)` is ubiquitous."
+  constraints:
+  - arg_tainted:
+      kw: contentsOf
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {name: standardizedFileURL}
+      canonicalizer_input_from_receiver: true
+      base_canonicalizer: {name: standardizedFileURL}
+      path_constructor: {name: appendingPathComponent}
+      path_constructor_base_from_receiver: true
+      containment_check: {name: hasPrefix}
+      containment_candidate_projection: {regex: "(?:^|[.:])path$"}
+      containment_base_projection: {regex: "(?:^|[.:])path$"}
+      accepted_boundary_values:
+      - {kind: string, value: "/"}
+      static_base_factories:
+      - {name: URL}
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: []
+  match_examples:
+  - name: Foundation Data contents-of URL
+    code: |
+      import Foundation
+      func read(_ input: URL) { _ = try? Data(contentsOf: input) }
+    expect_match_text: [Data]
+  - name: ordinary Data construction negative
+    code: |
+      import Foundation
+      func build(_ input: [UInt8]) { _ = Data(input) }
+    expect_no_match: true
+  - name: literal contents URL negative
+    code: |
+      import Foundation
+      func read() { _ = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/safe")) }
+    expect_no_match: true
+  description: "Foundation Data(contentsOf:) reads from a tainted file URL; the labeled compiler argument distinguishes it from ordinary Data construction."
 - id: swift.path.fm_create_file
   enabled: true
   language: swift
@@ -259,11 +249,6 @@
     expect_no_match: true
   description: "ZIPFoundation unzipItem(at:to:) - zip slip risk."
 
-# FileManager.default.contents(atPath:) - read-arbitrary-file. The
-# `String(contentsOfFile:)` family above is disabled until the engine
-# has labeled-init kwarg-presence narrowers, but FileManager's
-# `contents` method is unambiguous and has stable receiver+selector
-# shape, so it's safe to enable.
 - id: swift.path.zip_unzip_dest
   enabled: true
   language: swift
@@ -289,11 +274,7 @@
     expect_no_match: true
   description: "ZIPFoundation unzipItem(at:to:) - tainted destinations can extract outside the intended directory."
 
-# FileManager.default.contents(atPath:) - read-arbitrary-file. The
-# `String(contentsOfFile:)` family above is disabled until the engine
-# has labeled-init kwarg-presence narrowers, but FileManager's
-# `contents` method is unambiguous and has stable receiver+selector
-# shape, so it's safe to enable.
+# FileManager.default.contents(atPath:) - read-arbitrary-file.
 - id: swift.path.filemanager_contents
   enabled: true
   language: swift

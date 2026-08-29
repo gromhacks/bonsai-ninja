@@ -355,37 +355,6 @@
     payloads."
 
 # --- Path containment ------------------------------------------------
-- id: scala.sanitizer.path_normalize
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: scala
-  tag: path-sanitize
-  match:
-    kind: call
-    callee:
-      attribute: [Path, normalize]
-  description: "Disabled - java.nio.file.Path.normalize collapses .. segments but still requires a trusted-root containment
-    check."
-
-- id: scala.sanitizer.path_startswith
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: scala
-  tag: path-sanitize
-  match:
-    kind: call
-    callee:
-      attribute: [Path, startsWith]
-  description: "Disabled - startsWith is only a sanitizer on normalized Path values with a trusted-root argument; v1 matching
-    cannot prove receiver type."
-
-# URL decode passthrough sanitizers (T301). Tagged
-# `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) - taint propagates THROUGH instead of
-# being cleared. Bludit CVE-2019-16113 used urldecode to
-# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: scala.passthrough.urldecoder_decode
   enabled: true
   language: scala
@@ -516,111 +485,6 @@
   description: "Same-origin redirect path guard paired with a second startsWith call on the same receiver for the `!path.startsWith(\"\
     //\")` scheme-relative rejection shape."
 
-- id: scala.sanitizer.same_origin_path_reject_scheme_relative
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: scala
-  tag: same-origin-path
-  match:
-    kind: call
-    callee:
-      name: startsWith
-  constraints:
-  - arg_equals:
-      index: 0
-      value: '"//"'
-  match_examples:
-  - name: reject scheme-relative redirect target
-    code: |
-      object App {
-        def allow(next: String): Boolean = {
-          next.startsWith("/") && !next.startsWith("//")
-        }
-      }
-    expect_match_text: [next.startsWith]
-  - name: reject scheme-relative redirect target negative constraint boundary
-    code: "object App {\n  def allow(next: String): Boolean = {\n    next.startsWith(\"/\") && !next.startsWith(\"http://\"\
-      )\n  }\n}\n"
-    expect_no_match: true
-  description: "Disabled duplicate - the complete same-origin-path sanitizer is the paired startsWith(\"/\") + !startsWith(\"\
-    //\") shape in scala.sanitizer.same_origin_path_startswith_slash."
-
-- id: scala.sanitizer.allowlist_contains
-  enabled: false
-  language: scala
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      name: contains
-  constraints:
-  - arg_count: 1
-  match_examples:
-  - name: set allowlist contains
-    code: |
-      object App {
-        def allow(role: String): Boolean = {
-          val allowed = Set("user", "admin")
-          allowed.contains(role)
-        }
-      }
-    expect_match_text: [allowed.contains]
-  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Set/List
-    allowlist membership check on explicitly allowlist-named receivers."
-
-  disabled_reason:
-    code: over-broad
-- id: scala.sanitizer.map_get_or_else_allowlist
-  enabled: false
-  language: scala
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      name: getOrElse
-  constraints:
-  - arg_count: 2
-  match_examples:
-  - name: map default allowlist
-    code: |
-      object App {
-        def allow(key: String): String = {
-          val allowed = Map("home" -> "/")
-          allowed.getOrElse(key, "/")
-        }
-      }
-    expect_match_text: [allowed.getOrElse]
-  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Map.getOrElse
-    on an allowlist-named mapping bounds attacker input to known values or a safe default."
-
-  disabled_reason:
-    code: over-broad
-- id: scala.sanitizer.enum_withname_allowlist
-  enabled: false
-  language: scala
-  tag: allowlist-validate
-  match:
-    kind: call
-    callee:
-      name: withName
-  constraints:
-  - arg_count: 1
-  match_examples:
-  - name: enum parse allowlist
-    code: |
-      object AllowedRole extends Enumeration { val User, Admin = Value }
-      object App {
-        def allow(role: String): AllowedRole.Value = {
-          AllowedRole.withName(role)
-        }
-      }
-    expect_match_text: [AllowedRole.withName]
-  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Scala Enumeration.withName
-    on narrowly named allowlist enums rejects values outside the enum domain."
-
-  disabled_reason:
-    code: over-broad
 - id: scala.sanitizer.string_matches_safe_shape
   enabled: true
   language: scala
@@ -985,6 +849,7 @@
   language: scala
   tag: xxe-sanitizer
   packages: ["javax.xml.parsers", "jakarta.xml.parsers"]
+  imports: [javax.xml.parsers, jakarta.xml.parsers]
   match:
     kind: call
     callee:
@@ -995,9 +860,12 @@
     - SAXParserFactory
   - arg_matches_regex:
       index: 0
-      regex: 'external-general-entities|external-parameter-entities|load-external-dtd|disallow-doctype-decl'
+      regex: 'disallow-doctype-decl'
+  - arg_matches_regex:
+      index: 1
+      regex: '^(?:true|TRUE)$'
   match_examples:
-  - name: scala document builder disable external entity feature
+  - name: scala document builder disallows doctype declarations
     code: |
       import javax.xml.parsers._
       object App {
@@ -1006,10 +874,77 @@
         }
       }
     expect_match_text: [factory.setFeature]
-  - name: scala document builder disable external entity feature negative constraint boundary
-    code: "import javax.xml.parsers._\nobject App {\n  def configure(factory: DocumentBuilderFactory): Unit = {\n    factory.setFeature()\n  }\n}\n"
+  - name: allowing doctype declarations is not hardening
+    code: |
+      import javax.xml.parsers._
+      object App {
+        def configure(factory: DocumentBuilderFactory): Unit = {
+          factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", false)
+        }
+      }
     expect_no_match: true
-  description: "XML parser feature hardening - disables external entity / external DTD loading or disallows DOCTYPE to block XXE (Scala via Java interop)."
+  - name: local XML factory does not earn doctype sanitizer credit
+    code: |
+      import javax.xml.parsers.SAXParserFactory
+      class DocumentBuilderFactory { def setFeature(name: String, value: Boolean): Unit = () }
+      object App {
+        def configure(factory: DocumentBuilderFactory, parserFactory: SAXParserFactory): Unit = {
+          factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+        }
+      }
+    expect_no_match: true
+  description: "A compiler-typed JAXP factory sets disallow-doctype-decl to true, rejecting document type declarations before parsing."
+
+- id: scala.sanitizer.xml_factory_disable_external_entities
+  enabled: true
+  language: scala
+  tag: xxe-sanitizer
+  packages: ["javax.xml.parsers", "jakarta.xml.parsers"]
+  imports: [javax.xml.parsers, jakarta.xml.parsers]
+  match:
+    kind: call
+    callee:
+      name: setFeature
+  constraints:
+  - receiver_type_in:
+    - DocumentBuilderFactory
+    - SAXParserFactory
+  - arg_matches_regex:
+      index: 0
+      regex: 'external-general-entities|external-parameter-entities|load-external-dtd'
+  - arg_matches_regex:
+      index: 1
+      regex: '^(?:false|FALSE)$'
+  match_examples:
+  - name: scala document builder disables external entities
+    code: |
+      import javax.xml.parsers._
+      object App {
+        def configure(factory: DocumentBuilderFactory): Unit = {
+          factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
+        }
+      }
+    expect_match_text: [factory.setFeature]
+  - name: enabling external entities is not hardening
+    code: |
+      import javax.xml.parsers._
+      object App {
+        def configure(factory: DocumentBuilderFactory): Unit = {
+          factory.setFeature("http://xml.org/sax/features/external-general-entities", true)
+        }
+      }
+    expect_no_match: true
+  - name: local XML factory does not earn entity sanitizer credit
+    code: |
+      import javax.xml.parsers.SAXParserFactory
+      class DocumentBuilderFactory { def setFeature(name: String, value: Boolean): Unit = () }
+      object App {
+        def configure(factory: DocumentBuilderFactory, parserFactory: SAXParserFactory): Unit = {
+          factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
+        }
+      }
+    expect_no_match: true
+  description: "A compiler-typed JAXP factory disables external entity or external DTD loading before parsing."
 - id: scala.passthrough.string_format
   enabled: true
   language: scala

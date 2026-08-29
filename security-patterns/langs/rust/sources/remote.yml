@@ -14,7 +14,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Query, actix_web::web::Query]
+      param_type_in: [Query, "actix_web::web::Query"]
   match_examples:
   - name: actix typed query extractor parameter
     code: |
@@ -41,7 +41,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Path, actix_web::web::Path]
+      param_type_in: [Path, "actix_web::web::Path"]
   match_examples:
   - name: actix typed path extractor parameter
     code: |
@@ -68,7 +68,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Form, actix_web::web::Form]
+      param_type_in: [Form, "actix_web::web::Form"]
   match_examples:
   - name: actix typed form extractor parameter
     code: |
@@ -95,7 +95,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Json, actix_web::web::Json]
+      param_type_in: [Json, "actix_web::web::Json"]
   match_examples:
   - name: actix typed json extractor parameter
     code: |
@@ -122,7 +122,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Query, axum::extract::Query]
+      param_type_in: [Query, "axum::extract::Query"]
   match_examples:
   - name: axum typed query extractor parameter
     code: |
@@ -147,7 +147,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Json, axum::Json]
+      param_type_in: [Json, "axum::Json"]
   match_examples:
   - name: axum typed json extractor parameter
     code: |
@@ -172,7 +172,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Path, axum::extract::Path]
+      param_type_in: [Path, "axum::extract::Path"]
   match_examples:
   - name: axum typed path extractor parameter
     code: |
@@ -197,7 +197,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Form, axum::Form]
+      param_type_in: [Form, "axum::Form"]
   match_examples:
   - name: axum typed form extractor parameter
     code: |
@@ -222,7 +222,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Multipart, axum::extract::Multipart]
+      param_type_in: [Multipart, "axum::extract::Multipart"]
   match_examples:
   - name: axum multipart extractor parameter
     code: |
@@ -235,6 +235,34 @@
       async fn helper(multipart: String) { let _ = multipart; }
     expect_no_match: true
   description: "axum::extract::Multipart handler parameter exposes attacker-controlled multipart form data."
+
+- id: rust.axum.body_bytes
+  enabled: true
+  language: rust
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [binary]
+  frameworks: [axum]
+  packages: [axum]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Bytes, "axum::body::Bytes"]
+  match_examples:
+  - name: axum raw request body bytes
+    code: |
+      use axum::body::Bytes;
+      async fn ingest(body: Bytes) { let _ = body; }
+    expect_match_text: [body]
+  - name: local Bytes type collision negative
+    code: |
+      struct Bytes(Vec<u8>);
+      async fn helper(body: Bytes) { let _ = body; }
+    expect_no_match: true
+  description: "Axum Bytes handler parameter contains the exact raw HTTP request body supplied by the remote client."
+
 - id: rust.axum.multipart_field_file_name
   enabled: true
   language: rust
@@ -246,16 +274,25 @@
   match:
     kind: call
     callee:
-      attribute: [field, file_name]
+      name: file_name
   constraints:
   - max_args: 0
+  - receiver_type_in: [Field, "axum::extract::multipart::Field"]
   match_examples:
-  - name: rust.axum.multipart_field_file_name example
+  - name: axum multipart field file name
     code: |
-      use axum::dummy;
-      fn example(field: Field) {
+      use axum::extract::multipart::Field;
+      fn example(field: Field<'_>) {
           field.file_name();
       }
+    expect_match_text: [field.file_name]
+  - name: same method on local field negative
+    code: |
+      use axum::extract::multipart::Field;
+      struct LocalField;
+      impl LocalField { fn file_name(&self) -> &str { "safe" } }
+      fn example(field: LocalField) { field.file_name(); }
+    expect_no_match: true
   description: "axum multipart Field::file_name() - client-controlled Content-Disposition filename; taints path/file-upload sinks."
 - id: rust.actix.multipart_field_filename
   enabled: true
@@ -271,6 +308,7 @@
       attribute: [ContentDisposition, get_filename]
   constraints:
   - max_args: 0
+  - receiver_type_in: [ContentDisposition, "actix_web::http::header::ContentDisposition"]
   match_examples:
   - name: actix multipart content disposition filename
     code: |
@@ -279,68 +317,93 @@
           cd.get_filename();
       }
     expect_match_text: [cd.get_filename]
+  - name: same method on local content type negative
+    code: |
+      use actix_multipart::form::tempfile::TempFile;
+      struct LocalDisposition;
+      impl LocalDisposition { fn get_filename(&self) -> Option<&str> { None } }
+      fn example(cd: LocalDisposition) { cd.get_filename(); }
+    expect_no_match: true
   description: "actix_multipart ContentDisposition::get_filename() - client-controlled multipart filename; taints path/file-upload sinks."
-- id: rust.warp.filter_query
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+- id: rust.warp.filter_callback_inline
+  enabled: true
   language: rust
   trust: remote
   tag: http-input
-  payload_types: [query]
+  payload_types: [query, json, form, header, cookie, path]
   frameworks: [warp]
   packages: [warp]
   match:
     kind: call
     callee:
-      attribute: [warp, query]
+      regex: '[.](and_then|map)$'
+  constraints:
+  - receiver_matches_regex: '(^|.*[^A-Za-z0-9_])warp::(query|header|cookie|path::param|body::(json|form|bytes))([:<(.]|$)'
+  - arg_is_inline_callback: 0
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices_from: 0
   match_examples:
-  - name: warp query constructs a filter rather than input
+  - name: inline composed warp filter callback
     code: |
       use std::collections::HashMap;
+      use warp::Filter;
+      fn route() {
+          let _ = warp::path("items")
+              .and(warp::query::<HashMap<String, String>>())
+              .and_then(|query| async move { consume(query) });
+      }
+      fn consume<T>(_: T) {}
+  - name: warp filter construction alone is not source data
+    code: |
+      use std::collections::HashMap;
+      use warp::Filter;
       fn route() { let _ = warp::query::<HashMap<String, String>>(); }
     expect_no_match: true
-  description: "Disabled - warp::query() constructs a Filter. Request values arrive later in the composed handler callback and require filter-to-callback lineage."
-- id: rust.warp.body_json
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  description: "Inline Warp filter compositions deliver all compiler-declared callback parameters from remote request extractors. Filter descriptor results remain clean."
+
+- id: rust.warp.filter_callback_typed
+  enabled: true
   language: rust
   trust: remote
   tag: http-input
-  payload_types: [json]
+  payload_types: [query, json, form, header, cookie, path]
   frameworks: [warp]
   packages: [warp]
   match:
     kind: call
     callee:
-      attribute: [body, json]
+      regex: '[.](and_then|map)$'
+  constraints:
+  - receiver_type_in: [WarpFilter]
+  - receiver_not_matches_regex: '(^|.*[^A-Za-z0-9_])warp::(query|header|cookie|path::param|body::(json|form|bytes))([:<(.]|$)'
+  - arg_is_inline_callback: 0
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices_from: 0
   match_examples:
-  - name: warp json constructs a filter rather than input
+  - name: assigned typed warp filter callback
     code: |
-      fn route() { let _ = warp::body::json::<String>(); }
-    expect_no_match: true
-  description: "Disabled - warp::body::json() constructs a Filter; the decoded value is delivered to a later handler callback."
-- id: rust.warp.body_form
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
-  language: rust
-  trust: remote
-  tag: http-input
-  payload_types: [form]
-  frameworks: [warp]
-  packages: [warp]
-  match:
-    kind: call
-    callee:
-      attribute: [body, form]
-  match_examples:
-  - name: warp form constructs a filter rather than input
+      use std::collections::HashMap;
+      use warp::Filter;
+      fn route() {
+          let input = warp::query::<HashMap<String, String>>();
+          let _ = input.and_then(|query| async move { consume(query) });
+      }
+      fn consume<T>(_: T) {}
+  - name: local and_then receiver negative
     code: |
-      fn route() { let _ = warp::body::form::<String>(); }
+      use warp::Filter;
+      struct Local;
+      impl Local { fn and_then<F>(&self, callback: F) {} }
+      fn route(local: Local) { local.and_then(|value| consume(value)); }
+      fn consume<T>(_: T) {}
     expect_no_match: true
-  description: "Disabled - warp::body::form() constructs a Filter; the parsed form is delivered to a later handler callback."
+  description: "Assigned Warp filter values retain rulepack-declared WarpFilter type through exact factory/method-result fixed points; their callback parameters are remote request input."
 - id: rust.rocket.form_data
   enabled: true
   language: rust
@@ -353,7 +416,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Form, rocket::form::Form]
+      param_type_in: [Form, "rocket::form::Form"]
   match_examples:
   - name: rocket typed form guard parameter
     code: |
@@ -378,7 +441,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Json, rocket::serde::json::Json]
+      param_type_in: [Json, "rocket::serde::json::Json"]
   match_examples:
   - name: rocket typed json guard parameter
     code: |
@@ -497,7 +560,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [TypedHeader, axum_extra::TypedHeader]
+      param_type_in: [TypedHeader, "axum_extra::TypedHeader"]
   match_examples:
   - name: axum typed header extractor parameter
     code: |
@@ -510,41 +573,6 @@
       async fn helper(header: String) { let _ = header; }
     expect_no_match: true
   description: "axum-extra TypedHeader<T> handler parameter wraps an attacker-controlled request header."
-- id: rust.axum.header_extract
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  trust: remote
-  tag: http-input
-  payload_types: [header]
-  frameworks: [axum]
-  packages: [axum]
-  match:
-    kind: call
-    callee:
-      attribute: [extract, Header]
-  match_examples:
-  - name: unsupported header constructor is not input
-    code: |
-      fn helper(value: String) { let _ = value; }
-    expect_no_match: true
-  description: "Disabled - modern Axum exposes HeaderMap handler parameters and axum-extra TypedHeader, not an extract::Header constructor source."
-- id: rust.axum.extension
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  trust: remote
-  tag: http-input
-  payload_types: [json]
-  frameworks: [axum]
-  packages: [axum]
-  match:
-    kind: call
-    callee:
-      attribute: [extract, Extension]
-  description: "Disabled - Extension<T> wraps server-side state injected by middleware (DB pools, configs); only attacker-controlled when middleware stores parsed request data, which over-fires by default."
 - id: rust.actix.request_headers
   enabled: true
   language: rust
@@ -560,7 +588,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      use actix_web;
       use actix_web;
       use actix_web::dummy;
       fn example() {
@@ -617,7 +644,6 @@
   - name: generated direct match
     code: |
       use actix_web;
-      use actix_web;
       use actix_web::dummy;
       fn example() {
           let target = "tainted";
@@ -627,41 +653,6 @@
   description: "actix_web::HttpRequest::cookie(name) - attacker-controlled cookie value."
   imports:
   - actix_web
-- id: rust.warp.header_filter
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
-  language: rust
-  trust: remote
-  tag: http-input
-  payload_types: [header]
-  frameworks: [warp]
-  packages: [warp]
-  match:
-    kind: call
-    callee:
-      attribute: [warp, header]
-  match_examples:
-  - name: warp header constructs a filter rather than input
-    code: |
-      fn route() { let _ = warp::header::<String>("x-trace"); }
-    expect_no_match: true
-  description: "Disabled - warp::header constructs a Filter; the header value is delivered to a later handler callback."
-- id: rust.rocket.state_guard
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  trust: remote
-  tag: http-input
-  payload_types: [json]
-  frameworks: [rocket]
-  packages: [rocket]
-  match:
-    kind: call
-    callee:
-      attribute: [rocket, State]
-  description: "Disabled - &State<T> wraps managed application state (DB pools, configs), not request input; would over-fire on every framework state access."
 - id: rust.poem.json
   enabled: true
   language: rust
@@ -674,7 +665,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Json, poem::web::Json]
+      param_type_in: [Json, "poem::web::Json"]
   match_examples:
   - name: poem typed json extractor parameter
     code: |
@@ -699,7 +690,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Path, poem::web::Path]
+      param_type_in: [Path, "poem::web::Path"]
   match_examples:
   - name: poem typed path extractor parameter
     code: |
@@ -724,7 +715,7 @@
     kind: param
     target:
       regex: "^[A-Za-z_][A-Za-z0-9_]*$"
-      param_type_in: [Query, poem::web::Query]
+      param_type_in: [Query, "poem::web::Query"]
   match_examples:
   - name: poem typed query extractor parameter
     code: |
@@ -759,22 +750,6 @@
           tonic::Request::get_ref(target);
       }
   description: "tonic::Request::get_ref - borrows the inner protobuf message; contents are attacker-controlled gRPC client input."
-- id: rust.tokio.async_read
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  trust: remote
-  tag: socket-input
-  payload_types: [binary]
-  frameworks: [tokio]
-  packages: [tokio]
-  match:
-    kind: call
-    callee:
-      attribute: [AsyncReadExt, read]
-  description: "Disabled - `AsyncReadExt::read` covers both untrusted sockets and trusted local files; default-on would over-fire on every file/byte read. Enable for TCP/UDP-handler audits where the reader is known to be a network socket."
-
 - id: rust.source.async_graphql_context_args
   enabled: true
   language: rust
@@ -790,7 +765,7 @@
       regex: '(^|[.])args$'
   constraints:
   - max_args: 0
-  - receiver_type_in: [Context]
+  - receiver_type_in: [Context, "async_graphql::Context"]
   match_examples:
   - name: async graphql context args
     code: |
@@ -810,3 +785,127 @@
       }
     expect_no_match: true
   description: "async-graphql Context::args() - resolver arguments supplied by the GraphQL caller. Receiver type is required so generic args() helpers stay clean."
+
+- id: rust.tide.request_route_value
+  enabled: true
+  language: rust
+  trust: remote
+  tag: http-input
+  payload_types: [path, query]
+  frameworks: [tide]
+  packages: [tide]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(param|query)$'
+  constraints:
+  - receiver_type_in: [Request, "tide::Request"]
+  - max_args: 1
+  match_examples:
+  - name: tide route parameter
+    code: |
+      use tide::Request;
+      fn handler(req: Request<()>) {
+          let _ = req.param("id");
+      }
+    expect_match_text: [req.param]
+  - name: local request query helper is not input
+    code: |
+      use tide::Request;
+      struct LocalRequest;
+      impl LocalRequest { fn query(&self) -> String { String::new() } }
+      fn helper(req: &LocalRequest) { let _ = req.query(); }
+    expect_no_match: true
+  description: "Tide Request route-parameter and typed-query accessors return values decoded from the inbound HTTP request."
+
+- id: rust.tide.request_body_value
+  enabled: true
+  language: rust
+  trust: remote
+  tag: http-input
+  payload_types: [text, json]
+  frameworks: [tide]
+  packages: [tide]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(body_string|body_json)$'
+  constraints:
+  - receiver_type_in: [Request, "tide::Request"]
+  - max_args: 0
+  match_examples:
+  - name: tide request body text
+    code: |
+      use tide::Request;
+      async fn handler(mut req: Request<()>) {
+          let _ = req.body_string().await;
+      }
+    expect_match_text: [req.body_string]
+  - name: local body renderer is not input
+    code: |
+      use tide::Request;
+      struct Document;
+      impl Document { fn body_string(&self) -> String { String::new() } }
+      fn helper(doc: &Document) { let _ = doc.body_string(); }
+    expect_no_match: true
+  description: "Tide Request body_string/body_json decode the remote request entity as text or JSON."
+
+- id: rust.salvo.request_value
+  enabled: true
+  language: rust
+  trust: remote
+  tag: http-input
+  payload_types: [path, query, form, json]
+  frameworks: [salvo]
+  packages: [salvo]
+  imports: ["salvo::http"]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(query|form|param|payload|parse_json)$'
+  constraints:
+  - receiver_type_in: [Request, "salvo::http::Request"]
+  - max_args: 1
+  match_examples:
+  - name: salvo query value
+    code: |
+      use salvo::http::Request;
+      async fn handler(req: &mut Request) {
+          let _: Option<String> = req.query("q");
+      }
+    expect_match_text: [req.query]
+  - name: local query helper is not request input
+    code: |
+      use salvo::http::Request;
+      struct Store;
+      impl Store { fn query(&self, key: &str) -> String { key.into() } }
+      fn helper(store: &Store) { let _ = store.query("q"); }
+    expect_no_match: true
+  description: "Salvo Request query/form/path/body decoders return values supplied by the inbound HTTP request."
+
+- id: rust.ntex.extractor_param
+  enabled: true
+  language: rust
+  trust: remote
+  tag: http-input
+  payload_types: [query, json, path]
+  frameworks: [ntex]
+  packages: [ntex, ntex-web]
+  match:
+    kind: param
+    target:
+      regex: '^[A-Za-z_][A-Za-z0-9_]*$'
+      param_type_in: [Query, "ntex::web::types::Query", Json, "ntex::web::types::Json", Path, "ntex::web::types::Path"]
+  match_examples:
+  - name: ntex destructured query extractor
+    code: |
+      use ntex::web::types::Query;
+      struct Params { q: String }
+      async fn handler(Query(params): Query<Params>) { let _ = params.q; }
+    expect_match_text: [params]
+  - name: ordinary ntex handler parameter is not an extractor
+    code: |
+      use ntex::web::types::Query;
+      async fn handler(params: String) { let _ = params; }
+    expect_no_match: true
+  description: "ntex-web Query/Json/Path extractor parameters, including destructured tuple-struct patterns, carry request data into a handler."

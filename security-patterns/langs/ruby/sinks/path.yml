@@ -317,40 +317,6 @@
       end
     expect_no_match: true
   description: Rails send_file with tainted path.
-- id: ruby.path.send_data
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: path-traversal
-  severity: medium
-  packages:
-  - rails
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      name: send_data
-  description: "Disabled - send_data takes bytes, not a path."
-- id: ruby.path.kernel_require
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: ruby
-  tag: path-traversal
-  severity: critical
-  cwe:
-  - CWE-22
-  - CWE-94
-  match:
-    kind: call
-    callee:
-      name: require
-  match_examples:
-  - name: ruby.path.kernel_require example
-    code: "def example(input, url, id, payload, request, params)\n  require(input)\nend\n"
-  description: "Disabled - bare `name: require` matches every literal `require \"lib\"` import, the canonical Ruby module-loading statement. Every fixture's import line collides with this rule, so it cannot stay enabled without an arg-shape constraint that excludes literal strings."
 - id: ruby.path.io_read
   enabled: true
   language: ruby
@@ -397,6 +363,48 @@
     code: "def example(input, url, id, payload, request, params)\n  IO.binread(\"config/settings.bin\")\nend\n"
     expect_no_match: true
   description: "IO.binread with tainted path. `io_binread` core class has no canonical ecosystem package, so strict `['IO', 'binread']` match only."
+- id: ruby.path.file_binread
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, binread]
+  constraints:
+  - arg_tainted:
+      index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {attribute: [File, expand_path]}
+      base_canonicalizer: {attribute: [File, expand_path]}
+      path_constructor: {attribute: [File, join]}
+      containment_check: {name: "start_with?"}
+      accepted_boundary_values:
+      - {kind: string, value: "/"}
+      static_base_factories:
+      - {attribute: [File, expand_path]}
+      - {name: freeze}
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: []
+  match_examples:
+  - name: Ruby File binary read with tainted path
+    code: |
+      def read_asset(path)
+        File.binread(path)
+      end
+    expect_match_text: [File.binread]
+  - name: literal Ruby File binary read is not traversal
+    code: |
+      def read_banner
+        File.binread('/var/app/banner.bin')
+      end
+    expect_no_match: true
+  description: "File.binread(tainted_path) reads an attacker-selected binary file; strict core-class qualification avoids same-named application methods."
 - id: ruby.path.io_write
   enabled: true
   language: ruby
@@ -512,22 +520,6 @@
     code: "def example(input, url, id, payload, request, params)\n  File.rename(\"public/report.txt\", \"tmp/report.txt\")\nend\n"
     expect_no_match: true
   description: "File.rename(src, tainted_dst) - attacker-controlled destinations can overwrite arbitrary files. `file_rename_dest` core class has no canonical ecosystem package, so strict `['File', 'rename']` match only."
-- id: ruby.path.fileutils_mv_alias
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: path-traversal
-  severity: high
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      attribute:
-      - File
-      - move
-  description: "Disabled - File.move is not stdlib; kept as placeholder only if custom helper."
 - id: ruby.path.pathname_new
   enabled: true
   language: ruby
@@ -551,20 +543,6 @@
     code: "def example(input, url, id, payload, request, params)\n  Pathname.new(\"tmp/report.txt\")\nend\n"
     expect_no_match: true
   description: "Pathname.new(tainted) - construction alone is safe; flag when later passed to a file sink without root-prefix check."
-- id: ruby.path.pathname_join
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: path-traversal
-  severity: medium
-  cwe:
-  - CWE-22
-  match:
-    kind: call
-    callee:
-      name: join
-  description: "Disabled - bare `name: join` matches Array#join / String#join everywhere; enable only with receiver-type narrowing for Pathname#join."
 - id: ruby.path.fileutils_mkdir_p
   enabled: true
   language: ruby

@@ -7,6 +7,8 @@
 //! enclosing function's flow_events. If a construct's calls are
 //! missing, `inspect`, `export`, `trace`, and every downstream
 //! consumer will render broken flows.
+//! Inline callbacks are the deliberate exception: their bodies belong to
+//! separate callable declarations linked to host calls by exact syntax spans.
 //!
 //! This file is the single source of truth for "what constructs does
 //! each language actually support?". A regression in any plugin's
@@ -186,6 +188,93 @@ fn return_contains_text_in(events: &[FlowEvent], needle: &str) -> bool {
         }
         _ => false,
     })
+}
+
+fn call_spans_containing(events: &[FlowEvent], needle: &str, spans: &mut Vec<bonsai_common::Span>) {
+    for event in events {
+        match event {
+            FlowEvent::Call { span, name, .. } if name.contains(needle) => spans.push(*span),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                call_spans_containing(then_events, needle, spans);
+                call_spans_containing(else_events, needle, spans);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                call_spans_containing(body, needle, spans);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                call_spans_containing(body, needle, spans);
+                call_spans_containing(catch_events, needle, spans);
+                call_spans_containing(finally_events, needle, spans);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Assert that the compiler keeps an inline callback as a distinct callable
+/// and connects it to its host call by exact syntax spans. Passing a callback
+/// to an arbitrary higher-order function is not proof that the host executes
+/// it, so the callback body must never leak into the caller's flow.
+fn assert_inline_callback_scope(
+    ws: &bonsai_workspace::Workspace,
+    outer_name: &str,
+    host_call: &str,
+    callback_call: &str,
+) {
+    let outer = decl_by_name(ws, outer_name).expect("outer declaration");
+    assert!(
+        !calls_contains(ws, outer_name, callback_call),
+        "callback call {callback_call} leaked into {outer_name}: {:#?}",
+        outer.flow_events
+    );
+
+    let mut host_spans = Vec::new();
+    call_spans_containing(&outer.flow_events, host_call, &mut host_spans);
+    assert_eq!(
+        host_spans.len(),
+        1,
+        "expected one {host_call} call in {outer_name}: {:#?}",
+        outer.flow_events
+    );
+
+    let global = ws.db().global_index();
+    let index = global
+        .file_index(outer.span.file)
+        .expect("outer file declaration index");
+    let callback_spans = index
+        .call_argument_values
+        .iter()
+        .filter(|fact| fact.call_span == host_spans[0])
+        .filter_map(|fact| fact.inline_callback_span)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        callback_spans.len(),
+        1,
+        "expected one exact inline callback fact for {host_call}: {:#?}",
+        index.call_argument_values
+    );
+    let callback = index
+        .defs
+        .iter()
+        .find(|decl| decl.span == callback_spans[0])
+        .expect("callback declaration at compiler-provided span");
+    let mut inner_spans = Vec::new();
+    call_spans_containing(&callback.flow_events, callback_call, &mut inner_spans);
+    assert_eq!(
+        inner_spans.len(),
+        1,
+        "callback declaration must own {callback_call}: {:#?}",
+        callback.flow_events
+    );
 }
 
 // ===========================================================================
@@ -1249,11 +1338,10 @@ fn kotlin_complex_every_construct() {
     );
 }
 
-/// Closures passed to higher-order functions should inline their body
-/// into the outer flow. `xs.map { x -> step(x) }` — `step` must appear
-/// under the enclosing function.
+/// Kotlin trailing closures keep a separate callable scope linked to the
+/// host call by exact compiler spans.
 #[test]
-fn kotlin_closure_body_inlines_into_outer_flow() {
+fn kotlin_closure_body_has_separate_exact_scope() {
     let w = ws_multi(
         kt(),
         &[(
@@ -1261,12 +1349,14 @@ fn kotlin_closure_body_inlines_into_outer_flow() {
             "fun f(xs: List<Int>) { xs.forEach { x -> step(x) }; xs.map { it -> transform(it) } }\n",
         )],
     );
-    assert_calls(&w, "f", &["step", "transform"]);
+    assert_calls(&w, "f", &["forEach", "map"]);
+    assert_inline_callback_scope(&w, "f", "forEach", "step");
+    assert_inline_callback_scope(&w, "f", "map", "transform");
 }
 
-/// Same invariant for JS/TS: `xs.forEach(x => step(x))` inlines step.
+/// JavaScript arrow callbacks obey the same separate-scope invariant.
 #[test]
-fn js_closure_body_inlines_into_outer_flow() {
+fn js_closure_body_has_separate_exact_scope() {
     let w = ws_multi(
         js(),
         &[(
@@ -1274,12 +1364,14 @@ fn js_closure_body_inlines_into_outer_flow() {
             "function f(xs) { xs.forEach(x => step(x)); xs.map(x => transform(x)); }\n",
         )],
     );
-    assert_calls(&w, "f", &["step", "transform"]);
+    assert_calls(&w, "f", &["forEach", "map"]);
+    assert_inline_callback_scope(&w, "f", "forEach", "step");
+    assert_inline_callback_scope(&w, "f", "map", "transform");
 }
 
-/// Scala `.foreach { x => ... }` — closure body must propagate.
+/// Scala block callbacks keep their calls under callback declarations.
 #[test]
-fn scala_foreach_closure_body_propagates() {
+fn scala_foreach_closure_body_has_separate_exact_scope() {
     let w = ws_multi(
         sc(),
         &[(
@@ -1294,13 +1386,14 @@ fn scala_foreach_closure_body_propagates() {
              }\n",
         )],
     );
-    assert_calls(&w, "f", &["step", "transform"]);
+    assert_calls(&w, "f", &["foreach", "map"]);
+    assert_inline_callback_scope(&w, "f", "foreach", "step");
+    assert_inline_callback_scope(&w, "f", "map", "transform");
 }
 
-/// Ruby blocks `xs.each { |x| step(x) }` — the block body is a closure
-/// whose calls should propagate to the enclosing method.
+/// Ruby blocks remain distinct callable scopes joined by exact spans.
 #[test]
-fn ruby_block_body_propagates() {
+fn ruby_block_body_has_separate_exact_scope() {
     let w = ws_multi(
         rb(),
         &[(
@@ -1308,12 +1401,14 @@ fn ruby_block_body_propagates() {
             "def f(xs)\n  xs.each { |x| step(x) }\n  xs.map { |x| transform(x) }\nend\n",
         )],
     );
-    assert_calls(&w, "f", &["step", "transform"]);
+    assert_calls(&w, "f", &["each", "map"]);
+    assert_inline_callback_scope(&w, "f", "each", "step");
+    assert_inline_callback_scope(&w, "f", "map", "transform");
 }
 
-/// Swift trailing closures: `xs.forEach { step($0) }`.
+/// Swift trailing closures remain distinct callable scopes joined by spans.
 #[test]
-fn swift_trailing_closure_propagates() {
+fn swift_trailing_closure_has_separate_exact_scope() {
     let w = ws_multi(
         sw(),
         &[(
@@ -1321,7 +1416,9 @@ fn swift_trailing_closure_propagates() {
             "func f(xs: [Int]) { xs.forEach { x in step(x) }; xs.map { x in transform(x) } }\n",
         )],
     );
-    assert_calls(&w, "f", &["step", "transform"]);
+    assert_calls(&w, "f", &["forEach", "map"]);
+    assert_inline_callback_scope(&w, "f", "forEach", "step");
+    assert_inline_callback_scope(&w, "f", "map", "transform");
 }
 
 /// Ternary expressions emit both branches' calls. Verified across

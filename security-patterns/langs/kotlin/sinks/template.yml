@@ -36,43 +36,6 @@
   aliases:
   - kotlin.template.freemarker_process
   - kotlin.template.freemarker_template_process_local
-- id: kotlin.template.thymeleaf_fragment_concat
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: ssti
-  severity: high
-  packages:
-  - org.thymeleaf
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - TemplateEngine
-      - process
-  description: "Disabled duplicate - folded into kotlin.template.thymeleaf_processstring\
-    \ with fragment-expression examples."
-- id: kotlin.template.thymeleaf_string_resolver
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: kotlin
-  tag: ssti
-  category: source-independent
-  severity: critical
-  packages:
-  - org.thymeleaf
-  cwe:
-  - CWE-94
-  - CWE-1336
-  match:
-    kind: new
-    callee:
-      name: StringTemplateResolver
-  description: "Disabled - Thymeleaf StringTemplateResolver is a resolver configuration object, not the tainted template source. Model the later TemplateEngine.process(template, context) call instead."
 - id: kotlin.template.freemarker_template_ctor
   enabled: true
   language: kotlin
@@ -164,30 +127,6 @@
       \ writer, \"log\", \"safe\")\n  }\n}\n"
     expect_no_match: true
   description: VelocityEngine.evaluate(tainted).
-  imports:
-  - org.apache.velocity
-- id: kotlin.template.velocity_merge
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: kotlin
-  tag: ssti
-  severity: high
-  packages:
-  - org.apache.velocity
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Template
-      - merge
-  match_examples:
-  - name: generated shape example
-    code: "import org.apache.velocity.*\n// uses org.apache.velocity\nclass App {\n\
-      \  fun handle(input: String) {\n    Template.merge(\"{{\" + input)\n  }\n}\n"
-  description: "Disabled - Template.merge(...) executes template source held in receiver state; Velocity.evaluate/template constructors carry tainted template arguments."
   imports:
   - org.apache.velocity
 - id: kotlin.template.spel_parseexpression
@@ -329,46 +268,6 @@
       \ {\n  Handlebars.compile(\"safe\")\n}\n}\n"
     expect_no_match: true
   description: Handlebars (jknack) Handlebars.compile(tainted).
-- id: kotlin.template.jtwig_render
-  enabled: false
-  language: kotlin
-  tag: ssti
-  severity: high
-  packages:
-  - jtwig
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - JtwigTemplate
-      - render
-  match_examples:
-  - name: generated shape example
-    code: "import jtwig.*\n// uses jtwig\nclass App {\n  fun handle(input: String)\
-      \ {\n    JtwigTemplate.render(\"{{\" + input)\n  }\n}\n"
-  description: Jtwig JtwigTemplate.render(tainted model).
-  disabled_reason:
-    code: over-broad
-- id: kotlin.template.mustache_compile
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  tag: ssti
-  severity: medium
-  packages:
-  - mustache.java
-  cwe:
-  - CWE-1336
-  match:
-    kind: call
-    callee:
-      attribute:
-      - DefaultMustacheFactory
-      - compile
-  description: "Disabled - Mustache is logic-less."
 - id: kotlin.template.freemarker_autoesc_off
   enabled: true
   language: kotlin

@@ -78,6 +78,70 @@ fn match_patterns_bind_only_capture_positions_to_the_subject() {
 }
 
 #[test]
+fn repeated_match_capture_names_remain_owned_by_each_case_arm() {
+    use bonsai_lang_api::FlowEvent;
+
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_python::PythonAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "a.py",
+            r#"def validate(payload):
+    match payload:
+        case {"tag": "left", "value": value, **rest}:
+            return {"cmd": value, **rest}
+        case {"tag": "right", "value": value, **rest}:
+            return {"cmd": value, **rest}
+        case _:
+            raise ValueError(payload)
+"#,
+        )],
+    );
+    let global = ws.db().global_index();
+    let validate = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "validate")
+        .expect("validate declaration");
+
+    fn collect(events: &[FlowEvent], target: &str, spans: &mut Vec<bonsai_common::Span>) {
+        for event in events {
+            match event {
+                FlowEvent::Assign {
+                    span,
+                    target: actual,
+                    source_name,
+                    ..
+                } if actual == target && source_name.as_deref() == Some("payload.value") => {
+                    spans.push(*span);
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect(then_events, target, spans);
+                    collect(else_events, target, spans);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut spans = Vec::new();
+    collect(&validate.flow_events, "value", &mut spans);
+    spans.sort();
+    spans.dedup();
+    assert_eq!(
+        spans.len(),
+        2,
+        "same-spelled captures in distinct case arms are distinct compiler writes: {:#?}",
+        validate.flow_events
+    );
+}
+
+#[test]
 fn projected_call_argument_does_not_become_the_outer_call_result() {
     use bonsai_lang_api::FlowEvent;
 

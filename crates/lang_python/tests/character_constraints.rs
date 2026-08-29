@@ -1,5 +1,6 @@
 use bonsai_lang_api::{
-    CharacterClass, CharacterConstraintDomain, CharacterConstraintOutput, LanguageAdapter,
+    CharacterClass, CharacterConstraintDomain, CharacterConstraintOutput, CharacterConstraintProof,
+    LanguageAdapter,
 };
 use std::sync::Arc;
 
@@ -14,7 +15,7 @@ fn index(source: &str) -> bonsai_lang_api::DeclIndex {
 fn comprehension_allowlist_lowers_to_exact_alphabet() {
     let index = index(
         r#"
-def clean(q):
+def clean(q: str):
     safe = "".join(ch for ch in q if ch.isalnum() or ch == " ")[:64]
     return safe
 "#,
@@ -27,6 +28,7 @@ def clean(q):
     };
     assert_eq!(fact.input_place, "q");
     assert_eq!(fact.input_param_index, Some(0));
+    assert_eq!(fact.proof, CharacterConstraintProof::ExactRuntimeSemantics);
     assert_eq!(
         fact.output,
         CharacterConstraintOutput::Assignment {
@@ -145,6 +147,99 @@ def bad(q):
 }
 
 #[test]
+fn comprehension_constraint_records_when_source_payload_evidence_is_required() {
+    let untyped = index(
+        r#"
+def clean(values):
+    safe = "".join(ch for ch in values if ch.isalnum())
+    return safe
+"#,
+    );
+    let [fact] = untyped.character_constraints.as_slice() else {
+        panic!("expected structural constraint: {untyped:#?}");
+    };
+    assert_eq!(
+        fact.proof,
+        CharacterConstraintProof::RequiresSourcePayloadEvidence
+    );
+
+    let shadowed = index(
+        r#"
+class str:
+    pass
+def clean(values: str):
+    safe = "".join(ch for ch in values if ch.isalnum())
+    return safe
+"#,
+    );
+    let [shadowed_fact] = shadowed.character_constraints.as_slice() else {
+        panic!("expected structural constraint: {shadowed:#?}");
+    };
+    assert_eq!(
+        shadowed_fact.proof,
+        CharacterConstraintProof::RequiresSourcePayloadEvidence
+    );
+
+    let lookalike = index(
+        r#"
+class Joiner:
+    def join(self, values): return "safe"
+def clean(values: str, joiner: Joiner):
+    safe = joiner.join(ch for ch in values if ch.isalnum())
+    return safe
+"#,
+    );
+    assert!(
+        lookalike.character_constraints.is_empty(),
+        "lookalike join receivers must fail closed: {:#?}",
+        lookalike.character_constraints
+    );
+}
+
+#[test]
+fn comprehension_constraint_accepts_only_branch_local_builtin_string_narrowing() {
+    let narrowed = index(
+        r#"
+def clean(value):
+    if isinstance(value, str):
+        safe = "".join(ch for ch in value if ch.isalnum())
+        return safe
+    return ""
+"#,
+    );
+    assert_eq!(narrowed.character_constraints.len(), 1, "{narrowed:#?}");
+
+    for source in [
+        r#"
+def clean(value):
+    if isinstance(value, str):
+        pass
+    safe = "".join(ch for ch in value if ch.isalnum())
+    return safe
+"#,
+        r#"
+class str:
+    pass
+def clean(value):
+    if isinstance(value, str):
+        safe = "".join(ch for ch in value if ch.isalnum())
+        return safe
+    return ""
+"#,
+    ] {
+        let rejected = index(source);
+        let [fact] = rejected.character_constraints.as_slice() else {
+            panic!("expected a structural constraint without exact type proof: {rejected:#?}");
+        };
+        assert_eq!(
+            fact.proof,
+            CharacterConstraintProof::RequiresSourcePayloadEvidence,
+            "out-of-scope or shadowed narrowing must not become an exact proof"
+        );
+    }
+}
+
+#[test]
 fn compiled_regex_substitution_lowers_excluded_characters() {
     let index = index(
         r#"
@@ -179,6 +274,70 @@ def safe_filename(filename):
     assert!(characters.contains(&"\n".to_string()));
     assert!(characters.contains(&"\"".to_string()));
     assert!(characters.contains(&"\\".to_string()));
+}
+
+#[test]
+fn regex_provider_identity_expands_aliases_and_rejects_lexical_shadows() {
+    let aliased = index(
+        r#"
+import re as patterns
+CONTROL = patterns.compile(r'[\r\n]')
+def clean(value):
+    return CONTROL.sub("_", value)
+"#,
+    );
+    let [fact] = aliased.character_constraints.as_slice() else {
+        panic!(
+            "expected aliased regex fact: {:#?}",
+            aliased.character_constraints
+        );
+    };
+    let CharacterConstraintDomain::ProviderBound { factory_call, .. } = &fact.domain else {
+        panic!("expected provider-bound fact: {fact:#?}");
+    };
+    assert_eq!(factory_call, "re.compile");
+
+    let lookalike = index(
+        r#"
+from text_patterns import compile
+CONTROL = compile(r'[\r\n]')
+def clean(value):
+    return CONTROL.sub("_", value)
+"#,
+    );
+    let [fact] = lookalike.character_constraints.as_slice() else {
+        panic!(
+            "expected generic provider fact: {:#?}",
+            lookalike.character_constraints
+        );
+    };
+    let CharacterConstraintDomain::ProviderBound { factory_call, .. } = &fact.domain else {
+        panic!("expected provider-bound fact: {fact:#?}");
+    };
+    assert_eq!(factory_call, "text_patterns.compile");
+
+    for source in [
+        r#"
+import re
+def clean(value, re):
+    control = re.compile(r'[\r\n]')
+    return control.sub("_", value)
+"#,
+        r#"
+import re
+factory = choose_factory()
+def clean(value):
+    control = factory(r'[\r\n]')
+    return control.sub("_", value)
+"#,
+    ] {
+        let lowered = index(source);
+        assert!(
+            lowered.character_constraints.is_empty(),
+            "lexically shadowed or dynamic factories must not acquire an imported provider: {:#?}",
+            lowered.character_constraints
+        );
+    }
 }
 
 #[test]
@@ -326,6 +485,21 @@ def same_site(target):
         Some("urllib.parse.urlparse")
     );
 
+    let split = index(
+        r#"
+from urllib.parse import urlsplit as parse_target
+def same_site(target):
+    parsed = parse_target(target)
+    if parsed.scheme or parsed.netloc or not target.startswith("/") or target.startswith("//"):
+        return "/"
+    return target
+"#,
+    );
+    assert_eq!(
+        split.same_origin_path_constraints[0].provider_call.as_deref(),
+        Some("urllib.parse.urlsplit")
+    );
+
     let lookalike = index(
         r#"
 from untrusted_url_helpers import urlparse
@@ -340,6 +514,31 @@ def same_site(target):
         lookalike.same_origin_path_constraints[0].provider_call.as_deref(),
         Some("untrusted_url_helpers.urlparse")
     );
+
+    for source in [
+        r#"
+from urllib.parse import urlparse
+def same_site(target, urlparse):
+    parsed = urlparse(target)
+    if parsed.scheme or parsed.netloc or not target.startswith("/") or target.startswith("//"):
+        return "/"
+    return target
+"#,
+        r#"
+def same_site(target, parser):
+    parsed = parser(target)
+    if parsed.scheme or parsed.netloc or not target.startswith("/") or target.startswith("//"):
+        return "/"
+    return target
+"#,
+    ] {
+        let lowered = index(source);
+        assert!(
+            lowered.same_origin_path_constraints.is_empty(),
+            "lexically shadowed or dynamic parsers must not acquire provider identity: {:#?}",
+            lowered.same_origin_path_constraints
+        );
+    }
 
     for source in [
         r#"
@@ -396,6 +595,26 @@ def choose(name):
     };
     assert_eq!(fact.target.as_deref(), Some("selected"));
     assert!(fact.assignment_span.is_some());
+}
+
+#[test]
+fn finite_map_selection_rejects_same_spelled_method_without_literal_map_state() {
+    let lowered = index(
+        r#"
+class Catalog:
+    def get(self, key):
+        return dynamic_value(key)
+
+def choose(catalog: Catalog, name):
+    selected = catalog.get(name)
+    return selected
+"#,
+    );
+    assert!(
+        lowered.finite_literal_selections.is_empty(),
+        "method spelling alone is not a finite selector: {:#?}",
+        lowered.finite_literal_selections
+    );
 }
 
 #[test]

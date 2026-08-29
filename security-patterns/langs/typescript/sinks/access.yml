@@ -118,50 +118,6 @@
     expect_no_match: true
   description: "new InvokeCommand({FunctionName, Payload}) - tainted function selector invokes arbitrary Lambda targets."
 
-- id: typescript.access.azure_blob_download
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: access-control
-  severity: high
-  packages: ["@azure/storage-blob"]
-  cwe: [CWE-284, CWE-639]
-  match:
-    kind: call
-    callee:
-      regex: "\\.downloadToBuffer$"
-  match_examples:
-  - name: azure blob download
-    code: |
-      const _u = require("@azure/storage-blob");
-      function demo(input, req, obj) {
-        return blobClient.downloadToBuffer(input);
-      }
-  description: "Disabled - BlobClient.downloadToBuffer() reads from the receiver-selected blob; selector taint belongs on BlobClient construction."
-
-- id: typescript.access.azure_blob_upload
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: access-control
-  severity: high
-  packages: ["@azure/storage-blob"]
-  cwe: [CWE-284, CWE-639]
-  match:
-    kind: call
-    callee:
-      regex: "\\.uploadData$"
-  match_examples:
-  - name: azure blob upload
-    code: |
-      const _u = require("@azure/storage-blob");
-      function demo(input, req, obj) {
-        return blobClient.uploadData(input);
-      }
-  description: "Disabled - BlobClient.uploadData(data) uploads bytes to an already-selected blob client. The storage target is receiver construction, not this data argument."
-
 - id: typescript.access.gcp_secretmanager_access_secret_version
   enabled: true
   language: typescript

@@ -35,6 +35,51 @@
       }
     expect_no_match: true
   description: "starlark.ExecFile(thread, filename, source, predeclared) - executes tainted Starlark source in-process."
+- id: go.eval.otto_run
+  enabled: true
+  language: go
+  tag: code-injection
+  severity: critical
+  packages:
+  - github.com/robertkrimen/otto
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Run$'
+  constraints:
+  - receiver_type_in: [otto.Otto, Otto]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: otto runtime executes tainted javascript
+    code: |
+      package main
+      import "github.com/robertkrimen/otto"
+      func run(vm *otto.Otto, source string) {
+        _, _ = vm.Run(source)
+      }
+    expect_match_text: [vm.Run]
+  - name: otto runtime executes literal javascript negative
+    code: |
+      package main
+      import "github.com/robertkrimen/otto"
+      func run(vm *otto.Otto) {
+        _, _ = vm.Run("1 + 1")
+      }
+    expect_no_match: true
+  - name: local run method collision negative
+    code: |
+      package main
+      import "github.com/robertkrimen/otto"
+      type localRunner struct{}
+      func (localRunner) Run(string) {}
+      func run(_ *otto.Otto, runner localRunner, source string) {
+        runner.Run(source)
+      }
+    expect_no_match: true
+  description: "Otto runtime Run(tainted source) evaluates attacker-controlled JavaScript. Exact receiver typing excludes process runners and ordinary Run methods."
 - id: go.eval.gopher_lua_dostring
   enabled: true
   language: go
@@ -200,11 +245,8 @@
   packages:
   - github.com/antonmedv/expr
   - github.com/expr-lang/expr
-  - github.com/traefik/yaegi
-  - github.com/go-redis/redis
   cwe:
   - CWE-94
-  - CWE-943
   match:
     kind: call
     callee:
@@ -234,10 +276,52 @@
         expr.Eval("user.Name == 'alice'", nil)
       }
     expect_no_match: true
-  description: "expr.Eval(tainted, env) - one-shot evaluate of tainted expression. Merged collision aliases: go.eval.yaegi_eval, go.nosql.redis_eval."
-  aliases:
-  - go.eval.yaegi_eval
-  - go.nosql.redis_eval
+  description: "expr.Eval(tainted, env) - one-shot evaluation of a tainted expression. Same-spelled Yaegi and Redis APIs have independent typed rules and argument positions."
+- id: go.eval.yaegi_eval
+  enabled: true
+  language: go
+  tag: code-injection
+  severity: critical
+  packages:
+  - github.com/traefik/yaegi
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.Eval$'
+  constraints:
+  - receiver_type_in: [interp.Interpreter, Interpreter]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: yaegi interpreter evaluates tainted Go
+    code: |
+      package main
+      import "github.com/traefik/yaegi/interp"
+      func run(engine *interp.Interpreter, source string) {
+        _, _ = engine.Eval(source)
+      }
+    expect_match_text: [engine.Eval]
+  - name: yaegi interpreter literal source negative
+    code: |
+      package main
+      import "github.com/traefik/yaegi/interp"
+      func run(engine *interp.Interpreter) {
+        _, _ = engine.Eval("1 + 1")
+      }
+    expect_no_match: true
+  - name: local eval method collision negative
+    code: |
+      package main
+      import "github.com/traefik/yaegi/interp"
+      type localEvaluator struct{}
+      func (localEvaluator) Eval(string) {}
+      func run(_ *interp.Interpreter, evaluator localEvaluator, source string) {
+        evaluator.Eval(source)
+      }
+    expect_no_match: true
+  description: "Yaegi Interpreter.Eval(tainted Go source) executes attacker-controlled code. Exact receiver typing separates it from expression and datastore Eval APIs."
 - id: go.eval.govaluate_newexpression
   enabled: true
   language: go
@@ -321,11 +405,8 @@
   severity: high
   packages:
   - github.com/mattn/anko/vm
-  - text/template
-  - github.com/gobuffalo/buffalo
   cwe:
   - CWE-94
-  - CWE-79
   match:
     kind: call
     callee:
@@ -349,9 +430,7 @@
         _, _ = vm.Execute(nil, nil, nil, "println(1)")
       }
     expect_no_match: true
-  description: "anko vm.Execute(ctx, env, stmts, taintedSource) - executes attacker-controlled Anko script text. Merged collision aliases: go.template.text_template_execute_html."
-  aliases:
-  - go.template.text_template_execute_html
+  description: "anko vm.Execute(ctx, env, stmts, taintedSource) - executes attacker-controlled Anko script text. Template execution is not equivalent and is modeled independently when an exact HTML emission boundary is proven."
 - id: go.eval.plugin_open
   enabled: true
   language: go
@@ -392,17 +471,3 @@
       }
     expect_no_match: true
   description: "plugin.Open(tainted .so) - loads an arbitrary Go plugin; init() of the .so runs as the host process = RCE."
-- id: go.eval.reflect_call
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: go
-  tag: code-injection
-  severity: medium
-  cwe:
-  - CWE-470
-  match:
-    kind: call
-    callee:
-      regex: \.Call$
-  description: "Disabled - reflect.Value.Call; enable only when the method name is tainted."

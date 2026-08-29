@@ -65,7 +65,7 @@ fn rows_of(v: &serde_json::Value) -> Vec<serde_json::Value> {
 
 fn fixture_ws(lang: &str) -> String {
     repo_root()
-        .join("examples")
+        .join("test-fixtures/languages")
         .join(lang)
         .join("sanitizer_test")
         .to_string_lossy()

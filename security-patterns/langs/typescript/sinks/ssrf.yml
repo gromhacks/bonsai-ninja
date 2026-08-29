@@ -267,25 +267,6 @@
       \ https.get(\"https://example.com\");\n}\n"
     expect_no_match: true
   description: https.get(tainted URL).
-- id: typescript.ssrf.request_legacy
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: ssrf
-  severity: high
-  packages:
-  - request
-  imports:
-  - request
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: request
-  description: "Disabled - bare `request` name is too ambiguous (many libs export\
-    \ `request`); use an import-anchored variant if needed."
 - id: typescript.ssrf.superagent_get
   enabled: true
   language: typescript

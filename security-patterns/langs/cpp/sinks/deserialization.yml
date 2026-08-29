@@ -17,8 +17,6 @@
   - name: generated direct match
     code: |
       #include <boost/serialization/serialization.hpp>
-      #include <boost/serialization/serialization.hpp>
-      #include <boost/serialization/serialization.hpp>
       void example(const char *arg) {
         auto *x = new text_iarchive(arg);
       }
@@ -51,8 +49,6 @@
   - name: generated direct match
     code: |
       #include <boost/serialization/serialization.hpp>
-      #include <boost/serialization/serialization.hpp>
-      #include <boost/serialization/serialization.hpp>
       void example(const char *arg) {
         auto *x = new binary_iarchive(arg);
       }
@@ -84,8 +80,6 @@
   match_examples:
   - name: generated direct match
     code: |
-      #include <boost/serialization/serialization.hpp>
-      #include <boost/serialization/serialization.hpp>
       #include <boost/serialization/serialization.hpp>
       void example(const char *arg) {
         auto *x = new xml_iarchive(arg);
@@ -235,7 +229,6 @@
   - name: generated direct match
     code: |
       #include <QtCore/Qt>
-      #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
       void example(const char *arg) {
         auto *x = new QDataStream(arg);
@@ -251,47 +244,3 @@
   imports:
   - QtCore
   - QtCore/Qt
-- id: cpp.deser.protobuf_parsefromstring
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: cpp
-  tag: insecure-deserialization
-  severity: low
-  packages: [protobuf]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: ParseFromString
-  description: "Disabled - protobuf is type-bounded; flag only when untyped Any is used."
-
-- id: cpp.deser.msgpack_unpacked
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: insecure-deserialization
-  severity: low
-  packages: [msgpack-c]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: msgpack_unpack_next
-  description: "Disabled - msgpack is type-bounded."
-
-- id: cpp.deser.flatbuffers_getroot
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: cpp
-  tag: insecure-deserialization
-  severity: low
-  packages: [flatbuffers]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      name: GetRoot
-  description: "Disabled - FlatBuffers is type-bounded (tables verified by schema)."

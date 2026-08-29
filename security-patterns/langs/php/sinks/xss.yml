@@ -21,34 +21,57 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  echo \"safe\";\n}\n"
     expect_no_match: true
   description: echo(tainted) - direct HTML output to response body. Constraint requires interp (`$var`) or concat (`.`) shape so plain literal echos are skipped; the taint engine is the second gate.
-- id: php.xss.print
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: php.xss.psr7_response_body_write
+  enabled: true
   language: php
   tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
+  severity: high
+  packages: [psr/http-message, slim/slim, laminas/laminas-diactoros, mezzio/mezzio]
+  cwe: [CWE-79]
   match:
     kind: call
     callee:
-      name: print
-  description: Disabled - print is ubiquitous.
-- id: php.xss.printf
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: xss
-  severity: medium
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: printf
-  description: Disabled - flag per-audit.
+      regex: '^\$?[A-Za-z_][A-Za-z0-9_]*->getBody\(\)\.write$'
+      receiver_type_in: [ResponseInterface]
+  constraints:
+  - arg_tainted:
+      index: 0
+  - arg_matches_regex:
+      index: 0
+      regex: '<'
+  match_examples:
+  - name: PSR-7 HTML response body write
+    code: |
+      <?php
+      use Psr\Http\Message\ResponseInterface as Outgoing;
+      function respond($input, Outgoing $response) {
+        $response->getBody()->write("<h1>{$input}</h1>");
+      }
+    expect_match_text: ['$response->getBody().write']
+  - name: literal PSR-7 response body is not XSS
+    code: |
+      <?php
+      use Psr\Http\Message\ResponseInterface as Outgoing;
+      function respond(Outgoing $response) {
+        $response->getBody()->write('<h1>ready</h1>');
+      }
+    expect_no_match: true
+  - name: unrelated stream body writer is not a PSR-7 response
+    code: |
+      <?php
+      class Buffer { function getBody() { return $this; } function write($x) {} }
+      function respond($input, Buffer $buffer) { $buffer->getBody()->write($input); }
+    expect_no_match: true
+  - name: encoded JSON response body is not HTML
+    code: |
+      <?php
+      use Psr\Http\Message\ResponseInterface as Outgoing;
+      function respond($input, Outgoing $response) {
+        $response->getBody()->write(json_encode($input));
+      }
+    expect_no_match: true
+  description: "PSR-7 ResponseInterface body stream write of tainted markup; exact imported response typing distinguishes inbound/outbound message bodies and arbitrary stream builders."
+  imports: [Psr, Psr\Http\Message]
 - id: php.xss.twig_markup
   enabled: true
   language: php
@@ -70,7 +93,6 @@
     code: |
       <?php
       use twig\twig;
-      use twig\twig;
       function example($input, $url, $id, $payload, $request) {
         new Markup($input);
       }
@@ -86,25 +108,6 @@
   imports:
   - twig\twig
   - twig
-- id: php.xss.twig_raw_filter
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: php.template.twig_create_template
-  language: php
-  tag: xss
-  severity: high
-  packages:
-  - twig/twig
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Environment
-      - createTemplate
-  description: Disabled duplicate - Twig Environment::createTemplate covered by template.twig_createTemplate (classified as SSTI).
 - id: php.xss.blade_html_string
   enabled: true
   language: php
@@ -126,7 +129,6 @@
     code: |
       <?php
       use illuminate\support;
-      use illuminate\support;
       function example($input, $url, $id, $payload, $request) {
         new HtmlString($input);
       }
@@ -142,65 +144,6 @@
   imports:
   - illuminate\support
   - illuminate
-- id: php.xss.wordpress_the_content
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: php
-  tag: xss
-  severity: high
-  packages:
-  - wordpress
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: the_content
-  match_examples:
-  - name: php.xss.wordpress_the_content example
-    code: |
-      <?php
-      use wordpress;
-      use wordpress;
-      function example($input, $url, $id, $payload, $request) {
-        the_content($input);
-      }
-  description: "Disabled - the_content() prints global post content; unsafe user content reaches this through WordPress state rather than a taintable argument."
-- id: php.xss.smarty_display
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: xss
-  severity: high
-  packages:
-  - smarty/smarty
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Smarty
-      - display
-  description: Disabled duplicate - Smarty::display is classified as SSTI/template-path selection in php.template.smarty_display; v1 matching cannot distinguish tainted template path from tainted assigned variable.
-- id: php.xss.cakephp_set
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: xss
-  severity: medium
-  packages:
-  - cakephp/cakephp
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: set
-  description: Disabled - generic set(); flag with h() absence.
 - id: php.xss.yii_raw
   enabled: true
   language: php
@@ -224,7 +167,6 @@
     code: |
       <?php
       use yiisoft\yii2;
-      use yiisoft\yii2;
       function example($input, $url, $id, $payload, $request) {
         Html::raw($input);
       }
@@ -240,19 +182,3 @@
   imports:
   - yiisoft\yii2
   - yiisoft
-- id: php.xss.symfony_raw_filter
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: php
-  tag: xss
-  severity: medium
-  packages:
-  - symfony/twig-bundle
-  cwe:
-  - CWE-79
-  match:
-    kind: call
-    callee:
-      name: raw
-  description: Disabled - Twig |raw filter surfaced in template scanner.

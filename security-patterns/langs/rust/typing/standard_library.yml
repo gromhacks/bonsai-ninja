@@ -1,0 +1,36 @@
+- id: rust.typing.result_unwrap_or_else
+  enabled: true
+  language: rust
+  taint_semantics:
+    call_result_passthrough_receiver: true
+    callback_invocation:
+      callback_arg_index: 0
+      callback_return_result_offset: 0
+  match:
+    kind: call
+    callee:
+      name: unwrap_or_else
+  constraints:
+  - receiver_type_in: [Result]
+  - arg_is_inline_callback: 0
+  match_examples:
+  - name: Result fallback closure contributes to the returned value
+    code: |
+      fn choose(input: String) -> String {
+          (|| -> Result<String, ()> { Ok(input) })()
+              .unwrap_or_else(|_| String::new())
+      }
+    expect_match_text:
+    - '(|| -> Result<String, ()> { Ok(input) })().unwrap_or_else'
+  - name: same-named local method is not Result
+    code: |
+      struct Local;
+      impl Local {
+          fn unwrap_or_else<F>(self, _: F) -> String
+          where F: FnOnce(()) -> String { String::new() }
+      }
+      fn choose(local: Local) -> String {
+          local.unwrap_or_else(|_| String::new())
+      }
+    expect_no_match: true
+  description: "Rust Result::unwrap_or_else returns either the compiler-typed Result receiver payload or the exact inline fallback callback result. The frontend supplies Result receiver identity; this typing-only rule owns the standard-library method semantics."

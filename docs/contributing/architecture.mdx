@@ -280,6 +280,17 @@ rule plan; candidate collection preserves canonical file order. This is a
 planning optimization only: import/package headers, exact syntax targets, and
 canonical body matching still decide the result set.
 
+Within each language batch, literal target and package anchors are evaluated by
+one multi-pattern source pass. That pass returns the candidate FileId together
+with compact literal-presence and call-shape evidence; header planning reuses
+the evidence and must not rescan the same source once per rule or once per
+planning stage. Per-file package evidence is lazy: construct it only after a
+rule's exact target survives and its package literal is absent. Its
+process-local cache identity is the unique VFS instance, stable FileId,
+edit-monotonic file version, and exact package-context fingerprint. Those
+scheduling choices may retain extra candidates but must never change the
+canonical matcher verdict.
+
 Object identity is the workspace-relative path/module context, selected
 adapter, explicit frontend ABI, and SHA-256 of the complete source. A
 factstore generation contains exact per-object payload digests and a strong
@@ -559,8 +570,8 @@ scheduled function and fixed-point relation is still consumed.
 
 Before `index --semantic` publishes the immutable IDG generation, it derives
 the query-ready `FuncId -> SegmentId` directory, unified numeric node
-identities, and default `Exact/Narrowed` contextual CSR from that same spooled
-graph. Warm open validates array lengths, ownership, CSR offsets/targets, and
+identities, and default compiler-proven contextual CSR from that same spooled
+graph while retaining `Exact`/`Narrowed` edge provenance. Warm open validates array lengths, ownership, CSR offsets/targets, and
 call-boundary identities before installing the accelerator. A normal cold
 query may persist only the canonical graph; semantic prewarm distinguishes
 that valid-but-cold artifact and completes the accelerator rather than
@@ -750,7 +761,7 @@ name-only fan-out.
 
 `path` builds an exact compressed corridor from the cached resolved callgraph
 plus warmed IDG cross-call edges when an IDG sidecar has been hydrated.
-Forward/reverse fixed points retain every exact/narrowed node and edge that is
+Forward/reverse fixed points retain every compiler-proven node and edge that is
 both reachable from a selected source and able to reach a selected target.
 The command never enumerates concrete path combinations, so diamonds and
 cycles remain linear in graph size. Edge precision and resolver provenance
@@ -840,6 +851,11 @@ construction. All interprocedural taint surfaces are IDG-backed: source seeds ar
 resolved to concrete IDG nodes, configured transfer summaries are applied to
 fixpoint, and the resulting closure is cut to a semantic target/lineage
 corridor before call records or findings are rendered.
+Projected state shared through an imported module/singleton binding is linked
+only at an exact resolved call site with matching compiler import identity.
+That relation may parent downstream evidence without inventing a positional
+argument; allocation-insensitive heap relations remain closure-only and are
+not rendered as calls.
 After `index --semantic`, the first query decodes and validates the persisted
 default semantic CSR and compact identity directories without reopening every
 IDG segment. A valid canonical graph without that optional accelerator builds
@@ -1005,11 +1021,12 @@ source-to-sink callgraph/IDG corridor, then propagates only through that
 semantic corridor. `source-analysis` uses a source-lineage corridor from the
 resolved callgraph, including summary-output caller support, and seeds a scoped
 IDG over only the files/functions needed for the rendered lineage.
-`sink-analysis` reuses taint-analysis's endpoint-matching pass, compiles one
+`sink-analysis` runs the shared sink endpoint matcher, compiles one
 sink-relevant compiler/IDG scope, and validates candidate value origins
-forward against exact sink nodes. Source-to-sink security proofs are grouped
-separately under the same endpoint; source filters cannot erase compiler
-lineage. It does not run a backward graph walk per sink. None of these surfaces uses
+forward against exact sink nodes. Source-to-sink security proofs are a
+separate demand-driven matcher enrichment under the same endpoint; the
+default source-independent view does not scan source rules, and source filters
+cannot erase compiler lineage. It does not run a backward graph walk per sink. None of these surfaces uses
 whole-workspace per-source/per-sink traversal for production evidence. On a
 fresh partitioned callgraph, the security scopes replay the
 same uncapped forward, summary-output reverse, target-return, provider, and
@@ -1090,7 +1107,7 @@ scope/cache facts directly.
 ## Tests / supporting crates
 
 **`crates/conformance`** is the architectural-invariant test suite:
-mega-flow, single-engine-path checks, drift gates against the snapshots
+language-gauntlet, single-engine-path checks, drift gates against the snapshots
 under `docs/`.
 
 **`crates/testkit`** is shared test helpers — workspace fixtures,

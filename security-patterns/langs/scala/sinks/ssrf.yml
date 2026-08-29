@@ -1,25 +1,3 @@
-- id: scala.ssrf.url_openconnection
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: scala
-  tag: ssrf
-  severity: high
-  packages:
-  - java.net
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - URL
-      - openConnection
-  match_examples:
-  - name: url open connection
-    code: "import java.net._\nobject App {\n  def handle(input: String): Unit = {\n\
-      \    URL.openConnection(input)\n  }\n}\n"
-  description: "Disabled - URL.openConnection() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
 - id: scala.ssrf.apache_httpget_ctor
   enabled: true
   language: scala
@@ -138,29 +116,6 @@
     expect_no_match: true
   description: "Spring WebClient.uri(url) - reactive server-side request target\
     \ controlled by attacker input."
-- id: scala.ssrf.webclient_retrieve
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: scala
-  tag: ssrf
-  severity: high
-  packages:
-  - org.springframework.web.reactive.function.client
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: retrieve
-  match_examples:
-  - name: webclient retrieve request
-    code: "import org.springframework.web.reactive.function.client._\nobject App {\n\
-      \  def handle(requestSpec: RequestSpec): Any = {\n    requestSpec.retrieve()\n\
-      \  }\n}\nclass RequestSpec {\n  def retrieve(args: Any*): Any = null\n}\n"
-    expect_match_text:
-    - requestSpec.retrieve
-  description: "Disabled - WebClient retrieve() dispatches URI held in receiver state; WebClient.uri(tainted) carries the tainted argument."
 - id: scala.ssrf.akka_http_single_request
   enabled: true
   language: scala
@@ -221,52 +176,6 @@
     expect_no_match: true
   description: "HttpRequest(uri = tainted) - constructs SSRF request; chain to\
     \ singleRequest."
-- id: scala.ssrf.sttp_send
-  enabled: false
-  language: scala
-  tag: ssrf
-  severity: high
-  packages:
-  - sttp
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - basicRequest
-      - send
-  match_examples:
-  - name: generated shape example
-    code: "import sttp._\nobject App {\n  def handle(input: String): Unit = {\n  \
-      \  basicRequest.send(input)\n  }\n}\n"
-  description: "sttp basicRequest.get(uri).send() - fires HTTP request to attacker\
-    \ URL."
-  disabled_reason:
-    code: over-broad
-- id: scala.ssrf.sttp_quickrequest
-  enabled: false
-  language: scala
-  tag: ssrf
-  severity: high
-  packages:
-  - sttp
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      attribute:
-      - quickRequest
-      - send
-  match_examples:
-  - name: generated shape example
-    code: "import sttp._\nobject App {\n  def handle(input: String): Unit = {\n  \
-      \  quickRequest.send(input)\n  }\n}\n"
-  description: "sttp quickRequest.get(uri).send() - dispatches GET to tainted\
-    \ URI; SSRF to internal services."
-  disabled_reason:
-    code: over-broad
 - id: scala.ssrf.play_ws_url
   enabled: true
   language: scala
@@ -281,22 +190,83 @@
   match:
     kind: call
     callee:
-      attribute:
-      - WSClient
-      - url
+      name: url
+      receiver_type_in: [WSClient]
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    url_network_guard:
+      root:
+        kind: sink-argument-parser-input
+        sink_argument_index: 0
+        parser_argument_index: 0
+      parser: {name: URI}
+      scheme:
+        component:
+          field: getScheme
+        comparison_predicate: {name: "=="}
+        allowed_values: [https]
+      host_allowlist:
+        component:
+          field: getHost
+        membership_predicate: {name: contains}
+        static_collection_factories:
+        - {name: Set}
+      redirect:
+        kind: post-sink-call
+        call: {name: withFollowRedirects}
+        argument_index: 0
+        required_value:
+          kind: boolean
+          value: false
   match_examples:
   - name: generated shape example
-    code: "import play.api.libs.ws._\nobject App {\n  def handle(input: String): Unit = {\n\
-      \    WSClient.url(input)\n  }\n}\n"
+    code: |
+      import play.api.libs.ws._
+      object App {
+        def handle(ws: WSClient, input: String): Unit = {
+          ws.url(input)
+        }
+      }
+    expect_match_text: [ws.url]
   - name: arg tainted literal negative
-    code: "import play.api.libs.ws._\nobject App {\n  def handle(input: String): Unit = {\n\
-      \    WSClient.url(\"https://example.test/\")\n  }\n}\n"
+    code: |
+      import play.api.libs.ws._
+      object App {
+        def handle(ws: WSClient): Unit = {
+          ws.url("https://example.test/")
+        }
+      }
     expect_no_match: true
-  description: "Play WSClient.url(tainted) - builds WSRequest; downstream .get/.post\
-    \ fire."
+  - name: local url receiver is not Play WS
+    code: |
+      import play.api.libs.ws._
+      class LocalClient { def url(value: String): Unit = () }
+      object App {
+        def handle(client: LocalClient, input: String): Unit = {
+          client.url(input)
+        }
+      }
+    expect_no_match: true
+  - name: finite host allowlist and disabled redirects remain a match for guard attribution
+    code: |
+      import java.net.URI
+      import play.api.libs.ws._
+      import scala.util.Try
+      object App {
+        private val hosts = Set("api.example.test")
+        def handle(ws: WSClient, input: String): Unit = {
+          val parsed = Try(new URI(input)).toOption
+          parsed match {
+            case Some(uri) if uri.getScheme == "https" && hosts.contains(uri.getHost) =>
+              ws.url(input).withFollowRedirects(false).get()
+            case _ => ()
+          }
+        }
+      }
+    expect_match_text: [ws.url]
+  description: "Compiler-typed Play WSClient.url(tainted) builds a WSRequest; downstream .get/.post fire."
   imports:
   - play.api.libs.ws
 - id: scala.ssrf.http4s_client_expect
@@ -481,20 +451,3 @@
   imports:
   - scalaj
   - scalaj.http.Http
-- id: scala.ssrf.dispatch_url
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: scala
-  tag: ssrf
-  severity: high
-  packages:
-  - dispatch
-  cwe:
-  - CWE-918
-  match:
-    kind: call
-    callee:
-      name: url
-  description: "Disabled - dispatch `url(tainted)` too ambiguous (ubiquitous\
-    \ `url` name); rely on HTTP singleRequest/expect."

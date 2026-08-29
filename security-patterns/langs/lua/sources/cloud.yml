@@ -1,17 +1,35 @@
-# Lua cloud / serverless sources - trust: service.
-# AWS Lambda custom runtime (Lua) handler receives an event table.
-# Typical pattern: function handler(event, context) - event.body is attacker-controlled.
-# Lua adapter cannot pin handler signature; rely on the http-input sources invoked
-# inside handler bodies. Keep disabled stub for canonical coverage.
-- id: lua.source.lambda_event
-  enabled: false
-  disabled_reason:
-    code: over-broad
+# Lua cloud-service response sources.
+- id: lua.cloud.resty_aws_s3_get_object
+  enabled: true
   language: lua
   trust: service
-  tag: cloud-event
+  tag: cloud-input
+  category: cloud-input
+  payload_types: [binary]
+  packages: [lua-resty-aws, resty.aws]
+  imports: [resty.aws]
   match:
-    kind: read
-    target:
-      name: event
-  description: "Disabled - AWS Lambda Lua custom runtime handler event table (too broad without handler narrowing)."
+    kind: call
+    callee:
+      name: getObject
+  constraints:
+  - receiver_type_in: [AwsS3Client]
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: lua-resty-aws S3 object response
+    code: |
+      local AWS = require("resty.aws")
+      local aws = AWS({ region = "us-east-1" })
+      local s3 = aws:S3()
+      local response, err = s3:getObject({ Bucket = "uploads", Key = "item" })
+      sink(response.body)
+    expect_match_text: [s3.getObject]
+  - name: application getObject method is not a cloud boundary
+    code: |
+      local AWS = require("resty.aws")
+      local store = LocalStore()
+      local response = store:getObject({ key = "item" })
+      sink(response.body)
+    expect_no_match: true
+  description: "lua-resty-aws S3:getObject returns cloud-controlled object content on a compiler-typed S3 service receiver."

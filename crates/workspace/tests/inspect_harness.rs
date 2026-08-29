@@ -44,30 +44,13 @@ pub fn ws_multi(adapter: AdapterArc, files: &[(&str, &str)]) -> Workspace {
 pub fn build_callers_map(ws: &Workspace) -> AHashMap<String, AHashSet<String>> {
     let global = ws.db().global_index();
     let mut map: AHashMap<String, AHashSet<String>> = AHashMap::new();
-    let callable_names = callable_names(ws);
     for file in global.all_files() {
         let aliases = per_file_symbol_aliases(ws, file);
         for d in global.decls_in(file) {
-            collect_call_edges(&d.flow_events, &d.name, &aliases, &callable_names, &mut map);
+            collect_call_edges(&d.flow_events, &d.name, &aliases, &mut map);
         }
     }
     map
-}
-
-fn callable_names(ws: &Workspace) -> AHashSet<String> {
-    let global = ws.db().global_index();
-    let mut out = AHashSet::new();
-    for file in global.all_files() {
-        for d in global.decls_in(file) {
-            if matches!(
-                d.kind,
-                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-            ) {
-                out.insert(d.name.clone());
-            }
-        }
-    }
-    out
 }
 
 /// Mirror of the CLI's `per_file_symbol_aliases` — derives a
@@ -91,14 +74,11 @@ fn collect_call_edges(
     events: &[FlowEvent],
     caller: &str,
     aliases: &AHashMap<String, String>,
-    callable_names: &AHashSet<String>,
     map: &mut AHashMap<String, AHashSet<String>>,
 ) {
     for e in events {
         match e {
-            FlowEvent::Call {
-                name, receiver, args, ..
-            } => {
+            FlowEvent::Call { name, .. } => {
                 map.entry(name.clone()).or_default().insert(caller.to_string());
                 let short = short_tail(name);
                 if short != name.as_str() {
@@ -119,38 +99,28 @@ fn collect_call_edges(
                         .or_default()
                         .insert(caller.to_string());
                 }
-                if receiver.is_some() {
-                    for arg in args {
-                        let callback = short_tail(arg.value_text.trim());
-                        if callable_names.contains(callback) {
-                            map.entry(callback.to_string())
-                                .or_default()
-                                .insert(caller.to_string());
-                        }
-                    }
-                }
             }
             FlowEvent::Branch {
                 then_events,
                 else_events,
                 ..
             } => {
-                collect_call_edges(then_events, caller, aliases, callable_names, map);
-                collect_call_edges(else_events, caller, aliases, callable_names, map);
+                collect_call_edges(then_events, caller, aliases, map);
+                collect_call_edges(else_events, caller, aliases, map);
             }
-            FlowEvent::Loop { body, .. } => collect_call_edges(body, caller, aliases, callable_names, map),
+            FlowEvent::Loop { body, .. } => collect_call_edges(body, caller, aliases, map),
             FlowEvent::Try {
                 body,
                 catch_events,
                 finally_events,
                 ..
             } => {
-                collect_call_edges(body, caller, aliases, callable_names, map);
-                collect_call_edges(catch_events, caller, aliases, callable_names, map);
-                collect_call_edges(finally_events, caller, aliases, callable_names, map);
+                collect_call_edges(body, caller, aliases, map);
+                collect_call_edges(catch_events, caller, aliases, map);
+                collect_call_edges(finally_events, caller, aliases, map);
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_call_edges(body, caller, aliases, callable_names, map);
+                collect_call_edges(body, caller, aliases, map);
             }
             _ => {}
         }

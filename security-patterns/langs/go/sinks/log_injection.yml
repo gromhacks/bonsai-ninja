@@ -203,15 +203,12 @@
   packages:
   - github.com/sirupsen/logrus
   - go.uber.org/zap
-  - github.com/rs/zerolog
-  imports:
-  - github.com/sirupsen/logrus
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.Info$"
-      base_name_in: [logger, log, lgr, _logger, sugar, slogger, zlog]
+      name: Info
   constraints:
+  - receiver_type_in: [logrus.Logger, logrus.Entry, zap.Logger, zap.SugaredLogger]
   - arg_matches_regex:
       index: 0
       regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
@@ -235,6 +232,25 @@
         log.Info(name + value)
       }
     expect_match_text: [log.Info]
+  - name: zap logger arbitrary local name
+    code: |
+      package main
+      import "go.uber.org/zap"
+      func audit(input string) {
+        arbitrary, _ := zap.NewProduction()
+        arbitrary.Info("user=" + input)
+      }
+    expect_match_text: [arbitrary.Info]
+  - name: zap sugared logger arbitrary local name
+    code: |
+      package main
+      import "go.uber.org/zap"
+      func audit(input string) {
+        base := zap.NewNop()
+        arbitrary := base.Sugar()
+        arbitrary.Info("user=" + input)
+      }
+    expect_match_text: [arbitrary.Info]
   - name: logger info ordinary value negative
     code: |
       package main
@@ -244,7 +260,16 @@
         logger.Info(user)
       }
     expect_no_match: true
-  description: "<receiver>.Info(... + tainted) - log-injection via concat (logrus/zap/zerolog). WS4 receiver-name keying: was attribute:[logger,Info] which missed the common var aliases (log/lgr/sugar); now regex+base_name_in over conventional logger var names, gated on the logger frameworks (required for receiver-agnostic regexes). The stdlib `log` package has no .Info (Print/Println/Fatal/Panic), so log.Info is always a structured logger - no collision with go.log_injection.log_*; slog excluded (its own rule)."
+  - name: unrelated Info method is not a structured logger
+    code: |
+      package main
+      import standard "github.com/sirupsen/logrus"
+      var _ = standard.New
+      type reporter struct{}
+      func (reporter) Info(value string) {}
+      func audit(value reporter, input string) { value.Info("user=" + input) }
+    expect_no_match: true
+  description: "Typed logrus/zap logger Info with a constructed tainted message can forge log output."
 - id: go.log_injection.slog_info_concat
   enabled: true
   language: go
@@ -374,15 +399,12 @@
   packages:
   - github.com/sirupsen/logrus
   - go.uber.org/zap
-  - github.com/rs/zerolog
-  imports:
-  - github.com/sirupsen/logrus
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.Error$"
-      base_name_in: [logger, log, lgr, _logger, sugar, slogger, zlog]
+      name: Error
   constraints:
+  - receiver_type_in: [logrus.Logger, logrus.Entry, zap.Logger, zap.SugaredLogger]
   - arg_matches_regex:
       index: 0
       regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
@@ -406,6 +428,15 @@
         log.Error(name + value)
       }
     expect_match_text: [log.Error]
+  - name: zap logger Error on arbitrary local name
+    code: |
+      package main
+      import "go.uber.org/zap"
+      func audit(input string) {
+        arbitrary, _ := zap.NewDevelopment()
+        arbitrary.Error("user=" + input)
+      }
+    expect_match_text: [arbitrary.Error]
   - name: logger error ordinary value negative
     code: |
       package main
@@ -415,4 +446,13 @@
         logger.Error(user)
       }
     expect_no_match: true
-  description: "<receiver>.Error(... + tainted) - log-injection via concat (logrus/zap/zerolog). WS4 receiver-name keying: was attribute:[logger,Error] which missed var aliases (log/lgr/sugar); now regex+base_name_in, gated on the logger frameworks. base_name_in excludes bare error vars so err.Error() (the error-interface stringer) never matches; slog excluded (its own rule)."
+  - name: unrelated Error method is not a structured logger
+    code: |
+      package main
+      import standard "github.com/sirupsen/logrus"
+      var _ = standard.New
+      type reporter struct{}
+      func (reporter) Error(value string) {}
+      func audit(value reporter, input string) { value.Error("user=" + input) }
+    expect_no_match: true
+  description: "Typed logrus/zap logger Error with a constructed tainted message can forge log output."

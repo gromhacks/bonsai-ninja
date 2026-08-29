@@ -286,6 +286,7 @@ fn build_project_with_bonsai_and_options(
     bonsai: bonsai_sdk::Bonsai,
     options: bonsai_sdk::OpenOptions,
 ) -> Result<Project> {
+    let options = options_for_cache_policy(options, *crate::NO_CACHE.get().unwrap_or(&false));
     let open_started = std::time::Instant::now();
     let progress = workspace_open_progress();
     let project = bonsai
@@ -306,6 +307,40 @@ fn build_project_with_bonsai_and_options(
     Ok(project)
 }
 
+fn options_for_cache_policy(mut options: bonsai_sdk::OpenOptions, no_cache: bool) -> bonsai_sdk::OpenOptions {
+    if no_cache {
+        options.disable_persistent_semantic_cache();
+    }
+    options
+}
+
+#[cfg(test)]
+mod cache_policy_tests {
+    use super::options_for_cache_policy;
+
+    #[test]
+    fn no_cache_bypasses_every_reusable_semantic_sidecar() {
+        let cached = bonsai_sdk::OpenOptions::full_prewarm();
+        assert_eq!(options_for_cache_policy(cached, false), cached);
+
+        let uncached = options_for_cache_policy(cached, true);
+        assert!(!uncached.persistent_semantic_cache);
+        assert!(!uncached.load_compiler_object_sidecar);
+        assert!(!uncached.save_compiler_object_sidecar);
+        assert!(!uncached.load_callgraph_sidecar);
+        assert!(!uncached.load_dataflow_sidecar);
+        assert!(!uncached.save_dataflow_sidecar);
+        assert!(!uncached.load_value_flow_sidecar);
+        assert!(!uncached.save_value_flow_sidecar);
+        assert!(!uncached.load_idg_sidecar);
+        assert!(
+            uncached.prewarm_dataflow,
+            "cache policy must change reuse only, never requested semantic work"
+        );
+        assert!(!uncached.prewarm_flow_ids);
+    }
+}
+
 fn bonsai_with_rulepack(
     workspace: &std::path::Path,
     rules_dir: Option<&std::path::Path>,
@@ -319,7 +354,9 @@ fn bonsai_with_rulepack(
 }
 
 pub(crate) fn bonsai_for_cli() -> bonsai_sdk::Bonsai {
-    let bonsai = bonsai_sdk::Bonsai::new().with_minified_sources(crate::include_minified_sources());
+    let bonsai = bonsai_sdk::Bonsai::new()
+        .with_minified_sources(crate::include_minified_sources())
+        .with_persistent_semantic_cache(!*crate::NO_CACHE.get().unwrap_or(&false));
     match crate::PARSE_TIMEOUT_MS.get().copied().flatten() {
         Some(ms) => bonsai.with_parse_timeout(Duration::from_millis(ms)),
         None => bonsai,

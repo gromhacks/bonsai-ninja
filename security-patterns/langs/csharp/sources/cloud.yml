@@ -1,18 +1,4 @@
 # C# cloud / FaaS sources. AWS Lambda, Azure Functions, GCF.
-- id: csharp.source.aws_lambda_handler
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: cloud-event
-  trust: service
-  packages: [Amazon.Lambda.Core]
-  match:
-    kind: param
-    target:
-      name: FunctionHandler
-  description: "Disabled - `FunctionHandler` is the delegate/type name; `kind: param` only matches parameter identifiers."
-
 - id: csharp.source.aws_lambda_annotation_event
   enabled: true
   language: csharp

@@ -1,30 +1,4 @@
 # TypeScript cloud-event sources whose producer is a service or broker.
-- id: typescript.source.aws_lambda_event
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: typescript
-  trust: service
-  tag: cloud-event
-  packages: ["aws-lambda"]
-  match:
-    kind: param
-    target: { name: event }
-  description: "Disabled - the typed API Gateway parameter rule lives in remote.yml; a bare event parameter does not prove a non-HTTP Lambda invocation boundary."
-
-- id: typescript.source.cloudevents
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  trust: service
-  tag: cloud-event
-  packages: [cloudevents]
-  match:
-    kind: new
-    callee: { name: CloudEvent }
-  description: "Disabled - new CloudEvent constructs producer data; consume-side cloudEvent.data is the source."
-
 - id: typescript.source.cloudevents_data
   enabled: true
   language: typescript

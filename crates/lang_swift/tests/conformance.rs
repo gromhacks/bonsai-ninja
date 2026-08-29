@@ -8,6 +8,125 @@ fn conformance_traced() {
 }
 
 #[test]
+fn unified_nominal_declaration_cst_keeps_exact_swift_kinds() {
+    use bonsai_lang_api::DeclKind;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[(
+            "Nominals.swift",
+            "class Object {}\nstruct Envelope { let value: String }\nenum State { case ready }\nprotocol Payload {}\nextension Envelope { func render() {} }\n",
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Swift declaration index");
+
+    for (name, kind) in [
+        ("Object", DeclKind::Class),
+        ("Envelope", DeclKind::Struct),
+        ("State", DeclKind::Enum),
+        ("Payload", DeclKind::Interface),
+    ] {
+        assert!(
+            index
+                .defs
+                .iter()
+                .any(|decl| decl.name == name && decl.kind == kind),
+            "missing {name}: {kind:?}; declarations={:#?}",
+            index.defs
+        );
+    }
+    assert!(
+        index.defs.iter().any(|decl| {
+            decl.name == "render"
+                && decl.kind == DeclKind::Method
+                && decl.parent.and_then(|parent| {
+                    index
+                        .defs
+                        .iter()
+                        .find(|candidate| candidate.symbol == parent)
+                        .map(|owner| owner.name.as_str())
+                }) == Some("Envelope")
+        }),
+        "extension method lost its exact nominal parent: {:#?}",
+        index.defs
+    );
+}
+
+#[test]
+fn class_stored_property_has_one_compiler_getter_and_computed_getter_is_not_duplicated() {
+    use bonsai_lang_api::{DeclKind, FlowEvent};
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[(
+            "Stored.swift",
+            r#"
+class Record {
+    var value: String = ""
+    var computed: String { value }
+    func read() -> String { self.value }
+}
+protocol Contract { var value: String { get } }
+"#,
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Swift declaration index");
+    let record = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Record" && decl.kind == DeclKind::Class)
+        .expect("Record class");
+    let stored = index
+        .defs
+        .iter()
+        .filter(|decl| decl.parent == Some(record.symbol) && decl.name == "value" && decl.params.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stored.len(),
+        1,
+        "stored property must own one getter: {:#?}",
+        index.defs
+    );
+    assert!(stored[0].flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Return { value_flow, .. }
+            if value_flow.place.as_deref() == Some("self.value")
+    )));
+    assert_eq!(
+        index
+            .defs
+            .iter()
+            .filter(|decl| {
+                decl.parent == Some(record.symbol) && decl.name == "computed" && decl.params.is_empty()
+            })
+            .count(),
+        1,
+        "computed property synthesis must remain unique"
+    );
+    let contract = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Contract" && decl.kind == DeclKind::Interface)
+        .expect("Contract protocol");
+    assert!(
+        index.defs.iter().all(|decl| {
+            decl.parent != Some(contract.symbol)
+                || decl.name != "value"
+                || !decl.flow_events.iter().any(|event| {
+                    matches!(
+                        event,
+                        FlowEvent::Return { value_flow, .. }
+                            if value_flow.place.as_deref() == Some("self.value")
+                    )
+                })
+        }),
+        "a protocol requirement must not invent concrete stored state"
+    );
+}
+
+#[test]
 fn navigation_calls_emit_one_exact_separator_and_receiver() {
     use bonsai_lang_api::FlowEvent;
 
@@ -37,6 +156,81 @@ fn navigation_calls_emit_one_exact_separator_and_receiver() {
     assert!(calls.contains(&("task.cancel", Some("task"))), "{calls:?}");
     assert!(calls.contains(&("task.result", Some("task"))), "{calls:?}");
     assert!(calls.iter().all(|(name, _)| !name.contains("..")), "{calls:?}");
+}
+
+#[test]
+fn plain_module_imports_and_symbol_imports_keep_distinct_binding_scope() {
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[(
+            "Imports.swift",
+            "import Vapor\nimport struct Foundation.URL\nimport func Glibc.exit\n",
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let imports = workspace.db().import_index(file).expect("Swift import index");
+
+    let vapor = imports
+        .imports
+        .iter()
+        .find(|import| import.module == "Vapor")
+        .expect("plain module import");
+    assert!(vapor.is_wildcard, "plain module imports expose public members");
+
+    for symbol in ["Foundation.URL", "Glibc.exit"] {
+        let imported = imports
+            .imports
+            .iter()
+            .find(|import| import.module == symbol)
+            .unwrap_or_else(|| panic!("missing symbol import {symbol}: {:#?}", imports.imports));
+        assert!(
+            !imported.is_wildcard,
+            "symbol-kind import {symbol} must not authorize unrelated bare bindings"
+        );
+    }
+}
+
+#[test]
+fn labeled_call_arguments_keep_exact_compiler_names() {
+    use bonsai_lang_api::FlowEvent;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[(
+            "Arguments.swift",
+            r#"
+func build(_ input: URL, _ bytes: [UInt8]) {
+    _ = Data(contentsOf: input)
+    _ = Data(bytes)
+}
+"#,
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Swift declaration index");
+    let build = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "build")
+        .expect("build declaration");
+    let arguments = build
+        .flow_events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Call { name, args, .. } if name == "Data" => args.first(),
+            _ => None,
+        })
+        .map(|argument| (argument.name.as_deref(), argument.value_text.as_str()))
+        .collect::<Vec<_>>();
+
+    assert!(
+        arguments.contains(&(Some("contentsOf"), "input")),
+        "labeled argument missing its compiler name: {arguments:#?}"
+    );
+    assert!(
+        arguments.contains(&(None, "bytes")),
+        "ordinary positional construction must remain unlabeled: {arguments:#?}"
+    );
 }
 
 #[test]
@@ -85,6 +279,72 @@ fn switch_value_binding_uses_the_switch_subject() {
             }
         }
     }
+}
+
+#[test]
+fn guard_optional_binding_preserves_initializer_call_and_assignment() {
+    use bonsai_lang_api::FlowEvent;
+
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> = Arc::new(bonsai_lang_swift::SwiftAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Guard.swift",
+            "struct Parsed { init?(_ raw: String) {} }\n\
+             func consume(_ value: Parsed) {}\n\
+             func handle(_ raw: String) {\n\
+               guard let parsed = Parsed(raw) else { return }\n\
+               consume(parsed)\n\
+             }\n\
+             func check(_ ready: Bool) { guard ready else { return } }",
+        )],
+    );
+    let global = ws.db().global_index();
+    let handle = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle declaration");
+
+    assert!(
+        handle.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                source_call: Some(source_call),
+                source_call_args,
+                declares_new_binding: true,
+                value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+                ..
+            } if target == "parsed"
+                && source_call == "Parsed"
+                && source_call_args == &["raw"]
+        )),
+        "guard binding must retain its exact initializer call: {:#?}",
+        handle.flow_events
+    );
+    assert!(
+        handle
+            .flow_events
+            .iter()
+            .any(|event| matches!(event, FlowEvent::Call { name, .. } if name == "Parsed")),
+        "guard initializer call must remain independently matchable: {:#?}",
+        handle.flow_events
+    );
+
+    let check = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "check")
+        .expect("check declaration");
+    assert!(
+        check
+            .flow_events
+            .iter()
+            .all(|event| !matches!(event, FlowEvent::Assign { .. })),
+        "an ordinary boolean guard must not invent a binding: {:#?}",
+        check.flow_events
+    );
 }
 
 #[test]
@@ -184,6 +444,481 @@ fn parameter_attributes_are_parallel_with_parameter_bindings() {
     assert_eq!(
         handle.param_annotations,
         [Vec::<String>::new(), vec!["escaping".to_string()]]
+    );
+}
+
+#[test]
+fn switch_expression_with_only_literal_results_emits_finite_selection() {
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[(
+            "Selection.swift",
+            r#"
+func choose(_ key: String) -> String {
+    return switch key {
+    case "short": "s"
+    case "long": "l"
+    default: "fallback"
+    }
+}
+
+func passthrough(_ key: String) -> String {
+    return switch key {
+    case "short": "s"
+    default: key
+    }
+}
+"#,
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Swift declaration index");
+    let choose = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "choose")
+        .expect("choose declaration");
+    let passthrough = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "passthrough")
+        .expect("passthrough declaration");
+
+    assert!(
+        index
+            .finite_literal_selections
+            .iter()
+            .any(|fact| fact.selection_span.file == choose.span.file
+                && choose.span.start <= fact.selection_span.start
+                && fact.selection_span.end <= choose.span.end),
+        "complete literal switch must be a finite selection: facts={:#?}; events={:#?}",
+        index.finite_literal_selections,
+        choose.flow_events
+    );
+    assert!(
+        index
+            .finite_literal_selections
+            .iter()
+            .all(|fact| !(passthrough.span.start <= fact.selection_span.start
+                && fact.selection_span.end <= passthrough.span.end)),
+        "a dynamic switch arm must fail closed: {:#?}",
+        index.finite_literal_selections
+    );
+}
+
+#[test]
+fn immutable_dictionary_lookup_with_literal_fallback_is_finite() {
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[(
+            "Selection.swift",
+            r#"
+struct OrderRepo {
+    private static let sortable = ["total": "total", "created_at": "created_at"]
+    private static var mutable = ["total": "total"]
+    private static let dynamic = ["total": runtimeValue()]
+
+    func choose(_ key: String) {
+        let col = Self.sortable[key] ?? "id"
+        let mutableCol = Self.mutable[key] ?? "id"
+        let dynamicCol = Self.dynamic[key] ?? "id"
+        let dynamicFallback = Self.sortable[key] ?? key
+        let local = ["one": "first", "two": "second"]
+        let localCol = local[key] ?? "fallback"
+        consume(col, mutableCol, dynamicCol, dynamicFallback, localCol)
+    }
+}
+func runtimeValue() -> String { "runtime" }
+func consume(_: String, _: String, _: String, _: String, _: String) {}
+"#,
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Swift declaration index");
+    let targets = index
+        .finite_literal_selections
+        .iter()
+        .filter_map(|fact| fact.target.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        targets,
+        vec!["col", "localCol"],
+        "only immutable complete dictionaries with literal fallbacks are finite: {:#?}",
+        index.finite_literal_selections
+    );
+}
+
+#[test]
+fn enum_associated_value_case_is_an_exact_constructor_boundary() {
+    use bonsai_lang_api::{DeclKind, FlowEvent};
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[(
+            "Events.swift",
+            r#"
+enum Event {
+    case message(String)
+    case empty
+}
+
+func wrap(_ value: String) -> Event { Event.message(value) }
+func unwrap(_ event: Event) -> String {
+    switch event {
+    case .message(let value): return value
+    case .empty: return ""
+    }
+}
+"#,
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let parsed = workspace.db().parse(file).expect("parse Swift enum");
+    let index = workspace.db().decl_index(file).expect("Swift declaration index");
+    let event = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Event" && decl.kind == DeclKind::Enum)
+        .expect("Event enum declaration");
+    let constructor = index
+        .defs
+        .iter()
+        .find(|decl| {
+            decl.name == "message" && decl.kind == DeclKind::Constructor && decl.parent == Some(event.symbol)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "associated-value case constructor; tree={}; decls={:#?}",
+                parsed.tree.root_node().to_sexp(),
+                index.defs
+            )
+        });
+    assert_eq!(constructor.params, ["value0"]);
+    assert_eq!(constructor.receiver_field_writes.len(), 1);
+    assert_eq!(constructor.receiver_field_writes[0].source_param_indices, [0]);
+    let unwrap = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "unwrap")
+        .expect("unwrap declaration");
+    let projected_binding = unwrap.flow_events.iter().find_map(|event| {
+        let FlowEvent::Branch { then_events, .. } = event else {
+            return None;
+        };
+        let mut found = None;
+        bonsai_lang_api::for_each_flow_event(then_events, &mut |nested| {
+            if let FlowEvent::Assign {
+                target, source_name, ..
+            } = nested
+            {
+                if target == "value" {
+                    found = source_name.clone();
+                }
+            }
+        });
+        found
+    });
+    assert_eq!(projected_binding.as_deref(), Some("event.value0"));
+}
+
+#[test]
+fn scalar_member_writes_keep_exact_compiler_values() {
+    use bonsai_lang_api::StaticScalarValue;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[(
+            "State.swift",
+            r#"
+struct Worker { var mode: String; var enabled: Bool }
+func configure(_ worker: Worker) {
+    worker.mode = "/bin/sh"
+    worker.enabled = false
+}
+"#,
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Swift declaration index");
+    assert!(index.assignment_values.iter().any(|fact| {
+        fact.target.as_deref() == Some("worker.mode")
+            && fact.static_value == Some(StaticScalarValue::String("/bin/sh".to_string()))
+    }));
+    assert!(index.assignment_values.iter().any(|fact| {
+        fact.target.as_deref() == Some("worker.enabled")
+            && fact.static_value == Some(StaticScalarValue::Boolean(false))
+    }));
+}
+
+#[test]
+fn call_valued_member_writes_keep_exact_callee_and_scalar_arguments() {
+    use bonsai_lang_api::StaticScalarValue;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[(
+            "State.swift",
+            r#"
+import Foundation
+func configure(_ process: Process) {
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+}
+"#,
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Swift declaration index");
+    let fact = index
+        .assignment_values
+        .iter()
+        .find(|fact| fact.target.as_deref() == Some("process.executableURL"))
+        .unwrap_or_else(|| panic!("executableURL assignment fact: {:#?}", index.assignment_values));
+    assert_eq!(fact.direct_call_name.as_deref(), Some("URL"), "{fact:#?}");
+    assert_eq!(
+        fact.exact_static_call_args.as_deref(),
+        Some(&[StaticScalarValue::String("/bin/sh".to_string())][..]),
+        "{fact:#?}"
+    );
+}
+
+#[test]
+fn optional_try_initializer_keeps_exact_call_identity_and_input() {
+    use bonsai_lang_api::{AssignValueKind, FlowEvent};
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[(
+            "Restore.swift",
+            r#"
+import Foundation
+func restore(_ blob: Data) {
+    let optional = try? NSKeyedUnarchiver(forReadingFrom: blob)
+    let forced = try! NSKeyedUnarchiver(forReadingFrom: blob)
+    consume(optional)
+    consume(forced)
+}
+"#,
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Swift declaration index");
+    let restore = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "restore")
+        .expect("restore declaration");
+
+    for target in ["optional", "forced"] {
+        assert!(
+            restore.flow_events.iter().any(|event| matches!(
+                event,
+                FlowEvent::Assign {
+                    target: actual,
+                    source_call: Some(call),
+                    value_kind: Some(AssignValueKind::CallResult),
+                    ..
+                } if actual == target
+                    && call == "NSKeyedUnarchiver"
+            )),
+            "{target} must retain the wrapped constructor identity and input: {:#?}",
+            restore.flow_events
+        );
+        assert!(
+            index.assignment_values.iter().any(|fact| {
+                fact.target.as_deref() == Some(target)
+                    && fact.direct_call_name.as_deref() == Some("NSKeyedUnarchiver")
+            }),
+            "{target} assignment fact lost the wrapped constructor: {:#?}",
+            index.assignment_values
+        );
+    }
+}
+
+#[test]
+fn typed_member_reads_retain_the_receiver_place_and_type() {
+    use bonsai_lang_api::{FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_swift::SwiftAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Inputs.swift",
+            "func read(board: UIPasteboard, req: Request) { let a = board.string; let b = req.body; consume(a); consume(b) }",
+        )],
+    );
+    let global = ws.db().global_index();
+    let read = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "read")
+        .expect("read declaration");
+    assert!(read
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "board" && alias.type_name == "UIPasteboard"));
+    assert!(read
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "req" && alias.type_name == "Request"));
+    let assignments = read
+        .flow_events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Assign { source_names, .. } => Some(source_names),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(assignments
+        .iter()
+        .any(|names| names.iter().any(|name| name == "board.string")));
+    assert!(assignments
+        .iter()
+        .any(|names| names.iter().any(|name| name == "req.body")));
+}
+
+#[test]
+fn trailing_and_parenthesized_closures_are_exact_callback_argument_facts() {
+    use bonsai_lang_api::{FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_swift::SwiftAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Sockets.swift",
+            r#"
+func trailing(socket: WebSocket) {
+  socket.onText { ws, text in consume(text) }
+}
+func parenthesized(socket: WebSocket) {
+  socket.onBinary({ ws, data in consume(data) })
+}
+func named(socket: WebSocket, handler: (WebSocket, String) -> Void) {
+  socket.onText(handler)
+}
+"#,
+        )],
+    );
+    let index = ws
+        .db()
+        .decl_index(bonsai_common::FileId::new(0))
+        .expect("Swift index");
+    for (decl_name, call_suffix, expected_params) in [
+        ("trailing", "onText", vec!["ws", "text"]),
+        ("parenthesized", "onBinary", vec!["ws", "data"]),
+    ] {
+        let decl = index
+            .defs
+            .iter()
+            .find(|decl| decl.name == decl_name)
+            .expect("callback host");
+        let call_span = decl
+            .flow_events
+            .iter()
+            .find_map(|event| match event {
+                FlowEvent::Call {
+                    name,
+                    span,
+                    receiver_types,
+                    ..
+                } if name.ends_with(call_suffix) => {
+                    assert!(receiver_types.iter().any(|ty| ty == "WebSocket"));
+                    Some(*span)
+                }
+                _ => None,
+            })
+            .expect("callback registration call");
+        let callback = index
+            .call_argument_values
+            .iter()
+            .find(|fact| fact.call_span == call_span && fact.argument_index == 0)
+            .unwrap_or_else(|| {
+                panic!(
+                    "inline callback argument for {decl_name}; call={call_span:?}, facts={:#?}",
+                    index.call_argument_values
+                )
+            });
+        assert_eq!(callback.inline_callback_params, expected_params);
+        assert!(callback.inline_callback_span.is_some());
+    }
+
+    let named = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "named")
+        .expect("named host");
+    let named_span = named
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { name, span, .. } if name.ends_with("onText") => Some(*span),
+            _ => None,
+        })
+        .expect("named callback call");
+    let named_arg = index
+        .call_argument_values
+        .iter()
+        .find(|fact| fact.call_span == named_span && fact.argument_index == 0)
+        .expect("named callback argument");
+    assert!(named_arg.inline_callback_params.is_empty());
+    assert!(named_arg.inline_callback_span.is_none());
+}
+
+#[test]
+fn computed_property_argument_records_exact_pseudo_call_result() {
+    use bonsai_lang_api::FlowEvent;
+
+    let ws = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[(
+            "Clipboard.swift",
+            "func forward(board: UIPasteboard) { consume(board.string) }\n",
+        )],
+    );
+    let index = ws
+        .db()
+        .decl_index(bonsai_common::FileId::new(0))
+        .expect("Swift index");
+    let forward = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "forward")
+        .expect("forward declaration");
+    let getter_span = forward
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { name, span, .. } if name == "board.string" => Some(*span),
+            _ => None,
+        })
+        .expect("computed-property getter call");
+    let consume_span = forward
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { name, span, .. } if name == "consume" => Some(*span),
+            _ => None,
+        })
+        .expect("consumer call");
+    let argument = index
+        .call_argument_values
+        .iter()
+        .find(|fact| fact.call_span == consume_span && fact.argument_index == 0)
+        .expect("consumer argument fact");
+    assert_eq!(argument.direct_call_span, Some(getter_span));
+    assert_eq!(
+        argument.value_kind,
+        Some(bonsai_lang_api::AssignValueKind::PropertyRead),
+        "a Swift navigation value must retain its property-read semantics even when a getter pseudo-call is emitted"
+    );
+    assert_eq!(
+        argument
+            .value_flow
+            .projection
+            .as_ref()
+            .map(bonsai_lang_api::ExpressionProjection::canonical_place)
+            .as_deref(),
+        Some("board.string"),
+        "the exact projected storage identity must accompany the getter call"
     );
 }
 
@@ -809,4 +1544,185 @@ class Repository {
         "computed getter must retain its AST-derived receiver field state: {:?}",
         getter.receiver_state_sources
     );
+}
+
+#[test]
+fn struct_stored_property_types_reach_method_receiver_calls() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_swift::SwiftAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("Controller.swift"),
+        r#"
+struct Store {
+    func read(name: String) -> String { name }
+}
+struct Controller {
+    let store: Store
+    func handle(name: String) -> String { store.read(name: name) }
+}
+"#,
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let handle = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "handle")
+        .expect("handle declaration");
+
+    assert!(
+        handle
+            .type_aliases
+            .iter()
+            .any(|alias| { alias.name == "store" && alias.type_name == "Store" }),
+        "struct stored-property type must be visible in methods: {:?}",
+        handle.type_aliases
+    );
+    assert!(handle.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Call { name, receiver_types, .. }
+            if name == "store.read" && receiver_types.iter().any(|ty| ty == "Store")
+    )));
+}
+
+#[test]
+fn typed_stored_property_dispatches_to_exact_cross_file_swift_method() {
+    let ws = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[
+            (
+                "Sources/App/Services/Formatter.swift",
+                r#"
+struct Formatter {
+    func transform(_ value: String) -> String { value }
+}
+"#,
+            ),
+            (
+                "Sources/App/Controllers/Controller.swift",
+                r#"
+struct Controller {
+    let formatter: Formatter
+    func handle(_ value: String) -> String { formatter.transform(value) }
+}
+"#,
+            ),
+        ],
+    );
+    let global = ws.db().global_index();
+    let caller = bonsai_common::FuncId::new(global.find_by_name("handle")[0].raw());
+    let expected = global
+        .find_by_name("transform")
+        .iter()
+        .find_map(|symbol| {
+            let decl = global.decl_of(*symbol)?;
+            let parent = decl.parent.and_then(|parent| global.decl_of(parent))?;
+            (parent.name == "Formatter").then(|| bonsai_common::FuncId::new(decl.symbol.raw()))
+        })
+        .expect("Formatter.transform");
+    let graph = ws.cached_resolved_call_graph();
+    let targets = graph.callees_of(caller).map(|edge| edge.to).collect::<Vec<_>>();
+    assert_eq!(
+        targets.iter().filter(|target| **target == expected).count(),
+        1,
+        "exact stored-property receiver type must resolve across files: {targets:?}"
+    );
+}
+
+#[test]
+fn typed_stored_property_does_not_dispatch_to_unrelated_same_named_method() {
+    let ws = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[
+            (
+                "Sources/App/Services/Formatter.swift",
+                "struct Formatter { func transform(_ value: String) -> String { value } }\n",
+            ),
+            (
+                "Sources/App/Services/Unrelated.swift",
+                "struct Unrelated { func transform(_ value: String) -> String { value } }\n",
+            ),
+            (
+                "Sources/App/Controllers/Controller.swift",
+                r#"
+struct Controller {
+    let formatter: Formatter
+    func handle(_ value: String) -> String { formatter.transform(value) }
+}
+"#,
+            ),
+        ],
+    );
+    let global = ws.db().global_index();
+    let caller = bonsai_common::FuncId::new(global.find_by_name("handle")[0].raw());
+    let method_for_owner = |owner: &str| {
+        global
+            .find_by_name("transform")
+            .iter()
+            .find_map(|symbol| {
+                let decl = global.decl_of(*symbol)?;
+                let parent = decl.parent.and_then(|parent| global.decl_of(parent))?;
+                (parent.name == owner).then(|| bonsai_common::FuncId::new(decl.symbol.raw()))
+            })
+            .unwrap_or_else(|| panic!("missing {owner}.transform"))
+    };
+    let expected = method_for_owner("Formatter");
+    let collision = method_for_owner("Unrelated");
+    let graph = ws.cached_resolved_call_graph();
+    let targets = graph.callees_of(caller).map(|edge| edge.to).collect::<Vec<_>>();
+    assert!(targets.contains(&expected), "missing exact target: {targets:?}");
+    assert!(
+        !targets.contains(&collision),
+        "same-spelled method on another type must not be linked: {targets:?}"
+    );
+}
+
+#[test]
+fn ambiguous_public_swift_receiver_type_fails_closed_across_modules() {
+    let ws = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[
+            (
+                "Sources/First/Formatter.swift",
+                "public struct Formatter { public func transform(_ value: String) -> String { value } }\n",
+            ),
+            (
+                "Sources/Second/Formatter.swift",
+                "public struct Formatter { public func transform(_ value: String) -> String { value } }\n",
+            ),
+            (
+                "Sources/App/Controller.swift",
+                r#"
+struct Controller {
+    let formatter: Formatter
+    func handle(_ value: String) -> String { formatter.transform(value) }
+}
+"#,
+            ),
+        ],
+    );
+    let global = ws.db().global_index();
+    let caller = bonsai_common::FuncId::new(global.find_by_name("handle")[0].raw());
+    let graph = ws.cached_resolved_call_graph();
+    let targets = graph.callees_of(caller).map(|edge| edge.to).collect::<Vec<_>>();
+    for target in targets {
+        let decl = global
+            .decl_of(bonsai_common::SymbolId::new(target.raw()))
+            .expect("target declaration");
+        assert_ne!(
+            decl.name, "transform",
+            "an ambiguous declared receiver type must not select either module: {decl:#?}"
+        );
+    }
 }

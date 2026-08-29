@@ -1,110 +1,4 @@
 # Dart remote / network-trust sources.
-- id: dart.shelf.request_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  trust: remote
-  tag: http-input
-  payload_types: [query, json, path, header, form]
-  frameworks: [shelf, angel, dart_frog]
-  packages: [shelf, angel_framework, dart_frog]
-  manifests: [pubspec.yaml]
-  lockfiles: [pubspec.lock]
-  match:
-    kind: param
-    target:
-      name: request
-  description: "Disabled - whole request object taints too broadly without field-sensitive Request access tracking; body-reader rules stay enabled."
-
-- id: dart.shelf.req_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  trust: remote
-  tag: http-input
-  frameworks: [shelf]
-  packages: [shelf]
-  match:
-    kind: param
-    target:
-      name: req
-  description: "Disabled duplicate - merged into dart.shelf.request_param."
-
-- id: dart.shelf.context_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  trust: remote
-  tag: http-input
-  frameworks: [dart_frog]
-  packages: [dart_frog]
-  match:
-    kind: param
-    target:
-      name: context
-  description: "Disabled - whole context object taints too broadly without field-sensitive Request access tracking."
-
-- id: dart.http.request_query_parameters
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: dart
-  trust: remote
-  tag: http-input
-  payload_types: [query]
-  match:
-    kind: read
-    target:
-      name: queryParameters
-      receiver_type_in: [Uri]
-  match_examples:
-  - name: uri query parameters read
-    code: |
-      Map<String, String> handle(Uri uri) {
-        var q = uri.queryParameters;
-        return q;
-      }
-  description: "Disabled - Uri is also constructed from literals and trusted configuration. Query fields inherit provenance from a proven inbound Request.url/requestedUri boundary."
-
-- id: dart.http.request_query_parameters_all
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: dart
-  trust: remote
-  tag: http-input
-  payload_types: [query]
-  match:
-    kind: read
-    target:
-      name: queryParametersAll
-      receiver_type_in: [Uri]
-  match_examples:
-  - name: uri query parameters all read
-    code: |
-      Map<String, List<String>> handle(Uri uri) {
-        var q = uri.queryParametersAll;
-        return q;
-      }
-  description: "Disabled - Uri.queryParametersAll is an accessor, not an input origin. It requires proven inbound Request/Intent provenance."
-
-- id: dart.http.request_headers
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: dart
-  trust: remote
-  tag: http-input
-  payload_types: [header]
-  match:
-    kind: read
-    target:
-      name: headers
-  description: "Disabled - FP-prone. Bare name 'headers' matches every .headers attribute. Re-enable with attribute chain."
-
 - id: dart.http.request_read_as_string
   enabled: true
   language: dart
@@ -168,9 +62,7 @@
   imports:
   - shelf/shelf.dart
 - id: dart.http.response_body
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   trust: remote
   tag: network-response
@@ -193,14 +85,12 @@
       class LocalResponse { final String body = 'local'; }
       String consume(LocalResponse response) => response.body;
     expect_no_match: true
-  description: "Disabled - package:http Response.body is a real network-response boundary, but precise receiver-type evidence is not yet adapter-visible on Dart property reads. A bare `.body` source would overmatch application models."
+  description: "package:http Response.body - response content received across the network. The adapter emits the exact property chain and the receiver type rejects local model `.body` fields."
 
-# --- Re-enabled / new framework-scoped HTTP request handlers ---
+# --- Framework-scoped HTTP request handlers ---
 
 - id: dart.shelf.request_url
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   trust: remote
   tag: http-input
@@ -224,14 +114,12 @@
       class LocalRequest { final Uri url = Uri.parse('https://example.test'); }
       Uri requestUrl(LocalRequest request) => request.url;
     expect_no_match: true
-  description: "Disabled - Shelf Request.url is an inbound value, but the Dart adapter does not yet prove the receiver type on property reads; matching bare `.url` would include local URL models."
+  description: "Shelf Request.url - inbound request URL, constrained by compiler-emitted property and receiver-type facts."
 
   imports:
   - shelf/shelf.dart
 - id: dart.shelf.request_requested_uri
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   trust: remote
   tag: http-input
@@ -255,14 +143,12 @@
       class LocalRequest { final Uri requestedUri = Uri.parse('https://example.test'); }
       Uri requested(LocalRequest request) => request.requestedUri;
     expect_no_match: true
-  description: "Disabled - Shelf Request.requestedUri is inbound, but exact typed property-read evidence is not yet emitted by the Dart adapter."
+  description: "Shelf Request.requestedUri - inbound absolute request URI, constrained by compiler-emitted property and receiver-type facts."
 
   imports:
   - shelf/shelf.dart
 - id: dart.shelf.request_headers_chain
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   trust: remote
   tag: http-input
@@ -286,26 +172,10 @@
       class LocalRequest { final Map<String, String> headers = const {}; }
       Map<String, String> headers(LocalRequest request) => request.headers;
     expect_no_match: true
-  description: "Disabled - Shelf Request.headers is inbound, but enabling a bare `.headers` source without typed property-read evidence would overmatch local objects."
+  description: "Shelf Request.headers - inbound request headers, constrained by compiler-emitted property and receiver-type facts."
 
   imports:
   - shelf/shelf.dart
-- id: dart.conduit.request_controller_request
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  trust: remote
-  tag: http-input
-  payload_types: [json, query, header]
-  frameworks: [aqueduct, conduit]
-  packages: [aqueduct, conduit]
-  match:
-    kind: param
-    target:
-      name: request
-  description: "Disabled - bare `param name: request` is FP-prone; no canonical exists. Use the attribute-chain rule dart.conduit.request_body_decode for body access. Re-enable when adapter supports class-scoped Conduit Request param matching."
-
 - id: dart.conduit.request_body_decode
   enabled: true
   language: dart
@@ -333,9 +203,7 @@
   imports:
   - aqueduct/aqueduct.dart
 - id: dart.dart_frog.request_uri
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   trust: remote
   tag: http-input
@@ -359,7 +227,7 @@
       class LocalRequest { final Uri uri = Uri.parse('https://example.test'); }
       Uri requestUri(LocalRequest request) => request.uri;
     expect_no_match: true
-  description: "Disabled - Dart Frog Request.uri is inbound, but the Dart adapter does not yet expose receiver-type evidence on property reads; bare `.uri` is not precise enough."
+  description: "Dart Frog Request.uri - inbound request URI, constrained by compiler-emitted property and receiver-type facts."
 
   imports:
   - dart_frog/dart_frog.dart
@@ -478,95 +346,136 @@
   description: "Flutter EventChannel.receiveBroadcastStream - values arrive from native/JS over platform channel."
 
 - id: dart.cloud.firebase_oncall_data
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   trust: remote
   tag: cloud-input
   payload_types: [json]
   frameworks: [firebase_functions]
-  packages: [firebase_functions_interop, cloud_functions]
+  packages: [firebase_functions]
   match:
     kind: call
     callee:
-      attribute: [data, onCall]
+      name: onCall
   constraints:
-  - min_args: 1
+  - receiver_type_in: [Firebase]
+  - receiver_matches_regex: "\\.https$"
+  - arg_count: 2
+  - arg_is_inline_callback: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
   match_examples:
-  - name: declared shape
+  - name: Firebase callable request callback
     code: |
-      import 'package:firebase_functions_interop/firebase_functions_interop.dart';
-      void test() { var input = "x"; var amount = 1; data.onCall(input); }
-  - name: zero-arg onCall accessor negative
+      import 'package:firebase_functions/firebase_functions.dart';
+      void registerFunctions() {
+        runFunctions((firebase) {
+          firebase.https.onCall(name: 'lookup', handler: (request) async => sink(request.data));
+        });
+      }
+    expect_match_text: [firebase.https.onCall]
+  - name: application onCall method is not a Firebase boundary
     code: |
-      import 'package:firebase_functions_interop/firebase_functions_interop.dart';
-      void test() { data.onCall(); }
+      import 'package:firebase_functions/firebase_functions.dart';
+      class LocalHttps { void onCall({required String name, required Function handler}) {} }
+      class LocalFirebase { final https = LocalHttps(); }
+      void main() {
+        final firebase = LocalFirebase();
+        firebase.https.onCall(name: 'lookup', handler: (request) => sink(request));
+      }
     expect_no_match: true
-  description: "Disabled - onCall(handler) is a registration call. The caller payload belongs on the registered handler parameter and requires a compiler-resolved callback source edge."
+  description: "firebase_functions HttpsNamespace.onCall callback parameter 0 - callable request data delivered by the runtime. Callback position, inline binding, and the Firebase type of the enclosing runFunctions callback are compiler-proven; the registration result remains clean."
 
-  imports:
-  - firebase_functions_interop/firebase_functions_interop.dart
-- id: dart.cloud.firebase_https_oncall_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: dart.cloud.firebase_interop_oncall_data
+  enabled: true
   language: dart
   trust: remote
   tag: cloud-input
   payload_types: [json]
-  frameworks: [firebase_functions]
-  packages: [firebase_functions_interop, cloud_functions]
-  match:
-    kind: param
-    target:
-      name: call
-  description: "Disabled - bare `param name: call` is FP-prone; rely on attribute-chain `data.onCall` rule above."
-
-- id: dart.grpc.service_method_request
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  trust: remote
-  tag: rpc-input
-  payload_types: [protobuf]
-  frameworks: [grpc]
-  packages: [grpc]
-  match:
-    kind: param
-    target:
-      name: request
-  description: "Disabled - bare `param name: request` is FP-prone. Re-enable after generated service inheritance and fixed request-parameter position can be proven."
-
-- id: dart.grpc.service_call_request
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
-  language: dart
-  trust: remote
-  tag: rpc-input
-  payload_types: [protobuf]
-  frameworks: [grpc]
-  packages: [grpc]
+  frameworks: [firebase_functions_interop]
+  packages: [firebase_functions_interop]
+  analysis_semantics:
+    allow_file_package_evidence: false
   match:
     kind: call
     callee:
-      attribute: [call, request]
+      name: onCall
+  constraints:
+  - receiver_matches_regex: "\\.https$"
+  - arg_count: 1
+  - arg_is_inline_callback: 0
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
   match_examples:
-  - name: declared shape
+  - name: firebase functions interop callable data callback
     code: |
-      import 'package:grpc/grpc.dart';
-      void test() { var input = "x"; var amount = 1; call.request(input); }
-  - name: unrelated call method negative
+      import 'package:firebase_functions_interop/firebase_functions_interop.dart' as functions;
+      void main() {
+        functions.https.onCall((data, context) => sink(data));
+      }
+    expect_match_text: [functions.https.onCall]
+  - name: application onCall receiver is not the imported functions namespace
     code: |
-      import 'package:grpc/grpc.dart';
-      void test() { var input = "x"; call.sendTrailers(input); }
+      import 'package:firebase_functions_interop/firebase_functions_interop.dart' as functions;
+      class Registry { void onCall(Function callback) {} }
+      void main(Registry registry) {
+        registry.onCall((data) => sink(data));
+      }
     expect_no_match: true
-  description: "Disabled - gRPC Dart server methods receive (ServiceCall, Request); ServiceCall has no request() payload accessor. Re-enable the request parameter rule when generated service inheritance and fixed parameter position are available."
-
-  imports:
-  - grpc/grpc.dart
+  description: "firebase_functions_interop https.onCall callback parameter 0 - legacy callable payload delivery, bound to the exact imported namespace and inline callback fact."
+- id: dart.grpc.service_method_request
+  enabled: true
+  language: dart
+  trust: remote
+  tag: rpc-input
+  payload_types: [protobuf]
+  frameworks: [grpc]
+  packages: [grpc]
+  match:
+    kind: param
+    target:
+      param_index_in: [1]
+      param_count_in: [2]
+      in_class_suffix: [ServiceBase]
+      signature_param_types:
+      - index: 0
+        type_in: [ServiceCall, grpc.ServiceCall]
+  constraints:
+  - enclosing_decorator_in: [override]
+  match_examples:
+  - name: generated gRPC service override payload
+    code: |
+      import 'package:grpc/grpc.dart';
+      class GreeterService extends GreeterServiceBase {
+        @override
+        Future<Reply> sayHello(ServiceCall call, HelloRequest payload) async {
+          sink(payload);
+          return Reply();
+        }
+      }
+  - name: same signature outside a generated service negative
+    code: |
+      import 'package:grpc/grpc.dart';
+      class LocalHandler extends LocalBase {
+        @override
+        void handle(ServiceCall call, Object payload) { sink(payload); }
+      }
+    expect_no_match: true
+  - name: generated-looking class without ServiceCall context negative
+    code: |
+      import 'package:grpc/grpc.dart';
+      class LocalService extends LocalServiceBase {
+        @override
+        void handle(Object context, Object payload) { sink(payload); }
+      }
+    expect_no_match: true
+  description: "Dart gRPC generated service override parameter 1 - remote protobuf request proven by generated ServiceBase inheritance, override syntax, complete arity, and the compiler-typed ServiceCall context at parameter 0; independent of payload variable and message type names."
 - id: dart.shelf_multipart_part_filename
   enabled: true
   language: dart
@@ -600,16 +509,3 @@
 # as audit hints.
   imports:
   - shelf_multipart/shelf_multipart.dart
-- id: dart.input.comment_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: dart
-  trust: remote
-  tag: http-input
-  payload_types: [text]
-  match:
-    kind: param
-    target:
-      name: comment
-  description: "Disabled - a parameter named comment has no HTTP framework, route, type, annotation, or registration evidence and must not be treated as remote input."

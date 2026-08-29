@@ -106,6 +106,9 @@ impl DeclIndex {
             fact.input_place.shrink_to_fit();
             fact.output_place.shrink_to_fit();
         }
+        for fact in &mut self.predicate_returns {
+            compact_condition_expression(&mut fact.expression);
+        }
         for fact in &mut self.dynamic_key_filters {
             compact_optional_string(&mut fact.output_place);
             fact.collection_constructor.shrink_to_fit();
@@ -150,6 +153,7 @@ impl DeclIndex {
         self.character_substitutions.shrink_to_fit();
         self.character_constraints.shrink_to_fit();
         self.guarded_value_filters.shrink_to_fit();
+        self.predicate_returns.shrink_to_fit();
         self.same_origin_path_constraints.shrink_to_fit();
         self.compiler_guards.shrink_to_fit();
         self.dynamic_key_filters.shrink_to_fit();
@@ -345,6 +349,7 @@ fn compact_flow_event_storage(event: &mut FlowEvent) {
             finally_events,
             catch_param,
             catch_types,
+            catch_arms,
             ..
         } => {
             compact_flow_events(body);
@@ -352,6 +357,12 @@ fn compact_flow_event_storage(event: &mut FlowEvent) {
             compact_flow_events(finally_events);
             compact_optional_string(catch_param);
             compact_strings(catch_types);
+            for arm in catch_arms.iter_mut() {
+                compact_optional_string(&mut arm.parameter);
+                compact_strings(&mut arm.types);
+                arm.types.shrink_to_fit();
+            }
+            catch_arms.shrink_to_fit();
         }
         FlowEvent::Break { label, .. } | FlowEvent::Continue { label, .. } => {
             compact_optional_string(label);

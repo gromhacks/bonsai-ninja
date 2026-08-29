@@ -250,24 +250,6 @@
       }
     expect_no_match: true
   description: Struts2 ActionRedirectResult.setLocation.
-- id: java.open_redirect.spring_responseentity_status
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: java
-  tag: open-redirect
-  severity: medium
-  packages:
-  - org.springframework.http
-  cwe:
-  - CWE-601
-  match:
-    kind: call
-    callee:
-      attribute:
-      - ResponseEntity
-      - status
-  description: "Disabled - flag only when 30x + Location header is tainted."
 - id: java.open_redirect.spring_httpheaders_setlocation
   enabled: true
   language: java

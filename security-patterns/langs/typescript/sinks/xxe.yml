@@ -75,62 +75,11 @@
   description: 'libxmljs.parseXmlString. Merged aliases: typescript.xxe.libxmljs_parsexmlstring_unsafe_options.'
   aliases:
   - typescript.xxe.libxmljs_parsexmlstring_unsafe_options
-- id: typescript.xxe.xmldom_parser
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: typescript
-  tag: xxe
-  severity: high
-  packages:
-  - xmldom
-  - '@xmldom/xmldom'
-  cwe:
-  - CWE-611
-  match:
-    kind: new
-    callee:
-      name: DOMParser
-  description: "Disabled - `new DOMParser()` matches the browser's native DOMParser (safe). Re-enable with an import-anchored constraint once supported."
-- id: typescript.xxe.xml2js_parsestring
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: xxe
-  severity: low
-  packages:
-  - xml2js
-  cwe:
-  - CWE-611
-  match:
-    kind: call
-    callee:
-      attribute:
-      - xml2js
-      - parseString
-  description: "Disabled - xml2js uses sax-js internally and does not resolve external entities by default."
-- id: typescript.xxe.fast_xml_parser
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: xxe
-  severity: low
-  packages:
-  - fast-xml-parser
-  cwe:
-  - CWE-611
-  match:
-    kind: new
-    callee:
-      name: XMLParser
-  description: "Disabled - fast-xml-parser doesn't resolve external entities."
 - id: typescript.xxe.fast_xml_parser_entities_enabled
   enabled: true
   language: typescript
   tag: xxe
-  severity: medium
+  severity: high
   imports:
   - fast-xml-parser
   cwe:
@@ -160,45 +109,7 @@
         return parser.parse(xml);
       }
     expect_no_match: true
-  description: "Tainted XML reaches an immutable fast-xml-parser receiver configured with processEntities=true. The compiler-proven configuration and consumption path is an entity-expansion resource-exhaustion hazard (CWE-776), not a claim that the parser resolves external SYSTEM entities."
-- id: typescript.xxe.fast_xml_parser_parse
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: typescript
-  tag: xxe
-  severity: high
-  packages:
-  - fast-xml-parser
-  imports:
-  - fast-xml-parser
-  cwe:
-  - CWE-611
-  match:
-    kind: call
-    callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.parse$"
-  constraints:
-  - receiver_type_in: [XMLParser]
-  - arg_tainted: {index: 0}
-  match_examples:
-  - name: fast xml parser parse tainted
-    code: |
-      import { XMLParser } from "fast-xml-parser";
-      function parseFeed(xml: string) {
-        const parser = new XMLParser({ processEntities: true });
-        return parser.parse(xml);
-      }
-    expect_match_text: [parser.parse]
-  - name: fast xml parser parse literal negative
-    code: |
-      import { XMLParser } from "fast-xml-parser";
-      function parseFeed() {
-        const parser = new XMLParser({ processEntities: true });
-        return parser.parse("<rss/>");
-      }
-    expect_no_match: true
-  description: "Disabled - fast-xml-parser does not resolve external SYSTEM entities, so parsing attacker-controlled XML is not an XXE file/network boundary. Internal-entity resource limits belong to a separate denial-of-service rule family."
+  description: "Remotely tainted XML reaches an immutable fast-xml-parser receiver configured with processEntities=true. The compiler-proven configuration and consumption path permits exponential entity expansion and availability loss (CWE-776); this is not a claim that the parser resolves external SYSTEM entities."
 - id: typescript.xxe.parse_xml_resolve_entities
   enabled: true
   language: typescript

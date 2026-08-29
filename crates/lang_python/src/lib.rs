@@ -1,7 +1,7 @@
 //! Python language adapter.
 use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
-    decl_index_with_handler, extract_imports_via,
+    decl_index_from_tree_with_handler, extract_imports_via,
     kit::{
         call_arg_from_nodes_with_handler, collect_kinds, language_from_pack, node_text,
         normalize_call_name_whitespace, parse_with, span_of,
@@ -11,9 +11,9 @@ use bonsai_lang_api::{
     CharacterSubstitutionDomain, CharacterSubstitutionFact, Comment, CommentKind, ConditionEquality,
     ConditionExpressionFact, ConditionOperandFact, DeclIndex, DeclKind, FiniteLiteralSelectionFact,
     FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
-    LanguageId, PatternSourceProjection, ProjectedPatternBindingSite, SameOriginPathConstraintFact,
-    StaticScalarValue, StaticStringMapEntry, StringCompositionFact, StringCompositionPart, TypeAliasBinding,
-    Visibility, EMPTY_HANDLER,
+    LanguageId, PatternSourceProjection, ProjectedPatternBindingSite, Ref, RefKind,
+    SameOriginPathConstraintFact, StaticScalarValue, StaticStringMapEntry, StringCompositionFact,
+    StringCompositionPart, TypeAliasBinding, Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -336,14 +336,16 @@ const HANDLER: GrammarHandler = GrammarHandler {
     binding_pattern_field_names: &[],
     pattern_head_value_kinds: &["class_pattern"],
     multi_segment_value_pattern_kinds: &["dotted_name"],
-    non_binding_pattern_field_names: &["type", "key", "class", "guard"],
+    non_binding_pattern_field_names: &["type", "key", "guard"],
     binding_name_extractor: None,
     binding_name_filter: None,
     pattern_binding_extractor: None,
     projected_pattern_binding_extractor: Some(python_pattern_bindings),
     anonymous_variadic_token: None,
     variadic_parameter_kinds: &["list_splat_pattern"],
-    destructured_parameter_kinds: &["list_pattern", "tuple_pattern", "dictionary_pattern"],
+    // Python 3 parameters cannot destructure collection patterns. `*args`
+    // and `**kwargs` are handled by their exact parameter node kinds above.
+    destructured_parameter_kinds: &[],
     identifier_kinds: &["identifier"],
     aggregate_pattern_kinds: &["pattern_list", "list_pattern", "tuple_pattern"],
     comprehension_kinds: &[
@@ -393,8 +395,16 @@ const HANDLER: GrammarHandler = GrammarHandler {
     branch_else_field_names: &["alternative"],
     branch_condition_field_names: &["condition", "subject"],
     branch_condition_kinds: &[],
+    branch_condition_is_first_named_child: false,
+    condition_group_kinds: &["parenthesized_expression"],
+    condition_all_operators: &["and"],
+    condition_any_operators: &["or"],
+    condition_not_operators: &["not"],
+    condition_not_operator_kinds: &[],
     branch_alias_extractor: None,
     branch_arm_kinds: &["block", "elif_clause", "else_clause"],
+    exclusive_branch_arm_kinds: &["case_clause"],
+    fallthrough_branch_arm_kinds: &[],
     additional_alternative_kinds: &["elif_clause", "else_clause"],
     for_kinds: &[],
     foreach_kinds: &["for_statement"],
@@ -404,6 +414,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     loop_kinds: &[],
     loop_body_field_names: &["body"],
     loop_body_kinds: &["block"],
+    loop_header_container_kinds: &[],
+    loop_update_field_names: &[],
     call_kinds: &["call"],
     constructor_call_kinds: &[],
     nested_call_component_kinds: &[],
@@ -451,6 +463,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     lambda_body_kinds: &[],
     try_kinds: &["try_statement"],
     catch_kinds: &["except_clause"],
+    exclusive_catch_arm_kinds: &["except_clause"],
     finally_kinds: &["finally_clause"],
     try_fallback_body_kinds: &["block"],
     catch_body_follows_marker: false,
@@ -507,6 +520,89 @@ const HANDLER: GrammarHandler = GrammarHandler {
     void_return_type_names: EMPTY_HANDLER.void_return_type_names,
 };
 
+/// Python-specific compiler passes consume these node kinds outside the
+/// shared grammar-handler walker. The conformance suite validates this exact
+/// inventory against the active Tree-sitter grammar.
+const ADDITIONAL_GRAMMAR_NODE_KINDS: &[(&str, &str)] = &[
+    ("pattern match", "match_statement"),
+    ("pattern arm", "case_clause"),
+    ("pattern wrapper", "case_pattern"),
+    ("pattern name", "dotted_name"),
+    ("binding", "identifier"),
+    ("mapping pattern", "dict_pattern"),
+    ("pattern remainder", "splat_pattern"),
+    ("class pattern", "class_pattern"),
+    ("keyword pattern", "keyword_pattern"),
+    ("pattern alias", "as_pattern"),
+    ("list pattern", "list_pattern"),
+    ("tuple pattern", "tuple_pattern"),
+    ("union pattern", "union_pattern"),
+    ("comprehension binding", "for_in_clause"),
+    ("loop binding", "for_statement"),
+    ("loop remainder", "list_splat_pattern"),
+    ("decorated definition", "decorated_definition"),
+    ("decorator", "decorator"),
+    ("call expression", "call"),
+    ("keyword argument", "keyword_argument"),
+    ("boolean literal", "true"),
+    ("boolean literal", "false"),
+    ("member expression", "attribute"),
+    ("assignment", "assignment"),
+    ("augmented assignment", "augmented_assignment"),
+    ("named assignment", "named_expression"),
+    ("module scope", "module"),
+    ("function scope", "function_definition"),
+    ("class scope", "class_definition"),
+    ("expression statement", "expression_statement"),
+    ("if branch", "if_statement"),
+    ("else-if branch", "elif_clause"),
+    ("if filter", "if_clause"),
+    ("grouped expression", "parenthesized_expression"),
+    ("logical negation", "not_operator"),
+    ("boolean expression", "boolean_operator"),
+    ("comparison", "comparison_operator"),
+    ("type expression", "type"),
+    ("generic type", "generic_type"),
+    ("union type", "union_type"),
+    ("subscript", "subscript"),
+    ("null literal", "none"),
+    ("integer literal", "integer"),
+    ("float literal", "float"),
+    ("string literal", "string"),
+    ("concatenated string", "concatenated_string"),
+    ("conditional expression", "conditional_expression"),
+    ("set literal", "set"),
+    ("list literal", "list"),
+    ("tuple literal", "tuple"),
+    ("dictionary literal", "dictionary"),
+    ("dictionary pair", "pair"),
+    ("generator expression", "generator_expression"),
+    ("list comprehension", "list_comprehension"),
+    ("dictionary comprehension", "dictionary_comprehension"),
+    ("set comprehension", "set_comprehension"),
+    ("return statement", "return_statement"),
+    ("raise statement", "raise_statement"),
+    ("global directive", "global_statement"),
+    ("nonlocal directive", "nonlocal_statement"),
+    ("block", "block"),
+    ("comment filter", "comment"),
+    ("binary expression", "binary_operator"),
+    ("default parameter", "default_parameter"),
+    ("typed default parameter", "typed_default_parameter"),
+    ("typed parameter", "typed_parameter"),
+    ("lambda", "lambda"),
+    ("formatted string start", "string_start"),
+    ("formatted string content", "string_content"),
+    ("formatted string interpolation", "interpolation"),
+    ("formatted string end", "string_end"),
+    ("parenthesized splat", "parenthesized_list_splat"),
+    ("loop pattern list", "pattern_list"),
+    ("import", "import_statement"),
+    ("from import", "import_from_statement"),
+    ("aliased import", "aliased_import"),
+    ("wildcard import", "wildcard_import"),
+];
+
 /// Python methods normally bind parameter zero as their receiver, except for
 /// the exact built-in `staticmethod` decorator forms. This syntax belongs to
 /// the Python adapter; shared lowering receives only the resulting boolean.
@@ -557,6 +653,144 @@ fn python_expr_is_staticmethod(node: Node<'_>, src: &[u8]) -> bool {
             .is_some_and(|callee| python_expr_is_staticmethod(callee, src)),
         _ => false,
     }
+}
+
+/// Exact keyword presence and static values attached to Python decorators.
+///
+/// The shared decorator extractor records the decorator target. Python also
+/// permits keyword configuration on the decorator call itself. Emit an exact
+/// provider-neutral presence fact for every parsed keyword and an additional
+/// value fact only for literal booleans. Rule data can therefore distinguish
+/// an absent option from `option=false`, `option=true`, and a runtime-unknown
+/// expression without teaching the compiler what the option means.
+fn python_decorator_identity_refs(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+    imports: &[ImportSpec],
+    index: &DeclIndex,
+) -> Vec<Ref> {
+    let mut refs = Vec::new();
+    for decorator in collect_kinds(tree, &["decorator"]) {
+        let mut cursor = decorator.walk();
+        let Some(expression) = decorator.named_children(&mut cursor).next() else {
+            continue;
+        };
+        let (target_node, call) = if expression.kind() == "call" {
+            let Some(target) = python_call_target(expression, src) else {
+                continue;
+            };
+            (target.node, Some(expression))
+        } else {
+            (expression, None)
+        };
+        let target_text = node_text(&target_node, src).trim();
+        if target_text.is_empty() {
+            continue;
+        }
+        let expanded = python_imported_call_identity(target_node, imports, src);
+        let call_result = python_decorator_receiver_call_identity(
+            target_text,
+            span_of(file, &decorator).start,
+            imports,
+            index,
+        );
+        let mut identities = vec![target_text.to_string()];
+        for identity in [expanded, call_result].into_iter().flatten() {
+            if !identities.iter().any(|existing| existing == &identity) {
+                identities.push(identity);
+            }
+        }
+        for identity in identities.iter().skip(1) {
+            refs.push(Ref {
+                span: span_of(file, &decorator),
+                name: identity.clone(),
+                kind: RefKind::Decorator,
+                scope: None,
+                resolved: None,
+            });
+        }
+        let Some(call) = call else { continue };
+        let Some(arguments) = call.child_by_field_name("arguments") else {
+            continue;
+        };
+        let mut argument_cursor = arguments.walk();
+        for argument in arguments
+            .named_children(&mut argument_cursor)
+            .filter(|child| child.kind() == "keyword_argument")
+        {
+            let Some(name_node) = argument.child_by_field_name("name") else {
+                continue;
+            };
+            let keyword = node_text(&name_node, src).trim();
+            if keyword.is_empty() {
+                continue;
+            }
+            for identity in &identities {
+                refs.push(Ref {
+                    span: span_of(file, &decorator),
+                    name: format!("{identity}.{keyword}"),
+                    kind: RefKind::Decorator,
+                    scope: None,
+                    resolved: None,
+                });
+            }
+            let Some(value_node) = argument.child_by_field_name("value") else {
+                continue;
+            };
+            let literal = match value_node.kind() {
+                "true" => "true",
+                "false" => "false",
+                _ => continue,
+            };
+            for identity in &identities {
+                refs.push(Ref {
+                    span: span_of(file, &decorator),
+                    name: format!("{identity}.{keyword}={literal}"),
+                    kind: RefKind::Decorator,
+                    scope: None,
+                    resolved: None,
+                });
+            }
+        }
+    }
+    refs
+}
+
+/// Resolve a decorator receiver through its latest exact call assignment.
+///
+/// `worker = Factory(); @worker.callback` becomes
+/// `imported.Factory.callback`. Reassignment to any non-call value, local
+/// shadowing of the imported call, nested receivers, and unknown call
+/// results fail closed. The adapter reports only compiler identity; rule data
+/// decides whether that identity is a security boundary.
+fn python_decorator_receiver_call_identity(
+    decorator_target: &str,
+    before: u64,
+    imports: &[ImportSpec],
+    index: &DeclIndex,
+) -> Option<String> {
+    let (receiver, member) = decorator_target.rsplit_once('.')?;
+    if receiver.is_empty() || member.is_empty() || receiver.contains('.') {
+        return None;
+    }
+    let assignment = index
+        .assignment_values
+        .iter()
+        .filter(|fact| fact.assignment_span.start < before && fact.target.as_deref() == Some(receiver))
+        .max_by_key(|fact| (fact.assignment_span.start, fact.assignment_span.end))?;
+    let call = assignment.direct_call_name.as_deref()?;
+    let call_head = call.split('.').next().unwrap_or(call);
+    if index.defs.iter().any(|decl| {
+        decl.parent.is_none() && decl.name == call_head && decl.span.start < assignment.assignment_span.start
+    }) || index.assignment_values.iter().any(|fact| {
+        fact.assignment_span.start < assignment.assignment_span.start
+            && fact.target.as_deref() == Some(call_head)
+    }) {
+        return None;
+    }
+    let call = python_imported_text_identity(call, imports).unwrap_or_else(|| call.to_string());
+    Some(format!("{call}.{member}"))
 }
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -610,11 +844,27 @@ impl LanguageAdapter for PythonAdapter {
                 wrapper_calls: &["type"],
                 class_object_suffixes: &[".__class__"],
             },
+            module_resolution_extensions: &["py", "pyi"],
+            unqualified_imports_search_current_directory: true,
             ..LanguageCapabilities::partial_baseline()
         }
     }
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        Some(&HANDLER)
+    }
+    fn additional_grammar_node_kinds(&self) -> &'static [(&'static str, &'static str)] {
+        ADDITIONAL_GRAMMAR_NODE_KINDS
+    }
+
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
-        let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
+        let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) else {
+            return DeclIndex {
+                file,
+                ..Default::default()
+            };
+        };
+        let src = snapshot.text.as_bytes();
+        let mut idx = decl_index_from_tree_with_handler(file, src, &tree, &HANDLER);
         // Python module path: the dotted module name derived from the
         // file path. e.g. `pkg/sub/foo.py` -> ["pkg", "sub", "foo"].
         // Falls back to file-stem if the path isn't usable.
@@ -673,14 +923,16 @@ impl LanguageAdapter for PythonAdapter {
         // rules, so typed receivers such as `[UploadFile, filename]` still
         // resolve per
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
-            let src = snapshot.text.as_bytes();
+        {
+            let imports = parse_imports(&tree, src, file);
+            let decorator_refs = python_decorator_identity_refs(&tree, file, src, &imports, &idx);
+            idx.refs.extend(decorator_refs);
             idx.comments.extend(python_docstring_comments(&tree, file, src));
             populate_python_condition_expressions(&mut idx, &tree, file, src);
             idx.string_compositions = python_string_compositions(&tree, file, src);
             idx.finite_literal_selections = python_finite_literal_selections(&idx, &tree, file, src);
             idx.character_substitutions = python_character_substitutions(&idx, &tree, file, src);
-            idx.character_constraints = python_character_constraints(&idx, &tree, file, src);
+            idx.character_constraints = python_character_constraints(&idx, &tree, file, src, &imports);
             idx.same_origin_path_constraints = python_same_origin_path_constraints(&idx, &tree, file, src);
             // Phase-6 return-type extraction: `def f() -> T:` populates
             // `Decl.return_type`, which `apply_assign_call_result_types`
@@ -806,15 +1058,7 @@ impl LanguageAdapter for PythonAdapter {
 /// only consumes explicit comment nodes declared by its active handler.
 fn python_docstring_comments(tree: &Tree, file: FileId, src: &[u8]) -> Vec<Comment> {
     let mut out = Vec::new();
-    for scope in collect_kinds(
-        tree,
-        &[
-            "module",
-            "function_definition",
-            "class_definition",
-            "async_function_definition",
-        ],
-    ) {
+    for scope in collect_kinds(tree, &["module", "function_definition", "class_definition"]) {
         let body = scope.child_by_field_name("body").unwrap_or(scope);
         let Some(first_statement) = body.named_child(0) else {
             continue;
@@ -864,10 +1108,7 @@ fn populate_python_condition_expressions(index: &mut DeclIndex, tree: &Tree, fil
 }
 
 fn lower_python_condition_expression(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionExpressionFact {
-    if matches!(
-        node.kind(),
-        "parenthesized_expression" | "parenthesized_expression_list"
-    ) {
+    if matches!(node.kind(), "parenthesized_expression") {
         if let Some(inner) = node.named_child(0) {
             return lower_python_condition_expression(inner, file, src);
         }
@@ -1011,6 +1252,7 @@ fn python_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> Conditi
     let value_node = python_condition_dynamic_value_node(node, src);
     ConditionOperandFact {
         span: span_of(file, &node),
+        direct_call_span: (value_node.kind() == "call").then(|| span_of(file, &value_node)),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(
             value_node, file, src, &HANDLER,
         ),
@@ -1026,10 +1268,7 @@ fn python_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> Conditi
 /// security classification.
 fn python_condition_dynamic_value_node<'tree>(mut node: Node<'tree>, src: &[u8]) -> Node<'tree> {
     loop {
-        if matches!(
-            node.kind(),
-            "parenthesized_expression" | "parenthesized_expression_list"
-        ) {
+        if matches!(node.kind(), "parenthesized_expression") {
             if let Some(inner) = node.named_child(0) {
                 node = inner;
                 continue;
@@ -1067,11 +1306,21 @@ fn python_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue>
 fn python_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {
     match python_static_scalar(node, src)? {
         StaticScalarValue::String(value) => Some(value),
-        StaticScalarValue::Boolean(_) | StaticScalarValue::Null => None,
+        StaticScalarValue::Boolean(_) | StaticScalarValue::Integer(_) | StaticScalarValue::Null => None,
     }
 }
 
 fn python_static_string(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() == "concatenated_string" {
+        let mut value = String::new();
+        let mut cursor = node.walk();
+        let mut children = node.named_children(&mut cursor).peekable();
+        children.peek()?;
+        for child in children {
+            value.push_str(&python_static_string(child, src)?);
+        }
+        return Some(value);
+    }
     if node.kind() != "string" {
         return None;
     }
@@ -1127,10 +1376,15 @@ fn python_character_constraints(
     tree: &Tree,
     file: FileId,
     src: &[u8],
+    imports: &[ImportSpec],
 ) -> Vec<CharacterConstraintFact> {
-    let mut facts = python_comprehension_character_constraints(index, tree, file, src);
-    facts.extend(python_regex_substitution_constraints(index, tree, file, src));
-    facts.extend(python_regex_validation_constraints(index, tree, file, src));
+    let mut facts = python_comprehension_character_constraints(index, tree, file, src, imports);
+    facts.extend(python_regex_substitution_constraints(
+        index, tree, file, src, imports,
+    ));
+    facts.extend(python_regex_validation_constraints(
+        index, tree, file, src, imports,
+    ));
     facts.sort_by_key(|fact| (fact.transform_span.start, fact.transform_span.end));
     facts.dedup_by_key(|fact| fact.transform_span);
     facts
@@ -1845,9 +2099,11 @@ fn python_comprehension_character_constraints(
     tree: &Tree,
     file: FileId,
     src: &[u8],
+    imports: &[ImportSpec],
 ) -> Vec<CharacterConstraintFact> {
+    let assignments = collect_kinds(tree, &["assignment"]);
     let mut facts = Vec::new();
-    for assignment in collect_kinds(tree, &["assignment"]) {
+    for assignment in &assignments {
         let Some(target_node) = assignment.child_by_field_name("left") else {
             continue;
         };
@@ -1889,10 +2145,25 @@ fn python_comprehension_character_constraints(
         else {
             continue;
         };
-        let transform_span = span_of(file, &assignment);
+        let transform_span = span_of(file, assignment);
         let Some(decl) = python_enclosing_callable(index, transform_span) else {
             continue;
         };
+        let Some(function) =
+            bonsai_lang_api::kit::node_at_span(tree.root_node(), decl.span, &["function_definition"])
+        else {
+            continue;
+        };
+        let exact_runtime_semantics = python_value_is_unshadowed_builtin_str(
+            function,
+            &input_place,
+            transform_span,
+            imports,
+            index,
+            &assignments,
+            file,
+            src,
+        );
         let target = node_text(&target_node, src).trim().to_string();
         let input_param_index = decl.params.iter().position(|param| param == &input_place);
         facts.push(CharacterConstraintFact {
@@ -1900,6 +2171,11 @@ fn python_comprehension_character_constraints(
             transform_span,
             input_place,
             input_param_index,
+            proof: if exact_runtime_semantics {
+                bonsai_lang_api::CharacterConstraintProof::ExactRuntimeSemantics
+            } else {
+                bonsai_lang_api::CharacterConstraintProof::RequiresSourcePayloadEvidence
+            },
             output: CharacterConstraintOutput::Assignment { target },
             domain: CharacterConstraintDomain::AllowOnly {
                 classes,
@@ -1908,6 +2184,53 @@ fn python_comprehension_character_constraints(
         });
     }
     facts
+}
+
+/// Prove that a comprehension's iterated value is Python's built-in string
+/// type at the transform site. The proof is either an exact parameter
+/// annotation or an adapter-lowered, branch-local runtime narrowing.
+/// Character predicate spellings such as `isalnum` are only meaningful as
+/// compiler facts on that exact receiver; a user class with a same-spelled
+/// method must not acquire sanitizer credit.
+#[allow(clippy::too_many_arguments)]
+fn python_value_is_unshadowed_builtin_str(
+    function: Node<'_>,
+    parameter_name: &str,
+    use_span: Span,
+    imports: &[ImportSpec],
+    index: &DeclIndex,
+    assignments: &[Node<'_>],
+    file: FileId,
+    src: &[u8],
+) -> bool {
+    let Some(parameters) = function.child_by_field_name("parameters") else {
+        return false;
+    };
+    let mut cursor = parameters.walk();
+    let exact_annotation = parameters.named_children(&mut cursor).any(|parameter| {
+        parameter
+            .child_by_field_name("name")
+            .or_else(|| {
+                parameter
+                    .named_child(0)
+                    .filter(|child| child.kind() == "identifier")
+            })
+            .is_some_and(|name| node_text(&name, src).trim() == parameter_name)
+            && parameter
+                .child_by_field_name("type")
+                .is_some_and(|annotation| node_text(&annotation, src).trim() == "str")
+    });
+    let runtime_narrowing = index.runtime_type_narrowings.iter().any(|fact| {
+        fact.subject == parameter_name
+            && fact.type_name == "str"
+            && function.start_byte() <= fact.branch_span.start as usize
+            && fact.branch_span.end as usize <= function.end_byte()
+            && fact.guarded_span.start <= use_span.start
+            && use_span.end <= fact.guarded_span.end
+    });
+    (exact_annotation || runtime_narrowing)
+        && python_imported_text_identity("str", imports).is_none()
+        && !python_provider_root_is_lexically_shadowed("str", use_span, index, assignments, file, src)
 }
 
 fn python_filtered_character_generator(
@@ -2038,6 +2361,7 @@ fn python_regex_substitution_constraints(
     tree: &Tree,
     file: FileId,
     src: &[u8],
+    imports: &[ImportSpec],
 ) -> Vec<CharacterConstraintFact> {
     let assignments = collect_kinds(tree, &["assignment"]);
     let mut compiled = Vec::new();
@@ -2052,6 +2376,17 @@ fn python_regex_substitution_constraints(
             continue;
         }
         let Some((function, arguments)) = python_call_parts(value) else {
+            continue;
+        };
+        let Some(factory_call) = python_canonical_provider_call_identity(
+            function,
+            span_of(file, &value),
+            imports,
+            index,
+            &assignments,
+            file,
+            src,
+        ) else {
             continue;
         };
         let args = python_argument_nodes(arguments);
@@ -2071,12 +2406,7 @@ fn python_regex_substitution_constraints(
             })
             .count();
         if writes == 1 {
-            compiled.push((
-                name,
-                span_of(file, assignment),
-                characters,
-                node_text(&function, src).trim().to_string(),
-            ));
+            compiled.push((name, span_of(file, assignment), characters, factory_call));
         }
     }
 
@@ -2134,6 +2464,7 @@ fn python_regex_substitution_constraints(
             transform_span: return_span,
             input_place,
             input_param_index: Some(input_param_index),
+            proof: bonsai_lang_api::CharacterConstraintProof::ExactRuntimeSemantics,
             output: CharacterConstraintOutput::Return,
             domain: CharacterConstraintDomain::ProviderBound {
                 factory_call,
@@ -2155,6 +2486,7 @@ fn python_regex_validation_constraints(
     tree: &Tree,
     file: FileId,
     src: &[u8],
+    imports: &[ImportSpec],
 ) -> Vec<CharacterConstraintFact> {
     let assignments = collect_kinds(tree, &["assignment"]);
     let mut compiled = Vec::new();
@@ -2169,6 +2501,17 @@ fn python_regex_validation_constraints(
             continue;
         }
         let Some((function, arguments)) = python_call_parts(value) else {
+            continue;
+        };
+        let Some(factory_call) = python_canonical_provider_call_identity(
+            function,
+            span_of(file, &value),
+            imports,
+            index,
+            &assignments,
+            file,
+            src,
+        ) else {
             continue;
         };
         let args = python_argument_nodes(arguments);
@@ -2191,12 +2534,7 @@ fn python_regex_validation_constraints(
         {
             continue;
         }
-        compiled.push((
-            name,
-            span_of(file, assignment),
-            node_text(&function, src).trim().to_string(),
-            domain,
-        ));
+        compiled.push((name, span_of(file, assignment), factory_call, domain));
     }
 
     let mut facts = Vec::new();
@@ -2256,6 +2594,7 @@ fn python_regex_validation_constraints(
             transform_span: branch_span,
             input_param_index: decl.params.iter().position(|parameter| parameter == &input_place),
             input_place: input_place.clone(),
+            proof: bonsai_lang_api::CharacterConstraintProof::ExactRuntimeSemantics,
             output: CharacterConstraintOutput::Assignment { target: input_place },
             domain: CharacterConstraintDomain::ProviderBound {
                 factory_call,
@@ -2268,10 +2607,7 @@ fn python_regex_validation_constraints(
 }
 
 fn python_negated_guard_call(mut condition: Node<'_>) -> Option<Node<'_>> {
-    while matches!(
-        condition.kind(),
-        "parenthesized_expression" | "parenthesized_expression_list"
-    ) {
+    while matches!(condition.kind(), "parenthesized_expression") {
         condition = condition.named_child(0)?;
     }
     if condition.kind() != "not_operator" {
@@ -2452,6 +2788,7 @@ fn python_same_origin_path_constraints(
     src: &[u8],
 ) -> Vec<SameOriginPathConstraintFact> {
     let imports = parse_imports(tree, src, file);
+    let assignments = collect_kinds(tree, &["assignment"]);
     let mut facts = Vec::new();
     for function in collect_kinds(tree, &["function_definition"]) {
         let function_span = span_of(file, &function);
@@ -2490,7 +2827,15 @@ fn python_same_origin_path_constraints(
         let Some((parser, parser_arguments)) = python_call_parts(parser_call) else {
             continue;
         };
-        let Some(provider_call) = python_imported_call_identity(parser, &imports, src) else {
+        let Some(provider_call) = python_canonical_provider_call_identity(
+            parser,
+            span_of(file, &parser_call),
+            &imports,
+            index,
+            &assignments,
+            file,
+            src,
+        ) else {
             continue;
         };
         let parser_args = python_argument_nodes(parser_arguments);
@@ -2559,6 +2904,88 @@ fn python_same_origin_path_constraints(
 
 fn python_imported_call_identity(callee: Node<'_>, imports: &[ImportSpec], src: &[u8]) -> Option<String> {
     let rendered = node_text(&callee, src).trim();
+    python_imported_text_identity(rendered, imports)
+}
+
+/// Canonical provider identity for one runtime call.
+///
+/// Imported aliases are expanded to their declared module/member identity,
+/// but only while the import binding is not shadowed by an exact Python
+/// lexical binding. Security meaning remains in rule data: this helper merely
+/// distinguishes an imported provider from a same-spelled local value.
+fn python_canonical_provider_call_identity(
+    callee: Node<'_>,
+    use_span: Span,
+    imports: &[ImportSpec],
+    index: &DeclIndex,
+    assignments: &[Node<'_>],
+    file: FileId,
+    src: &[u8],
+) -> Option<String> {
+    let rendered = node_text(&callee, src).trim();
+    let root = rendered.split('.').next()?.trim();
+    if root.is_empty()
+        || python_provider_root_is_lexically_shadowed(root, use_span, index, assignments, file, src)
+    {
+        return None;
+    }
+    python_imported_text_identity(rendered, imports)
+}
+
+fn python_provider_root_is_lexically_shadowed(
+    root: &str,
+    use_span: Span,
+    index: &DeclIndex,
+    assignments: &[Node<'_>],
+    file: FileId,
+    src: &[u8],
+) -> bool {
+    let enclosing = index
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            ) && decl.span.start <= use_span.start
+                && use_span.end <= decl.span.end
+        })
+        .min_by_key(|decl| decl.span.len());
+
+    if let Some(owner) = enclosing {
+        if owner.params.iter().any(|parameter| parameter == root)
+            || assignments.iter().any(|assignment| {
+                python_lexical_owner(index, span_of(file, assignment)) == Some(owner.span)
+                    && assignment.child_by_field_name("left").is_some_and(|left| {
+                        left.kind() == "identifier" && node_text(&left, src).trim() == root
+                    })
+            })
+            || index
+                .defs
+                .iter()
+                .any(|decl| decl.parent == Some(owner.symbol) && decl.name == root)
+        {
+            return true;
+        }
+    }
+
+    // A module binding competes with an imported spelling for every nested
+    // callable. At module execution sites source order is exact; inside a
+    // callable, invocation order is external, so any module-level writer is
+    // ambiguous and must fail closed.
+    let nested_use = enclosing.is_some();
+    assignments.iter().any(|assignment| {
+        python_lexical_owner(index, span_of(file, assignment)).is_none()
+            && assignment
+                .child_by_field_name("left")
+                .is_some_and(|left| left.kind() == "identifier" && node_text(&left, src).trim() == root)
+            && (nested_use || assignment.end_byte() as u64 <= use_span.start)
+    }) || index.defs.iter().any(|decl| {
+        decl.parent.is_none() && decl.name == root && (nested_use || decl.span.end <= use_span.start)
+    })
+}
+
+fn python_imported_text_identity(rendered: &str, imports: &[ImportSpec]) -> Option<String> {
     if rendered.is_empty() {
         return None;
     }
@@ -2683,11 +3110,15 @@ fn python_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<Stri
             continue;
         }
         let mut parts = Vec::new();
-        if lower_python_string_composition(value, file, src, &mut parts) && parts.len() > 1 {
+        let mut dynamic_spans = Vec::new();
+        if lower_python_string_composition(value, file, src, &mut parts, &mut dynamic_spans)
+            && parts.len() > 1
+        {
             facts.push(StringCompositionFact {
                 container_span: span_of(file, &assignment),
                 value_span: span_of(file, &value),
                 target: Some(node_text(&target, src).trim().to_string()),
+                dynamic_anchor_span: (dynamic_spans.len() == 1).then(|| dynamic_spans[0]),
                 parts,
             });
         }
@@ -2697,11 +3128,15 @@ fn python_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<Stri
             continue;
         };
         let mut parts = Vec::new();
-        if lower_python_string_composition(value, file, src, &mut parts) && parts.len() > 1 {
+        let mut dynamic_spans = Vec::new();
+        if lower_python_string_composition(value, file, src, &mut parts, &mut dynamic_spans)
+            && parts.len() > 1
+        {
             facts.push(StringCompositionFact {
                 container_span: span_of(file, &return_node),
                 value_span: span_of(file, &value),
                 target: None,
+                dynamic_anchor_span: (dynamic_spans.len() == 1).then(|| dynamic_spans[0]),
                 parts,
             });
         }
@@ -2723,11 +3158,9 @@ fn lower_python_string_composition(
     file: FileId,
     src: &[u8],
     out: &mut Vec<StringCompositionPart>,
+    dynamic_spans: &mut Vec<Span>,
 ) -> bool {
-    while matches!(
-        node.kind(),
-        "parenthesized_expression" | "parenthesized_expression_list"
-    ) {
+    while matches!(node.kind(), "parenthesized_expression") {
         let Some(inner) = node.named_child(0) else {
             return false;
         };
@@ -2737,11 +3170,12 @@ fn lower_python_string_composition(
         out.push(StringCompositionPart::Literal { value });
         return true;
     }
-    if node.kind() == "string" && lower_python_formatted_string(node, src, out) {
+    if node.kind() == "string" && lower_python_formatted_string(node, file, src, out, dynamic_spans) {
         return true;
     }
     if let Some(place) = python_exact_place(node, src) {
         out.push(StringCompositionPart::Place { place });
+        dynamic_spans.push(span_of(file, &node));
         return true;
     }
     if let Some((function, _)) = python_call_parts(node) {
@@ -2762,8 +3196,8 @@ fn lower_python_string_composition(
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .map(str::trim);
         return operator == Some("+")
-            && lower_python_string_composition(left, file, src, out)
-            && lower_python_string_composition(right, file, src, out);
+            && lower_python_string_composition(left, file, src, out, dynamic_spans)
+            && lower_python_string_composition(right, file, src, out, dynamic_spans);
     }
     if node.kind() == "boolean_operator" {
         let (Some(left), Some(right)) = (
@@ -2782,13 +3216,20 @@ fn lower_python_string_composition(
         };
         if operator == Some("or") {
             out.push(StringCompositionPart::PlaceOrLiteral { place, fallback });
+            dynamic_spans.push(span_of(file, &left));
             return true;
         }
     }
     false
 }
 
-fn lower_python_formatted_string(node: Node<'_>, src: &[u8], out: &mut Vec<StringCompositionPart>) -> bool {
+fn lower_python_formatted_string(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<StringCompositionPart>,
+    dynamic_spans: &mut Vec<Span>,
+) -> bool {
     let text = node_text(&node, src).trim();
     let Some(quote_start) = text.find(['\'', '"']) else {
         return false;
@@ -2825,6 +3266,7 @@ fn lower_python_formatted_string(node: Node<'_>, src: &[u8], out: &mut Vec<Strin
                     return false;
                 };
                 out.push(StringCompositionPart::Place { place });
+                dynamic_spans.push(span_of(file, &expression));
                 saw_interpolation = true;
             }
             _ => return false,
@@ -2859,9 +3301,7 @@ fn python_exact_place(node: Node<'_>, src: &[u8]) -> Option<String> {
             let attribute = node_text(&attribute, src).trim();
             (!attribute.is_empty()).then(|| format!("{object}.{attribute}"))
         }
-        "parenthesized_expression" | "parenthesized_expression_list" => {
-            python_exact_place(node.named_child(0)?, src)
-        }
+        "parenthesized_expression" => python_exact_place(node.named_child(0)?, src),
         _ => None,
     }
 }
@@ -3350,11 +3790,7 @@ fn python_for_in_clause_is_comprehension(clause: &Node<'_>) -> bool {
     while let Some(node) = parent {
         if matches!(
             node.kind(),
-            "list_comprehension"
-                | "dict_comprehension"
-                | "dictionary_comprehension"
-                | "set_comprehension"
-                | "generator_expression"
+            "list_comprehension" | "dictionary_comprehension" | "set_comprehension" | "generator_expression"
         ) {
             return true;
         }
@@ -3778,7 +4214,7 @@ fn python_loop_binding_targets(node: Node<'_>, src: &[u8]) -> Vec<String> {
         }
         if !matches!(
             node.kind(),
-            "pattern_list" | "tuple_pattern" | "list_pattern" | "star_pattern"
+            "pattern_list" | "tuple_pattern" | "list_pattern" | "list_splat_pattern"
         ) {
             return;
         }
@@ -4783,14 +5219,22 @@ fn canonical_python_type_from_node(node: Node<'_>, src: &[u8]) -> Option<String>
                 .find_map(|child| canonical_python_type_from_node(child, src));
             canonical
         }
-        "generic_type" => {
-            let base = node.named_child(0)?;
+        "generic_type" | "subscript" => {
+            let base = node
+                .child_by_field_name("value")
+                .or_else(|| node.named_child(0))?;
             let base_name = canonical_python_type_name(node_text(&base, src))?;
+            let base_tail = bonsai_common::short_qualified_tail(&base_name);
             if matches!(
-                base_name.as_str(),
+                base_tail,
                 "Annotated" | "Optional" | "ClassVar" | "Final" | "Required" | "NotRequired"
             ) {
-                let parameters = node.named_child(1)?;
+                let parameters = node
+                    .child_by_field_name("subscript")
+                    .or_else(|| node.named_child(1))?;
+                if parameters.kind() != "type_parameter" && parameters.kind() != "type_parameter_list" {
+                    return canonical_python_type_from_node(parameters, src);
+                }
                 let mut cursor = parameters.walk();
                 return parameters
                     .named_children(&mut cursor)
@@ -4813,11 +5257,14 @@ fn canonical_python_type_from_node(node: Node<'_>, src: &[u8]) -> Option<String>
 fn canonical_python_type_name(raw: &str) -> Option<String> {
     let trimmed = raw.trim().split('|').next().unwrap_or(raw).trim();
     let head = trimmed.split('[').next().unwrap_or(trimmed).trim();
-    let bare = head.rsplit('.').next().unwrap_or(head).trim();
-    if bare.is_empty() {
+    if head.is_empty() {
         return None;
     }
-    Some(bare.to_string())
+    // Preserve the exact source-qualified annotation. Receiver matching can
+    // always compare its structural terminal type, while discarding the
+    // provider here makes two distinct compiler identities indistinguishable
+    // before import/local-shadow resolution can run.
+    Some(head.to_string())
 }
 
 fn push_python_type_alias(out: &mut Vec<TypeAliasBinding>, name: &str, type_name: &str) {

@@ -1,40 +1,4 @@
 # C# TLS misconfiguration.
-- id: csharp.tls.servercertificate_bypass
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: weak-tls
-  severity: critical
-  cwe: [CWE-295]
-  match:
-    kind: write
-    target:
-      name: ServerCertificateValidationCallback
-  match_examples:
-  - name: declared shape
-    code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ServerCertificateValidationCallback = input; } }
-  description: "Disabled broad duplicate - use csharp.tls.disable_verify_servicepoint_callback, which requires an explicit accept-all callback shape."
-
-- id: csharp.tls.servercertificate_callback_handler
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: weak-tls
-  severity: critical
-  cwe: [CWE-295]
-  match:
-    kind: write
-    target:
-      name: ServerCertificateCustomValidationCallback
-  match_examples:
-  - name: declared shape
-    code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ServerCertificateCustomValidationCallback = input; } }
-  description: "Disabled broad duplicate - use csharp.tls.disable_verify_httpclienthandler, which requires an explicit accept-all callback shape."
-
 - id: csharp.tls.security_protocol_ssl3
   enabled: true
   language: csharp
@@ -42,29 +6,35 @@
   category: source-independent
   severity: high
   cwe: [CWE-326]
+  imports: [System.Net]
   match:
     kind: write
     target:
-      name: SecurityProtocol
+      attribute: [ServicePointManager, SecurityProtocol]
+      receiver_type_in: [ServicePointManager, System.Net.ServicePointManager]
+      binding_origin: imported
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:SecurityProtocolType\.)?(?:Ssl3|Tls|Tls11)$'
   match_examples:
-  - name: declared shape
+  - name: imported service point manager uses obsolete TLS
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SecurityProtocol = input; } }
+      using System.Net;
+      class App { void Configure() { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls11; } }
+    expect_match_text: [ServicePointManager.SecurityProtocol]
+  - name: imported service point manager uses modern TLS
+    code: |
+      using System.Net;
+      class App { void Configure() { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; } }
+    expect_no_match: true
+  - name: local service point manager collision
+    code: |
+      using System.Net;
+      class ServicePointManager { public static SecurityProtocolType SecurityProtocol { get; set; } }
+      class App { void Configure() { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls11; } }
+    expect_no_match: true
   description: "ServicePointManager.SecurityProtocol = Ssl3/Tls/Tls11 - outdated protocol."
-
-- id: csharp.tls.checkcertrevocation_off
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: csharp
-  tag: weak-tls
-  severity: medium
-  cwe: [CWE-295]
-  match:
-    kind: write
-    target:
-      name: CheckCertificateRevocationList
-  description: "Disabled - CheckCertificateRevocationList=false; flag with constraint."
 
 - id: csharp.tls.ssl_protocols_assign
   enabled: true
@@ -73,14 +43,39 @@
   category: source-independent
   severity: high
   cwe: [CWE-326]
+  imports: [System.Net.Http, System.Net.Security, System.Security.Authentication]
   match:
     kind: write
     target:
-      name: SslProtocols
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.SslProtocols$'
+      receiver_type_in:
+      - HttpClientHandler
+      - System.Net.Http.HttpClientHandler
+      - SslClientAuthenticationOptions
+      - System.Net.Security.SslClientAuthenticationOptions
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^(?:SslProtocols\.)?(?:Ssl2|Ssl3|Tls|Tls11)$'
   match_examples:
-  - name: declared shape
+  - name: typed HTTP handler uses obsolete TLS
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SslProtocols = input; } }
+      using System.Net.Http;
+      using System.Security.Authentication;
+      class App { void Configure(HttpClientHandler handler) { handler.SslProtocols = SslProtocols.Tls11; } }
+    expect_match_text: [handler.SslProtocols]
+  - name: typed HTTP handler uses modern TLS
+    code: |
+      using System.Net.Http;
+      using System.Security.Authentication;
+      class App { void Configure(HttpClientHandler handler) { handler.SslProtocols = SslProtocols.Tls12; } }
+    expect_no_match: true
+  - name: unrelated TLS protocols member collision
+    code: |
+      using System.Security.Authentication;
+      class LocalOptions { public SslProtocols SslProtocols { get; set; } }
+      class App { void Configure(LocalOptions options) { options.SslProtocols = SslProtocols.Tls11; } }
+    expect_no_match: true
   description: "SslProtocols = Ssl3 / Tls / Tls11 - covers HttpClientHandler.SslProtocols, SslStream client opts, Kestrel HttpsConnectionAdapterOptions.SslProtocols."
 
 - id: csharp.tls.sslstream_authenticate_client
@@ -90,15 +85,60 @@
   category: source-independent
   severity: high
   cwe: [CWE-295]
+  imports: [System.Net.Security]
   match:
-    kind: call
+    kind: new
     callee:
-      attribute: [SslStream, AuthenticateAsClient]
+      name: SslStream
+      binding_origin: imported
+  constraints:
+  - arg_inline_callback_returns_static:
+      index: 2
+      value: {kind: boolean, value: true}
   match_examples:
-  - name: declared shape
+  - name: inline certificate callback always accepts
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SslStream.AuthenticateAsClient(input); } }
-  description: "SslStream.AuthenticateAsClient - flag when constructed with a `(_,_,_,_) => true` validation callback (no cert validation)."
+      using System.IO;
+      using System.Net.Security;
+      class App {
+        SslStream Open(Stream stream) =>
+          new SslStream(stream, false, (sender, certificate, chain, errors) => true);
+      }
+    expect_match_text: [SslStream]
+  - name: rejecting inline certificate callback
+    code: |
+      using System.IO;
+      using System.Net.Security;
+      class App {
+        SslStream Open(Stream stream) =>
+          new SslStream(stream, false, (sender, certificate, chain, errors) => false);
+      }
+    expect_no_match: true
+  - name: conditional inline certificate callback
+    code: |
+      using System.IO;
+      using System.Net.Security;
+      class App {
+        SslStream Open(Stream stream, bool allow) =>
+          new SslStream(stream, false, (sender, certificate, chain, errors) => allow ? true : false);
+      }
+    expect_no_match: true
+  - name: named certificate callback remains unproven
+    code: |
+      using System.IO;
+      using System.Net.Security;
+      class App {
+        bool Validate(object sender, object certificate, object chain, object errors) => true;
+        SslStream Open(Stream stream) => new SslStream(stream, false, Validate);
+      }
+    expect_no_match: true
+  - name: local stream type collision
+    code: |
+      using System.Net.Security;
+      class SslStream { public SslStream(object stream, bool leaveOpen, object callback) {} }
+      class App { object Open(object stream) => new SslStream(stream, false, value => true); }
+    expect_no_match: true
+  description: "SslStream constructed with a parsed inline certificate-validation callback whose complete return is the constant true disables certificate validation."
 
 - id: csharp.tls.servicepoint_dangerous_accept
   enabled: true
@@ -107,15 +147,37 @@
   category: source-independent
   severity: critical
   cwe: [CWE-295]
+  imports: [System.Net.Http]
   match:
     kind: write
     target:
-      name: DangerousAcceptAnyServerCertificateValidator
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.ServerCertificateCustomValidationCallback$'
+      receiver_type_in: [HttpClientHandler, System.Net.Http.HttpClientHandler]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^HttpClientHandler\.DangerousAcceptAnyServerCertificateValidator$'
   match_examples:
-  - name: declared shape
+  - name: typed handler uses framework accept-any delegate
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DangerousAcceptAnyServerCertificateValidator = input; } }
-  description: "HttpClientHandler.DangerousAcceptAnyServerCertificateValidator - explicitly disables server cert validation (modern .NET)."
+      using System.Net.Http;
+      class App {
+        void Configure(HttpClientHandler handler) {
+          handler.ServerCertificateCustomValidationCallback =
+            HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+        }
+      }
+    expect_match_text: [handler.ServerCertificateCustomValidationCallback]
+  - name: typed handler uses another validator
+    code: |
+      using System.Net.Http;
+      class App {
+        void Configure(HttpClientHandler handler, object validator) {
+          handler.ServerCertificateCustomValidationCallback = validator;
+        }
+      }
+    expect_no_match: true
+  description: "Assigning HttpClientHandler.DangerousAcceptAnyServerCertificateValidator to a typed handler callback explicitly disables certificate validation."
 
 # Disabled SSL/TLS verification (T404). Tagged weak-tls so
 # `security sinks --tag weak-tls` enumerates these alongside
@@ -126,17 +188,50 @@
   tag: weak-tls
   category: source-independent
   severity: high
+  imports: [System.Net]
   packages: [System.Net]
   cwe: [CWE-295]
   match:
     kind: write
     target:
       attribute: [ServicePointManager, ServerCertificateValidationCallback]
+      receiver_type_in: [ServicePointManager, System.Net.ServicePointManager]
+      binding_origin: imported
+  constraints:
+  - arg_inline_callback_returns_static:
+      index: 0
+      value: {kind: boolean, value: true}
   match_examples:
-  - name: declared shape
+  - name: imported global callback always accepts
     code: |
       using System.Net;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ServicePointManager.ServerCertificateValidationCallback = true; } }
+      class App {
+        void Configure() {
+          ServicePointManager.ServerCertificateValidationCallback =
+            (sender, certificate, chain, errors) => true;
+        }
+      }
+    expect_match_text: [ServicePointManager.ServerCertificateValidationCallback]
+  - name: imported global callback rejects
+    code: |
+      using System.Net;
+      class App {
+        void Configure() {
+          ServicePointManager.ServerCertificateValidationCallback =
+            (sender, certificate, chain, errors) => false;
+        }
+      }
+    expect_no_match: true
+  - name: local service point manager callback collision
+    code: |
+      using System.Net;
+      class ServicePointManager { public static object ServerCertificateValidationCallback { get; set; } }
+      class App {
+        void Configure() {
+          ServicePointManager.ServerCertificateValidationCallback = value => true;
+        }
+      }
+    expect_no_match: true
   description: "ServicePointManager.ServerCertificateValidationCallback = (s,c,ch,e) => true - disables TLS chain validation globally."
 - id: csharp.tls.disable_verify_httpclienthandler
   enabled: true
@@ -149,10 +244,41 @@
   match:
     kind: write
     target:
-      attribute: [HttpClientHandler, ServerCertificateCustomValidationCallback]
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.ServerCertificateCustomValidationCallback$'
+      receiver_type_in: [HttpClientHandler, System.Net.Http.HttpClientHandler]
+  constraints:
+  - arg_inline_callback_returns_static:
+      index: 0
+      value: {kind: boolean, value: true}
   match_examples:
-  - name: declared shape
+  - name: typed handler callback always accepts
     code: |
       using System.Net.Http;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpClientHandler.ServerCertificateCustomValidationCallback = true; } }
+      class App {
+        void Configure(HttpClientHandler handler) {
+          handler.ServerCertificateCustomValidationCallback =
+            (message, certificate, chain, errors) => true;
+        }
+      }
+    expect_match_text: [handler.ServerCertificateCustomValidationCallback]
+  - name: typed handler callback rejects
+    code: |
+      using System.Net.Http;
+      class App {
+        void Configure(HttpClientHandler handler) {
+          handler.ServerCertificateCustomValidationCallback =
+            (message, certificate, chain, errors) => false;
+        }
+      }
+    expect_no_match: true
+  - name: unrelated callback member collision
+    code: |
+      using System.Net.Http;
+      class LocalHandler { public object ServerCertificateCustomValidationCallback { get; set; } }
+      class App {
+        void Configure(LocalHandler handler) {
+          handler.ServerCertificateCustomValidationCallback = value => true;
+        }
+      }
+    expect_no_match: true
   description: "HttpClientHandler.ServerCertificateCustomValidationCallback = (m,c,ch,e) => true - per-handler TLS bypass."

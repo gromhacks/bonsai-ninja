@@ -1,19 +1,34 @@
 - id: java.typing.securerandom_getinstance
   enabled: true
   language: java
+  imports: [java.security]
   returns_type: SecureRandom
   match:
     kind: call
     callee:
       attribute: [SecureRandom, getInstance]
+      binding_origin: imported
   match_examples:
   - name: SecureRandom factory return
     code: |
+      import java.security.SecureRandom;
       class App {
         void handle() throws Exception {
-          java.util.Random generator = java.security.SecureRandom.getInstance("SHA1PRNG");
+          java.util.Random generator = SecureRandom.getInstance("SHA1PRNG");
           generator.nextBytes(new byte[16]);
         }
       }
-    expect_match_text: [java.security.SecureRandom.getInstance]
+    expect_match_text: [SecureRandom.getInstance]
+  - name: local SecureRandom owner is not java security
+    code: |
+      import java.security.SecureRandom;
+      class LocalRandom {
+        LocalRandom getInstance(String algorithm) { return this; }
+      }
+      class App {
+        Object handle(LocalRandom SecureRandom) throws Exception {
+          return SecureRandom.getInstance("local");
+        }
+      }
+    expect_no_match: true
   description: "SecureRandom.getInstance(...) returns SecureRandom even when stored in a java.util.Random variable; type the local so weak-random rules can exclude the secure implementation. Typing-only - never a finding."

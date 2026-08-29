@@ -132,32 +132,6 @@
       }
     expect_no_match: true
   description: "execv(path, argv) - tainted path or argv lets attacker choose the binary / flags."
-- id: c.cmdi.execv_argv
-  enabled: true
-  language: c
-  tag: command-injection
-  severity: critical
-  cwe: [CWE-78]
-  match:
-    kind: call
-    callee:
-      name: execv
-  constraints:
-  - arg_tainted:
-      index: 1
-  match_examples:
-  - name: tainted arg 1
-    code: |
-      void example(char *input) {
-        execv("safe", input);
-      }
-  - name: literal arg 1 negative
-    code: |
-      void example(void) {
-        execv("safe", "safe");
-      }
-    expect_no_match: true
-  description: "execv(path, argv) - tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
 - id: c.cmdi.execvp
   enabled: true
   language: c
@@ -863,35 +837,6 @@
   imports:
   - shellapi.h
   - shellapi
-- id: c.cmdi.win_shell_execute_ex_a
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  tag: command-injection
-  severity: critical
-  packages: [win32-shell]
-  cwe: [CWE-78]
-  match:
-    kind: call
-    callee:
-      name: ShellExecuteExA
-  match_examples:
-  - name: generated direct match
-    code: |
-      #include <shellapi.h>
-      #include <shellapi.h>
-      #include <shellapi.h> /* win32-shell */
-      #include <shellapi.h> /* win32-shell */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        ShellExecuteExA(arg);
-      }
-  description: "Disabled - ShellExecuteExA stores lpFile/lpParameters inside SHELLEXECUTEINFO; accurate matching needs struct-field tracking, so the call-only rule is over-broad."
-  imports:
-  - shellapi.h
-  - shellapi
 - id: c.cmdi.win_winexec
   enabled: true
   language: c
@@ -910,8 +855,6 @@
   - name: generated direct match
     code: |
       #include <windows.h>
-      #include <windows.h>
-      #include <windows.h> /* win32 */
       #include <windows.h> /* win32 */
       void example(char *arg) {
         char *fmt = arg;
@@ -979,16 +922,3 @@
       }
     expect_no_match: true
   description: "fexecve(fd, argv, envp) - tainted envp reaches the spawned process."
-- id: c.cmdi.fork_exec
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: c
-  tag: command-injection
-  severity: medium
-  cwe: [CWE-78]
-  match:
-    kind: call
-    callee:
-      name: fork
-  description: "Disabled - fork by itself is fine; flag with adjacent execve."

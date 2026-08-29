@@ -7,12 +7,13 @@
   tag: db-input
   payload_types: [text, binary]
   packages: [sqlx]
+  imports: ["sqlx::postgres", "sqlx::mysql", "sqlx::sqlite", "sqlx::any"]
   match:
     kind: call
     callee:
       regex: "\\.(get|try_get)$"
   constraints:
-  - receiver_type_in: [PgRow, MySqlRow, SqliteRow, AnyRow]
+  - receiver_type_in: [PgRow, "sqlx::postgres::PgRow", MySqlRow, "sqlx::mysql::MySqlRow", SqliteRow, "sqlx::sqlite::SqliteRow", AnyRow, "sqlx::any::AnyRow"]
   - min_args: 1
   - max_args: 1
   match_examples:
@@ -38,12 +39,13 @@
   tag: db-input
   payload_types: [text, binary]
   packages: [tokio_postgres]
+  imports: [tokio_postgres]
   match:
     kind: call
     callee:
       regex: "\\.(get|try_get)$"
   constraints:
-  - receiver_type_in: [Row, SimpleQueryRow]
+  - receiver_type_in: [Row, "tokio_postgres::Row", SimpleQueryRow, "tokio_postgres::SimpleQueryRow"]
   - min_args: 1
   - max_args: 1
   match_examples:
@@ -68,12 +70,13 @@
   tag: db-input
   payload_types: [text, binary]
   packages: [rusqlite]
+  imports: [rusqlite]
   match:
     kind: call
     callee:
       regex: "\\.(get|get_ref)$"
   constraints:
-  - receiver_type_in: [Row]
+  - receiver_type_in: [Row, "rusqlite::Row"]
   - min_args: 1
   - max_args: 1
   match_examples:

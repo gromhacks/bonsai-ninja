@@ -24,6 +24,16 @@
       - {input: '(', output: '\28'}
       - {input: ')', output: '\29'}
       - {input: "\0", output: '\00'}
+    character_constraint:
+      required_mappings:
+      - {input: '\', output: '\5c'}
+      - {input: '*', output: '\2a'}
+      - {input: '(', output: '\28'}
+      - {input: ')', output: '\29'}
+      - {input: "\0", output: '\00'}
+      accepted_providers:
+      - operation:
+          regex: '^(?:(?:java[.]lang[.])?String[.]replace#(?:character-literal|single-character-string|regex-meta-character-string))(?:[|](?:java[.]lang[.])?String[.]replace#(?:character-literal|single-character-string|regex-meta-character-string))*$'
   match_examples:
   - name: JNDI DirContext search tainted filter
     code: |

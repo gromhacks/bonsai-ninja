@@ -32,7 +32,10 @@ fn repo_root() -> PathBuf {
 }
 
 fn fixture_root(lang: &str) -> Option<PathBuf> {
-    let p = repo_root().join("examples").join(lang).join("sanitizer_credit");
+    let p = repo_root()
+        .join("test-fixtures/languages")
+        .join(lang)
+        .join("sanitizer_credit");
     if !p.is_dir() {
         return None;
     }

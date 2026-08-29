@@ -1,0 +1,33 @@
+# Compiler-typed Foundation receiver-state transfers. These rules contribute
+# graph facts only and never report findings.
+- id: swift.typing.process_arguments_receiver_state
+  enabled: true
+  language: swift
+  packages: [Foundation]
+  imports: [Foundation]
+  match:
+    kind: write
+    target:
+      name: arguments
+      receiver_type_in: [Process]
+  constraints:
+  - arg_tainted: {index: 0}
+  taint_semantics:
+    taint_receiver_from_args: true
+  match_examples:
+  - name: Foundation Process arguments update receiver state
+    code: |
+      import Foundation
+      func configure(_ process: Process, input: String) {
+          process.arguments = ["-c", input]
+      }
+    expect_match_text: [process.arguments]
+  - name: local arguments binding is not Process state
+    code: |
+      import Foundation
+      func configure(input: String) {
+          let arguments = [input]
+          consume(arguments)
+      }
+    expect_no_match: true
+  description: "A tainted write to compiler-typed Foundation Process.arguments transfers influence into the receiver; command-execution rules separately decide whether the configured executable interprets argv as shell syntax. Typing-only — never a finding."

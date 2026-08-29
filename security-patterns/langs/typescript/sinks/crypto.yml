@@ -8,15 +8,15 @@
   - crypto
   imports:
   - crypto
+  - node:crypto
   cwe:
   - CWE-327
   - CWE-328
   match:
     kind: call
     callee:
-      attribute:
-      - crypto
-      - createHash
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.createHash$'
+      binding_origin: imported
   constraints:
   - arg_matches_regex:
       index: 0
@@ -24,24 +24,36 @@
   match_examples:
   - name: createhash md5
     code: |
-      const _u = require("crypto");
+      const crypto = require("crypto");
       function demo(input, req, obj) {
         return crypto.createHash('md5');
       }
     expect_match_text: [crypto.createHash]
   - name: createhash sha1
     code: |
-      const _u = require("crypto");
+      const crypto = require("crypto");
       function demo(input, req, obj) {
         return crypto.createHash('sha1');
       }
     expect_match_text: [crypto.createHash]
   - name: createhash sha256 negative
     code: |
-      const _u = require("crypto");
+      const crypto = require("crypto");
       function demo(input, req, obj) {
         return crypto.createHash('sha256');
       }
+    expect_no_match: true
+  - name: aliased Node crypto hash provider
+    code: |
+      import * as nodeCrypto from "node:crypto";
+      nodeCrypto.createHash("sha1");
+    expect_match_text: [nodeCrypto.createHash]
+  - name: application createHash collision negative
+    code: |
+      import runtimeCrypto = require("crypto");
+      void runtimeCrypto.createHash;
+      const crypto = { createHash(name: string) { return name; } };
+      crypto.createHash("md5");
     expect_no_match: true
   description: "crypto.createHash('md5'|'sha1') - broken/deprecated hash. The arg-0 algorithm regex pins the weak digests so sha256/sha512 stay quiet. Merged aliases: typescript.crypto.createhash_sha1."
   aliases:
@@ -54,14 +66,16 @@
   severity: high
   packages:
   - crypto
+  imports:
+  - crypto
+  - node:crypto
   cwe:
   - CWE-327
   match:
     kind: call
     callee:
-      attribute:
-      - crypto
-      - createCipheriv
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.createCipheriv$'
+      binding_origin: imported
   constraints:
   - arg_matches_regex:
       index: 0
@@ -69,24 +83,36 @@
   match_examples:
   - name: createcipher des
     code: |
-      const _u = require("crypto");
+      const crypto = require("crypto");
       function demo(input, req, obj) {
         return crypto.createCipheriv('des');
       }
     expect_match_text: [crypto.createCipheriv]
   - name: createcipher aes ecb
     code: |
-      const _u = require("crypto");
+      const crypto = require("crypto");
       function demo(input, req, obj) {
         return crypto.createCipheriv('aes-128-ecb');
       }
     expect_match_text: [crypto.createCipheriv]
   - name: createcipher aes gcm negative
     code: |
-      const _u = require("crypto");
+      const crypto = require("crypto");
       function demo(input, req, obj) {
         return crypto.createCipheriv('aes-256-gcm', key, iv);
       }
+    expect_no_match: true
+  - name: aliased Node crypto cipher provider
+    code: |
+      import * as nodeCrypto from "node:crypto";
+      nodeCrypto.createCipheriv("des");
+    expect_match_text: [nodeCrypto.createCipheriv]
+  - name: application createCipheriv collision negative
+    code: |
+      import runtimeCrypto = require("crypto");
+      void runtimeCrypto.createCipheriv;
+      const crypto = { createCipheriv(name: string) { return name; } };
+      crypto.createCipheriv("des");
     expect_no_match: true
   description: "crypto.createCipheriv('des'|'rc4'|'*-ecb', ...) - weak cipher or ECB mode. The arg-0 algorithm regex pins broken ciphers/modes so aes-*-gcm/cbc stay quiet. Merged aliases: typescript.crypto.createcipher_des_ede, typescript.crypto.createcipher_rc4, typescript.crypto.createcipher_aes_ecb."
   aliases:
@@ -160,6 +186,11 @@
       attribute:
       - crypto
       - createDecipheriv
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "(?i)^['\"][a-z0-9-]*-gcm['\"]$"
+  - arg_count: 3
   match_examples:
   - name: gcm decipher missing auth tag length
     code: |
@@ -169,7 +200,21 @@
       }
     expect_match_text:
     - crypto.createDecipheriv
-  description: crypto.createDecipheriv('*-gcm', key, iv) without authTagLength can accept unexpectedly short GCM tags.
+  - name: gcm decipher with explicit auth tag length negative
+    code: |
+      const crypto = require("crypto");
+      function demo(key: Buffer, iv: Buffer) {
+        return crypto.createDecipheriv("aes-256-gcm", key, iv, { authTagLength: 16 });
+      }
+    expect_no_match: true
+  - name: non-GCM decipher negative
+    code: |
+      const crypto = require("crypto");
+      function demo(key: Buffer, iv: Buffer) {
+        return crypto.createDecipheriv("aes-256-cbc", key, iv);
+      }
+    expect_no_match: true
+  description: "Node crypto.createDecipheriv with a compiler-decoded GCM algorithm and exactly three arguments omits authTagLength; explicit tag-length options and non-GCM modes stay quiet."
 - id: typescript.crypto.cryptojs_md5
   enabled: true
   language: typescript

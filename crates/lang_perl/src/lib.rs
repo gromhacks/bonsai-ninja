@@ -1,15 +1,18 @@
 //! Perl language adapter.
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
-    decl_index_with_handler, extract_imports_via,
+    decl_index_from_tree_with_handler, extract_imports_via,
     kit::{
         call_arg_from_node_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
-        named_child_call_args_with_handler, node_at_span, node_text, parse_with, span_of,
+        named_child_call_args_with_handler, node_at_span, node_text, parse_with,
+        populate_call_argument_static_values, span_of,
     },
     AdapterContext, AdapterError, AssignValueKind, AssignmentNodeSemantics, AssignmentValueIndex, CallArg,
-    CallKind, CallTargetExtraction, DeclIndex, DeclKind, ExpressionPlaceExtraction, FieldWrite, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModulePath, Ref, RefKind, TypeAliasBinding,
+    CallKind, CallTargetExtraction, CompilerGuardFact, ConditionEquality, ConditionExpressionFact,
+    ConditionOperandFact, DeclIndex, DeclKind, ExpressionPlaceExtraction, FieldWrite,
+    FiniteLiteralSelectionFact, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
+    LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind, StaticScalarValue,
+    StringCompositionFact, StringCompositionPart, TypeAliasBinding,
 };
 
 fn extract_perl_pseudo_call(
@@ -18,6 +21,33 @@ fn extract_perl_pseudo_call(
     src: &[u8],
     handler: &GrammarHandler,
 ) -> Option<FlowEvent> {
+    if node.kind() == "substitution_regexp" {
+        let content = node.child_by_field_name("content")?;
+        let mut args = vec![perl_call_arg_from_node(content, file, src, None)?];
+        let replacement = node.child_by_field_name("replacement").or_else(|| {
+            let mut cursor = node.walk();
+            let replacement = node
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "replacement");
+            replacement
+        });
+        if let Some(replacement) = replacement {
+            args.push(perl_call_arg_from_node(replacement, file, src, None)?);
+        }
+        if let Some(modifiers) = node.child_by_field_name("modifiers") {
+            args.push(perl_call_arg_from_node(modifiers, file, src, None)?);
+        }
+        return Some(FlowEvent::Call {
+            span: span_of(file, &node),
+            receiver: perl_substitution_receiver(node, src)
+                .and_then(|receiver| perl_expression_places(receiver, src).places.into_iter().next())
+                .or_else(|| Some("$_".to_string())),
+            receiver_types: Vec::new(),
+            name: "s".to_string(),
+            call_kind: CallKind::Operator,
+            args,
+        });
+    }
     let name = match node.kind() {
         "eval_expression" if node.named_child(0).is_none_or(|child| child.kind() != "block") => "eval",
         // `undef EXPR` is a Perl language operator with call-like value
@@ -35,6 +65,20 @@ fn extract_perl_pseudo_call(
         call_kind: CallKind::Function,
         args: named_child_call_args_with_handler(&node, file, src, handler),
     })
+}
+
+/// Return the exact mutable operand of `$value =~ s///`. A bare `s///`
+/// operates on Perl's implicit `$_` carrier and therefore has no explicit
+/// receiver node.
+fn perl_substitution_receiver<'tree>(node: Node<'tree>, _src: &[u8]) -> Option<Node<'tree>> {
+    let parent = node
+        .parent()
+        .filter(|parent| parent.kind() == "binary_expression")?;
+    parent
+        .child_by_field_name("right")
+        .is_some_and(|right| right.id() == node.id())
+        .then(|| parent.child_by_field_name("left"))
+        .flatten()
 }
 use tree_sitter::{Language, Node, Tree};
 
@@ -63,7 +107,7 @@ fn extract_perl_syntax_event(
 }
 
 fn perl_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
-    if !matches!(node.kind(), "foreach_statement" | "for_statement") {
+    if node.kind() != "for_statement" {
         return None;
     }
     if let (Some(binding), Some(iterable)) = (
@@ -143,11 +187,7 @@ fn perl_expression_places(node: Node<'_>, src: &[u8]) -> ExpressionPlaceExtracti
 fn perl_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
     if !matches!(
         node.kind(),
-        "call_expression"
-            | "function_call_expression"
-            | "subroutine_call_expression"
-            | "method_call_expression"
-            | "ambiguous_function_call_expression"
+        "function_call_expression" | "method_call_expression" | "ambiguous_function_call_expression"
     ) {
         return None;
     }
@@ -160,6 +200,83 @@ fn perl_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetEx
         node: target,
         full_text: full_text.to_string(),
     })
+}
+
+/// Decode the value-producing call on the right side of a Perl assignment.
+///
+/// `tree-sitter-perl` represents `Class->method(...)` as a method-call node
+/// whose generic `function` field is only the invocant.  Reading that field
+/// alone turns `my $x = Class->method()` into the false fact
+/// `source_call = Class`.  Keep this adapter fact purely syntactic: combine
+/// the grammar's exact `invocant` and `method` fields and lower its argument
+/// field, without assigning any library meaning to either spelling.
+fn perl_direct_call_info(
+    node: Node<'_>,
+    src: &[u8],
+    _handler: &GrammarHandler,
+) -> Option<(Option<String>, Vec<String>)> {
+    fn direct_call_node<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
+        if matches!(
+            node.kind(),
+            "function_call_expression" | "method_call_expression" | "ambiguous_function_call_expression"
+        ) {
+            return Some(node);
+        }
+        // `my $value = source() // <static default>` still has one exact
+        // value-producing call: Perl's defined-or operator returns the left
+        // operand unchanged whenever it is defined. Preserve that compiler
+        // dependency without treating arbitrary nested calls as assignment
+        // results. A dynamic RHS is deliberately rejected because both
+        // operands could then provide the value.
+        if node.kind() == "binary_expression" {
+            let left = node.child_by_field_name("left")?;
+            let right = node.child_by_field_name("right")?;
+            let operator = src
+                .get(left.end_byte()..right.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(str::trim);
+            if operator == Some("//") && perl_static_scalar(right, src).is_some() {
+                return direct_call_node(left, src);
+            }
+            return None;
+        }
+        // Assignment/declaration wrappers may own the grammar field while
+        // the RHS call is their one direct value child.  Never search an
+        // arbitrary descendant: a nested call in a condition or aggregate
+        // is not the assignment's value-producing call.
+        for field in ["right", "value", "initializer"] {
+            if let Some(child) = node.child_by_field_name(field) {
+                return direct_call_node(child, src);
+            }
+        }
+        None
+    }
+
+    let call = direct_call_node(node, src)?;
+    let name = if call.kind() == "method_call_expression" {
+        let invocant = call.child_by_field_name("invocant")?;
+        let method = call.child_by_field_name("method")?;
+        let receiver = node_text(&invocant, src)
+            .trim()
+            .trim_start_matches(['$', '@', '%']);
+        let method = node_text(&method, src).trim();
+        if receiver.is_empty() || method.is_empty() {
+            return None;
+        }
+        format!("{receiver}->{method}")
+    } else {
+        perl_call_target(call, src)?.full_text
+    };
+    let args = call
+        .child_by_field_name("arguments")
+        .map(|arguments| perl_list_args(&arguments, src, FileId::INVALID))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|argument| argument.name.is_none())
+        .map(|argument| argument.value_text)
+        .filter(|value| !value.trim().is_empty())
+        .collect();
+    Some((Some(name), args))
 }
 
 /// Perl's `variable_declaration` is the binding pattern on the left of an
@@ -180,23 +297,15 @@ fn perl_assignment_semantics(node: Node<'_>, _src: &[u8]) -> AssignmentNodeSeman
 const PERL_CLASS_KINDS: &[&str] = &["package_statement", "class_statement"];
 
 const HANDLER: GrammarHandler = GrammarHandler {
-    literal_value_kinds: &["special_literal", "integer", "octal", "number"],
+    literal_value_kinds: &["number"],
     literal_value_spellings: &[],
-    string_literal_kinds: &[
-        "interpolated_string_literal",
-        "string_literal",
-        "string_double_quoted",
-        "string_single_quoted",
-        "string_q_quoted",
-        "string_qq_quoted",
-        "heredoc_body_statement",
-    ],
+    string_literal_kinds: &["interpolated_string_literal", "string_literal"],
     comment_kinds: &["comment"],
     doc_comment_kinds: &[],
     doc_comment_prefixes: &[],
     decorator_kinds: &["attribute"],
-    parameter_container_kinds: &["parameters"],
-    parameter_kinds: &["parameter", "variable_name", "varname"],
+    parameter_container_kinds: &["signature"],
+    parameter_kinds: &["mandatory_parameter", "optional_parameter", "slurpy_parameter"],
     parameter_modifier_kinds: &[],
     parameter_annotation_kinds: &["attribute"],
     parameter_annotation_name_extractor: None,
@@ -205,7 +314,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     implicit_parameter_kinds: &[],
     self_parameter_kinds: &[],
     last_identifier_parameter_kinds: &[],
-    binding_identifier_kinds: &["identifier", "variable_name", "varname"],
+    binding_identifier_kinds: &["identifier", "varname"],
     non_binding_pattern_kinds: &[],
     binding_lhs_pattern_kinds: &[],
     binding_pattern_field_names: &[],
@@ -217,10 +326,10 @@ const HANDLER: GrammarHandler = GrammarHandler {
     pattern_binding_extractor: None,
     projected_pattern_binding_extractor: None,
     anonymous_variadic_token: None,
-    variadic_parameter_kinds: &[],
+    variadic_parameter_kinds: &["slurpy_parameter"],
     destructured_parameter_kinds: &[],
-    identifier_kinds: &["identifier", "variable_name", "varname"],
-    aggregate_pattern_kinds: &["list_expression", "variable_list", "variables"],
+    identifier_kinds: &["identifier", "varname"],
+    aggregate_pattern_kinds: &["list_expression"],
     comprehension_kinds: &[],
     comprehension_binding_clause_kinds: &[],
     comprehension_binding_extractor: None,
@@ -238,8 +347,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     aggregate_syntax_only_kinds: &[],
     multi_child_aggregate_pattern_kinds: &[],
     lambda_value_container_kinds: &[],
-    transparent_call_wrapper_kinds: &["member_expression", "parenthesized_expression"],
-    single_expression_group_kinds: &["expression_list"],
+    transparent_call_wrapper_kinds: &[],
+    single_expression_group_kinds: &[],
     assignment_target_wrapper_kinds: &["variable_declaration"],
     binding_declaration_keyword_spellings: &["my", "our", "state", "local"],
     nested_type_ownership: true,
@@ -264,61 +373,62 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "conditional_statement",
         "conditional_expression",
         "postfix_conditional_expression",
-        "if_statement",
-        "unless_statement",
-        "if_simple_statement",
-        "unless_simple_statement",
+        "elsif",
     ],
-    branch_then_field_names: &["consequence", "body"],
+    branch_then_field_names: &["body", "block"],
     branch_else_field_names: &["alternative"],
     branch_condition_field_names: &["condition"],
     branch_condition_kinds: &[],
+    branch_condition_is_first_named_child: false,
+    condition_group_kinds: &[],
+    condition_all_operators: &["&&", "and"],
+    condition_any_operators: &["||", "or"],
+    condition_not_operators: &["!", "not"],
+    condition_not_operator_kinds: &[],
     branch_alias_extractor: None,
-    branch_arm_kinds: &["block", "block_statement", "expression_statement"],
+    branch_arm_kinds: &[
+        "block",
+        "block_statement",
+        "expression_statement",
+        "elsif",
+        "else",
+    ],
+    exclusive_branch_arm_kinds: &[],
+    fallthrough_branch_arm_kinds: &[],
+    exclusive_catch_arm_kinds: &[],
     // `tree-sitter-perl` wraps the trailing branch in an unfielded `else`
     // node rather than attaching it as `alternative` on the conditional.
-    additional_alternative_kinds: &["else"],
-    for_kinds: &[
-        "for_statement_1",
-        "for_statement_2",
-        "for_simple_statement",
-        "cstyle_for_statement",
-    ],
-    foreach_kinds: &["for_statement", "foreach_statement"],
+    additional_alternative_kinds: &[],
+    for_kinds: &["cstyle_for_statement"],
+    foreach_kinds: &["for_statement"],
     foreach_binding_extractor: Some(perl_foreach_binding),
-    while_kinds: &[
-        "while_statement",
-        "until_statement",
-        "while_simple_statement",
-        "until_simple_statement",
-        "loop_statement",
-    ],
+    while_kinds: &["loop_statement"],
     do_kinds: &[],
     loop_kinds: &[],
-    loop_body_field_names: &["body"],
+    loop_body_field_names: &["body", "block"],
     loop_body_kinds: &["block", "block_statement", "expression_statement"],
+    loop_header_container_kinds: &[],
+    loop_update_field_names: &["iterator"],
     call_kinds: &[
-        "call_expression",
         "function_call_expression",
-        "subroutine_call_expression",
         "method_call_expression",
         "ambiguous_function_call_expression",
     ],
     constructor_call_kinds: &[],
     nested_call_component_kinds: &[],
-    call_callee_field_names: &["function", "function_name"],
-    call_receiver_field_names: &["object", "invocant"],
-    call_member_field_names: &["function_name", "method"],
+    call_callee_field_names: &["function"],
+    call_receiver_field_names: &["invocant"],
+    call_member_field_names: &["method"],
     constructor_type_field_names: &[],
-    call_argument_field_names: &["args", "arguments"],
-    call_argument_container_kinds: &["arguments", "argument_list"],
+    call_argument_field_names: &["arguments"],
+    call_argument_container_kinds: &[],
     call_argument_wrapper_kinds: &[],
     call_callee_is_first_named_child: true,
     argument_wrapper_kinds: &[],
     argument_name_field_names: &[],
     argument_value_field_names: &[],
     named_argument_extractor: None,
-    direct_call_info_extractor: None,
+    direct_call_info_extractor: Some(perl_direct_call_info),
     call_target_extractor: Some(perl_call_target),
     call_receiver_extractor: None,
     call_ref_node_filter: None,
@@ -330,7 +440,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     syntax_event_extractor: Some(extract_perl_syntax_event),
     syntax_events_extractor: None,
     call_encoded_control_flow_extractor: None,
-    pseudo_call_receiver_extractor: None,
+    pseudo_call_receiver_extractor: Some(perl_substitution_receiver),
     argument_passing_mode_extractor: None,
     expression_value_kind_extractor: None,
     assignment_kinds: &["assignment_expression", "variable_declaration"],
@@ -355,7 +465,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     finally_kinds: &[],
     try_fallback_body_kinds: &["block"],
     catch_body_follows_marker: false,
-    break_kinds: &["loop_control_statement"],
+    break_kinds: &[],
     continue_kinds: &[],
     control_label_field_names: &[],
     yield_kinds: &[],
@@ -377,9 +487,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     value_free_call_names: &[],
     value_free_unary_operators: &[],
     call_ref_kinds: &[
-        "call_expression",
         "function_call_expression",
-        "subroutine_call_expression",
         "method_call_expression",
         "ambiguous_function_call_expression",
     ],
@@ -461,14 +569,104 @@ impl LanguageAdapter for PerlAdapter {
             ..LanguageCapabilities::partial_baseline()
         }
     }
+    fn grammar_handler(&self) -> Option<&'static GrammarHandler> {
+        Some(&HANDLER)
+    }
+    fn additional_grammar_node_kinds(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("custom lowering", "ambiguous_function_call_expression"),
+            ("custom lowering", "anonymous_hash_expression"),
+            ("custom lowering", "array"),
+            ("custom lowering", "assignment_expression"),
+            ("custom lowering", "autoquoted_bareword"),
+            ("custom lowering", "bareword"),
+            ("custom lowering", "binary_expression"),
+            ("custom lowering", "block"),
+            ("custom lowering", "class_statement"),
+            ("custom lowering", "command_string"),
+            ("custom lowering", "container_variable"),
+            ("custom lowering", "eval_expression"),
+            ("custom lowering", "filehandle"),
+            ("custom lowering", "for_statement"),
+            ("custom lowering", "func1op_call_expression"),
+            ("custom lowering", "function_call_expression"),
+            ("custom lowering", "hash"),
+            ("custom lowering", "hash_element_expression"),
+            ("custom lowering", "heredoc_content"),
+            ("custom lowering", "heredoc_token"),
+            ("custom lowering", "mandatory_parameter"),
+            ("custom lowering", "list_expression"),
+            ("custom lowering", "lowprec_logical_expression"),
+            ("custom lowering", "loopex_expression"),
+            ("custom lowering", "map_grep_expression"),
+            ("custom lowering", "match_regexp"),
+            ("custom lowering", "method_call_expression"),
+            ("custom lowering", "optional_parameter"),
+            ("custom lowering", "package_statement"),
+            ("custom lowering", "quoted_word_list"),
+            ("custom lowering", "regexp_content"),
+            ("custom lowering", "require_expression"),
+            ("custom lowering", "scalar"),
+            ("custom lowering", "signature"),
+            ("custom lowering", "slurpy_parameter"),
+            ("custom lowering", "string_content"),
+            ("custom lowering", "string_literal"),
+            ("custom lowering", "substitution_regexp"),
+            ("custom lowering", "undef"),
+            ("custom lowering", "undef_expression"),
+            ("custom lowering", "use_statement"),
+            ("custom lowering", "variable_declaration"),
+            ("custom lowering", "varname"),
+        ]
+    }
+
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
-        let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
         let parsed = parse_with(PACK_NAME, file, ctx);
+        let mut idx = parsed.as_ref().map_or_else(
+            || DeclIndex {
+                file,
+                ..DeclIndex::default()
+            },
+            |(snapshot, tree)| {
+                decl_index_from_tree_with_handler(file, snapshot.text.as_bytes(), tree, &HANDLER)
+            },
+        );
         let source = parsed
             .as_ref()
             .map(|(snapshot, _)| snapshot.text.to_string())
             .unwrap_or_default();
+        if let Some((_, tree)) = parsed.as_ref() {
+            idx.finite_literal_selections =
+                collect_perl_finite_literal_selections(&idx, tree, file, source.as_bytes());
+            populate_call_argument_static_values(
+                &mut idx,
+                tree,
+                file,
+                source.as_bytes(),
+                &HANDLER,
+                perl_static_scalar,
+            );
+            populate_perl_constant_static_values(&mut idx, tree, file, source.as_bytes());
+            populate_perl_assignment_static_call_arguments(&mut idx);
+            populate_perl_condition_expressions(&mut idx.branch_conditions, tree, file, source.as_bytes());
+            idx.compiler_guards.extend(perl_compound_static_allowlist_guards(
+                tree,
+                file,
+                source.as_bytes(),
+            ));
+            let string_compositions = collect_perl_string_compositions(&idx, tree, file, source.as_bytes());
+            idx.string_compositions.extend(string_compositions);
+            idx.string_compositions
+                .sort_by_key(|fact| (fact.value_span.start, fact.value_span.end));
+            idx.string_compositions.dedup();
+        }
         let assignment_values = AssignmentValueIndex::new(&idx.assignment_values);
+        let heredoc_sources = parsed
+            .as_ref()
+            .map(|(_, tree)| collect_perl_heredoc_assignment_sources(tree, file, source.as_bytes()));
+        let readline_sources = parsed
+            .as_ref()
+            .map(|(_, tree)| collect_perl_readline_assignment_sources(tree, file, source.as_bytes()));
         // Perl's tree-sitter grammar doesn't label subroutine
         // parameters structurally — every sub is parameterless at
         // the grammar level. Real code binds positional args via
@@ -509,6 +707,11 @@ impl LanguageAdapter for PerlAdapter {
                 .extend(extract_perl_special_variable_refs(tree, source.as_bytes(), file));
             let mut calls = synthesize_qx_call_events(tree, source.as_bytes(), file);
             calls.extend(synthesize_method_call_events(tree, source.as_bytes(), file));
+            calls.extend(synthesize_qualified_function_call_events(
+                tree,
+                source.as_bytes(),
+                file,
+            ));
             calls.extend(synthesize_builtin_call_events(tree, source.as_bytes(), file));
             calls.extend(synthesize_builtin_expression_arg_call_events(
                 tree,
@@ -527,6 +730,12 @@ impl LanguageAdapter for PerlAdapter {
             }
         }
         for decl in &mut idx.defs {
+            if let Some(heredoc_sources) = heredoc_sources.as_ref() {
+                normalize_perl_heredoc_assignments(&mut decl.flow_events, heredoc_sources);
+            }
+            if let Some(readline_sources) = readline_sources.as_ref() {
+                normalize_perl_readline_assignments(&mut decl.flow_events, readline_sources);
+            }
             normalize_perl_package_call_kinds(&mut decl.flow_events);
             rewrite_perl_call_arg_texts(&mut decl.flow_events, &source);
             normalize_perl_hash_deref_flow_events(&mut decl.flow_events, &source, &assignment_values);
@@ -534,6 +743,7 @@ impl LanguageAdapter for PerlAdapter {
                 expand_perl_anonymous_hash_field_assigns(&mut decl.flow_events, tree, source.as_bytes());
             }
             normalize_perl_simple_scalar_renames(&mut decl.flow_events, &source, &assignment_values);
+            normalize_perl_list_result_targets(&mut decl.flow_events, &source, &assignment_values);
             augment_perl_collection_flow_events(&mut decl.flow_events, &source, &assignment_values);
             inject_perl_coderef_aliases(&mut decl.flow_events, &source, &assignment_values);
             if let Some((_, tree)) = parsed.as_ref() {
@@ -543,6 +753,7 @@ impl LanguageAdapter for PerlAdapter {
                     &source,
                     &assignment_values,
                 );
+                normalize_perl_short_circuit_flow(&mut decl.flow_events, tree, file, source.as_bytes());
             }
             // L1: lower `die` to Throw across the WHOLE sub body, not
             // just inside an `eval {}; if ($@)` region. This seeds a
@@ -608,6 +819,13 @@ impl LanguageAdapter for PerlAdapter {
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
         }
+        // Several Perl syntax repairs append exact Call facts after the
+        // generic declaration walk. Restore compiler evaluation order only
+        // after every repair has run; otherwise CFG normalization can see a
+        // later `return` before an earlier synthesized call and correctly
+        // discard that call as unreachable. The shared normalizer uses AST
+        // containment and source spans, not API names.
+        bonsai_lang_api::normalize_decl_event_evaluation_order(&mut idx);
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
@@ -623,6 +841,1104 @@ impl LanguageAdapter for PerlAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+/// Associate Perl's out-of-line heredoc body with the assignment whose RHS is
+/// the grammar's `heredoc_token`. Tree-sitter stores `heredoc_content` as the
+/// next named sibling of the assignment statement, so the generic assignment
+/// walker cannot see interpolated values as descendants of the RHS node.
+/// This adapter-owned relation is exact: only that grammar-proven sibling
+/// shape contributes value dependencies.
+fn collect_perl_heredoc_assignment_sources(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<Span, Vec<String>> {
+    let mut out = std::collections::HashMap::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "assignment_expression"
+            && node
+                .child_by_field_name("right")
+                .is_some_and(|right| right.kind() == "heredoc_token")
+        {
+            let content = node
+                .parent()
+                .filter(|parent| parent.kind() == "expression_statement")
+                .and_then(|statement| statement.next_named_sibling())
+                .filter(|sibling| sibling.kind() == "heredoc_content");
+            if let Some(content) = content {
+                let flow = bonsai_lang_api::kit::expression_flow_from_node_with_handler(
+                    content, file, src, &HANDLER,
+                );
+                let mut sources = flow.source_names;
+                if let Some(place) = flow.place {
+                    if !sources.contains(&place) {
+                        sources.push(place);
+                    }
+                }
+                sources.sort();
+                sources.dedup();
+                out.insert(span_of(file, &node), sources);
+            }
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    out
+}
+
+fn normalize_perl_heredoc_assignments(
+    events: &mut [FlowEvent],
+    heredoc_sources: &std::collections::HashMap<Span, Vec<String>>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                value_kind,
+                ..
+            } if heredoc_sources.contains_key(span) => {
+                let sources = heredoc_sources.get(span).expect("checked heredoc source span");
+                *source_name = (sources.len() == 1).then(|| sources[0].clone());
+                *source_call = None;
+                source_call_args.clear();
+                source_names.clone_from(sources);
+                *value_kind = Some(if sources.is_empty() {
+                    AssignValueKind::Literal
+                } else {
+                    AssignValueKind::Compound
+                });
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_perl_heredoc_assignments(then_events, heredoc_sources);
+                normalize_perl_heredoc_assignments(else_events, heredoc_sources);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_perl_heredoc_assignments(body, heredoc_sources);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_perl_heredoc_assignments(body, heredoc_sources);
+                normalize_perl_heredoc_assignments(catch_events, heredoc_sources);
+                normalize_perl_heredoc_assignments(finally_events, heredoc_sources);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Record the exact filehandle value read by Perl's `<HANDLE>` syntax.
+///
+/// Tree-sitter exposes this as `assignment_expression(right:
+/// readline_expression(filehandle))`. The shared expression walker cannot
+/// treat every filehandle token as an ordinary variable place, so the Perl
+/// frontend attaches the grammar-proven handle identity to the assignment.
+/// Rule data decides whether a particular handle is a security source.
+fn collect_perl_readline_assignment_sources(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<Span, String> {
+    let mut out = std::collections::HashMap::new();
+    for assignment in collect_kinds(tree, &["assignment_expression"]) {
+        let Some(readline) = assignment
+            .child_by_field_name("right")
+            .filter(|right| right.kind() == "readline_expression")
+        else {
+            continue;
+        };
+        let mut cursor = readline.walk();
+        let Some(handle) = readline
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == "filehandle")
+        else {
+            continue;
+        };
+        let name = node_text(&handle, src).trim();
+        if !name.is_empty() {
+            out.insert(span_of(file, &assignment), name.to_string());
+        }
+    }
+    out
+}
+
+fn normalize_perl_readline_assignments(
+    events: &mut [FlowEvent],
+    sources: &std::collections::HashMap<Span, String>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                value_kind,
+                ..
+            } if sources.contains_key(span) => {
+                let source = sources.get(span).expect("checked readline assignment span");
+                *source_name = Some(source.clone());
+                *source_call = None;
+                source_call_args.clear();
+                source_names.clear();
+                source_names.push(source.clone());
+                *value_kind = Some(AssignValueKind::Compound);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_perl_readline_assignments(then_events, sources);
+                normalize_perl_readline_assignments(else_events, sources);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_perl_readline_assignments(body, sources);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_perl_readline_assignments(body, sources);
+                normalize_perl_readline_assignments(catch_events, sources);
+                normalize_perl_readline_assignments(finally_events, sources);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_perl_finite_literal_selections(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<FiniteLiteralSelectionFact> {
+    struct FiniteHash {
+        name: String,
+        declaration_end: u64,
+    }
+
+    let assignments = collect_kinds(tree, &["assignment_expression"]);
+    let mut maps = Vec::new();
+    for assignment in &assignments {
+        if node_has_ancestor_kind(*assignment, "subroutine_declaration_statement") {
+            continue;
+        }
+        let Some(left) = assignment.child_by_field_name("left") else {
+            continue;
+        };
+        let Some(right) = perl_assignment_rhs(*assignment, left) else {
+            continue;
+        };
+        let Some(hash) = first_named_child_of_kind(&left, "hash") else {
+            continue;
+        };
+        let name = perl_identifier_text(node_text(&hash, src).trim()).to_string();
+        if name.is_empty()
+            || !perl_static_string_hash(right, src)
+            || !perl_hash_binding_is_stable(tree, hash.id(), &name, src)
+        {
+            continue;
+        }
+        maps.push(FiniteHash {
+            name,
+            declaration_end: assignment.end_byte() as u64,
+        });
+    }
+
+    let mut facts = Vec::new();
+    for assignment in assignments {
+        let Some(left) = assignment.child_by_field_name("left") else {
+            continue;
+        };
+        let Some(value) = perl_assignment_rhs(assignment, left) else {
+            continue;
+        };
+        let Some(lookup) = perl_finite_hash_lookup(value, src) else {
+            continue;
+        };
+        let Some(map_name) = lookup
+            .child_by_field_name("hash")
+            .or_else(|| lookup.named_child(0))
+            .map(|hash| perl_identifier_text(node_text(&hash, src).trim()))
+        else {
+            continue;
+        };
+        if !maps
+            .iter()
+            .any(|map| map.name == map_name && map.declaration_end <= assignment.start_byte() as u64)
+        {
+            continue;
+        }
+        let selection_span = span_of(file, &lookup);
+        if !perl_value_is_finite_hash_selection(value, map_name, src) {
+            continue;
+        }
+        let assignment_span = span_of(file, &assignment);
+        let target = index
+            .assignment_values
+            .iter()
+            .find(|fact| fact.assignment_span == assignment_span)
+            .and_then(|fact| fact.target.clone());
+        if target.is_some() {
+            facts.push(FiniteLiteralSelectionFact {
+                selection_span,
+                assignment_span: Some(assignment_span),
+                target,
+                call_span: None,
+                argument_index: None,
+            });
+        }
+    }
+    bonsai_lang_api::kit::sort_dedup_finite_literal_selections(&mut facts);
+    facts
+}
+
+fn perl_assignment_rhs<'tree>(assignment: Node<'tree>, left: Node<'tree>) -> Option<Node<'tree>> {
+    assignment
+        .child_by_field_name("right")
+        .filter(Node::is_named)
+        .or_else(|| {
+            let mut cursor = assignment.walk();
+            assignment
+                .named_children(&mut cursor)
+                .filter(|child| child.id() != left.id())
+                .last()
+        })
+}
+
+fn node_has_ancestor_kind(mut node: Node<'_>, kind: &str) -> bool {
+    while let Some(parent) = node.parent() {
+        if parent.kind() == kind {
+            return true;
+        }
+        node = parent;
+    }
+    false
+}
+
+fn perl_static_string_hash(node: Node<'_>, src: &[u8]) -> bool {
+    if node.kind() != "list_expression" || node.named_child_count() == 0 || node.named_child_count() % 2 != 0
+    {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let is_static = node
+        .named_children(&mut cursor)
+        .all(|value| perl_static_string(value, src).is_some());
+    is_static
+}
+
+const PERL_GUARD_TERMINAL_COMPOUND_STATIC_ALLOWLIST: &str = "terminal-predicate.compound-static-allowlist";
+
+/// Lower Perl's terminal compound predicate into API-neutral evidence. The
+/// frontend proves the parser assignment, exact scalar comparison, lookup in
+/// a finite map built from a quoted-word list, parsed-component consumption,
+/// and exact receiver factory options. Rule data owns all security meaning.
+fn perl_compound_static_allowlist_guards(tree: &Tree, file: FileId, src: &[u8]) -> Vec<CompilerGuardFact> {
+    let static_collections = perl_static_map_collections(tree, src);
+    let mut facts = Vec::new();
+    for function in collect_kinds(tree, &["subroutine_declaration_statement"]) {
+        let Some(body) = function.child_by_field_name("body") else {
+            continue;
+        };
+        let calls = perl_collect_kinds_below(body, &["method_call_expression"]);
+        for branch in perl_collect_kinds_below(body, &["postfix_conditional_expression"]) {
+            let (Some(terminal), Some(condition)) =
+                (branch.named_child(0), branch.child_by_field_name("condition"))
+            else {
+                continue;
+            };
+            let keyword = src
+                .get(terminal.end_byte()..condition.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(str::trim);
+            if terminal.kind() != "return_expression" || keyword != Some("unless") {
+                continue;
+            }
+            let Some(predicate) = perl_compound_acceptance_predicate(condition, src, &static_collections)
+            else {
+                continue;
+            };
+            let Some(parser) = perl_collect_kinds_below(body, &["assignment_expression"])
+                .into_iter()
+                .filter(|assignment| assignment.end_byte() <= branch.start_byte())
+                .filter_map(|assignment| perl_parser_assignment(assignment, src))
+                .filter(|assignment| assignment.output == predicate.parsed_place)
+                .max_by_key(|assignment| assignment.start)
+            else {
+                continue;
+            };
+            for guarded_call in calls
+                .iter()
+                .copied()
+                .filter(|call| call.start_byte() > branch.end_byte())
+            {
+                let guarded_args = perl_direct_method_arguments(guarded_call);
+                let component_relations = guarded_args
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, argument)| {
+                        let (receiver, component, _) = perl_accessor_call(*argument, src)?;
+                        (receiver == predicate.parsed_place)
+                            .then(|| format!("guarded-argument:{index}=predicate-component:{component}"))
+                    })
+                    .collect::<Vec<_>>();
+                if component_relations.is_empty() {
+                    continue;
+                }
+                let (Some(guarded_receiver), Some(guarded_method)) = (
+                    guarded_call
+                        .child_by_field_name("invocant")
+                        .and_then(|node| perl_exact_place(node, src)),
+                    guarded_call.child_by_field_name("method"),
+                ) else {
+                    continue;
+                };
+                let Some(factory) =
+                    perl_receiver_factory_before(body, guarded_call.start_byte(), &guarded_receiver, src)
+                else {
+                    continue;
+                };
+                let mut evidence = vec![
+                    "predicate-complete:true".to_string(),
+                    "finite-static-string-membership:true".to_string(),
+                    format!("parser-call:{}", parser.call_name),
+                    format!("scheme-component:{}", predicate.scheme_component),
+                    format!("scheme-value:string:{}", predicate.scheme_value),
+                    "membership-kind:hash-element".to_string(),
+                    format!("membership-component:{}", predicate.host_component),
+                    format!("receiver-factory-call:{}", factory.call_name),
+                ];
+                evidence.extend(component_relations);
+                evidence.extend(factory.argument_evidence);
+                evidence.sort();
+                evidence.dedup();
+                facts.push(CompilerGuardFact {
+                    function_span: span_of(file, &function),
+                    guarded_call_span: span_of(file, &guarded_method),
+                    proof_span: span_of(file, &branch),
+                    capability: PERL_GUARD_TERMINAL_COMPOUND_STATIC_ALLOWLIST.to_string(),
+                    evidence,
+                });
+            }
+        }
+    }
+    facts.sort_by(|left, right| {
+        (
+            left.function_span.start,
+            left.guarded_call_span.start,
+            left.proof_span.start,
+            &left.evidence,
+        )
+            .cmp(&(
+                right.function_span.start,
+                right.guarded_call_span.start,
+                right.proof_span.start,
+                &right.evidence,
+            ))
+    });
+    facts.dedup();
+    facts
+}
+
+struct PerlParserAssignment {
+    start: usize,
+    output: String,
+    call_name: String,
+}
+
+struct PerlCompoundPredicate {
+    parsed_place: String,
+    scheme_component: String,
+    scheme_value: String,
+    host_component: String,
+}
+
+struct PerlReceiverFactory {
+    call_name: String,
+    argument_evidence: Vec<String>,
+}
+
+fn perl_parser_assignment(assignment: Node<'_>, src: &[u8]) -> Option<PerlParserAssignment> {
+    let output = perl_assignment_target_place(assignment.child_by_field_name("left")?, src)?;
+    let call = assignment.child_by_field_name("right")?;
+    let (receiver, method) = perl_method_identity(call, src)?;
+    let arguments = perl_direct_method_arguments(call);
+    let [_argument] = arguments.as_slice() else {
+        return None;
+    };
+    Some(PerlParserAssignment {
+        start: assignment.start_byte(),
+        output,
+        call_name: format!("{receiver}.{method}"),
+    })
+}
+
+fn perl_compound_acceptance_predicate(
+    condition: Node<'_>,
+    src: &[u8],
+    static_collections: &std::collections::HashMap<String, Vec<String>>,
+) -> Option<PerlCompoundPredicate> {
+    let equality = perl_collect_kinds_below(condition, &["equality_expression"])
+        .into_iter()
+        .next()?;
+    let (equality_left, equality_right) = (
+        equality.child_by_field_name("left")?,
+        equality.child_by_field_name("right")?,
+    );
+    let (parsed_place, scheme_component, _) = perl_accessor_call(equality_left, src)?;
+    let scheme_value = perl_static_string(equality_right, src)?;
+    let membership = perl_collect_kinds_below(condition, &["hash_element_expression"])
+        .into_iter()
+        .next()?;
+    let collection = membership
+        .child_by_field_name("hash")
+        .or_else(|| membership.named_child(0))
+        .and_then(|node| perl_exact_place(node, src))?;
+    if !static_collections.contains_key(perl_place_key(&collection)) {
+        return None;
+    }
+    let key = membership
+        .child_by_field_name("key")
+        .or_else(|| membership.named_child(1))?;
+    let host_call = perl_collect_kinds_below(key, &["method_call_expression"])
+        .into_iter()
+        .next()?;
+    let (host_receiver, host_component, _) = perl_accessor_call(host_call, src)?;
+    if host_receiver != parsed_place {
+        return None;
+    }
+    Some(PerlCompoundPredicate {
+        parsed_place,
+        scheme_component,
+        scheme_value,
+        host_component,
+    })
+}
+
+fn perl_static_map_collections(tree: &Tree, src: &[u8]) -> std::collections::HashMap<String, Vec<String>> {
+    let mut collections = std::collections::HashMap::new();
+    for assignment in collect_kinds(tree, &["assignment_expression"]) {
+        let Some(target) = assignment
+            .child_by_field_name("left")
+            .and_then(|left| perl_collect_kinds_below(left, &["hash"]).into_iter().next())
+            .and_then(|hash| perl_exact_place(hash, src))
+        else {
+            continue;
+        };
+        let Some(map) = assignment
+            .child_by_field_name("right")
+            .filter(|right| right.kind() == "map_grep_expression")
+        else {
+            continue;
+        };
+        let Some(callback) = map.child_by_field_name("callback").or_else(|| map.named_child(0)) else {
+            continue;
+        };
+        let callback_text = node_text(&callback, src)
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        if callback_text != "{$_=>1}" {
+            continue;
+        }
+        let Some(words) = map.child_by_field_name("list").or_else(|| {
+            perl_collect_kinds_below(map, &["quoted_word_list"])
+                .into_iter()
+                .next()
+        }) else {
+            continue;
+        };
+        let Some(content) = words
+            .child_by_field_name("content")
+            .or_else(|| words.named_child(0))
+        else {
+            continue;
+        };
+        let raw = node_text(&content, src);
+        if raw.contains('\\') {
+            continue;
+        }
+        let values = raw.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        if !values.is_empty() {
+            collections.insert(perl_place_key(&target).to_string(), values);
+        }
+    }
+    collections
+}
+
+fn perl_receiver_factory_before(
+    body: Node<'_>,
+    before: usize,
+    receiver: &str,
+    src: &[u8],
+) -> Option<PerlReceiverFactory> {
+    perl_collect_kinds_below(body, &["assignment_expression"])
+        .into_iter()
+        .filter(|assignment| assignment.end_byte() <= before)
+        .filter_map(|assignment| {
+            let target = perl_assignment_target_place(assignment.child_by_field_name("left")?, src)?;
+            if target != receiver {
+                return None;
+            }
+            let call = assignment.child_by_field_name("right")?;
+            let (factory_receiver, method) = perl_method_identity(call, src)?;
+            let arguments = perl_direct_method_arguments(call);
+            let mut argument_evidence = Vec::new();
+            for pair in arguments.chunks_exact(2) {
+                let key = node_text(&pair[0], src).trim();
+                let value = perl_compiler_evidence_operand(pair[1], src)?;
+                if key.is_empty() {
+                    return None;
+                }
+                argument_evidence.push(format!("receiver-config:{key}={value}"));
+            }
+            Some((
+                assignment.start_byte(),
+                PerlReceiverFactory {
+                    call_name: format!("{factory_receiver}.{method}"),
+                    argument_evidence,
+                },
+            ))
+        })
+        .max_by_key(|(start, _)| *start)
+        .map(|(_, factory)| factory)
+}
+
+fn perl_assignment_target_place(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if let Some(place) = perl_exact_place(node, src) {
+        return Some(place);
+    }
+    perl_collect_kinds_below(node, &["scalar", "hash", "array"])
+        .into_iter()
+        .next()
+        .and_then(|node| perl_exact_place(node, src))
+}
+
+fn perl_exact_place(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "scalar" | "hash" | "array" | "container_variable" | "bareword" | "package" => {
+            let value = node_text(&node, src).trim();
+            (!value.is_empty()).then(|| value.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn perl_place_key(place: &str) -> &str {
+    place.trim_start_matches(['$', '%', '@'])
+}
+
+fn perl_method_identity(node: Node<'_>, src: &[u8]) -> Option<(String, String)> {
+    if node.kind() != "method_call_expression" {
+        return None;
+    }
+    let receiver = node
+        .child_by_field_name("invocant")
+        .and_then(|receiver| perl_exact_place(receiver, src))?;
+    let method = node_text(&node.child_by_field_name("method")?, src)
+        .trim()
+        .to_string();
+    (!method.is_empty()).then_some((receiver, method))
+}
+
+fn perl_accessor_call<'tree>(node: Node<'tree>, src: &[u8]) -> Option<(String, String, Node<'tree>)> {
+    if !perl_direct_method_arguments(node).is_empty() {
+        return None;
+    }
+    let receiver = node
+        .child_by_field_name("invocant")
+        .and_then(|receiver| perl_exact_place(receiver, src))?;
+    let method = node.child_by_field_name("method")?;
+    let component = node_text(&method, src).trim();
+    (!component.is_empty()).then(|| (receiver, component.to_string(), method))
+}
+
+fn perl_direct_method_arguments(node: Node<'_>) -> Vec<Node<'_>> {
+    let Some(arguments) = node.child_by_field_name("arguments") else {
+        return Vec::new();
+    };
+    if arguments.kind() == "list_expression" {
+        let mut cursor = arguments.walk();
+        return arguments.named_children(&mut cursor).collect();
+    }
+    vec![arguments]
+}
+
+fn perl_compiler_evidence_operand(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match perl_static_scalar(node, src) {
+        Some(StaticScalarValue::String(value)) => Some(format!("string:{value}")),
+        Some(StaticScalarValue::Boolean(value)) => Some(format!("boolean:{value}")),
+        Some(StaticScalarValue::Null) => Some("null".to_string()),
+        Some(StaticScalarValue::Integer(value)) => Some(format!("number:{value}")),
+        None => perl_exact_place(node, src).map(|value| format!("place:{value}")),
+    }
+}
+
+fn perl_collect_kinds_below<'tree>(node: Node<'tree>, kinds: &[&str]) -> Vec<Node<'tree>> {
+    let mut result = Vec::new();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.id() != node.id() && kinds.contains(&current.kind()) {
+            result.push(current);
+        }
+        let mut cursor = current.walk();
+        let mut children = current.named_children(&mut cursor).collect::<Vec<_>>();
+        children.reverse();
+        stack.extend(children);
+    }
+    result
+}
+
+fn perl_static_string(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "autoquoted_bareword" => Some(node_text(&node, src).trim().to_string()),
+        "string_content" if !node_has_descendant_kind(node, "scalar") => {
+            let text = node_text(&node, src);
+            (!text.contains(['\\', '\n', '\r'])).then(|| text.to_string())
+        }
+        "string_literal" | "interpolated_string_literal" if !node_has_descendant_kind(node, "scalar") => {
+            let text = node_text(&node, src).trim();
+            if text.len() < 2 {
+                return None;
+            }
+            let quote = text.as_bytes()[0];
+            ((quote == b'\'' || quote == b'"') && text.as_bytes().last() == Some(&quote))
+                .then(|| text[1..text.len() - 1].to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Perl method-call facts key arguments to the callee span while assignment
+/// values cover the complete invocation. Join those two compiler-owned spans
+/// to retain a complete ordered scalar vector; ambiguity or any dynamic
+/// argument keeps the vector unknown.
+fn populate_perl_assignment_static_call_arguments(index: &mut DeclIndex) {
+    for assignment in &mut index.assignment_values {
+        if assignment.direct_call_name.is_none() {
+            continue;
+        }
+        let mut candidates = index
+            .call_argument_values
+            .iter()
+            .filter(|argument| {
+                assignment.value_span.start <= argument.call_span.start
+                    && argument.call_span.end <= assignment.value_span.end
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|argument| (argument.call_span.start, argument.argument_index));
+        let Some(first) = candidates.first() else {
+            continue;
+        };
+        if candidates
+            .iter()
+            .any(|argument| argument.call_span != first.call_span)
+        {
+            continue;
+        }
+        let mut values = Vec::with_capacity(candidates.len());
+        for (expected_index, argument) in candidates.into_iter().enumerate() {
+            if argument.argument_index != expected_index {
+                values.clear();
+                break;
+            }
+            let Some(value) = argument.static_value.clone() else {
+                values.clear();
+                break;
+            };
+            values.push(value);
+        }
+        if !values.is_empty() {
+            assignment.exact_static_call_args = Some(values);
+        }
+    }
+}
+
+/// Decode only Perl scalars whose runtime truth value is unambiguous from the
+/// parsed literal. Security meaning remains in rule data; this frontend fact
+/// merely preserves the exact language value used by configuration APIs.
+fn perl_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
+    if let Some(value) = perl_static_string(node, src) {
+        return Some(StaticScalarValue::String(value));
+    }
+    if node.kind() == "number" {
+        return match node_text(&node, src).trim() {
+            "0" => Some(StaticScalarValue::Boolean(false)),
+            "1" => Some(StaticScalarValue::Boolean(true)),
+            _ => None,
+        };
+    }
+    (node.kind() == "undef").then_some(StaticScalarValue::Null)
+}
+
+/// Preserve the exact immutable scalar introduced by Perl's declarative
+/// `use constant NAME => VALUE` form. Tree-sitter represents this as a
+/// `use_statement`, not as an assignment, so the shared assignment extractor
+/// cannot publish the binding without this grammar-owned bridge.
+fn populate_perl_constant_static_values(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    for statement in collect_kinds(tree, &["use_statement"]) {
+        let Some(module) = statement.child_by_field_name("module") else {
+            continue;
+        };
+        if node_text(&module, src).trim() != "constant" {
+            continue;
+        }
+        let Some(arguments) = first_named_child_of_kind(&statement, "list_expression") else {
+            continue;
+        };
+        let mut cursor = arguments.walk();
+        let children = arguments.named_children(&mut cursor).collect::<Vec<_>>();
+        let [name, value] = children.as_slice() else {
+            continue;
+        };
+        if name.kind() != "autoquoted_bareword" {
+            continue;
+        }
+        let target = node_text(name, src).trim();
+        let Some(static_value) = perl_static_scalar(*value, src) else {
+            continue;
+        };
+        let assignment_span = span_of(file, &statement);
+        if index
+            .assignment_values
+            .iter()
+            .any(|fact| fact.assignment_span == assignment_span && fact.target.as_deref() == Some(target))
+        {
+            continue;
+        }
+        index
+            .assignment_values
+            .push(bonsai_lang_api::AssignmentValueFact {
+                assignment_span,
+                target: Some(target.to_string()),
+                target_is_immutable: true,
+                target_owner: None,
+                target_span: Some(span_of(file, name)),
+                value_span: span_of(file, value),
+                call_sites: Vec::new(),
+                value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(
+                    *value, file, src, &HANDLER,
+                ),
+                static_value: Some(static_value),
+                exact_callable_return: None,
+                inline_callback_static_return: None,
+                inline_callback_fields: Vec::new(),
+                exact_static_call_args: None,
+                direct_call_name: None,
+                direct_call_span: None,
+                direct_call_receiver: None,
+                direct_call_receiver_span: None,
+                direct_call_receiver_flow: None,
+            });
+    }
+    index.assignment_values.sort_by_key(|fact| {
+        (
+            fact.assignment_span.start,
+            fact.assignment_span.end,
+            fact.target_span.map_or(0, |span| span.start),
+        )
+    });
+    index.assignment_values.dedup();
+}
+
+fn perl_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
+    ConditionOperandFact {
+        span: span_of(file, &node),
+        direct_call_span: matches!(
+            node.kind(),
+            "function_call_expression"
+                | "method_call_expression"
+                | "ambiguous_function_call_expression"
+                | "func1op_call_expression"
+        )
+        .then(|| span_of(file, &node)),
+        value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER),
+        static_string: perl_static_string(node, src),
+        static_value: perl_static_scalar(node, src),
+    }
+}
+
+fn lower_perl_condition_expression(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionExpressionFact {
+    let span = span_of(file, &node);
+    let mut cursor = node.walk();
+    let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+    if let [operand] = children.as_slice() {
+        let operator = src
+            .get(node.start_byte()..operand.start_byte())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(str::trim);
+        if matches!(operator, Some("!" | "not")) {
+            return ConditionExpressionFact::Not {
+                span,
+                operand: Box::new(lower_perl_condition_expression(*operand, file, src)),
+            };
+        }
+    }
+    if matches!(node.kind(), "binary_expression" | "equality_expression") {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left").or_else(|| node.named_child(0)),
+            node.child_by_field_name("right").or_else(|| node.named_child(1)),
+        ) {
+            let operator = src
+                .get(left.end_byte()..right.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(str::trim);
+            if matches!(operator, Some("==" | "eq" | "!=" | "ne")) {
+                return ConditionExpressionFact::Equality {
+                    span,
+                    relation: if matches!(operator, Some("==" | "eq")) {
+                        ConditionEquality::Equal
+                    } else {
+                        ConditionEquality::NotEqual
+                    },
+                    left: perl_condition_operand(left, file, src),
+                    right: perl_condition_operand(right, file, src),
+                };
+            }
+            let all = matches!(operator, Some("&&" | "and"));
+            let any = matches!(operator, Some("||" | "or"));
+            if all || any {
+                let operands = vec![
+                    lower_perl_condition_expression(left, file, src),
+                    lower_perl_condition_expression(right, file, src),
+                ];
+                return if all {
+                    ConditionExpressionFact::All { span, operands }
+                } else {
+                    ConditionExpressionFact::Any { span, operands }
+                };
+            }
+        }
+    }
+    ConditionExpressionFact::Atom { span }
+}
+
+fn populate_perl_condition_expressions(
+    facts: &mut [bonsai_lang_api::BranchConditionFact],
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) {
+    for fact in facts {
+        let Some(condition) = node_at_span(tree.root_node(), fact.condition_span, &[]) else {
+            continue;
+        };
+        let expression = lower_perl_condition_expression(condition, file, src);
+        let is_unless = condition.parent().is_some_and(|parent| {
+            let mut cursor = parent.walk();
+            let found = parent.children(&mut cursor).any(|child| child.kind() == "unless");
+            found
+        });
+        if is_unless {
+            fact.polarity = bonsai_lang_api::BranchConditionPolarity::Negated;
+            fact.expression = Some(ConditionExpressionFact::Not {
+                span: fact.condition_span,
+                operand: Box::new(expression),
+            });
+        } else {
+            fact.expression = Some(expression);
+        }
+    }
+}
+
+fn collect_perl_string_compositions(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<StringCompositionFact> {
+    fn lower(node: Node<'_>, file: FileId, src: &[u8], out: &mut Vec<StringCompositionPart>) -> bool {
+        if let Some(value) = perl_static_string(node, src) {
+            out.push(StringCompositionPart::Literal { value });
+            return true;
+        }
+        if node.kind() == "interpolated_string_literal" {
+            let Some(content) = node
+                .child_by_field_name("content")
+                .or_else(|| node.named_child(0))
+            else {
+                return false;
+            };
+            let mut cursor = content.walk();
+            let children = content.named_children(&mut cursor).collect::<Vec<_>>();
+            if children.is_empty() {
+                return false;
+            }
+            let mut offset = content.start_byte();
+            for child in children {
+                if child.start_byte() > offset {
+                    let Some(literal) = src
+                        .get(offset..child.start_byte())
+                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                    else {
+                        return false;
+                    };
+                    if literal.contains('\\') {
+                        return false;
+                    }
+                    if !literal.is_empty() {
+                        out.push(StringCompositionPart::Literal {
+                            value: literal.to_string(),
+                        });
+                    }
+                }
+                let places = perl_expression_places(child, src).places;
+                let [place] = places.as_slice() else {
+                    return false;
+                };
+                out.push(StringCompositionPart::Place { place: place.clone() });
+                offset = child.end_byte();
+            }
+            if offset < content.end_byte() {
+                let Some(literal) = src
+                    .get(offset..content.end_byte())
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                else {
+                    return false;
+                };
+                if literal.contains('\\') {
+                    return false;
+                }
+                if !literal.is_empty() {
+                    out.push(StringCompositionPart::Literal {
+                        value: literal.to_string(),
+                    });
+                }
+            }
+            return out.len() >= 2;
+        }
+        let places = perl_expression_places(node, src).places;
+        if places.len() == 1 && node.kind() != "binary_expression" {
+            out.push(StringCompositionPart::Place {
+                place: places[0].clone(),
+            });
+            return true;
+        }
+        if node.kind() != "binary_expression" {
+            return false;
+        }
+        let (Some(left), Some(right)) = (
+            node.child_by_field_name("left").or_else(|| node.named_child(0)),
+            node.child_by_field_name("right").or_else(|| node.named_child(1)),
+        ) else {
+            return false;
+        };
+        let operator = src
+            .get(left.end_byte()..right.start_byte())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(str::trim);
+        operator == Some(".") && lower(left, file, src, out) && lower(right, file, src, out)
+    }
+
+    let mut facts = Vec::new();
+    for expression in collect_kinds(tree, &["binary_expression", "interpolated_string_literal"]) {
+        let mut parts = Vec::new();
+        if !lower(expression, file, src, &mut parts) || parts.len() < 2 {
+            continue;
+        }
+        let value_span = span_of(file, &expression);
+        let assignment = index
+            .assignment_values
+            .iter()
+            .filter(|fact| fact.value_span.start <= value_span.start && value_span.end <= fact.value_span.end)
+            .min_by_key(|fact| fact.value_span.len());
+        facts.push(StringCompositionFact {
+            container_span: assignment.map_or(value_span, |fact| fact.assignment_span),
+            value_span,
+            target: assignment.and_then(|fact| fact.target.clone()),
+            dynamic_anchor_span: None,
+            parts,
+        });
+    }
+    facts
+}
+
+fn node_has_descendant_kind(node: Node<'_>, kind: &str) -> bool {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.id() != node.id() && current.kind() == kind {
+            return true;
+        }
+        let mut cursor = current.walk();
+        stack.extend(current.named_children(&mut cursor));
+    }
+    false
+}
+
+fn perl_hash_binding_is_stable(tree: &Tree, declaration_hash_id: usize, name: &str, src: &[u8]) -> bool {
+    for hash in collect_kinds(tree, &["hash"]) {
+        if perl_identifier_text(node_text(&hash, src).trim()) == name && hash.id() != declaration_hash_id {
+            return false;
+        }
+    }
+    for variable in collect_kinds(tree, &["container_variable"]) {
+        if perl_identifier_text(node_text(&variable, src).trim()) != name {
+            continue;
+        }
+        let Some(projected) = variable
+            .parent()
+            .filter(|parent| parent.kind() == "hash_element_expression")
+        else {
+            return false;
+        };
+        let mut current = Some(projected);
+        while let Some(node) = current {
+            if matches!(node.kind(), "delete_expression" | "undef_expression") {
+                return false;
+            }
+            if node.kind() == "assignment_expression" {
+                if node.child_by_field_name("left").is_some_and(|left| {
+                    left.start_byte() <= projected.start_byte() && projected.end_byte() <= left.end_byte()
+                }) {
+                    return false;
+                }
+                break;
+            }
+            current = node.parent();
+        }
+    }
+    true
+}
+
+fn perl_finite_hash_lookup<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
+    if node.kind() == "hash_element_expression" {
+        return Some(node);
+    }
+    if node.kind() != "binary_expression" || !node_text(&node, src).contains("//") {
+        return None;
+    }
+    let left = node.child_by_field_name("left")?;
+    let right = node.child_by_field_name("right")?;
+    (left.kind() == "hash_element_expression" && perl_static_string(right, src).is_some()).then_some(left)
+}
+
+fn perl_value_is_finite_hash_selection(node: Node<'_>, map_name: &str, src: &[u8]) -> bool {
+    let Some(lookup) = perl_finite_hash_lookup(node, src) else {
+        return false;
+    };
+    lookup
+        .child_by_field_name("hash")
+        .or_else(|| lookup.named_child(0))
+        .is_some_and(|hash| perl_identifier_text(node_text(&hash, src).trim()) == map_name)
 }
 
 /// Preserve both the exact sigil-bearing storage place and its canonical
@@ -966,9 +2282,32 @@ fn apply_perl_package_semantic_identity(idx: &mut DeclIndex) {
     }
     for decl in &mut idx.defs {
         if is_class_like(decl.kind) {
-            let module_path = ModulePath::from_segments([decl.name.clone()]);
-            decl.module_path = module_path;
-            decl.qualified_name = Some(decl.name.clone());
+            // Perl writes the complete namespace in one `package`
+            // declaration (`package Domain::Repository`).  The shared type
+            // resolver, like a compiler symbol table, stores the terminal
+            // declaration name separately from its owning module path.  A
+            // qualified package must therefore lower to:
+            //
+            //   name           = Repository
+            //   module_path    = Domain
+            //   qualified_name = Domain::Repository
+            //
+            // Keeping the complete namespace in `name` makes an exact
+            // compiler-proven receiver type impossible to resolve from a
+            // different package, even though both facts carry the same
+            // qualified identity.
+            let qualified = decl.name.clone();
+            let mut segments = qualified
+                .split("::")
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            if let Some(name) = segments.pop() {
+                decl.name = name;
+                decl.module_path = ModulePath::from_segments(segments);
+            }
+            decl.qualified_name = Some(qualified);
             continue;
         }
         if !matches!(
@@ -985,7 +2324,13 @@ fn apply_perl_package_semantic_identity(idx: &mut DeclIndex) {
             continue;
         };
         decl.parent = Some(*package_symbol);
-        decl.module_path = ModulePath::from_segments([package_name.clone()]);
+        decl.module_path = ModulePath::from_segments(
+            package_name
+                .split("::")
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty())
+                .map(str::to_string),
+        );
         decl.qualified_name = Some(format!("{package_name}::{}", decl.name));
     }
 }
@@ -1407,6 +2752,7 @@ fn rewrite_perl_eval_exception_regions(
             finally_events: Vec::new(),
             catch_param,
             catch_types: Vec::new(),
+            catch_arms: Vec::new(),
         });
         idx = body_end + 1;
     }
@@ -1415,6 +2761,130 @@ fn rewrite_perl_eval_exception_regions(
 
 fn event_span(event: &FlowEvent) -> Option<Span> {
     Some(event.span())
+}
+
+#[derive(Clone, Debug)]
+struct PerlShortCircuitRegion {
+    span: Span,
+    right_span: Span,
+    branch_condition: String,
+}
+
+/// Lower Perl's expression-level `or`/`and` (and `||`/`&&`) effects into
+/// explicit conditional control flow. The generic walker correctly extracts
+/// calls, assignments, returns, and throws from both operands, but a flat
+/// event list would make a right-hand `return` unconditional and let CFG
+/// reachability delete every later statement. Tree-sitter supplies exact
+/// operand fields and the adapter owns the operator vocabulary, so shared CFG
+/// and IDG code consume only an ordinary [`FlowEvent::Branch`].
+fn normalize_perl_short_circuit_flow(events: &mut Vec<FlowEvent>, tree: &Tree, file: FileId, src: &[u8]) {
+    let mut regions = collect_kinds(tree, &["lowprec_logical_expression", "binary_expression"])
+        .into_iter()
+        .filter_map(|node| {
+            let left = node.child_by_field_name("left")?;
+            let right = node.child_by_field_name("right")?;
+            let operator = std::str::from_utf8(src.get(left.end_byte()..right.start_byte())?)
+                .ok()?
+                .trim();
+            let executes_when_true = match operator {
+                "and" | "&&" => true,
+                "or" | "||" => false,
+                _ => return None,
+            };
+            let left_text = node_text(&left, src).trim();
+            if left_text.is_empty() {
+                return None;
+            }
+            Some(PerlShortCircuitRegion {
+                span: span_of(file, &node),
+                right_span: span_of(file, &right),
+                branch_condition: if executes_when_true {
+                    left_text.to_string()
+                } else {
+                    format!("!({left_text})")
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    // Inner expressions must acquire their own branch before an outer right
+    // operand can move that complete branch into its conditional arm.
+    regions.sort_by_key(|region| region.span.len());
+    for region in regions {
+        rewrite_perl_short_circuit_region(events, &region);
+    }
+}
+
+fn rewrite_perl_short_circuit_region(events: &mut Vec<FlowEvent>, region: &PerlShortCircuitRegion) -> bool {
+    let selected = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            let span = event.span();
+            (span.file == region.right_span.file
+                && span.start >= region.right_span.start
+                && span.end <= region.right_span.end)
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if let Some(&insert_at) = selected.first() {
+        let selected_set = selected.into_iter().collect::<std::collections::HashSet<_>>();
+        let mut right_events = Vec::new();
+        let mut retained = Vec::with_capacity(events.len());
+        for (index, event) in std::mem::take(events).into_iter().enumerate() {
+            if selected_set.contains(&index) {
+                right_events.push(event);
+            } else {
+                retained.push(event);
+            }
+        }
+        if right_events.is_empty() {
+            *events = retained;
+            return false;
+        }
+        let retained_insert = insert_at.min(retained.len());
+        retained.insert(
+            retained_insert,
+            FlowEvent::Branch {
+                span: region.span,
+                condition: Some(region.branch_condition.clone()),
+                then_events: right_events,
+                else_events: Vec::new(),
+            },
+        );
+        *events = retained;
+        return true;
+    }
+
+    for event in events {
+        let rewritten = match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_perl_short_circuit_region(then_events, region)
+                    || rewrite_perl_short_circuit_region(else_events, region)
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rewrite_perl_short_circuit_region(body, region)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_perl_short_circuit_region(body, region)
+                    || rewrite_perl_short_circuit_region(catch_events, region)
+                    || rewrite_perl_short_circuit_region(finally_events, region)
+            }
+            _ => false,
+        };
+        if rewritten {
+            return true;
+        }
+    }
+    false
 }
 
 fn span_inside_eval_body(span: Span, block: PerlEvalBlockRange) -> bool {
@@ -1508,6 +2978,7 @@ fn lower_perl_die_calls_to_throws(events: Vec<FlowEvent>) -> Vec<FlowEvent> {
                 finally_events,
                 catch_param,
                 catch_types,
+                catch_arms,
             } => out.push(FlowEvent::Try {
                 span,
                 body: lower_perl_die_calls_to_throws(body),
@@ -1515,6 +2986,7 @@ fn lower_perl_die_calls_to_throws(events: Vec<FlowEvent>) -> Vec<FlowEvent> {
                 finally_events: lower_perl_die_calls_to_throws(finally_events),
                 catch_param,
                 catch_types,
+                catch_arms,
             }),
             FlowEvent::Defer { span, body } => out.push(FlowEvent::Defer {
                 span,
@@ -2508,6 +3980,88 @@ fn perl_list_binding_at(
     }
 }
 
+/// Preserve Perl sigils on list-context call-result bindings.
+///
+/// The shared tuple lowering correctly emits one assignment per result slot,
+/// but `tree-sitter-perl` exposes each list-pattern variable's inner
+/// `varname`, so those synthetic targets arrive as `count` / `bytes`.  The
+/// assignment syntax fact still owns the exact `my ($count, $bytes)` pattern;
+/// map each compiler-emitted tuple-result ordinal back to that parsed binding
+/// and remove the grammar's redundant same-slot alias.
+fn normalize_perl_list_result_targets(
+    events: &mut Vec<FlowEvent>,
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_names,
+                ..
+            } => {
+                let tuple_index = source_names.iter().find_map(|name| {
+                    name.strip_prefix("__bonsai_tuple_result_")
+                        .and_then(|index| index.parse::<usize>().ok())
+                });
+                let Some(tuple_index) = tuple_index else {
+                    continue;
+                };
+                let Some(lhs) = assignment_values.target_rendering(*span, source) else {
+                    continue;
+                };
+                let bindings = perl_sigiled_identifiers(lhs, ['$', '@', '%']);
+                if let Some(binding) = bindings.get(tuple_index) {
+                    target.clone_from(binding);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_perl_list_result_targets(then_events, source, assignment_values);
+                normalize_perl_list_result_targets(else_events, source, assignment_values);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_perl_list_result_targets(body, source, assignment_values);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_perl_list_result_targets(body, source, assignment_values);
+                normalize_perl_list_result_targets(catch_events, source, assignment_values);
+                normalize_perl_list_result_targets(finally_events, source, assignment_values);
+            }
+            _ => {}
+        }
+    }
+
+    let mut seen_tuple_slots = std::collections::HashSet::new();
+    events.retain(|event| {
+        let FlowEvent::Assign {
+            span,
+            target,
+            source_names,
+            ..
+        } = event
+        else {
+            return true;
+        };
+        let Some(tuple_index) = source_names.iter().find_map(|name| {
+            name.strip_prefix("__bonsai_tuple_result_")
+                .and_then(|index| index.parse::<usize>().ok())
+        }) else {
+            return true;
+        };
+        seen_tuple_slots.insert((*span, tuple_index, target.clone()))
+    });
+}
+
 /// Walk the leading flow events of a Perl sub looking for the
 /// canonical positional-arg binding patterns:
 ///
@@ -2776,7 +4330,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         // (`require 'module.pl'` is a runtime path-load form).
         let module = match first_child.kind() {
             "bareword" => node_text(&first_child, src).to_string(),
-            "string" | "string_literal" => node_text(&first_child, src)
+            "interpolated_string_literal" | "string_literal" => node_text(&first_child, src)
                 .trim_matches(|ch: char| matches!(ch, '"' | '\''))
                 .to_string(),
             _ => continue,
@@ -2813,10 +4367,7 @@ fn is_perl_inheritance_pragma(module: &str) -> bool {
 }
 
 fn collect_qw_words(node: tree_sitter::Node<'_>, src: &[u8], out: &mut Vec<String>) {
-    if matches!(
-        node.kind(),
-        "string_content" | "bareword" | "interpolation_string_content"
-    ) {
+    if matches!(node.kind(), "string_content" | "bareword") {
         for word in node_text(&node, src).split_whitespace() {
             let word = word.trim();
             if word.is_empty() || out.iter().any(|seen| seen == word) {
@@ -2933,6 +4484,50 @@ fn synthesize_method_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(
     events
 }
 
+/// Synthesize exact calls for Perl's statically-qualified
+/// `Package::function(args)` form.
+///
+/// In this grammar a single argument is the `arguments` field itself rather
+/// than a child of an argument-list wrapper.  The shared lowering therefore
+/// retains the exact qualified callee but can see an empty argument vector.
+/// Re-lower that grammar shape here so argument-count and value-flow facts are
+/// exact.  Package/API meaning remains entirely in rule data.
+fn synthesize_qualified_function_call_events(
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) -> Vec<(Span, FlowEvent)> {
+    let mut events = Vec::new();
+    for call_node in collect_kinds(
+        tree,
+        &["function_call_expression", "ambiguous_function_call_expression"],
+    ) {
+        let Some(target) = perl_call_target(call_node, src) else {
+            continue;
+        };
+        if !target.full_text.contains("::") {
+            continue;
+        }
+        let args = call_node
+            .child_by_field_name("arguments")
+            .map(|arguments| perl_list_args(&arguments, src, file))
+            .unwrap_or_default();
+        let span = span_of(file, &call_node);
+        events.push((
+            span,
+            FlowEvent::Call {
+                span,
+                name: target.full_text,
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Function,
+                args,
+            },
+        ));
+    }
+    events
+}
+
 /// Convert a Perl argument-list node into `CallArg`s. Recognises
 /// `key => value` fat-comma pairs as named args; everything else
 /// becomes a positional arg.
@@ -2971,12 +4566,11 @@ fn perl_list_args(node: &tree_sitter::Node<'_>, src: &[u8], file: FileId) -> Vec
         let child = children[child_idx];
         // Detect fat-comma named args: `key => value` pairs.
         if matches!(child.kind(), "bareword" | "autoquoted_bareword") && child_idx + 1 < children.len() {
-            let explicit_separator = children[child_idx + 1].kind() == "fat_comma";
-            let value_idx = child_idx + usize::from(explicit_separator) + 1;
+            let value_idx = child_idx + 1;
             if let Some(next) = children
                 .get(value_idx)
                 .copied()
-                .filter(|next| explicit_separator || perl_args_have_fat_comma_token(*node, child, *next))
+                .filter(|next| perl_args_have_fat_comma_token(*node, child, *next))
             {
                 let name = node_text(&child, src).trim().to_string();
                 if let Some(mut argument) = perl_call_arg_from_node(next, file, src, Some(name)) {
@@ -2990,10 +4584,6 @@ fn perl_list_args(node: &tree_sitter::Node<'_>, src: &[u8], file: FileId) -> Vec
                 child_idx = value_idx + 1;
                 continue;
             }
-        }
-        if child.kind() == "fat_comma" {
-            child_idx += 1;
-            continue;
         }
         if let Some(argument) = perl_call_arg_from_node(child, file, src, None) {
             args.push(argument);
@@ -3010,7 +4600,7 @@ fn perl_args_have_fat_comma_token(
 ) -> bool {
     let mut cursor = container.walk();
     let found = container.children(&mut cursor).any(|token| {
-        matches!(token.kind(), "=>" | "fat_comma")
+        token.kind() == "=>"
             && token.start_byte() >= left.end_byte()
             && token.end_byte() <= right.start_byte()
     });
@@ -3026,9 +4616,7 @@ fn perl_node_is_single_arg(kind: &str) -> bool {
             | "array"
             | "hash"
             | "number"
-            | "integer"
-            | "float"
-            | "string"
+            | "interpolated_string_literal"
             | "string_literal"
             | "command_string"
             | "bareword"
@@ -3141,12 +4729,22 @@ fn synthesize_builtin_expression_arg_call_events(
 fn synthesize_match_regex_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Span, FlowEvent)> {
     let mut events = Vec::new();
     for match_node in collect_kinds(tree, &["match_regexp"]) {
+        // In `split /pattern/, $value`, tree-sitter-perl reuses the
+        // `match_regexp` node for the delimiter. Perl evaluates that node as
+        // split's pattern argument; it does not execute an implicit `m//`
+        // against `$_`. Emitting a second match call also gives the synthetic
+        // foreach binding's loop-wide span a false late prerequisite. Classify
+        // the intrinsic syntax from the exact parsed callee/argument position.
+        if perl_match_regexp_is_split_pattern(match_node, src) {
+            continue;
+        }
         let Some(content) = match_node.child_by_field_name("content") else {
             continue;
         };
-        let Some(argument) = perl_call_arg_from_node(content, file, src, None) else {
+        let Some(content_argument) = perl_call_arg_from_node(content, file, src, None) else {
             continue;
         };
+        let args = vec![content_argument];
         let span = span_of(file, &match_node);
         events.push((
             span,
@@ -3156,11 +4754,41 @@ fn synthesize_match_regex_call_events(tree: &Tree, src: &[u8], file: FileId) -> 
                 receiver: None,
                 receiver_types: Vec::new(),
                 call_kind: CallKind::Function,
-                args: vec![argument],
+                args,
             },
         ));
     }
     events
+}
+
+fn perl_match_regexp_is_split_pattern(match_node: Node<'_>, src: &[u8]) -> bool {
+    let mut current = match_node;
+    while let Some(parent) = current.parent() {
+        if matches!(
+            parent.kind(),
+            "ambiguous_function_call_expression" | "function_call_expression"
+        ) {
+            let Some(function) = parent.child_by_field_name("function") else {
+                return false;
+            };
+            if node_text(&function, src).trim() != "split" {
+                return false;
+            }
+            let Some(arguments) = parent.child_by_field_name("arguments") else {
+                return false;
+            };
+            let mut cursor = arguments.walk();
+            return arguments
+                .named_children(&mut cursor)
+                .next()
+                .is_some_and(|first| first.id() == match_node.id());
+        }
+        if matches!(parent.kind(), "statement" | "expression_statement" | "block") {
+            return false;
+        }
+        current = parent;
+    }
+    false
 }
 
 /// Detect coderef invocations (`$cb->(...)` / `&$cb(...)`) by textual
@@ -3472,21 +5100,112 @@ fn attach_synthesized_calls_to_decls(idx: &mut DeclIndex, events: Vec<(Span, Flo
             }
         }
         if let Some(decl_idx) = best_decl {
-            // L8: the Perl handler declares `method_call_expression`, so
-            // the kit already emitted a Call for `$obj->method(...)`
-            // (carrying source_names + a receiver this synth lacks).
-            // Drop the synth duplicate when the kit's Call for the
-            // same node is already present: its name-span is CONTAINED
-            // in this synth's whole-call-node span and it shares the
-            // same name + receiver. We only drop when a real match is
-            // found, so a node the kit somehow missed still keeps its
-            // synth Call.
+            // Keep an already-complete kit call in its compiler-owned
+            // control/evaluation position. The synthesized fact exists only
+            // to repair grammar shapes whose generic call is incomplete.
             if perl_synth_call_duplicates_kit_call(&idx.defs[decl_idx].flow_events, event_span, &event) {
+                continue;
+            }
+            // The grammar's generic call lowering also sees these nodes, but
+            // for an arrow call it exposes only the invocant as the callee,
+            // and for a qualified function with a leaf argument field it
+            // exposes an empty arg vector. Replace that exact event in place
+            // so its branch/loop membership and statement order survive the
+            // repair. Removing it and appending the replacement to the end
+            // made earlier calls appear after a terminal return, where CFG
+            // normalization correctly discarded them as unreachable.
+            if replace_perl_incomplete_call_for_synth(&mut idx.defs[decl_idx].flow_events, event_span, &event)
+            {
                 continue;
             }
             idx.defs[decl_idx].flow_events.push(event);
         }
     }
+}
+
+fn replace_perl_incomplete_call_for_synth(
+    events: &mut [FlowEvent],
+    synth_span: Span,
+    synth: &FlowEvent,
+) -> bool {
+    let FlowEvent::Call {
+        name: synth_name,
+        receiver: synth_receiver,
+        call_kind: synth_kind,
+        ..
+    } = synth
+    else {
+        return false;
+    };
+    for event in events {
+        let replace = match event {
+            FlowEvent::Call {
+                span, name, receiver, ..
+            } => {
+                let same_node_prefix = span.file == synth_span.file
+                    && span.start == synth_span.start
+                    && span.end <= synth_span.end;
+                if !same_node_prefix {
+                    false
+                } else {
+                    match synth_kind {
+                        CallKind::Function => name == synth_name,
+                        CallKind::Method | CallKind::Constructor => {
+                            let Some(expected_receiver) = synth_receiver.as_deref() else {
+                                return false;
+                            };
+                            let name_receiver = name.trim().trim_start_matches(['$', '@', '%']);
+                            let emitted_receiver = receiver
+                                .as_deref()
+                                .unwrap_or_default()
+                                .trim()
+                                .trim_start_matches(['$', '@', '%']);
+                            name_receiver == expected_receiver && emitted_receiver == expected_receiver
+                        }
+                        _ => false,
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if replace_perl_incomplete_call_for_synth(then_events, synth_span, synth)
+                    || replace_perl_incomplete_call_for_synth(else_events, synth_span, synth)
+                {
+                    return true;
+                }
+                false
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if replace_perl_incomplete_call_for_synth(body, synth_span, synth) {
+                    return true;
+                }
+                false
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if replace_perl_incomplete_call_for_synth(body, synth_span, synth)
+                    || replace_perl_incomplete_call_for_synth(catch_events, synth_span, synth)
+                    || replace_perl_incomplete_call_for_synth(finally_events, synth_span, synth)
+                {
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        };
+        if replace {
+            *event = synth.clone();
+            return true;
+        }
+    }
+    false
 }
 
 /// True when `event` is a synthesized `$obj->method(...)` Call that
@@ -3621,7 +5340,7 @@ fn collect_perl_class_bases(
                 continue;
             }
             match node.kind() {
-                "string_content" | "bareword" | "interpolation_string_content" => {
+                "string_content" | "bareword" => {
                     let raw = node_text(&node, src).trim();
                     // `qw(A B C)` content is a single text node;
                     // split on whitespace to get each parent name.
@@ -3745,10 +5464,7 @@ fn collect_perl_isa_assignment_bases(
         let mut base_nodes = Vec::new();
         let mut stack = vec![right];
         while let Some(node) = stack.pop() {
-            if matches!(
-                node.kind(),
-                "string_content" | "bareword" | "autoquoted_bareword" | "interpolation_string_content"
-            ) {
+            if matches!(node.kind(), "string_content" | "bareword" | "autoquoted_bareword") {
                 base_nodes.push(node);
                 continue;
             }

@@ -98,21 +98,3 @@
       params)\n  JSON::JWT.decode(\"safe\")\nend\n"
     expect_no_match: true
   description: "json-jwt JSON::JWT.decode - flag if no subsequent .verify!."
-- id: ruby.jwt.devise_jwt_decode
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: ruby
-  tag: jwt
-  severity: medium
-  packages:
-  - devise-jwt
-  cwe:
-  - CWE-347
-  match:
-    kind: call
-    callee:
-      attribute:
-      - Devise::JWT
-      - decode
-  description: "Disabled - Devise::JWT has default config."

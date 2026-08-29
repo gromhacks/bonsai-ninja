@@ -5,7 +5,7 @@
   trust: ipc
   tag: ipc-input
   payload_types: [text, binary]
-  packages: [dart:io]
+  packages: ["dart:io"]
   match:
     kind: call
     callee:

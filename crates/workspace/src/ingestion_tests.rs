@@ -17,6 +17,54 @@ fn javascript_registry() -> Arc<LanguageRegistry> {
     registry
 }
 
+fn c_registry() -> Arc<LanguageRegistry> {
+    let registry = Arc::new(LanguageRegistry::new());
+    let adapter: AdapterArc = Arc::new(bonsai_lang_c::CAdapter::new());
+    registry.register(adapter);
+    registry
+}
+
+#[test]
+fn invalid_utf8_is_admitted_only_inside_grammar_proven_comments() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let comment_path = root.path().join("comment.c");
+    let mut comment_source = b"/* legacy quote: x */\nint answer(void) { return 42; }\n".to_vec();
+    let comment_byte = comment_source
+        .iter()
+        .position(|byte| *byte == b'x')
+        .expect("comment marker byte");
+    comment_source[comment_byte] = 0x92;
+    std::fs::write(&comment_path, &comment_source).expect("write comment source");
+
+    let workspace = Workspace::open(root.path(), c_registry())
+        .expect("a legacy byte proven to be comment trivia must not discard valid code");
+    assert!(workspace.lookup_function("answer").is_some());
+    let comment_path = comment_path.canonicalize().expect("canonical comment source");
+    let file = workspace
+        .vfs()
+        .lookup(&comment_path)
+        .expect("comment source in VFS");
+    let snapshot = workspace.vfs().snapshot(file).expect("comment source snapshot");
+    assert_eq!(
+        snapshot.text.len(),
+        comment_source.len(),
+        "byte spans must remain stable"
+    );
+    assert_eq!(snapshot.text.as_bytes()[comment_byte], b' ');
+
+    let code_root = tempfile::tempdir().expect("workspace tempdir");
+    let code_path = code_root.path().join("code.c");
+    let mut code_source = b"int bad_name(void) { return 0; }\n".to_vec();
+    code_source[5] = 0x92;
+    std::fs::write(code_path, code_source).expect("write invalid code source");
+    let error = Workspace::open(code_root.path(), c_registry())
+        .expect_err("invalid executable syntax must fail closed");
+    assert!(
+        error.to_string().contains("outside a grammar-proven comment"),
+        "unexpected error: {error}"
+    );
+}
+
 fn assert_function_was_parsed(workspace: &Workspace, expected: &str) {
     let files = workspace.vfs().all_files();
     assert_eq!(files.len(), 1, "the supported source file must be ingested");

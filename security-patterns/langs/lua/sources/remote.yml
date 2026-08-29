@@ -5,18 +5,28 @@
   trust: remote
   tag: http-input
   payload_types: [query]
-  packages: [openresty]
   match:
     kind: call
     callee:
       attribute: [ngx, req, get_uri_args]
+      binding_origin: runtime-global
+  constraints:
+  - max_args: 1
   match_examples:
   - name: lua.source.openresty_get_uri_args example
     code: |
-      local _openresty = require("openresty")
       function example(input, url, id, payload, request, params, user)
         ngx.req.get_uri_args(input)
       end
+  - name: OpenResty URI argument parser invalid arity
+    code: |
+      ngx.req.get_uri_args(10, 20)
+    expect_no_match: true
+  - name: locally shadowed ngx table is not the OpenResty runtime global
+    code: |
+      local ngx = { req = { get_uri_args = function() return {} end } }
+      ngx.req.get_uri_args()
+    expect_no_match: true
   description: "ngx.req.get_uri_args - parsed query-string; attacker-controlled."
 
 - id: lua.source.openresty_get_post_args
@@ -25,18 +35,22 @@
   trust: remote
   tag: http-input
   payload_types: [form]
-  packages: [openresty]
   match:
     kind: call
     callee:
       attribute: [ngx, req, get_post_args]
+      binding_origin: runtime-global
   match_examples:
   - name: lua.source.openresty_get_post_args example
     code: |
-      local _openresty = require("openresty")
       function example(input, url, id, payload, request, params, user)
         ngx.req.get_post_args(input)
       end
+  - name: locally shadowed ngx post table is not the OpenResty runtime global
+    code: |
+      local ngx = { req = { get_post_args = function() return {} end } }
+      ngx.req.get_post_args()
+    expect_no_match: true
   description: "ngx.req.get_post_args - form-encoded body; attacker-controlled."
 
 - id: lua.source.openresty_get_body_data
@@ -45,18 +59,22 @@
   trust: remote
   tag: http-input
   payload_types: [json]
-  packages: [openresty]
   match:
     kind: call
     callee:
       attribute: [ngx, req, get_body_data]
+      binding_origin: runtime-global
   match_examples:
   - name: lua.source.openresty_get_body_data example
     code: |
-      local _openresty = require("openresty")
       function example(input, url, id, payload, request, params, user)
         ngx.req.get_body_data(input)
       end
+  - name: locally shadowed ngx body table is not the OpenResty runtime global
+    code: |
+      local ngx = { req = { get_body_data = function() return "fixed" end } }
+      ngx.req.get_body_data()
+    expect_no_match: true
   description: "ngx.req.get_body_data - raw request body; attacker-controlled."
 
 - id: lua.source.openresty_get_headers
@@ -65,18 +83,22 @@
   trust: remote
   tag: http-input
   payload_types: [header]
-  packages: [openresty]
   match:
     kind: call
     callee:
       attribute: [ngx, req, get_headers]
+      binding_origin: runtime-global
   match_examples:
   - name: lua.source.openresty_get_headers example
     code: |
-      local _openresty = require("openresty")
       function example(input, url, id, payload, request, params, user)
         ngx.req.get_headers(input)
       end
+  - name: locally shadowed ngx headers table is not the OpenResty runtime global
+    code: |
+      local ngx = { req = { get_headers = function() return {} end } }
+      ngx.req.get_headers()
+    expect_no_match: true
   description: "ngx.req.get_headers - all request headers; attacker-controlled."
 
 - id: lua.source.openresty_get_method
@@ -84,18 +106,22 @@
   language: lua
   trust: remote
   tag: http-input
-  packages: [openresty]
   match:
     kind: call
     callee:
       attribute: [ngx, req, get_method]
+      binding_origin: runtime-global
   match_examples:
   - name: lua.source.openresty_get_method example
     code: |
-      local _openresty = require("openresty")
       function example(input, url, id, payload, request, params, user)
         ngx.req.get_method(input)
       end
+  - name: locally shadowed ngx method table is not the OpenResty runtime global
+    code: |
+      local ngx = { req = { get_method = function() return "GET" end } }
+      ngx.req.get_method()
+    expect_no_match: true
   description: "ngx.req.get_method - HTTP method string; attacker-controlled (enum-bounded)."
 
 - id: lua.source.openresty_var_uri
@@ -104,18 +130,22 @@
   trust: remote
   tag: http-input
   payload_types: [path]
-  packages: [openresty]
   match:
     kind: read
     target:
       attribute: [ngx, var, uri]
+      binding_origin: runtime-global
   match_examples:
   - name: lua.source.openresty_var_uri example
     code: |
-      local _openresty = require("openresty")
       function example(input, url, id, payload, request, params, user)
         local value = ngx.var.uri
       end
+  - name: locally shadowed ngx uri table is not the OpenResty runtime global
+    code: |
+      local ngx = { var = { uri = "/fixed" } }
+      local value = ngx.var.uri
+    expect_no_match: true
   description: "ngx.var.uri - normalised request path; attacker-controlled."
 
 - id: lua.source.openresty_var_args
@@ -124,18 +154,22 @@
   trust: remote
   tag: http-input
   payload_types: [query]
-  packages: [openresty]
   match:
     kind: read
     target:
       attribute: [ngx, var, args]
+      binding_origin: runtime-global
   match_examples:
   - name: lua.source.openresty_var_args example
     code: |
-      local _openresty = require("openresty")
       function example(input, url, id, payload, request, params, user)
         local value = ngx.var.args
       end
+  - name: locally shadowed ngx args table is not the OpenResty runtime global
+    code: |
+      local ngx = { var = { args = "fixed=1" } }
+      local value = ngx.var.args
+    expect_no_match: true
   description: "ngx.var.args - raw query string; attacker-controlled."
 
 - id: lua.source.openresty_var_request_uri
@@ -144,33 +178,23 @@
   trust: remote
   tag: http-input
   payload_types: [path]
-  packages: [openresty]
   match:
     kind: read
     target:
       attribute: [ngx, var, request_uri]
+      binding_origin: runtime-global
   match_examples:
   - name: lua.source.openresty_var_request_uri example
     code: |
-      local _openresty = require("openresty")
       function example(input, url, id, payload, request, params, user)
         local value = ngx.var.request_uri
       end
+  - name: locally shadowed ngx request-uri table is not the OpenResty runtime global
+    code: |
+      local ngx = { var = { request_uri = "/fixed" } }
+      local value = ngx.var.request_uri
+    expect_no_match: true
   description: "ngx.var.request_uri - full unparsed request URI; attacker-controlled."
-
-- id: lua.source.openresty_var_remote_addr
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: lua
-  trust: remote
-  tag: http-input
-  packages: [openresty]
-  match:
-    kind: read
-    target:
-      attribute: [ngx, var, remote_addr]
-  description: "Disabled - client IP; spoofable via X-Forwarded-For only if downstream proxy trusted. Enable for log-injection / rate-limit bypass analyses."
 
 - id: lua.source.lapis_params
   enabled: true
@@ -213,7 +237,7 @@
       app:get("/search", function(self)
         return self.GET.q
       end)
-    expect_match_text: [self.GET.q]
+    expect_match_text: [self.GET]
   - name: Lapis response fields are not request query parameters
     code: |
       local lapis = require("lapis")
@@ -243,7 +267,7 @@
       app:post("/submit", function(self)
         return self.POST.title
       end)
-    expect_match_text: [self.POST.title]
+    expect_match_text: [self.POST]
   - name: ordinary POST field is not a Lapis request carrier
     code: |
       local lapis = require("lapis")
@@ -271,7 +295,7 @@
       app:get("/", function(self)
         return self.cookies.theme
       end)
-    expect_match_text: [self.cookies.theme]
+    expect_match_text: [self.cookies]
   - name: response headers are not request cookies
     code: |
       local lapis = require("lapis")
@@ -391,7 +415,7 @@
       app:get("/", function(self)
         return self.req.parsed_url.path
       end)
-    expect_match_text: [self.req.parsed_url.path]
+    expect_match_text: [self.req.parsed_url]
   - name: application URL setting is not the request URL
     code: |
       local lapis = require("lapis")
@@ -399,20 +423,6 @@
       return app.parsed_url.path
     expect_no_match: true
   description: "Lapis self.req.parsed_url - components of the client-requested URL."
-
-- id: lua.source.lapis_session
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: lua
-  trust: remote
-  tag: http-input
-  packages: [lapis]
-  match:
-    kind: read
-    target:
-      name: session
-  description: "Disabled - Lapis self.session is HMAC-signed by default; enable only when session_secret is weak/missing."
 
 - id: lua.source.kong_request_get_query
   enabled: true
@@ -656,30 +666,198 @@
   trust: remote
   tag: http-input
   payload_types: [query]
-  packages: [openresty]
   match:
     kind: read
     target:
       attribute: [ngx, var, uri_args]
+      binding_origin: runtime-global
   match_examples:
   - name: lua.source.ngx_uri_args example
     code: |
-      local _openresty = require("openresty")
       function example(input, url, id, payload, request, params, user)
         local value = ngx.var.uri_args
       end
+  - name: locally shadowed ngx uri-args table is not the OpenResty runtime global
+    code: |
+      local ngx = { var = { uri_args = "fixed=1" } }
+      local value = ngx.var.uri_args
+    expect_no_match: true
   description: "ngx.var.uri_args - OpenResty parsed query-string variable; attacker-controlled. Property-read shape complementary to the call-shape ngx.req.get_uri_args() rule."
 
-- id: lua.source.openresty_session_data
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+- id: lua.source.openresty_get_body_file
+  enabled: true
   language: lua
   trust: remote
+  category: http-input
   tag: http-input
-  packages: [lua-resty-session]
+  payload_types: [file, path]
   match:
-    kind: read
-    target:
-      attribute: [session, data]
-  description: "Disabled - lua-resty-session session.data is HMAC/AES-protected by default; enable only when secret is weak/static or when modeling second-order taint from session payloads."
+    kind: call
+    callee:
+      attribute: [ngx, req, get_body_file]
+      binding_origin: runtime-global
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: OpenResty buffered request-body file
+    code: |
+      local path = ngx.req.get_body_file()
+    expect_match_text: [ngx.req.get_body_file]
+  - name: locally shadowed ngx body-file table is not the OpenResty runtime global
+    code: |
+      local ngx = { req = { get_body_file = function() return "/tmp/fixed" end } }
+      local path = ngx.req.get_body_file()
+    expect_no_match: true
+  description: "ngx.req.get_body_file() - temporary file path containing a client request body when the body was buffered to disk."
+
+- id: lua.source.turbo_request_argument
+  enabled: true
+  language: lua
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [query, form]
+  packages: [turbo]
+  match:
+    kind: call
+    callee:
+      attribute: [self, get_argument]
+  constraints:
+  - min_args: 1
+  - max_args: 3
+  match_examples:
+  - name: Turbo request argument
+    code: |
+      local turbo = require "turbo"
+      local Handler = class("Handler", turbo.web.RequestHandler)
+      function Handler:get()
+        return self:get_argument("q")
+      end
+    expect_match_text: [self.get_argument]
+  - name: different receiver is not the Turbo handler request
+    code: |
+      local turbo = require "turbo"
+      return form:get_argument("q")
+    expect_no_match: true
+  description: "Turbo RequestHandler self:get_argument(name, default, strip) - decoded query/form input on the canonical handler receiver."
+
+- id: lua.source.turbo_json_argument
+  enabled: true
+  language: lua
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [json]
+  packages: [turbo]
+  match:
+    kind: call
+    callee:
+      attribute: [self, get_json_argument]
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: Turbo JSON request field
+    code: |
+      local turbo = require "turbo"
+      local Handler = class("Handler", turbo.web.RequestHandler)
+      function Handler:post()
+        return self:get_json_argument("name")
+      end
+    expect_match_text: [self.get_json_argument]
+  - name: JSON document helper is not the Turbo request accessor
+    code: |
+      local turbo = require "turbo"
+      return document:get_json_argument("name")
+    expect_no_match: true
+  description: "Turbo RequestHandler self:get_json_argument(name, default) - field decoded from a client JSON request body."
+
+- id: lua.source.pegasus_sailor_request_params
+  enabled: true
+  language: lua
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [query, form]
+  packages: [pegasus, sailor]
+  match:
+    kind: call
+    callee:
+      attribute: [request, params]
+  constraints:
+  - max_args: 1
+  match_examples:
+  - name: Pegasus request parameters
+    code: |
+      local pegasus = require "pegasus"
+      local value = request:params("q")
+    expect_match_text: [request.params]
+  - name: application configuration params are not request input
+    code: |
+      local pegasus = require "pegasus"
+      local value = config:params("q")
+    expect_no_match: true
+  description: "Pegasus/Sailor request:params([name]) - decoded client request parameter mapping or selected value on the request namespace."
+
+- id: lua.source.pegasus_sailor_request_post
+  enabled: true
+  language: lua
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [form]
+  packages: [pegasus, sailor]
+  match:
+    kind: call
+    callee:
+      attribute: [request, post]
+  constraints:
+  - max_args: 1
+  match_examples:
+  - name: Pegasus request form body
+    code: |
+      local pegasus = require "pegasus"
+      local value = request:post("name")
+    expect_match_text: [request.post]
+  - name: outbound client post is not an inbound request source
+    code: |
+      local pegasus = require "pegasus"
+      local value = client:post("https://example.test")
+    expect_no_match: true
+  description: "Pegasus/Sailor request:post([name]) - form input decoded from the inbound request body."
+
+- id: lua.source.lua_http_stream_headers
+  enabled: true
+  language: lua
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [header]
+  packages: [lua-http, http.server]
+  imports: [http.server]
+  match:
+    kind: call
+    callee:
+      name: get_headers
+  constraints:
+  - receiver_type_in: [HttpServerStream]
+  match_examples:
+  - name: lua-http server stream headers
+    code: |
+      local http_server = require "http.server"
+      http_server.listen({
+        onstream = function(server, stream)
+          local headers = stream:get_headers()
+          consume(headers)
+        end
+      })
+    expect_match_text: [stream.get_headers]
+  - name: outbound or application stream is not inbound
+    code: |
+      local http_server = require "http.server"
+      function consume_response(stream)
+        local headers = stream:get_headers()
+        consume(headers)
+      end
+    expect_no_match: true
+  description: "lua-http inbound request headers read from the compiler-typed stream parameter of http.server.listen's exact onstream configuration callback; outbound client streams with the same method stay untrusted-source free."

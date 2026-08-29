@@ -1,0 +1,37 @@
+- id: java.typing.jdbi_withhandle_callback_invocation
+  enabled: true
+  language: java
+  packages: [org.jdbi.v3]
+  imports: [org.jdbi.v3]
+  taint_semantics:
+    callback_invocation:
+      callback_arg_index: 0
+      callback_return_result_offset: 0
+  match:
+    kind: call
+    callee:
+      name: withHandle
+      receiver_type_in: [org.jdbi.v3.core.Jdbi, Jdbi]
+  constraints:
+  - arg_is_inline_callback: 0
+  match_examples:
+  - name: Jdbi invokes an inline handle callback
+    code: |
+      import org.jdbi.v3.core.Jdbi;
+      class Repo {
+        Object find(Jdbi jdbi, String sql) {
+          return jdbi.withHandle(handle -> handle.createQuery(sql));
+        }
+      }
+    expect_match_text: [jdbi.withHandle]
+  - name: same method on an unrelated receiver is not Jdbi
+    code: |
+      import org.jdbi.v3.core.Jdbi;
+      class LocalDb { Object withHandle(java.util.function.Function<Object, Object> fn) { return fn.apply(new Object()); } }
+      class Repo {
+        Object find(LocalDb db, String sql) {
+          return db.withHandle(handle -> sql);
+        }
+      }
+    expect_no_match: true
+  description: "Jdbi.withHandle invokes inline callback argument zero and returns its result. Typing-only callback semantics preserve compiler-proven lexical captures without placing Jdbi API names in the shared IDG engine."

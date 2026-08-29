@@ -279,6 +279,7 @@ fn render_runtime_only() -> String {
             callable_reference_syntax: _,
             call_text_prefilter: _,
             module_resolution_extensions: _,
+            unqualified_imports_search_current_directory: _,
             workspace_manifest_context_extensions: _,
         } = caps;
         let aliases = if module_export_aliases.is_empty() {

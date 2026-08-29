@@ -46,8 +46,8 @@ fn fixture_workspace() -> Option<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest.parent()?.parent()?;
     let candidates = [
-        workspace_root.join("examples/python/complex"),
-        workspace_root.join("examples/python/micro"),
+        workspace_root.join("test-fixtures/languages/python/complex"),
+        workspace_root.join("test-fixtures/languages/python/micro"),
         workspace_root.join("examples/realworld/requests/src/requests"),
         workspace_root.join("crates/workspace/tests/fixtures/python"),
     ];

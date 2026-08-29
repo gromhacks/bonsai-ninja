@@ -13,6 +13,200 @@ fn conformance_traced() {
 }
 
 #[test]
+fn typed_default_rest_and_destructured_parameters_follow_current_grammar_shapes() {
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new())],
+        &[(
+            "params.ts",
+            r#"
+function variadic(value: string = source(), ...rest: string[]): string[] { return rest; }
+function destructured(
+  { head, ...tail }: { head: string; tail?: unknown },
+  [first, ...remaining]: string[],
+): string { return head; }
+"#,
+        )],
+    );
+    let file = workspace.db().vfs().all_files()[0];
+    let index = workspace
+        .db()
+        .decl_index(file)
+        .expect("TypeScript compiler index");
+    let variadic = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "variadic")
+        .expect("variadic declaration");
+    assert_eq!(variadic.params, ["value", "rest"]);
+    assert!(variadic.is_variadic);
+
+    let destructured = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "destructured")
+        .expect("destructured declaration");
+    assert_eq!(destructured.params, ["head", "tail", "first", "remaining"]);
+    assert!(
+        !destructured.is_variadic,
+        "rest inside an object/array pattern does not collect overflow arguments"
+    );
+}
+
+#[test]
+fn value_member_reads_are_property_facts_but_method_calls_are_call_results() {
+    use bonsai_lang_api::{AssignValueKind, FlowEvent};
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new())],
+        &[(
+            "values.ts",
+            r#"
+function bind(req: { files: { avatar: { name: string } } }): string {
+  const file = req.files.avatar;
+  const name = file.name;
+  const trimmed = file.name.trim();
+  return trimmed;
+}
+"#,
+        )],
+    );
+    let file = workspace.db().vfs().all_files()[0];
+    let index = workspace
+        .db()
+        .decl_index(file)
+        .expect("TypeScript compiler index");
+    let bind = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "bind")
+        .expect("bind declaration");
+    let kind_for = |target: &str| {
+        bind.flow_events.iter().find_map(|event| match event {
+            FlowEvent::Assign {
+                target: actual,
+                value_kind,
+                ..
+            } if actual == target => *value_kind,
+            _ => None,
+        })
+    };
+    assert_eq!(kind_for("file"), Some(AssignValueKind::PropertyRead));
+    assert_eq!(kind_for("name"), Some(AssignValueKind::PropertyRead));
+    assert_eq!(kind_for("trimmed"), Some(AssignValueKind::CallResult));
+}
+
+#[test]
+fn wrapped_logical_and_ternary_value_selection_is_exact_but_binary_addition_is_not() {
+    use bonsai_lang_api::{AssignValueKind, FlowEvent};
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new())],
+        &[(
+            "selection.ts",
+            r#"
+function bind(req: any, flag: boolean) {
+  const fallback = (req.body || {}) as Record<string, unknown>;
+  const nullable = (req.body ?? {}) as Record<string, unknown>;
+  const selected = (flag ? req.body : {}) satisfies Record<string, unknown>;
+  const combined = (req.body as any) + "";
+  return [fallback, nullable, selected, combined];
+}
+"#,
+        )],
+    );
+    let file = workspace.db().vfs().all_files()[0];
+    let index = workspace
+        .db()
+        .decl_index(file)
+        .expect("TypeScript compiler index");
+    let bind = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "bind")
+        .expect("bind declaration");
+    let kind_for = |target: &str| {
+        bind.flow_events.iter().find_map(|event| match event {
+            FlowEvent::Assign {
+                target: actual,
+                value_kind,
+                ..
+            } if actual == target => *value_kind,
+            _ => None,
+        })
+    };
+
+    for target in ["fallback", "nullable", "selected"] {
+        assert_eq!(
+            kind_for(target),
+            Some(AssignValueKind::WholeValueSelection),
+            "{target} must retain selection identity through TypeScript wrappers"
+        );
+    }
+    assert_eq!(kind_for("combined"), Some(AssignValueKind::Compound));
+}
+
+#[test]
+fn legacy_import_require_clause_preserves_module_alias_from_current_cst() {
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new())],
+        &[(
+            "imports.ts",
+            "import Legacy = require(\"legacy-package\");\nLegacy.run();\n",
+        )],
+    );
+    let file = workspace.db().vfs().all_files()[0];
+    let imports = workspace
+        .db()
+        .import_index(file)
+        .expect("TypeScript import index");
+    let matching = imports
+        .imports
+        .iter()
+        .filter(|import| import.module == "legacy-package")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching.len(),
+        1,
+        "legacy require import must not duplicate: {matching:?}"
+    );
+    assert_eq!(matching[0].alias.as_deref(), Some("Legacy"));
+    assert_eq!(matching[0].scope, bonsai_lang_api::ImportScope::Module);
+}
+
+#[test]
+fn parameter_decorator_fact_does_not_confuse_an_identifier_with_the_decorator() {
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new())],
+        &[(
+            "controller.ts",
+            r#"
+import { Body } from "@nestjs/common";
+class Controller {
+  create(@Body("name") value: string): void {}
+  ordinary(Body: string): void {}
+}
+"#,
+        )],
+    );
+    let global = workspace.db().global_index();
+    let create = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "create")
+        .expect("decorated method");
+    assert_eq!(create.params, ["value"]);
+    assert_eq!(create.param_annotations, [vec!["Body".to_string()]]);
+
+    let ordinary = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "ordinary")
+        .expect("ordinary method");
+    assert_eq!(ordinary.params, ["Body"]);
+    assert_eq!(ordinary.param_annotations, [Vec::<String>::new()]);
+}
+
+#[test]
 fn assigned_object_methods_share_receiver_identity() {
     use bonsai_common::FuncId;
     use bonsai_lang_api::{DeclKind, FlowEvent, LanguageAdapter};
@@ -124,6 +318,44 @@ fn tsx_uses_the_tsx_grammar_and_lowers_component_calls() {
                     && args[0].source_names.iter().any(|source| source == "value")
         )
     }));
+}
+
+#[test]
+fn grammar_specific_handlers_lower_ts_and_tsx_assertion_forms() {
+    use bonsai_lang_api::FlowEvent;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new())],
+        &[
+            (
+                "assertion.ts",
+                "function fromTs(value: unknown) { sink(<string>value); }\n",
+            ),
+            (
+                "assertion.tsx",
+                "function fromTsx(value: unknown) { sink(value as string); }\n",
+            ),
+        ],
+    );
+    let global = workspace.db().global_index();
+    for function in ["fromTs", "fromTsx"] {
+        let decl = global
+            .all_files()
+            .flat_map(|file| global.decls_in(file))
+            .find(|decl| decl.name == function)
+            .unwrap_or_else(|| panic!("{function} declaration"));
+        assert!(
+            decl.flow_events.iter().any(|event| matches!(
+                event,
+                FlowEvent::Call { name, args, .. }
+                    if name == "sink"
+                        && args.len() == 1
+                        && args[0].source_names.iter().any(|source| source == "value")
+            )),
+            "{function} assertion wrapper must preserve value flow: {:?}",
+            decl.flow_events
+        );
+    }
 }
 
 #[test]
@@ -282,8 +514,52 @@ const route = procedure.input(schema).query(async ({ input }: Request, context: 
 }
 
 #[test]
+fn ts_and_tsx_call_options_retain_exact_nested_aggregate_fields() {
+    use bonsai_lang_api::{LanguageAdapter, StaticScalarValue};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[
+            (
+                "client.ts",
+                "const timeout = dynamicTimeout; client.configure({ timeout, transport: { verify: false } });\n",
+            ),
+            (
+                "component.tsx",
+                "const element = <span />; client.configure({ element, transport: { verify: false } });\n",
+            ),
+        ],
+    );
+
+    for file in ws.db().vfs().all_files() {
+        let index = ws.db().decl_index(file).expect("TypeScript declaration index");
+        let options = index
+            .call_argument_values
+            .iter()
+            .find(|fact| fact.argument_index == 0 && !fact.exact_static_aggregate_fields.is_empty())
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing exact TypeScript options aggregate for {:?}: {:#?}",
+                    ws.db().vfs().path(file),
+                    index.call_argument_values
+                )
+            });
+        assert!(options.exact_static_aggregate_fields.iter().any(|field| {
+            field.path.iter().map(String::as_str).eq(["transport", "verify"])
+                && field.value == StaticScalarValue::Boolean(false)
+        }));
+        assert_eq!(
+            options.exact_static_aggregate_fields.len(),
+            1,
+            "dynamic or JSX siblings must not become exact scalar fields: {options:#?}"
+        );
+    }
+}
+
+#[test]
 fn static_escape_maps_and_character_transforms_are_exact_compiler_facts() {
-    use bonsai_lang_api::{CharacterSubstitutionDomain, LanguageAdapter};
+    use bonsai_lang_api::{CharacterConstraintDomain, LanguageAdapter};
 
     let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
     let ws = bonsai_testkit::workspace_with(
@@ -318,8 +594,21 @@ function htmlEscape(v: string): string {
         .entries
         .iter()
         .any(|entry| entry.key == "\0" && entry.value == "\\00"));
-    assert!(index.character_substitutions.iter().any(|fact| {
-        fact.table == "LDAP" && fact.domain == CharacterSubstitutionDomain::TableKeysWithIdentityFallback
+    assert!(index.character_constraints.iter().any(|fact| {
+        matches!(
+            &fact.domain,
+            CharacterConstraintDomain::ProviderBound {
+                factory_call,
+                operation_call,
+                domain,
+            } if factory_call == "map"
+                && operation_call == "map.join"
+                && matches!(
+                    domain.as_ref(),
+                    CharacterConstraintDomain::SubstitutesExact { mappings }
+                        if mappings.iter().any(|entry| entry.key == "\0" && entry.value == "\\00")
+                )
+        )
     }));
 
     let html_map = index
@@ -328,20 +617,24 @@ function htmlEscape(v: string): string {
         .find(|fact| fact.target == "HTML")
         .expect("decoded HTML map");
     assert_eq!(html_map.entries.len(), 5);
-    assert!(index.character_substitutions.iter().any(|fact| {
-        fact.table == "HTML"
-            && matches!(
-                &fact.domain,
-                CharacterSubstitutionDomain::ExactCharacters { characters }
-                    if characters == &vec![
-                        "\"".to_string(),
-                        "&".to_string(),
-                        "'".to_string(),
-                        "<".to_string(),
-                        ">".to_string(),
-                    ]
-            )
+    assert!(index.character_constraints.iter().any(|fact| {
+        matches!(
+            &fact.domain,
+            CharacterConstraintDomain::ProviderBound {
+                factory_call,
+                operation_call,
+                domain,
+            } if factory_call.is_empty()
+                && operation_call == "replace"
+                && matches!(
+                    domain.as_ref(),
+                    CharacterConstraintDomain::SubstitutesExact { mappings }
+                        if mappings.len() == 5
+                            && mappings.iter().any(|entry| entry.key == "&" && entry.value == "&amp;")
+                )
+        )
     }));
+    assert!(index.character_substitutions.is_empty());
 }
 
 #[test]
@@ -365,10 +658,35 @@ const escapeHtml = (value: string): string => value
     );
     let file = ws.db().vfs().all_files()[0];
     let index = ws.db().decl_index(file).expect("TypeScript declaration index");
-    let [summary] = index.character_substitutions.as_slice() else {
-        panic!("expected one arrow summary: {:#?}", index.character_substitutions);
+    let summary = index.character_constraints.iter().find(|fact| {
+        matches!(
+            &fact.domain,
+            bonsai_lang_api::CharacterConstraintDomain::ProviderBound {
+                factory_call,
+                operation_call,
+                domain,
+            } if factory_call.is_empty()
+                && operation_call == "replace"
+                && matches!(
+                    domain.as_ref(),
+                    bonsai_lang_api::CharacterConstraintDomain::SubstitutesExact { .. }
+                )
+        )
+    });
+    let Some(summary) = summary else {
+        panic!(
+            "expected provider-bound arrow summary: {:#?}",
+            index.character_constraints
+        );
     };
-    assert_eq!(summary.exact_mappings.len(), 5);
+    let bonsai_lang_api::CharacterConstraintDomain::ProviderBound { domain, .. } = &summary.domain else {
+        unreachable!("selected a provider-bound fact")
+    };
+    let bonsai_lang_api::CharacterConstraintDomain::SubstitutesExact { mappings } = domain.as_ref() else {
+        unreachable!("selected a substitution fact")
+    };
+    assert_eq!(mappings.len(), 5);
+    assert!(index.character_substitutions.is_empty());
 }
 
 #[test]
@@ -388,23 +706,121 @@ const safeFilename = (name: string): string => name.replace(UNSAFE, "_");
     );
     let file = ws.db().vfs().all_files()[0];
     let index = ws.db().decl_index(file).expect("TypeScript declaration index");
-    let [summary] = index.character_constraints.as_slice() else {
-        panic!(
-            "expected one character constraint: {:#?}",
-            index.character_constraints
-        );
-    };
     let helper = index
         .defs
         .iter()
         .find(|decl| decl.name == "safeFilename")
         .expect("safeFilename declaration");
+    let summary = index
+        .character_constraints
+        .iter()
+        .find(|fact| {
+            fact.function_span == helper.span
+                && matches!(
+                    &fact.domain,
+                    CharacterConstraintDomain::ProviderBound {
+                        factory_call,
+                        operation_call,
+                        domain,
+                    } if factory_call.is_empty()
+                        && operation_call == "replace"
+                        && matches!(
+                            domain.as_ref(),
+                            CharacterConstraintDomain::ExcludesExact { .. }
+                        )
+                )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected provider-bound character constraint: {:#?}",
+                index.character_constraints
+            )
+        });
     assert_eq!(summary.function_span, helper.span);
     assert!(matches!(
         &summary.domain,
-        CharacterConstraintDomain::ExcludesExact { characters }
-            if characters.contains(&"\r".to_string()) && characters.contains(&"\n".to_string())
+        CharacterConstraintDomain::ProviderBound { domain, .. }
+            if matches!(
+                domain.as_ref(),
+                CharacterConstraintDomain::ExcludesExact { characters }
+                    if characters.contains(&"\r".to_string())
+                        && characters.contains(&"\n".to_string())
+            )
     ));
+    assert!(index.character_substitutions.is_empty());
+}
+
+#[test]
+fn provider_bound_mapping_candidates_keep_typescript_operations_generic_and_fail_closed() {
+    use bonsai_lang_api::{CharacterConstraintDomain, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "mapping.ts",
+            r#"
+function direct(value: string): string {
+  return value.scrub(/&/g, "and").scrub(/</g, "less");
+}
+function converted(value: string): string {
+  return Coerce(value).scrub(/&/g, "and");
+}
+function mixed(value: string): string {
+  return value.scrub(/&/g, "and").other(/</g, "less");
+}
+function Scalar(value: string): string {
+  return value;
+}
+function shadowed(value: string): string {
+  return Scalar(value).scrub(/&/g, "and");
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("TypeScript declaration index");
+    let span = |name: &str| {
+        index
+            .defs
+            .iter()
+            .find(|decl| decl.name == name)
+            .map(|decl| decl.span)
+            .expect("named declaration")
+    };
+    let providers = index
+        .character_constraints
+        .iter()
+        .filter_map(|fact| match &fact.domain {
+            CharacterConstraintDomain::ProviderBound {
+                factory_call,
+                operation_call,
+                domain,
+            } if matches!(
+                domain.as_ref(),
+                CharacterConstraintDomain::SubstitutesExact { .. }
+            ) =>
+            {
+                Some((fact.function_span, factory_call.as_str(), operation_call.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(providers.contains(&(span("direct"), "", "scrub")));
+    assert!(providers.contains(&(span("converted"), "Coerce", "Coerce.scrub")));
+    assert!(
+        !providers
+            .iter()
+            .any(|(function, _, _)| *function == span("mixed")),
+        "mixed operations must fail closed: {providers:#?}"
+    );
+    assert!(
+        !providers
+            .iter()
+            .any(|(function, _, _)| *function == span("shadowed")),
+        "a locally declared factory must fail closed: {providers:#?}"
+    );
+    assert!(index.character_substitutions.is_empty());
 }
 
 #[test]
@@ -441,10 +857,14 @@ class Store {
             && fact.output_place.as_deref() == Some("segments")
             && fact.rejected_exact_values == ["__proto__", "constructor", "prototype"]
     }));
-    assert!(index
-        .assignment_values
-        .iter()
-        .any(|fact| { fact.target.as_deref() == Some("this.BASE") && fact.value_flow.is_empty() }));
+    assert!(index.assignment_values.iter().any(|fact| {
+        fact.target.as_deref() == Some("this.BASE")
+            && fact.value_flow.is_empty()
+            && fact.static_value
+                == Some(bonsai_lang_api::StaticScalarValue::String(
+                    "/srv/data".to_string(),
+                ))
+    }));
     assert!(!index
         .assignment_values
         .iter()
@@ -827,7 +1247,7 @@ fn arrow_iife_params_bind_to_corresponding_arguments() {
 }
 
 #[test]
-fn graphql_root_value_dispatches_variable_values_to_resolver() {
+fn external_dispatch_config_retains_syntax_without_inventing_execution() {
     use bonsai_lang_api::{FlowEvent, LanguageAdapter};
 
     let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
@@ -852,23 +1272,63 @@ router.post("/query", async (req: any, res: any) => {
     for file in ws.db().vfs().all_files() {
         let _ = ws.db().decl_index(file);
     }
+    let file = ws.db().vfs().all_files()[0];
+    let file_index = ws.db().decl_index(file).expect("TypeScript compiler index");
+    let root_assignment = file_index
+        .assignment_values
+        .iter()
+        .find(|fact| fact.target.as_deref() == Some("root"))
+        .expect("root resolver-map assignment");
+    assert!(root_assignment.target_is_immutable);
+    assert_eq!(root_assignment.inline_callback_fields.len(), 1);
+    assert_eq!(root_assignment.inline_callback_fields[0].path, ["products"]);
+    assert_eq!(root_assignment.inline_callback_fields[0].params, ["filter"]);
+    let graphql_argument = file_index
+        .call_argument_values
+        .iter()
+        .find(|fact| {
+            fact.value_flow
+                .aggregate_fields
+                .iter()
+                .any(|field| field.name == "rootValue")
+        })
+        .expect("GraphQL aggregate argument");
+    assert!(graphql_argument
+        .value_flow
+        .aggregate_fields
+        .iter()
+        .any(|field| field.name == "variableValues" && field.value.place.as_deref() == Some("variables")));
     let global = ws.db().global_index();
     let module = global
         .all_files()
         .flat_map(|file| global.decls_in(file))
         .find(|decl| decl.name == "__module__")
         .expect("module declaration");
+    let products = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "products")
+        .expect("resolver callable declaration");
 
     assert!(
-        flow_events_contain(&module.flow_events, &|event| {
-            matches!(
-                event,
-                FlowEvent::Call { name, args, .. }
-                    if name == "products"
-                        && args.iter().any(|arg| arg.value_text == "variables.filter")
-            )
+        products.params.iter().any(|param| param == "filter"),
+        "the frontend must retain the resolver's exact destructured parameter: {:?}",
+        products.params
+    );
+    assert!(
+        global
+            .all_files()
+            .flat_map(|file| global.decls_in(file))
+            .any(|decl| flow_events_contain(&decl.flow_events, &|event| {
+                matches!(event, FlowEvent::Call { name, .. } if name == "graphql")
+            })),
+        "the external call itself must remain owned by its exact nested callable"
+    );
+    assert!(
+        !flow_events_contain(&module.flow_events, &|event| {
+            matches!(event, FlowEvent::Call { name, .. } if name == "products")
         }),
-        "graphql({{ rootValue, variableValues }}) should dispatch variable values into root resolver calls: {:?}",
+        "passing an external dispatch configuration must not fabricate resolver execution: {:?}",
         module.flow_events
     );
 }

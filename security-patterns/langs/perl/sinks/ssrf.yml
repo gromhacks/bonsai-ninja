@@ -8,6 +8,22 @@
   severity: high
   packages: ["LWP::UserAgent", "HTTP::Tiny", "Mojo::UserAgent", "LWP::Simple"]
   cwe: [CWE-918]
+  analysis_semantics:
+    compiler_guard:
+      capability: terminal-predicate.compound-static-allowlist
+      required_evidence:
+      - guarded-argument:0=predicate-component:as_string
+      - predicate-complete:true
+      - finite-static-string-membership:true
+      - parser-call:URI.new
+      - scheme-component:scheme
+      - scheme-value:string:https
+      - membership-kind:hash-element
+      - membership-component:host
+      - receiver-factory-call:LWP::UserAgent.new
+      - receiver-config:max_redirect=boolean:false
+      sanitizer_tag: ssrf
+      category: finite-host-allowlist-and-no-redirect
   match:
     kind: call
     callee:

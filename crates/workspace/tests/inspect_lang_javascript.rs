@@ -5,6 +5,7 @@
 mod h;
 
 use bonsai_common::{FuncId, SymbolId};
+use bonsai_trace::TraceStepKind;
 use h::*;
 use std::sync::Arc;
 
@@ -47,12 +48,36 @@ fn receiver_callback_chain_to_sink() {
         js(),
         &[(
             "/w/a.js",
-            "function entry(items) { items.forEach(cb); }\n\
+            "class Runner { forEach(callback, value) { callback(value); } }\n\
+             function entry(items) { const runner = new Runner(); runner.forEach(cb, items[0]); }\n\
              function cb(item) { sink(item); }\n\
              function sink(x) {}\n",
         )],
     );
-    assert_chain_contains(&w, "sink", &["entry", "cb", "sink"]);
+    let trace = w.trace_from("entry").expect("trace from entry");
+    let host = trace
+        .steps
+        .iter()
+        .position(|step| step.kind == TraceStepKind::EnterFunction && step.message.contains("forEach"))
+        .expect("enter compiler-resolved callback host");
+    let callback = trace
+        .steps
+        .iter()
+        .position(|step| step.kind == TraceStepKind::EnterFunction && step.message.contains("cb"))
+        .expect("enter compiler-proven callback target");
+    assert!(
+        host < callback,
+        "callback executed before its invoking host: {:#?}",
+        trace.steps
+    );
+    assert!(
+        trace
+            .steps
+            .iter()
+            .any(|step| step.kind == TraceStepKind::Call && step.message.contains("sink")),
+        "callback body did not reach sink: {:#?}",
+        trace.steps
+    );
 }
 
 #[test]

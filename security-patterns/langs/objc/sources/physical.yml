@@ -39,10 +39,11 @@
   match:
     kind: call
     callee:
-      regex: "(?:^|\\.)(startAccelerometerUpdatesToQueue|startGyroUpdatesToQueue|startMagnetometerUpdatesToQueue|startDeviceMotionUpdatesToQueue)$"
+      regex: "(?:^|\\.)(?:startAccelerometerUpdatesToQueue:withHandler:|startGyroUpdatesToQueue:withHandler:|startMagnetometerUpdatesToQueue:withHandler:|startDeviceMotionUpdatesToQueue:withHandler:)$"
   constraints:
   - receiver_type_in: [CMMotionManager]
   - arg_count: 2
+  - arg_is_inline_callback: 1
   taint_semantics:
     source_callback_only: true
     source_callback_args:
@@ -55,7 +56,7 @@
       void start(CMMotionManager *manager, NSOperationQueue *queue) {
         [manager startAccelerometerUpdatesToQueue:queue withHandler:^(CMAccelerometerData *sample, NSError *error) { NSLog(@"%@", sample); }];
       }
-    expect_match_text: [manager.startAccelerometerUpdatesToQueue]
+    expect_match_text: ["manager.startAccelerometerUpdatesToQueue:withHandler:"]
   - name: polling start without callback has no delivered value
     code: |
       #import <CoreMotion/CoreMotion.h>

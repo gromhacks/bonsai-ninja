@@ -1,20 +1,3 @@
-- id: javascript.oauth.passport_use_no_secret
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  tag: oauth
-  severity: medium
-  packages: [passport]
-  cwe: [CWE-287]
-  match:
-    kind: call
-    callee:
-      attribute: [passport, use]
-  description: "Disabled - passport.use needs strategy-aware analysis."
-
-# OAuth misconfig sinks. State-CSRF disabled, PKCE missing,
-# id_token verify off, redirect_uri substring match.
 - id: javascript.oauth.passport_state_disabled
   enabled: true
   language: javascript

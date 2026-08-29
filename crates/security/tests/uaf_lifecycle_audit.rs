@@ -1407,21 +1407,42 @@ func handle(fh: FileHandle) {
 
 #[test]
 fn objc_nsstream_close_audit_site() {
-    // The objc rule uses attribute matching `[NSStream, close]` —
-    // the bracketed message-send shape `[NSStream close]` is the
-    // exact form the rule's match_examples carry.
+    // The lifecycle transition is `[stream close]`; the later unsafe use is
+    // NSInputStream's exact two-piece `read:maxLength:` selector. Objective-C
+    // selector arity is semantic identity, so a zero-argument `read` must not
+    // stand in for this API.
     let ws = ws_for(
         "App.m",
         r#"
 #import <Foundation/Foundation.h>
 void example(NSStream *stream) {
   [stream close];
-  [stream read];
+  [stream read:NULL maxLength:0];
 }
 "#,
     );
     let fired = fired_sink_rule_ids(&ws, "objc");
     assert_rule_fires(&fired, "objc.memory.nsstream_close", "objc NSStream close");
+}
+
+#[test]
+fn objc_zero_argument_read_does_not_collide_with_nsstream_selector() {
+    let ws = ws_for(
+        "App.m",
+        r#"
+#import <Foundation/Foundation.h>
+void example(id stream) {
+  [stream close];
+  [stream read];
+}
+"#,
+    );
+    let fired = fired_sink_rule_ids(&ws, "objc");
+    assert_rule_silent(
+        &fired,
+        "objc.memory.nsstream_close",
+        "zero-argument selector collision",
+    );
 }
 
 #[test]

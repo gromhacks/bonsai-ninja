@@ -178,7 +178,7 @@ def run(cmd):
 ### Validate the pack
 
 ```bash
-./target/release/bonsai-ninja security ./examples/python/mega_flow pack \
+./target/release/bonsai-ninja security ./examples/python/language_gauntlet pack \
   --rules-dir ./security-patterns \
   --validate
 ```
@@ -186,7 +186,7 @@ def run(cmd):
 ### Run a fixture scan
 
 ```bash
-./target/release/bonsai-ninja security ./examples/python/mega_flow taint-analysis \
+./target/release/bonsai-ninja security ./examples/python/language_gauntlet taint-analysis \
   --rules-dir ./security-patterns \
   --source python.flask.request_args_get \
   --sink python.cmdi.os_system
