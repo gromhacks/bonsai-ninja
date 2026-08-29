@@ -59,7 +59,7 @@ fn source_analysis_json_incomplete_reasons(
     reasons
 }
 
-const TAINT_RENDER_CACHE_KIND: &str = "security/taint-analysis/render-report/v10";
+const TAINT_RENDER_CACHE_KIND: &str = "security/taint-analysis/render-report/v11";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct TaintAnalysisRenderReport {
@@ -188,6 +188,11 @@ struct TaintAnalysisSummary {
     source_rule_count: usize,
     sink_rule_count: usize,
     sanitizer_rule_count: usize,
+    /// Effective sink-severity floor after applying the selected review
+    /// profile and explicit CLI overrides. This is output metadata only; the
+    /// semantic request already carries the parsed severity constraint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    severity_floor: Option<String>,
     severity_counts: BTreeMap<String, usize>,
     status_counts: BTreeMap<String, usize>,
     precision_counts: BTreeMap<String, usize>,
@@ -1332,11 +1337,12 @@ fn cmd_flows(
         SecurityFormat::Json | SecurityFormat::Text => {}
     }
 
-    let render_report = build_taint_render_report(
+    let mut render_report = build_taint_render_report(
         report,
         /* include_findings = */ !summary_only || baseline_ids.is_some(),
         bulk_flow_evidence_attached,
     );
+    render_report.summary.severity_floor.clone_from(&severity);
     let render_progress = ScopedProgress::new(if summary_only {
         "rendering taint summary"
     } else if matches!(format, SecurityFormat::Json) {
@@ -1898,12 +1904,17 @@ fn render_taint_analysis_text_body(
 
 fn render_taint_analysis_report_heading(summary: &TaintAnalysisSummary) {
     let u = ui();
+    let severity_filter = summary
+        .severity_floor
+        .as_deref()
+        .map(|severity| format!(" · severity >= {severity}"))
+        .unwrap_or_default();
     cli_println!(
         "{}",
         u.dim(&format!(
             "security taint-analysis — {} finding(s)  \
              (critical {}, high {}, medium {})  · \
-             {} source rule(s) · {} sink rule(s) · {} sanitizer rule(s) loaded",
+             {} source rule(s) · {} sink rule(s) · {} sanitizer rule(s) loaded{}",
             summary.total_findings,
             summary.severity_counts.get("critical").copied().unwrap_or(0),
             summary.severity_counts.get("high").copied().unwrap_or(0),
@@ -1911,6 +1922,7 @@ fn render_taint_analysis_report_heading(summary: &TaintAnalysisSummary) {
             summary.source_rule_count,
             summary.sink_rule_count,
             summary.sanitizer_rule_count,
+            severity_filter,
         ))
     );
 }
@@ -2456,6 +2468,7 @@ fn summarize_taint_findings<'a>(
         source_rule_count,
         sink_rule_count,
         sanitizer_rule_count,
+        severity_floor: None,
         severity_counts: BTreeMap::new(),
         status_counts: BTreeMap::new(),
         precision_counts: BTreeMap::new(),
@@ -2519,7 +2532,7 @@ fn filter_taint_render_report(report: &TaintAnalysisRenderReport) -> TaintAnalys
         .filter(|rf| secondary.matches_value(&rf.finding))
         .cloned()
         .collect();
-    let summary = summarize_taint_findings(
+    let mut summary = summarize_taint_findings(
         findings.iter().map(|rf| &rf.finding),
         findings.len(),
         report.summary.source_rule_count,
@@ -2528,6 +2541,7 @@ fn filter_taint_render_report(report: &TaintAnalysisRenderReport) -> TaintAnalys
         report.analysis_complete,
         report.analysis_incomplete_reasons.clone(),
     );
+    summary.severity_floor.clone_from(&report.summary.severity_floor);
     TaintAnalysisRenderReport {
         summary,
         findings,
@@ -2667,6 +2681,9 @@ fn render_taint_summary_text(summary: &TaintAnalysisSummary) {
         };
         cli_println!("{}", u.warn(&format!("analysis incomplete — {reasons}")));
     }
+    if let Some(severity) = summary.severity_floor.as_deref() {
+        cli_println!("{}", u.dim(&format!("filter: sink severity >= {severity}")));
+    }
     let mut overview = u.table(&["metric", "count"]);
     overview.add_row(vec![Cell::new("findings"), Cell::new(summary.total_findings)]);
     overview.add_row(vec![
@@ -2733,6 +2750,7 @@ fn compact_taint_summary(summary: &TaintAnalysisSummary) -> serde_json::Value {
         "source_rule_count": summary.source_rule_count,
         "sink_rule_count": summary.sink_rule_count,
         "sanitizer_rule_count": summary.sanitizer_rule_count,
+        "severity_floor": summary.severity_floor,
         "severity_counts": summary.severity_counts,
         "status_counts": summary.status_counts,
         "precision_counts": summary.precision_counts,
@@ -2909,6 +2927,7 @@ fn cmd_sink_analysis(
                         "source_rule_count": source_rule_count,
                         "sink_rule_count": sink_rule_count,
                         "sanitizer_rule_count": sanitizer_rule_count,
+                        "severity_floor": severity.map(Severity::as_str),
                     },
                     "page": page_info_to_json(info),
                 });
@@ -2927,6 +2946,7 @@ fn cmd_sink_analysis(
                 source_rule_count,
                 sink_rule_count,
                 sanitizer_rule_count,
+                severity,
                 report_analysis_complete,
                 &report_analysis_incomplete_reasons,
                 &runtime_disabled_rules,
@@ -2948,18 +2968,22 @@ fn render_sink_analysis_text_page(
     source_rule_count: usize,
     sink_rule_count: usize,
     sanitizer_rule_count: usize,
+    severity_floor: Option<Severity>,
     report_analysis_complete: bool,
     report_analysis_incomplete_reasons: &[String],
     runtime_disabled_rules: &[RuntimeDisabledRule],
 ) -> Result<()> {
     let u = ui();
+    let severity_filter = severity_floor
+        .map(|severity| format!(" · severity >= {}", severity.as_str()))
+        .unwrap_or_default();
     cli_println!(
         "{}",
         u.dim(&format!(
             "security sink-analysis — {total_candidates} sink(s) · {total_upstream_flows} upstream flow(s) · \
              {total_security_source_flows} security-source proof(s) · \
              {source_rule_count} source rule(s) · {sink_rule_count} sink rule(s) · \
-             {sanitizer_rule_count} sanitizer rule(s) loaded"
+             {sanitizer_rule_count} sanitizer rule(s) loaded{severity_filter}"
         ))
     );
     if report_analysis_complete {

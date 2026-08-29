@@ -126,8 +126,8 @@ class RestoreJob {
   final int retries;
   RestoreJob({required this.workerUri, required this.retries});
   factory RestoreJob.fromJson(Map<String, dynamic> j) => RestoreJob(
+    retries: 1,
     workerUri: j['worker'] as String? ?? '',
-    retries: j['retries'] as int? ?? 1,
   );
 }
 Future<String> runJob(RestoreJob job) => spawnWorker(job.workerUri);
@@ -179,6 +179,59 @@ Future<String> spawnWorker(String uri) async {
         }),
         "source-analysis must retain the workerUri branch as well as other tainted map fields: {:#?}",
         source_report.candidates
+    );
+}
+
+#[test]
+fn dart_named_constructor_does_not_cross_taint_from_retries_into_worker_uri() {
+    let workspace = workspace(&[
+        (
+            "lib/routes.dart",
+            r#"import 'dart:convert';
+import 'package:shelf/shelf.dart';
+import 'job.dart';
+Future<Response> restoreHandler(Request req) async {
+  final payload = jsonDecode(await req.readAsString()) as Map<String, dynamic>;
+  final job = RestoreJob.fromJson(payload);
+  return Response.ok(await runJob(job));
+}
+"#,
+        ),
+        (
+            "lib/job.dart",
+            r#"import 'worker.dart';
+class RestoreJob {
+  final String workerUri;
+  final int retries;
+  RestoreJob({required this.workerUri, required this.retries});
+  factory RestoreJob.fromJson(Map<String, dynamic> j) => RestoreJob(
+    retries: j['retries'] as int? ?? 1,
+    workerUri: 'file:///safe-worker.dart',
+  );
+}
+Future<String> runJob(RestoreJob job) => spawnWorker(job.workerUri);
+"#,
+        ),
+        (
+            "lib/worker.dart",
+            r#"import 'dart:isolate';
+Future<String> spawnWorker(String uri) async {
+  await Isolate.spawnUri(Uri.parse(uri), const <String>[], null);
+  return 'spawned';
+}
+"#,
+        ),
+    ]);
+
+    let findings = run_taint_analysis(&workspace, rulepack(), TaintAnalysisOptions::default())
+        .expect("Dart named-argument negative taint analysis");
+    assert!(
+        findings
+            .findings
+            .iter()
+            .all(|finding| finding.finding.sink.rule_id != "dart.eval.isolate_spawn_uri"),
+        "taint in retries must not cross into the clean workerUri field: {:#?}",
+        findings.findings
     );
 }
 

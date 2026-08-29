@@ -2109,6 +2109,126 @@ fn sink_analysis_maps_python_endpoints_and_exact_upstream_paths() {
 }
 
 #[test]
+fn security_analysis_reports_the_effective_profile_severity_floor() {
+    let ws = temp_workspace("effective-severity-floor");
+    std::fs::write(
+        ws.join("pubspec.yaml"),
+        "name: effective_severity_floor\ndependencies:\n  shelf: any\n  xml: any\n",
+    )
+    .expect("write Dart package manifest");
+    std::fs::write(
+        ws.join("app.dart"),
+        r#"import 'package:shelf/shelf.dart';
+import 'package:xml/xml.dart';
+Future<Response> feed(Request req) async {
+  final body = await req.readAsString();
+  XmlDocument.parse(body);
+  return Response.ok('done');
+}
+"#,
+    )
+    .expect("write Dart medium-severity flow fixture");
+    let rules = rules_dir();
+
+    let sinks = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "sinks",
+        "--rules-dir",
+        &rules,
+        "--all",
+    ])
+    .unwrap();
+    assert!(
+        sinks.contains("dart.xxe.xml_document_parse") && sinks.contains("severity medium"),
+        "the unprofiled inventory must retain the medium audit endpoint:\n{sinks}"
+    );
+
+    let default_sink = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "sink-analysis",
+        "--rules-dir",
+        &rules,
+        "--all",
+    ])
+    .unwrap();
+    assert!(
+        default_sink.contains("0 sink(s)") && default_sink.contains("severity >= high"),
+        "an empty production result must expose the effective severity floor:\n{default_sink}"
+    );
+
+    let medium_sink_json = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "sink-analysis",
+        "--rules-dir",
+        &rules,
+        "--severity",
+        "medium",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    let medium_sink: serde_json::Value =
+        serde_json::from_str(&medium_sink_json).expect("medium sink-analysis JSON");
+    assert_eq!(medium_sink["summary"]["severity_floor"], "medium");
+    assert!(
+        json_rows(&medium_sink).iter().any(|row| {
+            row.pointer("/sink/rule_id")
+                .and_then(serde_json::Value::as_str)
+                == Some("dart.xxe.xml_document_parse")
+                && row
+                    .get("upstream_flows")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|flows| !flows.is_empty())
+        }),
+        "lowering the sink-analysis severity floor must admit the Dart XML endpoint and lineage:\n{medium_sink_json}"
+    );
+
+    let default_taint_json = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "taint-analysis",
+        "--rules-dir",
+        &rules,
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    let default_taint: serde_json::Value =
+        serde_json::from_str(&default_taint_json).expect("default taint JSON");
+    assert_eq!(default_taint["summary"]["severity_floor"], "high");
+    assert!(json_rows(&default_taint).is_empty());
+
+    let medium_taint_json = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "taint-analysis",
+        "--rules-dir",
+        &rules,
+        "--severity",
+        "medium",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    let medium_taint: serde_json::Value =
+        serde_json::from_str(&medium_taint_json).expect("medium taint JSON");
+    assert_eq!(medium_taint["summary"]["severity_floor"], "medium");
+    assert!(
+        json_rows(&medium_taint).iter().any(|row| {
+            row.pointer("/sink/rule_id").and_then(serde_json::Value::as_str)
+                == Some("dart.xxe.xml_document_parse")
+        }),
+        "lowering the explicit severity floor must expose the admitted Dart XML flow:\n{medium_taint_json}"
+    );
+}
+
+#[test]
 fn source_and_sink_text_flows_keep_parent_endpoint_labels_and_global_page_numbers() {
     let ws = micro_path("python");
     if !ws.exists() {

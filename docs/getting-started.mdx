@@ -171,7 +171,10 @@ source-independent upstream compiler lineage:
 
 `upstream_flows` remains present even when no selected security source reaches
 the endpoint. Exact selected-source proofs are reported separately under
-`security_source_flows`.
+`security_source_flows`. The report header echoes the effective severity floor;
+use `--profile all` or an explicit `--severity medium` when a lower-severity
+endpoint shown by the unprofiled `security sinks` inventory is intentionally in
+scope.
 
 For a complete machine-readable artifact:
 
