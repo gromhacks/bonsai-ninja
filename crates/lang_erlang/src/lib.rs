@@ -1426,7 +1426,7 @@ fn normalize_erlang_access_events(
             FlowEvent::Call { args, .. } => {
                 for arg in args {
                     if let Some(source) = fun_refs.get(&arg.span) {
-                        arg.value_text.clone_from(&source);
+                        arg.value_text.clone_from(source);
                         // `fun name/arity` is Erlang's exact callable-value
                         // syntax. Lower the grammar-proven target as a place
                         // so shared callgraph construction can distinguish it

@@ -2804,9 +2804,7 @@ fn go_map_callback_excluded_characters(callback: Node<'_>, src: &[u8]) -> Option
     let [parameter] = parameter_declarations.as_slice() else {
         return None;
     };
-    let Some(name) = parameter.child_by_field_name("name") else {
-        return None;
-    };
+    let name = parameter.child_by_field_name("name")?;
     let rune = node_text(&name, src).trim();
     let statements = go_block_statements(body);
     let [guard, fallback] = statements.as_slice() else {
@@ -2826,12 +2824,8 @@ fn go_map_callback_excluded_characters(callback: Node<'_>, src: &[u8]) -> Option
     let [replacement_return] = replacement_statements.as_slice() else {
         return None;
     };
-    let Some(replacement) = go_single_expression(*replacement_return) else {
-        return None;
-    };
-    let Some(replacement_value) = go_static_rune(replacement, src) else {
-        return None;
-    };
+    let replacement = go_single_expression(*replacement_return)?;
+    let replacement_value = go_static_rune(replacement, src)?;
     if !go_single_expression(*fallback)
         .is_some_and(|value| value.kind() == "identifier" && node_text(&value, src).trim() == rune)
     {
@@ -2839,7 +2833,7 @@ fn go_map_callback_excluded_characters(callback: Node<'_>, src: &[u8]) -> Option
     }
     let mut excluded = selected
         .into_iter()
-        .filter(|value| value.chars().next() != Some(replacement_value))
+        .filter(|value| !value.starts_with(replacement_value))
         .collect::<Vec<_>>();
     excluded.sort();
     excluded.dedup();

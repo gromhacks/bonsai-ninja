@@ -1098,9 +1098,7 @@ fn ecmascript_guarded_predicate_call(
 ) -> Option<(bonsai_common::Span, bool)> {
     let expression = unwrap_ecmascript_expression(expression);
     let (call, negated) = if expression.kind() == "unary_expression" {
-        let Some(argument) = expression.child_by_field_name("argument") else {
-            return None;
-        };
+        let argument = expression.child_by_field_name("argument")?;
         if src
             .get(expression.start_byte()..argument.start_byte())
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
@@ -1115,9 +1113,7 @@ fn ecmascript_guarded_predicate_call(
     if call.kind() != "call_expression" {
         return None;
     }
-    let Some(function) = call.child_by_field_name("function") else {
-        return None;
-    };
+    let function = call.child_by_field_name("function")?;
     if function.kind() != "member_expression"
         || function
             .child_by_field_name("object")
@@ -1151,7 +1147,6 @@ fn ecmascript_dynamic_key_filters(
             let Some(fact) = ecmascript_dynamic_key_filter_in_block(
                 tree,
                 function,
-                body,
                 block,
                 decl,
                 file,
@@ -1171,7 +1166,6 @@ fn ecmascript_dynamic_key_filters(
 fn ecmascript_dynamic_key_filter_in_block(
     tree: &Tree,
     function: Node<'_>,
-    function_body: Node<'_>,
     block: Node<'_>,
     decl: &bonsai_lang_api::Decl,
     file: FileId,
@@ -1293,6 +1287,7 @@ fn ecmascript_dynamic_key_filter_in_block(
     }) {
         return None;
     }
+    let function_body = function.child_by_field_name("body")?;
     let (collection_constructor, rejected_exact_values) =
         ecmascript_exact_top_level_collection(tree, function, function_body, collection, src)?;
 

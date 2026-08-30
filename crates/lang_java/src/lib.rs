@@ -841,12 +841,9 @@ fn java_guarded_predicate_call(
 ) -> Option<(bonsai_common::Span, bool)> {
     let expression = java_unwrap_parenthesized(expression);
     let (call, negated) = if expression.kind() == "unary_expression" {
-        let Some(operand) = expression
+        let operand = expression
             .child_by_field_name("operand")
-            .or_else(|| expression.named_child(0))
-        else {
-            return None;
-        };
+            .or_else(|| expression.named_child(0))?;
         if src
             .get(expression.start_byte()..operand.start_byte())
             .and_then(|bytes| std::str::from_utf8(bytes).ok())

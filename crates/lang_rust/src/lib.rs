@@ -2950,7 +2950,7 @@ fn collect_rust_value_event_sources(events: &[FlowEvent], out: &mut Vec<String>)
                 collect_rust_value_event_sources(else_events, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_rust_value_event_sources(body, out)
+                collect_rust_value_event_sources(body, out);
             }
             FlowEvent::Try {
                 body,

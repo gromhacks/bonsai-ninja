@@ -2432,9 +2432,7 @@ fn perl_anonymous_hash_aggregate_for_event(event: &FlowEvent, tree: &Tree, src: 
     if target.is_empty() || target.contains(['.', '{', '[']) {
         return None;
     }
-    let Some(assignment) = node_at_span(tree.root_node(), *span, &["assignment_expression"]) else {
-        return None;
-    };
+    let assignment = node_at_span(tree.root_node(), *span, &["assignment_expression"])?;
     let rhs = assignment
         .child_by_field_name("right")
         .filter(tree_sitter::Node::is_named)
@@ -2442,9 +2440,7 @@ fn perl_anonymous_hash_aggregate_for_event(event: &FlowEvent, tree: &Tree, src: 
             let mut cursor = assignment.walk();
             assignment.named_children(&mut cursor).last()
         });
-    let Some(rhs) = rhs.filter(|rhs| rhs.kind() == "anonymous_hash_expression") else {
-        return None;
-    };
+    let rhs = rhs.filter(|rhs| rhs.kind() == "anonymous_hash_expression")?;
 
     let mut aggregate_fields = Vec::new();
     for (key, value) in perl_anonymous_hash_fields(rhs, src) {
@@ -4043,7 +4039,7 @@ fn apply_perl_call_arguments(
                 apply_perl_call_arguments(else_events, parsed);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                apply_perl_call_arguments(body, parsed)
+                apply_perl_call_arguments(body, parsed);
             }
             FlowEvent::Try {
                 body,

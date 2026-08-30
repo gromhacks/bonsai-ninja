@@ -28,6 +28,17 @@ pub(super) struct CompilerGuardContext<'a> {
     pub(super) sink_tainted_args: &'a [TaintedArgInfo],
 }
 
+/// Immutable graph state required by the path-consumer containment proof.
+/// Grouping it keeps the sanitizer entry point focused on the finding-specific
+/// values while retaining each independently compiled evidence source.
+pub(super) struct PathConsumerGuardContext<'a> {
+    pub(super) ws: &'a Workspace,
+    pub(super) global: &'a bonsai_index::GlobalIndex,
+    pub(super) call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
+    pub(super) static_provenance_call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
+    pub(super) callback_invocations: &'a [bonsai_taint::CallbackInvocation],
+}
+
 pub(super) fn source_sink_pair_is_low_signal(
     source: &FindingMatch,
     source_rule: Option<&Rule>,
@@ -1322,16 +1333,19 @@ pub(super) fn path_containment_guard_sanitizer(
 }
 
 pub(super) fn path_consumer_containment_guard_sanitizer(
-    ws: &Workspace,
-    global: &bonsai_index::GlobalIndex,
-    call_graph: &bonsai_callgraph::ResolvedCallGraph,
-    static_provenance_call_graph: &bonsai_callgraph::ResolvedCallGraph,
-    callback_invocations: &[bonsai_taint::CallbackInvocation],
+    context: &PathConsumerGuardContext<'_>,
     taint_path: &[TaintPropagationStep],
     sink_func: FuncId,
     sink: &RuleMatch,
     sink_rule: &Rule,
 ) -> Option<FindingMatch> {
+    let PathConsumerGuardContext {
+        ws,
+        global,
+        call_graph,
+        static_provenance_call_graph,
+        callback_invocations,
+    } = context;
     let semantics = sink_rule.analysis_semantics.as_ref()?;
     if semantics.guard_profile != Some(GuardProfile::PathConsumerContainment) {
         return None;

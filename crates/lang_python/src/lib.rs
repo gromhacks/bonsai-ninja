@@ -3186,12 +3186,8 @@ fn python_guarded_predicate_call(
     if negated {
         node = node.named_child(0)?;
     }
-    let Some((function, _arguments)) = python_call_parts(node) else {
-        return None;
-    };
-    let Some((object, _method)) = python_attribute_parts(function, src) else {
-        return None;
-    };
+    let (function, _arguments) = python_call_parts(node)?;
+    let (object, _method) = python_attribute_parts(function, src)?;
     if object.kind() != "identifier" || node_text(&object, src).trim() != receiver {
         return None;
     }

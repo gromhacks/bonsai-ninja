@@ -92,7 +92,7 @@ use guard_sanitizers::{
     relative_path_containment_guard_sanitizer, runtime_type_rejection_guard_sanitizer,
     same_origin_path_constraint_sanitizer, sanitized_context_rewrite_covers_consumer,
     source_sink_pair_is_low_signal, terminal_rejection_predicate_guard_span, url_network_guard_sanitizer,
-    url_reconstruction_guard_sanitizer, CompilerGuardContext,
+    url_reconstruction_guard_sanitizer, CompilerGuardContext, PathConsumerGuardContext,
 };
 use prototype_guard::prototype_pollution_sink_is_guarded;
 #[cfg(test)]

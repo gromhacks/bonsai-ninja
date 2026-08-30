@@ -435,12 +435,15 @@ pub(super) fn make_finding(
             sanitizers_seen.push(path_guard);
         }
     }
+    let path_consumer_context = PathConsumerGuardContext {
+        ws: context.ws,
+        global: context.global.as_ref(),
+        call_graph: context.call_graph,
+        static_provenance_call_graph: context.static_provenance_call_graph,
+        callback_invocations: context.callback_invocations,
+    };
     if let Some(path_guard) = path_consumer_containment_guard_sanitizer(
-        context.ws,
-        context.global.as_ref(),
-        context.call_graph,
-        context.static_provenance_call_graph,
-        context.callback_invocations,
+        &path_consumer_context,
         &context.taint_path,
         context.sink_func,
         snk,
