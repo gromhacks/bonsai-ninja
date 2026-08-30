@@ -271,8 +271,12 @@ ERROR/MISSING node. A later completeness audit runs Tree-sitter only for
 unchecked snapshots and retains just their syntax diagnostics; it never lowers
 declarations, imports, or flow bodies merely to compute `analysis_complete`.
 An edit invalidates that parser coverage and the file's compiler diagnostic
-rows. A deliberately requested full `diagnostics` inventory may still stream
-compiler objects because it reports adapter/lowering diagnostics as well.
+rows. A deliberately requested full `diagnostics` inventory streams compiler
+objects once because it reports adapter/lowering diagnostics as well. It must
+not first parse and retain the complete workspace and then repeat compiler
+lowering. Source-weighted compiler-object admission remains canonical so an
+out-of-order completed object cannot retain all memory permits while an
+earlier publication head waits.
 
 Raw-anchor rule planning is also parallel but bounded by the shared compiler
 worker schedule. Each worker reads one immutable VFS snapshot and the compiled
@@ -307,6 +311,13 @@ products built from older facts even when the workspace source and dependency
 bytes have not changed. Root-only validators reconstruct the same ABI-bound
 identity as a fully opened workspace; a cheap validation path must never
 accept a graph the compiler path would reject.
+
+The partitioned resolved-callgraph sidecar also stores an independently
+decodable stable-edge-ID directory. Each entry maps the existing public
+low-32-bit edge digest to its exact owner partition and outgoing ordinal;
+digest collisions deliberately retain every candidate and are resolved by the
+normal exact edge record. `show E:<id>` must query that directory rather than
+decode and hash every edge in the workspace.
 
 The selected adapter also owns per-path grammar variants. Parser pools and
 tree-cache entries include that exact grammar identity (for example

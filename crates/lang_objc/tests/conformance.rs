@@ -1147,8 +1147,9 @@ fn objc_inheritance_and_local_receiver_type_are_ast_facts() {
     let vfs = Vfs::new();
     let file = vfs.write(
         std::path::Path::new("Entry.m"),
-        "@interface Base : NSObject\n@end\n\
-         @interface Child : Base\n@end\n\
+        "@protocol Runnable\n@end\n\
+         @interface Base : NSObject\n@end\n\
+         @interface Child : Base <Runnable>\n@end\n\
          @implementation Child\n@end\n\
          void entry(NSString *args) { Child *obj = [[Child alloc] init]; [obj helper:args]; }\n",
     );
@@ -1173,8 +1174,9 @@ fn objc_inheritance_and_local_receiver_type_are_ast_facts() {
     assert!(
         child_decls
             .iter()
-            .all(|decl| decl.bases.iter().any(|base| base == "Base")),
-        "both split declarations must retain the interface's exact superclass: {child_decls:#?}"
+            .all(|decl| decl.bases.iter().any(|base| base == "Base")
+                && decl.bases.iter().any(|base| base == "Runnable")),
+        "both split declarations must retain the interface's exact superclass and protocol syntax: {child_decls:#?}"
     );
 
     let entry = idx

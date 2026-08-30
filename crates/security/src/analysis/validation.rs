@@ -1431,6 +1431,47 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             "same_origin_path_constraint must require at least one proven boundary",
         );
     }
+    if let Some(guard) = semantics.same_origin_path_constraint.as_ref() {
+        if guard.required_predicates.is_empty()
+            && guard.required_accepted_prefixes.is_empty()
+            && guard.required_rejected_prefixes.is_empty()
+            && guard.required_rejected_components.is_empty()
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "same_origin_path_constraint requires an exact compiler constraint or rule-owned predicate",
+            );
+        }
+        for (index, predicate) in guard.required_predicates.iter().enumerate() {
+            if !rule_target_has_callable_identity(&predicate.target) {
+                push_validation_issue(
+                    issues,
+                    "error",
+                    "invalid-analysis-semantics",
+                    Some(rule),
+                    &format!(
+                        "same_origin_path_constraint.required_predicates[{index}].target must identify a callable"
+                    ),
+                );
+            }
+            if let Some(pattern) = predicate.target.regex.as_deref() {
+                if let Err(error) = Regex::new(pattern) {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "invalid-analysis-semantics",
+                        Some(rule),
+                        &format!(
+                            "same_origin_path_constraint.required_predicates[{index}].target.regex is invalid: {error}"
+                        ),
+                    );
+                }
+            }
+        }
+    }
     if semantics
         .same_origin_path_constraint
         .as_ref()

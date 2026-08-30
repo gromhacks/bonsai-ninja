@@ -78,6 +78,38 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  shell_exec(\"safe\");\n}\n"
     expect_no_match: true
   description: shell_exec() - runs argv through /bin/sh; tainted argv executes arbitrary shell commands.
+- id: php.cmdi.backtick
+  enabled: true
+  language: php
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  analysis_semantics:
+    flow_classes: [process-execution]
+  match:
+    kind: call
+    callee:
+      name: "`"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: interpolated PHP backtick command
+    code: |-
+      <?php
+      function example($input) {
+        return `printf %s $input`;
+      }
+  - name: literal PHP backtick command is not a taint sink
+    code: |-
+      <?php
+      function example($input) {
+        return `printf safe`;
+      }
+    expect_no_match: true
+  description: PHP backtick command syntax executes its interpolated contents through the shell.
 - id: php.cmdi.passthru
   enabled: true
   language: php

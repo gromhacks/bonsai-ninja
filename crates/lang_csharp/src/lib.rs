@@ -7,7 +7,8 @@ use bonsai_lang_api::{
     extract_imports_via,
     kit::{
         call_arg_from_node_with_handler, canonical_simple_type_name, collect_kinds,
-        collect_receiver_field_writes, expression_flow_from_node_with_handler, language_from_pack, node_text,
+        collect_receiver_field_writes, collect_receiver_state_sources,
+        expression_flow_from_node_with_handler, language_from_pack, node_text,
         package_module_segments_with_workspace_prefix, parse_with, sort_dedup_finite_literal_selections,
         span_of,
     },
@@ -1182,18 +1183,10 @@ fn synthesize_csharp_expression_bodied_properties(
         let Some(expr) = named.last().copied() else {
             continue;
         };
-        let body = node_text(&expr, src).trim().to_string();
-        if body.is_empty() {
+        let body_text = node_text(&expr, src).trim().to_string();
+        if body_text.is_empty() {
             continue;
         }
-        // Qualify a bare member read against the receiver so the field
-        // base resolves to `this` (`Data.Cmd` → `this.Data.Cmd`), which
-        // is what the receiver-state machinery keys on.
-        let qualified = if body.starts_with("this.") || body.starts_with("base.") {
-            body.clone()
-        } else {
-            format!("this.{body}")
-        };
         let Some((parent, module_path, visibility)) = csharp_enclosing_type_decl(index, prop, file) else {
             continue;
         };
@@ -1220,52 +1213,61 @@ fn synthesize_csharp_expression_bodied_properties(
         // already handles — the call resolves to the receiver-typed
         // member (e.g. the record component's synthesized accessor),
         // and that 1-level hop forwards the tainted field.
-        let flow_events =
-            if let Some((call_receiver, call_name)) = dotted_member_access_call_parts(&qualified) {
-                // Look up the receiver's static type from sibling
-                // `property_declaration` / `field_declaration` siblings in
-                // the same class so the resolver can disambiguate the
-                // call's `name` against the receiver's class instead of
-                // resolving back to the synthesizing property itself
-                // (which would self-recurse).
-                let lookup_member = csharp_receiver_member_lookup_name(&call_receiver);
-                let receiver_types = csharp_lookup_member_type(prop, lookup_member, src)
-                    .into_iter()
-                    .collect();
-                let mut return_flow = bonsai_lang_api::ExpressionFlow::from_place(qualified.clone());
-                return_flow.call_sites.push(body_span);
-                vec![
-                    FlowEvent::Call {
-                        span: body_span,
-                        name: call_name.clone(),
-                        receiver: Some(call_receiver),
-                        receiver_types,
-                        call_kind: CallKind::Method,
-                        args: Vec::new(),
-                    },
-                    FlowEvent::Return {
-                        span: body_span,
-                        value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
-                        value_text: Some(call_name.clone()),
-                        value_name: Some(call_name),
-                        // Preserve both compiler facts: this is a resolved
-                        // nested member call and an exact projected value.
-                        // The call-site fact composes accessor summaries;
-                        // the projection lets field-sensitive lowering
-                        // consume only the selected member (`Data.Cmd`) and
-                        // never a sibling (`Data.User`).
-                        value_flow: return_flow,
-                    },
-                ]
-            } else {
-                vec![FlowEvent::Return {
+        let flow_events = if let Some((call_receiver, call_name)) = csharp_member_access_call_parts(expr, src)
+        {
+            // Look up the receiver's static type from sibling
+            // `property_declaration` / `field_declaration` siblings in
+            // the same class so the resolver can disambiguate the
+            // call's `name` against the receiver's class instead of
+            // resolving back to the synthesizing property itself
+            // (which would self-recurse).
+            let lookup_member = csharp_receiver_member_lookup_name(&call_receiver);
+            let receiver_types = csharp_lookup_member_type(prop, lookup_member, src)
+                .into_iter()
+                .collect();
+            let mut return_flow = bonsai_lang_api::ExpressionFlow::from_place(call_name.clone());
+            return_flow.call_sites.push(body_span);
+            vec![
+                FlowEvent::Call {
                     span: body_span,
-                    value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
-                    value_text: Some(qualified.clone()),
-                    value_name: Some(qualified.clone()),
-                    value_flow: bonsai_lang_api::ExpressionFlow::from_place(qualified.clone()),
-                }]
-            };
+                    name: call_name.clone(),
+                    receiver: Some(call_receiver),
+                    receiver_types,
+                    call_kind: CallKind::Method,
+                    args: Vec::new(),
+                },
+                FlowEvent::Return {
+                    span: body_span,
+                    value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+                    value_text: Some(call_name.clone()),
+                    value_name: Some(call_name),
+                    // Preserve both compiler facts: this is a resolved
+                    // nested member call and an exact projected value.
+                    // The call-site fact composes accessor summaries;
+                    // the projection lets field-sensitive lowering
+                    // consume only the selected member (`Data.Cmd`) and
+                    // never a sibling (`Data.User`).
+                    value_flow: return_flow,
+                },
+            ]
+        } else {
+            let mut value_flow = expression_flow_from_node_with_handler(expr, file, src, &HANDLER);
+            if let Some(place) = csharp_exact_member_place(expr, src).map(csharp_qualify_member_place) {
+                value_flow = bonsai_lang_api::ExpressionFlow::from_place(place);
+            }
+            let value_name = value_flow.place.clone();
+            vec![FlowEvent::Return {
+                span: body_span,
+                value_kind: HANDLER
+                    .expression_value_kind(expr, src)
+                    .or(Some(bonsai_lang_api::AssignValueKind::Compound)),
+                value_text: Some(body_text),
+                value_name,
+                value_flow,
+            }]
+        };
+        let receiver_state_sources =
+            collect_receiver_state_sources(&flow_events, &[], HANDLER.implicit_receiver_names);
         synthesized.push(bonsai_lang_api::Decl {
             symbol: bonsai_common::SymbolId::new(next_symbol),
             kind: DeclKind::Method,
@@ -1288,7 +1290,7 @@ fn synthesize_csharp_expression_bodied_properties(
             receiver_field_writes: Vec::new(),
             receiver_field_initializers: Vec::new(),
             implicit_receiver_names: vec!["this".to_string(), "base".to_string()],
-            receiver_state_sources: vec![qualified],
+            receiver_state_sources,
             return_type: None,
             is_variadic: false,
         });
@@ -1495,41 +1497,44 @@ fn csharp_lookup_member_type(prop: tree_sitter::Node<'_>, member: &str, src: &[u
     None
 }
 
-/// If `body` is a simple dotted member-access of identifiers
-/// (`Data.Cmd`, optionally prefixed `this.`/`base.`), return
-/// `(receiver, call_name)` modeling it as a method call — `this.Data.Cmd`
-/// becomes `(receiver="this.Data", call_name="this.Data.Cmd")` so the
-/// IDG's receiver-state bridge preserves exact field taint while still
-/// resolving to the receiver-typed member (e.g. a record component's
-/// synthesized accessor). Returns `None` for any non-trivial body (call,
-/// indexer, literal, complex expression) so those keep the Return-only
-/// fallback.
-fn dotted_member_access_call_parts(body: &str) -> Option<(String, String)> {
-    let trimmed = body.trim();
-    // The text must be a pure dotted identifier path of at least two
-    // segments (`A.B`/`this.A.B`/`A.B.C`/...).
-    let inner = trimmed;
-    let segments: Vec<&str> = inner.split('.').collect();
-    if segments.len() < 2 {
-        return None;
-    }
-    for seg in &segments {
-        if seg.is_empty()
-            || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            || !seg
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        {
-            return None;
+/// Lower a pure C# identifier/member-access chain from its CST. This never
+/// tokenizes a rendered expression: calls, indexers, conditionals, and other
+/// non-member syntax fail closed at their node kind.
+fn csharp_exact_member_place(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" | "this_expression" | "base_expression" => {
+            let value = node_text(&node, src).trim();
+            csharp_bare_identifier(value).map(str::to_string)
         }
+        "member_access_expression" => {
+            let base = node
+                .child_by_field_name("expression")
+                .or_else(|| node.child_by_field_name("object"))?;
+            let member = node
+                .child_by_field_name("name")
+                .or_else(|| node.child_by_field_name("member"))?;
+            let base = csharp_exact_member_place(base, src)?;
+            let member = node_text(&member, src).trim();
+            let member = csharp_bare_identifier(member)?;
+            Some(format!("{base}.{member}"))
+        }
+        _ => None,
     }
-    // Receiver = everything up to the last dot; call_name = full dotted
-    // form mirroring Java's `data.cmd` pattern (`receiver="data",
-    // name="data.cmd"`).
-    let last_dot = inner.rfind('.')?;
-    let receiver = inner[..last_dot].to_string();
-    Some((receiver, inner.to_string()))
+}
+
+fn csharp_qualify_member_place(place: String) -> String {
+    if place == "this" || place == "base" || place.starts_with("this.") || place.starts_with("base.") {
+        place
+    } else {
+        format!("this.{place}")
+    }
+}
+
+fn csharp_member_access_call_parts(node: Node<'_>, src: &[u8]) -> Option<(String, String)> {
+    (node.kind() == "member_access_expression").then_some(())?;
+    let name = csharp_qualify_member_place(csharp_exact_member_place(node, src)?);
+    let (receiver, _) = name.rsplit_once('.')?;
+    Some((receiver.to_string(), name))
 }
 
 /// Resolve the type declaration (`class`/`struct`/`record`/`interface`)
@@ -1732,7 +1737,16 @@ fn collect_csharp_inherited_constructor_field_writes(
                         let Some(arg) = args.get(*source_param) else {
                             continue;
                         };
-                        if let Some(current_param) = csharp_param_index_for_bare_arg(decl, &arg.value_text) {
+                        let current_param = arg
+                            .place
+                            .as_deref()
+                            .and_then(|place| csharp_param_index_for_bare_arg(decl, place))
+                            .or_else(|| {
+                                arg.source_names
+                                    .iter()
+                                    .find_map(|source| csharp_param_index_for_bare_arg(decl, source))
+                            });
+                        if let Some(current_param) = current_param {
                             if !mapped_sources.contains(&current_param) {
                                 mapped_sources.push(current_param);
                             }

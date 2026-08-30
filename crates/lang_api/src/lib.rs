@@ -58,13 +58,14 @@ pub use types::{
     CompilerReceiverTypeHeader, CompilerReturnHeader, CompilerSyntaxHeader, CompilerWriteAttribution,
     ConditionEquality, ConditionExpressionFact, ConditionOperandFact, Decl, DeclIndex, DeclKind,
     DynamicKeyFilterFact, ExpressionField, ExpressionFlow, ExpressionProjection, FieldWrite,
-    FiniteLiteralSelectionFact, FlowEvent, GuardedValueFilterFact, ImportIndex, ImportScope, ImportSpec,
-    InlineAggregateCallbackFact, LanguageId, LoopKind, MembershipConditionFact, ModulePath, Operation,
-    OperationKind, OperationOperand, OperationOperandRole, PredicateReturnFact, ReceiverFieldInitializer,
-    Ref, RefKind, RuntimeTypeNarrowingFact, SameOriginPathConstraintFact, StaticAggregateFieldValue,
-    StaticScalarValue, StaticStringMapEntry, StaticStringMapFact, StringCategory, StringCompositionFact,
-    StringCompositionPart, StringLiteral, TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
-    COMPILER_GUARD_RELATIVE_PATH_BOUNDARY_REJECTION,
+    FiniteLiteralSelectionFact, FlowEvent, GuardedPredicateCallFact, GuardedValueConstraintFact,
+    GuardedValueFilterFact, ImportIndex, ImportScope, ImportSpec, InlineAggregateCallbackFact, LanguageId,
+    LoopKind, MembershipConditionFact, ModulePath, Operation, OperationKind, OperationOperand,
+    OperationOperandRole, PredicateReturnFact, ReceiverFieldInitializer, Ref, RefKind,
+    RuntimeTypeNarrowingFact, StaticAggregateFieldValue, StaticScalarValue, StaticStringMapEntry,
+    StaticStringMapFact, StringCategory, StringCompositionFact, StringCompositionPart, StringLiteral,
+    TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
+    COMPILER_GUARD_PREFIX_BOUNDARY_EQUALITY,
 };
 
 use bonsai_common::FileId;

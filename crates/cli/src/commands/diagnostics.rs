@@ -714,19 +714,14 @@ fn flush_stdout() -> Result<()> {
 
 pub(crate) fn cmd_diagnostics(root: &std::path::Path) -> Result<()> {
     let (project, _footer) = open_project_index_only(root)?;
-    let ws = project.workspace();
-    let files = ws.vfs().all_files();
-    let bar = progress::progress_bar("collecting diagnostics", files.len() as u64);
-    let parse_result = (|| -> Result<()> {
-        for f in files {
-            let _ = ws.db().parse(f)?;
-            bar.inc(1);
-        }
-        Ok(())
-    })();
+    let file_count = project.workspace().vfs().file_count();
+    let bar = progress::progress_bar("collecting diagnostics", file_count as u64);
+    // `diagnostics_report_with_progress` owns the one exact compiler pass.
+    // Parsing every file first retained a workspace-sized syntax forest and
+    // then repeated the frontend work while collecting adapter diagnostics.
+    let report = project.diagnostics_report_with_progress(|| bar.inc(1));
     bar.finish_and_clear();
-    parse_result?;
-    cli_println!("{}", serde_json::to_string_pretty(&project.diagnostics_report())?);
+    cli_println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 

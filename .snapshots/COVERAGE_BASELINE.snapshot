@@ -7,14 +7,14 @@
 | elixir | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Partial | Unsupported | — |
 | erlang | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Partial | Unsupported | — |
 | go | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Partial | Partial | — |
-| java | Partial | Partial | Unsupported | Partial | Exact | Partial | Partial | Partial | Unsupported | Partial | Partial | — |
+| java | Partial | Partial | Unsupported | Partial | Exact | Partial | Partial | Unsupported | Unsupported | Partial | Partial | — |
 | javascript | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Partial | Unsupported | exports, module.exports |
 | kotlin | Partial | Partial | Unsupported | Partial | Exact | Partial | Partial | Unsupported | Unsupported | Partial | Partial | — |
 | lua | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Partial | Unsupported | — |
 | objc | Partial | Partial | Partial | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Partial | Partial | — |
 | perl | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Partial | Unsupported | — |
 | php | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Partial | Partial | — |
-| python | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Partial | Unsupported | Partial | Partial | — |
+| python | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Partial | Partial | — |
 | ruby | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Partial | Unsupported | — |
 | rust | Partial | Partial | Partial | Partial | Unsupported | Exact | Unsupported | Unsupported | Partial | Exact | Partial | — |
 | scala | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Exact | Partial | — |

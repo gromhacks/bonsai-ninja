@@ -570,9 +570,21 @@ fn inspect_finite_map_uses(
                 }
             }
             FlowEvent::AggregateAssign {
-                target, value_flow, ..
+                span,
+                target,
+                value_flow,
+                ..
             } => {
-                if place_is_or_projects_from(target, map) || expression_flow_reads_place(value_flow, map) {
+                // Aggregate lowering and scalar assignment lowering describe
+                // the same parsed map initializer. The exact static-map fact
+                // proves that initializer finite, so its companion aggregate
+                // event is not a mutation or escape. Any other aggregate
+                // write/read of the map remains disqualifying.
+                let initializes_proven_map = direct && *span == map_assignment && target == map;
+                if !initializes_proven_map
+                    && (place_is_or_projects_from(target, map)
+                        || expression_flow_reads_place(value_flow, map))
+                {
                     proof.safe = false;
                 }
             }
@@ -1314,6 +1326,8 @@ pub(super) fn path_consumer_containment_guard_sanitizer(
     global: &bonsai_index::GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
     static_provenance_call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    callback_invocations: &[bonsai_taint::CallbackInvocation],
+    taint_path: &[TaintPropagationStep],
     sink_func: FuncId,
     sink: &RuleMatch,
     sink_rule: &Rule,
@@ -1364,6 +1378,18 @@ pub(super) fn path_consumer_containment_guard_sanitizer(
                 )
             });
         guarded
+    })
+    .or_else(|| {
+        path_consumer_callback_guard_span(
+            ws,
+            global,
+            static_provenance_call_graph,
+            callback_invocations,
+            taint_path,
+            sink_func,
+            &decl,
+            guard,
+        )
     })?;
     finding_for_guard_span_in_workspace(
         ws,
@@ -1373,6 +1399,77 @@ pub(super) fn path_consumer_containment_guard_sanitizer(
         sink_rule.tag.as_deref()?,
         "canonical-path-consumer-containment",
     )
+}
+
+#[allow(clippy::too_many_arguments)] // Each input is an independent compiler or rule proof.
+fn path_consumer_callback_guard_span(
+    ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
+    static_provenance_call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    invocations: &[bonsai_taint::CallbackInvocation],
+    taint_path: &[TaintPropagationStep],
+    callback: FuncId,
+    callback_decl: &bonsai_lang_api::Decl,
+    guard: &crate::rule::PathConsumerContainmentGuardSemantics,
+) -> Option<Span> {
+    for invocation in invocations {
+        let Some(outer_arg) = invocation
+            .forwarded_args_from
+            .map(|start| start.saturating_add(guard.sink_path_arg_index))
+        else {
+            continue;
+        };
+        for (call_span, target) in &invocation.resolved_callback_targets {
+            if *target != callback {
+                continue;
+            }
+            let Some(owner) = ws
+                .enclosing_index()
+                .enclosing_for(global, call_span.file, call_span.start)
+            else {
+                continue;
+            };
+            let Some(caller) = ws.exact_decl(owner.symbol) else {
+                continue;
+            };
+            if !callback_host_call_is_on_taint_path(ws, &caller, *call_span, callback_decl, taint_path) {
+                continue;
+            }
+            if let Some(span) = path_consumer_guard_span(
+                ws,
+                global,
+                static_provenance_call_graph,
+                &caller,
+                *call_span,
+                outer_arg,
+                guard,
+                None,
+            ) {
+                return Some(span);
+            }
+        }
+    }
+    None
+}
+
+fn callback_host_call_is_on_taint_path(
+    ws: &Workspace,
+    caller: &bonsai_lang_api::Decl,
+    call_span: Span,
+    callback: &bonsai_lang_api::Decl,
+    taint_path: &[TaintPropagationStep],
+) -> bool {
+    let Ok(snapshot) = ws.vfs().snapshot(call_span.file) else {
+        return false;
+    };
+    let location = bonsai_common::cached_span_map_arc(call_span.file, snapshot.version, &snapshot.text)
+        .line_col(call_span.start);
+    taint_path.iter().any(|step| {
+        step.caller == caller.name
+            && callee_spelling_tail(&step.callee) == callee_spelling_tail(&callback.name)
+            && step.line == location.line
+            && step.column == location.column
+    })
 }
 
 #[allow(clippy::too_many_arguments)] // Every argument is a distinct compiler proof input; bundling would obscure provenance.
@@ -2688,16 +2785,11 @@ pub(super) fn same_origin_path_constraint_sanitizer(
         let decl = ws.exact_decl(SymbolId::new(function.raw()))?;
         let file_index = ws.exact_decl_index_shared(decl.span.file)?;
         for fact in file_index
-            .same_origin_path_constraints
+            .guarded_value_constraints
             .iter()
             .filter(|fact| fact.function_span == decl.span)
         {
-            if !same_origin_provider_is_accepted(fact, required)
-                || (required.require_scheme_rejection && !fact.rejects_scheme)
-                || (required.require_authority_rejection && !fact.rejects_authority)
-                || (required.require_absolute_path && !fact.requires_absolute_path)
-                || (required.require_scheme_relative_rejection && !fact.rejects_scheme_relative_path)
-            {
+            if !guarded_value_constraint_satisfies_rule(fact, required, &decl, &file_index) {
                 continue;
             }
             let receives_tainted_parameter =
@@ -2835,16 +2927,11 @@ pub(super) fn same_origin_path_constraint_sanitizer(
                     continue;
                 };
                 for fact in helper_index
-                    .same_origin_path_constraints
+                    .guarded_value_constraints
                     .iter()
                     .filter(|fact| fact.function_span == helper.span)
                 {
-                    if !same_origin_provider_is_accepted(fact, required)
-                        || (required.require_scheme_rejection && !fact.rejects_scheme)
-                        || (required.require_authority_rejection && !fact.rejects_authority)
-                        || (required.require_absolute_path && !fact.requires_absolute_path)
-                        || (required.require_scheme_relative_rejection && !fact.rejects_scheme_relative_path)
-                    {
+                    if !guarded_value_constraint_satisfies_rule(fact, required, &helper, &helper_index) {
                         continue;
                     }
                     let Some(input_param_index) = fact.input_param_index else {
@@ -2901,11 +2988,13 @@ pub(super) fn same_origin_path_constraint_sanitizer(
     None
 }
 
-fn same_origin_provider_is_accepted(
-    fact: &bonsai_lang_api::SameOriginPathConstraintFact,
+fn guarded_value_constraint_satisfies_rule(
+    fact: &bonsai_lang_api::GuardedValueConstraintFact,
     required: &crate::rule::SameOriginPathConstraintSemantics,
+    decl: &bonsai_lang_api::Decl,
+    file_index: &bonsai_lang_api::DeclIndex,
 ) -> bool {
-    match fact.provider_call.as_deref() {
+    let provider_is_accepted = match fact.provider_call.as_deref() {
         // A provider-bound fact is only security-relevant when the rulepack
         // explicitly assigns semantics to that imported runtime call.
         Some(provider) => required
@@ -2915,7 +3004,53 @@ fn same_origin_provider_is_accepted(
         // Syntax-only facts are valid only for semantics that do not require
         // a particular runtime provider.
         None => required.accepted_providers.is_empty(),
-    }
+    };
+    provider_is_accepted
+        && required
+            .required_predicates
+            .iter()
+            .all(|predicate| guarded_predicate_requirement_is_satisfied(fact, predicate, decl, file_index))
+        && required
+            .required_accepted_prefixes
+            .iter()
+            .all(|prefix| fact.accepted_prefixes.contains(prefix))
+        && required
+            .required_rejected_prefixes
+            .iter()
+            .all(|prefix| fact.rejected_prefixes.contains(prefix))
+        && required
+            .required_rejected_components
+            .iter()
+            .all(|component| fact.rejected_components.contains(component))
+        && (required.accepted_static_fallbacks.is_empty()
+            || fact
+                .static_fallbacks
+                .iter()
+                .any(|fallback| required.accepted_static_fallbacks.contains(fallback)))
+}
+
+fn guarded_predicate_requirement_is_satisfied(
+    fact: &bonsai_lang_api::GuardedValueConstraintFact,
+    required: &crate::rule::GuardedPredicateRequirement,
+    decl: &bonsai_lang_api::Decl,
+    file_index: &bonsai_lang_api::DeclIndex,
+) -> bool {
+    let mut calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    fact.predicate_calls.iter().any(|predicate| {
+        predicate.required_result == required.required_result
+            && calls.iter().any(|call| {
+                spans_overlap(call.span, predicate.call_expression_span)
+                    && rule_target_matches_call(call.name, call.receiver_types, &required.target)
+                    && bonsai_lang_api::call_argument_value_fact(
+                        &file_index.call_argument_values,
+                        call.span,
+                        required.argument_index,
+                    )
+                    .and_then(|argument| argument.static_value.as_ref())
+                        == Some(&required.argument_value)
+            })
+    })
 }
 
 pub(super) fn collect_compiler_call_sites_reaching_value(
@@ -3207,7 +3342,7 @@ fn place_depends_on_match_span(
             })
         }) || assignment.call_sites.iter().any(|call_expression| {
             file_index.call_receivers.iter().any(|receiver| {
-                receiver.role == bonsai_lang_api::CallReceiverRole::Value
+                receiver.role.is_runtime_value()
                     && span_contains(*call_expression, receiver.call_span)
                     && expression_flow_depends_on_match_span(
                         &receiver.value_flow,
@@ -4322,7 +4457,7 @@ fn compiler_call_input_contains_call(
     };
     if input_from_receiver {
         return bonsai_lang_api::call_receiver_fact_for_span(&file_index.call_receivers, outer.span)
-            .filter(|fact| fact.role == bonsai_lang_api::CallReceiverRole::Value)
+            .filter(|fact| fact.role.is_runtime_value())
             .is_some_and(|fact| fact.value_flow.call_sites.iter().copied().any(contains_inner));
     }
     bonsai_lang_api::call_argument_value_fact(&file_index.call_argument_values, outer.span, 0)
@@ -4666,7 +4801,7 @@ fn rule_owned_factory_call_has_static_input(
         return false;
     };
     if let Some(receiver) = bonsai_lang_api::call_receiver_fact_for_span(call_receivers, call.span) {
-        if receiver.role == bonsai_lang_api::CallReceiverRole::Value
+        if receiver.role.is_runtime_value()
             && (receiver.static_value.is_some()
                 || expression_flow_is_literal(&receiver.value_flow)
                 || expression_flow_has_static_binding_provenance(
@@ -5053,8 +5188,9 @@ fn relative_rejection_call_in_span(events: &[FlowEvent], query: &RelativeRejecti
                 ..
             } if span_contains(query.condition_span, *span) => {
                 let compiler_boundary_rejection = query.file_index.compiler_guards.iter().any(|guard| {
-                    guard.capability == bonsai_lang_api::COMPILER_GUARD_RELATIVE_PATH_BOUNDARY_REJECTION
+                    guard.capability == bonsai_lang_api::COMPILER_GUARD_PREFIX_BOUNDARY_EQUALITY
                         && spans_overlap(guard.guarded_call_span, *span)
+                        && prefix_boundary_evidence_matches_rule(&guard.evidence, query.guard)
                 });
                 if compiler_boundary_rejection
                     && matches!(args.as_slice(), [argument]
@@ -5120,6 +5256,42 @@ fn relative_rejection_call_in_span(events: &[FlowEvent], query: &RelativeRejecti
         }
     }
     false
+}
+
+fn prefix_boundary_evidence_matches_rule(
+    evidence: &[String],
+    guard: &RelativePathContainmentGuardSemantics,
+) -> bool {
+    let value = |prefix: &str| evidence.iter().find_map(|item| item.strip_prefix(prefix));
+    let Some(literal) = value("literal:") else {
+        return false;
+    };
+    let Some(boundary_place) = value("boundary-place:") else {
+        return false;
+    };
+    let Some(boundary_wrapper) = value("boundary-wrapper:") else {
+        return false;
+    };
+    let Some(slice_end) = value("slice-end:").and_then(|value| value.parse::<usize>().ok()) else {
+        return false;
+    };
+    let Some(length_minimum) = value("length-minimum:").and_then(|value| value.parse::<usize>().ok()) else {
+        return false;
+    };
+    guard
+        .rejected_exact_values
+        .iter()
+        .any(|accepted| accepted == literal)
+        && guard
+            .rejection_boundary_places
+            .iter()
+            .any(|accepted| accepted == boundary_place)
+        && guard
+            .rejection_boundary_wrappers
+            .iter()
+            .any(|target| rule_target_matches_call(boundary_wrapper, &[], target))
+        && slice_end == literal.len().saturating_add(1)
+        && length_minimum >= slice_end
 }
 
 fn relative_rejection_prefix_is_exact(
@@ -5623,7 +5795,7 @@ fn canonical_call_receiver_root(
         return None;
     }
     let receiver = bonsai_lang_api::call_receiver_fact_for_span(call_receivers, call.span)?;
-    if receiver.role != bonsai_lang_api::CallReceiverRole::Value {
+    if !receiver.role.is_runtime_value() {
         return None;
     }
     if receiver.value_flow.call_sites.is_empty() {

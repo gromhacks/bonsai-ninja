@@ -18,7 +18,7 @@
 /// Capitalization is not static/type evidence.
 pub fn normalize_call_result_assignment_sources(events: &mut [crate::FlowEvent]) {
     for event_index in 0..events.len() {
-        let adjacent_call_args = adjacent_call_args_for_call_result_assignment(events, event_index);
+        let adjacent_call = adjacent_call_evidence_for_call_result_assignment(events, event_index);
         match &mut events[event_index] {
             crate::FlowEvent::Assign {
                 source_name,
@@ -27,13 +27,22 @@ pub fn normalize_call_result_assignment_sources(events: &mut [crate::FlowEvent])
                 source_names,
                 ..
             } => {
-                if !adjacent_call_args.is_empty()
-                    && (source_call_args.is_empty() || adjacent_call_args.len() > source_call_args.len())
-                {
-                    *source_call_args = adjacent_call_args;
+                if let Some(adjacent_call) = adjacent_call.as_ref() {
+                    if !adjacent_call.renderings.is_empty()
+                        && (source_call_args.is_empty()
+                            || adjacent_call.renderings.len() > source_call_args.len())
+                    {
+                        source_call_args.clone_from(&adjacent_call.renderings);
+                    }
                 }
                 *source_name = None;
-                prune_call_result_source_names(source_call, source_call_args, source_names);
+                prune_call_result_source_names(
+                    source_call,
+                    adjacent_call
+                        .as_ref()
+                        .map_or(&[][..], |evidence| evidence.semantic_sources.as_slice()),
+                    source_names,
+                );
             }
             crate::FlowEvent::Branch {
                 then_events,
@@ -63,42 +72,56 @@ pub fn normalize_call_result_assignment_sources(events: &mut [crate::FlowEvent])
     }
 }
 
-fn adjacent_call_args_for_call_result_assignment(
+#[derive(Default)]
+struct AdjacentCallEvidence {
+    /// Rendering retained only for legacy trace/output compatibility.
+    renderings: Vec<String>,
+    /// Exact value identities lowered from the argument CST.
+    semantic_sources: Vec<String>,
+}
+
+fn adjacent_call_evidence_for_call_result_assignment(
     events: &[crate::FlowEvent],
     event_index: usize,
-) -> Vec<String> {
+) -> Option<AdjacentCallEvidence> {
     let Some(crate::FlowEvent::Assign {
         source_call: Some(source_call),
-        source_call_args,
         span: assign_span,
         ..
     }) = events.get(event_index)
     else {
-        return Vec::new();
+        return None;
     };
 
-    events
-        .iter()
-        .skip(event_index + 1)
-        .find_map(|event| match event {
-            crate::FlowEvent::Call { name, args, span, .. }
-                if call_result_names_match(source_call, name)
-                    && span.file == assign_span.file
-                    && span.start >= assign_span.start
-                    && span.end <= assign_span.end
-                    && !args.is_empty()
-                    && (source_call_args.is_empty() || args.len() > source_call_args.len()) =>
-            {
-                Some(args.iter().map(|arg| arg.value_text.clone()).collect())
+    events.iter().skip(event_index + 1).find_map(|event| match event {
+        crate::FlowEvent::Call { name, args, span, .. }
+            if call_result_names_match(source_call, name)
+                && span.file == assign_span.file
+                && span.start >= assign_span.start
+                && span.end <= assign_span.end
+                && !args.is_empty() =>
+        {
+            let mut semantic_sources = Vec::new();
+            for argument in args {
+                if let Some(place) = argument.place.as_deref() {
+                    push_unique_call_result_source(&mut semantic_sources, place);
+                }
+                for source in &argument.source_names {
+                    push_unique_call_result_source(&mut semantic_sources, source);
+                }
             }
-            _ => None,
-        })
-        .unwrap_or_default()
+            Some(AdjacentCallEvidence {
+                renderings: args.iter().map(|arg| arg.value_text.clone()).collect(),
+                semantic_sources,
+            })
+        }
+        _ => None,
+    })
 }
 
 fn prune_call_result_source_names(
     source_call: &str,
-    source_call_args: &[String],
+    exact_argument_sources: &[String],
     source_names: &mut Vec<String>,
 ) {
     let call = source_call.trim();
@@ -106,30 +129,18 @@ fn prune_call_result_source_names(
         return;
     }
     let receiver_and_tail = call_receiver_and_tail(call);
-    let arg_texts = source_call_args
-        .iter()
-        .map(|arg| arg.trim())
-        .filter(|arg| !arg.is_empty())
-        .collect::<Vec<_>>();
-    let arg_identifiers = source_call_args
-        .iter()
-        .flat_map(|arg| call_result_identifier_tokens(arg))
-        .collect::<Vec<_>>();
-
     source_names.retain(|name| {
         let name = name.trim();
         if name.is_empty()
             || name == call
-            || arg_texts
+            || exact_argument_sources
                 .iter()
                 .any(|arg| call_result_identifier_names_match(arg, name))
         {
             return false;
         }
         let Some((receiver, tail)) = receiver_and_tail else {
-            return !arg_identifiers
-                .iter()
-                .any(|arg| call_result_identifier_names_match(arg, name));
+            return true;
         };
         if name == receiver {
             return true;
@@ -137,9 +148,7 @@ fn prune_call_result_source_names(
         if name == tail {
             return false;
         }
-        !arg_identifiers
-            .iter()
-            .any(|arg| call_result_identifier_names_match(arg, name))
+        true
     });
     dedup_call_result_source_names(source_names);
 }
@@ -174,31 +183,16 @@ fn call_result_short_tail(name: &str) -> &str {
     bonsai_common::short_qualified_tail(name).trim()
 }
 
-fn call_result_identifier_tokens(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    for ch in text.chars() {
-        if ch == '_' || ch.is_ascii_alphanumeric() {
-            current.push(ch);
-        } else if !current.is_empty() {
-            push_unique_call_result_identifier(&mut out, &current);
-            current.clear();
+fn push_unique_call_result_source(out: &mut Vec<String>, source: &str) {
+    let source = source.trim();
+    if source.is_empty() {
+        return;
+    }
+    for candidate in std::iter::once(source).chain(bonsai_common::qualified_name_segments(source)) {
+        let candidate = candidate.trim();
+        if !candidate.is_empty() && !out.iter().any(|existing| existing == candidate) {
+            out.push(candidate.to_string());
         }
-    }
-    if !current.is_empty() {
-        push_unique_call_result_identifier(&mut out, &current);
-    }
-    out
-}
-
-fn push_unique_call_result_identifier(out: &mut Vec<String>, token: &str) {
-    if token
-        .chars()
-        .next()
-        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
-        && !out.iter().any(|existing| existing == token)
-    {
-        out.push(token.to_string());
     }
 }
 

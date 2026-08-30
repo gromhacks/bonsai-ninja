@@ -8,6 +8,7 @@ use super::super::{
     type_only_declaration_without_initializer, AssignmentNodeSemantics, FlowEvent, Node,
 };
 use super::{walk_into, LoweringContext};
+use crate::ExpressionFlow;
 
 /// Whether this assignment-shaped CST node introduces a lexical binding.
 ///
@@ -262,30 +263,43 @@ pub(super) fn lower_assignment(
             (rhs.is_some() || source_name.is_some() || source_call.is_some() || !source_names.is_empty())
                 && !type_only_declaration_without_initializer(&node, handler);
         if has_value_semantics {
-            // Positional aggregate initialization is a distinct compiler
-            // operation from scalar assignment. Preserve the initializer's
-            // ordered tree-sitter value facts here; the workspace semantic
-            // pass later resolves the declared type against its parsed field
-            // layout (including layouts declared in another file).
-            if let Some(rhs_node) = rhs.filter(|rhs_node| {
-                handler
+            // Aggregate initialization is a distinct compiler operation from
+            // scalar assignment. Named object/map fields are already exact in
+            // the active grammar, while positional values are resolved later
+            // against the parsed type layout. Preserve both forms directly
+            // from Tree-sitter instead of asking an adapter to re-tokenize the
+            // rendered RHS.
+            let aggregate_assignment = if let Some(rhs_node) = rhs {
+                let value_flow = if handler.named_aggregate_kinds.contains(&rhs_node.kind()) {
+                    expression_flow::expression_flow_from_node_with_handler(rhs_node, file, src, handler)
+                } else if handler
                     .positional_aggregate_assignment_kinds
                     .contains(&node.kind())
                     && handler
                         .positional_aggregate_value_kinds
                         .contains(&rhs_node.kind())
-            }) {
-                let value_flow =
-                    expression_flow::positional_expression_flow_from_node(rhs_node, file, src, handler);
-                if !value_flow.tuple_items.is_empty() && !target.is_empty() {
-                    out.push(FlowEvent::AggregateAssign {
+                {
+                    expression_flow::positional_expression_flow_from_node(rhs_node, file, src, handler)
+                } else {
+                    ExpressionFlow::default()
+                };
+                if (!value_flow.aggregate_fields.is_empty()
+                    || !value_flow.tuple_items.is_empty()
+                    || !value_flow.spreads.is_empty())
+                    && !target.is_empty()
+                {
+                    Some(FlowEvent::AggregateAssign {
                         span: span_of(file, &node),
                         target: target.clone(),
                         type_name: assignment_declared_type(&node, src),
                         value_flow,
-                    });
+                    })
+                } else {
+                    None
                 }
-            }
+            } else {
+                None
+            };
             // G3 + G4: when the LHS is a member / subscript expression
             // (`self.cmd = x`, `env['cmd'] = x`), also emit an Assign for
             // the FULL qualified form so reads of `self.cmd` / `env.cmd`
@@ -387,6 +401,15 @@ pub(super) fn lower_assignment(
                     declares_new_binding,
                     value_kind: assignment_value_kind,
                 });
+            }
+            // Aggregate initialization overwrites the root binding before
+            // installing its exact named fields. Preserve that evaluator
+            // order explicitly: emitting fields first lets the following
+            // root write kill them as stale descendants in the IDG. Both
+            // facts come from the same parsed assignment node; this is not a
+            // source-order or adapter-specific convention.
+            if let Some(aggregate_assignment) = aggregate_assignment {
+                out.push(aggregate_assignment);
             }
         }
         // Walk every named child so nested calls inside the LHS or RHS

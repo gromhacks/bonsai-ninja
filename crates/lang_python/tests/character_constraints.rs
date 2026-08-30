@@ -446,7 +446,7 @@ def load(name):
 }
 
 #[test]
-fn same_origin_helper_requires_all_url_and_path_boundaries() {
+fn guarded_value_helper_preserves_provider_components_and_generic_predicate_polarity() {
     let exact = index(
         r#"
 from urllib.parse import urlparse
@@ -458,16 +458,19 @@ def same_site(target):
     return target
 "#,
     );
-    let [fact] = exact.same_origin_path_constraints.as_slice() else {
+    let [fact] = exact.guarded_value_constraints.as_slice() else {
         panic!(
             "expected exact same-origin summary: {:#?}",
-            exact.same_origin_path_constraints
+            exact.guarded_value_constraints
         );
     };
-    assert!(fact.rejects_scheme);
-    assert!(fact.rejects_authority);
-    assert!(fact.requires_absolute_path);
-    assert!(fact.rejects_scheme_relative_path);
+    assert_eq!(fact.rejected_components, ["scheme", "netloc"]);
+    assert!(fact.accepted_prefixes.is_empty());
+    assert!(fact.rejected_prefixes.is_empty());
+    assert_eq!(fact.predicate_calls.len(), 2);
+    assert!(fact.predicate_calls.iter().any(|call| call.required_result));
+    assert!(fact.predicate_calls.iter().any(|call| !call.required_result));
+    assert_eq!(fact.static_fallbacks, ["/"]);
     assert_eq!(fact.provider_call.as_deref(), Some("urllib.parse.urlparse"));
 
     let aliased = index(
@@ -481,7 +484,7 @@ def same_site(target):
 "#,
     );
     assert_eq!(
-        aliased.same_origin_path_constraints[0].provider_call.as_deref(),
+        aliased.guarded_value_constraints[0].provider_call.as_deref(),
         Some("urllib.parse.urlparse")
     );
 
@@ -496,7 +499,7 @@ def same_site(target):
 "#,
     );
     assert_eq!(
-        split.same_origin_path_constraints[0].provider_call.as_deref(),
+        split.guarded_value_constraints[0].provider_call.as_deref(),
         Some("urllib.parse.urlsplit")
     );
 
@@ -511,7 +514,7 @@ def same_site(target):
 "#,
     );
     assert_eq!(
-        lookalike.same_origin_path_constraints[0].provider_call.as_deref(),
+        lookalike.guarded_value_constraints[0].provider_call.as_deref(),
         Some("untrusted_url_helpers.urlparse")
     );
 
@@ -534,9 +537,9 @@ def same_site(target, parser):
     ] {
         let lowered = index(source);
         assert!(
-            lowered.same_origin_path_constraints.is_empty(),
+            lowered.guarded_value_constraints.is_empty(),
             "lexically shadowed or dynamic parsers must not acquire provider identity: {:#?}",
-            lowered.same_origin_path_constraints
+            lowered.guarded_value_constraints
         );
     }
 
@@ -559,10 +562,11 @@ def inverted(target):
 "#,
     ] {
         let weak = index(source);
-        assert!(
-            weak.same_origin_path_constraints.is_empty(),
-            "partial/inverted helper must fail closed: {:#?}",
-            weak.same_origin_path_constraints
+        assert_eq!(
+            weak.guarded_value_constraints.len(),
+            1,
+            "the adapter must preserve partial constraints for rule-owned evaluation: {:#?}",
+            weak.guarded_value_constraints
         );
     }
 }

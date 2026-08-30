@@ -1,8 +1,6 @@
-//! P3.3: Python `gen.send(value)` rewriting. The adapter recognizes
-//! the `g = gen(); g.send(value)` pattern and rewrites the send call
-//! into a synthesized direct call to the generator factory `gen` with
-//! `value` as a positional arg, so the engine's interprocedural
-//! propagation taints the generator's body when `value` is tainted.
+//! Python generator calls remain exact syntax facts. A `.send(...)` member
+//! call is not proof that its receiver is the result of a generator function;
+//! runtime/type semantics must not be guessed by the adapter.
 
 #![allow(clippy::case_sensitive_file_extension_comparisons)]
 
@@ -56,7 +54,7 @@ fn walk(events: &[FlowEvent], out: &mut Vec<String>) {
 }
 
 #[test]
-fn gen_send_rewrites_to_factory_call() {
+fn generator_send_does_not_invent_a_factory_call() {
     let src = r#"
 def gen():
     while True:
@@ -71,17 +69,13 @@ def driver(tainted):
     let db = db_with(src);
     let calls = calls_in(&db, "driver");
     assert!(
-        calls.iter().any(|n| n == "gen"),
-        "expected synthesized direct call to gen() factory after send rewrite, got {calls:?}"
+        calls.iter().any(|n| n.ends_with(".send")),
+        "parsed member call missing: {calls:?}"
     );
-    // The two distinct gen calls (the original `gen()` factory call
-    // and the rewritten send) BOTH appear as `gen`. The engine's
-    // interprocedural taint will follow the second one's args into
-    // gen's body.
     let gen_count = calls.iter().filter(|n| *n == "gen").count();
-    assert!(
-        gen_count >= 2,
-        "expected at least two `gen` calls (factory + rewritten send), got {gen_count} in {calls:?}"
+    assert_eq!(
+        gen_count, 1,
+        "adapter invented a runtime generator edge: {calls:?}"
     );
 }
 

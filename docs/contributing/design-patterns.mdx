@@ -235,19 +235,18 @@ it requires a declared semantic summary before it may change continuation
 state. `FlowEvent::Defer` remains the shared representation only when the
 frontend can prove a deferred scope from language syntax.
 
-## 11. Reflection and dynamic dispatch rewrites
+## 11. Reflection and dynamic dispatch evidence
 
-Where a literal-string call can be statically resolved, the adapter
-rewrites it to a direct call before the engine runs. Python
-`getattr(obj, "method")` and Java
-`Class.forName("X").getMethod("Y").invoke(...)` both lower to the
-equivalent direct method call so the resolver narrows them like any other
-dispatch.
+Reflection calls remain the exact runtime calls Tree-sitter parsed. A literal
+string is data, not declaration identity: Python `getattr(obj, "method")` and
+Java `Class.forName("X").getMethod("Y").invoke(...)` must not be rewritten
+into guessed first-party calls merely because their strings resemble local
+symbols.
 
-Truly dynamic shapes (computed string arguments, runtime lookup tables)
-remain unresolved until an adapter or summary model can prove the target
-semantically. The engine must not fan those shapes out into workspace-wide
-candidate sets or report them as semantic findings.
+Reflective shapes remain unresolved until exact first-party type/declaration
+facts or an explicit rulepack typing model proves the target. The engine must
+not fan them out into workspace-wide candidate sets or report guessed edges as
+semantic findings.
 
 ## 12. Adapter responsibility versus engine responsibility
 

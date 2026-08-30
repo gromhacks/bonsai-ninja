@@ -276,6 +276,11 @@
       require_authority_rejection: true
       require_absolute_path: true
       require_scheme_relative_rejection: true
+      required_predicates:
+      - {target: {name: startswith}, argument_value: {kind: string, value: "/"}, required_result: true}
+      - {target: {name: startswith}, argument_value: {kind: string, value: "//"}, required_result: false}
+      required_rejected_components: [scheme, netloc]
+      accepted_static_fallbacks: ["/"]
       sink_argument_index: 0
   match_examples:
   - name: aiohttp httpfound keyword location
@@ -312,6 +317,11 @@
       require_authority_rejection: true
       require_absolute_path: true
       require_scheme_relative_rejection: true
+      required_predicates:
+      - {target: {name: startswith}, argument_value: {kind: string, value: "/"}, required_result: true}
+      - {target: {name: startswith}, argument_value: {kind: string, value: "//"}, required_result: false}
+      required_rejected_components: [scheme, netloc]
+      accepted_static_fallbacks: ["/"]
   match_examples:
   - name: open redirect response redirect
     code: |

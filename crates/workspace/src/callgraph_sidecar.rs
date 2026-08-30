@@ -11,7 +11,7 @@ use bonsai_callgraph::{
     CallEdge, CallGraphCallableArgument, CallGraphLocalBinding, CallGraphNode, ResolvedCallGraph,
     UnresolvedWorkspaceCallSite,
 };
-use bonsai_common::{wire, workspace_bonsai_dir, FileId, FuncId, MATCHER_POLICY_FINGERPRINT};
+use bonsai_common::{wire, workspace_bonsai_dir, FileId, FuncId, SpanMap, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::{AnalyzerDb, COMPILER_OBJECT_CACHE_VERSION};
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_hash::fnv1a_bytes64;
@@ -23,6 +23,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// v39 (2026-08-30): persist an independently decodable stable edge-id index
+// so `show E:<id>` opens one exact callgraph partition instead of hashing the
+// complete multi-million-edge relation.
 // v37 (2026-08-28): nested callable receiver resolution consults the exact
 // lexical parent type chain, so captured typed values dispatch without
 // copying aliases into child compiler objects. Cached v36 graphs can omit
@@ -104,15 +107,16 @@ use std::sync::Arc;
 // v13 (2026-07-18): metadata and graph payloads are independent factstore
 // entries, so freshness checks do not recursively decode millions of edges.
 // v12 (2026-07-16): MessagePack replaced the retired binary codec.
-pub const CALLGRAPH_CACHE_VERSION: u32 = 38;
+pub const CALLGRAPH_CACHE_VERSION: u32 = 39;
 
 const CALLGRAPH_TABLE_ID: u32 = 102;
 const METADATA_KEY: u64 = 0;
 const IDENTITY_TABLE_KEY: u64 = 1;
+const EDGE_ID_INDEX_KEY: u64 = 2;
 const FILE_PARTITION_KEY_BASE: u64 = 0x1000_0000_0000_0000;
 const NAME_BUCKET_KEY_BASE: u64 = 0x4000_0000_0000_0000;
 const KEY_PAYLOAD_MASK: u64 = 0x0fff_ffff_ffff_ffff;
-const FIXED_ENTRY_COUNT: usize = 2;
+const FIXED_ENTRY_COUNT: usize = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CallgraphMetadata {
@@ -147,6 +151,18 @@ struct CallgraphFilePartition {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct CallgraphNameBucket {
     entries: Vec<(String, Vec<FuncId>)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct CallgraphEdgeIdEntry {
+    digest: u32,
+    owner_file: FileId,
+    outgoing_index: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct CallgraphEdgeIdIndex {
+    entries: Vec<CallgraphEdgeIdEntry>,
 }
 
 #[derive(Default)]
@@ -423,6 +439,48 @@ impl CallgraphQueryService {
                     format!("callgraph partition is missing function {}", function.raw()),
                 )
             })
+    }
+
+    /// Resolve every exact call edge sharing one public stable-id digest.
+    ///
+    /// The 32-bit public id intentionally permits collisions. The index keeps
+    /// all colliding rows and the browse layer preserves its existing
+    /// zero/one/multiple-result contract after rendering and verification.
+    pub(crate) fn edges_by_stable_digest(
+        &self,
+        digest: u32,
+    ) -> std::io::Result<Vec<(CallGraphNode, CallGraphNode, CallEdge)>> {
+        let index = decode_edge_id_index(&self.reader)?;
+        let start = index.entries.partition_point(|entry| entry.digest < digest);
+        let end = index.entries.partition_point(|entry| entry.digest <= digest);
+        let mut out = Vec::with_capacity(end.saturating_sub(start));
+        for entry in &index.entries[start..end] {
+            let partition = self.cached_partition(entry.owner_file)?;
+            let edge = partition
+                .outgoing
+                .get(entry.outgoing_index as usize)
+                .cloned()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "callgraph edge-id index references missing outgoing row {} in file {}",
+                            entry.outgoing_index,
+                            entry.owner_file.raw()
+                        ),
+                    )
+                })?;
+            let caller = self.callable_node(edge.from)?;
+            if caller.file != entry.owner_file {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "callgraph edge-id index owner does not match the caller partition",
+                ));
+            }
+            let callee = self.callable_node(edge.to)?;
+            out.push((caller, callee, edge));
+        }
+        Ok(out)
     }
 
     fn record_relation_error(&self, error: std::io::Error) {
@@ -1251,6 +1309,81 @@ pub fn callgraph_sidecar_summary_with_source_inputs(
     CallgraphQueryService::open_checked_with_source_inputs(&path, source_inputs)?.summary_rows()
 }
 
+fn build_edge_id_index(
+    db: &AnalyzerDb,
+    graph: &ResolvedCallGraph,
+    node_locations: &AHashMap<FuncId, (FileId, usize)>,
+    partitions: &BTreeMap<u32, CallgraphPartitionOrdinals>,
+) -> std::io::Result<CallgraphEdgeIdIndex> {
+    let mut entries = Vec::with_capacity(graph.inner().edges.len());
+    let mut source_locations = AHashMap::<FileId, (String, Arc<SpanMap>)>::new();
+    let workspace_root = db.workspace_root();
+
+    for (&owner_file, ordinals) in partitions {
+        let mut outgoing = ordinals.outgoing.clone();
+        outgoing.sort_unstable_by_key(|index| edge_sort_key(&graph.inner().edges[*index]));
+        for (outgoing_index, edge_index) in outgoing.into_iter().enumerate() {
+            let edge = &graph.inner().edges[edge_index];
+            let caller_index = node_locations
+                .get(&edge.from)
+                .map(|(_, index)| *index)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("callgraph edge source {} has no persisted node", edge.from.raw()),
+                    )
+                })?;
+            let callee_index = node_locations
+                .get(&edge.to)
+                .map(|(_, index)| *index)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("callgraph edge target {} has no persisted node", edge.to.raw()),
+                    )
+                })?;
+            let (call_file, call_line, call_column) =
+                if let Some((path, span_map)) = source_locations.get(&edge.span.file) {
+                    let location = span_map.line_col(edge.span.start);
+                    (path.as_str(), location.line, location.column)
+                } else if let Ok(snapshot) = db.vfs().snapshot(edge.span.file) {
+                    let path = bonsai_common::workspace_relative_filter_path(
+                        workspace_root.as_deref(),
+                        &snapshot.path.to_string_lossy(),
+                    );
+                    let span_map =
+                        bonsai_common::cached_span_map_arc(edge.span.file, snapshot.version, &snapshot.text);
+                    let location = span_map.line_col(edge.span.start);
+                    source_locations.insert(edge.span.file, (path, span_map));
+                    let (path, _) = source_locations
+                        .get(&edge.span.file)
+                        .expect("inserted edge source location");
+                    (path.as_str(), location.line, location.column)
+                } else {
+                    ("<unknown>", 0, 0)
+                };
+            entries.push(CallgraphEdgeIdEntry {
+                digest: bonsai_hash::edge_id_low32(
+                    graph.nodes()[caller_index].name.as_ref(),
+                    graph.nodes()[callee_index].name.as_ref(),
+                    call_file,
+                    call_line,
+                    call_column,
+                ),
+                owner_file: FileId::new(owner_file),
+                outgoing_index: u32::try_from(outgoing_index).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("callgraph file {owner_file} exceeds the u32 edge index space"),
+                    )
+                })?,
+            });
+        }
+    }
+    entries.sort_unstable();
+    Ok(CallgraphEdgeIdIndex { entries })
+}
+
 #[must_use]
 pub fn callgraph_sidecar_path(workspace_root: &Path) -> PathBuf {
     workspace_bonsai_dir(workspace_root).join(format!("callgraph.v{CALLGRAPH_CACHE_VERSION}.factstore"))
@@ -1263,7 +1396,7 @@ pub(crate) fn save_callgraph_sidecar(
 ) -> std::io::Result<()> {
     let total_started = std::time::Instant::now();
     let stage_started = std::time::Instant::now();
-    let mut node_files = AHashMap::new();
+    let mut node_locations = AHashMap::new();
     // Retain compact positions into the immutable graph, not cloned graph
     // payloads. Each exact file partition is materialized only while its
     // factstore entry is synchronously encoded below.
@@ -1271,7 +1404,10 @@ pub(crate) fn save_callgraph_sidecar(
     let mut identities = Vec::with_capacity(graph.nodes().len());
     let mut name_bucket_ordinals = BTreeMap::<u64, Vec<(usize, bool)>>::new();
     for (node_index, node) in graph.nodes().iter().enumerate() {
-        if node_files.insert(node.func, node.file).is_some() {
+        if node_locations
+            .insert(node.func, (node.file, node_index))
+            .is_some()
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("callgraph contains duplicate function {}", node.func.raw()),
@@ -1295,8 +1431,10 @@ pub(crate) fn save_callgraph_sidecar(
             .push(node_index);
     }
     for (edge_index, edge) in graph.inner().edges.iter().enumerate() {
-        let from_file = node_files.get(&edge.from).copied().unwrap_or(edge.span.file);
-        let Some(to_file) = node_files.get(&edge.to).copied() else {
+        let from_file = node_locations
+            .get(&edge.from)
+            .map_or(edge.span.file, |(file, _)| *file);
+        let Some(to_file) = node_locations.get(&edge.to).map(|(file, _)| *file) else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("callgraph target {} has no persisted node", edge.to.raw()),
@@ -1314,7 +1452,7 @@ pub(crate) fn save_callgraph_sidecar(
             .push(edge_index);
     }
     for (binding_index, binding) in graph.local_binding_records().iter().enumerate() {
-        let Some(file) = node_files.get(&binding.caller).copied() else {
+        let Some(file) = node_locations.get(&binding.caller).map(|(file, _)| *file) else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
@@ -1330,7 +1468,7 @@ pub(crate) fn save_callgraph_sidecar(
             .push(binding_index);
     }
     for (argument_index, argument) in graph.callable_argument_records().iter().enumerate() {
-        let Some(file) = node_files.get(&argument.caller).copied() else {
+        let Some(file) = node_locations.get(&argument.caller).map(|(file, _)| *file) else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
@@ -1346,7 +1484,7 @@ pub(crate) fn save_callgraph_sidecar(
             .push(argument_index);
     }
     for (site_index, site) in graph.unresolved_workspace_site_records().iter().enumerate() {
-        let Some(file) = node_files.get(&site.caller).copied() else {
+        let Some(file) = node_locations.get(&site.caller).map(|(file, _)| *file) else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
@@ -1361,10 +1499,11 @@ pub(crate) fn save_callgraph_sidecar(
             .unresolved_workspace_sites
             .push(site_index);
     }
+    let edge_id_index = build_edge_id_index(db, graph.as_ref(), &node_locations, &partition_ordinals)?;
     identities.sort_unstable_by_key(|(function, _)| function.raw());
     let partition_files = partition_ordinals.keys().copied().collect::<Vec<_>>();
     let name_bucket_keys = name_bucket_ordinals.keys().copied().collect::<Vec<_>>();
-    drop(node_files);
+    drop(node_locations);
     bonsai_diagnostics::debug_log!(
         "callgraph-build",
         "sidecar partition planning elapsed seconds {:.3}",
@@ -1398,6 +1537,11 @@ pub(crate) fn save_callgraph_sidecar(
             CALLGRAPH_CACHE_VERSION as u64,
             move |output| wire::encode_to_writer(output, &identities).map_err(invalid_wire),
         )
+        .map_err(factstore_io)?;
+    writer
+        .add_streamed(EDGE_ID_INDEX_KEY, CALLGRAPH_CACHE_VERSION as u64, move |output| {
+            wire::encode_to_writer(output, &edge_id_index).map_err(invalid_wire)
+        })
         .map_err(factstore_io)?;
     // Exact-name strings can dominate large Java monorepos. Retain only
     // compact node ordinals globally; materialize, persist, and free one hash
@@ -1637,6 +1781,7 @@ fn open_sidecar(path: &Path) -> std::io::Result<(FactStoreReader, CallgraphMetad
         .saturating_add(metadata.name_bucket_keys.len());
     if reader.len() != expected_entries
         || !reader.contains_key(IDENTITY_TABLE_KEY)
+        || !reader.contains_key(EDGE_ID_INDEX_KEY)
         || metadata
             .partition_files
             .iter()
@@ -1685,6 +1830,39 @@ fn decode_identities(reader: &FactStoreReader) -> std::io::Result<Vec<(FuncId, F
         ));
     }
     Ok(identities)
+}
+
+fn decode_edge_id_index(reader: &FactStoreReader) -> std::io::Result<CallgraphEdgeIdIndex> {
+    let mut payload = reader
+        .payload_reader(EDGE_ID_INDEX_KEY)
+        .map_err(factstore_io)?
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "callgraph edge-id index is missing",
+            )
+        })?;
+    if payload.body_hash != CALLGRAPH_CACHE_VERSION as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "callgraph edge-id index body version mismatch",
+        ));
+    }
+    let index: CallgraphEdgeIdIndex = wire::decode_from_reader(&mut payload).map_err(invalid_wire)?;
+    let mut trailing = [0u8; 1];
+    if payload.read(&mut trailing)? != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "callgraph edge-id index has trailing bytes",
+        ));
+    }
+    if index.entries.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "callgraph edge-id index is not strictly sorted",
+        ));
+    }
+    Ok(index)
 }
 
 fn decode_name_bucket(reader: &FactStoreReader, key: u64) -> std::io::Result<CallgraphNameBucket> {
@@ -1924,20 +2102,21 @@ fn name_bucket_body_hash(key: u64) -> u64 {
     (u64::from(CALLGRAPH_CACHE_VERSION) << 32) ^ key
 }
 
+fn edge_sort_key(edge: &CallEdge) -> (u32, u32, u32, u64, u64, u8, u8) {
+    (
+        edge.from.raw(),
+        edge.to.raw(),
+        edge.span.file.raw(),
+        edge.span.start,
+        edge.span.end,
+        edge.kind as u8,
+        edge.precision.rank(),
+    )
+}
+
 fn sort_partition(partition: &mut CallgraphFilePartition) {
-    let edge_key = |edge: &CallEdge| {
-        (
-            edge.from.raw(),
-            edge.to.raw(),
-            edge.span.file.raw(),
-            edge.span.start,
-            edge.span.end,
-            edge.kind as u8,
-            edge.precision.rank(),
-        )
-    };
-    partition.outgoing.sort_unstable_by_key(edge_key);
-    partition.incoming.sort_unstable_by_key(edge_key);
+    partition.outgoing.sort_unstable_by_key(edge_sort_key);
+    partition.incoming.sort_unstable_by_key(edge_sort_key);
     partition.nodes.sort_unstable_by_key(|node| node.func.raw());
     partition.nodes.dedup_by_key(|node| node.func.raw());
     partition.local_bindings.sort();
@@ -2141,6 +2320,16 @@ mod tests {
         assert_eq!(decoded.unresolved_workspace_site_records().len(), 1);
 
         let service = CallgraphQueryService::open_checked(&path, &db).expect("open query service");
+        let stable_edge = service
+            .edges_by_stable_digest(bonsai_hash::edge_id_low32("start", "middle", "<unknown>", 0, 0))
+            .expect("query stable edge id");
+        assert_eq!(stable_edge.len(), 1);
+        assert_eq!(stable_edge[0].0.name.as_ref(), "start");
+        assert_eq!(stable_edge[0].1.name.as_ref(), "middle");
+        assert_eq!(
+            (stable_edge[0].2.from, stable_edge[0].2.to),
+            (FuncId::new(1), FuncId::new(2))
+        );
         for raw in 1..=6 {
             let function = FuncId::new(raw);
             let resident_callees = decoded

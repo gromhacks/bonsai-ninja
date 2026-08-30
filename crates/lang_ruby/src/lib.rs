@@ -1151,8 +1151,8 @@ impl LanguageAdapter for RubyAdapter {
         "Ruby"
     }
     fn file_extensions(&self) -> &'static [&'static str] {
-        // `.erb` (HTML/Ruby template blend) and `.rhtml` (legacy
-        // Rails) are claimed alongside `.rb`. tree-sitter-ruby cannot
+        // `.erb` and `.rhtml` HTML/Ruby template blends are claimed alongside
+        // `.rb`. tree-sitter-ruby cannot
         // parse the HTML wrapper as Ruby — extract_declarations
         // pre-processes ERB files to mask HTML with whitespace
         // (preserving line numbers) and expose only the embedded
@@ -1314,8 +1314,8 @@ impl LanguageAdapter for RubyAdapter {
         // canonical lowerer already owns module-scope declaration creation,
         // syntax diagnostics, refs, literals, arguments, and branch facts;
         // this adapter pass adds only Ruby's semantic projections.
-        // Rails/ERB instance variables are values supplied to the template's
-        // execution context. Model the exact Tree-sitter instance-variable
+        // Embedded-template instance variables are values supplied to the
+        // template execution context. Model the exact Tree-sitter nodes
         // nodes as implicit inputs of the synthetic module declaration so
         // ordinary compiler dataflow can prove `@value -> helper(@value)`.
         // Assignments inside the template remain normal FlowEvents and can
@@ -2176,19 +2176,10 @@ fn inject_ruby_super_call_events(events: &mut Vec<FlowEvent>, method_name: &str)
 }
 
 fn ruby_return_is_bare_super(event: &FlowEvent) -> bool {
-    let FlowEvent::Return {
-        value_name,
-        value_text,
-        value_flow,
-        ..
-    } = event
-    else {
+    let FlowEvent::Return { value_flow, .. } = event else {
         return false;
     };
-    value_flow.place.as_deref() == Some("super")
-        || (value_name.as_deref() == Some("super")
-            && value_text.as_deref().is_some_and(|text| text.trim() == "super")
-            && value_flow.call_sites.is_empty())
+    value_flow.place.as_deref() == Some("super") && value_flow.call_sites.is_empty()
 }
 
 fn ruby_raise_throw_event(event: &FlowEvent) -> Option<FlowEvent> {
@@ -2202,7 +2193,9 @@ fn ruby_raise_throw_event(event: &FlowEvent) -> Option<FlowEvent> {
     // class, so the thrown *value* is the message in arg1. Recognize
     // the class form by a Capitalized constant or `Foo::Bar` scope.
     let thrown_arg = match args.first() {
-        Some(first) if args.len() >= 2 && ruby_is_exception_class(&first.value_text) => args.get(1),
+        Some(first) if args.len() >= 2 && first.place.as_deref().is_some_and(ruby_is_exception_class) => {
+            args.get(1)
+        }
         other => other,
     };
     // value_name is contractually a bare identifier (M18): take it
@@ -2240,13 +2233,7 @@ fn normalize_ruby_subshell_events(events: &mut [FlowEvent], src: &[u8]) {
                 let value_text = ruby_span_text(src, *span)
                     .filter(|text| !text.trim().is_empty())
                     .map(|text| text.trim().to_string())
-                    .unwrap_or_else(|| {
-                        args.iter()
-                            .map(|arg| arg.value_text.trim())
-                            .filter(|text| !text.is_empty())
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    });
+                    .unwrap_or_default();
                 *call_kind = CallKind::Function;
                 *args = vec![CallArg {
                     passing_mode: Default::default(),
@@ -2430,7 +2417,16 @@ fn normalize_ruby_instance_variable_texts(values: &mut [String]) {
 }
 
 fn enrich_ruby_instance_variable_call_arg(arg: &mut CallArg) {
-    let Some(place) = ruby_normalized_instance_variable_place(&arg.value_text) else {
+    let Some(place) = arg
+        .place
+        .as_deref()
+        .and_then(ruby_normalized_instance_variable_place)
+        .or_else(|| {
+            arg.source_names
+                .iter()
+                .find_map(|source| ruby_normalized_instance_variable_place(source))
+        })
+    else {
         return;
     };
     if arg.place.as_deref().is_none_or(str::is_empty) {

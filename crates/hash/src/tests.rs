@@ -37,6 +37,19 @@ fn low32_is_truncation_of_64() {
 }
 
 #[test]
+fn edge_digest_preserves_the_legacy_three_token_contract() {
+    let names = vec![
+        "caller".to_string(),
+        "callee".to_string(),
+        "src/app.rs:12:7".to_string(),
+    ];
+    assert_eq!(
+        edge_id_low32("caller", "callee", "src/app.rs", 12, 7),
+        fnv1a_names_low32(&names)
+    );
+}
+
+#[test]
 fn streaming_matches_one_shot() {
     let one_shot = fnv1a_bytes64(b"abc");
     let mut hasher = Hasher::new();

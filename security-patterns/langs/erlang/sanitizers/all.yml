@@ -267,7 +267,7 @@
 - id: erlang.sanitizer.binary_to_term_safe
   enabled: true
   language: erlang
-  tag: validation
+  tag: deser-secure
   match:
     kind: call
     callee:

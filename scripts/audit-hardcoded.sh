@@ -54,8 +54,10 @@ fi
 mkdir -p "$OUT_DIR"
 : > "$MARKER"
 rm -rf "$OUT_DIR/stripped"
+rm -rf "$OUT_DIR/adapters"
 rm -f "$OUT_DIR/violations.tsv"
 mkdir -p "$OUT_DIR/stripped"
+mkdir -p "$OUT_DIR/adapters"
 REPORT="$OUT_DIR/violations.tsv"
 : > "$REPORT"
 
@@ -75,14 +77,31 @@ is_shared_source() {
     esac
 }
 
+is_adapter_source() {
+    local path="$1"
+    case "$path" in
+        */tests/*|*/tests.rs|*/_tests.rs|*_test.rs|*_tests.rs|crates/lang_api/*)
+            return 1 ;;
+        crates/lang_*/src/*.rs|crates/lang_*/src/**/*.rs)
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
 # Copy production text while dropping individual `#[cfg(test)]` items. Inline
 # test modules are not required to be last: stopping at the first one silently
 # hid later production code in the past. The lightweight delimiter walk is
 # sufficient here because it only decides which lines feed literal searches;
 # architecture/behavior tests remain the semantic source of truth.
 while IFS= read -r source; do
-    is_shared_source "$source" || continue
-    target="$OUT_DIR/stripped/$source"
+    if is_shared_source "$source"; then
+        target="$OUT_DIR/stripped/$source"
+    elif is_adapter_source "$source"; then
+        target="$OUT_DIR/adapters/$source"
+    else
+        continue
+    fi
     mkdir -p "$(dirname "$target")"
     awk '
         function brace_delta(line, opens, closes) {
@@ -117,15 +136,16 @@ record_matches() {
     local pattern="$2"
     local scope_regex="${3:-.}"
     local exclude_regex="${4:-^$}"
+    local search_root="${5:-$OUT_DIR/stripped}"
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
         local stripped_path="${line%%:*}"
-        local original="${stripped_path#"$OUT_DIR/stripped/"}"
+        local original="${stripped_path#"$search_root/"}"
         [[ "$original" =~ $scope_regex ]] || continue
         [[ "$original" =~ $exclude_regex ]] && continue
         local rest="${line#*:}"
         printf '%s\t%s\t%s\n' "$category" "$original" "$rest" >> "$REPORT"
-    done < <(rg -n -F --no-messages "$pattern" "$OUT_DIR/stripped" || true)
+    done < <(rg -n -F --no-messages "$pattern" "$search_root" || true)
 }
 
 record_regex_matches() {
@@ -133,15 +153,16 @@ record_regex_matches() {
     local pattern="$2"
     local scope_regex="${3:-.}"
     local exclude_regex="${4:-^$}"
+    local search_root="${5:-$OUT_DIR/stripped}"
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
         local stripped_path="${line%%:*}"
-        local original="${stripped_path#"$OUT_DIR/stripped/"}"
+        local original="${stripped_path#"$search_root/"}"
         [[ "$original" =~ $scope_regex ]] || continue
         [[ "$original" =~ $exclude_regex ]] && continue
         local rest="${line#*:}"
         printf '%s\t%s\t%s\n' "$category" "$original" "$rest" >> "$REPORT"
-    done < <(rg -n --no-messages "$pattern" "$OUT_DIR/stripped" || true)
+    done < <(rg -n --no-messages "$pattern" "$search_root" || true)
 }
 
 # The supported-language vocabulary is owned by the rulepack directory, not
@@ -153,6 +174,62 @@ while IFS= read -r language; do
 done < <(
     find security-patterns/langs -mindepth 1 -maxdepth 1 -type d -exec basename {} \; \
         | LC_ALL=C sort
+)
+
+# Moving a provider spelling from shared analysis into its language adapter is
+# still a boundary violation. Derive package/import identities and distinctive
+# callable/type names from package-gated rule blocks, then reject those exact
+# literals in production adapters. Package-less language-runtime intrinsics
+# are intentionally outside this check: adapters may implement documented
+# execution-model semantics, while their security meaning remains in rules.
+while IFS= read -r identity; do
+    [[ -n "$identity" ]] || continue
+    record_matches \
+        "adapter-provider-identity" \
+        "\"$identity\"" \
+        '^crates/lang_' \
+        '^$' \
+        "$OUT_DIR/adapters"
+done < <(
+    python3 - <<'PY'
+import re
+from pathlib import Path
+
+identities = set()
+language_ids = {
+    path.name
+    for path in Path("security-patterns/langs").iterdir()
+    if path.is_dir()
+}
+for path in Path("security-patterns/langs").glob("**/*.yml"):
+    blocks = re.split(r"(?m)^- id:\s*", path.read_text(encoding="utf-8"))[1:]
+    for block in blocks:
+        if not re.search(r"(?m)^\s+(?:packages|imports):\s*\[", block):
+            continue
+        for match in re.finditer(r"(?m)^\s+(?:packages|imports):\s*\[([^]]*)\]", block):
+            for value in match.group(1).split(","):
+                value = value.strip().strip("'\"")
+                distinctive_package = (
+                    value not in language_ids
+                    and len(value) >= 6
+                ) or any(character in value for character in "./:@-_")
+                if distinctive_package:
+                    identities.add(value)
+        for match in re.finditer(r"(?m)^\s+name:\s*['\"]?([^'\"#\s]+)", block):
+            value = match.group(1)
+            distinctive = (
+                len(value) >= 4
+                and (
+                    any(character in value for character in "./:@$")
+                    or any(character.isupper() for character in value[1:])
+                    or value.startswith("__")
+                )
+            )
+            if distinctive:
+                identities.add(value)
+for identity in sorted(identities):
+    print(identity)
+PY
 )
 for language in "${LANGUAGE_IDS[@]}"; do
     # `lang_api` type/trait docs legitimately show opaque id examples; the

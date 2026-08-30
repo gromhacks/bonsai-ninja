@@ -891,6 +891,16 @@ fn computed_property_argument_records_exact_pseudo_call_result() {
             _ => None,
         })
         .expect("computed-property getter call");
+    let getter_receiver = index
+        .call_receivers
+        .iter()
+        .find(|fact| fact.call_span == getter_span)
+        .expect("computed-property receiver fact");
+    assert_eq!(
+        getter_receiver.role,
+        bonsai_lang_api::CallReceiverRole::Projection,
+        "property syntax must not imply whole-receiver-to-result passthrough"
+    );
     let consume_span = forward
         .flow_events
         .iter()
@@ -920,6 +930,59 @@ fn computed_property_argument_records_exact_pseudo_call_result() {
         Some("board.string"),
         "the exact projected storage identity must accompany the getter call"
     );
+}
+
+#[test]
+fn terminal_property_getter_owns_assignment_over_nested_call() {
+    use bonsai_lang_api::FlowEvent;
+
+    let ws = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[(
+            "Values.swift",
+            r#"
+struct Values {
+    func build(base: Box, item: String) {
+        let output = base.combine(item).normalized
+        consume(output)
+    }
+}
+"#,
+        )],
+    );
+    let index = ws
+        .db()
+        .decl_index(bonsai_common::FileId::new(0))
+        .expect("Swift index");
+    let assignment = index
+        .assignment_values
+        .iter()
+        .find(|fact| fact.target.as_deref() == Some("output"))
+        .expect("output assignment fact");
+    assert_eq!(
+        assignment.direct_call_name.as_deref(),
+        Some("base.combine(item).normalized")
+    );
+    assert_eq!(assignment.direct_call_span, Some(assignment.value_span));
+    assert_eq!(
+        assignment.direct_call_receiver.as_deref(),
+        Some("base.combine(item)")
+    );
+    assert!(assignment.direct_call_receiver_span.is_some());
+    assert!(assignment.direct_call_receiver_flow.is_some());
+
+    let build = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "build")
+        .expect("build declaration");
+    let source_call = build.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Assign {
+            target, source_call, ..
+        } if target == "output" => source_call.as_deref(),
+        _ => None,
+    });
+    assert_eq!(source_call, Some("base.combine(item).normalized"));
 }
 
 #[test]
@@ -1488,7 +1551,7 @@ class Repository {
 }
 
 #[test]
-fn declared_typealias_canonicalizes_computed_property_receiver_type() {
+fn computed_property_returns_exact_nested_field_place() {
     use bonsai_diagnostics::DiagnosticSink;
     use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
     use bonsai_vfs::Vfs;
@@ -1524,26 +1587,51 @@ class Repository {
                 && decl
                     .flow_events
                     .iter()
-                    .any(|event| matches!(event, FlowEvent::Call { name, .. } if name == "self.data.cmd"))
+                    .any(|event| matches!(event, FlowEvent::Return { value_flow, .. } if value_flow.place.as_deref() == Some("self.data.cmd")))
         })
         .expect("computed cmd getter");
     assert!(
         getter.flow_events.iter().any(|event| matches!(
             event,
-            FlowEvent::Call { receiver_types, .. }
-                if receiver_types == &["Envelope".to_string()]
+            FlowEvent::Return { value_flow, .. }
+                if value_flow.place.as_deref() == Some("self.data.cmd")
         )),
-        "declared typealias must resolve to its AST target: {:?}",
+        "computed getter must return its exact parsed field place: {:?}",
         getter.flow_events
     );
     assert!(
         getter
             .receiver_state_sources
             .iter()
-            .any(|source| source == "self.data"),
+            .any(|source| source == "self.data.cmd"),
         "computed getter must retain its AST-derived receiver field state: {:?}",
         getter.receiver_state_sources
     );
+}
+
+#[test]
+fn nested_getter_does_not_replace_the_direct_outer_constructor() {
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_swift::SwiftAdapter::new())],
+        &[(
+            "Envelope.swift",
+            r#"
+struct Envelope { var size: Int; var cmd: String }
+func build(raw: String) {
+    let envelope = Envelope(size: raw.count, cmd: raw)
+    consume(envelope)
+}
+"#,
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Swift declaration index");
+    let fact = index
+        .assignment_values
+        .iter()
+        .find(|fact| fact.target.as_deref() == Some("envelope"))
+        .expect("envelope assignment fact");
+    assert_eq!(fact.direct_call_name.as_deref(), Some("Envelope"), "{fact:#?}");
 }
 
 #[test]

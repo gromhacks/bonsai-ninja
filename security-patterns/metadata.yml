@@ -416,6 +416,9 @@ languages:
           require_authority_rejection: true
           require_absolute_path: true
           require_scheme_relative_rejection: true
+          required_accepted_prefixes: ["/"]
+          required_rejected_prefixes: ["//"]
+          accepted_static_fallbacks: ["/"]
           sink_argument_index: 1
 
   rust:
@@ -464,6 +467,11 @@ languages:
           require_authority_rejection: true
           require_absolute_path: true
           require_scheme_relative_rejection: true
+          required_predicates:
+            - {target: {name: startswith}, argument_value: {kind: string, value: "/"}, required_result: true}
+            - {target: {name: startswith}, argument_value: {kind: string, value: "//"}, required_result: false}
+          required_rejected_components: [scheme, netloc]
+          accepted_static_fallbacks: ["/"]
           sink_argument_index: 0
           accepted_providers:
             - name: urllib.parse.urlparse

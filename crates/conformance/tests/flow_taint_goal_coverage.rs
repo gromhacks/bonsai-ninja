@@ -706,10 +706,14 @@ fn long_command_progress_uses_scoped_cleanup_for_shared_renderers() {
         "diagnostics progress cleanup",
         &diagnostics,
         &[
-            "let parse_result = (|| -> Result<()>",
+            "diagnostics_report_with_progress(|| bar.inc(1))",
             "bar.finish_and_clear();",
-            "parse_result?;",
+            "one exact compiler pass",
         ],
+    );
+    assert!(
+        !diagnostics.contains("let parse_result = (|| -> Result<()>"),
+        "diagnostics must not restore the duplicate parse-all pass that retained every syntax tree before compiler-object diagnostics"
     );
 }
 

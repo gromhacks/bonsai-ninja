@@ -79,30 +79,8 @@ fn fun_ref_assignment_emits_clean_callable_alias() {
         declares_new_binding: true,
         value_kind: None,
     };
-    let value_start = u64::try_from(src.find("fun").expect("RHS start")).unwrap();
-    let facts = [bonsai_lang_api::AssignmentValueFact {
-        assignment_span: span,
-        target: Some("Cb".to_string()),
-        target_is_immutable: false,
-        target_owner: None,
-        target_span: Some(bonsai_common::Span::new(FileId::new(0), 0, 2)),
-        value_span: bonsai_common::Span::new(FileId::new(0), value_start, span.end),
-        call_sites: Vec::new(),
-        value_flow: Default::default(),
-        static_value: None,
-        exact_callable_return: None,
-        inline_callback_static_return: None,
-        inline_callback_fields: Vec::new(),
-        exact_static_call_args: None,
-        direct_call_name: None,
-        direct_call_span: None,
-        direct_call_receiver: None,
-        direct_call_receiver_span: None,
-        direct_call_receiver_flow: None,
-    }];
-    let assignment_values = bonsai_lang_api::AssignmentValueIndex::new(&facts);
-
-    let alias = erlang_fun_ref_alias_assignment(&event, src, &assignment_values).expect("fun ref alias");
+    let aliases = std::collections::BTreeMap::from([(span, "helper".to_string())]);
+    let alias = erlang_fun_ref_alias_assignment(&event, &aliases).expect("fun ref alias");
 
     assert!(matches!(
         alias,
@@ -134,7 +112,12 @@ fn fun_ref_call_argument_emits_exact_callable_place() {
         }],
     }];
 
-    normalize_erlang_access_events(&mut events, "", &AssignmentValueIndex::default());
+    let arg_span = match &events[0] {
+        FlowEvent::Call { args, .. } => args[0].span,
+        _ => unreachable!(),
+    };
+    let fun_refs = std::collections::BTreeMap::from([(arg_span, "helper".to_string())]);
+    normalize_erlang_access_events(&mut events, &fun_refs);
 
     assert!(matches!(
         events.as_slice(),
@@ -195,48 +178,27 @@ fn exception_rewrite_keeps_bare_and_erlang_exception_bifs() {
 #[test]
 fn zero_arity_clause_has_no_synthetic_param_slot() {
     let src = "load_all_users() -> ok.";
-    let span = bonsai_common::Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
-
-    let params = erlang_clause_param_slots(src, span, "load_all_users").expect("params");
-
-    assert!(params.is_empty());
+    let language = language_from_pack(PACK_NAME).expect("erlang grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set erlang grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse erlang source");
+    let plans = collect_erlang_parameter_pattern_plans(&tree, FileId::new(0), src.as_bytes());
+    assert_eq!(plans.len(), 1, "{plans:#?}");
+    assert!(plans[0].params.is_empty(), "{plans:#?}");
 }
 
 #[test]
 fn list_cons_param_pattern_emits_entry_bindings() {
     let src = "process_batch([Token | Rest]) -> run_user(Token).";
-    let span = bonsai_common::Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
-    let mut decl = bonsai_lang_api::Decl {
-        symbol: bonsai_common::SymbolId::new(0),
-        kind: bonsai_lang_api::DeclKind::Function,
-        name: "process_batch".to_string(),
-        qualified_name: Some("process_batch".to_string()),
-        module_path: bonsai_lang_api::ModulePath::default(),
-        span,
-        name_span: span,
-        visibility: Visibility::Public,
-        parent: None,
-        body_span: Some(span),
-        flow_events: Vec::new(),
-        has_implicit_returns: false,
-        params: vec!["_Arg0".to_string()],
-        param_annotations: Vec::new(),
-        param_default_calls: Vec::new(),
-        type_aliases: Vec::new(),
-        bases: Vec::new(),
-        receiver_param_index: None,
-        receiver_field_writes: Vec::new(),
-        receiver_field_initializers: Vec::new(),
-        implicit_receiver_names: Vec::new(),
-        receiver_state_sources: Vec::new(),
-        return_type: None,
-        is_variadic: false,
-    };
-
-    augment_erlang_param_pattern_bindings(&mut decl, src);
-
-    let bindings = decl
-        .flow_events
+    let language = language_from_pack(PACK_NAME).expect("erlang grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set erlang grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse erlang source");
+    let plans = collect_erlang_parameter_pattern_plans(&tree, FileId::new(0), src.as_bytes());
+    assert_eq!(plans.len(), 1, "{plans:#?}");
+    assert_eq!(plans[0].params, ["_Arg0"]);
+    let bindings = plans[0]
+        .bindings
         .iter()
         .filter_map(|event| match event {
             FlowEvent::Assign {
@@ -253,49 +215,40 @@ fn list_cons_param_pattern_emits_entry_bindings() {
 
 #[test]
 fn list_comprehension_assignment_exposes_generator_sources() {
-    let src = r#"RawTokens = [Part || Part <- string:tokens(Cmd, " ")]"#;
-    let span = bonsai_common::Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
-    let mut events = vec![FlowEvent::Assign {
-        span,
-        target: "RawTokens".to_string(),
-        source_name: None,
-        source_call: None,
-        source_call_args: Vec::new(),
-        source_names: vec!["Part".to_string()],
-        declares_new_binding: true,
-        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
-    }];
-    let value_start = u64::try_from(src.find('[').expect("RHS start")).unwrap();
-    let facts = [bonsai_lang_api::AssignmentValueFact {
-        assignment_span: span,
-        target: Some("RawTokens".to_string()),
-        target_is_immutable: false,
-        target_owner: None,
-        target_span: Some(bonsai_common::Span::new(
-            FileId::new(0),
-            0,
-            u64::try_from("RawTokens".len()).unwrap(),
+    let src = r#"-module(main).
+run(Cmd) ->
+    RawTokens = [Part || Part <- string:tokens(Cmd, " ")],
+    RawTokens.
+"#;
+    let language = language_from_pack(PACK_NAME).expect("erlang grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set erlang grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse erlang source");
+    let clause = collect_kinds(&tree, &["function_clause"])
+        .into_iter()
+        .find(|clause| {
+            clause
+                .child_by_field_name("name")
+                .is_some_and(|name| node_text(&name, src.as_bytes()) == "run")
+        })
+        .expect("run clause");
+    let body = clause.child_by_field_name("body").expect("run body");
+    let events = walk_flow_events(body, FileId::new(0), src.as_bytes(), &HANDLER, &[]);
+    let binding = events.iter().find_map(|event| match event {
+        FlowEvent::Assign {
+            target,
+            source_call,
+            source_call_args,
+            ..
+        } if target == "Part" => Some((source_call.as_deref(), source_call_args.as_slice())),
+        _ => None,
+    });
+    assert_eq!(
+        binding,
+        Some((
+            Some("string:tokens"),
+            ["Cmd".to_string(), "\" \"".to_string()].as_slice()
         )),
-        value_span: bonsai_common::Span::new(FileId::new(0), value_start, span.end),
-        call_sites: Vec::new(),
-        value_flow: Default::default(),
-        static_value: None,
-        exact_callable_return: None,
-        inline_callback_static_return: None,
-        inline_callback_fields: Vec::new(),
-        exact_static_call_args: None,
-        direct_call_name: None,
-        direct_call_span: None,
-        direct_call_receiver: None,
-        direct_call_receiver_span: None,
-        direct_call_receiver_flow: None,
-    }];
-    let assignment_values = AssignmentValueIndex::new(&facts);
-
-    normalize_erlang_access_events(&mut events, src, &assignment_values);
-
-    let FlowEvent::Assign { source_names, .. } = &events[0] else {
-        panic!("expected assign");
-    };
-    assert!(source_names.contains(&"Cmd".to_string()), "{source_names:?}");
+        "generator binding must come from exact Tree-sitter call facts: {events:#?}"
+    );
 }

@@ -21,4 +21,8 @@ function handle_request(): string {
     return Pipeline::orchestrate($envelope);
 }
 
-echo handle_request();
+// Execute the deliberately vulnerable command flow, but keep the HTTP response
+// literal so this gauntlet has one intentional sink rather than also becoming
+// an unrelated reflected-XSS fixture.
+handle_request();
+echo "ok";

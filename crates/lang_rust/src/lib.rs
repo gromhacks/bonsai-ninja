@@ -532,7 +532,8 @@ impl LanguageAdapter for RustAdapter {
             .map_or(raw_src, |(source, _)| source.as_slice());
         let tree = compiler_view.as_ref().map_or(raw_tree.as_ref(), |(_, tree)| tree);
         let mut idx = decl_index_from_tree_with_handler(file, src, tree, &HANDLER);
-        mark_rust_format_macro_values_as_syntax_propagated(&mut idx, src);
+        let format_macros = collect_rust_format_macros(tree, file, src);
+        mark_rust_format_macro_values_as_syntax_propagated(&mut idx, &format_macros);
         // Phase-6 return-type extraction: `fn f() -> T {}` populates
         // `Decl.return_type` for `apply_assign_call_result_types`.
         bonsai_lang_api::populate_decl_return_types(&mut idx, tree, src, &HANDLER);
@@ -544,6 +545,7 @@ impl LanguageAdapter for RustAdapter {
         let exported_import_aliases = collect_rust_exported_import_aliases(tree, file, src);
         let format_nested_calls = collect_rust_format_nested_calls(tree, file, src);
         for decl in &mut idx.defs {
+            let owner_span = decl.span;
             enrich_rust_struct_literal_field_assigns(&mut decl.flow_events, &struct_literal_field_assigns);
             enrich_rust_chained_method_assignment_receivers(
                 &mut decl.flow_events,
@@ -551,7 +553,7 @@ impl LanguageAdapter for RustAdapter {
             );
             classify_rust_scoped_calls(&mut decl.flow_events, &scoped_call_spans);
             classify_rust_self_constructor_calls(&mut decl.flow_events, &self_constructor_call_spans);
-            enrich_rust_format_macro_operands(&mut decl.flow_events);
+            enrich_rust_format_macro_operands(&mut decl.flow_events, &format_macros, owner_span);
             enrich_rust_format_nested_call_events(&mut decl.flow_events, &format_nested_calls);
             enrich_rust_tail_return_sources(&mut decl.flow_events, &decl.params);
             enrich_rust_constructor_field_writes(decl);
@@ -1818,41 +1820,118 @@ fn classify_rust_self_constructor_calls(
     }
 }
 
-fn enrich_rust_format_macro_operands(events: &mut [FlowEvent]) {
+#[derive(Clone, Debug)]
+struct RustFormatMacroFact {
+    call_span: Span,
+    invocation_span: Span,
+    owner_span: Span,
+    captures: Vec<String>,
+}
+
+/// Lower the implicit named operands of Rust's standard formatting macros
+/// from their exact Tree-sitter token trees. The format mini-language is Rust
+/// compiler/runtime semantics; the surrounding expression is never recovered
+/// by reparsing a rendered `CallArg::value_text` string.
+fn collect_rust_format_macros(tree: &Tree, file: FileId, src: &[u8]) -> Vec<RustFormatMacroFact> {
+    let mut facts = Vec::new();
+    for invocation in collect_kinds(tree, &["macro_invocation"]) {
+        let Some(macro_node) = invocation.child_by_field_name("macro") else {
+            continue;
+        };
+        if !matches!(node_text(&macro_node, src).trim(), "format" | "format_args") {
+            continue;
+        }
+        let Some(token_tree) = first_named_child_of_kind_local(invocation, "token_tree") else {
+            continue;
+        };
+        let mut cursor = token_tree.walk();
+        let Some(format_literal) = token_tree
+            .named_children(&mut cursor)
+            .find(|child| matches!(child.kind(), "string_literal" | "raw_string_literal"))
+        else {
+            continue;
+        };
+        let Some(literal) = rust_static_string(node_text(&format_literal, src).trim()) else {
+            continue;
+        };
+        let Some(owner_span) = rust_nearest_callable_span(invocation, file) else {
+            continue;
+        };
+        facts.push(RustFormatMacroFact {
+            call_span: span_of(file, &macro_node),
+            invocation_span: span_of(file, &invocation),
+            owner_span,
+            captures: rust_format_named_captures_from_literal(&literal),
+        });
+    }
+    facts.sort_by_key(|fact| (fact.invocation_span.start, fact.invocation_span.end));
+    facts.dedup_by(|left, right| left.invocation_span == right.invocation_span);
+    facts
+}
+
+fn rust_nearest_callable_span(mut node: Node<'_>, file: FileId) -> Option<Span> {
+    while let Some(parent) = node.parent() {
+        if HANDLER.fn_kinds.contains(&parent.kind()) || HANDLER.lambda_kinds.contains(&parent.kind()) {
+            return Some(span_of(file, &parent));
+        }
+        node = parent;
+    }
+    None
+}
+
+fn enrich_rust_format_macro_operands(
+    events: &mut [FlowEvent],
+    facts: &[RustFormatMacroFact],
+    owner_span: Span,
+) {
     for event in events {
         match event {
             FlowEvent::Call { args, .. } => {
                 for arg in args {
-                    for capture in rust_format_named_captures(&arg.value_text) {
-                        if !arg.source_names.iter().any(|existing| existing == &capture) {
-                            arg.source_names.push(capture);
+                    for fact in facts.iter().filter(|fact| {
+                        fact.owner_span == owner_span
+                            && arg.span.file == fact.invocation_span.file
+                            && arg.span.start <= fact.invocation_span.start
+                            && fact.invocation_span.end <= arg.span.end
+                    }) {
+                        for capture in &fact.captures {
+                            if !arg.source_names.iter().any(|existing| existing == capture) {
+                                arg.source_names.push(capture.clone());
+                            }
                         }
                     }
+                    arg.source_names.sort();
+                    arg.source_names.dedup();
                 }
             }
             FlowEvent::Assign {
-                source_names,
-                source_call_args,
-                ..
+                span, source_names, ..
             } => {
-                for arg in source_call_args {
-                    for capture in rust_format_named_captures(arg) {
-                        if !source_names.iter().any(|existing| existing == &capture) {
-                            source_names.push(capture);
+                for fact in facts.iter().filter(|fact| {
+                    fact.owner_span == owner_span
+                        && span.file == fact.invocation_span.file
+                        && span.start <= fact.invocation_span.start
+                        && fact.invocation_span.end <= span.end
+                }) {
+                    for capture in &fact.captures {
+                        if !source_names.iter().any(|existing| existing == capture) {
+                            source_names.push(capture.clone());
                         }
                     }
                 }
+                source_names.sort();
+                source_names.dedup();
             }
             FlowEvent::Branch {
                 then_events,
                 else_events,
                 ..
             } => {
-                enrich_rust_format_macro_operands(then_events);
-                enrich_rust_format_macro_operands(else_events);
+                enrich_rust_format_macro_operands(then_events, facts, owner_span);
+                enrich_rust_format_macro_operands(else_events, facts, owner_span);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                enrich_rust_format_macro_operands(body);
+                enrich_rust_format_macro_operands(body, facts, owner_span);
             }
             FlowEvent::Try {
                 body,
@@ -1860,9 +1939,9 @@ fn enrich_rust_format_macro_operands(events: &mut [FlowEvent]) {
                 finally_events,
                 ..
             } => {
-                enrich_rust_format_macro_operands(body);
-                enrich_rust_format_macro_operands(catch_events);
-                enrich_rust_format_macro_operands(finally_events);
+                enrich_rust_format_macro_operands(body, facts, owner_span);
+                enrich_rust_format_macro_operands(catch_events, facts, owner_span);
+                enrich_rust_format_macro_operands(finally_events, facts, owner_span);
             }
             _ => {}
         }
@@ -2085,18 +2164,14 @@ fn enrich_rust_format_nested_call_value_facts(index: &mut DeclIndex, calls: &[Ru
 /// body. Marking the exact argument expression this way lets shared IDG
 /// lowering consume the adapter-emitted operand facts without teaching the
 /// graph core any Rust macro names.
-fn mark_rust_format_macro_values_as_syntax_propagated(index: &mut DeclIndex, src: &[u8]) {
+fn mark_rust_format_macro_values_as_syntax_propagated(index: &mut DeclIndex, facts: &[RustFormatMacroFact]) {
     for fact in &mut index.call_argument_values {
-        let start = usize::try_from(fact.argument_span.start).unwrap_or(usize::MAX);
-        let end = usize::try_from(fact.argument_span.end).unwrap_or(usize::MAX);
-        let Some(text) = src
-            .get(start..end)
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        else {
-            continue;
-        };
-        let text = text.trim_start();
-        if text.starts_with("format!(") || text.starts_with("format_args!(") {
+        if facts.iter().any(|format| {
+            fact.argument_span.file == format.invocation_span.file
+                && fact.argument_span.start <= format.invocation_span.start
+                && format.invocation_span.end <= fact.argument_span.end
+                && fact.direct_call_span == Some(format.call_span)
+        }) {
             fact.direct_call_span = None;
         }
     }
@@ -2786,7 +2861,26 @@ fn collect_rust_struct_literal_field_events(
                     continue;
                 }
                 let value_text = node_text(&value, src).trim();
-                let source_names = rust_value_source_names(value_text);
+                let value_flow =
+                    bonsai_lang_api::kit::expression_flow_from_node_with_handler(value, file, src, &HANDLER);
+                let mut source_names = value_flow.source_names;
+                if let Some(place) = value_flow.place {
+                    if !source_names.iter().any(|source| source == &place) {
+                        source_names.push(place);
+                    }
+                }
+                let mut nested_events = Vec::new();
+                bonsai_lang_api::kit::walk_flow_node_into(
+                    value,
+                    file,
+                    src,
+                    &HANDLER,
+                    &[],
+                    &mut nested_events,
+                );
+                collect_rust_value_event_sources(&nested_events, &mut source_names);
+                source_names.sort();
+                source_names.dedup();
                 if source_names.is_empty() {
                     continue;
                 }
@@ -2799,11 +2893,12 @@ fn collect_rust_struct_literal_field_events(
                 // Reuse the canonical Tree-sitter flow walker so shared IDG
                 // lowering never has to infer call syntax from rendered
                 // source names.
-                bonsai_lang_api::kit::walk_flow_node_into(value, file, src, &HANDLER, &[], out);
+                out.extend(nested_events);
                 out.push(FlowEvent::Assign {
                     span: span_of(file, &field_node),
                     target: format!("{target}.{field_name}"),
-                    source_name: rust_bare_identifier(value_text).then(|| value_text.to_string()),
+                    source_name: (value.kind() == "identifier" && rust_bare_identifier(value_text))
+                        .then(|| value_text.to_string()),
                     source_call: None,
                     source_call_args: Vec::new(),
                     source_names,
@@ -2826,6 +2921,46 @@ fn collect_rust_struct_literal_field_events(
                     declares_new_binding: false,
                     value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
                 });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_rust_value_event_sources(events: &[FlowEvent], out: &mut Vec<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Call { receiver, args, .. } => {
+                if let Some(receiver) = receiver {
+                    out.push(receiver.clone());
+                }
+                for argument in args {
+                    if let Some(place) = argument.place.as_ref() {
+                        out.push(place.clone());
+                    }
+                    out.extend(argument.source_names.iter().cloned());
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_rust_value_event_sources(then_events, out);
+                collect_rust_value_event_sources(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_rust_value_event_sources(body, out)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_rust_value_event_sources(body, out);
+                collect_rust_value_event_sources(catch_events, out);
+                collect_rust_value_event_sources(finally_events, out);
             }
             _ => {}
         }
@@ -3079,83 +3214,6 @@ fn rust_type_tail(text: &str) -> Option<String> {
     (rust_bare_identifier(tail)).then(|| tail.to_string())
 }
 
-fn rust_value_source_names(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for token in rust_identifier_chains_outside_strings(text) {
-        push_rust_source_token(&mut out, &token);
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn rust_identifier_chains_outside_strings(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut chars = text.chars().peekable();
-    let mut in_string: Option<char> = None;
-    let mut escape = false;
-    while let Some(ch) = chars.next() {
-        if let Some(quote) = in_string {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == quote {
-                in_string = None;
-            }
-            continue;
-        }
-        match ch {
-            '"' | '\'' => {
-                push_rust_identifier_chain(&mut out, &mut current);
-                in_string = Some(ch);
-            }
-            ':' if chars.peek() == Some(&':') => {
-                current.push_str("::");
-                let _ = chars.next();
-            }
-            '.' => current.push('.'),
-            '_' | 'a'..='z' | 'A'..='Z' | '0'..='9' => current.push(ch),
-            _ => push_rust_identifier_chain(&mut out, &mut current),
-        }
-    }
-    push_rust_identifier_chain(&mut out, &mut current);
-    out
-}
-
-fn push_rust_identifier_chain(out: &mut Vec<String>, current: &mut String) {
-    let token = current.trim_matches('.').trim_matches(':').trim();
-    if !token.is_empty()
-        && token
-            .chars()
-            .next()
-            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
-    {
-        out.push(token.to_string());
-    }
-    current.clear();
-}
-
-fn push_rust_source_token(out: &mut Vec<String>, token: &str) {
-    let token = token.trim_end_matches('!');
-    if token.is_empty() {
-        return;
-    }
-    out.push(token.to_string());
-    for sep in [".", "::"] {
-        if token.contains(sep) {
-            let parts = token.split(sep).collect::<Vec<_>>();
-            for split in 1..parts.len() {
-                let prefix = parts[..split].join(sep);
-                if !prefix.is_empty() {
-                    out.push(prefix);
-                }
-            }
-        }
-    }
-}
-
 fn first_named_child_of_kind_local<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
     let found = node
@@ -3216,50 +3274,6 @@ fn rust_nominal_type_alias(value: &str) -> bool {
     }
     let segments = bonsai_common::qualified_name_segments(value);
     !segments.is_empty() && segments.into_iter().all(rust_bare_identifier)
-}
-
-fn rust_format_named_captures(text: &str) -> Vec<String> {
-    let trimmed = text.trim_start();
-    let Some(after_macro) = trimmed
-        .strip_prefix("format!")
-        .or_else(|| trimmed.strip_prefix("format_args!"))
-    else {
-        return Vec::new();
-    };
-    let Some(open) = after_macro.find('(') else {
-        return Vec::new();
-    };
-    let args = &after_macro[open + 1..];
-    let Some((literal, _)) = first_rust_string_literal(args) else {
-        return Vec::new();
-    };
-    rust_format_named_captures_from_literal(literal)
-}
-
-fn first_rust_string_literal(text: &str) -> Option<(&str, usize)> {
-    let bytes = text.as_bytes();
-    let mut idx = 0usize;
-    while idx < bytes.len() {
-        if bytes[idx] == b'"' {
-            let start = idx + 1;
-            idx += 1;
-            let mut escaped = false;
-            while idx < bytes.len() {
-                let byte = bytes[idx];
-                if escaped {
-                    escaped = false;
-                } else if byte == b'\\' {
-                    escaped = true;
-                } else if byte == b'"' {
-                    return Some((&text[start..idx], idx + 1));
-                }
-                idx += 1;
-            }
-            return None;
-        }
-        idx += 1;
-    }
-    None
 }
 
 fn rust_format_named_captures_from_literal(literal: &str) -> Vec<String> {
@@ -3557,9 +3571,13 @@ fn collect_rust_impl_method_parents(
     let functions = collect_kinds(tree, &["function_item"]);
     let mut out = Vec::new();
     for impl_node in collect_kinds(tree, &["impl_item"]) {
-        let Some(type_name) = rust_impl_self_type(node_text(&impl_node, src)) else {
+        let Some(type_node) = impl_node.child_by_field_name("type") else {
             continue;
         };
+        let type_name = bonsai_lang_api::kit::canonical_simple_type_name(node_text(&type_node, src));
+        if type_name.is_empty() {
+            continue;
+        }
         let impl_span = span_of(file, &impl_node);
         for function in &functions {
             let fn_span = span_of(file, function);
@@ -3676,51 +3694,6 @@ fn qualify_rust_declared_type_aliases(idx: &mut DeclIndex, imports: &[ImportSpec
             }
         }
     }
-}
-
-fn rust_impl_self_type(text: &str) -> Option<String> {
-    let header = text.split('{').next()?.trim();
-    let rest = header.strip_prefix("impl")?.trim();
-    let self_type = if let Some((_, rhs)) = rest.rsplit_once(" for ") {
-        rhs.trim()
-    } else {
-        let mut rest = rest;
-        if rest.starts_with('<') {
-            if let Some(end) = matching_angle_close(rest) {
-                rest = rest[end + 1..].trim();
-            }
-        }
-        rest
-    };
-    let candidate = self_type
-        .split(|ch: char| !(ch == '_' || ch == ':' || ch.is_ascii_alphanumeric()))
-        .find(|part| !part.is_empty())?;
-    candidate
-        .rsplit("::")
-        .next()
-        .filter(|tail| {
-            tail.chars()
-                .next()
-                .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
-        })
-        .map(str::to_string)
-}
-
-fn matching_angle_close(text: &str) -> Option<usize> {
-    let mut depth = 0usize;
-    for (idx, ch) in text.char_indices() {
-        match ch {
-            '<' => depth = depth.saturating_add(1),
-            '>' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(idx);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {

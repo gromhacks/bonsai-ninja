@@ -345,7 +345,7 @@ class C {
 }
 
 #[test]
-fn jdbc_platform_supertypes_are_exported_as_semantic_receiver_types() {
+fn external_library_supertypes_are_not_invented_by_the_adapter() {
     let db = db_with(
         r#"
 class C {
@@ -369,9 +369,9 @@ class C {
         calls.iter().any(|(name, receiver_types)| {
             name == "statement.execute"
                 && receiver_types.iter().any(|ty| ty == "PreparedStatement")
-                && receiver_types.iter().any(|ty| ty == "Statement")
+                && !receiver_types.iter().any(|ty| ty == "Statement")
         }),
-        "JDBC receiver should carry declared type and semantic supertype, got {calls:?}"
+        "JDBC receiver must retain only compiler-declared type evidence; library hierarchy belongs in rule data: {calls:?}"
     );
 }
 

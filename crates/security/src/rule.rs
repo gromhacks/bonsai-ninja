@@ -1160,6 +1160,21 @@ pub struct CharacterConstraintProviderSemantics {
     pub operation: RuleTarget,
 }
 
+/// Rule-owned meaning for one compiler-proven boolean predicate call.
+///
+/// Adapters emit only the call expression span and branch polarity. This
+/// structure selects the runtime callable and exact scalar argument that make
+/// that generic syntax fact relevant to a security boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardedPredicateRequirement {
+    pub target: RuleTarget,
+    #[serde(default)]
+    pub argument_index: usize,
+    pub argument_value: StaticScalarValue,
+    pub required_result: bool,
+}
+
 /// Required facets of a compiler-proven same-origin path helper.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1172,6 +1187,20 @@ pub struct SameOriginPathConstraintSemantics {
     /// means the proof is entirely syntax-defined and provider-independent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepted_providers: Vec<RuleTarget>,
+    /// Runtime predicate meanings required by the proof. Callable and literal
+    /// vocabulary belongs here rather than in language adapters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_predicates: Vec<GuardedPredicateRequirement>,
+    /// Exact compiler facts required by this security proof. Literal values
+    /// and provider-result field names live in rule data, never adapters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_accepted_prefixes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_rejected_prefixes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_rejected_components: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_static_fallbacks: Vec<String>,
     /// Exact tainted sink argument that must receive the constrained path.
     /// Header-style APIs use argument one while direct redirect APIs use zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1541,6 +1570,31 @@ impl AnalysisSemantics {
         ) {
             if current.accepted_providers.is_empty() {
                 current.accepted_providers.clone_from(&default.accepted_providers);
+            }
+            if current.required_predicates.is_empty() {
+                current
+                    .required_predicates
+                    .clone_from(&default.required_predicates);
+            }
+            if current.required_accepted_prefixes.is_empty() {
+                current
+                    .required_accepted_prefixes
+                    .clone_from(&default.required_accepted_prefixes);
+            }
+            if current.required_rejected_prefixes.is_empty() {
+                current
+                    .required_rejected_prefixes
+                    .clone_from(&default.required_rejected_prefixes);
+            }
+            if current.required_rejected_components.is_empty() {
+                current
+                    .required_rejected_components
+                    .clone_from(&default.required_rejected_components);
+            }
+            if current.accepted_static_fallbacks.is_empty() {
+                current
+                    .accepted_static_fallbacks
+                    .clone_from(&default.accepted_static_fallbacks);
             }
         }
         macro_rules! inherit_option {

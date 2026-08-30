@@ -2139,14 +2139,16 @@ fn annotate_scala_named_call_args(events: &mut [FlowEvent], root: Node<'_>, file
     }
 }
 
-fn scala_class_parameter_declares_property(param: Node<'_>, src: &[u8]) -> bool {
-    node_text(&param, src)
-        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
-        .any(|token| matches!(token, "val" | "var"))
+fn scala_class_parameter_declares_property(param: Node<'_>, _src: &[u8]) -> bool {
+    let mut cursor = param.walk();
+    let declares_property = param
+        .children(&mut cursor)
+        .any(|child| matches!(child.kind(), "val" | "var"));
+    declares_property
 }
 
 /// Detect a Scala `case class` (modifier `case` on a `class_definition`).
-fn scala_class_is_case(class_node: Node<'_>, src: &[u8]) -> bool {
+fn scala_class_is_case(class_node: Node<'_>, _src: &[u8]) -> bool {
     let mut cw = class_node.walk();
     for child in class_node.children(&mut cw) {
         if child.kind() == "case" {
@@ -2158,21 +2160,7 @@ fn scala_class_is_case(class_node: Node<'_>, src: &[u8]) -> bool {
                 if m.kind() == "case" {
                     return true;
                 }
-                if node_text(&m, src).trim() == "case" {
-                    return true;
-                }
             }
-        }
-    }
-    // Fallback: scan the prefix text before `class` for the `case` keyword.
-    let text = node_text(&class_node, src);
-    if let Some(idx) = text.find("class") {
-        let prefix = &text[..idx];
-        if prefix
-            .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
-            .any(|t| t == "case")
-        {
-            return true;
         }
     }
     false
@@ -2665,34 +2653,34 @@ fn scala_node_visibility(node: tree_sitter::Node<'_>, src: &[u8]) -> Visibility 
         if child.kind() != "modifiers" {
             continue;
         }
-        // Walk modifier keywords; tree-sitter-scala emits keyword
-        // tokens directly as children. The optional `[X]` access
-        // qualifier lives next to the keyword as an `access_qualifier`
-        // node (or as a bracketed identifier).
+        // Walk exact modifier syntax. Current tree-sitter-scala nests the
+        // keyword token and optional qualifier beneath `access_modifier`.
+        // Anonymous keyword tokens and named qualifier identifiers are both
+        // grammar facts; no bracketed source text is reparsed.
         let mut modifiers_cursor = child.walk();
         for modifier in child.children(&mut modifiers_cursor) {
-            let text = node_text(&modifier, src);
-            if text == "private" {
-                found_private = true;
-            } else if text == "protected" {
-                found_protected = true;
-            } else if matches!(modifier.kind(), "access_qualifier") {
-                // Strip the surrounding `[ ]` to get the bare scope name.
-                let qualifier_text = node_text(&modifier, src);
-                let inside = qualifier_text
-                    .trim()
-                    .trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .trim();
-                if !inside.is_empty() {
-                    scope_marker = Some(inside.to_string());
-                }
-            } else if text.starts_with('[') && text.ends_with(']') {
-                // Older grammars emit the qualifier as a literal bracketed
-                // token rather than an `access_qualifier` node.
-                let inside = text.trim_start_matches('[').trim_end_matches(']').trim();
-                if !inside.is_empty() {
-                    scope_marker = Some(inside.to_string());
+            let mut stack = vec![modifier];
+            while let Some(part) = stack.pop() {
+                match part.kind() {
+                    "private" => found_private = true,
+                    "protected" => found_protected = true,
+                    "access_qualifier" => {
+                        let mut qualifier_cursor = part.walk();
+                        let identifiers = part
+                            .named_children(&mut qualifier_cursor)
+                            .filter(|child| matches!(child.kind(), "identifier" | "this"))
+                            .collect::<Vec<_>>();
+                        if let [identifier] = identifiers.as_slice() {
+                            let value = node_text(identifier, src).trim();
+                            if !value.is_empty() {
+                                scope_marker = Some(value.to_string());
+                            }
+                        }
+                    }
+                    _ => {
+                        let mut part_cursor = part.walk();
+                        stack.extend(part.children(&mut part_cursor));
+                    }
                 }
             }
         }
@@ -3219,7 +3207,7 @@ fn synthesize_scala_stored_property_accessors(idx: &mut DeclIndex, tree: &Tree, 
             if matches!(child.kind(), "modifiers") {
                 let mut mw = child.walk();
                 for m in child.children(&mut mw) {
-                    if m.kind() == "case" || node_text(&m, src).contains("case") {
+                    if m.kind() == "case" {
                         is_case = true;
                         break;
                     }
@@ -3239,8 +3227,7 @@ fn synthesize_scala_stored_property_accessors(idx: &mut DeclIndex, tree: &Tree, 
         };
         let parent_sym = parent_decl.symbol;
         let module_path = parent_decl.module_path.clone();
-        let visibility = parent_decl.visibility;
-        let mut comps: Vec<(String, Span)> = Vec::new();
+        let mut comps: Vec<(String, Span, Visibility)> = Vec::new();
         if let Some(params_node) = first_named_child_of_kind(&class_node, "class_parameters") {
             let mut pw = params_node.walk();
             for child in params_node.children(&mut pw) {
@@ -3253,7 +3240,7 @@ fn synthesize_scala_stored_property_accessors(idx: &mut DeclIndex, tree: &Tree, 
                 if let Some(name_node) = child.children(&mut subw).find(|sub| sub.kind() == "identifier") {
                     let name = node_text(&name_node, src).trim().to_string();
                     if !name.is_empty() {
-                        comps.push((name, span_of(file, &name_node)));
+                        comps.push((name, span_of(file, &name_node), scala_node_visibility(child, src)));
                     }
                 };
             }
@@ -3279,15 +3266,15 @@ fn synthesize_scala_stored_property_accessors(idx: &mut DeclIndex, tree: &Tree, 
                     .child_by_field_name("name")
                     .or_else(|| (pattern.kind() == "identifier").then_some(pattern))
                     .map_or_else(|| span_of(file, &pattern), |node| span_of(file, &node));
-                if !comps.iter().any(|(existing, _)| existing == &name) {
-                    comps.push((name, name_span));
+                if !comps.iter().any(|(existing, _, _)| existing == &name) {
+                    comps.push((name, name_span, scala_node_visibility(member, src)));
                 }
             }
         }
         if comps.is_empty() {
             continue;
         }
-        for (comp, comp_span) in &comps {
+        for (comp, comp_span, visibility) in &comps {
             let already = idx.defs.iter().chain(synthesized.iter()).any(|d| {
                 d.parent == Some(parent_sym)
                     && d.name == *comp
@@ -3306,7 +3293,7 @@ fn synthesize_scala_stored_property_accessors(idx: &mut DeclIndex, tree: &Tree, 
                 module_path: module_path.clone(),
                 span: *comp_span,
                 name_span: *comp_span,
-                visibility,
+                visibility: *visibility,
                 parent: Some(parent_sym),
                 body_span: Some(*comp_span),
                 flow_events: vec![FlowEvent::Return {

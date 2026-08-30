@@ -9,8 +9,8 @@ use bonsai_lang_api::{
     AdapterContext, AdapterError, ArgumentPassingMode, CallKind, CallTargetExtraction,
     CharacterConstraintDomain, CharacterConstraintFact, CharacterConstraintOutput, CompilerGuardFact,
     ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclIndex, DeclKind, ExpressionField,
-    ExpressionFlow, ExpressionPlaceExtraction, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, SameOriginPathConstraintFact,
+    ExpressionFlow, ExpressionPlaceExtraction, FlowEvent, GrammarHandler, GuardedValueConstraintFact,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
     StaticScalarValue, StaticStringMapEntry, StringCompositionFact, StringCompositionPart, TypeAliasBinding,
     Visibility,
 };
@@ -471,7 +471,7 @@ impl LanguageAdapter for GoAdapter {
             let exact_argument_flows = populate_go_call_argument_values(&mut idx, tree, file, src);
             populate_go_assignment_values(&mut idx, tree, file, src);
             idx.string_compositions = go_string_compositions(&idx, tree, file, src);
-            idx.same_origin_path_constraints = go_same_origin_path_constraints(&idx, tree, file, src);
+            idx.guarded_value_constraints = go_guarded_value_constraints(&idx, tree, file, src);
             idx.compiler_guards = go_compiler_guards(tree, file, src);
             let return_value_flows = collect_go_return_value_flows(tree, file, src);
             populate_go_exact_callable_assignments(&mut idx, tree, file, src);
@@ -1412,7 +1412,7 @@ fn go_character_constraints(
     src: &[u8],
 ) -> Vec<CharacterConstraintFact> {
     let imports = parse_imports(tree, src, file);
-    let mut facts = go_guarded_append_character_constraints(index);
+    let mut facts = go_guarded_append_character_constraints(index, tree, src);
     facts.extend(go_configured_character_substitution_constraints(index));
     if imports.is_empty() {
         return facts;
@@ -1465,9 +1465,9 @@ fn go_character_constraints(
         let Some(input_param_index) = decl.params.iter().position(|parameter| parameter == input_name) else {
             continue;
         };
-        if !go_map_callback_replaces_controls(*callback, src) {
+        let Some(excluded_characters) = go_map_callback_excluded_characters(*callback, src) else {
             continue;
-        }
+        };
         facts.push(CharacterConstraintFact {
             function_span,
             transform_span: span_of(file, &callee),
@@ -1479,7 +1479,7 @@ fn go_character_constraints(
                 factory_call: provider_call.clone(),
                 operation_call: provider_call,
                 domain: Box::new(CharacterConstraintDomain::ExcludesExact {
-                    characters: vec!["\r".to_string(), "\n".to_string()],
+                    characters: excluded_characters,
                 }),
             },
         });
@@ -1768,11 +1768,15 @@ fn go_callable_owner(index: &DeclIndex, span: Span) -> Option<&bonsai_lang_api::
 /// and `make` are Go predeclared functions, so their semantics belong to the
 /// frontend. Which excluded characters matter to a sink remains rulepack
 /// data through `CharacterConstraintSemantics`.
-fn go_guarded_append_character_constraints(index: &DeclIndex) -> Vec<CharacterConstraintFact> {
+fn go_guarded_append_character_constraints(
+    index: &DeclIndex,
+    tree: &Tree,
+    src: &[u8],
+) -> Vec<CharacterConstraintFact> {
     let mut facts = Vec::new();
     for decl in &index.defs {
         let mut assignments = Vec::new();
-        collect_go_assignments_with_guard(&decl.flow_events, None, &mut assignments);
+        collect_go_assignments_with_guard(&decl.flow_events, &[], &mut assignments);
         let mut targets = assignments
             .iter()
             .filter_map(|assignment| assignment.appended.as_ref().map(|_| assignment.target.clone()))
@@ -1802,17 +1806,20 @@ fn go_guarded_append_character_constraints(index: &DeclIndex) -> Vec<CharacterCo
 
             let mut input = None::<(String, usize)>;
             let mut transform_span = None::<Span>;
+            let mut write_exclusions = Vec::with_capacity(guarded_writes.len());
             let mut valid = true;
-            for write in guarded_writes {
+            for write in &guarded_writes {
                 let Some(appended) = write.appended.as_deref() else {
                     valid = false;
                     break;
                 };
-                if write
-                    .guard_condition
-                    .as_deref()
-                    .is_none_or(|condition| !go_character_allowlist_condition(condition, appended))
-                {
+                let Some(excluded_characters) =
+                    go_guarded_append_excluded_characters(tree, &write.guard_path, appended, src)
+                else {
+                    valid = false;
+                    break;
+                };
+                if excluded_characters.is_empty() {
                     valid = false;
                     break;
                 }
@@ -1839,6 +1846,7 @@ fn go_guarded_append_character_constraints(index: &DeclIndex) -> Vec<CharacterCo
                     break;
                 }
                 input = Some(candidate.clone());
+                write_exclusions.push(excluded_characters);
                 transform_span = Some(transform_span.map_or(write.span, |current| {
                     if (write.span.start, write.span.end) < (current.start, current.end) {
                         write.span
@@ -1854,6 +1862,19 @@ fn go_guarded_append_character_constraints(index: &DeclIndex) -> Vec<CharacterCo
             if !valid {
                 continue;
             }
+            let mut excluded_characters = write_exclusions
+                .into_iter()
+                .reduce(|left, right| {
+                    left.into_iter()
+                        .filter(|character| right.contains(character))
+                        .collect()
+                })
+                .unwrap_or_default();
+            excluded_characters.sort();
+            excluded_characters.dedup();
+            if excluded_characters.is_empty() {
+                continue;
+            }
             facts.push(CharacterConstraintFact {
                 function_span: decl.span,
                 transform_span,
@@ -1862,7 +1883,7 @@ fn go_guarded_append_character_constraints(index: &DeclIndex) -> Vec<CharacterCo
                 proof: bonsai_lang_api::CharacterConstraintProof::ExactRuntimeSemantics,
                 output: CharacterConstraintOutput::Assignment { target },
                 domain: CharacterConstraintDomain::ExcludesExact {
-                    characters: vec!["\r".to_string(), "\n".to_string()],
+                    characters: excluded_characters,
                 },
             });
         }
@@ -1876,32 +1897,61 @@ struct GoGuardedAssignment {
     source_names: Vec<String>,
     appended: Option<String>,
     clean_initialization: bool,
-    guard_condition: Option<String>,
+    guard_path: Vec<GoBranchCondition>,
+}
+
+#[derive(Clone, Copy)]
+struct GoBranchCondition {
+    span: Span,
+    selected: bool,
 }
 
 fn collect_go_assignments_with_guard(
     events: &[FlowEvent],
-    guard_condition: Option<&str>,
+    guard_path: &[GoBranchCondition],
     out: &mut Vec<GoGuardedAssignment>,
 ) {
-    for event in events {
+    for (event_index, event) in events.iter().enumerate() {
         match event {
             FlowEvent::Assign {
                 span,
                 target,
                 source_names,
                 source_call,
-                source_call_args,
                 value_kind,
                 ..
             } => {
-                let appended = (source_call.as_deref() == Some("append")
-                    && source_call_args.len() >= 2
-                    && source_call_args[0].trim() == target.trim())
-                .then(|| source_call_args[1].trim().to_string());
+                let exact_call_args = source_call.as_deref().and_then(|source_call| {
+                    events
+                        .iter()
+                        .skip(event_index + 1)
+                        .find_map(|candidate| match candidate {
+                            FlowEvent::Call {
+                                span: call_span,
+                                name,
+                                args,
+                                ..
+                            } if name == source_call && go_span_contains(*span, *call_span) => {
+                                Some(args.as_slice())
+                            }
+                            _ => None,
+                        })
+                });
+                let appended = if source_call.as_deref() == Some("append") {
+                    exact_call_args.and_then(|args| {
+                        let [collection, value, ..] = args else {
+                            return None;
+                        };
+                        (collection.place.as_deref() == Some(target.trim()))
+                            .then(|| value.place.clone())
+                            .flatten()
+                    })
+                } else {
+                    None
+                };
                 let clean_initialization = source_call.as_deref() == Some("make")
-                    || (source_names.is_empty()
-                        && source_call_args.is_empty()
+                    || (source_call.is_none()
+                        && source_names.is_empty()
                         && matches!(
                             value_kind,
                             Some(
@@ -1915,20 +1965,30 @@ fn collect_go_assignments_with_guard(
                     source_names: source_names.clone(),
                     appended,
                     clean_initialization,
-                    guard_condition: guard_condition.map(str::to_string),
+                    guard_path: guard_path.to_vec(),
                 });
             }
             FlowEvent::Branch {
-                condition,
+                span,
                 then_events,
                 else_events,
                 ..
             } => {
-                collect_go_assignments_with_guard(then_events, condition.as_deref().or(guard_condition), out);
-                collect_go_assignments_with_guard(else_events, guard_condition, out);
+                let mut then_path = guard_path.to_vec();
+                then_path.push(GoBranchCondition {
+                    span: *span,
+                    selected: true,
+                });
+                collect_go_assignments_with_guard(then_events, &then_path, out);
+                let mut else_path = guard_path.to_vec();
+                else_path.push(GoBranchCondition {
+                    span: *span,
+                    selected: false,
+                });
+                collect_go_assignments_with_guard(else_events, &else_path, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_go_assignments_with_guard(body, guard_condition, out);
+                collect_go_assignments_with_guard(body, guard_path, out);
             }
             FlowEvent::Try {
                 body,
@@ -1936,72 +1996,54 @@ fn collect_go_assignments_with_guard(
                 finally_events,
                 ..
             } => {
-                collect_go_assignments_with_guard(body, guard_condition, out);
-                collect_go_assignments_with_guard(catch_events, guard_condition, out);
-                collect_go_assignments_with_guard(finally_events, guard_condition, out);
+                collect_go_assignments_with_guard(body, guard_path, out);
+                collect_go_assignments_with_guard(catch_events, guard_path, out);
+                collect_go_assignments_with_guard(finally_events, guard_path, out);
             }
             _ => {}
         }
     }
 }
 
-fn go_character_allowlist_condition(condition: &str, variable: &str) -> bool {
-    let variable = variable.trim();
-    if variable.is_empty() {
-        return false;
+fn go_guarded_append_excluded_characters(
+    tree: &Tree,
+    guard_path: &[GoBranchCondition],
+    variable: &str,
+    src: &[u8],
+) -> Option<Vec<String>> {
+    if guard_path.is_empty() {
+        return None;
     }
-    let compact = condition
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .collect::<String>();
-    let printable_floor = [
-        format!("{variable}>=0x20"),
-        format!("{variable}>0x1f"),
-        format!("{variable}>=32"),
-        format!("{variable}>31"),
-        format!("0x20<={variable}"),
-        format!("0x1f<{variable}"),
-        format!("32<={variable}"),
-        format!("31<{variable}"),
-    ]
-    .into_iter()
-    .any(|needle| compact.contains(&needle));
-    let excludes = |literal: &str| {
-        compact.contains(&format!("{variable}!={literal}"))
-            || compact.contains(&format!("{literal}!={variable}"))
-    };
-    let crlf_excluded = printable_floor
-        || (excludes("'\\r'") && excludes("'\\n'"))
-        || (excludes("\"\\r\"") && excludes("\"\\n\""));
-    let del_excluded = [
-        format!("{variable}!=0x7f"),
-        format!("{variable}<0x7f"),
-        format!("{variable}<=0x7e"),
-        format!("0x7f!={variable}"),
-        format!("0x7f>{variable}"),
-        format!("0x7e>={variable}"),
-        format!("{variable}!=127"),
-        format!("{variable}<127"),
-        format!("{variable}<=126"),
-    ]
-    .into_iter()
-    .any(|needle| compact.contains(&needle));
-    crlf_excluded && (del_excluded || !printable_floor)
+    let mut accepted = (0_i64..=127).collect::<Vec<_>>();
+    for path_condition in guard_path {
+        let branch =
+            bonsai_lang_api::kit::node_at_span(tree.root_node(), path_condition.span, &["if_statement"])?;
+        let condition = branch.child_by_field_name("condition")?;
+        let selected = go_predicate_ascii_values(condition, variable, path_condition.selected, src)?;
+        accepted.retain(|value| selected.contains(value));
+    }
+    Some(
+        (0_i64..=127)
+            .filter(|value| !accepted.contains(value))
+            .filter_map(|value| {
+                char::from_u32(u32::try_from(value).ok()?).map(|character| character.to_string())
+            })
+            .collect(),
+    )
 }
 
-/// Prove a caller-local postcondition for a helper predicate that accepts
-/// only one-leading-slash paths. The frontend composes two Go syntax facts:
-/// the helper's exact boolean return and a rejecting branch that overwrites
-/// the original parameter with a static fallback. Shared security analysis
-/// sees only the resulting same-origin path fact.
-fn go_same_origin_path_constraints(
+/// Preserve a caller-local postcondition for a helper predicate that accepts
+/// one exact leading character and rejects a doubled boundary. The frontend
+/// records the source literals and fallback without assigning them security
+/// meaning.
+fn go_guarded_value_constraints(
     index: &DeclIndex,
     tree: &Tree,
     file: FileId,
     src: &[u8],
-) -> Vec<SameOriginPathConstraintFact> {
+) -> Vec<GuardedValueConstraintFact> {
     let functions = collect_kinds(tree, &["function_declaration", "method_declaration"]);
-    let safe_helpers = functions
+    let constrained_helpers = functions
         .iter()
         .filter_map(|function| {
             let function_span = span_of(file, function);
@@ -2013,10 +2055,12 @@ fn go_same_origin_path_constraints(
                 return None;
             };
             let expression = go_single_expression(*return_statement)?;
-            go_same_origin_predicate_expression(expression, input, src).then(|| decl.name.clone())
+            let (accepted_prefix, rejected_prefix) =
+                go_prefix_boundary_predicate_expression(expression, input, src)?;
+            Some((decl.name.clone(), (accepted_prefix, rejected_prefix)))
         })
-        .collect::<std::collections::HashSet<_>>();
-    if safe_helpers.is_empty() {
+        .collect::<std::collections::HashMap<_, _>>();
+    if constrained_helpers.is_empty() {
         return Vec::new();
     }
     let mut facts = Vec::new();
@@ -2038,25 +2082,28 @@ fn go_same_origin_path_constraints(
             let Some((helper, target)) = go_negated_single_arg_call_node(condition, src) else {
                 continue;
             };
-            if !safe_helpers.contains(&helper) || !go_block_assigns_static_fallback(consequence, &target, src)
-            {
+            let Some((accepted_prefix, rejected_prefix)) = constrained_helpers.get(&helper) else {
                 continue;
-            }
+            };
+            let Some(fallback) = go_block_static_fallback(consequence, &target, src) else {
+                continue;
+            };
             let guard_span = span_of(file, &branch);
             let input_param_index = decl.params.iter().position(|parameter| parameter == &target);
             if go_place_assigned_after(&decl.flow_events, &target, guard_span.end) {
                 continue;
             }
-            facts.push(SameOriginPathConstraintFact {
+            facts.push(GuardedValueConstraintFact {
                 function_span: decl.span,
                 guard_span,
                 input_place: target,
                 input_param_index,
                 provider_call: None,
-                rejects_scheme: true,
-                rejects_authority: true,
-                requires_absolute_path: true,
-                rejects_scheme_relative_path: true,
+                predicate_calls: Vec::new(),
+                accepted_prefixes: vec![accepted_prefix.clone()],
+                rejected_prefixes: vec![rejected_prefix.clone()],
+                rejected_components: Vec::new(),
+                static_fallbacks: vec![fallback],
             });
         }
     }
@@ -2065,18 +2112,146 @@ fn go_same_origin_path_constraints(
     facts
 }
 
-fn go_same_origin_predicate_expression(expression: Node<'_>, input: &str, src: &[u8]) -> bool {
-    let compact = node_text(&expression, src)
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .collect::<String>();
-    let first_is_slash =
-        compact.contains(&format!("{input}[0]=='/'")) || compact.contains(&format!("{input}[0]==\"/\""));
-    let second_is_not_slash =
-        compact.contains(&format!("{input}[1]!='/'")) || compact.contains(&format!("{input}[1]!=\"/\""));
-    let length_checked = compact.contains(&format!("len({input})>0"))
-        && (compact.contains(&format!("len({input})==1")) || compact.contains(&format!("len({input})>1")));
-    first_is_slash && second_is_not_slash && length_checked
+fn go_prefix_boundary_predicate_expression(
+    expression: Node<'_>,
+    input: &str,
+    src: &[u8],
+) -> Option<(String, String)> {
+    let mut conjunctions = Vec::new();
+    go_collect_binary_terms(expression, "&&", src, &mut conjunctions);
+    let length_nonempty = conjunctions
+        .iter()
+        .any(|term| go_len_comparison(*term, input, ">", 0, src));
+    let first_literal = conjunctions
+        .iter()
+        .find_map(|term| go_index_literal_comparison_value(*term, input, 0, "==", src));
+    let second_literal = conjunctions.iter().find_map(|term| {
+        let mut alternatives = Vec::new();
+        go_collect_binary_terms(*term, "||", src, &mut alternatives);
+        let has_single_character_length = alternatives
+            .iter()
+            .any(|term| go_len_comparison(*term, input, "==", 1, src));
+        has_single_character_length.then(|| {
+            alternatives
+                .iter()
+                .find_map(|term| go_index_literal_comparison_value(*term, input, 1, "!=", src))
+        })?
+    });
+    let (Some(first_literal), Some(second_literal)) = (first_literal, second_literal) else {
+        return None;
+    };
+    if !length_nonempty || first_literal != second_literal {
+        return None;
+    }
+    let accepted_prefix = first_literal.to_string();
+    let rejected_prefix = format!("{first_literal}{second_literal}");
+    Some((accepted_prefix, rejected_prefix))
+}
+
+fn go_collect_binary_terms<'tree>(
+    mut expression: Node<'tree>,
+    operator: &str,
+    src: &[u8],
+    out: &mut Vec<Node<'tree>>,
+) {
+    while expression.kind() == "parenthesized_expression" && expression.named_child_count() == 1 {
+        let Some(inner) = expression.named_child(0) else {
+            break;
+        };
+        expression = inner;
+    }
+    let operands = (
+        expression.child_by_field_name("left"),
+        expression.child_by_field_name("right"),
+    );
+    if expression.kind() == "binary_expression"
+        && operands
+            .0
+            .zip(operands.1)
+            .is_some_and(|(left, right)| go_binary_operator(expression, left, right, src) == Some(operator))
+    {
+        let (Some(left), Some(right)) = operands else {
+            return;
+        };
+        go_collect_binary_terms(left, operator, src, out);
+        go_collect_binary_terms(right, operator, src, out);
+    } else {
+        out.push(expression);
+    }
+}
+
+fn go_len_comparison(
+    expression: Node<'_>,
+    input: &str,
+    expected_operator: &str,
+    expected_value: usize,
+    src: &[u8],
+) -> bool {
+    let (Some(left), Some(right)) = (
+        expression.child_by_field_name("left"),
+        expression.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    expression.kind() == "binary_expression"
+        && go_binary_operator(expression, left, right, src) == Some(expected_operator)
+        && go_single_arg_identifier_call(left, "len", input, src)
+        && node_text(&right, src).trim().parse::<usize>() == Ok(expected_value)
+}
+
+fn go_single_arg_identifier_call(call: Node<'_>, callee: &str, argument: &str, src: &[u8]) -> bool {
+    if call.kind() != "call_expression" {
+        return false;
+    }
+    let (Some(function), Some(arguments)) = (
+        call.child_by_field_name("function"),
+        call.child_by_field_name("arguments"),
+    ) else {
+        return false;
+    };
+    let mut cursor = arguments.walk();
+    let values = arguments.named_children(&mut cursor).collect::<Vec<_>>();
+    function.kind() == "identifier"
+        && node_text(&function, src).trim() == callee
+        && matches!(values.as_slice(), [value]
+            if value.kind() == "identifier" && node_text(value, src).trim() == argument)
+}
+
+fn go_index_literal_comparison_value(
+    expression: Node<'_>,
+    input: &str,
+    expected_index: usize,
+    expected_operator: &str,
+    src: &[u8],
+) -> Option<char> {
+    let (Some(left), Some(right)) = (
+        expression.child_by_field_name("left"),
+        expression.child_by_field_name("right"),
+    ) else {
+        return None;
+    };
+    if expression.kind() != "binary_expression"
+        || go_binary_operator(expression, left, right, src) != Some(expected_operator)
+        || !go_index_is(left, input, expected_index, src)
+    {
+        return None;
+    }
+    go_static_rune(right, src).or_else(|| {
+        let literal = go_static_string_literal(right, src)?;
+        let mut characters = literal.chars();
+        let character = characters.next()?;
+        characters.next().is_none().then_some(character)
+    })
+}
+
+fn go_index_is(expression: Node<'_>, input: &str, expected_index: usize, src: &[u8]) -> bool {
+    expression.kind() == "index_expression"
+        && expression
+            .child_by_field_name("operand")
+            .is_some_and(|operand| operand.kind() == "identifier" && node_text(&operand, src).trim() == input)
+        && expression
+            .child_by_field_name("index")
+            .is_some_and(|index| node_text(&index, src).trim().parse::<usize>() == Ok(expected_index))
 }
 
 fn collect_go_owned_if_statements(function: Node<'_>) -> Vec<Node<'_>> {
@@ -2104,12 +2279,19 @@ fn go_negated_single_arg_call_node(mut condition: Node<'_>, src: &[u8]) -> Optio
     while condition.kind() == "parenthesized_expression" {
         condition = condition.named_child(0)?;
     }
-    if condition.kind() != "unary_expression" || !node_text(&condition, src).trim_start().starts_with('!') {
+    if condition.kind() != "unary_expression" {
         return None;
     }
     let call = condition
         .child_by_field_name("operand")
         .or_else(|| condition.named_child(0))?;
+    let operator = src
+        .get(condition.start_byte()..call.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim);
+    if operator != Some("!") {
+        return None;
+    }
     if call.kind() != "call_expression" {
         return None;
     }
@@ -2136,32 +2318,35 @@ fn go_negated_single_arg_call_node(mut condition: Node<'_>, src: &[u8]) -> Optio
     ))
 }
 
-fn go_block_assigns_static_fallback(block: Node<'_>, target: &str, src: &[u8]) -> bool {
+fn go_block_static_fallback(block: Node<'_>, target: &str, src: &[u8]) -> Option<String> {
     let statements = go_block_statements(block);
     let [assignment] = statements.as_slice() else {
-        return false;
+        return None;
     };
     if assignment.kind() != "assignment_statement" {
-        return false;
+        return None;
     }
     let (Some(left), Some(right)) = (
         assignment.child_by_field_name("left"),
         assignment.child_by_field_name("right"),
     ) else {
-        return false;
+        return None;
     };
     let left_values = go_expression_list_values(left);
     let right_values = go_expression_list_values(right);
     let ([left], [right]) = (left_values.as_slice(), right_values.as_slice()) else {
-        return false;
+        return None;
     };
-    left.kind() == "identifier"
-        && node_text(left, src).trim() == target
-        && go_static_string_literal(*right, src).is_some()
-        && src
+    if left.kind() != "identifier"
+        || node_text(left, src).trim() != target
+        || src
             .get(left.end_byte()..right.start_byte())
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .is_some_and(|operator| operator.trim() == "=")
+            .is_none_or(|operator| operator.trim() != "=")
+    {
+        return None;
+    }
+    go_static_string_literal(*right, src)
 }
 
 fn go_place_assigned_after(events: &[FlowEvent], place: &str, after: u64) -> bool {
@@ -2196,12 +2381,7 @@ const GO_GUARD_CALLBACK_SELECTOR_PINNED: &str = "callback.selector-result-pinned
 
 fn go_compiler_guards(tree: &Tree, file: FileId, src: &[u8]) -> Vec<CompilerGuardFact> {
     let imports = parse_imports(tree, src, file);
-    let filepath_aliases = imports
-        .iter()
-        .filter(|import| import.module == "path/filepath")
-        .filter_map(|import| import.alias.as_deref())
-        .collect::<Vec<_>>();
-    let relative_boundary_helpers = go_relative_path_boundary_helpers(tree, file, src, &filepath_aliases);
+    let relative_boundary_helpers = go_prefix_boundary_helpers(tree, file, src, &imports);
     let mut facts = Vec::new();
     for call in collect_kinds(tree, &["call_expression"]) {
         let Some(callee) = call.child_by_field_name("function") else {
@@ -2219,15 +2399,16 @@ fn go_compiler_guards(tree: &Tree, file: FileId, src: &[u8]) -> Vec<CompilerGuar
                 });
             }
         }
-        if let Some(proof_span) = go_relative_path_boundary_helper_call(call, &relative_boundary_helpers, src)
+        if let Some((proof_span, evidence)) =
+            go_prefix_boundary_helper_call(call, &relative_boundary_helpers, src)
         {
             if let Some(function_span) = go_enclosing_function_span(call, file) {
                 facts.push(CompilerGuardFact {
                     function_span,
                     guarded_call_span,
                     proof_span,
-                    capability: bonsai_lang_api::COMPILER_GUARD_RELATIVE_PATH_BOUNDARY_REJECTION.to_string(),
-                    evidence: Vec::new(),
+                    capability: bonsai_lang_api::COMPILER_GUARD_PREFIX_BOUNDARY_EQUALITY.to_string(),
+                    evidence,
                 });
             }
         }
@@ -2243,12 +2424,19 @@ fn go_compiler_guards(tree: &Tree, file: FileId, src: &[u8]) -> Vec<CompilerGuar
     facts
 }
 
-fn go_relative_path_boundary_helpers(
+#[derive(Clone, Debug)]
+struct GoPrefixBoundaryHelper {
+    name: String,
+    proof_span: Span,
+    evidence: Vec<String>,
+}
+
+fn go_prefix_boundary_helpers(
     tree: &Tree,
     file: FileId,
     src: &[u8],
-    filepath_aliases: &[&str],
-) -> Vec<(String, Span)> {
+    imports: &[ImportSpec],
+) -> Vec<GoPrefixBoundaryHelper> {
     let mut helpers = Vec::new();
     for function in collect_kinds(tree, &["function_declaration"]) {
         let (Some(name), Some(parameters), Some(result), Some(body)) = (
@@ -2277,131 +2465,191 @@ fn go_relative_path_boundary_helpers(
         let Some(expression) = go_single_expression(*statement) else {
             continue;
         };
-        if go_relative_path_boundary_expression(expression, parameter_name, filepath_aliases, src) {
-            helpers.push((node_text(&name, src).trim().to_string(), span_of(file, &function)));
+        if let Some(evidence) = go_prefix_boundary_expression(expression, parameter_name, imports, src) {
+            helpers.push(GoPrefixBoundaryHelper {
+                name: node_text(&name, src).trim().to_string(),
+                proof_span: span_of(file, &function),
+                evidence,
+            });
         }
     }
-    helpers.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.start.cmp(&right.1.start)));
-    helpers.dedup();
+    helpers.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.proof_span.start.cmp(&right.proof_span.start))
+    });
+    helpers.dedup_by(|left, right| left.name == right.name && left.proof_span == right.proof_span);
     helpers
 }
 
-fn go_relative_path_boundary_expression(
+fn go_prefix_boundary_expression(
     expression: Node<'_>,
     parameter: &str,
-    filepath_aliases: &[&str],
+    imports: &[ImportSpec],
     src: &[u8],
-) -> bool {
+) -> Option<Vec<String>> {
     let (Some(left), Some(right)) = (
         expression.child_by_field_name("left"),
         expression.child_by_field_name("right"),
     ) else {
-        return false;
+        return None;
     };
     if expression.kind() != "binary_expression"
         || go_binary_operator(expression, left, right, src) != Some("&&")
     {
-        return false;
+        return None;
     }
-    (go_relative_path_length_guard(left, parameter, src)
-        && go_relative_path_prefix_equality(right, parameter, filepath_aliases, src))
-        || (go_relative_path_length_guard(right, parameter, src)
-            && go_relative_path_prefix_equality(left, parameter, filepath_aliases, src))
+    let (length_minimum, prefix) = go_prefix_length_guard(left, parameter, src)
+        .zip(go_prefix_equality(right, parameter, imports, src))
+        .or_else(|| {
+            go_prefix_length_guard(right, parameter, src)
+                .zip(go_prefix_equality(left, parameter, imports, src))
+        })?;
+    if length_minimum < prefix.slice_end || prefix.slice_end != prefix.literal.len().saturating_add(1) {
+        return None;
+    }
+    Some(vec![
+        format!("literal:{}", prefix.literal),
+        format!("boundary-place:{}", prefix.boundary_place),
+        format!("boundary-wrapper:{}", prefix.boundary_wrapper),
+        format!("slice-end:{}", prefix.slice_end),
+        format!("length-minimum:{length_minimum}"),
+    ])
 }
 
-fn go_relative_path_length_guard(expression: Node<'_>, parameter: &str, src: &[u8]) -> bool {
+fn go_prefix_length_guard(expression: Node<'_>, parameter: &str, src: &[u8]) -> Option<usize> {
     let (Some(left), Some(right)) = (
         expression.child_by_field_name("left"),
         expression.child_by_field_name("right"),
     ) else {
-        return false;
+        return None;
     };
     if expression.kind() != "binary_expression"
         || go_binary_operator(expression, left, right, src) != Some(">=")
-        || node_text(&right, src).trim() != "3"
         || left.kind() != "call_expression"
     {
-        return false;
+        return None;
     }
+    let minimum = node_text(&right, src).trim().parse::<usize>().ok()?;
     let (Some(function), Some(arguments)) = (
         left.child_by_field_name("function"),
         left.child_by_field_name("arguments"),
     ) else {
-        return false;
+        return None;
     };
     let mut cursor = arguments.walk();
     let args = arguments.named_children(&mut cursor).collect::<Vec<_>>();
-    function.kind() == "identifier"
+    (function.kind() == "identifier"
         && node_text(&function, src).trim() == "len"
-        && matches!(args.as_slice(), [argument] if argument.kind() == "identifier" && node_text(argument, src).trim() == parameter)
+        && matches!(args.as_slice(), [argument] if argument.kind() == "identifier" && node_text(argument, src).trim() == parameter))
+        .then_some(minimum)
 }
 
-fn go_relative_path_prefix_equality(
+struct GoPrefixBoundaryEvidence {
+    slice_end: usize,
+    literal: String,
+    boundary_wrapper: String,
+    boundary_place: String,
+}
+
+fn go_prefix_equality(
     expression: Node<'_>,
     parameter: &str,
-    filepath_aliases: &[&str],
+    imports: &[ImportSpec],
     src: &[u8],
-) -> bool {
+) -> Option<GoPrefixBoundaryEvidence> {
     let (Some(left), Some(right)) = (
         expression.child_by_field_name("left"),
         expression.child_by_field_name("right"),
     ) else {
-        return false;
+        return None;
     };
     if expression.kind() != "binary_expression"
         || go_binary_operator(expression, left, right, src) != Some("==")
     {
-        return false;
+        return None;
     }
-    (go_relative_path_slice_prefix(left, parameter, src)
-        && go_relative_path_boundary_value(right, filepath_aliases, src))
-        || (go_relative_path_slice_prefix(right, parameter, src)
-            && go_relative_path_boundary_value(left, filepath_aliases, src))
+    let (slice_end, value) = go_prefix_slice_end(left, parameter, src)
+        .zip(go_prefix_boundary_value(right, imports, src))
+        .or_else(|| {
+            go_prefix_slice_end(right, parameter, src).zip(go_prefix_boundary_value(left, imports, src))
+        })?;
+    Some(GoPrefixBoundaryEvidence {
+        slice_end,
+        literal: value.0,
+        boundary_wrapper: value.1,
+        boundary_place: value.2,
+    })
 }
 
-fn go_relative_path_slice_prefix(expression: Node<'_>, parameter: &str, src: &[u8]) -> bool {
-    expression.kind() == "slice_expression"
+fn go_prefix_slice_end(expression: Node<'_>, parameter: &str, src: &[u8]) -> Option<usize> {
+    (expression.kind() == "slice_expression"
         && expression
             .child_by_field_name("operand")
             .is_some_and(|operand| node_text(&operand, src).trim() == parameter)
-        && expression.child_by_field_name("start").is_none()
-        && expression
+        && expression.child_by_field_name("start").is_none())
+    .then(|| {
+        expression
             .child_by_field_name("end")
-            .is_some_and(|end| node_text(&end, src).trim() == "3")
+            .and_then(|end| node_text(&end, src).trim().parse::<usize>().ok())
+    })
+    .flatten()
 }
 
-fn go_relative_path_boundary_value(expression: Node<'_>, filepath_aliases: &[&str], src: &[u8]) -> bool {
+fn go_prefix_boundary_value(
+    expression: Node<'_>,
+    imports: &[ImportSpec],
+    src: &[u8],
+) -> Option<(String, String, String)> {
     let (Some(left), Some(right)) = (
         expression.child_by_field_name("left"),
         expression.child_by_field_name("right"),
     ) else {
-        return false;
+        return None;
     };
     if expression.kind() != "binary_expression"
         || go_binary_operator(expression, left, right, src) != Some("+")
-        || go_static_string_literal(left, src).as_deref() != Some("..")
         || right.kind() != "call_expression"
     {
-        return false;
+        return None;
     }
+    let literal = go_static_string_literal(left, src)?;
     let (Some(function), Some(arguments)) = (
         right.child_by_field_name("function"),
         right.child_by_field_name("arguments"),
     ) else {
-        return false;
+        return None;
     };
     let mut cursor = arguments.walk();
     let args = arguments.named_children(&mut cursor).collect::<Vec<_>>();
-    function.kind() == "identifier"
-        && node_text(&function, src).trim() == "string"
-        && matches!(args.as_slice(), [argument] if filepath_aliases.iter().any(|alias| go_selector_is(*argument, alias, "Separator", src)))
+    let [argument] = args.as_slice() else {
+        return None;
+    };
+    let wrapper = go_canonical_imported_place(node_text(&function, src).trim(), imports);
+    let boundary = go_canonical_imported_place(node_text(argument, src).trim(), imports);
+    (!literal.is_empty() && !wrapper.is_empty() && !boundary.is_empty())
+        .then_some((literal, wrapper, boundary))
 }
 
-fn go_relative_path_boundary_helper_call(
+fn go_canonical_imported_place(place: &str, imports: &[ImportSpec]) -> String {
+    let place = place.trim();
+    let Some((root, suffix)) = place.split_once('.') else {
+        return place.to_string();
+    };
+    imports
+        .iter()
+        .find(|import| import.alias.as_deref() == Some(root))
+        .map_or_else(
+            || place.to_string(),
+            |import| format!("{}.{suffix}", import.module),
+        )
+}
+
+fn go_prefix_boundary_helper_call(
     call: Node<'_>,
-    helpers: &[(String, Span)],
+    helpers: &[GoPrefixBoundaryHelper],
     src: &[u8],
-) -> Option<Span> {
+) -> Option<(Span, Vec<String>)> {
     let (Some(function), Some(arguments)) = (
         call.child_by_field_name("function"),
         call.child_by_field_name("arguments"),
@@ -2419,7 +2667,8 @@ fn go_relative_path_boundary_helper_call(
     let name = node_text(&function, src).trim();
     helpers
         .iter()
-        .find_map(|(helper, proof_span)| (helper == name).then_some(*proof_span))
+        .find(|helper| helper.name == name)
+        .map(|helper| (helper.proof_span, helper.evidence.clone()))
 }
 
 fn go_callback_selector_pin_guard(call: Node<'_>, file: FileId, src: &[u8]) -> Option<(Span, Vec<String>)> {
@@ -2541,55 +2790,60 @@ fn go_return_values(statement: Node<'_>) -> Option<Vec<Node<'_>>> {
     }
 }
 
-fn go_map_callback_replaces_controls(callback: Node<'_>, src: &[u8]) -> bool {
+fn go_map_callback_excluded_characters(callback: Node<'_>, src: &[u8]) -> Option<Vec<String>> {
     if callback.kind() != "func_literal" {
-        return false;
+        return None;
     }
     let (Some(parameters), Some(body)) = (
         callback.child_by_field_name("parameters"),
         callback.child_by_field_name("body"),
     ) else {
-        return false;
+        return None;
     };
     let parameter_declarations = collect_kinds_under(&parameters, &["parameter_declaration"]);
     let [parameter] = parameter_declarations.as_slice() else {
-        return false;
+        return None;
     };
     let Some(name) = parameter.child_by_field_name("name") else {
-        return false;
+        return None;
     };
     let rune = node_text(&name, src).trim();
     let statements = go_block_statements(body);
     let [guard, fallback] = statements.as_slice() else {
-        return false;
+        return None;
     };
     if guard.kind() != "if_statement" || guard.child_by_field_name("alternative").is_some() {
-        return false;
+        return None;
     }
     let (Some(condition), Some(consequence)) = (
         guard.child_by_field_name("condition"),
         guard.child_by_field_name("consequence"),
     ) else {
-        return false;
+        return None;
     };
-    if !go_eval_rune_predicate(condition, rune, 10, src) || !go_eval_rune_predicate(condition, rune, 13, src)
-    {
-        return false;
-    }
+    let selected = go_predicate_ascii_partition(condition, rune, true, src)?;
     let replacement_statements = go_block_statements(consequence);
     let [replacement_return] = replacement_statements.as_slice() else {
-        return false;
+        return None;
     };
     let Some(replacement) = go_single_expression(*replacement_return) else {
-        return false;
+        return None;
     };
     let Some(replacement_value) = go_static_rune(replacement, src) else {
-        return false;
+        return None;
     };
-    replacement_value != '\r'
-        && replacement_value != '\n'
-        && go_single_expression(*fallback)
-            .is_some_and(|value| value.kind() == "identifier" && node_text(&value, src).trim() == rune)
+    if !go_single_expression(*fallback)
+        .is_some_and(|value| value.kind() == "identifier" && node_text(&value, src).trim() == rune)
+    {
+        return None;
+    }
+    let mut excluded = selected
+        .into_iter()
+        .filter(|value| value.chars().next() != Some(replacement_value))
+        .collect::<Vec<_>>();
+    excluded.sort();
+    excluded.dedup();
+    (!excluded.is_empty()).then_some(excluded)
 }
 
 fn go_block_statements(block: Node<'_>) -> Vec<Node<'_>> {
@@ -2618,16 +2872,6 @@ fn go_single_expression(statement: Node<'_>) -> Option<Node<'_>> {
         expression = expression.named_child(0)?;
     }
     Some(expression)
-}
-
-fn go_selector_is(node: Node<'_>, receiver: &str, field: &str, src: &[u8]) -> bool {
-    node.kind() == "selector_expression"
-        && node
-            .child_by_field_name("operand")
-            .is_some_and(|operand| node_text(&operand, src).trim() == receiver)
-        && node
-            .child_by_field_name("field")
-            .is_some_and(|name| node_text(&name, src).trim() == field)
 }
 
 fn go_imported_selector_identity(node: Node<'_>, imports: &[ImportSpec], src: &[u8]) -> Option<String> {
@@ -2712,6 +2956,86 @@ fn go_eval_rune_predicate(node: Node<'_>, rune: &str, value: i64, src: &[u8]) ->
     }
 }
 
+fn go_predicate_ascii_partition(
+    condition: Node<'_>,
+    variable: &str,
+    selected_value: bool,
+    src: &[u8],
+) -> Option<Vec<String>> {
+    Some(
+        go_predicate_ascii_values(condition, variable, selected_value, src)?
+            .into_iter()
+            .filter_map(|value| {
+                char::from_u32(u32::try_from(value).ok()?).map(|character| character.to_string())
+            })
+            .collect(),
+    )
+}
+
+fn go_predicate_ascii_values(
+    condition: Node<'_>,
+    variable: &str,
+    selected_value: bool,
+    src: &[u8],
+) -> Option<Vec<i64>> {
+    let variable = variable.trim();
+    if variable.is_empty()
+        || !go_rune_predicate_supported(condition, variable, src)
+        || !go_rune_predicate_mentions(condition, variable, src)
+    {
+        return None;
+    }
+    Some(
+        (0_i64..=127)
+            .filter(|value| go_eval_rune_predicate(condition, variable, *value, src) == selected_value)
+            .collect(),
+    )
+}
+
+fn go_rune_predicate_supported(mut node: Node<'_>, rune: &str, src: &[u8]) -> bool {
+    while node.kind() == "parenthesized_expression" && node.named_child_count() == 1 {
+        let Some(inner) = node.named_child(0) else {
+            return false;
+        };
+        node = inner;
+    }
+    if node.kind() != "binary_expression" {
+        return false;
+    }
+    let (Some(left), Some(right)) = (
+        node.child_by_field_name("left"),
+        node.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    match go_binary_operator(node, left, right, src) {
+        Some("||" | "&&") => {
+            go_rune_predicate_supported(left, rune, src) && go_rune_predicate_supported(right, rune, src)
+        }
+        Some("<" | "<=" | ">" | ">=" | "==" | "!=") => {
+            go_rune_operand(left, rune, 0, src).is_some() && go_rune_operand(right, rune, 0, src).is_some()
+        }
+        _ => false,
+    }
+}
+
+fn go_rune_predicate_mentions(mut node: Node<'_>, rune: &str, src: &[u8]) -> bool {
+    while node.kind() == "parenthesized_expression" && node.named_child_count() == 1 {
+        let Some(inner) = node.named_child(0) else {
+            return false;
+        };
+        node = inner;
+    }
+    if node.kind() == "identifier" {
+        return node_text(&node, src).trim() == rune;
+    }
+    let mut cursor = node.walk();
+    let mentions = node
+        .named_children(&mut cursor)
+        .any(|child| go_rune_predicate_mentions(child, rune, src));
+    mentions
+}
+
 fn go_binary_operator<'a>(
     _node: Node<'_>,
     left: Node<'_>,
@@ -2727,6 +3051,9 @@ fn go_rune_operand(node: Node<'_>, rune: &str, value: i64, src: &[u8]) -> Option
     if node.kind() == "identifier" && node_text(&node, src).trim() == rune {
         return Some(value);
     }
+    if let Some(value) = go_static_rune(node, src) {
+        return Some(i64::from(u32::from(value)));
+    }
     let text = node_text(&node, src).trim().replace('_', "");
     if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
         i64::from_str_radix(hex, 16).ok()
@@ -2738,9 +3065,47 @@ fn go_rune_operand(node: Node<'_>, rune: &str, value: i64, src: &[u8]) -> Option
 fn go_static_rune(node: Node<'_>, src: &[u8]) -> Option<char> {
     let text = node_text(&node, src).trim();
     let inner = text.strip_prefix('\'')?.strip_suffix('\'')?;
-    let mut chars = inner.chars();
-    let value = chars.next()?;
-    chars.next().is_none().then_some(value)
+    if !inner.starts_with('\\') {
+        let mut chars = inner.chars();
+        let value = chars.next()?;
+        return chars.next().is_none().then_some(value);
+    }
+    let escape = inner.strip_prefix('\\')?;
+    match escape {
+        "a" => Some('\u{7}'),
+        "b" => Some('\u{8}'),
+        "f" => Some('\u{c}'),
+        "n" => Some('\n'),
+        "r" => Some('\r'),
+        "t" => Some('\t'),
+        "v" => Some('\u{b}'),
+        "\\" => Some('\\'),
+        "'" => Some('\''),
+        _ => {
+            let (digits, radix) = if let Some(hex) = escape.strip_prefix('x') {
+                (hex, 16)
+            } else if let Some(hex) = escape.strip_prefix('u') {
+                (hex, 16)
+            } else if let Some(hex) = escape.strip_prefix('U') {
+                (hex, 16)
+            } else {
+                (escape, 8)
+            };
+            let expected = if escape.starts_with('x') {
+                2
+            } else if escape.starts_with('u') {
+                4
+            } else if escape.starts_with('U') {
+                8
+            } else {
+                3
+            };
+            (digits.len() == expected)
+                .then(|| u32::from_str_radix(digits, radix).ok())
+                .flatten()
+                .and_then(char::from_u32)
+        }
+    }
 }
 
 /// Parse `import` declarations into `ImportSpec` records.

@@ -23,8 +23,8 @@ The validated product contains:
 
 - 20 registered Tree-sitter language adapters;
 - one adapter-lowered compiler IR and one production sparse IDG taint engine;
-- 6,476 bundled rules, of which 6,476 are enabled;
-- 11,871 enabled rule examples;
+- 6,478 bundled rules, of which 6,478 are enabled;
+- 11,875 enabled rule examples;
 - native CLI, Rust SDK, SARIF 2.1.0, JSON, HTML, and graph-export surfaces.
 
 ## Correctness and architecture gates
@@ -76,11 +76,11 @@ The rulepack replay command was:
 
 | Rulepack measure | Result |
 |---|---:|
-| Rules | 6,476 |
-| Enabled rules | 6,476 |
+| Rules | 6,478 |
+| Enabled rules | 6,478 |
 | Disabled rules | 0 |
-| Examples | 11,871 |
-| Enabled examples | 11,871 |
+| Examples | 11,875 |
+| Enabled examples | 11,875 |
 | Errors | 0 |
 | Warnings | 0 |
 
@@ -175,42 +175,74 @@ after the gate.
 ## Large-workspace scale gate
 
 The required release test uses the sibling 30,055-source Elasticsearch
-checkout pinned by the release workflow at `e9741368da0`. On August 29, the
-current release candidate completed the full compiler/security workload under
-the 3 GiB scheduler in 618.55 seconds while calibrating an empty semantic
-generation; that generation took 308.58 seconds and a fresh process validated
-and reopened it in 2.50 seconds. With the resulting exact sidecars warm, the
-buffered seven-test gate passed 7/7 in 174.24 seconds. The SLOs below include
-small host-noise buffers over the reviewed limits. They are post-completion
-assertions: they never time out, truncate, or narrow semantic work.
+checkout pinned by the release workflow at `e9741368da0`. On August 30, the
+current release candidate passed all 11 large-repository tests in 538.27
+seconds under the 3 GiB scheduler. An empty current-schema semantic generation
+took 439.03 seconds and a fresh process validated and reopened it in 2.42
+seconds. The suite owns every public leaf command in the curated root menu,
+including the full native export, and its help-derived invariant fails if a
+new command has no scale-test owner. The SLOs below include small host-noise
+buffers over the reviewed limits. They are evaluated only after exact work
+completes and never truncate or narrow semantic work. A separate 900-second
+test watchdog fails and terminates a probable hung subprocess; it cannot turn
+partial analyzer output into a pass.
 For memory context, the prior instrumented
 August 20 empty-cache semantic run recorded 3,788,292,096 bytes maximum RSS
 and zero swaps; its fresh-process reopen used 99,287,040 bytes maximum RSS.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
-| Fresh-cache structural index | 50.51 s | 100 s |
-| Warm structural index | 4.29 s | 12 s |
-| Cold semantic generation | 308.58 s | 600 s |
-| Fresh-process semantic reuse | 2.50 s | 18 s |
-| Default inspect | 10.04 s | 35 s |
-| Compiler-proven raw-taint inspect | 30.75 s | 35 s |
-| Fresh-cache production taint | 29.84 s | 50 s |
-| Warm production taint | 15.89 s | 35 s |
-| Sink-centric upstream analysis (5 matched endpoints) | 50.42 s | 70 s |
-| `tree --max-depth 1` | 0.03 s | 35 s |
-| Search | 4.58 s | 35 s |
-| Definitions | 9.51 s | 35 s |
-| Imports | 7.96 s | 35 s |
-| Classes | 9.99 s | 35 s |
-| Entry points | 13.91 s | 35 s |
-| Calls | 3.85 s | 35 s |
-| Arguments | 7.60 s | 35 s |
-| Scoped `read-file` | 1.63 s | 35 s |
-| Source inventory | 4.81 s | 35 s |
-| High-severity sink inventory | 21.97 s | 35 s |
-| Sanitizer inventory | 18.35 s | 35 s |
-| Dependency inventory | 11.44 s | 35 s |
+| Fresh-cache structural index | 47.45 s | 100 s |
+| Warm structural index | 3.84 s | 12 s |
+| Cold semantic generation | 439.03 s | 600 s |
+| Fresh-process semantic reuse | 2.43 s | 18 s |
+| Default inspect | 0.89 s | 35 s |
+| Compiler-proven raw-taint inspect | 0.84 s | 35 s |
+| Fresh-cache production taint | 28.83 s | 50 s |
+| Warm production taint | 15.73 s | 35 s |
+| Sink-centric upstream analysis (5 matched endpoints) | 47.87 s | 70 s |
+| `tree --max-depth 1` | 0.11 s | 35 s |
+| Search | 1.07 s | 35 s |
+| Definitions | 1.05 s | 35 s |
+| Imports | 0.99 s | 35 s |
+| Classes | 0.99 s | 35 s |
+| Entry points | 0.82 s | 35 s |
+| Calls | 0.83 s | 35 s |
+| Arguments | 0.82 s | 35 s |
+| Scoped `read-file` | 1.77 s | 35 s |
+| Context summary | 1.07 s | 35 s |
+| Compiler-resolved trace | 1.00 s | 35 s |
+| Compressed path corridor | 5.37 s | 35 s |
+| Backward slice | 3.29 s | 35 s |
+| Complete diagnostics | 8.29 s | 35 s |
+| `dump-hir` | 3.57 s | 35 s |
+| `dump-cfg` | 3.07 s | 35 s |
+| `dump-callgraph` | 1.19 s | 35 s |
+| `dump-resolution` | 10.17 s | 35 s |
+| `dump-ast` | 1.58 s | 35 s |
+| `dump-resolve` | 8.82 s | 35 s |
+| `dump-taint` | 11.20 s | 35 s |
+| Variable inventory | 1.97 s | 35 s |
+| String inventory | 1.65 s | 35 s |
+| Comment inventory | 1.61 s | 35 s |
+| Operation inventory | 1.11 s | 35 s |
+| Reference lookup | 1.60 s | 35 s |
+| Symbol summary | 10.71 s | 35 s |
+| Exact persisted edge lookup (`show E:<id>`) | 7.30 s | 35 s |
+| Exact edge dump | 7.64 s | 35 s |
+| Source inventory | 4.93 s | 35 s |
+| High-severity sink inventory | 1.04 s | 35 s |
+| Sanitizer inventory | 1.00 s | 35 s |
+| Dependency inventory | 1.11 s | 35 s |
+| Source-centric forward analysis | 4.96 s | 35 s |
+| Complete embedded rulepack audit | 28.95 s | 70 s |
+
+The interactive rows above are the observed final gate values and may reuse a
+validated rendered-page entry from an earlier exact run. Separate runs with an
+empty rendered-page cache measured default inspect at 10.46 seconds and
+`inspect --taint-flow` at 28.99 seconds with byte-identical output. Semantic
+and rendered caches affect recomputation only; they do not change the selected
+facts.
 
 Command:
 
@@ -222,10 +254,12 @@ BONSAI_MEMORY_BUDGET_MB=3072 \
   --test elasticsearch_large_repo -- --nocapture
 ```
 
-The test waits for every command to finish before evaluating latency and
-completeness. It never uses a timeout to turn incomplete work into a pass.
-Memory scheduling may serialize workers, but the test does not cap files,
-rules, graph edges, closure steps, paths, or findings.
+The test normally waits for every command to finish before evaluating latency
+and completeness. Its independent 900-second subprocess watchdog exists only
+to turn a genuine hang into a failed test with captured stdout and stderr; a
+terminated process can never pass. Memory scheduling may serialize workers,
+but neither the product nor the gate caps files, rules, graph edges, closure
+steps, paths, or findings.
 
 The table records the default SLO class on the identified M1 Pro reference
 host. The tag workflow also runs the complete gate on GitHub's shared
@@ -264,7 +298,19 @@ callgraph, 1,505,969,092 bytes of linkage, 224,742,044 bytes of retrieval, and
 4,161,426,830 bytes of IDG, plus the manifest. Ordinary commands compute exact
 requested facts on demand; users only pay this full prewarm when they
 explicitly run `index --semantic`. A fresh process in the current gate reused
-the completed semantic generation in 2.50 seconds.
+the completed semantic generation in 2.42 seconds.
+
+Two scale defects were fixed during the August 30 command-completeness pass.
+Full diagnostics previously parsed and retained every syntax tree before
+streaming the same compiler objects again. It now performs one exact streaming
+compiler-object pass, and compiler-object admission is canonical so later
+files cannot retain all memory permits while an earlier publication head waits.
+That changed Elasticsearch diagnostics from a reproducible hang to 8.98
+seconds. Stable `show E:<id>` lookup previously regenerated and hashed roughly
+1.7 million rendered edge IDs. The resolved-callgraph sidecar now carries an
+independently decodable, collision-preserving stable-edge-ID index and opens
+only the exact partition candidates, reducing that lookup from 36.98 to 8.09
+seconds without changing the public ID or edge set.
 
 The August 25 sink-inventory gate initially failed at 34.25 seconds despite
 producing the correct 7,578 matches. Profiling found a rule-by-source literal

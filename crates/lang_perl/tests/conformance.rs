@@ -62,6 +62,53 @@ fn conformance_traced() {
 }
 
 #[test]
+fn anonymous_hash_aggregate_precedes_its_later_consumer_after_normalization() {
+    use bonsai_lang_api::FlowEvent;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_perl::PerlAdapter::new())],
+        &[(
+            "flow.pl",
+            r#"
+sub orchestrate { return $_[0]->{cmd}; }
+sub handle {
+    my ($raw, $user) = @_;
+    my $envelope = {
+        kind => 'run',
+        cmd => "$raw",
+        user => $user,
+        length => length($raw),
+    };
+    return orchestrate($envelope);
+}
+"#,
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Perl declaration index");
+    let handle = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "handle")
+        .expect("handle declaration");
+    let aggregate = handle
+        .flow_events
+        .iter()
+        .position(|event| matches!(event, FlowEvent::AggregateAssign { target, .. } if target == "$envelope"))
+        .expect("anonymous hash aggregate");
+    let consumer = handle
+        .flow_events
+        .iter()
+        .position(|event| matches!(event, FlowEvent::Call { name, .. } if name == "orchestrate"))
+        .expect("consumer call");
+    assert!(
+        aggregate < consumer,
+        "field writes must execute before the consumer: {:#?}",
+        handle.flow_events
+    );
+}
+
+#[test]
 fn signature_parameters_use_the_current_parameter_node_kinds() {
     let workspace = bonsai_testkit::workspace_with(
         vec![Arc::new(bonsai_lang_perl::PerlAdapter::new())],
@@ -195,6 +242,75 @@ fn grammar_function_nodes_emit_ordinary_call_facts() {
                     })
         )),
         "events={:?}",
+        example.flow_events
+    );
+}
+
+#[test]
+fn func1op_calls_are_lowered_from_cst_without_a_builtin_allowlist() {
+    use bonsai_lang_api::FlowEvent;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_perl::PerlAdapter::new())],
+        &[(
+            "main.pl",
+            "sub example { my ($path, $handle) = @_; my $n = rand 10; close $handle; chdir $path; }\n",
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Perl declaration index");
+    let example = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "example")
+        .expect("example declaration");
+    let calls = example
+        .flow_events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Call { name, args, .. } => Some((name.as_str(), args)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    for expected in ["rand", "close", "chdir"] {
+        assert!(
+            calls.iter().any(|(name, args)| *name == expected && !args.is_empty()),
+            "every grammar-classified func1op call must be lowered, including previously unlisted `{expected}`: {calls:#?}"
+        );
+    }
+}
+
+#[test]
+fn coderef_invocations_are_lowered_from_tree_sitter_nodes() {
+    use bonsai_lang_api::FlowEvent;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_perl::PerlAdapter::new())],
+        &[(
+            "main.pl",
+            "sub example { my ($callback, $value) = @_; my $out = $callback->($value); return $out; }\n",
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Perl declaration index");
+    let example = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "example")
+        .expect("example declaration");
+
+    assert!(
+        example.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call { name, args, .. }
+                if name == "$callback"
+                    && args.first().is_some_and(|argument| {
+                        argument.place.as_deref() == Some("$value")
+                            || argument.source_names.iter().any(|source| source == "$value")
+                    })
+        )),
+        "coderef calls must come from the exact coderef_call_expression and its arguments: {:#?}",
         example.flow_events
     );
 }

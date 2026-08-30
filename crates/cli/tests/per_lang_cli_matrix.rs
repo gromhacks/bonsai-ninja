@@ -199,6 +199,28 @@ fn copy_workspace_tree(src: &std::path::Path, dst: &std::path::Path) {
     }
 }
 
+/// Build a many-file compiler-input workspace for one adapter without adding
+/// a checked-in generated corpus. The source fixture is copied under distinct
+/// workspace-relative directories so discovery, VFS publication, parser
+/// scheduling, compiler-object preparation, and deterministic indexing all
+/// have to process the full file set. Semantic scale is exercised separately
+/// against Elasticsearch; this gate deliberately isolates adapter/compiler
+/// throughput from package-specific call resolution in duplicated fixtures.
+fn replicated_language_workspace(lang: &str, source: &std::path::Path) -> PathBuf {
+    const SHARDS: usize = 48;
+
+    let root = std::env::temp_dir().join(format!(
+        "bonsai-language-compiler-scale-{lang}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create replicated language workspace");
+    for shard in 0..SHARDS {
+        copy_workspace_tree(source, &root.join(format!("shard_{shard:03}")));
+    }
+    root
+}
+
 /// One language's expected-content signals. Names are substrings —
 /// matched against JSON field content or stdout text — so mixed-case
 /// conventions across the 20 languages all line up.
@@ -1361,9 +1383,10 @@ fn expected_all_profile_language_gauntlet_findings(lang: &str) -> usize {
         // One real CGI-param-to-system flow; the second sink in the project is
         // the explicit clean twin and must remain absent from findings.
         "perl" => 1,
-        // Two real vulns under the all-path profile: $_GET → shell_exec (CWE-78)
-        // and a separate remote value → echo (CWE-79).
-        "php" => 2,
+        // One intentional vulnerability: $_GET → shell_exec (CWE-78). The
+        // top-level response is literal so the command-flow gauntlet does not
+        // also become an unrelated reflected-XSS fixture.
+        "php" => 1,
         "python" => 1,
         // One distinct Rails-params -> Kernel.system vulnerability. Older
         // baselines counted an equivalent receiver-derived chain twice.
@@ -2454,6 +2477,47 @@ macro_rules! lang_matrix_tests {
                 #[test]
                 fn complex_index_stats() {
                     check_index(&ws(EXP.lang, "complex"), EXP.lang);
+                }
+
+                #[test]
+                fn replicated_compiler_inputs_scale_without_dropping_files() {
+                    let source = PathBuf::from(ws(EXP.lang, "complex"));
+                    let workspace = replicated_language_workspace(EXP.lang, &source);
+                    let workspace_arg = workspace.to_string_lossy().into_owned();
+                    let Some((out, _, code)) = run(&[
+                        "index",
+                        &workspace_arg,
+                        "--structural-only",
+                        "--no-cache",
+                    ]) else {
+                        return;
+                    };
+                    assert_eq!(
+                        code, 0,
+                        "[{}] replicated compiler-scale index ec={code}",
+                        EXP.lang
+                    );
+                    let stats: serde_json::Value = serde_json::from_str(&out)
+                        .expect("replicated compiler-scale index JSON");
+                    let files = stats["files"].as_u64().unwrap_or_default();
+                    assert!(
+                        files >= 48,
+                        "[{}] replicated scale workspace indexed only {files} files: {stats}",
+                        EXP.lang
+                    );
+                    assert_eq!(
+                        stats["compiler_objects"].as_u64(),
+                        Some(files),
+                        "[{}] every selected source must publish one compiler object: {stats}",
+                        EXP.lang
+                    );
+                    assert_eq!(
+                        stats["semantic_context"]["indexed_files"].as_u64(),
+                        Some(files),
+                        "[{}] context and compiler generation selected different files: {stats}",
+                        EXP.lang
+                    );
+                    let _ = std::fs::remove_dir_all(workspace);
                 }
 
                 #[test]

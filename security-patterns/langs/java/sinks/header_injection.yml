@@ -23,6 +23,10 @@
       require_authority_rejection: true
       require_absolute_path: true
       require_scheme_relative_rejection: true
+      required_predicates:
+      - {target: {name: startsWith}, argument_value: {kind: string, value: "/"}, required_result: true}
+      - {target: {name: startsWith}, argument_value: {kind: string, value: "//"}, required_result: false}
+      accepted_static_fallbacks: ["/"]
       sink_argument_index: 1
       static_context_argument:
         index: 0
@@ -316,6 +320,10 @@
       require_authority_rejection: true
       require_absolute_path: true
       require_scheme_relative_rejection: true
+      required_predicates:
+      - {target: {name: startsWith}, argument_value: {kind: string, value: "/"}, required_result: true}
+      - {target: {name: startsWith}, argument_value: {kind: string, value: "//"}, required_result: false}
+      accepted_static_fallbacks: ["/"]
       sink_argument_index: 1
       static_context_argument:
         index: 0

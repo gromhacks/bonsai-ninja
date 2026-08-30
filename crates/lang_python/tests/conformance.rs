@@ -221,3 +221,83 @@ fn projected_call_argument_does_not_become_the_outer_call_result() {
         }
     }
 }
+
+#[test]
+fn dictionary_assignments_use_tree_sitter_aggregate_flow() {
+    use bonsai_lang_api::FlowEvent;
+
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_python::PythonAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "a.py",
+            r#"def main(raw, prior):
+    envelope = {"cmd": raw, **prior}
+    return envelope["cmd"]
+"#,
+        )],
+    );
+    let global = ws.db().global_index();
+    let main = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "main")
+        .expect("main declaration");
+    let aggregate = main.flow_events.iter().find_map(|event| match event {
+        FlowEvent::AggregateAssign {
+            target, value_flow, ..
+        } if target == "envelope" => Some(value_flow),
+        _ => None,
+    });
+    let aggregate = aggregate.expect("dictionary AggregateAssign");
+    assert!(
+        aggregate
+            .aggregate_fields
+            .iter()
+            .any(|field| field.name == "cmd" && field.value.place.as_deref() == Some("raw")),
+        "static field must come from the parsed pair node: {aggregate:#?}"
+    );
+    assert!(
+        aggregate
+            .spreads
+            .iter()
+            .any(|spread| spread.place.as_deref() == Some("prior")),
+        "spread must come from the parsed dictionary_splat node: {aggregate:#?}"
+    );
+}
+
+#[test]
+fn conditional_dictionary_value_preserves_exact_field_flow() {
+    use bonsai_lang_api::FlowEvent;
+
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_python::PythonAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "a.py",
+            r#"def main(raw, enabled):
+    payload = ({"cmd": raw} if enabled else None)
+    return payload
+"#,
+        )],
+    );
+    let global = ws.db().global_index();
+    let main = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "main")
+        .expect("main declaration");
+    let aggregate = main.flow_events.iter().find_map(|event| match event {
+        FlowEvent::AggregateAssign {
+            target, value_flow, ..
+        } if target == "payload" => Some(value_flow),
+        _ => None,
+    });
+    let aggregate = aggregate.expect("conditional dictionary AggregateAssign");
+    assert!(aggregate
+        .aggregate_fields
+        .iter()
+        .any(|field| { field.name == "cmd" && field.value.place.as_deref() == Some("raw") }));
+}

@@ -68,6 +68,9 @@ For scripts, normally add:
 accept `--format`. Use `--output-path <file>` for large artifacts when the
 command supports it. Use `--html-output <file>` only for a standalone human
 report; it wraps the selected text view and never enables more analysis.
+Full `diagnostics` performs one exact streaming compiler-object pass. Stable
+`show E:<id>` drilldown uses the persisted exact edge directory; neither
+command requires a duplicate whole-workspace lowering or edge scan.
 
 ## Evidence rules
 

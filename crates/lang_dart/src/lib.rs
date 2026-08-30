@@ -462,6 +462,20 @@ fn dart_call_args(arguments: Node<'_>, file: FileId, src: &[u8], handler: &Gramm
                 .unwrap_or_default()
                 .split_whitespace()
                 .collect::<String>();
+            let places = dart_expression_places(argument, src).places;
+            if let [place] = places.as_slice() {
+                arg.place = Some(place.clone());
+                arg.source_names.clear();
+                arg.source_names.push(place.clone());
+            } else {
+                for place in places {
+                    if !arg.source_names.iter().any(|source| source == &place) {
+                        arg.source_names.push(place);
+                    }
+                }
+                arg.source_names.sort();
+                arg.source_names.dedup();
+            }
         }
         args.push(arg);
     }
@@ -1157,6 +1171,7 @@ fn extract_dart_syntax_events(
 // `identifier selector(args)`; the walker has a Dart-specific branch
 // that synthesizes a Call event from the previous-sibling identifier.
 const HANDLER: GrammarHandler = GrammarHandler {
+    pseudo_call_receiver_role: bonsai_lang_api::CallReceiverRole::Value,
     literal_value_kinds: &[
         "_literal",
         "null_literal",
@@ -2084,10 +2099,12 @@ fn collect_dart_declared_instance_fields(
             .named_children(&mut cursor)
             .filter(|child| child.kind() == "declaration")
         {
-            // `static` is an anonymous grammar token. A static binding is
-            // class storage, not receiver storage, so never canonicalize it
-            // to `this.<field>`.
-            if node_text(&declaration, src).trim_start().starts_with("static ") {
+            // `static` is an anonymous grammar token. Inspect that exact CST
+            // child rather than reparsing the rendered declaration.
+            if declaration
+                .children(&mut declaration.walk())
+                .any(|child| child.kind() == "static")
+            {
                 continue;
             }
             let Some(list) = first_named_child_of_kind(&declaration, "initialized_identifier_list") else {
@@ -2308,7 +2325,6 @@ fn qualify_dart_field_events(
                 span,
                 target,
                 source_name,
-                source_call_args,
                 source_names,
                 declares_new_binding,
                 ..
@@ -2316,7 +2332,7 @@ fn qualify_dart_field_events(
                 if let Some(source) = source_name {
                     qualify_dart_field_place(source, fields, locals);
                 }
-                for source in source_call_args.iter_mut().chain(source_names.iter_mut()) {
+                for source in source_names.iter_mut() {
                     qualify_dart_field_place(source, fields, locals);
                 }
                 let compiler_declares_local = lexical_local_bindings

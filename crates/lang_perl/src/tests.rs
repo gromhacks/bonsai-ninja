@@ -1,4 +1,5 @@
 use super::*;
+use bonsai_lang_api::RefKind;
 
 fn parse_import_specs(src: &str) -> Vec<ImportSpec> {
     let language = language_from_pack(PACK_NAME).expect("perl grammar");
@@ -9,25 +10,30 @@ fn parse_import_specs(src: &str) -> Vec<ImportSpec> {
 }
 
 #[test]
-fn special_process_inputs_come_only_from_parsed_nodes() {
+fn variables_and_filehandles_are_generic_parsed_references() {
     let src = r#"
 # $ARGV %ENV STDIN are comments, not reads.
 my $ignored = '$ARGV %ENV STDIN';
 my $arg = $ARGV[0];
 my $home = $ENV{'HOME'};
 my $line = <STDIN>;
+my $copy = $ordinary;
 "#;
     let language = language_from_pack(PACK_NAME).expect("perl grammar");
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&language).expect("set perl grammar");
     let tree = parser.parse(src.as_bytes(), None).expect("parse perl source");
-    let refs = extract_perl_special_variable_refs(&tree, src.as_bytes(), FileId::new(0));
+    let refs = bonsai_lang_api::kit::extract_read_write_refs(&tree, FileId::new(0), src.as_bytes(), &HANDLER);
     let names = refs
         .iter()
+        .filter(|reference| reference.kind == RefKind::Read)
         .map(|reference| reference.name.as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(names, ["ARGV", "ENV", "STDIN"]);
+    assert!(names.contains(&"ARGV"));
+    assert!(names.contains(&"ENV"));
+    assert!(names.contains(&"STDIN"));
+    assert!(names.contains(&"ordinary"));
     for reference in refs {
         let start = usize::try_from(reference.span.start).expect("span start");
         let end = usize::try_from(reference.span.end).expect("span end");
@@ -83,15 +89,14 @@ fn collect_kinds_below<'tree>(
     out
 }
 
-fn assignment_fixture(src: &str) -> (Span, AssignmentValueIndex) {
-    let language = language_from_pack(PACK_NAME).expect("perl grammar");
-    let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&language).expect("set perl grammar");
-    let tree = parser.parse(src.as_bytes(), None).expect("parse perl source");
-    let facts =
-        bonsai_lang_api::extract_assignment_value_facts(&tree, FileId::new(0), &HANDLER, src.as_bytes());
-    let span = facts.first().expect("assignment syntax fact").assignment_span;
-    (span, AssignmentValueIndex::new(&facts))
+fn assignment_fixture(src: &str) -> (Span, PerlAssignmentSyntaxFacts) {
+    let tree = parse_perl_tree(src);
+    let facts = collect_perl_assignment_syntax_facts(&tree, FileId::new(0), src.as_bytes());
+    let assignment = collect_kinds(&tree, &["assignment_expression"])
+        .into_iter()
+        .next()
+        .expect("assignment syntax node");
+    (span_of(FileId::new(0), &assignment), facts)
 }
 
 fn parse_perl_tree(src: &str) -> Tree {
@@ -455,7 +460,7 @@ fn inheritance_pragmas_do_not_emit_callable_member_imports() {
 #[test]
 fn coderef_assignment_emits_clean_callable_alias() {
     let src = "my $cb = \\&helper;";
-    let (span, assignment_values) = assignment_fixture(src);
+    let (span, assignment_syntax) = assignment_fixture(src);
     let event = FlowEvent::Assign {
         span,
         target: "$cb".to_string(),
@@ -467,7 +472,8 @@ fn coderef_assignment_emits_clean_callable_alias() {
         value_kind: None,
     };
 
-    let alias = perl_coderef_alias_assignment(&event, src, &assignment_values).expect("coderef alias");
+    let alias =
+        perl_coderef_alias_assignment(&event, &assignment_syntax.coderef_aliases).expect("coderef alias");
 
     assert!(matches!(
         alias,
@@ -483,40 +489,104 @@ fn coderef_assignment_emits_clean_callable_alias() {
 
 #[test]
 fn coderef_call_argument_emits_exact_callable_place() {
-    let mut events = vec![FlowEvent::Call {
-        span: Span::new(FileId::new(0), 0, 18),
-        name: "invoke".to_string(),
-        receiver: None,
-        receiver_types: Vec::new(),
-        call_kind: CallKind::Function,
-        args: vec![CallArg {
-            passing_mode: Default::default(),
-            span: Span::new(FileId::new(0), 7, 15),
-            name: None,
-            value_text: "\\&helper".to_string(),
-            place: None,
-            source_names: vec!["helper".to_string()],
-        }],
-    }];
+    let src = "invoke(\\&helper);";
+    let language = language_from_pack(PACK_NAME).expect("perl grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set perl grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse perl source");
+    let call = collect_kinds(&tree, &["function_call_expression"])
+        .into_iter()
+        .next()
+        .expect("parsed call");
+    let container = call.child_by_field_name("arguments").expect("parsed arguments");
+    let args = perl_list_args(&container, src.as_bytes(), FileId::new(0));
+    assert!(
+        args.first().is_some_and(|arg| {
+            arg.value_text == "helper"
+                && arg.place.as_deref() == Some("helper")
+                && arg.source_names == ["helper"]
+        }),
+        "args={args:#?}"
+    );
+}
 
-    rewrite_perl_call_arg_texts(&mut events, "");
+#[test]
+fn data_reference_call_argument_preserves_the_tree_sitter_referent() {
+    let source = r"consume(\@items);";
+    let language = language_from_pack(PACK_NAME).expect("perl grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set perl grammar");
+    let tree = parser.parse(source.as_bytes(), None).expect("parse Perl source");
+    let call = collect_kinds(&tree, &["function_call_expression"])
+        .into_iter()
+        .next()
+        .expect("parsed call");
+    let container = call.child_by_field_name("arguments").expect("parsed arguments");
+    let arguments = perl_list_args(&container, source.as_bytes(), FileId::new(0));
+    let argument = arguments.first().expect("consume data-reference argument");
 
-    assert!(matches!(
-        events.as_slice(),
-        [FlowEvent::Call { name, args, .. }]
-            if name == "invoke"
-                && args.first().is_some_and(|arg| {
-                    arg.value_text == "helper"
-                        && arg.place.as_deref() == Some("helper")
-                        && arg.source_names == ["helper"]
-                })
-    ));
+    assert_eq!(argument.value_text, r"\@items");
+    assert_eq!(argument.place.as_deref(), Some("@items"));
+    assert!(argument.source_names.iter().any(|source| source == "@items"));
+    assert!(argument.source_names.iter().any(|source| source == "items"));
+}
+
+#[test]
+fn array_dereference_retains_the_nested_scalar_dependency() {
+    let source = r"join ', ', @$items;";
+    let language = language_from_pack(PACK_NAME).expect("perl grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set perl grammar");
+    let tree = parser.parse(source.as_bytes(), None).expect("parse Perl source");
+    let call = collect_kinds(&tree, &["ambiguous_function_call_expression"])
+        .into_iter()
+        .next()
+        .expect("parsed call");
+    let container = call.child_by_field_name("arguments").expect("parsed arguments");
+    let arguments = perl_list_args(&container, source.as_bytes(), FileId::new(0));
+    let argument = arguments.get(1).expect("join dereference argument");
+
+    assert_eq!(argument.place.as_deref(), Some("@$items"));
+    assert!(argument.source_names.iter().any(|source| source == "$items"));
+    assert!(argument.source_names.iter().any(|source| source == "items"));
+}
+
+#[test]
+fn parenthesized_builtin_calls_remain_exact_compiler_calls() {
+    let source = r#"
+sub example {
+    my ($input, $handle) = @_;
+    rand($input);
+    close($handle);
+    cookie(-HttpOnly => 1);
+}
+"#;
+    let adapter: std::sync::Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        std::sync::Arc::new(PerlAdapter::new());
+    let ws = bonsai_testkit::workspace_with(vec![adapter], &[("app.pl", source)]);
+    let global = ws.db().global_index();
+    let example = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "example")
+        .expect("example declaration");
+    let mut calls = Vec::new();
+    calls_below(&example.flow_events, &mut calls);
+    for expected in ["rand", "close", "cookie"] {
+        assert!(
+            calls
+                .iter()
+                .any(|event| { matches!(event, FlowEvent::Call { name, .. } if name == expected) }),
+            "missing parsed call `{expected}`: {:#?}",
+            example.flow_events
+        );
+    }
 }
 
 #[test]
 fn direct_array_argv_binding_infers_perl_param() {
     let src = "my @items = @_;";
-    let (span, assignment_values) = assignment_fixture(src);
+    let (span, assignment_syntax) = assignment_fixture(src);
     let event = FlowEvent::Assign {
         span,
         target: "items".to_string(),
@@ -528,7 +598,8 @@ fn direct_array_argv_binding_infers_perl_param() {
         value_kind: None,
     };
 
-    let (_, vars) = perl_list_binding_at(&event, src, &assignment_values).expect("direct @_ binding");
+    let (_, vars) =
+        perl_list_binding_at(&event, &assignment_syntax.implicit_arg_bindings).expect("direct @_ binding");
 
     assert_eq!(vars, vec!["@items".to_string()]);
 }
@@ -568,7 +639,7 @@ fn eval_die_dollar_at_rewrites_to_try_throw_alias_catch() {
         .flat_map(|file| global.decls_in(file))
         .find(|decl| decl.name == "handle")
         .expect("handle decl");
-    let (_, assignment_values) = assignment_fixture(src);
+    let (_, assignment_syntax) = assignment_fixture(src);
 
     let (body, catch_events, catch_param) = handle
         .flow_events
@@ -594,7 +665,7 @@ fn eval_die_dollar_at_rewrites_to_try_throw_alias_catch() {
         Some("$e"),
         "events={:#?}; assignments={:#?}",
         handle.flow_events,
-        assignment_values
+        assignment_syntax
     );
     assert!(
         body.iter().any(|event| matches!(
@@ -610,7 +681,7 @@ fn eval_die_dollar_at_rewrites_to_try_throw_alias_catch() {
         catch_events
             .iter()
             .all(|event| !matches!(event, FlowEvent::Assign { span, .. }
-                if perl_assignment_rhs_is_dollar_at(src, *span, &assignment_values))),
+                if assignment_syntax.dollar_at_assignments.contains(span))),
         "the `$@` alias assignment should become the catch binding: {catch_events:#?}"
     );
     assert!(
@@ -624,7 +695,7 @@ fn eval_die_dollar_at_rewrites_to_try_throw_alias_catch() {
 #[test]
 fn simple_scalar_assignment_rewrites_to_exact_source_name() {
     let src = "my $y = $x;";
-    let (span, assignment_values) = assignment_fixture(src);
+    let (span, assignment_syntax) = assignment_fixture(src);
     let mut events = vec![FlowEvent::Assign {
         span,
         target: "$y".to_string(),
@@ -636,7 +707,7 @@ fn simple_scalar_assignment_rewrites_to_exact_source_name() {
         value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
     }];
 
-    normalize_perl_simple_scalar_renames(&mut events, src, &assignment_values);
+    normalize_perl_simple_scalar_renames(&mut events, &assignment_syntax.scalar_renames);
 
     // Normalizing `my $y = $x` to an EXACT scalar rename rewrites the
     // compound `source_names: ["x"]` shape into `source_name: Some("$x")`
@@ -657,7 +728,7 @@ fn simple_scalar_assignment_rewrites_to_exact_source_name() {
 #[test]
 fn scalar_deref_assignment_stays_compound() {
     let src = "my $y = $obj->{token};";
-    let (span, assignment_values) = assignment_fixture(src);
+    let (span, assignment_syntax) = assignment_fixture(src);
     let mut events = vec![FlowEvent::Assign {
         span,
         target: "$y".to_string(),
@@ -669,7 +740,7 @@ fn scalar_deref_assignment_stays_compound() {
         value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
     }];
 
-    normalize_perl_simple_scalar_renames(&mut events, src, &assignment_values);
+    normalize_perl_simple_scalar_renames(&mut events, &assignment_syntax.scalar_renames);
 
     assert!(matches!(
         &events[0],
@@ -700,30 +771,71 @@ fn anonymous_hash_assignment_emits_field_scoped_writes() {
 
     expand_perl_anonymous_hash_field_assigns(&mut events, &tree, src.as_bytes());
 
+    let aggregate = events.iter().find_map(|event| match event {
+        FlowEvent::AggregateAssign {
+            target, value_flow, ..
+        } if target == "$envelope" => Some(value_flow),
+        _ => None,
+    });
+    let aggregate = aggregate.expect("anonymous hash aggregate");
+    assert!(aggregate.aggregate_fields.iter().any(|field| {
+        field.name == "cmd"
+            && field.value.source_names.contains(&"$raw".to_string())
+            && field.value.source_names.contains(&"raw".to_string())
+    }));
+    assert!(aggregate.aggregate_fields.iter().any(|field| {
+        field.name == "user"
+            && field.value.source_names.contains(&"$user".to_string())
+            && field.value.source_names.contains(&"user".to_string())
+    }));
+    assert!(aggregate
+        .aggregate_fields
+        .iter()
+        .any(|field| field.name == "clean" && field.value.is_empty()));
+}
+
+#[test]
+fn anonymous_hash_fields_execute_before_a_later_return() {
+    let src = "my $envelope = { cmd => $raw }; return $envelope;";
+    let (span, _) = assignment_fixture(src);
+    let tree = parse_perl_tree(src);
+    let mut events = vec![
+        FlowEvent::Assign {
+            span,
+            target: "$envelope".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["$raw".to_string()],
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::Compound),
+        },
+        FlowEvent::Return {
+            span: Span::new(
+                FileId::new(0),
+                34,
+                u64::try_from(src.len()).expect("source length"),
+            ),
+            value_kind: Some(AssignValueKind::Compound),
+            value_text: Some("$envelope".to_string()),
+            value_name: Some("$envelope".to_string()),
+            value_flow: ExpressionFlow::from_place("$envelope"),
+        },
+    ];
+    expand_perl_anonymous_hash_field_assigns(&mut events, &tree, src.as_bytes());
+    let aggregate = events
+        .iter()
+        .position(|event| matches!(event, FlowEvent::AggregateAssign { target, .. } if target == "$envelope"))
+        .expect("anonymous hash aggregate");
+    let returned = events
+        .iter()
+        .position(|event| matches!(event, FlowEvent::Return { .. }))
+        .expect("return event");
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            FlowEvent::Assign { target, source_names, .. }
-                if target == "$envelope.cmd"
-                    && source_names.contains(&"$raw".to_string())
-                    && source_names.contains(&"raw".to_string())
-        )),
-        "hash cmd field should retain only its exact value sources: {events:#?}"
+        aggregate < returned,
+        "aggregate field writes must execute before return: {:#?}",
+        events
     );
-    assert!(events.iter().any(|event| matches!(
-        event,
-        FlowEvent::Assign { target, source_names, .. }
-            if target == "$envelope.user"
-                && source_names.contains(&"$user".to_string())
-                && source_names.contains(&"user".to_string())
-    )));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        FlowEvent::Assign { target, source_names, value_kind, .. }
-            if target == "$envelope.clean"
-                && source_names.is_empty()
-                && *value_kind == Some(AssignValueKind::Literal)
-    )));
 }
 
 #[test]

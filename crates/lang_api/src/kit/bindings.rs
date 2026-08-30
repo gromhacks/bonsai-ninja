@@ -370,18 +370,24 @@ pub(super) fn extract_comprehension_for_clause_assigns(
     if targets.is_empty() {
         return Vec::new();
     }
-    let (source_name, source_names) = binding_source_facts(rhs, src, handler);
+    let (source_name, source_names, source_call, source_call_args) =
+        foreach_binding_source_facts(rhs, src, handler);
+    let value_kind = Some(if source_call.is_some() {
+        crate::AssignValueKind::CallResult
+    } else {
+        crate::AssignValueKind::Compound
+    });
     targets
         .into_iter()
         .map(|target| FlowEvent::Assign {
             span: span_of(file, clause),
             target,
             source_name: source_name.clone(),
-            source_call: None,
-            source_call_args: Vec::new(),
+            source_call: source_call.clone(),
+            source_call_args: source_call_args.clone(),
             source_names: source_names.clone(),
             declares_new_binding: false,
-            value_kind: None,
+            value_kind,
         })
         .collect()
 }

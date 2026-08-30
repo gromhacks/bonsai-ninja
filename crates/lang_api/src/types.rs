@@ -171,16 +171,16 @@ pub struct Decl {
     pub params: Vec<String>,
     /// Parameter annotations / decorators, parallel-indexed with
     /// `params`. Each inner `Vec<String>` is the list of annotation /
-    /// decorator names attached to the corresponding parameter
-    /// (e.g. `["RequestParam"]` for Spring's `@RequestParam String x`).
+    /// decorator names attached to the corresponding parameter (for example,
+    /// `["Input"]` for a parsed `@Input String value` declaration).
     /// Empty for parameters without annotations and for adapters that
     /// don't surface this information. Adapter facts only — the engine
     /// does not interpret these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_annotations: Vec<Vec<String>>,
     /// Direct call expressions used as parameter defaults, parallel-indexed
-    /// with `params` (Python `payload = fastapi.Body(...)` ->
-    /// `["fastapi.Body"]`). This is a source-syntax fact only: adapters must
+    /// with `params` (`payload = provider(...)` -> `["provider"]`). This is
+    /// a source-syntax fact only: adapters must
     /// not interpret framework/API names, and consumers decide what a
     /// particular default call means through rulepack constraints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2788,11 +2788,29 @@ pub struct PredicateReturnFact {
     pub expression: ConditionExpressionFact,
 }
 
-/// Compiler/runtime proof that a helper returns only a same-origin absolute
-/// path or a static fallback. The owning adapter proves each language's URL
-/// and string predicate syntax; shared analysis consumes this summary.
+/// One parsed call used as a boolean predicate by a compiler-proven guard.
+///
+/// The fact records only syntax and control-flow meaning: the exact call
+/// expression and the result that must hold for the guarded value to be
+/// retained.  It deliberately carries no callee or argument vocabulary;
+/// rule data assigns runtime/security meaning by joining this span to the
+/// ordinary [`FlowEvent::Call`] and call-argument facts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SameOriginPathConstraintFact {
+pub struct GuardedPredicateCallFact {
+    pub call_expression_span: Span,
+    pub required_result: bool,
+}
+
+/// Exact compiler/runtime constraints on a value returned by a guarded
+/// helper or retained after a caller-local guard.
+///
+/// The owning adapter records only language facts: parsed predicate-call
+/// spans and branch polarity, literal prefixes accepted or rejected by
+/// language operators, rejected fields on an imported-provider result, and
+/// exact static fallback values. Rule data decides whether a particular
+/// combination has security meaning.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardedValueConstraintFact {
     pub function_span: Span,
     pub guard_span: Span,
     /// Exact value constrained by the guard in the owning function.
@@ -2805,17 +2823,27 @@ pub struct SameOriginPathConstraintFact {
     /// library semantics. Syntax-only proofs leave this absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_call: Option<String>,
-    pub rejects_scheme: bool,
-    pub rejects_authority: bool,
-    pub requires_absolute_path: bool,
-    pub rejects_scheme_relative_path: bool,
+    /// Calls whose boolean results are necessary for this guard to retain the
+    /// input. Callee identity and static argument values are joined from the
+    /// canonical compiler call facts by rule-selected consumers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub predicate_calls: Vec<GuardedPredicateCallFact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_prefixes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected_prefixes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected_components: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_fallbacks: Vec<String>,
 }
 
 /// One complete language/runtime guard proven by an adapter from its parsed
-/// syntax. The capability is semantic (for example an algorithm-pinned
-/// callback), never an API spelling. Rule-selected consumers may attach the
-/// proof only to the exact guarded call in the owning function.
-pub const COMPILER_GUARD_RELATIVE_PATH_BOUNDARY_REJECTION: &str = "path.relative-boundary-rejection";
+/// syntax. The capability is structural (for example a callback selector or
+/// a literal-plus-boundary prefix comparison), never an API or security-rule
+/// spelling. Rule-selected consumers may attach the proof only to the exact
+/// guarded call in the owning function.
+pub const COMPILER_GUARD_PREFIX_BOUNDARY_EQUALITY: &str = "string.prefix-boundary-equality";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompilerGuardFact {
@@ -3053,6 +3081,12 @@ pub enum CallReceiverRole {
     /// Ordinary runtime value receiver (`client.send(...)`).
     #[default]
     Value,
+    /// Receiver of a syntax-level property/getter projection. The receiver
+    /// still participates in typed dispatch. A resolved local getter requires
+    /// its exact body/projected-field evidence; an unresolved external getter
+    /// conservatively derives its result from the receiver because the
+    /// frontend cannot inspect that implementation.
+    Projection,
     /// Imported module/type namespace used only to qualify a callable
     /// (`pickle.loads(...)`, `fmt.Println(...)`).
     Namespace,
@@ -3062,6 +3096,20 @@ impl CallReceiverRole {
     #[must_use]
     pub const fn is_value(&self) -> bool {
         matches!(self, Self::Value)
+    }
+
+    /// Whether this receiver denotes a runtime value rather than a namespace.
+    #[must_use]
+    pub const fn is_runtime_value(self) -> bool {
+        !matches!(self, Self::Namespace)
+    }
+
+    /// Whether an unresolved call may conservatively carry the complete
+    /// receiver value into its result. Both ordinary runtime methods and
+    /// external getters execute against the receiver; namespaces do not.
+    #[must_use]
+    pub const fn allows_unresolved_result_passthrough(self) -> bool {
+        self.is_runtime_value()
     }
 }
 
@@ -3349,9 +3397,9 @@ pub struct DeclIndex {
     /// Complete boolean-return summaries lowered by the owning frontend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub predicate_returns: Vec<PredicateReturnFact>,
-    /// Exact same-origin path summaries lowered by the owning frontend.
+    /// Exact guarded-value summaries lowered by the owning frontend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub same_origin_path_constraints: Vec<SameOriginPathConstraintFact>,
+    pub guarded_value_constraints: Vec<GuardedValueConstraintFact>,
     /// Complete runtime guard capabilities lowered by the owning frontend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compiler_guards: Vec<CompilerGuardFact>,
@@ -3588,25 +3636,25 @@ pub enum ImportScope {
 ///
 /// | Language | Fixture import form | Adapter `module` |
 /// | --- | --- | --- |
-/// | C | `#include <stdio.h>` | `stdio.h` |
+/// | C | `#include <lib/header.h>` | `lib/header.h` |
 /// | C++ | `#include "envelope.hpp"` | `envelope.hpp` |
-/// | C# | `using Tasks = System.Threading.Tasks;` | `System.Threading.Tasks` |
-/// | Dart | `import 'dart:io';` | `dart:io` |
-/// | Elixir | `alias Mega.Storage, as: Store` | `Mega.Storage` |
+/// | C# | `using Tasks = Product.Tasks;` | `Product.Tasks` |
+/// | Dart | `import 'package:product/io.dart';` | `package:product/io.dart` |
+/// | Elixir | `alias Product.Storage, as: Store` | `Product.Storage` |
 /// | Erlang | `-include("envelope.hrl").` / module import | `envelope.hrl` / `storage` |
-/// | Go | `import execpkg "os/exec"` | `os/exec` |
-/// | Java | `import jakarta.servlet.http.HttpServletRequest;` | `jakarta.servlet.http.HttpServletRequest` |
+/// | Go | `import worker "product/worker"` | `product/worker` |
+/// | Java | `import product.Request;` | `product.Request` |
 /// | JavaScript | `const { persist: persistEnvelope } = require("./storage")` | `./storage` |
-/// | Kotlin | `import jakarta.servlet.http.HttpServletRequest` | `jakarta.servlet.http.HttpServletRequest` |
+/// | Kotlin | `import product.Request` | `product.Request` |
 /// | Lua | `local Executor = require("executor")` | `executor` |
-/// | Objective-C | `#import <Foundation/Foundation.h>` | `Foundation/Foundation.h` |
-/// | Perl | `use CGI;` | `CGI` |
+/// | Objective-C | `#import <Product/Request.h>` | `Product/Request.h` |
+/// | Perl | `use Product::Request;` | `Product::Request` |
 /// | PHP | `use Storage as Store;` | `Storage` |
-/// | Python | `from flask import request` | `flask` |
+/// | Python | `from product import request` | `product` |
 /// | Ruby | `require_relative "pipeline"` | `pipeline` |
-/// | Rust | `use std::io::{self, BufRead};` | `std::io` |
-/// | Scala | `import mega.Storage as Store` | `mega` |
-/// | Swift | `import Foundation` | `Foundation` |
+/// | Rust | `use product::io::{self, Reader};` | `product::io` |
+/// | Scala | `import product.Storage as Store` | `product` |
+/// | Swift | `import Product` | `Product` |
 /// | TypeScript | `import { persist as persistEnvelope } from "./storage"` | `./storage` |
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportSpec {

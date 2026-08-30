@@ -2660,8 +2660,8 @@ fn synthesize_kotlin_property_getter_decls(idx: &mut DeclIndex, file: FileId, tr
             .iter()
             .any(|event| matches!(event, FlowEvent::Return { .. }))
         {
-            if let Some(expr) = kotlin_getter_expression_text(body, src) {
-                let expression_node = body.named_child(0).unwrap_or(body);
+            if let Some(expression_node) = kotlin_getter_expression_node(body) {
+                let expr = node_text(&expression_node, src).trim().to_string();
                 flow_events.push(FlowEvent::Return {
                     span: body_span,
                     value_kind: HANDLER.expression_value_kind(expression_node, src),
@@ -2716,12 +2716,24 @@ fn kotlin_property_name_node(property: Node<'_>) -> Option<Node<'_>> {
         .or_else(|| first_named_child_of_kind(&variable, "identifier"))
 }
 
-fn kotlin_getter_expression_text(body: Node<'_>, src: &[u8]) -> Option<String> {
-    let mut text = node_text(&body, src).trim().trim_end_matches(';').trim();
-    if let Some(rest) = text.strip_prefix('=') {
-        text = rest.trim();
+fn kotlin_getter_expression_node(body: Node<'_>) -> Option<Node<'_>> {
+    if body.kind() == "function_body" {
+        let mut cursor = body.walk();
+        let expressions = body.named_children(&mut cursor).collect::<Vec<_>>();
+        let [expression] = expressions.as_slice() else {
+            return None;
+        };
+        return Some(*expression);
     }
-    (!text.is_empty()).then(|| text.to_string())
+    // Some grammar revisions expose the expression directly below `getter`.
+    // Select only an unambiguous single named child; punctuation remains
+    // anonymous syntax and is never stripped from rendered source text.
+    let mut cursor = body.walk();
+    let expressions = body.named_children(&mut cursor).collect::<Vec<_>>();
+    let [expression] = expressions.as_slice() else {
+        return None;
+    };
+    Some(*expression)
 }
 
 fn kotlin_bare_identifier(text: &str) -> Option<String> {
@@ -2819,9 +2831,12 @@ fn kotlin_primary_constructor_field_writes(
 }
 
 fn kotlin_class_parameter_declares_property(param: Node<'_>, src: &[u8]) -> bool {
-    node_text(&param, src)
-        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
-        .any(|token| matches!(token, "val" | "var"))
+    let mut cursor = param.walk();
+    let declares_property = param.children(&mut cursor).any(|child| {
+        child.kind() == "binding_pattern_kind" && matches!(node_text(&child, src).trim(), "val" | "var")
+            || matches!(child.kind(), "val" | "var")
+    });
+    declares_property
 }
 
 fn collect_descendant_kinds<'tree>(node: Node<'tree>, kinds: &[&str]) -> Vec<Node<'tree>> {

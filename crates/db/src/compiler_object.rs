@@ -36,6 +36,40 @@ use std::sync::{
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v171: aggregate assignment lowering commits the enclosing root overwrite
+// before installing Tree-sitter-derived field and spread writes. Cached v170
+// objects can emit those operations in the inverse order and immediately
+// kill the exact descendant writers.
+// v170: persisted call-site stitch facts retain the adapter-emitted receiver
+// role so resolved property/getter projections forward exact fields without
+// mapping the complete receiver root. Cached v169 payloads lack that role.
+// v169: pseudo property/getter receivers carry a projection role so
+// assignment lowering distinguishes field syntax from an ordinary receiver
+// method. Cached v168 objects classify every pseudo receiver as a value.
+// v168: Swift terminal property getters own the complete assignment value
+// even when their receiver contains a nested call. Cached v167 objects can
+// attribute that value to the inner call and lose the getter projection.
+// v167: callable assignments prefer their complete adapter-lowered place
+// before pattern bindings. Cached v166 objects can collapse `app.init` to
+// `app` and lose exact method-family ownership.
+// v166: parent-expression operands stop at callable scope boundaries, and
+// Rust formatting captures attach only to their nearest parsed callable.
+// Cached v165 objects can leak closure-local bindings into an outer value.
+// v165: PHP terminal compound predicates retain a direct negated-call guard
+// when the call itself is the unary operand. Cached v164 objects can omit the
+// exact guard because descendant traversal excludes the operand root.
+// v164: Perl filehandles participate in the adapter's generic parsed-reference
+// inventory instead of a security-oriented special-name subset. Cached v163
+// objects can omit ordinary filehandles or contain duplicate selected refs.
+// v163: anonymous callables stored under exact static aggregate fields retain
+// the field's Tree-sitter-proven structural name without falling back to
+// rendered-text tokenization. Cached v162 objects can leave those callables
+// anonymous and disconnect rule-owned external callback-map contracts.
+// v160: adapters no longer synthesize external reflection/callback edges or
+// runtime type hierarchies from provider spellings; Go character/prefix
+// guards retain exact Tree-sitter-derived domains instead of sink-specific
+// character/path policy. Cached v159 objects can therefore contain guessed
+// call edges, invented supertypes, or policy-narrowed compiler facts.
 // v158: JavaScript/TypeScript assignments distinguish compiler-proven
 // whole-value selection (`||`, `&&`, `??`, and conditional expressions) from
 // combining compound expressions. Cached v157 objects cannot safely decide
@@ -436,7 +470,10 @@ use std::sync::{
 // argument labels. Sparse taint-lineage rendering can now recover the same
 // actual-to-formal mapping as IDG stitching without reparsing source or
 // misattributing projected argument fields to a static receiver.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 159;
+// v172: Perl data-reference construction and nested scalar dereference
+// dependencies are retained as exact adapter-lowered call-argument places.
+// Cached v171 bodies can omit the complete argument vector for `\@array`.
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 172;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 105;
@@ -1459,12 +1496,14 @@ impl AnalyzerDb {
             .max(1)
             .min(files.len().max(1));
         let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
+        let next_memory_admission = std::sync::Mutex::new(0usize);
+        let memory_admission_ready = std::sync::Condvar::new();
         try_visit_parallel(
             files,
             workers,
             max_in_flight,
             ParallelVisitOrder::Input,
-            |_, file| {
+            |index, file| {
                 let source_bytes = self
                     .inner
                     .vfs
@@ -1472,7 +1511,22 @@ impl AnalyzerDb {
                     .ok()
                     .and_then(|snapshot| u64::try_from(snapshot.text.len()).ok())
                     .unwrap_or(0);
+                // Ordered output retains completed units until every earlier
+                // result has been published. Admit their memory in the same
+                // canonical order so later files can never consume the whole
+                // pool while the head file is still waiting to start.
+                let mut next = next_memory_admission
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while *next != index {
+                    next = memory_admission_ready
+                        .wait(next)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
                 let permit = memory_permits.acquire(source_bytes);
+                *next += 1;
+                memory_admission_ready.notify_all();
+                drop(next);
                 Ok((*file, self.parser_diagnostics_uncached(*file), permit))
             },
             |_, (file, diagnostics, _permit)| {
@@ -1738,12 +1792,14 @@ impl AnalyzerDb {
             .max(1)
             .min(files.len().max(1));
         let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
+        let next_memory_admission = std::sync::Mutex::new(0usize);
+        let memory_admission_ready = std::sync::Condvar::new();
         try_visit_parallel(
             files,
             workers,
             max_in_flight,
             ParallelVisitOrder::Input,
-            |_, file| {
+            |index, file| {
                 let source_bytes = self
                     .inner
                     .vfs
@@ -1751,7 +1807,21 @@ impl AnalyzerDb {
                     .ok()
                     .and_then(|snapshot| u64::try_from(snapshot.text.len()).ok())
                     .unwrap_or(0);
+                // A later completed object retains its permit in the reorder
+                // map. Canonical admission guarantees that such objects cannot
+                // starve the earlier object whose publication releases them.
+                let mut next = next_memory_admission
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while *next != index {
+                    next = memory_admission_ready
+                        .wait(next)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
                 let permit = memory_permits.acquire(source_bytes);
+                *next += 1;
+                memory_admission_ready.notify_all();
+                drop(next);
                 Ok((*file, self.compiler_file_object_uncached(*file), permit))
             },
             |_, (file, object, _permit)| {

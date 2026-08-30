@@ -2653,6 +2653,24 @@ impl Workspace {
         Some(service.callable_node(function))
     }
 
+    /// Resolve every persisted call edge sharing one stable public edge-id
+    /// digest without scanning unrelated callgraph partitions.
+    pub fn persisted_callgraph_edges_by_stable_digest(
+        &self,
+        digest: u32,
+    ) -> Option<
+        std::io::Result<
+            Vec<(
+                bonsai_callgraph::CallGraphNode,
+                bonsai_callgraph::CallGraphNode,
+                bonsai_callgraph::CallEdge,
+            )>,
+        >,
+    > {
+        let service = self.callgraph_query_service()?;
+        Some(service.edges_by_stable_digest(digest))
+    }
+
     /// Return the exact persisted callgraph slice containing every path from
     /// `starts` to `targets`, if a fresh partitioned sidecar is available.
     ///
@@ -5314,10 +5332,17 @@ impl Workspace {
     /// snapshot, so a warm query does not reparse the project merely to report
     /// syntax coverage.
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        self.diagnostics_with_progress(|_| {})
+    }
+
+    /// Aggregate exact diagnostics while reporting each completed compiler
+    /// object. The callback observes progress only and cannot alter the file
+    /// set, compiler facts, or canonical publication order.
+    pub fn diagnostics_with_progress(&self, mut on_file: impl FnMut(FileId)) -> Vec<Diagnostic> {
         let files = self.inner.vfs.all_files();
         self.inner
             .db
-            .visit_compiler_file_objects_uncached(&files, |_, _| {});
+            .visit_compiler_file_objects_uncached(&files, |file, _| on_file(file));
         self.inner.db.diagnostics()
     }
 

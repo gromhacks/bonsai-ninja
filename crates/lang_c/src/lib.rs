@@ -717,12 +717,15 @@ fn c_function_name(function: Node<'_>, src: &[u8]) -> Option<String> {
 
 fn c_negated_single_call<'tree>(condition: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
     let condition = c_unwrap_parentheses(condition);
-    if condition.kind() != "unary_expression" || node_text(&condition, src).trim().is_empty() {
+    if condition.kind() != "unary_expression" {
         return None;
     }
     let argument = condition.child_by_field_name("argument")?;
-    (node_text(&condition, src).trim_start().starts_with('!') && argument.kind() == "call_expression")
-        .then_some(argument)
+    let operator = src
+        .get(condition.start_byte()..argument.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim);
+    (operator == Some("!") && argument.kind() == "call_expression").then_some(argument)
 }
 
 fn c_return_has_literal(statement: Node<'_>, literal: &str, src: &[u8]) -> bool {

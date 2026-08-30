@@ -180,11 +180,14 @@ no workspace file-count ceiling.
 
 The current Elasticsearch measurements are recorded only in
 [Release Readiness](RELEASE_READINESS.md). The exact large-workspace suite
-covers fresh/warm structural indexing, fresh-cache planning, warm semantic
-reuse, navigation, inspect, inventory, and production taint under a 3 GiB
-scheduling budget. The gate requires production
-security to finish complete and keeps every measured query and analysis
-command below its reviewed SLO.
+owns every public leaf command and covers fresh/warm structural indexing,
+fresh-cache planning, warm semantic reuse, navigation, compiler diagnostics,
+debug surfaces, inspect, inventory, source/sink analysis, production taint,
+rulepack audit, and complete native export under a 3 GiB scheduling budget.
+The gate requires security work to finish complete and keeps every measured
+query and analysis command below its reviewed SLO. A separate test-only hang
+watchdog fails incomplete subprocesses; it never changes the analyzer's exact
+fixed point.
 
 Use `BONSAI_DEBUG=security-phase` for phase timing and add `idg-build` when
 the semantic graph phase is slow. For package-oriented languages, call-edge

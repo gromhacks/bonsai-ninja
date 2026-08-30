@@ -88,16 +88,34 @@ fact; rule data assigns security meaning; shared analysis joins the two. If a
 proof needs new information, add a narrow typed fact or semantic role rather
 than matching the API name in Rust.
 
+The boundary is deliberately strict:
+
+- allowed: Tree-sitter node/field kinds, exact language keywords and
+  punctuation selected from those nodes, lexer/literal decoding, documented
+  language control/dataflow semantics, and language-runtime intrinsics whose
+  identity is part of the language execution model;
+- forbidden: framework/provider/package names, source/sink/sanitizer API
+  inventories, security-relevant scalar lists, inferred external type
+  hierarchies, and any semantic decision recovered by tokenizing a rendered
+  `value_text`, branch condition, return text, or `source_call_args` string.
+
+When a standard-library call is not a language intrinsic, put its identity and
+transfer role in `security-patterns/langs/<language>/typing`. The adapter may
+emit the exact call span, arguments, receiver, and generic value-shape facts;
+it may not guess the library symbol from a matching method spelling.
+
 Examples that follow this rule:
 
 - Python direct parameter-default call extraction — `lang_python`; the fact
   is API-neutral and FastAPI binder names remain in YAML rules.
-- Python `getattr(obj, "literal")` reflection rewriting —
-  `lang_python::rewrite_python_constant_reflection`.
+- Python reflection calls remain ordinary parsed calls unless compiler-visible
+  type/typing data proves a target. Literal `getattr` spellings do not justify
+  an invented workspace edge.
 - Python `__all__` literal parsing for future wildcard-import narrowing;
   it is not a visibility boundary for explicit imports — `lang_python`.
-- Python `gen.send(value)` coroutine resume forwarding —
-  `lang_python::rewrite_python_generator_send`.
+- Python dictionary field/spread flow — generic `ExpressionFlow` aggregate
+  facts emitted from the parsed `dictionary`/`pair`/splat nodes; the adapter
+  does not tokenize the rendered RHS.
 - Perl `\&foo` coderef invocation lowering — `lang_perl`.
 - Erlang record pattern destructuring — `lang_erlang`.
 - Ruby `class Child < Parent` header fallback — `lang_ruby`.
@@ -107,16 +125,13 @@ Examples that follow this rule:
   compiler views — `lang_rust`; executor API names are not frontend facts.
 - Java / Kotlin / C# typed-exception extraction —
   `populate_*_exception_types` in each adapter.
-- Java `Class.forName(...).getMethod(...).invoke(...)` chain rewriting —
-  `lang_java::rewrite_java_reflection_chain`.
+- Java reflection chains remain unresolved runtime evidence unless an exact
+  workspace declaration or rule-owned typing fact proves the target.
 - Lua `local M = {}; ...; return M` module-export narrowing — `lang_lua`.
 
 Examples that legitimately stay in `kit` because they describe
 language-agnostic shapes:
 
-- `repair_branch_events_by_else_keyword` — applies to any C-like grammar
-  that drops the else arm. Keying on the literal `else` keyword is a
-  generic recovery, not a language fact.
 - `extract_return_value_text/name` — handles the `return EXPR;` shape
   that appears in every supported language.
 - `extract_foreach_binding_assigns` follows each grammar's parsed binding
@@ -250,9 +265,9 @@ New hooks should:
 
 `FlowEvent::Branch { then_events, else_events, .. }` requires both arms
 to be present when the source has both arms. If a grammar can only
-distinguish them in one shape, the adapter normalises before walking —
-or falls back to `kit::repair_branch_events_by_else_keyword` for span-
-based partitioning around the outer `else` keyword.
+distinguish them in one shape, the adapter normalises the exact parsed arm
+nodes before walking. Shared lowering does not search rendered branch text for
+an `else` token.
 
 Adapters must not emit both arms under `then_events` and trust the
 repair to fix it. The repair is a last resort, not a primary strategy.
@@ -284,8 +299,10 @@ exact, serializable summaries to `DeclIndex`:
   is copied from one input under a positively required predicate call. The
   fact records the exact predicate, write, input, and output spans/places but
   does not decide what the predicate means;
-- `SameOriginPathConstraintFact` for a helper that rejects schemes and
-  authorities, requires an absolute path, and rejects `//` paths;
+- `GuardedValueConstraintFact` for a helper/caller-local guard whose exact
+  branch structure proves accepted/rejected values or prefixes. The adapter
+  records provider-call span and literal/polarity evidence; rules decide what
+  those values mean;
 - `DynamicKeyFilterFact` for a helper that drops a finite static key set before
   reconstructing an object;
 - `StringCompositionFact` for concatenations, interpolations, accessor calls,
@@ -320,10 +337,10 @@ typed fact proves their identity.
 
 Provider-dependent facts record the canonical imported factory/operation call
 but do not classify it. `CharacterConstraintDomain::ProviderBound` and
-`SameOriginPathConstraintFact::provider_call` receive security credit only
-when rule metadata declares that provider. `SameOriginPathConstraintFact`
-also carries the exact guarded `input_place`; `input_param_index` is present
-only for a reusable helper summary and absent for caller-local guarded values.
+`GuardedValueConstraintFact::provider_call` receive security credit only when
+rule metadata declares that provider. `GuardedValueConstraintFact` also
+carries the exact guarded `input_place`; `input_param_index` is present only
+for a reusable helper summary and absent for caller-local guarded values.
 Likewise, a `GuardedValueFilterFact` receives sanitizer credit only when an
 enabled sanitizer rule matches its exact `predicate_call_span`. Proximity to a
 predicate is never evidence: negated predicates, predicates over a different

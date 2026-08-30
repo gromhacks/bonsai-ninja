@@ -154,7 +154,7 @@ impl DeclIndex {
         self.character_constraints.shrink_to_fit();
         self.guarded_value_filters.shrink_to_fit();
         self.predicate_returns.shrink_to_fit();
-        self.same_origin_path_constraints.shrink_to_fit();
+        self.guarded_value_constraints.shrink_to_fit();
         self.compiler_guards.shrink_to_fit();
         self.dynamic_key_filters.shrink_to_fit();
         self.runtime_type_narrowings.shrink_to_fit();

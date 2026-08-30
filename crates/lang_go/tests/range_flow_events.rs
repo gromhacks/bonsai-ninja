@@ -534,27 +534,33 @@ func partial(s string) string {
     );
     let file = db.vfs().all_files().into_iter().next().expect("Go source file");
     let index = db.decl_index(file).expect("Go declaration index");
-    let [constraint] = index.character_constraints.as_slice() else {
-        panic!(
-            "only the complete C0 filter should lower: {:#?}",
-            index.character_constraints
-        );
-    };
-    assert!(matches!(constraint.output, CharacterConstraintOutput::Return));
-    assert_eq!(constraint.input_param_index, Some(0));
-    assert!(matches!(
-        &constraint.domain,
-        CharacterConstraintDomain::ProviderBound {
-            factory_call,
-            operation_call,
-            domain,
-        }
-            if factory_call == "strings.Map"
-                && operation_call == "strings.Map"
-                && matches!(domain.as_ref(), CharacterConstraintDomain::ExcludesExact { characters }
-            if characters == &["\r".to_string(), "\n".to_string()]
-                )
-    ));
+    let safe = index.defs.iter().find(|decl| decl.name == "safe").expect("safe");
+    let partial = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "partial")
+        .expect("partial");
+    for (decl, expected) in [(safe, vec!['\r', '\n']), (partial, vec!['\n'])] {
+        let constraint = index
+            .character_constraints
+            .iter()
+            .find(|constraint| constraint.function_span == decl.span)
+            .unwrap_or_else(|| panic!("missing exact callback fact for {}", decl.name));
+        assert!(matches!(constraint.output, CharacterConstraintOutput::Return));
+        assert_eq!(constraint.input_param_index, Some(0));
+        assert!(matches!(
+            &constraint.domain,
+            CharacterConstraintDomain::ProviderBound {
+                factory_call,
+                operation_call,
+                domain,
+            }
+                if factory_call == "strings.Map"
+                    && operation_call == "strings.Map"
+                    && matches!(domain.as_ref(), CharacterConstraintDomain::ExcludesExact { characters }
+                        if expected.iter().all(|character| characters.contains(&character.to_string())))
+        ));
+    }
 }
 
 #[test]
@@ -793,20 +799,75 @@ func weak(filename string) string {
     assert!(matches!(
         &facts[0].domain,
         CharacterConstraintDomain::ExcludesExact { characters }
-            if characters == &["\r".to_string(), "\n".to_string()]
+            if characters.contains(&"\r".to_string())
+                && characters.contains(&"\n".to_string())
+                && characters.contains(&"\u{7f}".to_string())
     ));
     let weak = index
         .defs
         .iter()
         .find(|decl| decl.name == "weak")
         .expect("weak decl");
-    assert!(
-        index
+    let weak_fact = index
+        .character_constraints
+        .iter()
+        .find(|fact| fact.function_span == weak.span)
+        .expect("the frontend should retain the exact newline-only fact");
+    assert!(matches!(
+        &weak_fact.domain,
+        CharacterConstraintDomain::ExcludesExact { characters }
+            if characters == &["\n".to_string()]
+    ));
+}
+
+#[test]
+fn guarded_append_loop_composes_nested_then_and_else_branch_predicates() {
+    let db = db_with(
+        r#"
+package main
+
+func nested(input string, enabled bool) string {
+    clean := make([]byte, 0, len(input))
+    for i := 0; i < len(input); i++ {
+        ch := input[i]
+        if ch >= 0x20 {
+            if ch != 0x7f { clean = append(clean, ch) }
+        }
+    }
+    return string(clean)
+}
+
+func inverted(input string) string {
+    clean := make([]byte, 0, len(input))
+    for i := 0; i < len(input); i++ {
+        ch := input[i]
+        if ch < 0x20 || ch == 0x7f {
+            continue
+        } else {
+            clean = append(clean, ch)
+        }
+    }
+    return string(clean)
+}
+"#,
+    );
+    let file = db.vfs().all_files().into_iter().next().expect("Go source file");
+    let index = db.decl_index(file).expect("Go declaration index");
+    for name in ["nested", "inverted"] {
+        let decl = index.defs.iter().find(|decl| decl.name == name).expect(name);
+        let fact = index
             .character_constraints
             .iter()
-            .all(|fact| fact.function_span != weak.span),
-        "a partial newline-only filter is not a complete CR/LF boundary"
-    );
+            .find(|fact| fact.function_span == decl.span)
+            .unwrap_or_else(|| panic!("missing {name} constraint: {:#?}", index.character_constraints));
+        assert!(matches!(
+            &fact.domain,
+            CharacterConstraintDomain::ExcludesExact { characters }
+                if characters.contains(&"\r".to_string())
+                    && characters.contains(&"\n".to_string())
+                    && characters.contains(&"\u{7f}".to_string())
+        ));
+    }
 }
 
 #[test]
@@ -838,27 +899,28 @@ func weak(target string) {
         .find(|decl| decl.name == "redirect")
         .expect("redirect decl");
     let facts = index
-        .same_origin_path_constraints
+        .guarded_value_constraints
         .iter()
         .filter(|fact| fact.function_span == redirect.span)
         .collect::<Vec<_>>();
     let [fact] = facts.as_slice() else {
         panic!(
             "exact same-origin caller fact missing: {:#?}",
-            index.same_origin_path_constraints
+            index.guarded_value_constraints
         );
     };
     assert_eq!(fact.input_place, "target");
     assert_eq!(fact.input_param_index, Some(0));
-    assert!(fact.rejects_scheme && fact.rejects_authority);
-    assert!(fact.requires_absolute_path && fact.rejects_scheme_relative_path);
+    assert_eq!(fact.accepted_prefixes, ["/"]);
+    assert_eq!(fact.rejected_prefixes, ["//"]);
+    assert_eq!(fact.static_fallbacks, ["/"]);
     let weak = index
         .defs
         .iter()
         .find(|decl| decl.name == "weak")
         .expect("weak decl");
     assert!(index
-        .same_origin_path_constraints
+        .guarded_value_constraints
         .iter()
         .all(|fact| fact.function_span != weak.span));
 
@@ -883,7 +945,7 @@ func redirect() {
         .expect("Go source file");
     let local_index = local_db.decl_index(local_file).expect("Go declaration index");
     let local = local_index
-        .same_origin_path_constraints
+        .guarded_value_constraints
         .first()
         .expect("caller-local same-origin fact");
     assert_eq!(local.input_place, "target");
@@ -966,7 +1028,7 @@ func load(rel string) {
     let guards = index
         .compiler_guards
         .iter()
-        .filter(|fact| fact.capability == bonsai_lang_api::COMPILER_GUARD_RELATIVE_PATH_BOUNDARY_REJECTION)
+        .filter(|fact| fact.capability == bonsai_lang_api::COMPILER_GUARD_PREFIX_BOUNDARY_EQUALITY)
         .collect::<Vec<_>>();
 
     assert_eq!(
@@ -975,4 +1037,11 @@ func load(rel string) {
         "only the boundary-aware helper may be promoted: {:#?}",
         index.compiler_guards
     );
+    assert!(guards[0].evidence.contains(&"literal:..".to_string()));
+    assert!(guards[0]
+        .evidence
+        .contains(&"boundary-place:path/filepath.Separator".to_string()));
+    assert!(guards[0]
+        .evidence
+        .contains(&"boundary-wrapper:string".to_string()));
 }

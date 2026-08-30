@@ -1168,7 +1168,7 @@ fn over_taint_all_languages_lifecycle_field_and_guard_paths_stay_clean() {
             lang: "erlang",
             adapter: Arc::new(bonsai_lang_erlang::ErlangAdapter::new()),
             file: "demo.erl",
-            src: "-module(demo).\n-export([entry/1, carrier/1, lifecycle/1, stage/1, cleanup/2]).\nentry(Args) -> audit(Args), carrier(Args), lifecycle(Args).\ncarrier(C) -> audit(C), sink_carrier(C.capacity).\nlifecycle(C) -> stage(C).\nstage(C) -> cleanup(C, 1).\ncleanup(C, FreeArray) -> audit(C), if FreeArray == 0 -> sink_lifecycle(C.capacity); true -> release(C) end.\n",
+            src: "-module(demo).\n-export([entry/1, carrier/1, lifecycle/1, stage/1, cleanup/2]).\n-record(client, {capacity}).\nentry(Args) -> audit(Args), carrier(Args), lifecycle(Args).\ncarrier(C) -> audit(C), sink_carrier(C#client.capacity).\nlifecycle(C) -> stage(C).\nstage(C) -> cleanup(C, 1).\ncleanup(C, FreeArray) -> audit(C), if FreeArray == 0 -> sink_lifecycle(C#client.capacity); true -> release(C) end.\n",
             entry: "entry",
             seed: &["Args"],
             carrier_sink: "sink_carrier",
@@ -1693,8 +1693,9 @@ end
             file: "demo.erl",
             src: r#"-module(demo).
 -export([entry/1, derived/1]).
+-record(client, {capacity}).
 entry(Args) -> audit(Args), derived(Args).
-derived(C) -> audit(C), Size = C.capacity * 2, sink_derived(Size).
+derived(C) -> audit(C), Size = C#client.capacity * 2, sink_derived(Size).
 "#,
             entry: "entry",
             seed: &["Args"],

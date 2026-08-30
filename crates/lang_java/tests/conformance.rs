@@ -1221,7 +1221,7 @@ class Config {
 }
 
 #[test]
-fn same_origin_helper_requires_single_slash_and_static_fallback() {
+fn guarded_value_helper_preserves_predicate_polarity_without_api_meaning() {
     use bonsai_lang_api::LanguageAdapter;
 
     let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
@@ -1234,7 +1234,7 @@ fn same_origin_helper_requires_single_slash_and_static_fallback() {
         (
             r#"target == null || !target.startsWith("/")"#,
             r#"return "/";"#,
-            false,
+            true,
         ),
         (
             r#"target == null || !target.startsWith("/") || target.startsWith("//")"#,
@@ -1249,10 +1249,35 @@ fn same_origin_helper_requires_single_slash_and_static_fallback() {
         let file = ws.db().vfs().all_files()[0];
         let index = ws.db().decl_index(file).expect("Java declaration index");
         assert_eq!(
-            !index.same_origin_path_constraints.is_empty(),
+            !index.guarded_value_constraints.is_empty(),
             expected,
             "{condition}: {:#?}",
-            index.same_origin_path_constraints
+            index.guarded_value_constraints
         );
     }
+
+    let source = r#"
+class Selection {
+    static String select(String target) {
+        if (!target.isAccepted("local") || target.isRejected("remote")) return "fallback";
+        return target;
+    }
+}
+"#;
+    let ws = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_java::JavaAdapter::new())],
+        &[("Selection.java", source)],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+    let [fact] = index.guarded_value_constraints.as_slice() else {
+        panic!(
+            "generic Java predicate calls must lower: {:#?}",
+            index.guarded_value_constraints
+        );
+    };
+    assert!(fact.accepted_prefixes.is_empty());
+    assert!(fact.rejected_prefixes.is_empty());
+    assert!(fact.predicate_calls.iter().any(|call| call.required_result));
+    assert!(fact.predicate_calls.iter().any(|call| !call.required_result));
 }

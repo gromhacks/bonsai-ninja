@@ -34,6 +34,40 @@ fn repeated_parameter_type_marks_the_callable_variadic_without_changing_bindings
 }
 
 #[test]
+fn access_modifier_visibility_comes_from_nested_cst_tokens_and_qualifier_identifier() {
+    use bonsai_lang_api::Visibility;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_scala::ScalaAdapter::new())],
+        &[(
+            "Visibility.scala",
+            r#"
+package demo
+class Example {
+  private[this] val local = 1
+  private[demo] val packageValue = 2
+  protected val inherited = 3
+  val publicValue = 4
+}
+"#,
+        )],
+    );
+    let global = workspace.db().global_index();
+    let visibility = |name: &str| {
+        global
+            .all_files()
+            .flat_map(|file| global.decls_in(file))
+            .find(|decl| decl.name == name)
+            .unwrap_or_else(|| panic!("missing {name}"))
+            .visibility
+    };
+    assert_eq!(visibility("local"), Visibility::Private);
+    assert_eq!(visibility("packageValue"), Visibility::Crate);
+    assert_eq!(visibility("inherited"), Visibility::Protected);
+    assert_eq!(visibility("publicValue"), Visibility::Public);
+}
+
+#[test]
 fn concrete_stored_property_has_one_compiler_getter_with_exact_field_return() {
     use bonsai_lang_api::{DeclKind, FlowEvent};
 

@@ -1,8 +1,6 @@
-//! P3.2: Java reflection-chain rewriting. The adapter recognizes
-//! `Class.forName("X").getMethod("Y").invoke(target, args)` and
-//! rewrites the `m.invoke(...)` call into a synthesized direct call
-//! `X.Y(args)` so the resolver narrows like a normal method dispatch.
-//! Dynamic forms (computed string args) stay unrewritten.
+//! Java reflection remains explicit unresolved runtime evidence. Literal
+//! class and method strings do not authorize the frontend to invent a direct
+//! call edge because class loaders and reflective lookup are runtime state.
 
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::{FlowEvent, LanguageRegistry};
@@ -72,7 +70,7 @@ fn walk(events: &[FlowEvent], out: &mut Vec<(String, Option<String>, Vec<String>
 }
 
 #[test]
-fn class_forname_get_method_invoke_rewrites_to_direct_call() {
+fn literal_reflection_chain_stays_unresolved() {
     let src = r#"
 class C {
   void entry(String tainted) throws Exception {
@@ -84,30 +82,19 @@ class C {
 "#;
     let db = db_with(src);
     let calls = calls_in(&db, "entry");
-    let synthesized = calls.iter().find(|(name, _, _)| name == "Sink.run").cloned();
     assert!(
-        synthesized.is_some(),
-        "expected synthesized Sink.run call after reflection rewrite, got {calls:?}"
+        calls.iter().any(|(name, _, _)| name == "m.invoke"),
+        "the exact reflective call must remain visible, got {calls:?}"
     );
-    if let Some((_name, receiver, args)) = synthesized {
-        assert_eq!(receiver.as_deref(), Some("Sink"));
-        assert_eq!(
-            args,
-            vec!["tainted".to_string()],
-            "the leading null/target arg should be stripped, leaving only real args"
-        );
-    }
     assert!(
-        !calls.iter().any(|(name, _, _)| name == "m.invoke"),
-        "raw m.invoke must be rewritten away, not duplicated; got {calls:?}"
+        !calls.iter().any(|(name, _, _)| name == "Sink.run"),
+        "literal reflection must not create a guessed Sink.run edge, got {calls:?}"
     );
 }
 
 #[test]
 fn dynamic_method_name_stays_unrewritten() {
-    // Computed method name — adapter cannot resolve a target, so the
-    // raw `m.invoke` call survives and the engine's reflection
-    // rule-load-rejection still applies.
+    // Computed method names follow the same exact contract.
     let src = r#"
 class C {
   void entry(String tainted, String methodName) throws Exception {

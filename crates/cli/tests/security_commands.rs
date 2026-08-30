@@ -202,7 +202,7 @@ fn expected_language_gauntlet_finding_count_with_inferred_sources(lang: &str) ->
     // `expected_language_gauntlet_findings_with_inferred_sources` and
     // scripts/validate-language-gauntlets.py `EXPECTED_FINDINGS`. Refreshed
     // 2026-05-29: FN-language gaps closed (cpp/csharp/dart/elixir/java/
-    // scala 0→1, php 0→2); swift settled at 1 once the redundant
+    // scala 0→1); swift settled at 1 once the redundant
     // inferred-source over-claim was filtered; go 2→1 + objc 2→1
     // (redundant-inferred / xxe over-claim removed); python 5→2 and
     // dart→1 (combiner group_id+sink-site dedup collapsed duplicate
@@ -226,7 +226,9 @@ fn expected_language_gauntlet_finding_count_with_inferred_sources(lang: &str) ->
         "objc" => 1,
         // One real CGI-param-to-system flow; the second sink is the clean twin.
         "perl" => 1,
-        "php" => 2,
+        // One intentional $_GET-to-shell_exec flow; the response is literal
+        // so this command gauntlet does not also become an XSS fixture.
+        "php" => 1,
         "python" => 1,
         // One distinct Rails-params -> Kernel.system vulnerability; equivalent
         // receiver-derived evidence is grouped into the same finding.
@@ -243,9 +245,7 @@ fn expected_language_gauntlet_finding_count_with_concrete_sources(lang: &str) ->
     match lang {
         "c" | "cpp" | "csharp" | "dart" | "elixir" | "erlang" | "go" | "java" | "javascript" | "kotlin"
         | "lua" | "objc" | "perl" | "python" | "ruby" | "rust" | "scala" | "swift" | "typescript" => 1,
-        // The full-severity default retains the independent medium PSR-7
-        // response-body XSS flow as well as the high command flow.
-        "php" => 2,
+        "php" => 1,
         other => panic!("missing concrete language_gauntlet finding count for {other}"),
     }
 }

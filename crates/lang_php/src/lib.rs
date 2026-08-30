@@ -8,13 +8,13 @@ use bonsai_lang_api::{
         collect_receiver_field_writes, collect_receiver_state_sources, first_named_child_of_kind,
         language_from_pack, named_child_call_args_with_handler, node_text, parse_with, span_of,
     },
-    AdapterContext, AdapterError, AssignValueKind, AssignmentValueIndex, CallArg, CallKind,
-    CallTargetExtraction, CompilerGuardFact, DeclIndex, DeclKind, FieldWrite, FlowEvent,
-    FragmentParseContext, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, ModifierVocabulary, StaticScalarValue, StringCompositionFact,
-    StringCompositionPart, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, CallTargetExtraction,
+    CompilerGuardFact, DeclIndex, DeclKind, FieldWrite, FlowEvent, FragmentParseContext, GrammarHandler,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    ModifierVocabulary, StaticScalarValue, StringCompositionFact, StringCompositionPart, TypeAliasBinding,
+    TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 fn php_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
     let (target, full_text) = match node.kind() {
         "function_call_expression" => {
@@ -589,14 +589,25 @@ fn php_compound_rejection_predicate(
         .filter_map(|literal| php_static_subscript_key(literal, src))
         .find(|value| !value.is_empty() && value != &scheme_component)?;
 
-    if right.kind() != "unary_op_expression" || !node_text(&right, src).trim_start().starts_with('!') {
+    if right.kind() != "unary_op_expression" {
         return None;
     }
-    let membership_call = collect_kinds_below(right, &["function_call_expression"])
-        .into_iter()
-        .next()?;
-    let membership_target = php_call_target(membership_call, src)?;
-    let membership_args = php_direct_call_arguments(membership_call);
+    let mut operand = right.named_child(0)?;
+    let operator = src
+        .get(right.start_byte()..operand.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim);
+    if operator != Some("!") {
+        return None;
+    }
+    while operand.kind() == "parenthesized_expression" {
+        operand = operand.named_child(0)?;
+    }
+    if operand.kind() != "function_call_expression" {
+        return None;
+    }
+    let membership_target = php_call_target(operand, src)?;
+    let membership_args = php_direct_call_arguments(operand);
     if membership_args.len() < 2 {
         return None;
     }
@@ -1150,8 +1161,8 @@ impl LanguageAdapter for PhpAdapter {
         //   - `include $tainted` / `include_once $tainted`
         //   - `require $tainted` / `require_once $tainted`
         //   - `` `cmd $tainted` `` (shell_command_expression)
-        // Without this lowering the shipped php.eval.{include,require}_*
-        // and php.cmdi.backtick rules can't match real code.
+        // The emitted callable spelling is the exact language construct;
+        // rule data, not this adapter, assigns security meaning.
         let synthesized = synthesize_php_construct_events(&tree, src, file);
         if !synthesized.is_empty() {
             attach_synthesized_calls_to_decls(&mut idx, synthesized);
@@ -1273,13 +1284,29 @@ impl LanguageAdapter for PhpAdapter {
                 decl.receiver_field_writes.dedup();
             }
         }
-        let assignment_values = AssignmentValueIndex::new(&idx.assignment_values);
+        bonsai_lang_api::kit::populate_call_argument_static_values(
+            &mut idx,
+            &tree,
+            file,
+            src,
+            &HANDLER,
+            php_static_scalar,
+        );
+        let callable_literals = idx
+            .assignment_values
+            .iter()
+            .filter_map(|fact| match fact.static_value.as_ref() {
+                Some(StaticScalarValue::String(value)) => {
+                    php_bare_callable_name(value).map(|name| (fact.assignment_span, name.to_string()))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
         for decl in &mut idx.defs {
             let invoked_variables = php_invoked_variables(&decl.flow_events);
             augment_php_quoted_callable_literals(
                 &mut decl.flow_events,
-                &source,
-                &assignment_values,
+                &callable_literals,
                 &invoked_variables,
             );
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
@@ -1303,14 +1330,6 @@ impl LanguageAdapter for PhpAdapter {
             decl.receiver_state_sources =
                 collect_receiver_state_sources(&decl.flow_events, &decl.params, &["$this", "this"]);
         }
-        bonsai_lang_api::kit::populate_call_argument_static_values(
-            &mut idx,
-            &tree,
-            file,
-            src,
-            &HANDLER,
-            php_static_scalar,
-        );
         bonsai_lang_api::kit::populate_assignment_inline_callback_static_returns(
             &mut idx,
             &tree,
@@ -1352,8 +1371,7 @@ impl LanguageAdapter for PhpAdapter {
 /// carriers remain exclusively compiler-owned [`FlowEvent`] facts.
 fn augment_php_quoted_callable_literals(
     events: &mut [FlowEvent],
-    source: &str,
-    assignment_values: &AssignmentValueIndex,
+    callable_literals: &BTreeMap<Span, String>,
     invoked_variables: &BTreeSet<String>,
 ) {
     for event in events {
@@ -1369,16 +1387,14 @@ fn augment_php_quoted_callable_literals(
                     continue;
                 }
                 if invoked_variables.contains(target) {
-                    if let Some(rhs) = assignment_values.rendering(*span, source) {
-                        if let Some(callable) = target
-                            .trim_start()
-                            .starts_with('$')
-                            .then(|| php_quoted_bare_callable_literal(rhs))
-                            .flatten()
-                        {
-                            *source_name = Some(callable.to_string());
-                            *value_kind = Some(AssignValueKind::CallableReference);
-                        }
+                    if let Some(callable) = target
+                        .trim_start()
+                        .starts_with('$')
+                        .then(|| callable_literals.get(span))
+                        .flatten()
+                    {
+                        *source_name = Some(callable.clone());
+                        *value_kind = Some(AssignValueKind::CallableReference);
                     }
                 }
             }
@@ -1387,21 +1403,11 @@ fn augment_php_quoted_callable_literals(
                 else_events,
                 ..
             } => {
-                augment_php_quoted_callable_literals(
-                    then_events,
-                    source,
-                    assignment_values,
-                    invoked_variables,
-                );
-                augment_php_quoted_callable_literals(
-                    else_events,
-                    source,
-                    assignment_values,
-                    invoked_variables,
-                );
+                augment_php_quoted_callable_literals(then_events, callable_literals, invoked_variables);
+                augment_php_quoted_callable_literals(else_events, callable_literals, invoked_variables);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                augment_php_quoted_callable_literals(body, source, assignment_values, invoked_variables);
+                augment_php_quoted_callable_literals(body, callable_literals, invoked_variables);
             }
             FlowEvent::Try {
                 body,
@@ -1409,19 +1415,9 @@ fn augment_php_quoted_callable_literals(
                 finally_events,
                 ..
             } => {
-                augment_php_quoted_callable_literals(body, source, assignment_values, invoked_variables);
-                augment_php_quoted_callable_literals(
-                    catch_events,
-                    source,
-                    assignment_values,
-                    invoked_variables,
-                );
-                augment_php_quoted_callable_literals(
-                    finally_events,
-                    source,
-                    assignment_values,
-                    invoked_variables,
-                );
+                augment_php_quoted_callable_literals(body, callable_literals, invoked_variables);
+                augment_php_quoted_callable_literals(catch_events, callable_literals, invoked_variables);
+                augment_php_quoted_callable_literals(finally_events, callable_literals, invoked_variables);
             }
             _ => {}
         }
@@ -1448,22 +1444,17 @@ fn php_invoked_variables(events: &[FlowEvent]) -> BTreeSet<String> {
     invoked
 }
 
-fn php_quoted_bare_callable_literal(value: &str) -> Option<&str> {
+fn php_bare_callable_name(value: &str) -> Option<&str> {
     let value = value.trim();
-    let quote = value.as_bytes().first().copied()?;
-    if !matches!(quote, b'\'' | b'"') || value.as_bytes().last().copied() != Some(quote) {
-        return None;
-    }
-    let inner = value.get(1..value.len().saturating_sub(1))?.trim();
-    if inner.is_empty()
-        || inner
+    if value.is_empty()
+        || value
             .chars()
             .any(|ch| !(ch == '_' || ch == '\\' || ch.is_ascii_alphanumeric()))
-        || inner.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+        || value.chars().next().is_some_and(|ch| ch.is_ascii_digit())
     {
         return None;
     }
-    Some(inner)
+    Some(value)
 }
 
 /// Parse PHP `use`/`require`/`include` statements into `ImportSpec`s.
@@ -1477,22 +1468,16 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
     //   2. `require '...';` / `require_once '...';` / `include '...';`
     //      → dedicated expression nodes (NOT call expressions)
     for clause in collect_kinds(tree, &["namespace_use_clause"]) {
-        let raw = node_text(&clause, src)
-            .trim_start_matches("use ")
-            .trim_end_matches(';')
-            .trim();
-        if raw.is_empty() {
+        let alias_node = clause.child_by_field_name("alias");
+        let mut clause_cursor = clause.walk();
+        let Some(module_node) = clause.named_children(&mut clause_cursor).find(|child| {
+            alias_node.is_none_or(|alias| child.id() != alias.id())
+                && matches!(child.kind(), "name" | "namespace_name" | "qualified_name")
+        }) else {
             continue;
-        }
-        // Split off `as Alias` if present.
-        let (module_text, explicit_alias) = if let Some((module_part, alias_part)) = raw.rsplit_once(" as ") {
-            (
-                module_part.trim().to_string(),
-                Some(alias_part.trim().to_string()),
-            )
-        } else {
-            (raw.to_string(), None)
         };
+        let module_text = node_text(&module_node, src).trim().to_string();
+        let explicit_alias = alias_node.map(|alias| node_text(&alias, src).trim().to_string());
         // Grouped import `use Foo\{A, B as BB};` lowers each member
         // to a `namespace_use_clause` whose text is just `A` / `B as
         // BB` — the `Foo\` prefix lives on the outer
@@ -1568,7 +1553,7 @@ fn group_namespace_prefix(clause: &tree_sitter::Node<'_>, src: &[u8]) -> Option<
                     break;
                 }
                 if matches!(child.kind(), "namespace_name" | "qualified_name") {
-                    let text = node_text(&child, src).trim_end_matches('\\').trim().to_string();
+                    let text = node_text(&child, src).trim().to_string();
                     if !text.is_empty() {
                         last_prefix = Some(text);
                     }
@@ -1587,14 +1572,10 @@ fn first_string_descendant(node: &tree_sitter::Node<'_>, src: &[u8]) -> String {
     let mut stack = vec![*node];
     while let Some(current) = stack.pop() {
         if current.kind() == "string" {
-            // Prefer the unquoted `string_content` child; otherwise
-            // strip surrounding quotes manually.
             if let Some(content) = first_named_child_of_kind(&current, "string_content") {
                 return node_text(&content, src).to_string();
             }
-            return node_text(&current, src)
-                .trim_matches(|ch: char| matches!(ch, '"' | '\''))
-                .to_string();
+            return php_static_subscript_key(current, src).unwrap_or_default();
         }
         let mut cursor = current.walk();
         for child in current.named_children(&mut cursor) {
@@ -1612,24 +1593,19 @@ fn first_string_descendant(node: &tree_sitter::Node<'_>, src: &[u8]) -> String {
 ///   - include_once_expression      → name = "include_once"
 ///   - require_expression           → name = "require"
 ///   - require_once_expression      → name = "require_once"
-///   - shell_command_expression     → name = "shell_exec" (matches
-///     the existing php.cmdi.shell_exec rule's name without needing
-///     a new rule for backtick literal)
+///   - shell_command_expression     → name = "`"
 ///
-/// The expression's argument (the included path / shell command)
-/// becomes a single positional CallArg whose `value_text` is the
-/// argument's source text — typically a `variable_name` like `$t`
-/// or a string literal. The taint engine reads `value_text` to
-/// decide whether the argument is tainted.
+/// The expression's argument (the included path / shell command) becomes one
+/// positional `CallArg`. Its `place` and `source_names` come from the exact
+/// argument node and carry dataflow; `value_text` is rendering-only.
 fn synthesize_php_construct_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Span, FlowEvent)> {
-    // Pairs of (grammar kind, synthesized callee name). The callee
-    // name must match what the rulepack queries against.
+    // Pairs of (grammar kind, exact PHP construct spelling).
     const CONSTRUCT_KINDS: &[(&str, &str)] = &[
         ("include_expression", "include"),
         ("include_once_expression", "include_once"),
         ("require_expression", "require"),
         ("require_once_expression", "require_once"),
-        ("shell_command_expression", "shell_exec"),
+        ("shell_command_expression", "`"),
     ];
     let mut synthesized = Vec::new();
     for (kind, callee) in CONSTRUCT_KINDS {

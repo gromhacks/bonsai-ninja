@@ -4041,6 +4041,8 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
             && bulk_objects.contains("syntax_worker_count_for_sources")
             && bulk_objects.contains("SyntaxMemoryPermitPool")
             && bulk_objects.contains("ParallelVisitOrder::Input")
+            && bulk_objects.contains("next_memory_admission")
+            && bulk_objects.contains("memory_admission_ready")
             && bulk_objects.contains("compiler_file_object_uncached")
             && bulk_objects.contains("visit(file, object)")
             && !bulk_objects.contains("ThreadPoolBuilder")
@@ -4056,6 +4058,8 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
             && bulk_diagnostics.contains("syntax_worker_count_for_sources")
             && bulk_diagnostics.contains("SyntaxMemoryPermitPool")
             && bulk_diagnostics.contains("ParallelVisitOrder::Input")
+            && bulk_diagnostics.contains("next_memory_admission")
+            && bulk_diagnostics.contains("memory_admission_ready")
             && bulk_diagnostics.contains("parser_diagnostics_uncached")
             && !bulk_diagnostics.contains("compiler_weighted_batches")
             && !bulk_diagnostics.contains("for range in batches"),
@@ -4282,7 +4286,8 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
                 .contains("compiler_diagnostics_are_current")
             && !function_body(&workspace, "parser_incomplete_reasons_for_files")
                 .contains("visit_compiler_file_objects_uncached")
-            && function_body(&workspace, "diagnostics")
+            && function_body(&workspace, "diagnostics").contains("diagnostics_with_progress")
+            && function_body(&workspace, "diagnostics_with_progress")
                 .contains("visit_compiler_file_objects_uncached"),
         "parser completeness must use exact syntax diagnostics without lowering semantic bodies; explicit whole-workspace diagnostics may stream compiler objects"
     );
@@ -4806,6 +4811,30 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
             && page_cache.contains("rulepack_fingerprint")
             && function_body(&page_cache, "read_cache").contains("current_exe_is_newer_than_cache(&metadata)"),
         "CLI page cache metadata must bind binary version, executable freshness, matcher policy, source content, dependency metadata, and rulepack content"
+    );
+}
+
+#[test]
+fn stable_edge_drilldown_uses_the_persisted_exact_index() {
+    let root = repo_root();
+    let sidecar = read(&root.join("crates/workspace/src/callgraph_sidecar.rs"));
+    let workspace = read(&root.join("crates/workspace/src/lib.rs"));
+    let browse = read(&root.join("crates/browse/src/edges.rs"));
+    let save = function_body(&sidecar, "save_callgraph_sidecar");
+    let lookup = function_body(&sidecar, "edges_by_stable_digest");
+    let dump = function_body(&browse, "dump_edges");
+    assert!(
+        sidecar.contains("EDGE_ID_INDEX_KEY")
+            && save.contains("build_edge_id_index")
+            && sidecar.contains("decode_edge_id_index(&self.reader)")
+            && lookup.contains("partition_point")
+            && lookup.contains("cached_partition(entry.owner_file)")
+            && workspace.contains("persisted_callgraph_edges_by_stable_digest")
+            && dump.find("dump_persisted_edge_id").is_some_and(|indexed| {
+                dump.find("dump_persisted_filtered_edges")
+                    .is_some_and(|broad| indexed < broad)
+            }),
+        "stable E: drilldown must open its exact persisted edge partition before any broad callgraph scan"
     );
 }
 
@@ -6723,6 +6752,442 @@ fn typescript_external_dispatch_semantics_are_rulepack_owned() {
             && graphql_rules.contains("rootValue")
             && graphql_rules.contains("ApolloServer"),
         "TypeScript GraphQL provider identities must remain in rule data"
+    );
+}
+
+fn collect_qualified_rulepack_identities(value: &serde_yaml::Value, out: &mut BTreeSet<String>) {
+    match value {
+        serde_yaml::Value::Mapping(mapping) => {
+            for (key, value) in mapping {
+                let key = key.as_str().unwrap_or_default();
+                if matches!(
+                    key,
+                    "packages" | "imports" | "frameworks" | "modules" | "manifests" | "lockfiles"
+                ) {
+                    if let serde_yaml::Value::Sequence(values) = value {
+                        for value in values.iter().filter_map(serde_yaml::Value::as_str) {
+                            if provider_identity_is_qualified(value) {
+                                out.insert(value.to_string());
+                            }
+                        }
+                    }
+                } else if key == "attribute" {
+                    if let serde_yaml::Value::Sequence(parts) = value {
+                        let parts = parts
+                            .iter()
+                            .filter_map(serde_yaml::Value::as_str)
+                            .collect::<Vec<_>>();
+                        if parts.len() > 1 {
+                            out.insert(parts.join("."));
+                        }
+                    }
+                } else if key == "name" {
+                    if let Some(name) = value.as_str().filter(|name| provider_identity_is_qualified(name)) {
+                        out.insert(name.to_string());
+                    }
+                }
+                collect_qualified_rulepack_identities(value, out);
+            }
+        }
+        serde_yaml::Value::Sequence(values) => {
+            for value in values {
+                collect_qualified_rulepack_identities(value, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn provider_identity_is_qualified(value: &str) -> bool {
+    value.len() >= 4 && (value.contains(['.', '/', ':', '@']) || value.contains("->"))
+}
+
+fn collect_adapter_production_sources(root: &Path) -> Vec<(String, PathBuf)> {
+    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.expect("adapter source entry").path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if path.extension().is_some_and(|extension| extension == "rs")
+                && !path
+                    .components()
+                    .any(|component| component.as_os_str() == "tests")
+                && !path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name == "tests.rs" || name.ends_with("_test.rs") || name.ends_with("_tests.rs")
+                    })
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    let mut sources = Vec::new();
+    for entry in fs::read_dir(root.join("crates")).expect("read crates") {
+        let crate_path = entry.expect("crate entry").path();
+        let crate_name = crate_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !crate_name.starts_with("lang_") || crate_name == "lang_api" {
+            continue;
+        }
+        let mut crate_sources = Vec::new();
+        collect_rs_files(&crate_path.join("src"), &mut crate_sources);
+        crate_sources.sort();
+        sources.extend(
+            crate_sources
+                .into_iter()
+                .map(|source| (crate_name.to_string(), source)),
+        );
+    }
+    sources.sort();
+    sources
+}
+
+fn collect_rulepack_target_names(value: &serde_yaml::Value, inside_target: bool, out: &mut BTreeSet<String>) {
+    match value {
+        serde_yaml::Value::Mapping(mapping) => {
+            for (key, value) in mapping {
+                let key = key.as_str().unwrap_or_default();
+                let inside_target = inside_target || key == "target";
+                if inside_target && key == "name" {
+                    if let Some(name) = value.as_str().filter(|name| name.len() >= 3) {
+                        out.insert(name.to_string());
+                    }
+                }
+                collect_rulepack_target_names(value, inside_target, out);
+            }
+        }
+        serde_yaml::Value::Sequence(values) => {
+            for value in values {
+                collect_rulepack_target_names(value, inside_target, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Adapters own grammar and documented language-runtime semantics. External
+/// library/framework identities must remain data: the frontend records exact
+/// imports, calls, receivers, arguments, and callback values without turning
+/// a provider spelling into a synthetic edge or security verdict.
+#[test]
+fn external_provider_identities_are_not_compiled_into_adapters() {
+    let root = repo_root();
+    let mut identities = BTreeSet::new();
+    let mut yaml_files = Vec::new();
+    fn collect_yaml_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.expect("rulepack directory entry").path();
+            if path.is_dir() {
+                collect_yaml_files(&path, out);
+            } else if path.extension().is_some_and(|extension| extension == "yml") {
+                out.push(path);
+            }
+        }
+    }
+    collect_yaml_files(&root.join("security-patterns/langs"), &mut yaml_files);
+    yaml_files.sort();
+    for path in yaml_files {
+        let source = read(&path);
+        let value = serde_yaml::from_str::<serde_yaml::Value>(&source)
+            .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+        collect_qualified_rulepack_identities(&value, &mut identities);
+    }
+
+    let mut violations = Vec::new();
+    for (crate_name, source_path) in collect_adapter_production_sources(&root) {
+        let source = live_code(production_source(&read(&source_path)));
+        for identity in &identities {
+            let quoted = serde_json::to_string(identity).expect("serialize provider identity");
+            if source.contains(&quoted) {
+                violations.push(format!(
+                    "{crate_name}/{}: {identity}",
+                    source_path.strip_prefix(&root).unwrap_or(&source_path).display()
+                ));
+            }
+        }
+    }
+    violations.sort();
+    violations.dedup();
+    assert!(
+        violations.is_empty(),
+        "external rulepack identities leaked into adapter production code; emit generic compiler facts instead:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// Qualified provider spellings are not the only way a rule inventory can
+/// leak into a frontend. Keep unqualified rule targets out as well, except for
+/// grammar field/node vocabulary shared by the CST and Perl's language-owned
+/// special variables. A new collision must be reviewed explicitly rather than
+/// silently turning an adapter into a second rulepack.
+#[test]
+fn unqualified_rule_targets_are_not_compiled_into_adapters() {
+    let root = repo_root();
+    let mut names = BTreeSet::new();
+    let mut yaml_files = Vec::new();
+    fn collect_yaml_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.expect("rulepack directory entry").path();
+            if path.is_dir() {
+                collect_yaml_files(&path, out);
+            } else if path.extension().is_some_and(|extension| extension == "yml") {
+                out.push(path);
+            }
+        }
+    }
+    collect_yaml_files(&root.join("security-patterns/langs"), &mut yaml_files);
+    for path in yaml_files {
+        let value = serde_yaml::from_str::<serde_yaml::Value>(&read(&path))
+            .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+        collect_rulepack_target_names(&value, false, &mut names);
+    }
+    names.retain(|name| !provider_identity_is_qualified(name));
+
+    let grammar_vocabulary = BTreeSet::from([
+        "arg",
+        "args",
+        "arguments",
+        "body",
+        "content",
+        "data",
+        "parameters",
+        "string",
+        "uri",
+    ]);
+    let mut violations = Vec::new();
+    for (crate_name, source_path) in collect_adapter_production_sources(&root) {
+        let source = live_code(production_source(&read(&source_path)));
+        for name in &names {
+            if grammar_vocabulary.contains(name.as_str())
+                || (crate_name == "lang_perl" && matches!(name.as_str(), "ARGV" | "ENV" | "STDIN"))
+            {
+                continue;
+            }
+            let quoted = serde_json::to_string(name).expect("serialize target name");
+            if source.contains(&quoted) {
+                violations.push(format!(
+                    "{crate_name}/{}: {name}",
+                    source_path.strip_prefix(&root).unwrap_or(&source_path).display()
+                ));
+            }
+        }
+    }
+    violations.sort();
+    violations.dedup();
+    assert!(
+        violations.is_empty(),
+        "unqualified rule targets leaked into adapter production code:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// Keep known semantic-rewrite failures from returning under a new feature
+/// name. These implementations guessed runtime edges or embedded external
+/// type hierarchies instead of preserving exact compiler evidence.
+#[test]
+fn adapters_do_not_reintroduce_guessed_external_semantics() {
+    let root = repo_root();
+    let adapters = [
+        ("java", read(&root.join("crates/lang_java/src/lib.rs"))),
+        (
+            "javascript",
+            read(&root.join("crates/lang_javascript/src/lib.rs")),
+        ),
+        ("python", read(&root.join("crates/lang_python/src/lib.rs"))),
+        ("go", read(&root.join("crates/lang_go/src/lib.rs"))),
+        ("perl", read(&root.join("crates/lang_perl/src/lib.rs"))),
+        ("php", read(&root.join("crates/lang_php/src/lib.rs"))),
+        ("scala", read(&root.join("crates/lang_scala/src/lib.rs"))),
+        ("csharp", read(&root.join("crates/lang_csharp/src/lib.rs"))),
+        ("swift", read(&root.join("crates/lang_swift/src/lib.rs"))),
+        ("rust", read(&root.join("crates/lang_rust/src/lib.rs"))),
+        ("erlang", read(&root.join("crates/lang_erlang/src/lib.rs"))),
+    ];
+    for (language, source) in adapters {
+        let source = live_code(production_source(&source));
+        for forbidden in match language {
+            "java" => [
+                "rewrite_java_reflection_chain",
+                "java_platform_supertypes",
+                "Class.forName(\"X\").getMethod",
+                "SameOriginPathConstraintFact",
+                "java_same_origin_path_constraints",
+                "rejects_scheme_relative_path",
+                "java_starts_with_constraint",
+                "\"startsWith\"",
+            ]
+            .as_slice(),
+            "python" => [
+                "rewrite_python_constant_reflection",
+                "augment_python_asyncio_to_thread_calls",
+                "python_is_asyncio_to_thread_name",
+                "rewrite_python_generator_send",
+                "python_dict_bodies",
+                "python_matching_delimiter_end",
+                "SameOriginPathConstraintFact",
+                "python_same_origin_path_constraints",
+                "rejects_authority",
+                "python_startswith_constraint",
+                "\"startswith\"",
+            ]
+            .as_slice(),
+            "go" => [
+                "\"path/filepath\"",
+                "filepath_aliases",
+                "go_relative_path_boundary_value",
+                "SameOriginPathConstraintFact",
+                "go_same_origin_path_constraints",
+                "rejects_scheme_relative_path",
+            ]
+            .as_slice(),
+            "perl" => [
+                "synthesize_coderef_invocation_events",
+                "find_matching_perl_paren",
+                "normalize_perl_hash_deref_flow_events",
+                "rewrite_perl_call_arg_texts",
+                "the small set rulepack queries",
+                "AssignmentValueIndex",
+                "perl_sigiled_identifiers",
+                "perl_collection_source_names",
+                "perl_coderef_rhs_source",
+                "perl_exact_variable_rhs",
+            ]
+            .as_slice(),
+            "php" => [
+                "(\"shell_command_expression\", \"shell_exec\")",
+                "the existing php.cmdi.shell_exec rule",
+                "callee name must match what the rulepack",
+            ]
+            .as_slice(),
+            "scala" => ["text.find(\"class\")", "node_text(&m, src).contains(\"case\")"].as_slice(),
+            "csharp" => [
+                "dotted_member_access_call_parts",
+                "dotted_member_access_call_parts(&str)",
+            ]
+            .as_slice(),
+            "swift" => [
+                "swift_dotted_member_access_parts",
+                "swift_value_source_names_from_text",
+            ]
+            .as_slice(),
+            "rust" => [
+                "rust_value_source_names",
+                "rust_impl_self_type",
+                "matching_angle_close",
+            ]
+            .as_slice(),
+            "erlang" => [
+                "normalize_erlang_split_dot_args",
+                "erlang_pseudo_dot_accesses",
+                "erlang_record_bodies",
+                "find_matching_erlang_delim",
+                "split_top_level_args",
+                "erlang_tail_return_value",
+                "erlang_record_accesses_in_text",
+            ]
+            .as_slice(),
+            "javascript" => ["ecmascript_starts_with_constraint", "\"startsWith\""].as_slice(),
+            _ => unreachable!(),
+        } {
+            assert!(
+                !source.contains(forbidden),
+                "{language} adapter reintroduced guessed/provider-specific semantic `{forbidden}`"
+            );
+        }
+    }
+
+    let python_typing = read(&root.join("security-patterns/langs/python/typing/standard_library.yml"));
+    assert!(
+        python_typing.contains("asyncio_to_thread_callback_invocation")
+            && python_typing.contains("callback_arg_index: 0")
+            && python_typing.contains("forwarded_args_from: 1"),
+        "asyncio callback execution semantics must remain in typing rule data"
+    );
+    let java_sqli = read(&root.join("security-patterns/langs/java/sinks/sqli.yml"));
+    for receiver in ["Statement", "PreparedStatement", "CallableStatement"] {
+        assert!(
+            java_sqli.contains(receiver),
+            "JDBC receiver hierarchy spelling `{receiver}` must remain in Java rule data"
+        );
+    }
+    let php_cmdi = read(&root.join("security-patterns/langs/php/sinks/cmdi.yml"));
+    assert!(
+        php_cmdi.contains("php.cmdi.backtick") && php_cmdi.contains("name: \"`\""),
+        "PHP backtick security meaning must be a distinct rule over exact language syntax"
+    );
+}
+
+/// Rendering fields make diagnostics readable, but they are not compiler IR.
+/// A frontend may copy them to another rendering field; it must never recover
+/// places, operands, calls, or control flow by splitting/tokenizing them.
+#[test]
+fn compiler_frontends_do_not_reparse_rendered_flow_fields() {
+    let root = repo_root();
+    let mut sources = collect_adapter_production_sources(&root);
+    for relative in ["crates/lang_api/src/kit", "crates/lang_api/src/types.rs"] {
+        let path = root.join(relative);
+        if path.is_dir() {
+            let mut files = Vec::new();
+            collect_rs_files(&path, &mut files);
+            files.retain(|file| !is_test_rs_source(file));
+            sources.extend(files.into_iter().map(|file| ("lang_api".to_string(), file)));
+        } else {
+            sources.push(("lang_api".to_string(), path));
+        }
+    }
+    sources.sort();
+    sources.dedup();
+
+    let forbidden = [
+        "AssignmentValueIndex::rendering",
+        "call_result_identifier_tokens",
+        "callable_binding_name_from_text",
+        "receiver_base_from_text",
+        "push_value_text_source_name",
+        ".value_text.split",
+        ".value_text.contains",
+        ".value_text.starts_with",
+        ".value_text.ends_with",
+        ".value_text.find",
+        ".value_text.rfind",
+        ".value_text.strip_prefix",
+        ".value_text.strip_suffix",
+        ".value_text.trim_start_matches",
+        ".value_text.trim_end_matches",
+        "source_call_args.first().cloned()",
+        "source_call_args.iter().chain(source_names",
+        "source_call_args[0].trim()",
+    ];
+    let mut violations = Vec::new();
+    for (crate_name, path) in sources {
+        let source = live_code(production_source(&read(&path)));
+        for needle in forbidden {
+            if source.contains(needle) {
+                violations.push(format!(
+                    "{crate_name}/{}: {needle}",
+                    path.strip_prefix(&root).unwrap_or(&path).display()
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "compiler frontend reparsed a rendering-only flow field; carry an exact Tree-sitter-derived fact instead:\n  {}",
+        violations.join("\n  ")
     );
 }
 

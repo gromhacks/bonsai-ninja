@@ -11,9 +11,9 @@ use bonsai_lang_api::{
     AdapterContext, AdapterError, AssignValueKind, CallTargetExtraction, CharacterConstraintDomain,
     CharacterConstraintFact, CharacterConstraintOutput, CharacterSubstitutionDomain,
     CharacterSubstitutionFact, ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclIndex,
-    DeclKind, FileSnapshot, FiniteLiteralSelectionFact, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, ParseRecoveryEdit,
-    PatternBindingSite, SameOriginPathConstraintFact, StaticScalarValue, StringCompositionFact,
+    DeclKind, FileSnapshot, FiniteLiteralSelectionFact, FlowEvent, GrammarHandler, GuardedPredicateCallFact,
+    GuardedValueConstraintFact, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, ModulePath, ParseRecoveryEdit, PatternBindingSite, StaticScalarValue, StringCompositionFact,
     StringCompositionPart, SyntaxTree, TypeAliasBinding, Vfs, Visibility, EMPTY_HANDLER,
 };
 use parse_recovery::java_parse_recovery_edits;
@@ -426,17 +426,15 @@ impl LanguageAdapter for JavaAdapter {
         // when at least one body throw is type-assignable; this lifts
         // the `Partial` claim to `Exact` for typed-exception flow on
         // Java code.
-        // Reflection: the adapter rewrites the constant-string
-        // `Class.forName("X").getMethod("Y").invoke(target, args)`
-        // chain into a synthesized direct call `X.Y(args)`. Dynamic
-        // forms remain unrewritten and the rule-load gate still
-        // rejects rules anchored on the reflective shape.
         LanguageCapabilities {
             module_default_export_names: &[],
             universal_type_names: &["Object"],
             module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             exceptions: bonsai_lang_api::CapabilityLevel::Exact,
-            reflection: bonsai_lang_api::CapabilityLevel::Partial,
+            // Reflection is a runtime-library dispatch mechanism, not Java
+            // source syntax. Literal method names therefore remain explicit
+            // unresolved evidence instead of becoming guessed call edges.
+            reflection: bonsai_lang_api::CapabilityLevel::Unsupported,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             field_places_complete: true,
             // Java constructors are class-named, so the kind-based
@@ -483,7 +481,7 @@ impl LanguageAdapter for JavaAdapter {
             &index.defs,
             &index.character_substitutions,
         );
-        index.same_origin_path_constraints = java_same_origin_path_constraints(&index, &syntax, file, src);
+        index.guarded_value_constraints = java_guarded_value_constraints(&index, &syntax, file, src);
         // Phase-6 return-type extraction: `T method() {}` populates
         // `Decl.return_type` for `apply_assign_call_result_types`.
         bonsai_lang_api::populate_decl_return_types(&mut index, &tree, src, &HANDLER);
@@ -492,7 +490,6 @@ impl LanguageAdapter for JavaAdapter {
         // type info propagates through every later mutation.
         for decl in &mut index.defs {
             populate_java_exception_types(&mut decl.flow_events, &tree, src);
-            rewrite_java_reflection_chain(&mut decl.flow_events);
         }
         let field_aliases = collect_java_type_aliases(tree.root_node(), src, &["field_declaration"]);
         let method_aliases = collect_java_method_type_aliases(&syntax, file, src, &field_aliases);
@@ -694,12 +691,12 @@ fn populate_java_immutable_assignment_facts(
     }
 }
 
-fn java_same_origin_path_constraints(
+fn java_guarded_value_constraints(
     index: &DeclIndex,
     syntax: &SyntaxKindIndex<'_>,
     file: FileId,
     src: &[u8],
-) -> Vec<SameOriginPathConstraintFact> {
+) -> Vec<GuardedValueConstraintFact> {
     let mut facts = Vec::new();
     for method in syntax.collect(&["method_declaration"]) {
         let method_span = span_of(file, &method);
@@ -731,39 +728,52 @@ fn java_same_origin_path_constraints(
         let [fallback_return] = fallback_returns.as_slice() else {
             continue;
         };
-        if fallback_return
+        let Some(fallback) = fallback_return
             .named_child(0)
             .and_then(|value| java_static_string_literal(value, src))
-            .as_deref()
-            != Some("/")
-        {
+        else {
             continue;
-        }
+        };
         for (input_param_index, parameter) in decl.params.iter().enumerate() {
             if return_value.kind() != "identifier" || node_text(&return_value, src).trim() != parameter {
                 continue;
             }
             let mut terms = Vec::new();
             java_collect_logical_terms(condition, "||", src, &mut terms);
-            let requires_absolute_path = terms
-                .iter()
-                .any(|term| java_starts_with_literal(*term, parameter, "/", true, src));
-            let rejects_scheme_relative_path = terms
-                .iter()
-                .any(|term| java_starts_with_literal(*term, parameter, "//", false, src));
-            if requires_absolute_path && rejects_scheme_relative_path {
-                facts.push(SameOriginPathConstraintFact {
-                    function_span: decl.span,
-                    guard_span: span_of(file, guard),
-                    input_place: parameter.clone(),
-                    input_param_index: Some(input_param_index),
-                    provider_call: None,
-                    rejects_scheme: true,
-                    rejects_authority: true,
-                    requires_absolute_path,
-                    rejects_scheme_relative_path,
-                });
+            let mut predicate_calls = Vec::new();
+            for term in terms {
+                if let Some((call_expression_span, required_result)) =
+                    java_guarded_predicate_call(term, parameter, file, src)
+                {
+                    predicate_calls.push(GuardedPredicateCallFact {
+                        call_expression_span,
+                        required_result,
+                    });
+                }
             }
+            if predicate_calls.is_empty() {
+                continue;
+            }
+            predicate_calls.sort_by_key(|fact| {
+                (
+                    fact.call_expression_span.start,
+                    fact.call_expression_span.end,
+                    fact.required_result,
+                )
+            });
+            predicate_calls.dedup();
+            facts.push(GuardedValueConstraintFact {
+                function_span: decl.span,
+                guard_span: span_of(file, guard),
+                input_place: parameter.clone(),
+                input_param_index: Some(input_param_index),
+                provider_call: None,
+                predicate_calls,
+                accepted_prefixes: Vec::new(),
+                rejected_prefixes: Vec::new(),
+                rejected_components: Vec::new(),
+                static_fallbacks: vec![fallback.clone()],
+            });
         }
     }
     facts.sort_by_key(|fact| (fact.function_span.start, fact.guard_span.start));
@@ -823,54 +833,39 @@ fn java_unwrap_parenthesized(mut expression: Node<'_>) -> Node<'_> {
     expression
 }
 
-fn java_starts_with_literal(
+fn java_guarded_predicate_call(
     expression: Node<'_>,
     receiver: &str,
-    literal: &str,
-    negated: bool,
+    file: FileId,
     src: &[u8],
-) -> bool {
+) -> Option<(bonsai_common::Span, bool)> {
     let expression = java_unwrap_parenthesized(expression);
-    let call = if negated {
-        if expression.kind() != "unary_expression" {
-            return false;
-        }
+    let (call, negated) = if expression.kind() == "unary_expression" {
         let Some(operand) = expression
             .child_by_field_name("operand")
             .or_else(|| expression.named_child(0))
         else {
-            return false;
+            return None;
         };
         if src
             .get(expression.start_byte()..operand.start_byte())
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .is_none_or(|prefix| prefix.trim() != "!")
         {
-            return false;
+            return None;
         }
-        java_unwrap_parenthesized(operand)
+        (java_unwrap_parenthesized(operand), true)
     } else {
-        expression
+        (expression, false)
     };
     if call.kind() != "method_invocation"
         || call
             .child_by_field_name("object")
             .is_none_or(|object| object.kind() != "identifier" || node_text(&object, src).trim() != receiver)
-        || call
-            .child_by_field_name("name")
-            .is_none_or(|name| node_text(&name, src).trim() != "startsWith")
     {
-        return false;
+        return None;
     }
-    let Some(arguments) = call.child_by_field_name("arguments") else {
-        return false;
-    };
-    let mut cursor = arguments.walk();
-    let values = arguments.named_children(&mut cursor).collect::<Vec<_>>();
-    let [value] = values.as_slice() else {
-        return false;
-    };
-    java_static_string_literal(*value, src).as_deref() == Some(literal)
+    Some((span_of(file, &call), negated))
 }
 
 fn java_character_substitutions(
@@ -971,14 +966,8 @@ fn java_switch_character_substitution(
     let [switch_node] = switches.as_slice() else {
         return None;
     };
-    let condition = switch_node.child_by_field_name("condition")?;
-    if node_text(&condition, src)
-        .trim()
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .trim()
-        != loop_variable
-    {
+    let condition = java_unwrap_parenthesized(switch_node.child_by_field_name("condition")?);
+    if condition.kind() != "identifier" || node_text(&condition, src).trim() != loop_variable {
         return None;
     }
     let switch_body = switch_node.child_by_field_name("body")?;
@@ -1308,6 +1297,15 @@ fn java_static_string_or_character(node: Node<'_>, src: &[u8]) -> Option<String>
 }
 
 fn java_exact_regex_character_class(pattern: &str) -> Option<Vec<String>> {
+    if pattern == "\\p{Cntrl}" {
+        return Some(
+            (0_u32..=0x1f)
+                .chain(std::iter::once(0x7f))
+                .filter_map(char::from_u32)
+                .map(|character| character.to_string())
+                .collect(),
+        );
+    }
     let inner = pattern.strip_prefix('[')?.strip_suffix(']')?;
     if inner.starts_with('^') || inner.is_empty() {
         return None;
@@ -1379,11 +1377,7 @@ fn java_compiled_pattern_constraints(
         if !java_declaration_has_final_modifier(declaration) {
             continue;
         }
-        let characters = if pattern == "\\p{Cntrl}" {
-            vec!["\r".to_string(), "\n".to_string()]
-        } else if let Some(characters) = java_exact_regex_character_class(&pattern) {
-            characters
-        } else {
+        let Some(characters) = java_exact_regex_character_class(&pattern) else {
             continue;
         };
         let name = node_text(&name, src).trim().to_string();
@@ -2786,7 +2780,6 @@ fn collect_java_type_aliases(root: Node<'_>, src: &[u8], kinds: &[&str]) -> Vec<
             work_stack.push(child);
         }
     }
-    expand_java_platform_supertypes(&mut aliases);
     dedup_type_aliases(&mut aliases);
     aliases
 }
@@ -2941,29 +2934,6 @@ fn push_type_alias(aliases: &mut Vec<TypeAliasBinding>, name: &str, type_name: &
         name: bare_name.to_string(),
         type_name: type_name.to_string(),
     });
-}
-
-fn expand_java_platform_supertypes(aliases: &mut Vec<TypeAliasBinding>) {
-    let original = aliases.clone();
-    for alias in original {
-        for supertype in java_platform_supertypes(&alias.type_name) {
-            push_type_alias(aliases, &alias.name, supertype);
-        }
-    }
-}
-
-fn java_platform_supertypes(type_name: &str) -> &'static [&'static str] {
-    match type_name {
-        "CallableStatement" => &["PreparedStatement", "Statement"],
-        "PreparedStatement" => &["Statement"],
-        "Statement" => &[],
-        "ArrayList" | "LinkedList" | "Vector" => &["List", "Collection", "Iterable"],
-        "HashSet" | "LinkedHashSet" | "TreeSet" => &["Set", "Collection", "Iterable"],
-        "HashMap" | "LinkedHashMap" | "TreeMap" => &["Map"],
-        "List" | "Set" => &["Collection", "Iterable"],
-        "Collection" => &["Iterable"],
-        _ => &[],
-    }
 }
 
 /// Drop duplicate `TypeAliasBinding` entries while preserving source-order.
@@ -3724,130 +3694,6 @@ fn java_catch_clause_types(clause: Node<'_>, src: &[u8]) -> Vec<String> {
         }
     }
     out
-}
-
-/// Rewrite Java's reflection chain `Class.forName("X").getMethod("Y")
-/// .invoke(target, args...)` into a synthesized direct call to
-/// `X.Y(args...)` so the resolver narrows it like a normal method
-/// dispatch. Walks `flow_events` in source order, building an alias
-/// map of `var → "Class"` and `var → "Class.Method"` entries from
-/// constant-string `forName` / `getMethod` calls. When it sees
-/// `m.invoke(target, ...args)` where `m` resolves to a known
-/// "Class.Method", rewrites the Call's `name` to that target and
-/// drops the leading `target` (or `null`) arg so the remaining args
-/// align with the real method's parameters.
-///
-/// Dynamic forms (computed string args) stay unrewritten and the
-/// `reflection: Unsupported` rule continues to gate them at rulepack
-/// load time. This is the Java analog of P2.1's Python rewrite.
-fn rewrite_java_reflection_chain(events: &mut [bonsai_lang_api::FlowEvent]) {
-    use bonsai_lang_api::FlowEvent;
-    use std::collections::HashMap;
-    // var name -> what it points at, accumulated across the walk:
-    //   "c" -> "Sink"        (after `Class<?> c = Class.forName("Sink")`)
-    //   "m" -> "Sink.run"    (after `Method m = c.getMethod("run", ...)`)
-    let mut reflective_alias: HashMap<String, String> = HashMap::new();
-    for event in events.iter_mut() {
-        match event {
-            FlowEvent::Assign {
-                target,
-                source_call,
-                source_call_args,
-                ..
-            } => {
-                // Only the constant-string forms are usable; the second
-                // arg / dynamic forms stay unrewritten.
-                let Some(callee) = source_call else { continue };
-                let Some(literal_arg) = source_call_args.first() else {
-                    continue;
-                };
-                let Some(literal_text) = strip_java_string_quotes(literal_arg) else {
-                    continue;
-                };
-                // `Class.forName("X")` — record `target -> "X"`.
-                let is_for_name = callee == "Class.forName" || callee.ends_with(".forName");
-                if is_for_name {
-                    reflective_alias.insert(target.clone(), literal_text);
-                    continue;
-                }
-                // `<receiver>.getMethod("Y")` — chain only if receiver
-                // is itself a Class<?> we tracked. Result: `target ->
-                // "<receiver-class>.Y"`.
-                if let Some(get_method_receiver) = callee.strip_suffix(".getMethod") {
-                    if let Some(class_name) = reflective_alias.get(get_method_receiver) {
-                        let chained = format!("{class_name}.{literal_text}");
-                        reflective_alias.insert(target.clone(), chained);
-                    }
-                }
-            }
-            FlowEvent::Call {
-                name, receiver, args, ..
-            } => {
-                // `<receiver>.invoke(target_or_null, arg1, ..)` is the
-                // Java reflection escape hatch. Rewrite when the
-                // receiver was bound to a known Method handle.
-                let Some(receiver_name) = receiver.as_deref() else {
-                    continue;
-                };
-                if !name.ends_with(".invoke") {
-                    continue;
-                }
-                let Some(target_class_method) = reflective_alias.get(receiver_name) else {
-                    continue;
-                };
-                // Rewrite the call to point at the underlying method.
-                name.clone_from(target_class_method);
-                // `m.invoke(target, a, b)` ⇒ `Class.Method(a, b)`:
-                // drop the first arg (the receiver / `null` static
-                // target) so the remaining args line up with the real
-                // method's parameter list.
-                if !args.is_empty() {
-                    args.remove(0);
-                }
-                // Update `receiver` to the class part of the qualified
-                // name, e.g. "Sink.run" -> Some("Sink"). The resolver
-                // uses this to anchor the dispatch.
-                *receiver = target_class_method
-                    .rsplit_once('.')
-                    .map(|(class_part, _)| class_part.to_string());
-            }
-            // Reflection chains can hide inside any control-flow
-            // container — keep walking.
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                rewrite_java_reflection_chain(then_events);
-                rewrite_java_reflection_chain(else_events);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                rewrite_java_reflection_chain(body);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                rewrite_java_reflection_chain(body);
-                rewrite_java_reflection_chain(catch_events);
-                rewrite_java_reflection_chain(finally_events);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Strip surrounding `"..."` quotes from a Java string-literal arg-text
-/// representation, returning the inner content. Returns `None` for any
-/// non-literal form (variable, expression, single-quoted char, etc.).
-fn strip_java_string_quotes(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
-        return Some(trimmed[1..trimmed.len() - 1].to_string());
-    }
-    None
 }
 
 fn extract_java_package(root: Node<'_>, src: &[u8]) -> Option<Vec<String>> {

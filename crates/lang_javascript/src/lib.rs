@@ -8,9 +8,9 @@ use bonsai_lang_api::{
     },
     AdapterContext, AdapterError, CallTargetExtraction, CharacterConstraintDomain, CharacterConstraintFact,
     CharacterConstraintOutput, ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclIndex,
-    DynamicKeyFilterFact, FiniteLiteralSelectionFact, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, SameOriginPathConstraintFact,
-    SourceFileRepresentation, StaticScalarValue, StaticStringMapEntry, StaticStringMapFact,
+    DynamicKeyFilterFact, FiniteLiteralSelectionFact, GrammarHandler, GuardedPredicateCallFact,
+    GuardedValueConstraintFact, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, SourceFileRepresentation, StaticScalarValue, StaticStringMapEntry, StaticStringMapFact,
     StringCompositionFact, StringCompositionPart, TypeAliasBinding, Visibility, EMPTY_HANDLER,
 };
 use bonsai_lang_api::{CallArg, CallKind, DeclKind, FlowEvent};
@@ -548,7 +548,7 @@ pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, fi
         src,
     );
     index.string_compositions = ecmascript_string_compositions(tree, file, src);
-    index.same_origin_path_constraints = ecmascript_same_origin_path_constraints(index, tree, file, src);
+    index.guarded_value_constraints = ecmascript_guarded_value_constraints(index, tree, file, src);
     index.dynamic_key_filters = ecmascript_dynamic_key_filters(index, tree, file, src);
     bonsai_lang_api::kit::populate_call_argument_static_values(
         index,
@@ -965,12 +965,12 @@ fn ecmascript_exact_place(node: Node<'_>, src: &[u8]) -> Option<String> {
     }
 }
 
-fn ecmascript_same_origin_path_constraints(
+fn ecmascript_guarded_value_constraints(
     index: &DeclIndex,
     tree: &Tree,
     file: FileId,
     src: &[u8],
-) -> Vec<SameOriginPathConstraintFact> {
+) -> Vec<GuardedValueConstraintFact> {
     let mut facts = Vec::new();
     let mut guarded_expressions = collect_kinds(tree, &["return_statement"])
         .into_iter()
@@ -1008,35 +1008,48 @@ fn ecmascript_same_origin_path_constraints(
             continue;
         };
         for (input_param_index, parameter) in decl.params.iter().enumerate() {
-            if !ecmascript_expression_is_exact_place(consequence, parameter, src)
-                || ecmascript_static_string_literal(alternative, src).as_deref() != Some("/")
-            {
+            if !ecmascript_expression_is_exact_place(consequence, parameter, src) {
                 continue;
             }
+            let Some(fallback) = ecmascript_static_string_literal(alternative, src) else {
+                continue;
+            };
             let mut terms = Vec::new();
             ecmascript_collect_logical_terms(condition, "&&", src, &mut terms);
-            let requires_absolute_path = terms
-                .iter()
-                .any(|term| ecmascript_starts_with_literal(*term, parameter, "/", false, src));
-            let rejects_scheme_relative_path = terms
-                .iter()
-                .any(|term| ecmascript_starts_with_literal(*term, parameter, "//", true, src));
-            if requires_absolute_path && rejects_scheme_relative_path {
-                // Exactly one leading slash excludes both a URI scheme and
-                // an authority component. The frontend derives those facts
-                // from the two parsed predicates rather than API-name policy.
-                facts.push(SameOriginPathConstraintFact {
-                    function_span: decl.span,
-                    guard_span: span_of(file, &expression),
-                    input_place: parameter.clone(),
-                    input_param_index: Some(input_param_index),
-                    provider_call: None,
-                    rejects_scheme: true,
-                    rejects_authority: true,
-                    requires_absolute_path,
-                    rejects_scheme_relative_path,
-                });
+            let mut predicate_calls = Vec::new();
+            for term in terms {
+                if let Some((call_expression_span, required_result)) =
+                    ecmascript_guarded_predicate_call(term, parameter, file, src)
+                {
+                    predicate_calls.push(GuardedPredicateCallFact {
+                        call_expression_span,
+                        required_result,
+                    });
+                }
             }
+            if predicate_calls.is_empty() {
+                continue;
+            }
+            predicate_calls.sort_by_key(|fact| {
+                (
+                    fact.call_expression_span.start,
+                    fact.call_expression_span.end,
+                    fact.required_result,
+                )
+            });
+            predicate_calls.dedup();
+            facts.push(GuardedValueConstraintFact {
+                function_span: decl.span,
+                guard_span: span_of(file, &expression),
+                input_place: parameter.clone(),
+                input_param_index: Some(input_param_index),
+                provider_call: None,
+                predicate_calls,
+                accepted_prefixes: Vec::new(),
+                rejected_prefixes: Vec::new(),
+                rejected_components: Vec::new(),
+                static_fallbacks: vec![fallback],
+            });
         }
     }
     facts.sort_by_key(|fact| (fact.function_span.start, fact.guard_span.start));
@@ -1077,53 +1090,42 @@ fn ecmascript_expression_is_exact_place(expression: Node<'_>, place: &str, src: 
     expression.kind() == "identifier" && node_text(&expression, src).trim() == place
 }
 
-fn ecmascript_starts_with_literal(
+fn ecmascript_guarded_predicate_call(
     expression: Node<'_>,
     receiver: &str,
-    literal: &str,
-    negated: bool,
+    file: FileId,
     src: &[u8],
-) -> bool {
+) -> Option<(bonsai_common::Span, bool)> {
     let expression = unwrap_ecmascript_expression(expression);
-    let call = if negated {
-        if expression.kind() != "unary_expression" {
-            return false;
-        }
+    let (call, negated) = if expression.kind() == "unary_expression" {
         let Some(argument) = expression.child_by_field_name("argument") else {
-            return false;
+            return None;
         };
         if src
             .get(expression.start_byte()..argument.start_byte())
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .is_none_or(|prefix| prefix.trim() != "!")
         {
-            return false;
+            return None;
         }
-        unwrap_ecmascript_expression(argument)
+        (unwrap_ecmascript_expression(argument), true)
     } else {
-        expression
+        (expression, false)
     };
     if call.kind() != "call_expression" {
-        return false;
+        return None;
     }
     let Some(function) = call.child_by_field_name("function") else {
-        return false;
+        return None;
     };
     if function.kind() != "member_expression"
         || function
             .child_by_field_name("object")
             .is_none_or(|object| !ecmascript_expression_is_exact_place(object, receiver, src))
-        || function
-            .child_by_field_name("property")
-            .is_none_or(|property| node_text(&property, src).trim() != "startsWith")
     {
-        return false;
+        return None;
     }
-    let arguments = ecmascript_call_arguments(call);
-    let [argument] = arguments.as_slice() else {
-        return false;
-    };
-    ecmascript_static_string_literal(*argument, src).as_deref() == Some(literal)
+    Some((span_of(file, &call), !negated))
 }
 
 fn ecmascript_dynamic_key_filters(
@@ -1132,6 +1134,7 @@ fn ecmascript_dynamic_key_filters(
     file: FileId,
     src: &[u8],
 ) -> Vec<DynamicKeyFilterFact> {
+    let object_intrinsic_unshadowed = ecmascript_bindings(tree, src).object_intrinsic_unshadowed;
     let mut facts = Vec::new();
     for function in collect_kinds(tree, &["function_declaration"]) {
         let function_span = span_of(file, &function);
@@ -1145,9 +1148,16 @@ fn ecmascript_dynamic_key_filters(
             facts.push(fact);
         }
         for block in named_descendants_of_kind(body, "statement_block") {
-            let Some(fact) =
-                ecmascript_dynamic_key_filter_in_block(tree, function, body, block, decl, file, src)
-            else {
+            let Some(fact) = ecmascript_dynamic_key_filter_in_block(
+                tree,
+                function,
+                body,
+                block,
+                decl,
+                file,
+                src,
+                object_intrinsic_unshadowed,
+            ) else {
                 continue;
             };
             facts.push(fact);
@@ -1166,6 +1176,7 @@ fn ecmascript_dynamic_key_filter_in_block(
     decl: &bonsai_lang_api::Decl,
     file: FileId,
     src: &[u8],
+    object_intrinsic_unshadowed: bool,
 ) -> Option<DynamicKeyFilterFact> {
     let statements = named_children(block);
     let [output_decl, loop_node, return_node] = statements.as_slice() else {
@@ -1201,7 +1212,7 @@ fn ecmascript_dynamic_key_filter_in_block(
     let iteration = loop_node.child_by_field_name("right")?;
     let iteration_call = unwrap_ecmascript_expression(iteration);
     let (iteration_receiver, iteration_method) = ecmascript_member_call(iteration_call, src)?;
-    if iteration_receiver != "Object" || iteration_method != "entries" {
+    if !object_intrinsic_unshadowed || iteration_receiver != "Object" || iteration_method != "entries" {
         return None;
     }
     let iteration_args = ecmascript_call_arguments(iteration_call);
@@ -5065,7 +5076,6 @@ fn enrich_getter_property_sources_in_events(events: &mut [FlowEvent], projection
 
 fn enrich_getter_sources_in_call_arg(arg: &mut CallArg, projections: &[JsGetterProjection]) {
     let mut candidates = Vec::new();
-    candidates.push(arg.value_text.clone());
     if let Some(place) = arg.place.as_deref() {
         candidates.push(place.to_string());
     }

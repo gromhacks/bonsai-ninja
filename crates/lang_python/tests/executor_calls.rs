@@ -65,7 +65,7 @@ fn walk(events: &[FlowEvent], out: &mut Vec<(String, Vec<String>)>) {
 }
 
 #[test]
-fn asyncio_to_thread_emits_call_to_callable_argument() {
+fn asyncio_to_thread_remains_an_exact_runtime_call() {
     let db = db_with(
         r#"
 import asyncio
@@ -79,9 +79,12 @@ def _read_bytes(p):
     );
     let calls = calls_in(&db, "load_asset");
     assert!(
-        calls
-            .iter()
-            .any(|(name, args)| name == "_read_bytes" && args == &vec!["path".to_string()]),
-        "expected synthetic _read_bytes(path) call from asyncio.to_thread, got {calls:?}"
+        calls.iter().any(|(name, args)| name == "asyncio.to_thread"
+            && args == &vec!["_read_bytes".to_string(), "path".to_string()]),
+        "expected the compiler-lowered asyncio.to_thread call, got {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|(name, _)| name == "_read_bytes"),
+        "the adapter must not invent an _read_bytes call from library semantics: {calls:?}"
     );
 }

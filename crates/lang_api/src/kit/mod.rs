@@ -176,6 +176,25 @@ pub fn normalize_variadic_builtin_flow(
     start_builtins: &[&str],
     read_builtins: &[&str],
 ) {
+    let read_sources = events
+        .iter()
+        .filter_map(|event| {
+            let FlowEvent::Call { span, name, args, .. } = event else {
+                return None;
+            };
+            if !adapter_builtin_matches(name, read_builtins) {
+                return None;
+            }
+            let argument = args.first()?;
+            let source = argument.place.clone().or_else(|| {
+                let [source] = argument.source_names.as_slice() else {
+                    return None;
+                };
+                Some(source.clone())
+            })?;
+            Some((*span, name.clone(), source))
+        })
+        .collect::<Vec<_>>();
     let original = std::mem::take(events);
     for mut event in original {
         match &mut event {
@@ -224,6 +243,7 @@ pub fn normalize_variadic_builtin_flow(
         }
 
         if let FlowEvent::Assign {
+            span,
             source_name,
             source_call,
             source_call_args,
@@ -236,12 +256,22 @@ pub fn normalize_variadic_builtin_flow(
                 .as_deref()
                 .is_some_and(|name| adapter_builtin_matches(name, read_builtins))
             {
-                let list = source_call_args.first().cloned();
-                source_name.clone_from(&list);
+                let list = read_sources.iter().find_map(|(call_span, call_name, source)| {
+                    (source_call.as_deref() == Some(call_name.as_str())
+                        && span.file == call_span.file
+                        && span.start <= call_span.start
+                        && call_span.end <= span.end)
+                        .then(|| source.clone())
+                });
+                let Some(list) = list else {
+                    events.push(event);
+                    continue;
+                };
+                *source_name = Some(list.clone());
                 *source_call = None;
                 source_call_args.clear();
                 source_names.clear();
-                source_names.extend(list);
+                source_names.push(list);
                 *value_kind = Some(crate::AssignValueKind::Compound);
             }
         }
@@ -388,12 +418,20 @@ fn event_must_evaluate_before(
     candidate_precedes_consumer: bool,
     loop_body_phase_order: bool,
 ) -> bool {
-    if let FlowEvent::Assign {
-        span: candidate_span,
-        target,
-        ..
-    } = candidate
-    {
+    let candidate_write = match candidate {
+        FlowEvent::Assign {
+            span: candidate_span,
+            target,
+            ..
+        }
+        | FlowEvent::AggregateAssign {
+            span: candidate_span,
+            target,
+            ..
+        } => Some((*candidate_span, target.as_str())),
+        _ => None,
+    };
+    if let Some((candidate_span, target)) = candidate_write {
         let consumer_span = flow_event_span(consumer);
         // A write is available to a later lexical use, or when the assignment
         // expression itself is nested inside the consumer. The inverse
@@ -413,7 +451,7 @@ fn event_must_evaluate_before(
             && candidate_precedes_consumer
             && candidate_span.file == consumer_span.file
             && spans_are_disjoint;
-        let is_nested_in_consumer = span_strictly_contains(consumer_span, *candidate_span);
+        let is_nested_in_consumer = span_strictly_contains(consumer_span, candidate_span);
         if (precedes_in_source || precedes_in_lowered_loop_order || is_nested_in_consumer)
             && flow_event_reads_name(consumer, target)
         {
@@ -1911,6 +1949,9 @@ pub struct GrammarHandler {
     /// call. It must classify exactly the same nodes as
     /// `pseudo_call_extractor` when that pseudo call has a receiver.
     pub pseudo_call_receiver_extractor: Option<PseudoCallReceiverExtractor>,
+    /// Receiver role for pseudo calls emitted by this grammar. Ordinary call
+    /// expressions always use [`crate::CallReceiverRole::Value`].
+    pub pseudo_call_receiver_role: crate::CallReceiverRole,
     /// Optional exact classifier for argument passing syntax. Languages that
     /// do not expose caller-visible write-back leave this unset and receive
     /// ordinary value semantics.
@@ -2305,6 +2346,7 @@ pub const EMPTY_HANDLER: GrammarHandler = GrammarHandler {
     syntax_events_extractor: None,
     call_encoded_control_flow_extractor: None,
     pseudo_call_receiver_extractor: None,
+    pseudo_call_receiver_role: crate::CallReceiverRole::Value,
     argument_passing_mode_extractor: None,
     expression_value_kind_extractor: None,
     literal_value_kinds: &[],
@@ -2651,6 +2693,7 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
     syntax_events_extractor: None,
     call_encoded_control_flow_extractor: None,
     pseudo_call_receiver_extractor: None,
+    pseudo_call_receiver_role: crate::CallReceiverRole::Value,
     argument_passing_mode_extractor: None,
     expression_value_kind_extractor: None,
     literal_value_kinds: &[
@@ -5104,6 +5147,15 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8], handler: &GrammarHandl
         if node_is_value_free_expression(n, src, handler) {
             continue;
         }
+        // A callable literal is a value passed to the enclosing expression,
+        // not an eagerly evaluated scalar expression. Its parameters and
+        // body-local names belong to that callable's own scope; callback
+        // environment/capture lowering handles them when the callable is
+        // invoked. Descending here would leak a closure parameter such as
+        // `value` into the source set of `items = values.map(|value| ...)`.
+        if is_closure_arg(n.kind(), handler) {
+            continue;
+        }
         if handler.variadic_parameter_kinds.contains(&n.kind()) {
             out.push(SYNTHETIC_VARARGS_PARAM.to_string());
             continue;
@@ -5378,8 +5430,8 @@ fn leftmost_value_base(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> 
     None
 }
 
-fn receiver_base_from_text(text: &str) -> Option<String> {
-    let trimmed = text.trim();
+fn receiver_base_from_place(place: &str) -> Option<String> {
+    let trimmed = place.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -5822,6 +5874,7 @@ pub const fn with_fn_kinds_and_implicit_receivers(
         syntax_events_extractor: GENERIC_HANDLER.syntax_events_extractor,
         call_encoded_control_flow_extractor: GENERIC_HANDLER.call_encoded_control_flow_extractor,
         pseudo_call_receiver_extractor: GENERIC_HANDLER.pseudo_call_receiver_extractor,
+        pseudo_call_receiver_role: GENERIC_HANDLER.pseudo_call_receiver_role,
         argument_passing_mode_extractor: GENERIC_HANDLER.argument_passing_mode_extractor,
         expression_value_kind_extractor: GENERIC_HANDLER.expression_value_kind_extractor,
         literal_value_kinds: GENERIC_HANDLER.literal_value_kinds,
@@ -6121,21 +6174,27 @@ pub fn extract_call_receiver_facts(
         let receiver_and_span = if handler.is_call(node.kind()) {
             call_receiver_node(&node, src, handler)
                 .zip(parsed_call_target(&node, src, handler))
-                .map(|(receiver, target)| (receiver, span_of(file, &target.node)))
+                .map(|(receiver, target)| {
+                    (
+                        receiver,
+                        span_of(file, &target.node),
+                        crate::CallReceiverRole::Value,
+                    )
+                })
         } else {
             handler
                 .pseudo_call_receiver_extractor
                 .and_then(|extract| extract(node, src))
-                .map(|receiver| (receiver, span_of(file, &node)))
+                .map(|receiver| (receiver, span_of(file, &node), handler.pseudo_call_receiver_role))
         };
-        if let Some((receiver, call_span)) = receiver_and_span {
+        if let Some((receiver, call_span, role)) = receiver_and_span {
             let value_flow =
                 expression_flow::expression_flow_from_node_with_handler(receiver, file, src, handler);
             facts.push(crate::CallReceiverFact {
                 call_span,
                 receiver_span: span_of(file, &receiver),
                 value_flow,
-                role: crate::CallReceiverRole::Value,
+                role,
                 static_value: None,
             });
         }
@@ -6683,7 +6742,7 @@ fn lower_lambda_declarations(lowering: &CallableLowering<'_>, defs: &mut Vec<cra
                     lambda.start_position().column + 1
                 )
             },
-            |name_node| callable_binding_name_from_node(&name_node, lowering.src),
+            |name_node| callable_binding_name_from_node(&name_node, lowering.src, lowering.handler),
         );
         if name.is_empty() {
             continue;
@@ -7424,7 +7483,7 @@ pub fn decl_index_from_tree_with_handler(
         character_constraints: Vec::new(),
         guarded_value_filters: Vec::new(),
         predicate_returns: Vec::new(),
-        same_origin_path_constraints: Vec::new(),
+        guarded_value_constraints: Vec::new(),
         compiler_guards: Vec::new(),
         dynamic_key_filters: Vec::new(),
         runtime_type_narrowings,
@@ -7435,52 +7494,24 @@ pub fn decl_index_from_tree_with_handler(
     }
 }
 
-fn callable_binding_name_from_text(text: &str) -> String {
-    let trimmed = text.trim().trim_end_matches(';').trim();
-    if trimmed.is_empty() {
-        return String::new();
+fn callable_binding_name_from_node(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> String {
+    // A callable assigned to an addressable place is named by that complete
+    // compiler place (`app.init`, `$handler`, `obj.field`), not by a token
+    // recovered from rendered source and not by the place's root binding.
+    if let Some(place) = argument_place(node, src, handler) {
+        return place;
     }
-    if looks_like_bare_identifier(trimmed.trim_start_matches('$')) {
-        return trimmed.to_string();
+    let targets = binding_targets_from_pattern_node(node, src, handler);
+    if let [target] = targets.as_slice() {
+        return target.clone();
     }
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    for ch in trimmed.chars() {
-        if ch == '$' || ch == '_' || ch.is_alphanumeric() {
-            current.push(ch);
-        } else if !current.is_empty() {
-            tokens.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    tokens
-        .into_iter()
-        .rev()
-        .find(|token| {
-            let bare = token.trim_start_matches('$');
-            !bare.is_empty()
-                && looks_like_bare_identifier(bare)
-                && !matches!(bare, "my" | "our" | "local" | "let" | "var" | "const")
-        })
-        .unwrap_or_default()
-}
-
-fn callable_binding_name_from_node(node: &Node<'_>, src: &[u8]) -> String {
-    // C-family callable declarators can contain type identifiers after the
-    // actual binding (`void (^f)(NSString *)`). Text-token fallback walks
-    // from the end and would name that block `NSString`; the CST declarator
-    // chain puts the binding identifier first and proves `f` exactly.
-    if node.kind().contains("declarator") {
-        if let Some(identifier) = first_identifier_descendant(*node) {
-            let name = node_text(&identifier, src).trim();
-            if !name.is_empty() {
-                return name.to_string();
-            }
-        }
-    }
-    callable_binding_name_from_text(node_text(node, src))
+    // A lambda stored under a statically named aggregate field is a callable
+    // declaration owned by that exact field (`{ handler: value => ... }`).
+    // The field key is not a variable-binding pattern, so the binding pass
+    // correctly rejects it. Recover the callable's structural name only when
+    // the adapter's Tree-sitter vocabulary proves that the key itself is
+    // static. Computed/dynamic keys continue to fail closed.
+    expression_flow::exact_static_field_name(*node, src, handler).unwrap_or_default()
 }
 
 fn has_ancestor_kind(node: &Node<'_>, kinds: &[&str]) -> bool {
@@ -8088,11 +8119,9 @@ fn normalize_subscript_name(node: &Node<'_>, src: &[u8], handler: &GrammarHandle
 ///   target:
 ///     attribute: [req, query]
 /// ```
-/// rely on the adapter surfacing `req.query`-style reads. Without this
-/// walker, `extract_call_refs` only emits callee refs — every
-/// `kind: read target.attribute: [...]` rule in the pack (Express
-/// `req.query`, Flask `request.args`, PHP `_GET`, Rails `params`, …)
-/// would silently never match, regardless of what the rulepack says.
+/// rely on the adapter surfacing `object.field`-style reads. Without this
+/// walker, `extract_call_refs` only emits callee refs, so declarative read
+/// rules could never match member access regardless of their rule data.
 pub fn extract_read_write_refs(
     tree: &tree_sitter::Tree,
     file: FileId,
@@ -8143,14 +8172,11 @@ pub fn extract_read_write_refs(
             scope: None,
             resolved: None,
         });
-        // DSL idiom (Ruby / Python controller frameworks): a bare
-        // identifier used as a subscript receiver — `params[:token]`,
-        // `params['x']`, `session['user']` — is semantically an
-        // implicit-receiver method call in Ruby / a framework DSL in
-        // Python. Emit a matching `Call` ref so rules shaped as
-        // `kind: call callee.name: params` fire — without this, rules
-        // that target Rack/Sinatra/Rails/Flask controller params never
-        // see the access at all.
+        // Some language frontends prove that a bare identifier used as a
+        // subscript receiver also has an implicit call surface. Emit that
+        // matching `Call` ref only when the active adapter declares the
+        // capability; rule data decides whether any particular receiver has
+        // security meaning.
         if handler.subscript_base_call_refs
             && bonsai_common::qualified_name_owner(&name).is_none()
             && is_bare_identifier_base(&node, handler)
@@ -8165,8 +8191,9 @@ pub fn extract_read_write_refs(
         }
     }
 
-    // PHP `$_GET` / `$argv` style superglobals: surface the bare name
-    // (minus leading `$`) so rules like `name: _GET` match.
+    // For adapter-declared sigil globals, surface the normalized bare name in
+    // addition to the parsed spelling. Rule data assigns any API/security
+    // meaning to that value.
     for node in collect_kinds(tree, handler.sigil_variable_kinds) {
         if is_call_callee(&node, handler) {
             continue;
@@ -8425,7 +8452,7 @@ fn emit_invoked_lambda_param_bindings(
         };
         let mut source_names = arg.source_names.clone();
         if let Some(place) = arg.place.as_deref() {
-            push_value_text_source_name(&mut source_names, place);
+            push_place_source_name(&mut source_names, place);
         }
         source_names.sort();
         source_names.dedup();
@@ -8445,17 +8472,17 @@ fn emit_invoked_lambda_param_bindings(
     }
 }
 
-fn push_value_text_source_name(out: &mut Vec<String>, value: &str) {
-    let value = value.trim();
-    if value.is_empty() {
+fn push_place_source_name(out: &mut Vec<String>, place: &str) {
+    let place = place.trim();
+    if place.is_empty() {
         return;
     }
-    if let Some(base) = receiver_base_from_text(value) {
+    if let Some(base) = receiver_base_from_place(place) {
         push_receiver_base_variants(out, &base);
         return;
     }
-    if looks_like_bare_identifier(value) {
-        out.push(value.to_string());
+    if looks_like_bare_identifier(place) {
+        out.push(place.to_string());
     }
 }
 

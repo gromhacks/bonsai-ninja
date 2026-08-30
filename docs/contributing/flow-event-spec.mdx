@@ -124,10 +124,11 @@ Adapter obligations:
   Tree-sitter. `Truthy { operand }` preserves the exact tested property/value;
   a falsey literal fallback does not turn a dynamic projection into a constant.
 - `then_events` / `else_events` must be **non-overlapping** even when
-  the grammar emits a single flat block. The kit helper
-  `repair_branch_events_by_else_keyword` partitions on the literal
-  `else` keyword for C-like grammars; adapters in match/case-heavy
-  languages call `split_match_arms_in_branch_events`.
+  the grammar emits a single flat block. Adapters partition exact parsed arm
+  nodes; match/case-heavy languages may call
+  `split_match_arms_in_branch_events` with adapter-derived arm spans. Neither
+  the kit nor downstream analysis searches rendered condition/body text for
+  a branch keyword.
 - A branch with no else arm leaves `else_events` empty. Adapters MUST
   NOT synthesize an empty `else: pass` arm — the engine treats empty
   arms as "no constraint", not "no effect".

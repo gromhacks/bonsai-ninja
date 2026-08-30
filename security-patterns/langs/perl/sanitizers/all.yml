@@ -716,8 +716,9 @@
     callee:
       name: cookie
   constraints:
-  - any_arg_matches_regex: |-
-      HttpOnly|Secure
+  - keyword_arg_equals:
+      name: -HttpOnly
+      value: "1"
   match_examples:
   - name: perl.cookie.cgi_cookie_httponly_secure example
     code: |

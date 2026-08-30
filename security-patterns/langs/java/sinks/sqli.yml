@@ -3,23 +3,22 @@
   language: java
   tag: sql-injection
   severity: critical
+  packages: [java.sql, javax.sql]
   cwe:
   - CWE-89
   match:
     kind: call
     callee:
-      attribute:
-      - Statement
-      - executeQuery
+      regex: '(?:^|\.)(?:Statement|PreparedStatement|CallableStatement)\.executeQuery$'
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: generated shape example
-    code: "class App {\n  void handle(String input) throws Exception {\n    Statement.executeQuery(input);\n\
+    code: "import java.sql.Statement;\nclass App {\n  void handle(Statement stmt, String input) throws Exception {\n    stmt.executeQuery(input);\n\
       \  }\n}\n"
   - name: arg tainted literal negative
-    code: "class App {\n  void handle(String input) throws Exception {\n    Statement.executeQuery(\"\
+    code: "import java.sql.Statement;\nclass App {\n  void handle(Statement stmt, String input) throws Exception {\n    stmt.executeQuery(\"\
       select 1\");\n  }\n}\n"
     expect_no_match: true
   description: "JDBC Statement.executeQuery with string-built SQL - use PreparedStatement."
@@ -37,9 +36,7 @@
   match:
     kind: call
     callee:
-      attribute:
-      - Statement
-      - execute
+      regex: '(?:^|\.)(?:Statement|PreparedStatement|CallableStatement)\.execute$'
   constraints:
   - arg_tainted:
       index: 0
@@ -69,23 +66,22 @@
   language: java
   tag: sql-injection
   severity: critical
+  packages: [java.sql, javax.sql]
   cwe:
   - CWE-89
   match:
     kind: call
     callee:
-      attribute:
-      - Statement
-      - executeUpdate
+      regex: '(?:^|\.)(?:Statement|PreparedStatement|CallableStatement)\.executeUpdate$'
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: generated shape example
-    code: "class App {\n  void handle(String input) throws Exception {\n    Statement.executeUpdate(input);\n\
+    code: "import java.sql.Statement;\nclass App {\n  void handle(Statement stmt, String input) throws Exception {\n    stmt.executeUpdate(input);\n\
       \  }\n}\n"
   - name: arg tainted literal negative
-    code: "class App {\n  void handle(String input) throws Exception {\n    Statement.executeUpdate(\"\
+    code: "import java.sql.Statement;\nclass App {\n  void handle(Statement stmt, String input) throws Exception {\n    stmt.executeUpdate(\"\
       update users set active = true\");\n  }\n}\n"
     expect_no_match: true
   description: JDBC Statement.executeUpdate with string-built SQL.
@@ -94,25 +90,25 @@
   language: java
   tag: sql-injection
   severity: high
+  packages: [java.sql, javax.sql]
   cwe:
   - CWE-89
   match:
     kind: call
     callee:
-      attribute:
-      - Statement
-      - addBatch
+      regex: '(?:^|\.)(?:Statement|PreparedStatement|CallableStatement)\.addBatch$'
   constraints:
   - arg_tainted:
       index: 0
+  - receiver_type_in: [Statement, PreparedStatement, CallableStatement]
   taint_semantics:
     taint_receiver_from_args: true
   match_examples:
   - name: generated shape example
-    code: "class App {\n  void handle(String input) throws Exception {\n    Statement.addBatch(input);\n\
+    code: "import java.sql.Statement;\nclass App {\n  void handle(Statement stmt, String input) throws Exception {\n    stmt.addBatch(input);\n\
       \  }\n}\n"
   - name: arg tainted literal negative
-    code: "class App {\n  void handle(String input) throws Exception {\n    Statement.addBatch(\"\
+    code: "import java.sql.Statement;\nclass App {\n  void handle(Statement stmt, String input) throws Exception {\n    stmt.addBatch(\"\
       insert into audit values (1)\");\n  }\n}\n"
     expect_no_match: true
   description: JDBC Statement.addBatch accumulates raw SQL.
@@ -121,14 +117,13 @@
   language: java
   tag: sql-injection
   severity: high
+  packages: [java.sql, javax.sql]
   cwe:
   - CWE-89
   match:
     kind: call
     callee:
-      attribute:
-      - Statement
-      - executeBatch
+      regex: '(?:^|\.)(?:Statement|PreparedStatement|CallableStatement)\.executeBatch$'
   constraints:
   - receiver_tainted: true
   match_examples:

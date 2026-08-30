@@ -20,6 +20,8 @@
 //!   content fingerprints (file contents, package-set bytes).
 //! - [`fnv1a_low32`] — low 32 bits of a 64-bit digest, kept for the
 //!   legacy 8-hex IDs (`E:`, `N:`, `R:`, `T:`, `P:`).
+//! - [`edge_id_low32`] — stable call-edge digest shared by persisted lookup
+//!   indexes and human renderers.
 //! - [`Hasher`] — streaming builder for composite digests where the
 //!   input is built from heterogeneous parts (e.g. paging cursor IDs).
 
@@ -58,6 +60,23 @@ pub fn fnv1a_names64(names: &[String]) -> u64 {
 #[must_use]
 pub fn fnv1a_names_low32(names: &[String]) -> u32 {
     fnv1a_low32(fnv1a_names64(names))
+}
+
+/// Stable low-32 digest for one resolved call edge.
+///
+/// This preserves the original public `E:xxxxxxxx` token contract while
+/// allowing callgraph persistence to index the same identity without
+/// depending on the browse/rendering crate.
+#[must_use]
+pub fn edge_id_low32(
+    caller_name: &str,
+    callee_name: &str,
+    call_file: &str,
+    call_line: u32,
+    call_column: u32,
+) -> u32 {
+    let call_site_token = format!("{call_file}:{call_line}:{call_column}");
+    fnv1a_low32(fnv1a_str_slice64(&[caller_name, callee_name, &call_site_token]))
 }
 
 /// FNV-1a-64 digest of a single byte slice. No separators, no

@@ -58,7 +58,7 @@
         attribute: [strings, HasPrefix]
       rejection_check_arg_index: 0
       rejection_prefix_arg_index: 1
-      rejection_boundary_places: [os.PathSeparator]
+      rejection_boundary_places: [os.PathSeparator, path/filepath.Separator]
       rejection_boundary_wrappers: [{name: string}]
       rejected_exact_values: [".."]
   match:
@@ -112,7 +112,7 @@
         attribute: [strings, HasPrefix]
       rejection_check_arg_index: 0
       rejection_prefix_arg_index: 1
-      rejection_boundary_places: [os.PathSeparator]
+      rejection_boundary_places: [os.PathSeparator, path/filepath.Separator]
       rejection_boundary_wrappers: [{name: string}]
       rejected_exact_values: [".."]
   match:
@@ -166,7 +166,7 @@
         attribute: [strings, HasPrefix]
       rejection_check_arg_index: 0
       rejection_prefix_arg_index: 1
-      rejection_boundary_places: [os.PathSeparator]
+      rejection_boundary_places: [os.PathSeparator, path/filepath.Separator]
       rejection_boundary_wrappers: [{name: string}]
       rejected_exact_values: [".."]
   match:
@@ -628,7 +628,7 @@
         attribute: [strings, HasPrefix]
       rejection_check_arg_index: 0
       rejection_prefix_arg_index: 1
-      rejection_boundary_places: [os.PathSeparator]
+      rejection_boundary_places: [os.PathSeparator, path/filepath.Separator]
       rejection_boundary_wrappers: [{name: string}]
       rejected_exact_values: [".."]
   match:

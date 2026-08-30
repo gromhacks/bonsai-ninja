@@ -179,14 +179,14 @@ diagnostic-only.
 | elixir | Unsupported | n/a | n/a |
 | erlang | Unsupported | n/a | n/a |
 | go | n/a | Unsupported | Unsupported |
-| java | n/a | Partial | Unsupported |
+| java | n/a | Unsupported | Unsupported |
 | javascript | n/a | n/a | n/a |
 | kotlin | n/a | Unsupported | Unsupported |
 | lua | n/a | n/a | Unsupported |
 | objc | Partial | Unsupported | Unsupported |
 | perl | n/a | Unsupported | n/a |
 | php | n/a | Unsupported | n/a |
-| python | n/a | Partial | Unsupported |
+| python | n/a | Unsupported | Unsupported |
 | ruby | n/a | Unsupported | n/a |
 | rust | Partial | n/a | Partial |
 | scala | n/a | Unsupported | n/a |
@@ -238,8 +238,10 @@ A plain-English read of where each language stands today:
   level.
 - **Perl / PHP / Python / Ruby** - Standard class + module analysis.
   Decorators (Python) and modifiers (PHP attributes, Ruby method
-  visibility) feed the resolver. Dynamic dispatch (Python `getattr`,
-  Ruby `send`) is opaque when the method name is computed.
+  visibility) feed the resolver. Reflection-driven dispatch (Python
+  `getattr`, Ruby `send`) remains explicit unresolved evidence unless exact
+  first-party or rulepack typing facts prove a target; a literal method name
+  alone does not justify an invented workspace edge.
 - **Rust** - Trait-based dispatch analysis. `Box<dyn Trait>` calls emit
   semantic virtual edges only when the receiver set is proven. Rust uses
   `Result` rather than exceptions. The adapter lowers grammar-proven macro

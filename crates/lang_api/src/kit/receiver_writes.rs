@@ -216,15 +216,13 @@ fn collect_receiver_field_writes_inner(
                 span,
                 target,
                 source_name,
-                source_call_args,
                 source_names,
                 ..
             } => {
                 if !place_matches_receiver(target, receiver_names, receiver_prefixes) {
                     continue;
                 }
-                let source_values =
-                    assignment_source_values(source_name.as_ref(), source_call_args, source_names);
+                let source_values = assignment_source_values(source_name.as_ref(), source_names);
                 let mut source_param_indices = Vec::new();
                 for (idx, variants) in param_keys.iter().enumerate() {
                     if receiver_idx == Some(idx) {
@@ -955,16 +953,12 @@ fn first_declared_field<'tree>(node: Node<'tree>, field_names: &[&str]) -> Optio
         .find_map(|field| node.child_by_field_name(field))
 }
 
-fn assignment_source_values(
-    source_name: Option<&String>,
-    source_call_args: &[String],
-    source_names: &[String],
-) -> Vec<String> {
+fn assignment_source_values(source_name: Option<&String>, source_names: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(source_name) = source_name {
         out.extend(name_variants(source_name));
     }
-    for source in source_call_args.iter().chain(source_names.iter()) {
+    for source in source_names {
         out.extend(name_variants(source));
     }
     out.sort();

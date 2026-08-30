@@ -1233,8 +1233,15 @@ impl Project {
 
     #[must_use]
     pub fn diagnostics_report(&self) -> DiagnosticsReport {
+        self.diagnostics_report_with_progress(|| {})
+    }
+
+    /// Build the exact workspace diagnostics report while notifying the
+    /// caller after each compiler object is completed.
+    #[must_use]
+    pub fn diagnostics_report_with_progress(&self, mut on_file: impl FnMut()) -> DiagnosticsReport {
         self.refresh_from_disk_best_effort();
-        let diagnostics = self.workspace.diagnostics();
+        let diagnostics = self.workspace.diagnostics_with_progress(|_| on_file());
         let workspace_languages = self.workspace_languages();
         DiagnosticsReport {
             diagnostic_files: self.diagnostic_file_rows(&diagnostics),

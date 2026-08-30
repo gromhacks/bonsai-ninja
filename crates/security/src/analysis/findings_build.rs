@@ -157,6 +157,11 @@ pub(super) struct FindingBuildContext<'a> {
     /// Exact direct callers for guard proofs whose safety depends on every
     /// call-site argument. Prepared once on the serial planning thread.
     pub(super) static_provenance_call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
+    /// Matcher-approved callback execution contracts compiled before IDG
+    /// construction. Guard attribution uses only their exact call spans,
+    /// callback identities, and positional forwarding roles; provider/API
+    /// meaning remains in rule data.
+    pub(super) callback_invocations: &'a [bonsai_taint::CallbackInvocation],
     /// Spans of every call site the engine recorded as carrying
     /// tainted argument flow on this source's graph. A sanitizer
     /// only credits the finding when its match span overlaps one
@@ -435,6 +440,8 @@ pub(super) fn make_finding(
         context.global.as_ref(),
         context.call_graph,
         context.static_provenance_call_graph,
+        context.callback_invocations,
+        &context.taint_path,
         context.sink_func,
         snk,
         skr,

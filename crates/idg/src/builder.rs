@@ -37,7 +37,7 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
 use bonsai_common::{FuncId, Precision, Span};
 use bonsai_factstore::{StrId, StringPoolBuilder};
-use bonsai_lang_api::CallKind;
+use bonsai_lang_api::{CallKind, CallReceiverRole};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::sync::{Arc, LazyLock};
@@ -3460,23 +3460,26 @@ fn stitch_candidate_receiver_inputs(
     // separate from positional args so explicit arguments keep
     // their source-language order.
     if matches!(site.call_kind, CallKind::Method) {
+        let receiver_is_projection = matches!(site.receiver_role, CallReceiverRole::Projection);
         if let (Some(receiver_arg_node), Some(receiver_idx)) =
             (site.receiver_arg_node, endpoints.receiver_param_index())
         {
-            if let Some(&callee_param_node) = endpoints.params().get(receiver_idx) {
-                if !callee_param_node.is_sentinel() {
-                    let caller_call_arg = caller_remap.get(receiver_arg_node);
-                    if !caller_call_arg.is_sentinel() {
-                        let edge = IdgEdge::inter_call_arg(
-                            caller_call_arg,
-                            callee_param_node,
-                            site.site.0,
-                            cand.precision,
-                            cand.edge_kind,
-                        );
-                        place_inter_edge(caller_seg, endpoints.segment, edge, ws);
-                        if let Some(stats) = stats.as_deref_mut() {
-                            stats.inter_edges = stats.inter_edges.saturating_add(1);
+            if !receiver_is_projection {
+                if let Some(&callee_param_node) = endpoints.params().get(receiver_idx) {
+                    if !callee_param_node.is_sentinel() {
+                        let caller_call_arg = caller_remap.get(receiver_arg_node);
+                        if !caller_call_arg.is_sentinel() {
+                            let edge = IdgEdge::inter_call_arg(
+                                caller_call_arg,
+                                callee_param_node,
+                                site.site.0,
+                                cand.precision,
+                                cand.edge_kind,
+                            );
+                            place_inter_edge(caller_seg, endpoints.segment, edge, ws);
+                            if let Some(stats) = stats.as_deref_mut() {
+                                stats.inter_edges = stats.inter_edges.saturating_add(1);
+                            }
                         }
                     }
                 }
@@ -3495,19 +3498,21 @@ fn stitch_candidate_receiver_inputs(
                     is_ancestor_dispatch,
                     false,
                 );
-                push_receiver_field_arg_site(
-                    field_arg_sites,
-                    caller,
-                    caller_seg,
-                    cand.func,
-                    endpoints.segment,
-                    &actual_receiver,
-                    param_name,
-                    site.site.0,
-                    cand.precision,
-                    cand.edge_kind,
-                    None,
-                );
+                if !receiver_is_projection {
+                    push_receiver_field_arg_site(
+                        field_arg_sites,
+                        caller,
+                        caller_seg,
+                        cand.func,
+                        endpoints.segment,
+                        &actual_receiver,
+                        param_name,
+                        site.site.0,
+                        cand.precision,
+                        cand.edge_kind,
+                        None,
+                    );
+                }
                 push_nested_receiver_field_arg_sites(
                     field_arg_sites,
                     caller,
@@ -3521,24 +3526,29 @@ fn stitch_candidate_receiver_inputs(
                     cand.precision,
                     cand.edge_kind,
                 );
-                if let Some(receiver_type) = resolver.receiver_type_for(cand.func) {
-                    push_receiver_field_arg_site(
-                        field_arg_sites,
-                        caller,
-                        caller_seg,
-                        cand.func,
-                        endpoints.segment,
-                        &actual_receiver,
-                        param_name,
-                        site.site.0,
-                        cand.precision,
-                        cand.edge_kind,
-                        Some(receiver_type.as_str()),
-                    );
+                if !receiver_is_projection {
+                    if let Some(receiver_type) = resolver.receiver_type_for(cand.func) {
+                        push_receiver_field_arg_site(
+                            field_arg_sites,
+                            caller,
+                            caller_seg,
+                            cand.func,
+                            endpoints.segment,
+                            &actual_receiver,
+                            param_name,
+                            site.site.0,
+                            cand.precision,
+                            cand.edge_kind,
+                            Some(receiver_type.as_str()),
+                        );
+                    }
                 }
             }
         }
-        if endpoints.receiver_param_index().is_none() && !endpoints.receiver_consumer_nodes().is_empty() {
+        if !receiver_is_projection
+            && endpoints.receiver_param_index().is_none()
+            && !endpoints.receiver_consumer_nodes().is_empty()
+        {
             if let Some(receiver_arg_node) = site.receiver_arg_node {
                 let caller_call_arg = caller_remap.get(receiver_arg_node);
                 if !caller_call_arg.is_sentinel() {
@@ -3602,19 +3612,27 @@ fn stitch_candidate_receiver_inputs(
                         // the source base would incorrectly ask for a deeper
                         // suffix and strand the scalar field.
                         if seen.insert((actual_receiver.clone(), receiver_root.to_string())) {
-                            push_receiver_field_arg_site(
-                                field_arg_sites,
-                                caller,
-                                caller_seg,
-                                cand.func,
-                                endpoints.segment,
-                                &actual_receiver,
-                                receiver_root,
-                                site.site.0,
-                                cand.precision,
-                                cand.edge_kind,
-                                None,
-                            );
+                            // Ordinary methods may consume the complete
+                            // receiver value. A property/getter projection
+                            // instead forwards only compiler-proven fields;
+                            // mapping its root would collapse a tainted object
+                            // into every independent property before the
+                            // getter body selects one.
+                            if !receiver_is_projection {
+                                push_receiver_field_arg_site(
+                                    field_arg_sites,
+                                    caller,
+                                    caller_seg,
+                                    cand.func,
+                                    endpoints.segment,
+                                    &actual_receiver,
+                                    receiver_root,
+                                    site.site.0,
+                                    cand.precision,
+                                    cand.edge_kind,
+                                    None,
+                                );
+                            }
                             push_nested_receiver_field_arg_sites(
                                 field_arg_sites,
                                 caller,

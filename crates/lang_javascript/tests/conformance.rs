@@ -812,7 +812,7 @@ function query(value) {
 }
 
 #[test]
-fn same_origin_helper_requires_single_slash_and_static_fallback() {
+fn guarded_value_helper_preserves_predicate_polarity_without_api_meaning() {
     use bonsai_lang_api::LanguageAdapter;
 
     let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
@@ -821,7 +821,7 @@ fn same_origin_helper_requires_single_slash_and_static_fallback() {
             r#"return typeof target === "string" && target.startsWith("/") && !target.startsWith("//") ? target : "/";"#,
             true,
         ),
-        (r#"return target.startsWith("/") ? target : "/";"#, false),
+        (r#"return target.startsWith("/") ? target : "/";"#, true),
         (
             r#"return target.startsWith("/") && !target.startsWith("//") ? target : target;"#,
             false,
@@ -832,10 +832,10 @@ fn same_origin_helper_requires_single_slash_and_static_fallback() {
         let file = ws.db().vfs().all_files()[0];
         let index = ws.db().decl_index(file).expect("JavaScript declaration index");
         assert_eq!(
-            !index.same_origin_path_constraints.is_empty(),
+            !index.guarded_value_constraints.is_empty(),
             expected,
             "{body}: {:#?}",
-            index.same_origin_path_constraints
+            index.guarded_value_constraints
         );
     }
 
@@ -845,11 +845,26 @@ fn same_origin_helper_requires_single_slash_and_static_fallback() {
     let file = ws.db().vfs().all_files()[0];
     let index = ws.db().decl_index(file).expect("JavaScript declaration index");
     assert_eq!(
-        index.same_origin_path_constraints.len(),
+        index.guarded_value_constraints.len(),
         1,
         "expression-bodied arrows must lower the same exact guard fact: {:#?}",
-        index.same_origin_path_constraints
+        index.guarded_value_constraints
     );
+    let fact = &index.guarded_value_constraints[0];
+    assert!(fact.accepted_prefixes.is_empty());
+    assert!(fact.rejected_prefixes.is_empty());
+    assert_eq!(fact.predicate_calls.len(), 2);
+    assert!(fact.predicate_calls.iter().any(|call| call.required_result));
+    assert!(fact.predicate_calls.iter().any(|call| !call.required_result));
+
+    let source = r#"const select = (target) => target.isAccepted("local") && !target.isRejected("remote") ? target : "fallback";"#;
+    let ws = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new())],
+        &[("generic.js", source)],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+    assert_eq!(index.guarded_value_constraints.len(), 1);
 }
 
 #[test]
@@ -958,6 +973,38 @@ function shallow(value) {
     assert_eq!(
         fact.rejected_exact_values,
         ["__proto__", "constructor", "prototype"]
+    );
+}
+
+#[test]
+fn shadowed_object_entries_is_not_a_runtime_intrinsic() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "shadowed.js",
+            r#"
+const BLOCKED = new Set(["__proto__"]);
+function clean(value) {
+  const Object = { entries(input) { return input; } };
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (BLOCKED.has(key)) continue;
+    out[key] = clean(item);
+  }
+  return out;
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+    assert!(
+        index.dynamic_key_filters.is_empty(),
+        "a local Object binding must shadow the runtime intrinsic: {:#?}",
+        index.dynamic_key_filters
     );
 }
 

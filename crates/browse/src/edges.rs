@@ -8,7 +8,7 @@
 use crate::common::format_span;
 use bonsai_callgraph::{CallEdge, EdgeKind, ResolvedCallGraph};
 use bonsai_common::{FuncId, Span, SymbolId};
-use bonsai_hash::fnv1a_names_low32;
+use bonsai_hash::edge_id_low32;
 use bonsai_lang_api::{CallArg, Decl, FlowEvent};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -100,9 +100,10 @@ pub fn compute_edge_id(
     call_line: u32,
     call_column: u32,
 ) -> String {
-    let call_site_token = format!("{call_file}:{call_line}:{call_column}");
-    let tokens = [caller_name.to_string(), callee_name.to_string(), call_site_token];
-    format!("E:{:08x}", fnv1a_names_low32(&tokens))
+    format!(
+        "E:{:08x}",
+        edge_id_low32(caller_name, callee_name, call_file, call_line, call_column)
+    )
 }
 
 /// Collect matching resolved call edges in the workspace. Cheap filters over
@@ -112,6 +113,11 @@ pub fn compute_edge_id(
 /// its result set even though exact coverage still examines every candidate
 /// edge.
 pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
+    if let Some((edge_id, digest)) = f.edge_id.and_then(parse_edge_id_digest) {
+        if let Some(records) = dump_persisted_edge_id(ws, f, edge_id, digest) {
+            return records;
+        }
+    }
     // The partition visitor is exact for filtered and unfiltered reports and
     // keeps broad diagnostic dumps bounded by one compiler file relation.
     // Falling back to the resident graph is required only when the validated
@@ -137,8 +143,13 @@ pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
             if !edge_names_match_filters(&caller_decl.name, &callee_decl.name, f) {
                 return None;
             }
+            if f.edge_id.is_some_and(|id| {
+                edge_id_from_names_and_span(ws, &caller_decl.name, &callee_decl.name, edge.span) != id
+            }) {
+                return None;
+            }
             let record = edge_record_from_decls(ws, caller_decl, callee_decl, edge);
-            f.edge_id.is_none_or(|id| record.edge_id == id).then_some(record)
+            Some(record)
         })
         .collect();
     records.sort_by(|a, b| {
@@ -149,6 +160,41 @@ pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
             .then_with(|| a.call_line.cmp(&b.call_line))
     });
     records
+}
+
+fn parse_edge_id_digest(edge_id: &str) -> Option<(&str, u32)> {
+    let hex = edge_id.strip_prefix("E:")?;
+    (hex.len() == 8)
+        .then(|| u32::from_str_radix(hex, 16).ok())
+        .flatten()
+        .map(|digest| (edge_id, digest))
+}
+
+fn dump_persisted_edge_id(
+    ws: &Workspace,
+    filters: &EdgesFilters<'_>,
+    expected_id: &str,
+    digest: u32,
+) -> Option<Vec<EdgeRecord>> {
+    let matches = ws.persisted_callgraph_edges_by_stable_digest(digest)?;
+    let matches = matches.ok()?;
+    let mut records = Vec::with_capacity(matches.len());
+    for (caller, callee, edge) in matches {
+        if !edge.precision.is_semantic()
+            || filters
+                .precision
+                .is_some_and(|precision| !precision.matches(edge.precision))
+            || !edge_names_match_filters(caller.name.as_ref(), callee.name.as_ref(), filters)
+        {
+            continue;
+        }
+        let record = edge_record_from_nodes(ws, &caller, &callee, &edge);
+        if record.edge_id == expected_id {
+            records.push(record);
+        }
+    }
+    sort_edge_records(&mut records);
+    Some(records)
 }
 
 fn dump_persisted_filtered_edges(ws: &Workspace, filters: &EdgesFilters<'_>) -> Option<Vec<EdgeRecord>> {
@@ -214,10 +260,14 @@ fn dump_persisted_filtered_edges(ws: &Workspace, filters: &EdgesFilters<'_>) -> 
             if !edge_names_match_filters(caller.name.as_ref(), callee.name.as_ref(), filters) {
                 continue;
             }
-            let record = edge_record_from_nodes(ws, caller, callee, edge);
-            if filters.edge_id.is_none_or(|edge_id| edge_id == record.edge_id) {
-                records.push(record);
+            if filters.edge_id.is_some_and(|edge_id| {
+                edge_id_from_names_and_span(ws, caller.name.as_ref(), callee.name.as_ref(), edge.span)
+                    != edge_id
+            }) {
+                continue;
             }
+            let record = edge_record_from_nodes(ws, caller, callee, edge);
+            records.push(record);
         }
     })?;
     if visited.is_err() || failure.is_some() {
@@ -278,6 +328,15 @@ fn edge_record_from_nodes(
         evidence: edge.provenance.evidence().to_string(),
         confidence: edge.provenance.confidence(),
     }
+}
+
+/// Compute the stable id from compact callgraph metadata before hydrating the
+/// source-backed edge preview. Stable-id drilldown otherwise reads the source
+/// span for every edge merely to reject all but one candidate, which turns
+/// `show E:<id>` into a multi-million-source-read operation on large graphs.
+fn edge_id_from_names_and_span(ws: &Workspace, caller_name: &str, callee_name: &str, span: Span) -> String {
+    let (call_file, call_line, call_column) = format_span(&span, ws);
+    compute_edge_id(caller_name, callee_name, &call_file, call_line, call_column)
 }
 
 fn edge_names_match_filters(caller_name: &str, callee_name: &str, filters: &EdgesFilters<'_>) -> bool {

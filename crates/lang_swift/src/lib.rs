@@ -6,16 +6,16 @@ use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_from_tree_with_handler,
     extract_imports_via,
     kit::{
-        canonical_simple_type_name, collect_kinds, collect_receiver_field_writes,
-        collect_receiver_state_sources, first_identifier_like_child, first_named_child_of_kind,
+        collect_kinds, collect_receiver_field_writes, collect_receiver_state_sources,
+        expression_flow_from_node_with_handler, first_identifier_like_child, first_named_child_of_kind,
         language_from_pack, node_at_span, node_text, parse_with, span_of, walk_flow_events,
     },
     AdapterContext, AdapterError, ArgumentPassingMode, AssignValueKind, AssignmentNodeSemantics, CallKind,
-    CallTargetExtraction, Decl, DeclIndex, DeclKind, ExpressionPlaceExtraction, FiniteLiteralSelectionFact,
-    FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, ModifierVocabulary, PatternSourceProjection,
-    ProjectedPatternBindingSite, StaticScalarValue, StringCompositionFact, StringCompositionPart,
-    TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
+    CallReceiverRole, CallTargetExtraction, Decl, DeclIndex, DeclKind, ExpressionPlaceExtraction,
+    FiniteLiteralSelectionFact, FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary,
+    PatternSourceProjection, ProjectedPatternBindingSite, StaticScalarValue, StringCompositionFact,
+    StringCompositionPart, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::Node;
 
@@ -576,6 +576,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     call_target_extractor: Some(swift_call_target),
     pseudo_call_extractor: Some(swift_property_getter_call),
     pseudo_call_receiver_extractor: Some(swift_property_getter_receiver),
+    pseudo_call_receiver_role: CallReceiverRole::Projection,
     argument_wrapper_kinds: &["tuple_expression", "value_argument"],
     argument_name_field_names: &["name"],
     argument_value_field_names: &["value"],
@@ -1098,32 +1099,39 @@ fn normalize_swift_property_call_assignments(idx: &mut DeclIndex) {
         .collect::<Vec<_>>();
     let mut overrides = Vec::new();
     for fact in &mut idx.assignment_values {
+        // Ordinary call syntax already identifies its outer value producer
+        // directly from the RHS CST. A nested call beneath a terminal Swift
+        // property getter is not the complete RHS producer, however: its
+        // exact callee span is strictly smaller than the value span and the
+        // adapter-emitted getter fact below must own the assignment instead.
+        if fact.direct_call_name.is_some() && fact.direct_call_span == Some(fact.value_span) {
+            continue;
+        }
         // Only the parsed RHS value can produce the assignment. The complete
         // assignment span also contains target-side navigation and, for
         // pattern bindings, the entire guarded arm/body. Searching that span
         // can therefore select an unrelated getter or later call.
-        let outer = summaries
-            .iter()
-            .filter(|call| {
-                call.span.file == fact.value_span.file
-                    && call.span.start >= fact.value_span.start
-                    && call.span.end <= fact.value_span.end
-            })
-            .max_by_key(|call| call.span.len());
+        let outer = summaries.iter().find(|call| call.span == fact.value_span);
         let Some(call) = outer else { continue };
         fact.direct_call_name = Some(call.name.clone());
-        fact.direct_call_receiver = idx
+        let receiver = idx
             .call_receivers
             .iter()
             .find(|receiver| receiver.call_span == call.span)
-            .and_then(|receiver| {
+            .cloned();
+        fact.direct_call_span = Some(call.span);
+        fact.direct_call_receiver = call.receiver.clone().or_else(|| {
+            receiver.as_ref().and_then(|receiver| {
                 receiver
                     .value_flow
                     .projection
                     .as_ref()
                     .map(bonsai_lang_api::ExpressionProjection::canonical_place)
                     .or_else(|| receiver.value_flow.place.clone())
-            });
+            })
+        });
+        fact.direct_call_receiver_span = receiver.as_ref().map(|receiver| receiver.receiver_span);
+        fact.direct_call_receiver_flow = receiver.map(|receiver| receiver.value_flow);
         if !fact.call_sites.contains(&call.span) {
             fact.call_sites.push(call.span);
             fact.call_sites.sort_unstable();
@@ -1140,6 +1148,7 @@ fn normalize_swift_property_call_assignments(idx: &mut DeclIndex) {
 struct SwiftCallSummary {
     span: Span,
     name: String,
+    receiver: Option<String>,
     args: Vec<String>,
 }
 
@@ -1148,9 +1157,16 @@ fn swift_call_summaries(events: &[FlowEvent]) -> Vec<SwiftCallSummary> {
     fn visit(events: &[FlowEvent], calls: &mut Vec<SwiftCallSummary>) {
         for event in events {
             match event {
-                FlowEvent::Call { span, name, args, .. } => calls.push(SwiftCallSummary {
+                FlowEvent::Call {
+                    span,
+                    name,
+                    receiver,
+                    args,
+                    ..
+                } => calls.push(SwiftCallSummary {
                     span: *span,
                     name: name.clone(),
+                    receiver: receiver.clone(),
                     args: args.iter().map(|arg| arg.value_text.clone()).collect(),
                 }),
                 FlowEvent::Branch {
@@ -2566,11 +2582,9 @@ fn strip_swift_import_attribute_prefixes(text: &str) -> &str {
 /// `["function_declaration"]`, so `property_declaration` nodes (which
 /// is what computed properties parse to in tree-sitter-swift) aren't
 /// indexed and a bare property read `let c = cmd` resolves to
-/// nothing. Each synthesized Method's body is modeled as a `Call+
-/// Return` chain when the computed body is a simple dotted member
-/// access (`data.cmd`) so the 1-level receiver-field bridge can
-/// thread taint to the record/component accessor; otherwise it's a
-/// single `Return` with the body text.
+/// nothing. A simple member projection remains an exact value place in the
+/// synthesized return; it must not be converted into a call merely because
+/// Swift executes an accessor behind that syntax.
 fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
     let mut next = idx.defs.iter().map(|d| d.symbol.raw()).max().map_or(1, |m| m + 1);
     let mut synthesized: Vec<Decl> = Vec::new();
@@ -2589,11 +2603,14 @@ fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, t
         // Extract the body expression text. For
         // `computed_property > statements > <expr>`, take the
         // statements' last named child.
-        let body_text = swift_computed_body_text(computed, src);
-        let Some(body_text) = body_text else {
+        let Some(body_expression) = swift_computed_body_expression(computed) else {
             continue;
         };
-        let body_span = span_of(file, &computed);
+        let body_text = node_text(&body_expression, src).trim().to_string();
+        if body_text.is_empty() {
+            continue;
+        }
+        let body_span = span_of(file, &body_expression);
         // Find enclosing class/struct/protocol/extension decl for
         // parent + module path + visibility lookup.
         let Some((parent, module_path, visibility)) = swift_enclosing_type_decl(idx, prop, file) else {
@@ -2609,56 +2626,27 @@ fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, t
         }) {
             continue;
         }
-        // Body shape: Call+Return when it's a dotted member access,
-        // else single Return with the body text.
-        let flow_events =
-            if let Some((mut call_receiver, mut call_name)) = swift_dotted_member_access_parts(&body_text) {
-                let receiver_type = swift_lookup_member_type(prop, &call_receiver, src);
-                // A sibling stored property is an instance field even when
-                // Swift source omits `self.`. Keep the explicit compiler
-                // place so the constructor's `self.<field>` write and this
-                // later read share one IDG identity. The enclosing AST's
-                // property declaration proves membership; no field spelling
-                // is special-cased.
-                if receiver_type.is_some() && !call_receiver.starts_with("self.") {
-                    call_receiver = format!("self.{call_receiver}");
-                    call_name = format!("self.{call_name}");
-                }
-                let receiver_types = receiver_type.into_iter().collect();
-                vec![
-                    FlowEvent::Call {
-                        span: body_span,
-                        name: call_name.clone(),
-                        receiver: Some(call_receiver),
-                        receiver_types,
-                        call_kind: CallKind::Method,
-                        args: Vec::new(),
-                    },
-                    FlowEvent::Return {
-                        span: body_span,
-                        value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
-                        value_text: Some(format!("{call_name}()")),
-                        value_name: None,
-                        value_flow: bonsai_lang_api::ExpressionFlow {
-                            call_sites: vec![body_span],
-                            ..Default::default()
-                        },
-                    },
-                ]
-            } else {
-                let qualified = if body_text.starts_with("self.") || body_text.starts_with("super.") {
-                    body_text.clone()
-                } else {
-                    format!("self.{body_text}")
-                };
-                vec![FlowEvent::Return {
-                    span: body_span,
-                    value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
-                    value_text: Some(qualified.clone()),
-                    value_name: Some(qualified.clone()),
-                    value_flow: bonsai_lang_api::ExpressionFlow::from_place(qualified),
-                }]
-            };
+        let mut value_flow = expression_flow_from_node_with_handler(body_expression, file, src, &HANDLER);
+        if let Some(place) = value_flow.place.clone() {
+            let base = value_flow
+                .projection
+                .as_ref()
+                .map(|projection| projection.base.as_str())
+                .unwrap_or(place.as_str());
+            if !matches!(base, "self" | "super") && swift_has_sibling_property(prop, base, src) {
+                value_flow = bonsai_lang_api::ExpressionFlow::from_place(format!("self.{place}"));
+            }
+        }
+        let value_name = value_flow.place.clone();
+        let flow_events = vec![FlowEvent::Return {
+            span: body_span,
+            value_kind: HANDLER
+                .expression_value_kind(body_expression, src)
+                .or(Some(bonsai_lang_api::AssignValueKind::Compound)),
+            value_text: Some(body_text),
+            value_name,
+            value_flow,
+        }];
         // Name span: the simple_identifier under `name: pattern`.
         let name_span = swift_property_name_span(prop, file).unwrap_or(body_span);
         // This declaration is synthesized after the kit's ordinary callable
@@ -2798,14 +2786,7 @@ fn swift_property_name(prop: Node<'_>, src: &[u8]) -> Option<String> {
             return Some(name.to_string());
         }
     }
-    // Fallback: the pattern node's full text (covers destructure /
-    // tuple-pattern shapes that don't hit the wrapper above).
-    let n = node_text(&pattern, src).trim();
-    if n.is_empty() {
-        None
-    } else {
-        Some(n.to_string())
-    }
+    None
 }
 
 /// Span of a `property_declaration`'s name token, for stamping the
@@ -2815,61 +2796,43 @@ fn swift_property_name_span(prop: Node<'_>, file: FileId) -> Option<Span> {
     if let Some(identifier) = first_named_child_of_kind(&pattern, "simple_identifier") {
         return Some(span_of(file, &identifier));
     }
-    Some(span_of(file, &pattern))
+    None
 }
 
-/// Extract the expression text from a `computed_property` body —
-/// `var cmd: String { data.cmd }` → `"data.cmd"`. tree-sitter-swift
-/// wraps the body in `statements`; the last named child is the
-/// expression we want.
-fn swift_computed_body_text(computed: Node<'_>, src: &[u8]) -> Option<String> {
+/// Return the exact expression node from a `computed_property` body.
+/// Tree-sitter Swift wraps it in `statements`; retaining the node lets every
+/// later value/call fact use grammar fields instead of reparsing rendered
+/// source.
+fn swift_computed_body_expression(computed: Node<'_>) -> Option<Node<'_>> {
     let mut cw = computed.walk();
     let stmts = computed.children(&mut cw).find(|c| c.kind() == "statements")?;
     let mut sw = stmts.walk();
     let named: Vec<_> = stmts.children(&mut sw).filter(|c| c.is_named()).collect();
-    let expr = named.last().copied()?;
-    let text = node_text(&expr, src).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    named.last().copied()
 }
 
-/// If `body` is a simple dotted member-access of identifiers
-/// (`data.cmd`, optionally prefixed `self.`/`super.`), return
-/// `(receiver, call_name)` so the synthesized accessor can model
-/// it as a method call. Returns `None` for non-trivial bodies
-/// (literals, calls, complex expressions) — those keep the
-/// Return-only fallback.
-fn swift_dotted_member_access_parts(body: &str) -> Option<(String, String)> {
-    let trimmed = body.trim();
-    // Strip the implicit-receiver qualifier if present; the inner
-    // text must be a pure dotted identifier path of ≥2 segments.
-    let inner = trimmed
-        .strip_prefix("self.")
-        .or_else(|| trimmed.strip_prefix("super."))
-        .unwrap_or(trimmed);
-    let segments: Vec<&str> = inner.split('.').collect();
-    if segments.len() < 2 {
-        return None;
-    }
-    // Every segment must be a Rust-ASCII-style identifier.
-    for seg in &segments {
-        if seg.is_empty()
-            || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            || !seg
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        {
-            return None;
+/// Prove that an unqualified computed-property value starts at an instance
+/// member declared in the same nominal body. The proof is purely lexical CST
+/// membership; no capitalization convention or external API spelling is
+/// involved.
+fn swift_has_sibling_property(prop: Node<'_>, member: &str, src: &[u8]) -> bool {
+    let mut ancestor = prop.parent();
+    let mut body = None;
+    while let Some(node) = ancestor {
+        if node.kind() == "class_body" {
+            body = Some(node);
+            break;
         }
+        ancestor = node.parent();
     }
-    // Receiver = up-to-last-dot; call_name = full dotted form
-    // (mirrors Java's `data.cmd` shape: receiver="data" name="data.cmd").
-    let last_dot = inner.rfind('.')?;
-    Some((inner[..last_dot].to_string(), inner.to_string()))
+    let Some(body) = body else {
+        return false;
+    };
+    let mut cursor = body.walk();
+    let found = body.named_children(&mut cursor).any(|child| {
+        child.kind() == "property_declaration" && swift_property_name(child, src).as_deref() == Some(member)
+    });
+    found
 }
 
 /// Walk up from `node` to the enclosing nominal/protocol declaration and
@@ -2895,50 +2858,6 @@ fn swift_enclosing_type_decl(
                 .map(|d| (Some(d.symbol), d.module_path.clone(), d.visibility));
         }
         cur = n.parent();
-    }
-    None
-}
-
-/// Find a sibling stored-property/let-binding named `member` in the
-/// enclosing Swift type and return its canonical declared type.
-fn swift_lookup_member_type(prop: Node<'_>, member: &str, src: &[u8]) -> Option<String> {
-    let mut cur = prop.parent();
-    let mut type_node = None;
-    while let Some(n) = cur {
-        if matches!(n.kind(), "class_declaration" | "protocol_declaration") {
-            type_node = Some(n);
-            break;
-        }
-        cur = n.parent();
-    }
-    let type_node = type_node?;
-    let body = first_named_child_of_kind(&type_node, "class_body")?;
-    let mut bw = body.walk();
-    for child in body.children(&mut bw) {
-        if child.kind() != "property_declaration" {
-            continue;
-        }
-        let Some(name) = swift_property_name(child, src) else {
-            continue;
-        };
-        if name != member {
-            continue;
-        }
-        // Look for `type_annotation > <type>` sibling.
-        let mut cw = child.walk();
-        for c in child.children(&mut cw) {
-            if c.kind() == "type_annotation" {
-                let mut tw = c.walk();
-                for t in c.children(&mut tw) {
-                    if t.is_named() && t.kind() != "type_annotation" {
-                        let raw = node_text(&t, src).trim();
-                        if !raw.is_empty() {
-                            return Some(canonical_simple_type_name(raw).to_string());
-                        }
-                    }
-                }
-            }
-        }
     }
     None
 }
@@ -3319,7 +3238,7 @@ fn synthesize_swift_constructor_field_assignments(
                         let Some(arg) = args.get(*param_idx) else {
                             continue;
                         };
-                        let source_names = swift_value_source_names_from_text(arg);
+                        let source_names = arg.clone();
                         if source_names.is_empty() {
                             continue;
                         }
@@ -3347,22 +3266,10 @@ fn swift_constructor_call_for_assignment_event(
     events: &[FlowEvent],
     event_index: usize,
     constructor_field_params: &std::collections::HashMap<String, Vec<(usize, String)>>,
-) -> Option<(String, Vec<String>)> {
-    let FlowEvent::Assign {
-        span,
-        source_call,
-        source_call_args,
-        ..
-    } = events.get(event_index)?
-    else {
+) -> Option<(String, Vec<Vec<String>>)> {
+    let FlowEvent::Assign { span, .. } = events.get(event_index)? else {
         return None;
     };
-    if let Some(source_call) = source_call {
-        let constructor = swift_constructor_call_tail(source_call).to_string();
-        if constructor_field_params.contains_key(&constructor) {
-            return Some((constructor, source_call_args.clone()));
-        }
-    }
     events.iter().skip(event_index + 1).find_map(|event| {
         let FlowEvent::Call {
             name,
@@ -3380,7 +3287,19 @@ fn swift_constructor_call_for_assignment_event(
         constructor_field_params.contains_key(&constructor).then(|| {
             (
                 constructor,
-                args.iter().map(|arg| arg.value_text.clone()).collect(),
+                args.iter()
+                    .map(|arg| {
+                        let mut sources = arg.source_names.clone();
+                        if let Some(place) = arg.place.as_ref() {
+                            if !sources.iter().any(|source| source == place) {
+                                sources.push(place.clone());
+                            }
+                        }
+                        sources.sort();
+                        sources.dedup();
+                        sources
+                    })
+                    .collect(),
             )
         })
     })
@@ -3392,40 +3311,4 @@ fn swift_constructor_call_tail(call: &str) -> &str {
         .next_back()
         .map(str::trim)
         .unwrap_or(call.trim())
-}
-
-fn swift_value_source_names_from_text(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let trimmed = text.trim();
-    if trimmed.contains('.') && !trimmed.starts_with('.') {
-        out.push(trimmed.to_string());
-    }
-    let mut token = String::new();
-    for ch in trimmed.chars() {
-        if ch == '_' || ch.is_ascii_alphanumeric() || ch == '$' {
-            token.push(ch);
-        } else {
-            push_swift_value_token(&mut out, &token);
-            token.clear();
-        }
-    }
-    push_swift_value_token(&mut out, &token);
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn push_swift_value_token(out: &mut Vec<String>, token: &str) {
-    let token = token.trim();
-    if token.is_empty()
-        || token == "_"
-        || token.chars().all(|ch| ch.is_ascii_digit())
-        || matches!(
-            token,
-            "true" | "false" | "nil" | "self" | "super" | "return" | "let" | "var"
-        )
-    {
-        return;
-    }
-    out.push(token.to_string());
 }

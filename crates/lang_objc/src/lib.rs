@@ -522,6 +522,7 @@ impl LanguageAdapter for ObjCAdapter {
             ("custom lowering", "parameter_declaration"),
             ("custom lowering", "parameter_list"),
             ("custom lowering", "parenthesized_expression"),
+            ("custom lowering", "parameterized_arguments"),
             ("custom lowering", "pointer_expression"),
             ("custom lowering", "primitive_type"),
             ("custom lowering", "protocol_declaration"),
@@ -2075,17 +2076,22 @@ fn collect_objc_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span,
         }
         let mut cursor = class_node.walk();
         for child in class_node.named_children(&mut cursor) {
-            if child.kind() == "protocol_reference_list" {
-                let raw = node_text(&child, src).trim().to_string();
-                for piece in raw.split(',') {
-                    let cleaned = piece
-                        .trim()
-                        .trim_matches(|c: char| matches!(c, '<' | '>' | ':' | '*'));
-                    if let Some(name) = canonical_objc_base_name(cleaned) {
-                        if !bases.iter().any(|existing| existing == &name) {
-                            bases.push(name);
+            if matches!(
+                child.kind(),
+                "protocol_reference_list" | "parameterized_arguments"
+            ) {
+                let mut protocol_nodes = vec![child];
+                while let Some(protocol_node) = protocol_nodes.pop() {
+                    if matches!(protocol_node.kind(), "identifier" | "type_identifier") {
+                        if let Some(name) = canonical_objc_base_name(node_text(&protocol_node, src)) {
+                            if !bases.iter().any(|existing| existing == &name) {
+                                bases.push(name);
+                            }
                         }
+                        continue;
                     }
+                    let mut protocol_cursor = protocol_node.walk();
+                    protocol_nodes.extend(protocol_node.named_children(&mut protocol_cursor));
                 }
             }
         }

@@ -864,6 +864,21 @@ fn c_variadic_runtime_builtins_bridge_pack_to_extracted_value() {
             declares_new_binding: true,
             value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
         },
+        FlowEvent::Call {
+            span: span(44, 52),
+            name: "va_arg".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(45, 47),
+                name: None,
+                value_text: "ap".to_string(),
+                place: Some("ap".to_string()),
+                source_names: vec!["ap".to_string()],
+            }],
+        },
     ];
     bonsai_lang_api::kit::normalize_variadic_builtin_flow(
         &mut decl.flow_events,

@@ -209,10 +209,10 @@ fn catch_binding_identifier<'a>(node: Node<'a>) -> Option<Node<'a>> {
 /// This field is rendering-only; dataflow comes from
 /// `extract_return_value_flow_with_handler`.
 pub fn extract_return_value_text(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    if let Some(text) = return_statement_value_text(node, src) {
-        return Some(text);
+    if let Some(value) = return_value_node(node) {
+        return Some(node_text(&value, src).trim().to_string());
     }
-    return_value_node(node).map(|n| node_text(&n, src).trim().to_string())
+    return_statement_value_text(node, src)
 }
 
 /// Strip the leading `return` keyword and any trailing `;` from a return

@@ -212,10 +212,15 @@ BONSAI_MEMORY_BUDGET_MB=3072 \
   --test elasticsearch_large_repo -- --nocapture
 ```
 
-The gate checks semantic generation and reuse, lightweight navigation,
-inspect, rule inventories, and production taint. It evaluates latency only
-after each command completes and verifies completeness, so an SLO cannot hide
-truncated semantic work.
+The gate owns every public leaf command in the curated root menu and checks
+fresh/warm structural indexing, complete semantic generation and reuse,
+navigation, diagnostics and debug surfaces, inspect, source/sink analysis,
+rulepack validation, production taint, and a complete streamed native export.
+A help-derived completeness invariant fails when a new public command has no
+scale-test owner. Latency SLOs are evaluated only after successful complete
+output, so an SLO cannot hide truncated semantic work. A separate 900-second
+test-only subprocess watchdog converts a probable hang into a failure with
+captured output; it does not alter product semantics or make partial work pass.
 
 The test's default thresholds are the recorded reference-workstation SLOs.
 The tagged release workflow supplies separately recorded thresholds for the
@@ -234,10 +239,11 @@ measurements live only in
 
 ## Native export changes
 
-The regular large-workspace test does not write the multi-gigabyte native
-export on every runner. Changes to export serialization, compiled graph
-representation, phase release, or export caching also require an artifact-host
-check:
+The local required large-workspace suite writes and structurally validates the
+multi-gigabyte native export. Hosted runners may omit that expensive corpus
+gate when the pinned checkout is unavailable. Changes to export serialization,
+compiled graph representation, phase release, or export caching therefore
+also require this artifact-host check:
 
 ```bash
 BONSAI_MEMORY_BUDGET_MB=2048 MIMALLOC_PURGE_DELAY=0 \

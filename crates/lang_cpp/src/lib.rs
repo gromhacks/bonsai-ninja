@@ -1464,9 +1464,11 @@ fn cpp_field_call_parts(function: Node<'_>, src: &[u8]) -> Option<(String, Strin
 fn cpp_negated_single_call<'tree>(condition: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
     let condition = cpp_unwrap_condition(condition);
     let argument = condition.child_by_field_name("argument")?;
-    (condition.kind() == "unary_expression"
-        && node_text(&condition, src).trim_start().starts_with('!')
-        && argument.kind() == "call_expression")
+    let operator = src
+        .get(condition.start_byte()..argument.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim);
+    (condition.kind() == "unary_expression" && operator == Some("!") && argument.kind() == "call_expression")
         .then_some(argument)
 }
 

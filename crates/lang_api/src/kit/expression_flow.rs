@@ -333,7 +333,11 @@ pub(super) fn static_field_name(node: Node<'_>, src: &[u8], handler: &GrammarHan
 /// configuration facts must not use that fallback because a computed key
 /// such as `{ [name]: value }` may contain one identifier while remaining a
 /// dynamic property name.
-fn exact_static_field_name(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
+pub(super) fn exact_static_field_name(
+    node: Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<String> {
     if let Some(name) = handler
         .static_subscript_key_extractor
         .and_then(|extract| extract(node, src))

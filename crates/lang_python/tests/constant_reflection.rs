@@ -1,10 +1,6 @@
-//! P2.1: Python constant-string reflection rewriting. The Python
-//! adapter rewrites `getattr(obj, "literal", default)` /
-//! `setattr(obj, "literal", value)` / `hasattr(obj, "literal")` into
-//! the synthesized attribute call `obj.literal(...)` so the engine
-//! resolves dispatch by name like a normal method call. Dynamic
-//! forms (`getattr(obj, runtime_name)`) stay unrewritten and the
-//! engine's `reflection: Unsupported` rule continues to gate them.
+//! Python reflection remains exact runtime evidence. A literal attribute name
+//! does not prove that `getattr` or `hasattr` invokes that attribute, and a
+//! `setattr` call is a write rather than a method dispatch.
 
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::{FlowEvent, LanguageRegistry};
@@ -56,24 +52,21 @@ fn walk(events: &[FlowEvent], out: &mut Vec<(String, Option<String>)>) {
 }
 
 #[test]
-fn constant_getattr_rewrites_to_attribute_call() {
+fn constant_getattr_stays_reflective() {
     let src = r#"
 def main(obj, x):
     getattr(obj, "process")(x)
 "#;
     let db = db_with(src);
     let calls = calls_in(&db, "main");
-    let has_rewrite = calls
-        .iter()
-        .any(|(name, recv)| name == "obj.process" && recv.as_deref() == Some("obj"));
     let has_raw_getattr = calls.iter().any(|(name, _)| name == "getattr");
     assert!(
-        has_rewrite,
-        "expected synthesized obj.process call after rewrite, got {calls:?}"
+        has_raw_getattr,
+        "the exact getattr call must remain visible, got {calls:?}"
     );
     assert!(
-        !has_raw_getattr,
-        "raw getattr call must be rewritten away, not duplicated; got {calls:?}"
+        !calls.iter().any(|(name, _)| name == "obj.process"),
+        "getattr must not create an invented obj.process call, got {calls:?}"
     );
 }
 
@@ -94,7 +87,7 @@ def main(obj, name):
 }
 
 #[test]
-fn constant_setattr_rewrites() {
+fn constant_setattr_stays_a_runtime_write_call() {
     let src = r#"
 def main(obj, value):
     setattr(obj, "prop", value)
@@ -102,13 +95,13 @@ def main(obj, value):
     let db = db_with(src);
     let calls = calls_in(&db, "main");
     assert!(
-        calls.iter().any(|(name, _)| name == "obj.prop"),
-        "expected synthesized obj.prop from setattr rewrite, got {calls:?}"
+        calls.iter().any(|(name, _)| name == "setattr") && !calls.iter().any(|(name, _)| name == "obj.prop"),
+        "setattr must remain exact and must not become an invented dispatch: {calls:?}"
     );
 }
 
 #[test]
-fn constant_hasattr_rewrites() {
+fn constant_hasattr_stays_a_runtime_test_call() {
     let src = r#"
 def main(obj):
     if hasattr(obj, "feature"):
@@ -117,14 +110,14 @@ def main(obj):
     let db = db_with(src);
     let calls = calls_in(&db, "main");
     assert!(
-        calls.iter().any(|(name, _)| name == "obj.feature"),
-        "expected synthesized obj.feature from hasattr rewrite, got {calls:?}"
+        calls.iter().any(|(name, _)| name == "hasattr")
+            && !calls.iter().any(|(name, _)| name == "obj.feature"),
+        "hasattr must remain exact and must not become an invented dispatch: {calls:?}"
     );
 }
 
 #[test]
-fn single_quoted_literal_rewrites() {
-    // Python equivalent quotes — both `"x"` and `'x'` should rewrite.
+fn single_quoted_literal_does_not_change_the_reflection_contract() {
     let src = r#"
 def main(obj, value):
     setattr(obj, 'prop', value)
@@ -132,7 +125,7 @@ def main(obj, value):
     let db = db_with(src);
     let calls = calls_in(&db, "main");
     assert!(
-        calls.iter().any(|(name, _)| name == "obj.prop"),
-        "single-quoted literal also rewrites, got {calls:?}"
+        calls.iter().any(|(name, _)| name == "setattr") && !calls.iter().any(|(name, _)| name == "obj.prop"),
+        "quote style must not authorize a guessed edge, got {calls:?}"
     );
 }

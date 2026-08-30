@@ -322,6 +322,34 @@ sink(format!("ping {cmd}"));
 }
 
 #[test]
+fn format_macro_named_capture_uses_nested_cst_span_instead_of_rendered_argument_text() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[(
+            "lib.rs",
+            r##"fn run(cmd: &str) {
+sink(((format!(r#"ping {cmd}"#))));
+sink("format!(\"{decoy}\")");
+}"##,
+        )],
+    );
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).unwrap();
+    let run = idx.defs.iter().find(|decl| decl.name == "run").unwrap();
+    let sink_args = run
+        .flow_events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Call { name, args, .. } if name == "sink" => args.first(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sink_args.len(), 2);
+    assert!(sink_args[0].source_names.iter().any(|source| source == "cmd"));
+    assert!(!sink_args[1].source_names.iter().any(|source| source == "decoy"));
+}
+
+#[test]
 fn module_qualified_call_is_a_receiverless_path_call() {
     let ws = workspace_with(
         vec![Arc::new(RustAdapter::new())],

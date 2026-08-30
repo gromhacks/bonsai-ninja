@@ -377,26 +377,40 @@ fn map_literal_emits_field_scoped_assignments() {
         .find(|decl| decl.name == "run")
         .expect("run decl should exist");
 
-    assert!(run.flow_events.iter().any(|event| matches!(
-        event,
-        FlowEvent::Assign { target, source_names, .. }
-            if target == "B.tainted" && source_names == &["Args"]
-    )));
-    assert!(run.flow_events.iter().any(|event| matches!(
-        event,
-        FlowEvent::Assign { target, source_names, .. }
-            if target == "B.clean" && source_names.is_empty()
-    )));
-    assert!(run.flow_events.iter().any(|event| matches!(
-        event,
-        FlowEvent::Call { name, args, .. }
-            if name == "sink"
-                && args.first().is_some_and(|arg| {
-                    arg.value_text == "B.clean"
-                        && arg.place.as_deref() == Some("B.clean")
-                        && arg.source_names.iter().any(|source| source == "B.clean")
-                })
-    )));
+    let aggregate = run.flow_events.iter().find_map(|event| match event {
+        FlowEvent::AggregateAssign {
+            target, value_flow, ..
+        } if target == "B" => Some(value_flow),
+        _ => None,
+    });
+    let aggregate = aggregate.expect("map literal AggregateAssign");
+    assert!(
+        aggregate
+            .aggregate_fields
+            .iter()
+            .any(|field| field.name == "tainted" && field.value.place.as_deref() == Some("Args")),
+        "tainted field must come from the parsed map pair: {aggregate:#?}"
+    );
+    assert!(
+        aggregate
+            .aggregate_fields
+            .iter()
+            .any(|field| field.name == "clean" && field.value.is_empty()),
+        "literal field must retain a clean-overwrite proof from its parsed value: {aggregate:#?}"
+    );
+    assert!(
+        run.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call { name, args, .. }
+                if name == "sink"
+                    && args.first().is_some_and(|arg| {
+                        arg.place.as_deref() == Some("B.clean")
+                            && arg.source_names.iter().any(|source| source == "B.clean")
+                    })
+        )),
+        "maps:get/2 must lower to the exact field place: {:#?}",
+        run.flow_events
+    );
 }
 
 #[test]

@@ -1,0 +1,35 @@
+- id: python.typing.asyncio_to_thread_callback_invocation
+  enabled: true
+  language: python
+  packages: [asyncio]
+  imports: [asyncio]
+  taint_semantics:
+    callback_invocation:
+      callback_arg_index: 0
+      forwarded_args_from: 1
+      callback_return_result_offset: 0
+  match:
+    kind: call
+    callee:
+      attribute: [asyncio, to_thread]
+      binding_origin: imported
+  match_examples:
+  - name: asyncio to_thread invokes the exact callable argument
+    code: |
+      import asyncio
+      async def load(path):
+          return await asyncio.to_thread(read_bytes, path)
+      def read_bytes(path):
+          return path
+    expect_match_text: [asyncio.to_thread]
+  - name: local to_thread helper is not asyncio
+    code: |
+      import asyncio as stdlib_asyncio
+      _ = stdlib_asyncio
+      class Local:
+          def to_thread(self, callback, value): return value
+      async def load(local, path):
+          return await local.to_thread(read_bytes, path)
+      def read_bytes(path): return path
+    expect_no_match: true
+  description: "The imported asyncio runtime invokes callable argument zero with the remaining arguments and returns its result. The frontend emits only the exact call and callable facts; this typing rule owns the standard-library execution contract."

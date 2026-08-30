@@ -3,17 +3,17 @@ use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     decl_index_from_tree_with_handler, extract_imports_via,
     kit::{
-        call_arg_from_nodes_with_handler, collect_kinds, language_from_pack, node_text,
-        normalize_call_name_whitespace, parse_with, span_of,
+        call_arg_from_nodes_with_handler, collect_kinds, expression_flow_from_node_with_handler,
+        language_from_pack, node_text, normalize_call_name_whitespace, parse_with, span_of,
     },
-    AdapterContext, AdapterError, AssignmentValueIndex, CallArg, CallKind, CallTargetExtraction,
-    CharacterClass, CharacterConstraintDomain, CharacterConstraintFact, CharacterConstraintOutput,
-    CharacterSubstitutionDomain, CharacterSubstitutionFact, Comment, CommentKind, ConditionEquality,
-    ConditionExpressionFact, ConditionOperandFact, DeclIndex, DeclKind, FiniteLiteralSelectionFact,
-    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
-    LanguageId, PatternSourceProjection, ProjectedPatternBindingSite, Ref, RefKind,
-    SameOriginPathConstraintFact, StaticScalarValue, StaticStringMapEntry, StringCompositionFact,
-    StringCompositionPart, TypeAliasBinding, Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, CallKind, CallTargetExtraction, CharacterClass, CharacterConstraintDomain,
+    CharacterConstraintFact, CharacterConstraintOutput, CharacterSubstitutionDomain,
+    CharacterSubstitutionFact, Comment, CommentKind, ConditionEquality, ConditionExpressionFact,
+    ConditionOperandFact, DeclIndex, DeclKind, ExpressionFlow, FiniteLiteralSelectionFact, FlowEvent,
+    GrammarHandler, GuardedPredicateCallFact, GuardedValueConstraintFact, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, PatternSourceProjection,
+    ProjectedPatternBindingSite, Ref, RefKind, StaticScalarValue, StaticStringMapEntry,
+    StringCompositionFact, StringCompositionPart, TypeAliasBinding, Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -306,6 +306,7 @@ fn python_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
 }
 
 const HANDLER: GrammarHandler = GrammarHandler {
+    pseudo_call_receiver_role: bonsai_lang_api::CallReceiverRole::Value,
     literal_value_kinds: &["none", "integer", "float", "true", "false"],
     literal_value_spellings: &[],
     string_literal_kinds: &["string", "concatenated_string"],
@@ -817,17 +818,14 @@ impl LanguageAdapter for PythonAdapter {
         language_from_pack(PACK_NAME)
     }
     fn capabilities(&self) -> LanguageCapabilities {
-        // Reflection: the adapter rewrites the constant-string forms
-        // of `getattr` / `setattr` / `hasattr` into attribute calls
-        // before the engine sees them (see
-        // `rewrite_python_constant_reflection`). Dynamic forms with a
-        // computed name remain unrewritten and rules anchored on the
-        // reflective shape are still rejected at rulepack load time.
         LanguageCapabilities {
             module_default_export_names: &[],
             universal_type_names: &["Any", "object"],
             module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
-            reflection: bonsai_lang_api::CapabilityLevel::Partial,
+            // Reflective attribute selection is a runtime operation. Even a
+            // literal attribute name does not prove that reading or testing
+            // that attribute invokes it, so the exact call remains unresolved.
+            reflection: bonsai_lang_api::CapabilityLevel::Unsupported,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             // Static attribute/subscript projections are exact, but Python
             // still has dynamic subscripts and reflective projections whose
@@ -933,7 +931,7 @@ impl LanguageAdapter for PythonAdapter {
             idx.finite_literal_selections = python_finite_literal_selections(&idx, &tree, file, src);
             idx.character_substitutions = python_character_substitutions(&idx, &tree, file, src);
             idx.character_constraints = python_character_constraints(&idx, &tree, file, src, &imports);
-            idx.same_origin_path_constraints = python_same_origin_path_constraints(&idx, &tree, file, src);
+            idx.guarded_value_constraints = python_guarded_value_constraints(&idx, &tree, file, src);
             // Phase-6 return-type extraction: `def f() -> T:` populates
             // `Decl.return_type`, which `apply_assign_call_result_types`
             // then propagates onto LHS type_aliases.
@@ -974,8 +972,19 @@ impl LanguageAdapter for PythonAdapter {
             let property_fn_spans = collect_python_property_function_spans(&tree, file, src);
             let property_aliases = collect_python_property_aliases(&idx, &property_fn_spans);
             let property_aliases_by_decl = python_property_aliases_by_decl(&idx, &property_aliases);
-            let assignment_values = AssignmentValueIndex::new(&idx.assignment_values);
             let assignment_projected_reads = collect_python_assignment_projected_reads(&tree, file, src);
+            let conditional_aggregates = collect_python_conditional_aggregate_assignments(&tree, file, src);
+            for fact in &mut idx.assignment_values {
+                if let Some((_, _, flow)) = conditional_aggregates
+                    .iter()
+                    .find(|(span, _, _)| *span == fact.assignment_span)
+                {
+                    fact.value_flow
+                        .aggregate_fields
+                        .clone_from(&flow.aggregate_fields);
+                    fact.value_flow.spreads.clone_from(&flow.spreads);
+                }
+            }
             let call_argument_places = collect_python_call_argument_places(&tree, file, src);
             let return_places = collect_python_return_places(&tree, file, src);
             let callable_spans: Vec<Span> = idx
@@ -1001,29 +1010,20 @@ impl LanguageAdapter for PythonAdapter {
                     .collect::<Vec<_>>();
                 let comprehension_iterable_calls =
                     collect_python_comprehension_iterable_call_events(&tree, file, src, decl.span);
-                augment_python_comprehension_flow_events(
-                    &mut decl.flow_events,
-                    snapshot.text.as_ref(),
-                    &assignment_values,
-                );
                 insert_python_flow_events_by_span(
                     &mut decl.flow_events,
                     decl.span,
                     &comprehension_iterable_calls,
                 );
                 insert_python_iterable_yield_bindings(&mut decl.flow_events, &owned_yield_bindings);
-                augment_python_dict_flow_events(
+                augment_python_dict_flow_events(&mut decl.flow_events, &assignment_projected_reads);
+                inject_python_conditional_aggregate_assignments(
                     &mut decl.flow_events,
-                    snapshot.text.as_ref(),
-                    &assignment_values,
-                    &assignment_projected_reads,
+                    &conditional_aggregates,
                 );
                 if let Some(property_aliases_for_decl) = property_aliases_by_decl.get(&decl.symbol) {
                     augment_python_property_flow_events(&mut decl.flow_events, property_aliases_for_decl);
                 }
-                rewrite_python_constant_reflection(&mut decl.flow_events);
-                rewrite_python_generator_send(&mut decl.flow_events);
-                augment_python_asyncio_to_thread_calls(&mut decl.flow_events);
                 apply_python_call_argument_places(&mut decl.flow_events, &call_argument_places);
                 apply_python_return_places(&mut decl.flow_events, &return_places);
             }
@@ -1049,6 +1049,122 @@ impl LanguageAdapter for PythonAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+/// Lower the value arms of Python's conditional expression as one possible
+/// aggregate value. Tree-sitter gives the consequence, condition, and
+/// alternative as separate children; only the two value children contribute
+/// fields. This is deliberately adapter-owned syntax handling: a call or
+/// dictionary nested in the condition can never become the assigned value.
+fn collect_python_conditional_aggregate_assignments(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(Span, String, ExpressionFlow)> {
+    fn transparent_value(mut node: Node<'_>) -> Node<'_> {
+        while node.kind() == "parenthesized_expression" && node.named_child_count() == 1 {
+            let Some(child) = node.named_child(0) else { break };
+            node = child;
+        }
+        node
+    }
+
+    let mut out = Vec::new();
+    for assignment in collect_kinds(tree, &["assignment"]) {
+        let (Some(target), Some(value)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if target.kind() != "identifier" {
+            continue;
+        }
+        let conditional = transparent_value(value);
+        if conditional.kind() != "conditional_expression" {
+            continue;
+        }
+        let mut cursor = conditional.walk();
+        let values = conditional.named_children(&mut cursor).collect::<Vec<_>>();
+        let [consequence, _condition, alternative] = values.as_slice() else {
+            continue;
+        };
+        let mut merged = ExpressionFlow::default();
+        for branch in [*consequence, *alternative] {
+            let branch = transparent_value(branch);
+            if !HANDLER.named_aggregate_kinds.contains(&branch.kind()) {
+                continue;
+            }
+            let flow = expression_flow_from_node_with_handler(branch, file, src, &HANDLER);
+            merged.aggregate_fields.extend(flow.aggregate_fields);
+            merged.spreads.extend(flow.spreads);
+        }
+        if merged.aggregate_fields.is_empty() && merged.spreads.is_empty() {
+            continue;
+        }
+        out.push((
+            span_of(file, &assignment),
+            node_text(&target, src).trim().to_string(),
+            merged,
+        ));
+    }
+    out.sort_by_key(|(span, target, _)| (span.start, span.end, target.clone()));
+    out.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+    out
+}
+
+fn inject_python_conditional_aggregate_assignments(
+    events: &mut Vec<FlowEvent>,
+    facts: &[(Span, String, ExpressionFlow)],
+) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                inject_python_conditional_aggregate_assignments(then_events, facts);
+                inject_python_conditional_aggregate_assignments(else_events, facts);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                inject_python_conditional_aggregate_assignments(body, facts);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                inject_python_conditional_aggregate_assignments(body, facts);
+                inject_python_conditional_aggregate_assignments(catch_events, facts);
+                inject_python_conditional_aggregate_assignments(finally_events, facts);
+            }
+            _ => {}
+        }
+    }
+
+    let mut index = 0usize;
+    while index < events.len() {
+        let aggregate = match &events[index] {
+            FlowEvent::Assign { span, target, .. } => facts
+                .iter()
+                .find(|(fact_span, fact_target, _)| fact_span == span && fact_target == target)
+                .map(|(_, _, flow)| FlowEvent::AggregateAssign {
+                    span: *span,
+                    target: target.clone(),
+                    type_name: None,
+                    value_flow: flow.clone(),
+                }),
+            _ => None,
+        };
+        if let Some(aggregate) = aggregate {
+            events.insert(index + 1, aggregate);
+            index += 2;
+        } else {
+            index += 1;
+        }
     }
 }
 
@@ -2781,12 +2897,12 @@ fn python_is_single_statement_return(return_node: Node<'_>) -> bool {
     })
 }
 
-fn python_same_origin_path_constraints(
+fn python_guarded_value_constraints(
     index: &DeclIndex,
     tree: &Tree,
     file: FileId,
     src: &[u8],
-) -> Vec<SameOriginPathConstraintFact> {
+) -> Vec<GuardedValueConstraintFact> {
     let imports = parse_imports(tree, src, file);
     let assignments = collect_kinds(tree, &["assignment"]);
     let mut facts = Vec::new();
@@ -2858,44 +2974,55 @@ fn python_same_origin_path_constraints(
         ) else {
             continue;
         };
-        if !python_block_returns_static_path(consequence, src, "/")
-            || !python_return_is_exact_place(*final_return, input, src)
-        {
+        let Some(fallback) = python_block_static_return(consequence, src) else {
+            continue;
+        };
+        if !python_return_is_exact_place(*final_return, input, src) {
             continue;
         }
         let mut terms = Vec::new();
         python_collect_or_terms(condition, src, &mut terms);
-        if terms.len() != 4 {
+        let mut predicate_calls = Vec::new();
+        let mut rejected_components = Vec::new();
+        for term in terms {
+            if let Some(component) = python_attribute_component(term, parsed, src) {
+                if !rejected_components.contains(&component) {
+                    rejected_components.push(component);
+                }
+                continue;
+            }
+            if let Some((call_expression_span, required_result)) =
+                python_guarded_predicate_call(term, input, file, src)
+            {
+                predicate_calls.push(GuardedPredicateCallFact {
+                    call_expression_span,
+                    required_result,
+                });
+            }
+        }
+        if predicate_calls.is_empty() && rejected_components.is_empty() {
             continue;
         }
-        let rejects_scheme = terms
-            .iter()
-            .any(|term| python_attribute_is(*term, parsed, "scheme", src));
-        let rejects_authority = terms
-            .iter()
-            .any(|term| python_attribute_is(*term, parsed, "netloc", src));
-        let requires_absolute_path = terms.iter().any(|term| {
-            term.kind() == "not_operator"
-                && term
-                    .named_child(0)
-                    .is_some_and(|operand| python_startswith_literal(operand, input, "/", src))
+        predicate_calls.sort_by_key(|fact| {
+            (
+                fact.call_expression_span.start,
+                fact.call_expression_span.end,
+                fact.required_result,
+            )
         });
-        let rejects_scheme_relative_path = terms
-            .iter()
-            .any(|term| python_startswith_literal(*term, input, "//", src));
-        if rejects_scheme && rejects_authority && requires_absolute_path && rejects_scheme_relative_path {
-            facts.push(SameOriginPathConstraintFact {
-                function_span,
-                guard_span: span_of(file, guard),
-                input_place: input.to_string(),
-                input_param_index: Some(input_param_index),
-                provider_call: Some(provider_call),
-                rejects_scheme,
-                rejects_authority,
-                requires_absolute_path,
-                rejects_scheme_relative_path,
-            });
-        }
+        predicate_calls.dedup();
+        facts.push(GuardedValueConstraintFact {
+            function_span,
+            guard_span: span_of(file, guard),
+            input_place: input.to_string(),
+            input_param_index: Some(input_param_index),
+            provider_call: Some(provider_call),
+            predicate_calls,
+            accepted_prefixes: Vec::new(),
+            rejected_prefixes: Vec::new(),
+            rejected_components,
+            static_fallbacks: vec![fallback],
+        });
     }
     facts.sort_by_key(|fact| (fact.function_span.start, fact.guard_span.start));
     facts.dedup();
@@ -3044,47 +3171,49 @@ fn python_collect_or_terms<'tree>(node: Node<'tree>, src: &[u8], out: &mut Vec<N
     out.push(node);
 }
 
-fn python_attribute_is(node: Node<'_>, object: &str, field: &str, src: &[u8]) -> bool {
-    python_attribute_parts(node, src).is_some_and(|(receiver, name)| {
-        receiver.kind() == "identifier" && node_text(&receiver, src).trim() == object && name == field
-    })
+fn python_attribute_component(node: Node<'_>, object: &str, src: &[u8]) -> Option<String> {
+    let (receiver, name) = python_attribute_parts(node, src)?;
+    (receiver.kind() == "identifier" && node_text(&receiver, src).trim() == object).then(|| name.to_string())
 }
 
-fn python_startswith_literal(node: Node<'_>, receiver: &str, literal: &str, src: &[u8]) -> bool {
-    let Some((function, arguments)) = python_call_parts(node) else {
-        return false;
+fn python_guarded_predicate_call(
+    mut node: Node<'_>,
+    receiver: &str,
+    file: FileId,
+    src: &[u8],
+) -> Option<(bonsai_common::Span, bool)> {
+    let negated = node.kind() == "not_operator";
+    if negated {
+        node = node.named_child(0)?;
+    }
+    let Some((function, _arguments)) = python_call_parts(node) else {
+        return None;
     };
-    let Some((object, method)) = python_attribute_parts(function, src) else {
-        return false;
+    let Some((object, _method)) = python_attribute_parts(function, src) else {
+        return None;
     };
-    let args = python_argument_nodes(arguments);
-    object.kind() == "identifier"
-        && node_text(&object, src).trim() == receiver
-        && method == "startswith"
-        && args
-            .as_slice()
-            .first()
-            .and_then(|node| python_static_string(*node, src))
-            .as_deref()
-            == Some(literal)
-        && args.len() == 1
+    if object.kind() != "identifier" || node_text(&object, src).trim() != receiver {
+        return None;
+    }
+    Some((span_of(file, &node), negated))
 }
 
-fn python_block_returns_static_path(block: Node<'_>, src: &[u8], expected: &str) -> bool {
+fn python_block_static_return(block: Node<'_>, src: &[u8]) -> Option<String> {
     let mut cursor = block.walk();
     let statements: Vec<_> = block
         .named_children(&mut cursor)
         .filter(|node| node.kind() != "comment")
         .collect();
     let [return_node] = statements.as_slice() else {
-        return false;
+        return None;
     };
-    return_node.kind() == "return_statement"
-        && return_node
-            .named_child(0)
-            .and_then(|value| python_static_string(value, src))
-            .as_deref()
-            == Some(expected)
+    (return_node.kind() == "return_statement")
+        .then(|| {
+            return_node
+                .named_child(0)
+                .and_then(|value| python_static_string(value, src))
+        })
+        .flatten()
 }
 
 fn python_return_is_exact_place(return_node: Node<'_>, expected: &str, src: &[u8]) -> bool {
@@ -3719,50 +3848,6 @@ fn python_property_alias_source_name(source: &str, alias: &PythonPropertyAlias) 
     Some(format!("{}.{}.{}", alias.receiver_name, alias.target_tail, tail))
 }
 
-fn augment_python_comprehension_flow_events(
-    events: &mut [bonsai_lang_api::FlowEvent],
-    source: &str,
-    assignment_values: &AssignmentValueIndex,
-) {
-    for event in events {
-        match event {
-            bonsai_lang_api::FlowEvent::Assign {
-                span, source_names, ..
-            } => {
-                if let Some(rhs) = assignment_values.rendering(*span, source) {
-                    for iterable in python_comprehension_iterables(rhs) {
-                        push_python_source_name(source_names, iterable);
-                    }
-                }
-            }
-            bonsai_lang_api::FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                augment_python_comprehension_flow_events(then_events, source, assignment_values);
-                augment_python_comprehension_flow_events(else_events, source, assignment_values);
-            }
-            bonsai_lang_api::FlowEvent::Loop { body, .. }
-            | bonsai_lang_api::FlowEvent::Defer { body, .. }
-            | bonsai_lang_api::FlowEvent::Using { body, .. } => {
-                augment_python_comprehension_flow_events(body, source, assignment_values);
-            }
-            bonsai_lang_api::FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                augment_python_comprehension_flow_events(body, source, assignment_values);
-                augment_python_comprehension_flow_events(catch_events, source, assignment_values);
-                augment_python_comprehension_flow_events(finally_events, source, assignment_values);
-            }
-            _ => {}
-        }
-    }
-}
-
 fn collect_python_comprehension_iterable_call_events(
     tree: &Tree,
     file: FileId,
@@ -4237,93 +4322,6 @@ fn python_call_receiver_from_name(name: &str) -> Option<String> {
     (!receiver.is_empty()).then(|| receiver.to_string())
 }
 
-fn python_is_identifier_like(text: &str) -> bool {
-    let mut chars = text.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_alphabetic()) && chars.all(|ch| ch == '_' || ch.is_alphanumeric())
-}
-
-fn augment_python_asyncio_to_thread_calls(events: &mut Vec<FlowEvent>) {
-    let mut i = 0;
-    while i < events.len() {
-        match &mut events[i] {
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                augment_python_asyncio_to_thread_calls(then_events);
-                augment_python_asyncio_to_thread_calls(else_events);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                augment_python_asyncio_to_thread_calls(body);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                augment_python_asyncio_to_thread_calls(body);
-                augment_python_asyncio_to_thread_calls(catch_events);
-                augment_python_asyncio_to_thread_calls(finally_events);
-            }
-            _ => {}
-        }
-
-        let synthetic = match &events[i] {
-            FlowEvent::Call { span, name, args, .. } if python_is_asyncio_to_thread_name(name) => {
-                let Some((target, shifted_args)) = python_to_thread_target_and_args(args) else {
-                    i += 1;
-                    continue;
-                };
-                let receiver = python_call_receiver_from_name(&target);
-                let call_kind = if receiver.is_some() {
-                    CallKind::Method
-                } else {
-                    CallKind::Function
-                };
-                Some(FlowEvent::Call {
-                    span: *span,
-                    name: target,
-                    receiver,
-                    receiver_types: Vec::new(),
-                    call_kind,
-                    args: shifted_args,
-                })
-            }
-            _ => None,
-        };
-        if let Some(call) = synthetic {
-            events.insert(i + 1, call);
-            i += 1;
-        }
-        i += 1;
-    }
-}
-
-fn python_is_asyncio_to_thread_name(name: &str) -> bool {
-    matches!(name.trim(), "asyncio.to_thread" | "to_thread")
-}
-
-fn python_to_thread_target_and_args(args: &[CallArg]) -> Option<(String, Vec<CallArg>)> {
-    let target = args.first()?.value_text.trim();
-    if !python_is_qualified_identifier_like(target) {
-        return None;
-    }
-    Some((target.to_string(), args.iter().skip(1).cloned().collect()))
-}
-
-fn python_is_qualified_identifier_like(text: &str) -> bool {
-    let text = text.trim();
-    !text.is_empty()
-        && text
-            .split('.')
-            .all(|part| !part.is_empty() && python_is_identifier_like(part))
-}
-
 fn insert_python_flow_events_by_span(events: &mut Vec<FlowEvent>, owner_span: Span, synthetic: &[FlowEvent]) {
     for event in events.iter_mut() {
         let event_span = python_flow_event_span(event);
@@ -4436,128 +4434,6 @@ fn python_flow_event_same_call(left: &FlowEvent, right: &FlowEvent) -> bool {
     )
 }
 
-fn python_comprehension_iterables(rhs: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut depth = 0usize;
-    let iter = rhs.char_indices().peekable();
-    for (idx, ch) in iter {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' => depth = depth.saturating_add(1),
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            'i' if rhs[idx..].starts_with("in") && python_keyword_boundary(rhs, idx, idx + 2) => {
-                let start = idx + 2;
-                let end = python_comprehension_iterable_end(rhs, start, depth);
-                for token in python_access_tokens(&rhs[start..end]) {
-                    push_python_source_name(&mut out, token);
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-fn python_keyword_boundary(text: &str, start: usize, end: usize) -> bool {
-    let before = text[..start].chars().next_back();
-    let after = text[end..].chars().next();
-    !before.is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-        && !after.is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn python_comprehension_iterable_end(text: &str, start: usize, initial_depth: usize) -> usize {
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut depth = initial_depth;
-    for (idx, ch) in text.char_indices().skip_while(|(idx, _)| *idx < start) {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' => depth = depth.saturating_add(1),
-            ')' | ']' | '}' => {
-                if depth <= initial_depth {
-                    return idx;
-                }
-                depth = depth.saturating_sub(1);
-            }
-            ',' if depth == initial_depth => return idx,
-            'i' if depth == initial_depth
-                && text[idx..].starts_with("if")
-                && python_keyword_boundary(text, idx, idx + 2) =>
-            {
-                return idx;
-            }
-            'f' if depth == initial_depth
-                && text[idx..].starts_with("for")
-                && python_keyword_boundary(text, idx, idx + 3) =>
-            {
-                return idx;
-            }
-            _ => {}
-        }
-    }
-    text.len()
-}
-
-fn python_access_tokens(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut token = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for ch in text.chars().chain(std::iter::once(' ')) {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            push_python_source_name(&mut out, token.trim_matches('.').to_string());
-            token.clear();
-            quote = Some(ch);
-            continue;
-        }
-        if ch == '.' || ch == '_' || ch.is_ascii_alphanumeric() {
-            token.push(ch);
-            continue;
-        }
-        push_python_source_name(&mut out, token.trim_matches('.').to_string());
-        token.clear();
-    }
-    out
-}
-
 fn push_python_source_name(out: &mut Vec<String>, value: String) {
     if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
         out.push(value);
@@ -4622,8 +4498,6 @@ fn python_flow_event_span(event: &bonsai_lang_api::FlowEvent) -> Span {
 
 fn augment_python_dict_flow_events(
     events: &mut Vec<bonsai_lang_api::FlowEvent>,
-    source: &str,
-    assignment_values: &AssignmentValueIndex,
     assignment_projected_reads: &[(Span, Vec<String>)],
 ) {
     for event in events.iter_mut() {
@@ -4633,23 +4507,13 @@ fn augment_python_dict_flow_events(
                 else_events,
                 ..
             } => {
-                augment_python_dict_flow_events(
-                    then_events,
-                    source,
-                    assignment_values,
-                    assignment_projected_reads,
-                );
-                augment_python_dict_flow_events(
-                    else_events,
-                    source,
-                    assignment_values,
-                    assignment_projected_reads,
-                );
+                augment_python_dict_flow_events(then_events, assignment_projected_reads);
+                augment_python_dict_flow_events(else_events, assignment_projected_reads);
             }
             bonsai_lang_api::FlowEvent::Loop { body, .. }
             | bonsai_lang_api::FlowEvent::Defer { body, .. }
             | bonsai_lang_api::FlowEvent::Using { body, .. } => {
-                augment_python_dict_flow_events(body, source, assignment_values, assignment_projected_reads);
+                augment_python_dict_flow_events(body, assignment_projected_reads);
             }
             bonsai_lang_api::FlowEvent::Try {
                 body,
@@ -4657,80 +4521,36 @@ fn augment_python_dict_flow_events(
                 finally_events,
                 ..
             } => {
-                augment_python_dict_flow_events(body, source, assignment_values, assignment_projected_reads);
-                augment_python_dict_flow_events(
-                    catch_events,
-                    source,
-                    assignment_values,
-                    assignment_projected_reads,
-                );
-                augment_python_dict_flow_events(
-                    finally_events,
-                    source,
-                    assignment_values,
-                    assignment_projected_reads,
-                );
+                augment_python_dict_flow_events(body, assignment_projected_reads);
+                augment_python_dict_flow_events(catch_events, assignment_projected_reads);
+                augment_python_dict_flow_events(finally_events, assignment_projected_reads);
             }
             _ => {}
         }
     }
 
-    let mut known_fields: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     let mut rewritten = Vec::with_capacity(events.len());
     for event in events.drain(..) {
         let mut synthetic = Vec::new();
         if let bonsai_lang_api::FlowEvent::Assign { span, target, .. } = &event {
-            if let Some(rhs) = assignment_values.rendering(*span, source) {
-                for (field, value) in python_dict_field_initializers(rhs) {
-                    push_python_source_name(known_fields.entry(target.clone()).or_default(), field.clone());
-                    let source_names = python_value_source_names(&value);
-                    synthetic.push(bonsai_lang_api::FlowEvent::Assign {
-                        span: *span,
-                        target: format!("{target}.{field}"),
-                        source_name: None,
-                        source_call: None,
-                        source_call_args: Vec::new(),
-                        source_names,
-                        declares_new_binding: false,
-                        value_kind: None,
-                    });
-                }
-                for field_read in assignment_projected_reads
-                    .binary_search_by_key(&(span.start, span.end), |(candidate, _)| {
-                        (candidate.start, candidate.end)
-                    })
-                    .ok()
-                    .and_then(|index| assignment_projected_reads.get(index))
-                    .map_or(&[][..], |(_, reads)| reads.as_slice())
-                {
-                    synthetic.push(bonsai_lang_api::FlowEvent::Assign {
-                        span: *span,
-                        target: target.clone(),
-                        source_name: Some(field_read.clone()),
-                        source_call: None,
-                        source_call_args: Vec::new(),
-                        source_names: vec![field_read.clone()],
-                        declares_new_binding: false,
-                        value_kind: None,
-                    });
-                }
-                for spread in python_dict_spreads(rhs) {
-                    if let Some(fields) = known_fields.get(&spread).cloned() {
-                        for field in fields {
-                            synthetic.push(bonsai_lang_api::FlowEvent::Assign {
-                                span: *span,
-                                target: format!("{target}.{field}"),
-                                source_name: Some(format!("{spread}.{field}")),
-                                source_call: None,
-                                source_call_args: Vec::new(),
-                                source_names: vec![format!("{spread}.{field}")],
-                                declares_new_binding: false,
-                                value_kind: None,
-                            });
-                            push_python_source_name(known_fields.entry(target.clone()).or_default(), field);
-                        }
-                    }
-                }
+            for field_read in assignment_projected_reads
+                .binary_search_by_key(&(span.start, span.end), |(candidate, _)| {
+                    (candidate.start, candidate.end)
+                })
+                .ok()
+                .and_then(|index| assignment_projected_reads.get(index))
+                .map_or(&[][..], |(_, reads)| reads.as_slice())
+            {
+                synthetic.push(bonsai_lang_api::FlowEvent::Assign {
+                    span: *span,
+                    target: target.clone(),
+                    source_name: Some(field_read.clone()),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: vec![field_read.clone()],
+                    declares_new_binding: false,
+                    value_kind: None,
+                });
             }
         }
         rewritten.push(event);
@@ -4815,351 +4635,6 @@ fn collect_python_assignment_projected_reads(
     }
     reads.sort_by_key(|(span, _)| (span.start, span.end));
     reads
-}
-
-fn python_value_source_names(text: &str) -> Vec<String> {
-    let mut out = python_access_tokens(text);
-    for field_read in python_static_subscript_field_reads(text) {
-        push_python_source_name(&mut out, field_read);
-    }
-    for field_read in python_static_get_field_reads(text) {
-        push_python_source_name(&mut out, field_read);
-    }
-    out
-}
-
-fn python_static_subscript_field_reads(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut depth = 0usize;
-    for (idx, ch) in text.char_indices() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '[' if depth == 0 => {
-                let Some(receiver) = python_receiver_before_index(text, idx) else {
-                    depth = depth.saturating_add(1);
-                    continue;
-                };
-                let Some(end) = python_matching_bracket_end(text, idx + 1) else {
-                    depth = depth.saturating_add(1);
-                    continue;
-                };
-                if let Some(field) = python_static_dict_key(&text[idx + 1..end]) {
-                    push_python_source_name(&mut out, format!("{receiver}.{field}"));
-                }
-                depth = depth.saturating_add(1);
-            }
-            '(' | '[' | '{' => depth = depth.saturating_add(1),
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    out
-}
-
-fn python_static_get_field_reads(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut depth = 0usize;
-    for (idx, ch) in text.char_indices() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' => depth = depth.saturating_add(1),
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            '.' if depth == 0 && text[idx..].starts_with(".get(") => {
-                let Some(receiver) = python_receiver_before_dot_get(text, idx) else {
-                    continue;
-                };
-                let args_start = idx + ".get(".len();
-                let Some(args_end) = python_matching_paren_end(text, args_start) else {
-                    continue;
-                };
-                let args = &text[args_start..args_end];
-                let Some(first_arg) = python_split_top_level(args, ',').into_iter().next() else {
-                    continue;
-                };
-                if let Some(field) = python_static_dict_key(&first_arg) {
-                    push_python_source_name(&mut out, format!("{receiver}.{field}"));
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-fn python_receiver_before_index(text: &str, index_idx: usize) -> Option<String> {
-    let prefix = text.get(..index_idx)?;
-    let mut start = index_idx;
-    for (idx, ch) in prefix.char_indices().rev() {
-        if ch == '.' || ch == '_' || ch.is_ascii_alphanumeric() {
-            start = idx;
-            continue;
-        }
-        break;
-    }
-    let receiver = text[start..index_idx].trim_matches('.');
-    if receiver.is_empty() {
-        None
-    } else {
-        Some(receiver.to_string())
-    }
-}
-
-fn python_receiver_before_dot_get(text: &str, dot_idx: usize) -> Option<String> {
-    let prefix = text.get(..dot_idx)?;
-    let mut start = dot_idx;
-    for (idx, ch) in prefix.char_indices().rev() {
-        if ch == '.' || ch == '_' || ch.is_ascii_alphanumeric() {
-            start = idx;
-            continue;
-        }
-        break;
-    }
-    let receiver = text[start..dot_idx].trim_matches('.');
-    if receiver.is_empty() {
-        None
-    } else {
-        Some(receiver.to_string())
-    }
-}
-
-fn python_matching_bracket_end(text: &str, args_start: usize) -> Option<usize> {
-    python_matching_delimiter_end(text, args_start, '[', ']')
-}
-
-fn python_matching_paren_end(text: &str, args_start: usize) -> Option<usize> {
-    python_matching_delimiter_end(text, args_start, '(', ')')
-}
-
-fn python_matching_delimiter_end(
-    text: &str,
-    args_start: usize,
-    open_delimiter: char,
-    close_delimiter: char,
-) -> Option<usize> {
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut depth = 1usize;
-    for (idx, ch) in text.char_indices().skip_while(|(idx, _)| *idx < args_start) {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            ch if ch == open_delimiter => depth = depth.saturating_add(1),
-            ch if ch == close_delimiter => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(idx);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn python_dict_field_initializers(text: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for body in python_dict_bodies(text) {
-        for part in python_split_top_level(&body, ',') {
-            if part.trim_start().starts_with("**") {
-                continue;
-            }
-            let Some((key, value)) = python_split_top_level_once(&part, ':') else {
-                continue;
-            };
-            let Some(field) = python_static_dict_key(&key) else {
-                continue;
-            };
-            out.push((field, value.trim().to_string()));
-        }
-    }
-    out
-}
-
-fn python_dict_spreads(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for body in python_dict_bodies(text) {
-        for part in python_split_top_level(&body, ',') {
-            let Some(rest) = part.trim_start().strip_prefix("**") else {
-                continue;
-            };
-            for token in python_access_tokens(rest) {
-                push_python_source_name(&mut out, token);
-            }
-        }
-    }
-    out
-}
-
-fn python_dict_bodies(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut stack = Vec::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for (idx, ch) in text.char_indices() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '{' => stack.push(idx),
-            '}' => {
-                if let Some(start) = stack.pop() {
-                    if start < idx {
-                        out.push(text[start + 1..idx].to_string());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-fn python_split_top_level(text: &str, delimiter: char) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    for (idx, ch) in text.char_indices() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' => depth = depth.saturating_add(1),
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            ch if ch == delimiter && depth == 0 => {
-                let part = text[start..idx].trim();
-                if !part.is_empty() {
-                    out.push(part.to_string());
-                }
-                start = idx + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    let part = text[start..].trim();
-    if !part.is_empty() {
-        out.push(part.to_string());
-    }
-    out
-}
-
-fn python_split_top_level_once(text: &str, delimiter: char) -> Option<(String, String)> {
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut depth = 0usize;
-    for (idx, ch) in text.char_indices() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' => depth = depth.saturating_add(1),
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            ch if ch == delimiter && depth == 0 => {
-                return Some((text[..idx].to_string(), text[idx + ch.len_utf8()..].to_string()));
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn python_static_dict_key(text: &str) -> Option<String> {
-    let key = text
-        .trim()
-        .strip_prefix('"')
-        .and_then(|part| part.strip_suffix('"'))
-        .or_else(|| {
-            text.trim()
-                .strip_prefix('\'')
-                .and_then(|part| part.strip_suffix('\''))
-        })?
-        .trim();
-    if key.is_empty()
-        || !key
-            .chars()
-            .next()
-            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
-        || !key.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-    {
-        return None;
-    }
-    Some(key.to_string())
 }
 
 fn collect_python_parameter_aliases(node: Node<'_>, src: &[u8], out: &mut Vec<TypeAliasBinding>) {
@@ -5436,185 +4911,6 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         }
     }
     out
-}
-
-/// Rewrite Python's reflective `getattr(obj, "literal", default)` /
-/// `setattr(obj, "literal", value)` / `hasattr(obj, "literal")` shapes
-/// into the equivalent attribute access. The kit emits the call as
-/// `Call { name: "getattr", args: [{value_text: "obj"}, {value_text:
-/// "\"literal\""}, ...] }`. We rewrite to the synthesized call
-/// `Call { name: "obj.literal", receiver: Some("obj"), args: [...] }`
-/// so the resolver narrows the dispatch like a normal method call.
-///
-/// This is the constant-string sub-case of P2.1; dynamic forms
-/// (`getattr(obj, runtime_name)`) stay unrewritten and the engine's
-/// `reflection: Unsupported` rule continues to gate them out.
-///
-/// The transformation lives in the Python adapter (not the engine)
-/// because `getattr` / `setattr` / `hasattr` are Python-language-
-/// specific names. The taint engine sees the rewritten call as just
-/// another method dispatch.
-fn rewrite_python_constant_reflection(events: &mut [bonsai_lang_api::FlowEvent]) {
-    use bonsai_lang_api::FlowEvent;
-    for event in events {
-        match event {
-            // `getattr(obj, "literal")` / `setattr(obj, "literal", v)` /
-            // `hasattr(obj, "literal")` — only the first two args matter
-            // for the rewrite.
-            FlowEvent::Call {
-                name, receiver, args, ..
-            } if matches!(name.as_str(), "getattr" | "setattr" | "hasattr") && args.len() >= 2 => {
-                let receiver_arg = &args[0];
-                let attr_arg = &args[1];
-                // Skip dynamic forms — the rule-load gate still rejects
-                // rules anchored on the reflective shape, which is the
-                // safe fallback when the attribute name isn't constant.
-                if !is_python_string_literal(&attr_arg.value_text) {
-                    continue;
-                }
-                let attr_name = strip_python_string_quotes(&attr_arg.value_text);
-                if attr_name.is_empty() {
-                    continue;
-                }
-                let receiver_text = receiver_arg.value_text.trim();
-                if receiver_text.is_empty() {
-                    continue;
-                }
-                // Synthesize the direct attribute call: `getattr(obj,
-                // "process")(...)` becomes `obj.process(...)` from the
-                // engine's perspective.
-                *name = format!("{receiver_text}.{attr_name}");
-                *receiver = Some(receiver_text.to_string());
-            }
-            // Reflective calls can hide in any container — recurse.
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                rewrite_python_constant_reflection(then_events);
-                rewrite_python_constant_reflection(else_events);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                rewrite_python_constant_reflection(body);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                rewrite_python_constant_reflection(body);
-                rewrite_python_constant_reflection(catch_events);
-                rewrite_python_constant_reflection(finally_events);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// True iff `text` looks like a Python string literal. Accepts both
-/// double- and single-quoted forms (Python treats them equivalently);
-/// rejects f-strings, raw strings, and any non-quoted identifier.
-fn is_python_string_literal(text: &str) -> bool {
-    let trimmed = text.trim();
-    let starts_with_quote = trimmed.starts_with('"') || trimmed.starts_with('\'');
-    let ends_with_quote = trimmed.ends_with('"') || trimmed.ends_with('\'');
-    starts_with_quote && ends_with_quote && trimmed.len() >= 2
-}
-
-/// Strip the outermost matching quote pair from a Python string literal.
-/// Caller is expected to have already validated the input via
-/// `is_python_string_literal`; this just yields the inner text.
-fn strip_python_string_quotes(text: &str) -> String {
-    text.trim()
-        .trim_start_matches(['"', '\''])
-        .trim_end_matches(['"', '\''])
-        .to_string()
-}
-
-/// Rewrite `g.send(value)` (Python's coroutine resume) into a
-/// synthesized direct call to the generator factory whose result `g`
-/// was bound to. After the rewrite, the engine's normal
-/// interprocedural propagation taints the generator function's body
-/// when `value` is tainted.
-///
-/// Pattern recognized:
-///   `g = gen()`             ← Assign with source_call: "gen"
-///   `g.send(arg)`           ← Call with name: "g.send", receiver: "g"
-///
-/// Effect: rewrite the second event into
-///   `Call { name: "gen", args: [arg] }`
-///
-/// Generators without a recognizable factory binding are left alone.
-/// Dynamic forms (`gens[i].send(...)`) likewise stay unrewritten;
-/// the engine's existing yield-as-return-equivalent model still
-/// applies for those.
-#[allow(clippy::case_sensitive_file_extension_comparisons)] // `.send` is a method name, not an extension
-fn rewrite_python_generator_send(events: &mut [bonsai_lang_api::FlowEvent]) {
-    use bonsai_lang_api::{CallKind, FlowEvent};
-    use std::collections::HashMap;
-    let mut gen_factories: HashMap<String, String> = HashMap::new();
-    for event in events.iter_mut() {
-        match event {
-            FlowEvent::Assign {
-                target, source_call, ..
-            } => {
-                if let Some(call) = source_call {
-                    // Only register simple bare-identifier factories
-                    // — `gen()` not `pkg.gen(args)` — to keep the
-                    // rewrite low-risk. The right-hand call must
-                    // also have no qualifying receiver.
-                    if !call.contains('.') && !call.is_empty() {
-                        gen_factories.insert(target.clone(), call.clone());
-                    }
-                }
-            }
-            FlowEvent::Call {
-                name,
-                receiver,
-                args,
-                call_kind,
-                ..
-            } => {
-                let Some(rcv) = receiver.clone() else {
-                    continue;
-                };
-                if !name.ends_with(".send") {
-                    continue;
-                }
-                let Some(factory) = gen_factories.get(&rcv) else {
-                    continue;
-                };
-                name.clone_from(factory);
-                *receiver = None;
-                *call_kind = CallKind::Function;
-                let _ = args; // first arg becomes the resumed value, propagated as-is.
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                rewrite_python_generator_send(then_events);
-                rewrite_python_generator_send(else_events);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                rewrite_python_generator_send(body);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                rewrite_python_generator_send(body);
-                rewrite_python_generator_send(catch_events);
-                rewrite_python_generator_send(finally_events);
-            }
-            _ => {}
-        }
-    }
 }
 
 #[cfg(test)]

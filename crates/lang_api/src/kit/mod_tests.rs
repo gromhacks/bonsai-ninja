@@ -11,8 +11,9 @@ use super::{
     language_from_pack, lower_adapter_local_breaks, lower_local_closure_captures,
     mark_namespace_call_receivers, node_at_span, node_text, normalize_call_name_whitespace,
     normalize_call_result_assignment_sources, normalize_decl_event_evaluation_order,
-    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches, same_identifier_name,
-    span_of, walk_flow_events, SyntaxKindIndex, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
+    normalize_variadic_builtin_flow, package_module_segments_with_workspace_prefix,
+    receiver_projected_alias_matches, same_identifier_name, span_of, walk_flow_events, SyntaxKindIndex,
+    GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
 use crate::{
     AliasTarget, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, CallReceiverFact,
@@ -631,6 +632,47 @@ fn indexed_field_assignment_does_not_rebind_its_base_object() {
 }
 
 #[test]
+fn aggregate_assignment_overwrites_root_before_installing_exact_fields() {
+    let src = b"function build(raw, user) { const payload = {cmd: raw, user: user}; }";
+    let tree = parse_language("javascript", src);
+    let scope = collect_kinds(&tree, &["statement_block"])
+        .into_iter()
+        .next()
+        .expect("JavaScript function body");
+    let handler = GrammarHandler {
+        named_aggregate_kinds: &["object"],
+        aggregate_pair_kinds: &["pair"],
+        aggregate_key_field_names: &["key"],
+        aggregate_value_field_names: &["value"],
+        static_field_name_kinds: &["property_identifier"],
+        assignment_target_wrapper_kinds: &["variable_declarator"],
+        ..GENERIC_HANDLER
+    };
+    let events = walk_flow_events(scope, FileId::new(0), src, &handler, &[]);
+    let root = events
+        .iter()
+        .position(|event| matches!(event, FlowEvent::Assign { target, .. } if target == "payload"))
+        .expect("root assignment");
+    let fields = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                FlowEvent::AggregateAssign {
+                    target,
+                    value_flow,
+                    ..
+                } if target == "payload" && value_flow.aggregate_fields.len() == 2
+            )
+        })
+        .expect("exact aggregate assignment");
+    assert!(
+        root < fields,
+        "root overwrite must precede its exact field writes: {events:#?}"
+    );
+}
+
+#[test]
 fn indexed_assignment_is_a_typed_operation_not_a_pseudo_api_call() {
     let src = b"def set_header(response, name, value):\n    response[name] = value\n";
     let tree = parse_language("python", src);
@@ -1073,12 +1115,10 @@ fn direct_call_extraction_only_crosses_transparent_ast_wrappers() {
 
 #[test]
 fn call_result_assignment_pruning_removes_callee_and_arg_carriers() {
-    let mut events = vec![assign_call(
-        "z",
-        "f",
-        &["user.name"],
-        &["f", "user.name", "user", "name"],
-    )];
+    let mut events = vec![
+        assign_call("z", "f", &["user.name"], &["f", "user.name", "user", "name"]),
+        call("f", &["user.name"]),
+    ];
 
     normalize_call_result_assignment_sources(&mut events);
 
@@ -1096,7 +1136,7 @@ fn call_result_assignment_pruning_removes_callee_and_arg_carriers() {
 
 #[test]
 fn call_result_assignment_pruning_normalizes_identifier_sigils() {
-    let mut events = vec![assign_call("z", "f", &["x"], &["$x", "$xy"])];
+    let mut events = vec![assign_call("z", "f", &["$x"], &["$x", "$xy"]), call("f", &["$x"])];
 
     normalize_call_result_assignment_sources(&mut events);
 
@@ -1111,12 +1151,15 @@ fn call_result_assignment_pruning_normalizes_identifier_sigils() {
 
 #[test]
 fn call_result_assignment_pruning_preserves_method_receivers() {
-    let mut events = vec![assign_call(
-        "ok",
-        "target.call",
-        &["payload"],
-        &["target.call", "target", "call", "payload"],
-    )];
+    let mut events = vec![
+        assign_call(
+            "ok",
+            "target.call",
+            &["payload"],
+            &["target.call", "target", "call", "payload"],
+        ),
+        call("target.call", &["payload"]),
+    ];
 
     normalize_call_result_assignment_sources(&mut events);
 
@@ -1128,12 +1171,15 @@ fn call_result_assignment_pruning_preserves_method_receivers() {
 
 #[test]
 fn call_result_assignment_pruning_never_treats_casing_as_type_evidence() {
-    let mut events = vec![assign_call(
-        "logger",
-        "Logger.getLogger",
-        &["name"],
-        &["Logger", "Logger.getLogger", "getLogger", "name"],
-    )];
+    let mut events = vec![
+        assign_call(
+            "logger",
+            "Logger.getLogger",
+            &["name"],
+            &["Logger", "Logger.getLogger", "getLogger", "name"],
+        ),
+        call("Logger.getLogger", &["name"]),
+    ];
 
     normalize_call_result_assignment_sources(&mut events);
 
@@ -1141,6 +1187,112 @@ fn call_result_assignment_pruning_never_treats_casing_as_type_evidence() {
         panic!("expected assign event")
     };
     assert_eq!(source_names.as_slice(), ["Logger"]);
+}
+
+#[test]
+fn call_result_assignment_pruning_never_tokenizes_argument_rendering() {
+    let mut events = vec![
+        assign_call("z", "f", &["wrapper(user)"], &["f", "safe", "user"]),
+        FlowEvent::Call {
+            span: Span::new(FileId::INVALID, 0, 0),
+            name: "f".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: Span::new(FileId::INVALID, 0, 0),
+                name: None,
+                value_text: "wrapper(user)".to_string(),
+                place: Some("safe".to_string()),
+                source_names: vec!["safe".to_string()],
+            }],
+        },
+    ];
+
+    normalize_call_result_assignment_sources(&mut events);
+
+    let FlowEvent::Assign { source_names, .. } = &events[0] else {
+        panic!("expected assign event")
+    };
+    assert_eq!(source_names.as_slice(), ["user"]);
+}
+
+#[test]
+fn variadic_builtin_read_uses_exact_argument_place() {
+    let span = Span::new(FileId::INVALID, 0, 12);
+    let call_span = Span::new(FileId::INVALID, 4, 11);
+    let mut events = vec![
+        FlowEvent::Assign {
+            span,
+            target: "value".to_string(),
+            source_name: None,
+            source_call: Some("va_arg".to_string()),
+            source_call_args: vec!["rendered_decoy".to_string()],
+            source_names: vec!["rendered_decoy".to_string()],
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: call_span,
+            name: "va_arg".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: call_span,
+                name: None,
+                value_text: "rendered_decoy".to_string(),
+                place: Some("compiler_place".to_string()),
+                source_names: vec!["compiler_place".to_string()],
+            }],
+        },
+    ];
+
+    normalize_variadic_builtin_flow(&mut events, false, &[], &["va_arg"]);
+
+    let FlowEvent::Assign {
+        source_name,
+        source_call,
+        source_names,
+        ..
+    } = &events[0]
+    else {
+        panic!("expected assignment")
+    };
+    assert_eq!(source_name.as_deref(), Some("compiler_place"));
+    assert_eq!(source_call, &None);
+    assert_eq!(source_names.as_slice(), ["compiler_place"]);
+}
+
+#[test]
+fn variadic_builtin_read_fails_closed_without_exact_call_fact() {
+    let mut events = vec![FlowEvent::Assign {
+        span: Span::new(FileId::INVALID, 0, 12),
+        target: "value".to_string(),
+        source_name: None,
+        source_call: Some("va_arg".to_string()),
+        source_call_args: vec!["rendered_decoy".to_string()],
+        source_names: vec!["compiler_source".to_string()],
+        declares_new_binding: true,
+        value_kind: Some(AssignValueKind::CallResult),
+    }];
+
+    normalize_variadic_builtin_flow(&mut events, false, &[], &["va_arg"]);
+
+    let FlowEvent::Assign {
+        source_name,
+        source_call,
+        source_names,
+        ..
+    } = &events[0]
+    else {
+        panic!("expected assignment")
+    };
+    assert_eq!(source_name, &None);
+    assert_eq!(source_call.as_deref(), Some("va_arg"));
+    assert_eq!(source_names.as_slice(), ["compiler_source"]);
 }
 
 #[test]
@@ -1821,6 +1973,26 @@ fn callable_argument_does_not_treat_captures_as_host_value_operands() {
 }
 
 #[test]
+fn nested_callable_scope_does_not_leak_into_parent_expression_operands() {
+    let source = b"const items = values.map(value => value + captured);";
+    let tree = parse_language("javascript", source);
+    let declarator = collect_kinds(&tree, &["variable_declarator"])
+        .into_iter()
+        .next()
+        .expect("variable declarator");
+    let value = declarator.child_by_field_name("value").expect("initializer");
+
+    let operands = extract_rhs_expr_operands(&value, source, &GENERIC_HANDLER);
+    assert!(operands.iter().any(|operand| operand == "values"));
+    assert!(
+        operands
+            .iter()
+            .all(|operand| operand != "value" && operand != "captured"),
+        "callback parameters, locals, and captures belong to the callback environment: {operands:?}"
+    );
+}
+
+#[test]
 fn receiver_type_uses_declared_class_facts_without_factory_name_knowledge() {
     let mut idx = DeclIndex::default();
     let mut child = m9_func_decl(0, "Child", None, Vec::new());
@@ -2349,6 +2521,49 @@ fn evaluation_order_places_exact_binding_before_its_first_dependent_use() {
     assert!(matches!(&events[1], FlowEvent::Assign { target, .. } if target == "bound"));
     assert!(matches!(&events[2], FlowEvent::Call { name, .. } if name == "consume"));
     assert!(matches!(&events[3], FlowEvent::Assign { target, .. } if target == "result"));
+}
+
+#[test]
+fn evaluation_order_places_aggregate_write_before_its_consumer_and_is_idempotent() {
+    let file = FileId::new(0);
+    let consumer = FlowEvent::Call {
+        span: Span::new(file, 40, 58),
+        name: "consume".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            span: Span::new(file, 48, 57),
+            passing_mode: crate::ArgumentPassingMode::Value,
+            name: None,
+            value_text: "envelope".to_string(),
+            place: Some("envelope".to_string()),
+            source_names: vec!["envelope".to_string()],
+        }],
+    };
+    let aggregate = FlowEvent::AggregateAssign {
+        span: Span::new(file, 10, 30),
+        target: "envelope".to_string(),
+        type_name: None,
+        value_flow: ExpressionFlow {
+            aggregate_fields: vec![crate::ExpressionField {
+                name: "value".to_string(),
+                value_span: Some(Span::new(file, 20, 23)),
+                value: ExpressionFlow::from_place("raw"),
+            }],
+            ..ExpressionFlow::default()
+        },
+    };
+    let mut index = DeclIndex::default();
+    index
+        .defs
+        .push(m9_func_decl(1, "pipeline", None, vec![consumer, aggregate]));
+
+    normalize_decl_event_evaluation_order(&mut index);
+    normalize_decl_event_evaluation_order(&mut index);
+    let events = &index.defs[0].flow_events;
+    assert!(matches!(&events[0], FlowEvent::AggregateAssign { target, .. } if target == "envelope"));
+    assert!(matches!(&events[1], FlowEvent::Call { name, .. } if name == "consume"));
 }
 
 #[test]

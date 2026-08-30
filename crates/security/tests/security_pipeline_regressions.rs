@@ -157,17 +157,10 @@ fn expected_language_gauntlet_findings_with_inferred_sources(lang: &str) -> usiz
         "objc" => 1,
         // One real stdin-to-system flow; the second sink is the clean twin.
         "perl" => 1,
-        // Two real vulns: readline → $envelope.cmd → … → shell_exec (CWE-78)
-        // and readline → echo (CWE-79). Both reach their sink via real
-        // chains (verified with `--source readline`). NOTE: the php adapter
-        // models the `[...]` array literal / `[...$envelope]` spread as a
-        // whole-container value (the destructuring `['cmd'=>$cmd]=$env`
-        // emits no field link), so the combiner currently reports the
-        // co-tainted `$_SERVER` (in the `user` field) as the representative
-        // source instead of `readline`. Correct source attribution needs
-        // php-adapter field-precision (array-literal field-writes + spread +
-        // subscript-read field links) — see docs/goal.md.
-        "php" => 2,
+        // One intentional vulnerability: $_GET → $envelope['cmd'] → … →
+        // shell_exec (CWE-78). The top-level response is literal so this
+        // command-flow gauntlet does not also claim reflected XSS.
+        "php" => 1,
         // §C collapse (2026-05-28): one `class_field.inherited`
         // sibling-component over-approximation dropped now that
         // field-mismatched inferred sources are filtered when the
@@ -6519,6 +6512,23 @@ func unsafe() { sink(source()) }
     );
 }
 
+fn python_same_origin_predicate_requirements() -> Vec<bonsai_security::GuardedPredicateRequirement> {
+    [("/", true), ("//", false)]
+        .into_iter()
+        .map(
+            |(value, required_result)| bonsai_security::GuardedPredicateRequirement {
+                target: RuleTarget {
+                    name: Some("startswith".to_string()),
+                    ..RuleTarget::default()
+                },
+                argument_index: 0,
+                argument_value: bonsai_lang_api::StaticScalarValue::String(value.to_string()),
+                required_result,
+            },
+        )
+        .collect()
+}
+
 #[test]
 fn same_origin_path_summary_sanitizes_only_direct_helper_result() {
     let mut pack = constrained_call_sink_rulepack("python", "source", "sink");
@@ -6538,6 +6548,11 @@ fn same_origin_path_summary_sanitizes_only_direct_helper_result() {
                 name: Some("urllib.parse.urlparse".to_string()),
                 ..RuleTarget::default()
             }],
+            required_predicates: python_same_origin_predicate_requirements(),
+            required_accepted_prefixes: Vec::new(),
+            required_rejected_prefixes: Vec::new(),
+            required_rejected_components: vec!["scheme".to_string(), "netloc".to_string()],
+            accepted_static_fallbacks: vec!["/".to_string()],
             sink_argument_index: None,
             static_context_argument: None,
         }),
@@ -6595,6 +6610,11 @@ fn same_origin_path_summary_rejects_unapproved_parser_provider() {
                 name: Some("urllib.parse.urlparse".to_string()),
                 ..RuleTarget::default()
             }],
+            required_predicates: python_same_origin_predicate_requirements(),
+            required_accepted_prefixes: Vec::new(),
+            required_rejected_prefixes: Vec::new(),
+            required_rejected_components: vec!["scheme".to_string(), "netloc".to_string()],
+            accepted_static_fallbacks: vec!["/".to_string()],
             sink_argument_index: None,
             static_context_argument: None,
         }),
@@ -8080,6 +8100,11 @@ fn go_same_origin_redirect_helper_guard_is_sanitized() {
             require_absolute_path: true,
             require_scheme_relative_rejection: true,
             accepted_providers: Vec::new(),
+            required_predicates: Vec::new(),
+            required_accepted_prefixes: vec!["/".to_string()],
+            required_rejected_prefixes: vec!["//".to_string()],
+            required_rejected_components: Vec::new(),
+            accepted_static_fallbacks: vec!["/".to_string()],
             sink_argument_index: Some(1),
             static_context_argument: None,
         }),

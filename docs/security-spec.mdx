@@ -107,16 +107,15 @@ see the [Coverage Baseline](COVERAGE_BASELINE.md). A bundled rule that anchors
 on a construct the adapter declares `Unsupported` is rejected, so it cannot
 silently claim a shape the compiler does not analyse precisely.
 
-Recent capability promotions unblock several rule families:
+Capability declarations are intentionally conservative:
 
 - **Macros** in C / C++ / Objective-C - Unsupported -> Partial. Rules
   anchored on `STR_CPY`, `LOG`, `assert`, `NSAssert` shapes load.
-- **Reflection** in Python - Unsupported -> Partial. Constant-string
-  `getattr` / `setattr` / `hasattr` are rewritten to direct attribute
-  calls.
-- **Reflection** in Java - Unsupported -> Partial. The
-  `Class.forName("X").getMethod("Y").invoke(...)` chain rewrites to a
-  synthesized `X.Y(...)`.
+- **Reflection** in Python and Java remains Unsupported. Literal attribute,
+  class, or method strings stay as parsed runtime calls and unresolved
+  evidence; they are never rewritten into guessed first-party call edges.
+  Exact first-party declarations or rulepack typing may prove a target in the
+  future without changing that default.
 - **Exceptions** in Java / Kotlin / C# - Partial -> Exact. Rules that
   anchor on a specific catch arm fire only when the throw type can
   plausibly be caught.

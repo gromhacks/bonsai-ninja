@@ -12,6 +12,44 @@ fn conformance_traced() {
 }
 
 #[test]
+fn named_argument_selector_chain_uses_exact_cst_place_not_rendered_value_text() {
+    use bonsai_lang_api::FlowEvent;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_dart::DartAdapter::new())],
+        &[(
+            "named.dart",
+            r#"
+void send({required String value}) {}
+void run(Packet packet) {
+  send(value: packet.payload.command);
+}
+"#,
+        )],
+    );
+    let file = workspace.db().vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Dart compiler index");
+    let run = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run")
+        .expect("run declaration");
+    let argument = run
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { name, args, .. } if name == "send" => args.first(),
+            _ => None,
+        })
+        .expect("send named argument");
+    assert_eq!(argument.place.as_deref(), Some("packet.payload.command"));
+    assert!(argument
+        .source_names
+        .iter()
+        .any(|source| source == "packet.payload.command"));
+}
+
+#[test]
 fn assignment_literals_preserve_exact_dart_runtime_strings() {
     use bonsai_lang_api::StaticScalarValue;
 

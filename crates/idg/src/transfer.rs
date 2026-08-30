@@ -74,8 +74,9 @@ use bonsai_common::{FuncId, Precision, Span};
 use bonsai_factstore::{StrId, StringPoolBuilder};
 use bonsai_lang_api::{
     call_argument_value_fact, call_receiver_fact_for_span, kit::SYNTHETIC_TUPLE_RESULT_PREFIX,
-    AssignValueKind, AssignmentValueFact, CallArg, CallArgumentValueFact, CallKind, CallReceiverFact, Decl,
-    DeclKind, ExpressionFlow, ExpressionProjection, FiniteLiteralSelectionFact, FlowEvent,
+    AssignValueKind, AssignmentValueFact, CallArg, CallArgumentValueFact, CallKind, CallReceiverFact,
+    CallReceiverRole, Decl, DeclKind, ExpressionFlow, ExpressionProjection, FiniteLiteralSelectionFact,
+    FlowEvent,
 };
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -960,6 +961,11 @@ pub struct CallSiteRef {
     /// Adapter's classification for this call (Free / Method /
     /// Constructor / etc.). Mirrors the FlowEvent::Call::call_kind.
     pub call_kind: CallKind,
+    /// Compiler role of the receiver expression. Property/getter projections
+    /// use method-shaped dispatch while preserving exact field sensitivity;
+    /// namespaces carry no runtime value at all.
+    #[serde(default)]
+    pub receiver_role: CallReceiverRole,
     /// Number of arguments at the site. Phase 3 uses this to bound
     /// the param-index edges it stitches.
     pub args_count: u32,
@@ -1014,9 +1020,11 @@ pub struct CallSiteRef {
     /// edge if this call has no semantic callee.
     pub unresolved_result_passthrough: bool,
     /// Whether the unresolved-call compatibility fallback may carry the
-    /// method receiver into the result. This comes from the adapter's call
-    /// classification; syntax-level field/property access must not emit a
-    /// method call site.
+    /// method receiver into the result. This comes from the adapter's exact
+    /// receiver role. A property/getter projection may still use a
+    /// method-shaped call site: resolved local accessors use exact field/body
+    /// stitching, while an opaque external getter conservatively derives its
+    /// result from the runtime receiver.
     pub unresolved_receiver_result_passthrough: bool,
 }
 
@@ -1438,7 +1446,7 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
     out.return_field_projections = return_field_projections(&executable_flow, &out.receiver_names);
     out.return_passthrough_param_indices = return_passthrough_param_indices(&executable_flow, &decl.params);
     out.flow_control = FlowControlFacts::from_events(&executable_flow);
-    let method_receiver_projections = collect_method_receiver_projections(&executable_flow);
+    let method_receiver_projections = collect_method_receiver_projections(&executable_flow, call_receivers);
     let method_selector_fields = collect_method_selector_fields(&executable_flow);
     let field_precise_source_projections =
         collect_field_precise_source_projections(&executable_flow, &method_receiver_projections);
@@ -2510,10 +2518,16 @@ fn field_base_name(target: &str) -> Option<&str> {
 
 /// Collect exact receiver-method projections from adapter-emitted call
 /// events. Dotted assignment text alone is never enough to classify a
-/// field/property access as a method invocation.
-fn collect_method_receiver_projections(events: &[FlowEvent]) -> ahash::AHashSet<String> {
+/// field/property access as a method invocation. Namespace-qualified calls
+/// are still calls for expression-shape purposes; only syntax-level getter
+/// projections are excluded because their dotted receiver is a property
+/// value rather than an invoked method receiver.
+fn collect_method_receiver_projections(
+    events: &[FlowEvent],
+    call_receivers: &[CallReceiverFact],
+) -> ahash::AHashSet<String> {
     let mut out = ahash::AHashSet::default();
-    collect_method_receiver_projections_into(events, &mut out);
+    collect_method_receiver_projections_into(events, call_receivers, &mut out);
     out
 }
 
@@ -2747,11 +2761,25 @@ fn events_contain_yield(events: &[FlowEvent]) -> bool {
     })
 }
 
-fn collect_method_receiver_projections_into(events: &[FlowEvent], out: &mut ahash::AHashSet<String>) {
+fn collect_method_receiver_projections_into(
+    events: &[FlowEvent],
+    call_receivers: &[CallReceiverFact],
+    out: &mut ahash::AHashSet<String>,
+) {
     for event in events {
         match event {
-            FlowEvent::Call { name, call_kind, .. } => {
-                if matches!(call_kind, CallKind::Method) {
+            FlowEvent::Call {
+                span,
+                name,
+                call_kind,
+                ..
+            } => {
+                let receiver_role = call_receiver_fact_for_span(call_receivers, *span)
+                    .map(|fact| fact.role)
+                    .unwrap_or_default();
+                if matches!(call_kind, CallKind::Method)
+                    && !matches!(receiver_role, CallReceiverRole::Projection)
+                {
                     push_method_projection(name, out);
                 }
             }
@@ -2760,11 +2788,11 @@ fn collect_method_receiver_projections_into(events: &[FlowEvent], out: &mut ahas
                 else_events,
                 ..
             } => {
-                collect_method_receiver_projections_into(then_events, out);
-                collect_method_receiver_projections_into(else_events, out);
+                collect_method_receiver_projections_into(then_events, call_receivers, out);
+                collect_method_receiver_projections_into(else_events, call_receivers, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_method_receiver_projections_into(body, out);
+                collect_method_receiver_projections_into(body, call_receivers, out);
             }
             FlowEvent::Try {
                 body,
@@ -2772,9 +2800,9 @@ fn collect_method_receiver_projections_into(events: &[FlowEvent], out: &mut ahas
                 finally_events,
                 ..
             } => {
-                collect_method_receiver_projections_into(body, out);
-                collect_method_receiver_projections_into(catch_events, out);
-                collect_method_receiver_projections_into(finally_events, out);
+                collect_method_receiver_projections_into(body, call_receivers, out);
+                collect_method_receiver_projections_into(catch_events, call_receivers, out);
+                collect_method_receiver_projections_into(finally_events, call_receivers, out);
             }
             _ => {}
         }
@@ -4004,6 +4032,9 @@ fn walk_assign(
             }
             if !sibling_call_event {
                 let observed_callee = ObservedCallee::new(callee);
+                let receiver_role = call_receiver_fact_for_span(ctx.call_receivers, site_span)
+                    .map(|fact| fact.role)
+                    .unwrap_or_default();
                 let mut receiver_arg_node = None;
                 let mut receiver_storage_base = None;
                 if let Some((_, receiver_flow)) = indexed_source_call_receiver {
@@ -4042,6 +4073,7 @@ fn walk_assign(
                     receiver_types: Vec::new(),
                     receiver_storage_base,
                     call_kind,
+                    receiver_role,
                     args_count: u32::try_from(source_call_args.len()).unwrap_or(u32::MAX),
                     explicit_args_count: u32::try_from(source_call_args.len()).unwrap_or(u32::MAX),
                     call_ret_node: ret_node,
@@ -4501,9 +4533,14 @@ fn walk_call(
     // free functions don't carry implicit receiver flow.
     let mut receiver_arg_node = None;
     let mut receiver_storage_base = None;
+    let mut receiver_allows_unresolved_result_passthrough = true;
+    let mut receiver_role = CallReceiverRole::Value;
     if matches!(call_kind, CallKind::Method) {
         let receiver_was_prebound = ctx.prebound_assignment_receivers.remove(&span);
         let receiver_fact = call_receiver_fact_for_span(ctx.call_receivers, span);
+        receiver_role = receiver_fact.map(|fact| fact.role).unwrap_or_default();
+        receiver_allows_unresolved_result_passthrough =
+            receiver_fact.is_none_or(|fact| fact.role.allows_unresolved_result_passthrough());
         let receiver_is_namespace = receiver_fact
             .is_some_and(|fact| matches!(fact.role, bonsai_lang_api::CallReceiverRole::Namespace));
         let receiver_flow = receiver_fact
@@ -4593,6 +4630,7 @@ fn walk_call(
         receiver_types: receiver_types.to_vec(),
         receiver_storage_base,
         call_kind,
+        receiver_role,
         args_count: u32::try_from(arg_nodes.len()).unwrap_or(u32::MAX),
         explicit_args_count: u32::try_from(args.len()).unwrap_or(u32::MAX),
         call_ret_node: ret_node,
@@ -4610,6 +4648,7 @@ fn walk_call(
         unresolved_receiver_result_passthrough: (ctx.options.include_unresolved_call_result_passthrough
             || ctx.options.include_unresolved_receiver_result_passthrough)
             && matches!(call_kind, CallKind::Method)
+            && receiver_allows_unresolved_result_passthrough
             && receiver.is_some(),
     });
     apply_source_output_arg_writes(span, &observed_callee, args, ctx);
