@@ -350,8 +350,9 @@ Start from externally reachable input, then prove source-to-sink paths.
 ./target/release/bonsai-ninja security <workspace> taint-analysis --context 16k --no-color --no-progress
 ```
 
-The bundled rulepack defaults these commands to `--profile production`, which sets remote-trust defaults,
-`severity high` for taint findings, `context 16k`, and excludes common
+The bundled rulepack defaults these commands to `--profile production`, which
+sets remote-trust defaults, keeps every sink severity, sets `context 16k`, and
+excludes common
 non-production paths:
 tests, specs, fixtures, mocks, samples, examples, demos, e2e/integration
 harnesses, vendored deps, package caches, build outputs, generated code,
@@ -361,6 +362,8 @@ These values and test conventions come from
 test-path filter. Security file and profile filters are workspace-relative:
 an ancestor directory outside the selected workspace does not make the
 workspace generated, vendored, or test code.
+Apply `--severity <level>` only when an explicit severity floor is desired;
+default analysis does not discard lower-severity findings.
 
 `source-analysis` follows selected sources forward without requiring a sink.
 `sink-analysis` follows source-independent compiler/IDG value lineage backward

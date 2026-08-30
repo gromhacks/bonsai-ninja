@@ -46,10 +46,10 @@ class; for example `network-input`, `archive-input`, `graphql-input`,
 
 Trust changes reporting policy, not propagation. Exact local-trust flows stay
 visible in an unfiltered analysis, but their emitted severity is capped at
-`medium`. The bundled `production` profile selects remote-trust sources at
-`high` or above, so operator/environment findings do not add noise to the
-default deployment review. A rulepack may explicitly suppress a declared
-local flow class, but propagation and compiler facts remain unchanged.
+`medium`. The bundled `production` profile selects remote-trust sources but
+does not impose a severity floor; use `--severity` when a review intentionally
+wants one. A rulepack may explicitly suppress a declared local flow class, but
+propagation and compiler facts remain unchanged.
 
 Typing rules declare at least one non-finding compiler model:
 

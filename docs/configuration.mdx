@@ -126,7 +126,8 @@ want to trade repeated-run speed for less cache I/O.
 Security `--file`, `--exclude-file`, `--exclude-tests`, and production-profile
 path filters are evaluated against workspace-relative paths. The bundled
 production profile is the default for `source-analysis`, `sink-analysis`, and `taint-analysis`;
-`--profile all` disables its review-path/trust/severity defaults. Independently,
+it keeps every sink severity, and `--profile all` disables its review-path and
+trust defaults. Independently,
 the default compiler-input profile excludes adapter-classified minified
 JavaScript/TypeScript for indexing, navigation, graphs, security, and export;
 global `--minified-js` includes those bundles. Use both switches for an

@@ -149,8 +149,8 @@ Use qualified `Owner.member` selectors when short method names collide.
 ## Run a security scan
 
 Security analysis uses the bundled production profile by default. It selects
-remote input, high-severity findings, and common non-production path
-exclusions from rulepack metadata:
+remote input, every sink severity, and common non-production path exclusions
+from rulepack metadata:
 
 ```bash
 ./target/release/bonsai-ninja security ./src taint-analysis \
@@ -171,10 +171,9 @@ source-independent upstream compiler lineage:
 
 `upstream_flows` remains present even when no selected security source reaches
 the endpoint. Exact selected-source proofs are reported separately under
-`security_source_flows`. The report header echoes the effective severity floor;
-use `--profile all` or an explicit `--severity medium` when a lower-severity
-endpoint shown by the unprofiled `security sinks` inventory is intentionally in
-scope.
+`security_source_flows`. Default analysis keeps every severity. When a narrower
+review is intentional, pass a floor such as `--severity high`; the report header
+and JSON summary echo that effective filter.
 
 For a complete machine-readable artifact:
 

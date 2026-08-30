@@ -123,6 +123,79 @@ fn normalize_taint_path_preserves_distinct_report_lines() {
 }
 
 #[test]
+fn normalize_taint_path_does_not_relabel_a_call_as_a_self_call_on_same_line_return() {
+    let normalized = normalize_taint_path(vec![
+        path_step(
+            "factory",
+            "Record",
+            "lib/record.dart",
+            6,
+            12,
+            vec![(0, "fields['name']", "name"), (1, "fields['count']", "count")],
+        ),
+        path_step("Record", "factory", "lib/record.dart", 6, 12, Vec::new()),
+    ]);
+
+    assert_eq!(normalized.len(), 1);
+    assert_eq!(normalized[0].caller, "factory");
+    assert_eq!(normalized[0].callee, "Record");
+    assert_eq!(normalized[0].tainted_args.len(), 2);
+}
+
+#[test]
+fn equivalent_taint_call_sequences_merge_only_argument_evidence() {
+    let mut current = vec![path_step(
+        "factory",
+        "Record",
+        "lib/record.dart",
+        6,
+        12,
+        vec![(0, "fields['name']", "name")],
+    )];
+    let incoming = vec![path_step(
+        "factory",
+        "Record",
+        "lib/record.dart",
+        6,
+        12,
+        vec![(1, "fields['count']", "count")],
+    )];
+
+    assert!(equivalent_taint_call_sequence(&current, &incoming));
+    merge_equivalent_taint_path(&mut current, &incoming);
+    assert_eq!(
+        current[0]
+            .tainted_args
+            .iter()
+            .map(|arg| (arg.index, arg.param_name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "name"), (1, "count")]
+    );
+}
+
+#[test]
+fn same_named_chain_at_different_call_sites_is_not_equivalent() {
+    let first = vec![path_step(
+        "factory",
+        "Record",
+        "lib/record.dart",
+        6,
+        12,
+        vec![(0, "first", "name")],
+    )];
+    let second = vec![path_step(
+        "factory",
+        "Record",
+        "lib/record.dart",
+        14,
+        12,
+        vec![(0, "second", "name")],
+    )];
+
+    assert!(!equivalent_taint_call_sequence(&first, &second));
+}
+
+#[test]
 fn terminal_taint_step_aligns_to_selected_sink_location() {
     let aligned = align_terminal_taint_step_to_sink(
         vec![

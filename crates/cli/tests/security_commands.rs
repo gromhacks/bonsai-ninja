@@ -242,9 +242,10 @@ fn expected_language_gauntlet_finding_count_with_inferred_sources(lang: &str) ->
 fn expected_language_gauntlet_finding_count_with_concrete_sources(lang: &str) -> usize {
     match lang {
         "c" | "cpp" | "csharp" | "dart" | "elixir" | "erlang" | "go" | "java" | "javascript" | "kotlin"
-        | "lua" | "objc" | "perl" | "php" | "python" | "ruby" | "rust" | "scala" | "swift" | "typescript" => {
-            1
-        }
+        | "lua" | "objc" | "perl" | "python" | "ruby" | "rust" | "scala" | "swift" | "typescript" => 1,
+        // The full-severity default retains the independent medium PSR-7
+        // response-body XSS flow as well as the high command flow.
+        "php" => 2,
         other => panic!("missing concrete language_gauntlet finding count for {other}"),
     }
 }
@@ -2109,7 +2110,7 @@ fn sink_analysis_maps_python_endpoints_and_exact_upstream_paths() {
 }
 
 #[test]
-fn security_analysis_reports_the_effective_profile_severity_floor() {
+fn security_analysis_defaults_to_all_severities_and_reports_explicit_floor() {
     let ws = temp_workspace("effective-severity-floor");
     std::fs::write(
         ws.join("pubspec.yaml"),
@@ -2154,9 +2155,29 @@ Future<Response> feed(Request req) async {
     ])
     .unwrap();
     assert!(
-        default_sink.contains("0 sink(s)") && default_sink.contains("severity >= high"),
-        "an empty production result must expose the effective severity floor:\n{default_sink}"
+        default_sink.contains("1 sink(s)")
+            && default_sink.contains("dart.xxe.xml_document_parse")
+            && !default_sink.contains("severity >="),
+        "the production profile must retain every severity unless the user supplies a floor:\n{default_sink}"
     );
+
+    let high_sink_json = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "sink-analysis",
+        "--rules-dir",
+        &rules,
+        "--severity",
+        "high",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    let high_sink: serde_json::Value =
+        serde_json::from_str(&high_sink_json).expect("high sink-analysis JSON");
+    assert_eq!(high_sink["summary"]["severity_floor"], "high");
+    assert!(json_rows(&high_sink).is_empty());
 
     let medium_sink_json = run(&[
         "security",
@@ -2200,8 +2221,28 @@ Future<Response> feed(Request req) async {
     .unwrap();
     let default_taint: serde_json::Value =
         serde_json::from_str(&default_taint_json).expect("default taint JSON");
-    assert_eq!(default_taint["summary"]["severity_floor"], "high");
-    assert!(json_rows(&default_taint).is_empty());
+    assert!(default_taint["summary"]["severity_floor"].is_null());
+    assert!(json_rows(&default_taint).iter().any(|row| {
+        row.pointer("/sink/rule_id").and_then(serde_json::Value::as_str)
+            == Some("dart.xxe.xml_document_parse")
+    }));
+
+    let high_taint_json = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "taint-analysis",
+        "--rules-dir",
+        &rules,
+        "--severity",
+        "high",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    let high_taint: serde_json::Value = serde_json::from_str(&high_taint_json).expect("high taint JSON");
+    assert_eq!(high_taint["summary"]["severity_floor"], "high");
+    assert!(json_rows(&high_taint).is_empty());
 
     let medium_taint_json = run(&[
         "security",

@@ -126,8 +126,8 @@ class RestoreJob {
   final int retries;
   RestoreJob({required this.workerUri, required this.retries});
   factory RestoreJob.fromJson(Map<String, dynamic> j) => RestoreJob(
-    retries: 1,
     workerUri: j['worker'] as String? ?? '',
+    retries: j['retries'] as int? ?? 1,
   );
 }
 Future<String> runJob(RestoreJob job) => spawnWorker(job.workerUri);
@@ -179,6 +179,26 @@ Future<String> spawnWorker(String uri) async {
         }),
         "source-analysis must retain the workerUri branch as well as other tainted map fields: {:#?}",
         source_report.candidates
+    );
+    let constructor_step = source_report
+        .candidates
+        .iter()
+        .flat_map(|candidate| &candidate.taint_path)
+        .find(|step| step.callee == "RestoreJob")
+        .unwrap_or_else(|| {
+            panic!(
+                "source-analysis must retain the resolved constructor boundary: {:#?}",
+                source_report.candidates
+            )
+        });
+    assert_eq!(
+        constructor_step
+            .tainted_args
+            .iter()
+            .map(|arg| (arg.index, arg.param_name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "workerUri"), (1, "retries")],
+        "all tainted named arguments must remain attached to their exact fields: {constructor_step:#?}"
     );
 }
 

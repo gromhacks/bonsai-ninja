@@ -207,8 +207,9 @@ Start from externally reachable input and prove source-to-sink paths:
 ```
 
 The bundled `production` profile is the default. It selects remote input,
-high-severity taint findings, a 16k context budget, and common non-production
-path exclusions from rulepack metadata. Separately, compiler-backed commands
+every sink severity, a 16k context budget, and common non-production path
+exclusions from rulepack metadata. Add `--severity <level>` only when an
+explicit severity floor is wanted. Separately, compiler-backed commands
 exclude adapter-classified minified JavaScript/TypeScript before parsing,
 graph construction, security, and export. Use global `--minified-js` when
 bundle internals are intentionally in scope. Use `--profile all

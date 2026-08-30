@@ -237,8 +237,10 @@ workflows.
 ```
 
 The bundled rulepack defaults `source-analysis`, `sink-analysis`, and
-`taint-analysis` to its `production` profile: remote/high review plus common
-non-production path exclusions. Independently, compiler-backed commands exclude
+`taint-analysis` to its `production` profile: remote-input review, every sink
+severity, and common non-production path exclusions. Add an explicit severity
+floor such as `--severity high` only when the consumer wants to narrow the
+complete default finding set. Independently, compiler-backed commands exclude
 adapter-classified minified JavaScript/TypeScript bundles by default so
 generated distribution artifacts do not dominate indexing, graphs, security,
 or export. Add the global `--minified-js` switch when bundle internals are in

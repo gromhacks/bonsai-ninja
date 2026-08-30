@@ -2655,9 +2655,9 @@ fn build_source_group_candidates(
                 .insert_if_absent(group.start, group.graph_key.clone(), graph)
         });
 
-    let mut candidates = Vec::new();
+    let mut candidates: Vec<SourceAnalysisCandidate> = Vec::new();
     for job in &group.jobs {
-        let mut seen_chains: AHashSet<Vec<String>> = AHashSet::new();
+        let mut candidates_by_chain: AHashMap<Vec<String>, Vec<usize>> = AHashMap::new();
         let (lineages, lineage_stats) = collect_tainted_source_lineages(
             &graph.call_records,
             job.start,
@@ -2677,15 +2677,34 @@ fn build_source_group_candidates(
             let Some(chain_names) = chain_names_for_path(context.ws, context.global, &path) else {
                 continue;
             };
-            if !seen_chains.insert(chain_names.clone()) {
-                continue;
-            }
             let taint_path = taint_path_for_lineage(context.ws, context.global, &emission.records, None);
-            let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
             let precision = chain_precision_for_records(&emission.records);
             if !precision.is_semantic() {
                 continue;
             }
+            let merge_target = candidates_by_chain.get(&chain_names).and_then(|indices| {
+                indices
+                    .iter()
+                    .copied()
+                    .find(|&index| equivalent_taint_call_sequence(&candidates[index].taint_path, &taint_path))
+            });
+            if let Some(candidate_index) = merge_target {
+                let candidate = &mut candidates[candidate_index];
+                merge_equivalent_taint_path(&mut candidate.taint_path, &taint_path);
+                candidate.flow_id = flow_id_for_taint_path(&candidate.chain_names, &candidate.taint_path);
+                candidate.precision = candidate.precision.meet(precision);
+                merge_source_lineage_status(
+                    &mut candidate.lineage,
+                    SourceLineageStatus::from_lineage(emission, lineage_stats, emitted_lineage_rows),
+                );
+                emitted_lineage_rows = emitted_lineage_rows.saturating_add(1);
+                continue;
+            }
+            let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
+            candidates_by_chain
+                .entry(chain_names.clone())
+                .or_default()
+                .push(candidates.len());
             candidates.push(SourceAnalysisCandidate {
                 source: job.source_match.clone(),
                 path,
@@ -2716,6 +2735,44 @@ fn build_source_group_candidates(
         }
     }
     candidates
+}
+
+/// Merge argument evidence only when two source lineages describe the exact
+/// same resolved call-site sequence. The IDG retains one transition per
+/// `CallArg -> Param`; source-analysis presents the call boundary once with
+/// every compiler-proven argument attached. Divergent paths remain distinct
+/// semantic evidence and are never unioned here.
+fn merge_equivalent_taint_path(current: &mut [TaintPropagationStep], incoming: &[TaintPropagationStep]) {
+    debug_assert!(equivalent_taint_call_sequence(current, incoming));
+    for (current_step, incoming_step) in current.iter_mut().zip(incoming) {
+        for arg in &incoming_step.tainted_args {
+            if !current_step.tainted_args.iter().any(|existing| {
+                existing.index == arg.index
+                    && existing.value_text == arg.value_text
+                    && existing.param_name == arg.param_name
+            }) {
+                current_step.tainted_args.push(arg.clone());
+            }
+        }
+        current_step.tainted_args.sort_by(|left, right| {
+            (left.index, left.param_name.as_str(), left.value_text.as_str()).cmp(&(
+                right.index,
+                right.param_name.as_str(),
+                right.value_text.as_str(),
+            ))
+        });
+    }
+}
+
+fn equivalent_taint_call_sequence(left: &[TaintPropagationStep], right: &[TaintPropagationStep]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.caller == right.caller
+                && left.callee == right.callee
+                && left.file == right.file
+                && left.line == right.line
+                && left.column == right.column
+        })
 }
 
 fn canonicalize_source_candidates(
@@ -4777,10 +4834,11 @@ fn same_taint_report_site(left: &TaintPropagationStep, right: &TaintPropagationS
 }
 
 fn merge_taint_report_step(previous: &mut TaintPropagationStep, next: TaintPropagationStep) {
+    let returns_to_previous_caller = previous.caller == next.callee && previous.callee == next.caller;
     if previous.caller.is_empty() {
         previous.caller = next.caller;
     }
-    if !next.callee.is_empty() {
+    if !returns_to_previous_caller && !next.callee.is_empty() {
         previous.callee = next.callee;
     }
     if previous.column == 0 {

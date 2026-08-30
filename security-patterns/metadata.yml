@@ -203,7 +203,6 @@ profiles:
   all: {}
   production:
     trust: remote
-    severity: high
     context: 16k
     exclude_tests: true
     exclude_paths:

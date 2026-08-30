@@ -167,7 +167,8 @@ jobs:
         run: |
           set -euo pipefail
           ./target/release/bonsai-ninja security . taint-analysis \
-            --profile production --format json --all --no-color --no-progress \
+            --profile production --severity high \
+            --format json --all --no-color --no-progress \
             > /tmp/bonsai-self-security.json
           ./target/release/bonsai-ninja security examples/python/language_gauntlet taint-analysis \
             --format sarif --all --no-color --no-progress \
