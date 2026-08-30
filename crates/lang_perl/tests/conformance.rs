@@ -608,6 +608,31 @@ fn finite_hash_lookup_is_compiler_proven_only_for_static_unmodified_maps() {
     assert_eq!(safe.len(), 1, "exact finite lookup fact: {safe:#?}");
     assert_eq!(safe[0].target.as_deref(), Some("$column"));
 
+    let mapped = facts(
+        "my %COLUMNS = (name => 'name', created => 'created');\n\
+         sub choose { my ($keys) = @_; my @safe = grep { defined } map { $COLUMNS{$_} } @$keys; return join(', ', @safe); }\n",
+    );
+    assert_eq!(mapped.len(), 1, "finite map/grep selection fact: {mapped:#?}");
+    assert_eq!(mapped[0].target.as_deref(), Some("@safe"));
+
+    let dynamic_callback = facts(
+        "my %COLUMNS = (name => 'name', created => 'created');\n\
+         sub choose { my ($keys) = @_; my @unsafe = map { $COLUMNS{$_} . $_ } @$keys; return join(', ', @unsafe); }\n",
+    );
+    assert!(
+        dynamic_callback.is_empty(),
+        "a callback that also emits its dynamic key is not finite: {dynamic_callback:#?}"
+    );
+
+    let mutating_grep = facts(
+        "my %COLUMNS = (name => 'name', created => 'created');\n\
+         sub choose { my ($keys) = @_; my @unsafe = grep { $_ .= external_value() } map { $COLUMNS{$_} } @$keys; return join(', ', @unsafe); }\n",
+    );
+    assert!(
+        mutating_grep.is_empty(),
+        "a grep callback may mutate its aliased topic and must fail closed: {mutating_grep:#?}"
+    );
+
     let mutated = facts(
         "my %COLUMNS = (name => 'name');\n\
          $COLUMNS{name} = external_value();\n\

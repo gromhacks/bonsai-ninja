@@ -473,7 +473,10 @@ use std::sync::{
 // v172: Perl data-reference construction and nested scalar dereference
 // dependencies are retained as exact adapter-lowered call-argument places.
 // Cached v171 bodies can omit the complete argument vector for `\@array`.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 172;
+// v173: Perl finite-literal selection facts retain exact value replacement
+// through a non-mutating map/grep collection transform. Cached v172 bodies
+// can incorrectly retain the dynamic selection key as a value dependency.
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 173;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 105;

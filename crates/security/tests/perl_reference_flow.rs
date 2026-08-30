@@ -64,3 +64,74 @@ fn a_clean_referent_does_not_inherit_taint_from_a_sibling_array() {
         report.findings
     );
 }
+
+fn analyze_collection_selection(callback: &str) -> bonsai_security::TaintAnalysisReport {
+    let workspace = Workspace::new(bonsai_adapters::all_languages_registry());
+    workspace.vfs().write(
+        "lib/App/Controller/Orders.pm",
+        Arc::<str>::from(
+            r#"package App::Controller::Orders;
+use Mojo::Base 'Mojolicious::Controller', -signatures;
+use App::Sort;
+sub index ($self) {
+    my $raw = $self->param('sort') // 'id';
+    my @keys = split /,/, $raw;
+    return App::Sort::ordered(\@keys);
+}
+"#,
+        ),
+    );
+    workspace.vfs().write(
+        "lib/App/Sort.pm",
+        Arc::<str>::from(format!(
+            r#"package App::Sort;
+use App::Repo;
+my %SORTABLE = (total => 'total', created_at => 'created_at', id => 'id');
+sub ordered {{
+    my ($keys) = @_;
+    my @selected = {callback};
+    @selected = ('id') unless @selected;
+    return App::Repo::list_orders(join(', ', @selected));
+}}
+"#
+        )),
+    );
+    workspace.vfs().write(
+        "lib/App/Repo.pm",
+        Arc::<str>::from(
+            r#"package App::Repo;
+our $DBH;
+sub list_orders {
+    my ($clause) = @_;
+    return $DBH->selectall_arrayref("SELECT id FROM orders ORDER BY $clause");
+}
+"#,
+        ),
+    );
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("load source-controlled rulepack");
+    run_taint_analysis(&workspace, &pack, TaintAnalysisOptions::default())
+        .expect("run Perl finite collection-selection analysis")
+}
+
+#[test]
+fn finite_literal_map_over_array_reference_breaks_taint_across_files() {
+    let safe = analyze_collection_selection("grep { defined } map { $SORTABLE{$_} } @$keys");
+    assert!(
+        safe.findings
+            .iter()
+            .all(|finding| finding.finding.sink.rule_id != "perl.sqli.dbi_selectall"),
+        "a map/grep selection from an unmodified finite literal hash must break key taint: {:#?}",
+        safe.findings
+    );
+
+    let unsafe_report = analyze_collection_selection("map { $SORTABLE{$_} . $_ } @$keys");
+    assert!(
+        unsafe_report.findings.iter().any(|finding| {
+            finding.finding.source.rule_id == "perl.source.mojolicious_req_param"
+                && finding.finding.sink.rule_id == "perl.sqli.dbi_selectall"
+                && finding.finding.status == bonsai_security::FindingStatus::Unsanitized
+        }),
+        "a map callback that emits the caller-controlled key must remain tainted: {:#?}",
+        unsafe_report.findings
+    );
+}

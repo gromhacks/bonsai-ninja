@@ -1235,7 +1235,7 @@ fn collect_perl_finite_literal_selections(
         let Some(value) = perl_assignment_rhs(assignment, left) else {
             continue;
         };
-        let Some(lookup) = perl_finite_hash_lookup(value, src) else {
+        let Some(lookup) = perl_finite_hash_selection(value, src) else {
             continue;
         };
         let Some(map_name) = lookup
@@ -1252,9 +1252,6 @@ fn collect_perl_finite_literal_selections(
             continue;
         }
         let selection_span = span_of(file, &lookup);
-        if !perl_value_is_finite_hash_selection(value, map_name, src) {
-            continue;
-        }
         let assignment_span = span_of(file, &assignment);
         let target = index
             .assignment_values
@@ -2102,14 +2099,59 @@ fn perl_finite_hash_lookup<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<
     (left.kind() == "hash_element_expression" && perl_static_string(right, src).is_some()).then_some(left)
 }
 
-fn perl_value_is_finite_hash_selection(node: Node<'_>, map_name: &str, src: &[u8]) -> bool {
-    let Some(lookup) = perl_finite_hash_lookup(node, src) else {
-        return false;
-    };
-    lookup
-        .child_by_field_name("hash")
-        .or_else(|| lookup.named_child(0))
-        .is_some_and(|hash| perl_identifier_text(node_text(&hash, src).trim()) == map_name)
+/// Return the single runtime value represented by a callback block.
+///
+/// Comments are extras in the Perl grammar and therefore do not appear in
+/// `named_children`. Requiring exactly one parsed statement/expression keeps
+/// this proof closed over callbacks that append another value or mutate state.
+fn perl_single_callback_value(mut node: Node<'_>) -> Option<Node<'_>> {
+    while matches!(
+        node.kind(),
+        "block" | "expression_statement" | "parenthesized_expression"
+    ) {
+        let mut cursor = node.walk();
+        let mut children = node.named_children(&mut cursor);
+        let value = children.next()?;
+        if children.next().is_some() {
+            return None;
+        }
+        node = value;
+    }
+    Some(node)
+}
+
+/// Prove that the complete Perl expression can only return values selected
+/// from one finite literal hash.
+///
+/// `map` changes the list's values, so its callback must be exactly the hash
+/// selection (optionally with a literal `//` fallback). Perl aliases `$_`
+/// inside `grep`, so only its language-native, non-mutating `defined`
+/// predicate may preserve a proven finite input. The operator identity is read
+/// from Tree-sitter's anonymous keyword token; no library API or security name
+/// is interpreted here.
+fn perl_finite_hash_selection<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
+    if let Some(lookup) = perl_finite_hash_lookup(node, src) {
+        return Some(lookup);
+    }
+    if node.kind() != "map_grep_expression" {
+        return None;
+    }
+    let operator = node.child(0)?.kind();
+    let callback = node.child_by_field_name("callback")?;
+    let list = node.child_by_field_name("list")?;
+    match operator {
+        "map" => perl_finite_hash_lookup(perl_single_callback_value(callback)?, src),
+        "grep" => {
+            let predicate = perl_single_callback_value(callback)?;
+            let builtin = predicate.child(0).filter(|child| !child.is_named())?;
+            (predicate.kind() == "func1op_call_expression"
+                && builtin.kind() == "defined"
+                && predicate.named_child_count() == 0)
+                .then(|| perl_finite_hash_selection(list, src))
+                .flatten()
+        }
+        _ => None,
+    }
 }
 
 /// Preserve both the exact sigil-bearing storage place and its canonical
