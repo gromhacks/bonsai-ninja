@@ -478,6 +478,10 @@ fn graph_query_phase_plan(validation: &bonsai_sdk::CacheValidationReport) -> Vec
     phases
 }
 
+fn retain_worker_owner_until_process_exit<T>(owner: T) -> std::mem::ManuallyDrop<T> {
+    std::mem::ManuallyDrop::new(owner)
+}
+
 fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Result<()> {
     let label = std::env::var(SEMANTIC_PHASE_POSITION_ENV).map_or_else(
         |_| semantic_phase_progress_action(phase).to_string(),
@@ -498,7 +502,15 @@ fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Re
             return Ok(());
         }
     }
-    let project = open_project_sidecar_validation_only(root)?;
+    // Semantic phases run only in dedicated subprocesses. Keep the complete
+    // project alive until that subprocess exits and let the OS reclaim it as
+    // one unit. Dropping a production-sized workspace here can spend minutes
+    // recursively releasing compiler/IDG allocations after the atomically
+    // published phase is already complete; on Linux that made the parent wait
+    // indefinitely for an otherwise successful worker. `ManuallyDrop` is the
+    // intended hard-reclamation boundary, not a semantic shortcut: all phase
+    // work and persistence below still finish before the worker returns.
+    let project = retain_worker_owner_until_process_exit(open_project_sidecar_validation_only(root)?);
     match phase {
         SemanticWorkerPhase::Compiler => {
             let bar = progress::progress_bar(&label, project.stats().files as u64);
@@ -772,6 +784,28 @@ mod semantic_phase_tests {
     use super::*;
     use bonsai_sdk::{CacheFreshnessStatus, CacheSidecarValidation, CacheValidationReport};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropProbe(&'static AtomicBool);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn semantic_worker_owners_are_reclaimed_only_by_process_exit() {
+        static DROPPED: AtomicBool = AtomicBool::new(false);
+        DROPPED.store(false, Ordering::SeqCst);
+        {
+            let _owner = retain_worker_owner_until_process_exit(DropProbe(&DROPPED));
+        }
+        assert!(
+            !DROPPED.load(Ordering::SeqCst),
+            "isolated semantic workers must not recursively tear down a production workspace before exiting"
+        );
+    }
 
     #[test]
     fn semantic_workers_have_distinct_user_facing_progress_actions() {
