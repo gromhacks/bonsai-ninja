@@ -5120,13 +5120,14 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
             && idg_builder.contains("rows: Vec<CalleeEndpoints>")
             && idg_builder.contains("row_by_func: Vec<u32>")
             && idg_builder.contains("capture_funcs.is_none_or(|targets| targets.contains(&func))")
-            && idg_adapter.contains("let mut capture_funcs = local_callable_bindings")
-            && idg_adapter.contains("call_graph.visit_callable_arguments")
+            && idg_adapter.contains("let mut capture_funcs = AHashSet::new()")
+            && idg_adapter.contains("call_graph.visit_callable_metadata")
+            && !idg_adapter.contains("for &caller in maps.func_to_seg.keys() {\n        call_graph.visit_callable_arguments")
             && idg_adapter.contains("let Some(parent) = decl.parent")
             && idg_adapter.contains("capture_funcs.insert(parent_func)")
             && idg_adapter.contains("capture_funcs.insert(candidate)")
             && idg_adapter.contains("capture_funcs: Some(&capture_funcs)"),
-        "cold IDG stitching must keep endpoint records packed and retain lexical captures only for AST/callgraph-proven local callables"
+        "cold IDG stitching must keep endpoint records packed, stream callable metadata once, and retain lexical captures only for AST/callgraph-proven local callables"
     );
     let hydrate = function_body(&workspace, "load_idg_sidecar");
     assert!(

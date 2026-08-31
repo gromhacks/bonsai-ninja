@@ -59,6 +59,18 @@ pub trait CallGraphRelation: Sync {
     /// Visit every compiler-proven callable value passed at an exact argument
     /// span. This relation carries no execution semantics by itself.
     fn visit_callable_arguments(&self, caller: FuncId, visit: &mut dyn FnMut(bonsai_common::Span, FuncId));
+    /// Stream the complete compiler-proven callable metadata once.
+    ///
+    /// Workspace-wide compiler passes must use this visitor instead of
+    /// issuing separate partition scans for aliases and arguments. The
+    /// individual APIs expose the same exact facts; this form only avoids
+    /// repeatedly decoding the same callgraph partitions on production-sized
+    /// workspaces.
+    fn visit_callable_metadata(
+        &self,
+        visit_binding: &mut dyn FnMut(FuncId, &str, FuncId),
+        visit_argument: &mut dyn FnMut(FuncId, bonsai_common::Span, FuncId),
+    );
 
     /// Surface a deferred partition read/validation error after compiler
     /// visitors finish. Resident graphs are infallible.
@@ -92,6 +104,19 @@ impl CallGraphRelation for ResolvedCallGraph {
             .filter(|argument| argument.caller == caller)
         {
             visit(argument.span, argument.target);
+        }
+    }
+
+    fn visit_callable_metadata(
+        &self,
+        visit_binding: &mut dyn FnMut(FuncId, &str, FuncId),
+        visit_argument: &mut dyn FnMut(FuncId, bonsai_common::Span, FuncId),
+    ) {
+        for (caller, alias, target) in self.local_callable_bindings() {
+            visit_binding(caller, alias, target);
+        }
+        for argument in self.callable_arguments() {
+            visit_argument(argument.caller, argument.span, argument.target);
         }
     }
 }
@@ -3549,33 +3574,51 @@ where
     let mut local_callable_bindings: AHashMap<FuncId, AHashMap<String, FuncId>> = AHashMap::new();
     let mut ambiguous_local_callable_bindings = AHashSet::new();
     let mut saw_compiler_local_callable_binding = false;
-    call_graph.visit_local_callable_bindings(&mut |caller, alias, target| {
-        let alias = alias.trim();
-        if alias.is_empty() {
-            return;
-        }
-        saw_compiler_local_callable_binding = true;
-        let canonical = bonsai_common::normalize_qualified_name(alias);
-        for (variant_index, binding) in [alias, canonical.as_str()].into_iter().enumerate() {
-            if binding.is_empty()
-                || (variant_index == 1 && canonical == alias)
-                || ambiguous_local_callable_bindings.contains(&(caller, binding.to_string()))
-            {
-                continue;
+    let mut capture_funcs = AHashSet::new();
+    let mut inline_capture_relations = Vec::new();
+    call_graph.visit_callable_metadata(
+        &mut |caller, alias, target| {
+            let alias = alias.trim();
+            if alias.is_empty() {
+                return;
             }
-            let bindings = local_callable_bindings.entry(caller).or_default();
-            match bindings.get(binding).copied() {
-                None => {
-                    bindings.insert(binding.to_string(), target);
+            saw_compiler_local_callable_binding = true;
+            let canonical = bonsai_common::normalize_qualified_name(alias);
+            for (variant_index, binding) in [alias, canonical.as_str()].into_iter().enumerate() {
+                if binding.is_empty()
+                    || (variant_index == 1 && canonical == alias)
+                    || ambiguous_local_callable_bindings.contains(&(caller, binding.to_string()))
+                {
+                    continue;
                 }
-                Some(existing) if existing == target => {}
-                Some(_) => {
-                    bindings.remove(binding);
-                    ambiguous_local_callable_bindings.insert((caller, binding.to_string()));
+                let bindings = local_callable_bindings.entry(caller).or_default();
+                match bindings.get(binding).copied() {
+                    None => {
+                        bindings.insert(binding.to_string(), target);
+                    }
+                    Some(existing) if existing == target => {}
+                    Some(_) => {
+                        bindings.remove(binding);
+                        ambiguous_local_callable_bindings.insert((caller, binding.to_string()));
+                    }
                 }
             }
-        }
-    });
+        },
+        &mut |parent, span, callback| {
+            if !maps.func_to_seg.contains_key(&parent) || !maps.func_to_seg.contains_key(&callback) {
+                return;
+            }
+            capture_funcs.insert(parent);
+            capture_funcs.insert(callback);
+            let is_lexically_nested = global
+                .decl_of(bonsai_common::SymbolId::new(callback.raw()))
+                .and_then(|decl| decl.parent)
+                .is_some_and(|owner| owner.raw() == parent.raw());
+            if is_lexically_nested {
+                inline_capture_relations.push((parent, callback, span));
+            }
+        },
+    );
     // Graphs assembled directly by tests/importers predate the compact
     // binding table. Preserve the resident API contract there; production
     // compiler graphs always carry the exact bindings resolved while their
@@ -3594,11 +3637,12 @@ where
             add_func_call_alias(&mut func_to_call_names, *func, alias);
         }
     }
-    let mut capture_funcs = local_callable_bindings
-        .values()
-        .flat_map(|bindings| bindings.values())
-        .copied()
-        .collect::<AHashSet<_>>();
+    capture_funcs.extend(
+        local_callable_bindings
+            .values()
+            .flat_map(|bindings| bindings.values())
+            .copied(),
+    );
     // Inline callbacks do not have a caller-local binding name. Their exact
     // callable-argument relation is nevertheless compiler proof that the
     // body owns a lexical environment at the registration site. Retain
@@ -3606,14 +3650,6 @@ where
     // still requires a unique formal binding and exact origin before it can
     // emit an edge. Use the relation visitor so resident and partitioned
     // callgraphs keep identical behavior.
-    for &caller in maps.func_to_seg.keys() {
-        call_graph.visit_callable_arguments(caller, &mut |_, target| {
-            if maps.func_to_seg.contains_key(&target) {
-                capture_funcs.insert(caller);
-                capture_funcs.insert(target);
-            }
-        });
-    }
     // Rule-declared external callback invocations are intentionally absent
     // from the first-party callgraph until their API contract is matched.
     // Retain compact lexical endpoint facts for nested callable declarations
@@ -3825,18 +3861,6 @@ where
     // independently of whether the host API executes them. This preserves
     // captured value identity for later source/sink queries without adding a
     // callgraph edge or guessing a callback convention.
-    let mut inline_capture_relations = Vec::new();
-    for &parent in maps.func_to_seg.keys() {
-        call_graph.visit_callable_arguments(parent, &mut |span, callback| {
-            let is_lexically_nested = global
-                .decl_of(bonsai_common::SymbolId::new(callback.raw()))
-                .and_then(|decl| decl.parent)
-                .is_some_and(|owner| owner.raw() == parent.raw());
-            if is_lexically_nested && maps.func_to_seg.contains_key(&callback) {
-                inline_capture_relations.push((parent, callback, span));
-            }
-        });
-    }
     inline_capture_relations.sort_unstable();
     inline_capture_relations.dedup();
     for (parent, callback, span) in inline_capture_relations {

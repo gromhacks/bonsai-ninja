@@ -1282,6 +1282,28 @@ impl CallGraphRelation for CallgraphQueryService {
         }
     }
 
+    fn visit_callable_metadata(
+        &self,
+        visit_binding: &mut dyn FnMut(FuncId, &str, FuncId),
+        visit_argument: &mut dyn FnMut(FuncId, bonsai_common::Span, FuncId),
+    ) {
+        for file in &self.metadata.partition_files {
+            let partition = match self.partition(FileId::new(*file)) {
+                Ok(partition) => partition,
+                Err(error) => {
+                    self.record_relation_error(error);
+                    return;
+                }
+            };
+            for binding in &partition.local_bindings {
+                visit_binding(binding.caller, &binding.name, binding.target);
+            }
+            for argument in &partition.callable_arguments {
+                visit_argument(argument.caller, argument.span, argument.target);
+            }
+        }
+    }
+
     fn check_error(&self) -> Result<(), String> {
         self.relation_error.lock().clone().map_or(Ok(()), Err)
     }
@@ -2304,7 +2326,11 @@ mod tests {
                 name: "callback".into(),
                 target: FuncId::new(3),
             }],
-            Vec::new(),
+            vec![CallGraphCallableArgument {
+                caller: FuncId::new(2),
+                span: Span::new(FileId::new(2), 30, 38),
+                target: FuncId::new(3),
+            }],
             vec![UnresolvedWorkspaceCallSite {
                 caller: FuncId::new(2),
                 span: Span::new(FileId::new(2), 20, 24),
@@ -2317,9 +2343,30 @@ mod tests {
         assert_eq!(decoded.nodes().len(), 6);
         assert_eq!(decoded.inner().edges.len(), 4);
         assert_eq!(decoded.local_binding_records().len(), 1);
+        assert_eq!(decoded.callable_argument_records().len(), 1);
         assert_eq!(decoded.unresolved_workspace_site_records().len(), 1);
 
         let service = CallgraphQueryService::open_checked(&path, &db).expect("open query service");
+        let mut callable_arguments = Vec::new();
+        let mut callable_bindings = Vec::new();
+        service.visit_callable_metadata(
+            &mut |caller, name, target| {
+                callable_bindings.push((caller, name.to_string(), target));
+            },
+            &mut |caller, span, target| {
+                callable_arguments.push((caller, span, target));
+            },
+        );
+        assert_eq!(
+            callable_bindings,
+            vec![(FuncId::new(2), "callback".to_string(), FuncId::new(3),)],
+            "the bulk compiler relation must stream every persisted local binding exactly once"
+        );
+        assert_eq!(
+            callable_arguments,
+            vec![(FuncId::new(2), Span::new(FileId::new(2), 30, 38), FuncId::new(3),)],
+            "the bulk compiler relation must stream every persisted callable argument exactly once"
+        );
         let stable_edge = service
             .edges_by_stable_digest(bonsai_hash::edge_id_low32("start", "middle", "<unknown>", 0, 0))
             .expect("query stable edge id");

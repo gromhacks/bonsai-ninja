@@ -30,6 +30,13 @@ impl CallGraphRelation for TestCallGraphRelation {
     }
 
     fn visit_callable_arguments(&self, _caller: FuncId, _visit: &mut dyn FnMut(Span, FuncId)) {}
+
+    fn visit_callable_metadata(
+        &self,
+        _visit_binding: &mut dyn FnMut(FuncId, &str, FuncId),
+        _visit_argument: &mut dyn FnMut(FuncId, Span, FuncId),
+    ) {
+    }
 }
 
 #[test]
