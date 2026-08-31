@@ -68,6 +68,9 @@ For scripts, normally add:
 accept `--format`. Use `--output-path <file>` for large artifacts when the
 command supports it. Use `--html-output <file>` only for a standalone human
 report; it wraps the selected text view and never enables more analysis.
+Full `diagnostics` performs one exact streaming compiler-object pass. Stable
+`show E:<id>` drilldown uses the persisted exact edge directory; neither
+command requires a duplicate whole-workspace lowering or edge scan.
 
 ## Evidence rules
 
@@ -207,8 +210,9 @@ Start from externally reachable input and prove source-to-sink paths:
 ```
 
 The bundled `production` profile is the default. It selects remote input,
-high-severity taint findings, a 16k context budget, and common non-production
-path exclusions from rulepack metadata. Separately, compiler-backed commands
+every sink severity, a 16k context budget, and common non-production path
+exclusions from rulepack metadata. Add `--severity <level>` only when an
+explicit severity floor is wanted. Separately, compiler-backed commands
 exclude adapter-classified minified JavaScript/TypeScript before parsing,
 graph construction, security, and export. Use global `--minified-js` when
 bundle internals are intentionally in scope. Use `--profile all
@@ -336,8 +340,8 @@ with `--output-path` and let downstream code stream or index it. Do not request
 only.
 
 Native JSON documents identify themselves as `bonsai-native-export` plus a
-numeric `schema_version`. Validate v7 artifacts against
-`schemas/bonsai-native-export-v7.schema.json`; release archives include the
+numeric `schema_version`. Validate v9 artifacts against
+`schemas/bonsai-native-export-v9.schema.json`; release archives include the
 same Draft 2020-12 schema.
 
 ## Rulepack work

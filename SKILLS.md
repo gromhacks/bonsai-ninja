@@ -68,6 +68,9 @@ For scripts, normally add:
 accept `--format`. Use `--output-path <file>` for large artifacts when the
 command supports it. Use `--html-output <file>` only for a standalone human
 report; it wraps the selected text view and never enables more analysis.
+Full `diagnostics` performs one exact streaming compiler-object pass. Stable
+`show E:<id>` drilldown uses the persisted exact edge directory; neither
+command requires a duplicate whole-workspace lowering or edge scan.
 
 ## Evidence rules
 
@@ -337,8 +340,8 @@ with `--output-path` and let downstream code stream or index it. Do not request
 only.
 
 Native JSON documents identify themselves as `bonsai-native-export` plus a
-numeric `schema_version`. Validate v7 artifacts against
-`schemas/bonsai-native-export-v7.schema.json`; release archives include the
+numeric `schema_version`. Validate v9 artifacts against
+`schemas/bonsai-native-export-v9.schema.json`; release archives include the
 same Draft 2020-12 schema.
 
 ## Rulepack work
