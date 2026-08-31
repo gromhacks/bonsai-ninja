@@ -54,8 +54,15 @@ pub(super) fn retain_flow_events_outside_errors(
             retain_flow_events_outside_errors(else_events, error_spans, tolerant_call_names);
             true
         }
-        FlowEvent::Loop { body, .. } => {
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => {
+            retain_flow_events_outside_errors(condition_events, error_spans, tolerant_call_names);
             retain_flow_events_outside_errors(body, error_spans, tolerant_call_names);
+            retain_flow_events_outside_errors(update_events, error_spans, tolerant_call_names);
             true
         }
         FlowEvent::Try {

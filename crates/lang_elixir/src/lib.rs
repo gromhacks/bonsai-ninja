@@ -584,6 +584,9 @@ fn extract_elixir_control_flow(
             Some(vec![FlowEvent::Loop {
                 span: span_of(file, &node),
                 loop_kind: LoopKind::ForEach,
+                label: None,
+                condition_events: Vec::new(),
+                update_events: Vec::new(),
                 body,
             }])
         }

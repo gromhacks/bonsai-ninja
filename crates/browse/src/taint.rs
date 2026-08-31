@@ -807,8 +807,16 @@ fn caller_arg_value_text(
                         return Some(found);
                     }
                 }
-                FlowEvent::Loop { body, .. } => {
-                    if let Some(found) = find_call_arg(body, target_span, idx) {
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    if let Some(found) = find_call_arg(condition_events, target_span, idx)
+                        .or_else(|| find_call_arg(body, target_span, idx))
+                        .or_else(|| find_call_arg(update_events, target_span, idx))
+                    {
                         return Some(found);
                     }
                 }
@@ -861,8 +869,16 @@ fn caller_call_receiver_and_arg_count(
                         return Some(found);
                     }
                 }
-                FlowEvent::Loop { body, .. } => {
-                    if let Some(found) = find_call_receiver(body, target_span) {
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    if let Some(found) = find_call_receiver(condition_events, target_span)
+                        .or_else(|| find_call_receiver(body, target_span))
+                        .or_else(|| find_call_receiver(update_events, target_span))
+                    {
                         return Some(found);
                     }
                 }
@@ -916,8 +932,16 @@ fn caller_call_name(
                         return Some(found);
                     }
                 }
-                FlowEvent::Loop { body, .. } => {
-                    if let Some(found) = find_call_name(body, target_span) {
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    if let Some(found) = find_call_name(condition_events, target_span)
+                        .or_else(|| find_call_name(body, target_span))
+                        .or_else(|| find_call_name(update_events, target_span))
+                    {
                         return Some(found);
                     }
                 }

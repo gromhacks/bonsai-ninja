@@ -233,6 +233,11 @@ jobs:
         working-directory: bonsai-ninja
         env:
           BONSAI_ELASTICSEARCH_ROOT: ${{ github.workspace }}/elasticsearch
+          # A release must prove one genuinely cold semantic generation. The
+          # integration cases share this explicit cache after the first exact
+          # prewarm; neither a runner image nor an earlier command may turn
+          # the cold gate into an accidental warm-cache pass.
+          BONSAI_WORKSPACE_DIR: ${{ runner.temp }}/bonsai-elasticsearch-scale-cache
           BONSAI_REQUIRE_ELASTICSEARCH_GATE: "1"
           BONSAI_MEMORY_BUDGET_MB: "3072"
           MIMALLOC_PURGE_DELAY: "0"
@@ -249,14 +254,20 @@ jobs:
           BONSAI_ES_TAINT_MAX_SECS: "120"
           BONSAI_ES_SINK_ANALYSIS_MAX_SECS: "180"
           BONSAI_ES_SECURITY_INVENTORY_MAX_SECS: "60"
+          # Public runners can be substantially slower than the pinned local
+          # reference while constructing the first exact semantic generation.
+          # This is a hang detector only: completed work must still satisfy
+          # every operation-specific SLO below.
+          BONSAI_ES_PROCESS_WATCHDOG_SECS: "1800"
           # Exact native export writes a multi-gigabyte document, so shared
           # runner storage throughput is part of its wall time. Two completed
           # ubuntu-22.04 measurements were 400.63s and 327.18s while the pinned
           # local reference remained below the 300s product SLO. Preserve that
-          # product default and the independent 900s hang watchdog; this value
+          # product default and the independent hang watchdog; this value
           # is runner-class headroom for completed, envelope-validated output.
           BONSAI_ES_EXPORT_MAX_SECS: "450"
         run: |
+          rm -rf "$BONSAI_WORKSPACE_DIR"
           cargo test --release --locked -p bonsai-ninja \
             --test elasticsearch_large_repo -- --nocapture
 

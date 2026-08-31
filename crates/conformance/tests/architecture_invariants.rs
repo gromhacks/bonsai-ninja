@@ -7279,6 +7279,65 @@ fn cold_idg_build_reuses_its_existing_linkage_headers_for_callgraph_resolution()
     );
 }
 
+/// Callee endpoint extraction is one compiler pass per segment. Scanning a
+/// file's complete node/edge tables once per callable turns large Java files
+/// into quadratic IDG work and can look like a hung semantic prewarm on
+/// low-core machines even though the admitted facts are unchanged.
+#[test]
+fn idg_endpoint_extraction_indexes_each_segment_once() {
+    let source = read(&repo_root().join("crates/idg/src/builder.rs"));
+    let extraction = function_body(&source, "extend_callee_endpoints_for_segment");
+    let projected = function_body(&source, "collect_projected_stitch_places");
+    assert!(
+        extraction.contains("SegmentEndpointScanIndex::new(segment, funcs)")
+            && !extraction.contains("segment.nodes.nodes.iter()")
+            && !extraction.contains("segment.edges.iter()"),
+        "IDG endpoint extraction must build one segment-local directory before iterating callables"
+    );
+    assert!(
+        projected.contains(".incoming(segment, node_id)")
+            && projected.contains(".outgoing(segment, node_id)")
+            && !projected.contains("segment.edges.iter()"),
+        "projected endpoint compilation must use indexed adjacency rather than rescan every segment edge per node"
+    );
+}
+
+/// Callable-value discovery is an interval query over the compiler's stable
+/// declaration directory. Rechecking every declaration in a large source
+/// file for each host function, assignment, or callback argument is
+/// quadratic frontend/linker work even though the answer is already encoded
+/// by exact declaration spans and parent symbols.
+#[test]
+fn callable_value_resolution_uses_compiler_span_directories() {
+    let root = repo_root();
+    let callgraph = read(&root.join("crates/callgraph/src/lib.rs"));
+    let workspace_bindings = function_body(&callgraph, "collect_workspace_local_callable_bindings");
+    let assigned_lambda = function_body(&callgraph, "resolve_assigned_lambda_binding");
+    let returned_lambda = function_body(&callgraph, "resolve_returned_lambda_factory_with_alias_index");
+    assert!(
+        workspace_bindings.contains("callable_index.contains_nested_function")
+            && !workspace_bindings.contains("decls.iter().any"),
+        "workspace callable binding discovery must query the per-file span directory instead of rescan every declaration per callable"
+    );
+    assert!(
+        assigned_lambda.contains("contained_function_ids") && !assigned_lambda.contains("global.decls_in"),
+        "assigned-lambda resolution must use the compiler span directory"
+    );
+    assert!(
+        returned_lambda.contains("contained_function_ids") && !returned_lambda.contains("global.decls_in"),
+        "returned-lambda resolution must use the compiler span directory"
+    );
+
+    let idg = read(&root.join("crates/idg/src/workspace_adapter.rs"));
+    let callback_resolution = function_body(&idg, "callable_args_in_span_indexed");
+    assert!(
+        callback_resolution.contains("nested_callables")
+            && callback_resolution.contains("contained_descendants")
+            && !callback_resolution.contains("global.decls_in"),
+        "IDG inline-callback resolution must use its exact nested-callable interval directory"
+    );
+}
+
 /// Per-file callgraph work is part of the caller's continuous compiler
 /// schedule. Creating a private Rayon pool for each wave causes nested-pool
 /// stalls and repeatedly pays thread creation on large workspaces.
@@ -7359,5 +7418,124 @@ fn adapter_registry_replacement_removes_stale_extension_candidates() {
     assert!(
         body.contains("retain") && body.find("retain").is_some_and(|at| at < body.find("for ext").unwrap_or(usize::MAX)),
         "LanguageRegistry::register must remove the replaced language id from every old extension bucket before adding its current extensions"
+    );
+}
+
+/// A loop owns three compiler regions: condition, body, and update. A
+/// recursive IR consumer that visits only `body` silently drops valid calls,
+/// assignments, types, and taint facts from `while (f())` and `for (...;
+/// ...; update())`. Keep this source-level invariant beside the behavioral
+/// all-frontend gate so a new body-only shared visitor cannot compile into a
+/// partial command mode unnoticed.
+#[test]
+fn shared_compiler_consumers_cannot_use_body_only_loop_visitors() {
+    let root = repo_root();
+    let consumers = [
+        "crates/lang_api/src/kit/mod.rs",
+        "crates/lang_api/src/kit/call_results.rs",
+        "crates/lang_api/src/kit/flow_render.rs",
+        "crates/lang_api/src/kit/receiver_writes.rs",
+        "crates/lang_api/src/kit/syntax_errors.rs",
+        "crates/lang_api/src/storage.rs",
+        "crates/lang_api/src/types.rs",
+        "crates/index/src/lib.rs",
+        "crates/callgraph/src/lib.rs",
+        "crates/idg/src/transfer.rs",
+        "crates/idg/src/workspace_adapter.rs",
+        "crates/taint/src/assignment.rs",
+        "crates/taint/src/idg_api.rs",
+        "crates/taint/src/reachable.rs",
+        "crates/taint/src/value_flow.rs",
+        "crates/browse/src/args.rs",
+        "crates/browse/src/calls.rs",
+        "crates/browse/src/common.rs",
+        "crates/browse/src/edges.rs",
+        "crates/browse/src/graph_export.rs",
+        "crates/browse/src/native_export.rs",
+        "crates/browse/src/paths.rs",
+        "crates/browse/src/refs.rs",
+        "crates/browse/src/resolution.rs",
+        "crates/browse/src/resolve.rs",
+        "crates/browse/src/search.rs",
+        "crates/browse/src/slice.rs",
+        "crates/browse/src/taint.rs",
+        "crates/browse/src/vars.rs",
+        "crates/retrieval/src/lib.rs",
+        "crates/inspect/src/call_edges.rs",
+        "crates/cli/src/commands/inspect.rs",
+    ];
+    let mut violations = Vec::new();
+    for relative in consumers {
+        let source = read(&root.join(relative));
+        let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        for forbidden in [
+            "FlowEvent::Loop { body, .. }",
+            "FlowEvent::Loop { span, body, .. }",
+            "FlowEvent::Loop { loop_kind, body, .. }",
+        ] {
+            if normalized.contains(forbidden) {
+                violations.push(format!("{relative}: `{forbidden}`"));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "shared compiler visitors must handle condition/body/update phases:\n{}",
+        violations.join("\n")
+    );
+}
+
+/// Conformance helpers are part of the gate, not harmless presentation code.
+/// If a helper walks only a loop body, a broken condition/update frontend can
+/// disappear from the assertion and create a false green result. Keep the
+/// canonical cross-language suite subject to the same recursion contract as
+/// production consumers.
+#[test]
+fn compiler_conformance_visitors_cannot_hide_loop_phases() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    collect_rs_files(&root.join("crates/conformance/tests"), &mut files);
+    files.extend(
+        [
+            "crates/workspace/tests/flow_coverage.rs",
+            "crates/workspace/tests/flow_event_audit_fixes.rs",
+            "crates/workspace/tests/flow_events.rs",
+            "crates/workspace/tests/inspect_harness.rs",
+            "crates/workspace/tests/inspect_matrix.rs",
+            "crates/workspace/tests/lang_common.rs",
+            "crates/workspace/tests/scoped_idg_parity.rs",
+            "crates/security/src/analysis/compute_status_tests.rs",
+            "crates/security/tests/security_pipeline_regressions.rs",
+        ]
+        .into_iter()
+        .map(|relative| root.join(relative)),
+    );
+    let mut violations = Vec::new();
+    for path in files {
+        if path
+            .file_name()
+            .is_some_and(|name| name == "architecture_invariants.rs")
+        {
+            continue;
+        }
+        let source = read(&path);
+        let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        for forbidden in [
+            "FlowEvent::Loop { body, .. } | FlowEvent::Defer",
+            "FlowEvent::Loop { span, body, .. } | FlowEvent::Defer",
+            "FlowEvent::Loop { loop_kind, body, .. } | FlowEvent::Defer",
+            "FlowEvent::Loop { body, .. } =>",
+            "FlowEvent::Loop { span, body, .. } =>",
+            "FlowEvent::Loop { loop_kind, body, .. } =>",
+        ] {
+            if normalized.contains(forbidden) {
+                violations.push(format!("{}: `{forbidden}`", path.display()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "compiler conformance visitors must inspect condition/body/update phases:\n{}",
+        violations.join("\n")
     );
 }

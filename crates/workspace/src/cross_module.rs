@@ -489,7 +489,10 @@ impl<'a> TraceBuilder<'a> {
             FlowEvent::Loop {
                 span,
                 loop_kind,
+                condition_events,
                 body,
+                update_events,
+                ..
             } => {
                 let enter_msg = match loop_kind {
                     LoopKind::For => "Loop enter (for)",
@@ -523,8 +526,23 @@ impl<'a> TraceBuilder<'a> {
                         break;
                     }
                     iterations += 1;
-                    if !self.walk_events(body, func, depth) {
-                        return false;
+                    match loop_kind {
+                        LoopKind::DoWhile => {
+                            if !self.walk_events(body, func, depth)
+                                || !self.walk_events(update_events, func, depth)
+                                || !self.walk_events(condition_events, func, depth)
+                            {
+                                return false;
+                            }
+                        }
+                        LoopKind::For | LoopKind::ForEach | LoopKind::While | LoopKind::Loop => {
+                            if !self.walk_events(condition_events, func, depth)
+                                || !self.walk_events(body, func, depth)
+                                || !self.walk_events(update_events, func, depth)
+                            {
+                                return false;
+                            }
+                        }
                     }
                     let after = self
                         .frames
@@ -659,24 +677,36 @@ impl<'a> TraceBuilder<'a> {
                 }
                 self.emit(StepKind::Merge, func, *span, Precision::Exact, "Try exit".into())
             }
-            FlowEvent::Break { span, label } => self.emit(
+            FlowEvent::Break { span, target } => self.emit(
                 StepKind::Diagnostic,
                 func,
                 *span,
                 Precision::Exact,
-                label
+                target
                     .as_ref()
-                    .map(|l| format!("Break {l}"))
+                    .map(|target| match target {
+                        bonsai_lang_api::LoopControlTarget::Label(label) => format!("Break {label}"),
+                        bonsai_lang_api::LoopControlTarget::Levels(levels) => {
+                            format!("Break {levels} levels")
+                        }
+                    })
                     .unwrap_or_else(|| "Break".into()),
             ),
-            FlowEvent::Continue { span, label } => self.emit(
+            FlowEvent::Continue { span, target } => self.emit(
                 StepKind::Diagnostic,
                 func,
                 *span,
                 Precision::Exact,
-                label
+                target
                     .as_ref()
-                    .map(|l| format!("Continue {l}"))
+                    .map(|target| match target {
+                        bonsai_lang_api::LoopControlTarget::Label(label) => {
+                            format!("Continue {label}")
+                        }
+                        bonsai_lang_api::LoopControlTarget::Levels(levels) => {
+                            format!("Continue {levels} levels")
+                        }
+                    })
                     .unwrap_or_else(|| "Continue".into()),
             ),
             FlowEvent::Yield { span, value_text, .. } => self.emit(

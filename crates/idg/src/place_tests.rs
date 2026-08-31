@@ -52,8 +52,23 @@ fn discriminant_tags_are_stable() {
         .tag(),
         5
     );
-    assert_eq!(Place::Throw { ty: TypeId(0) }.tag(), 6);
-    assert_eq!(Place::Catch { ty: TypeId(0) }.tag(), 7);
+    assert_eq!(
+        Place::Throw {
+            ty: TypeId(0),
+            site: span(0, 1),
+        }
+        .tag(),
+        6
+    );
+    assert_eq!(
+        Place::Catch {
+            ty: TypeId(0),
+            site: span(0, 1),
+            try_span: span(0, 2),
+        }
+        .tag(),
+        7
+    );
     assert_eq!(Place::Yield.tag(), 8);
     assert_eq!(Place::Await.tag(), 9);
 }
@@ -100,6 +115,34 @@ fn equality_distinguishes_call_sites_by_span() {
 }
 
 #[test]
+fn equality_distinguishes_catch_handlers_by_span() {
+    let inner = Place::Catch {
+        ty: TypeId(0),
+        site: span(10, 20),
+        try_span: span(0, 25),
+    };
+    let outer = Place::Catch {
+        ty: TypeId(0),
+        site: span(30, 40),
+        try_span: span(0, 50),
+    };
+    assert_ne!(inner, outer, "each compiler catch arm is a distinct place");
+}
+
+#[test]
+fn equality_distinguishes_throw_sites_by_span() {
+    let first = Place::Throw {
+        ty: TypeId(0),
+        site: span(10, 20),
+    };
+    let second = Place::Throw {
+        ty: TypeId(0),
+        site: span(30, 40),
+    };
+    assert_ne!(first, second, "each compiler throw site is a distinct place");
+}
+
+#[test]
 fn is_named_storage_only_matches_read_write() {
     assert!(Place::read(0).is_named_storage());
     assert!(Place::write(0, span(0, 1)).is_named_storage());
@@ -109,7 +152,11 @@ fn is_named_storage_only_matches_read_write() {
         idx: 0,
     }
     .is_named_storage());
-    assert!(!Place::Throw { ty: TypeId(0) }.is_named_storage());
+    assert!(!Place::Throw {
+        ty: TypeId(0),
+        site: span(0, 1),
+    }
+    .is_named_storage());
 }
 
 #[test]

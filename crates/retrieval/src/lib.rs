@@ -2144,7 +2144,17 @@ fn walk_flow_events(
                 walk_flow_events(ws, docs, then_events, in_fn, language, pipeline);
                 walk_flow_events(ws, docs, else_events, in_fn, language, pipeline);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                walk_flow_events(ws, docs, condition_events, in_fn, language, pipeline);
+                walk_flow_events(ws, docs, body, in_fn, language, pipeline);
+                walk_flow_events(ws, docs, update_events, in_fn, language, pipeline);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 walk_flow_events(ws, docs, body, in_fn, language, pipeline);
             }
             FlowEvent::Try {

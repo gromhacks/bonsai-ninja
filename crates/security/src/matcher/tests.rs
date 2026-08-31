@@ -6724,6 +6724,9 @@ fn prior_receiver_write_reaching_definition_fails_closed_at_control_merges() {
                 FlowEvent::Loop {
                     span: Span::new(file, 20, 50),
                     loop_kind: bonsai_lang_api::LoopKind::While,
+                    label: None,
+                    condition_events: Vec::new(),
+                    update_events: Vec::new(),
                     body: vec![write(30, "worker.mode")],
                 },
             ],

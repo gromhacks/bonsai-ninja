@@ -139,6 +139,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     loop_body_kinds: &["block"],
     loop_header_container_kinds: &[],
     loop_update_field_names: &[],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: None,
     branch_arm_kinds: &["block", "elseif_statement", "else_statement"],
     exclusive_branch_arm_kinds: &[],
     fallthrough_branch_arm_kinds: &[],
@@ -178,6 +180,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     finally_kinds: &[],
     break_kinds: &["break_statement"],
     control_label_field_names: &[],
+    control_target_extractor: None,
+    loop_label_extractor: None,
     // Lua has no `continue` keyword. `goto label` is a general jump,
     // not a loop continue, so leaving this empty avoids mis-tagging
     // arbitrary gotos as `FlowEvent::Continue`.

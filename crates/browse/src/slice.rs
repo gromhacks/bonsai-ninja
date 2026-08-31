@@ -568,9 +568,20 @@ fn flatten_events(
                     nesting.pop();
                 }
             }
-            FlowEvent::Loop { body, .. } => {
-                nesting.push("loop".to_string());
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                nesting.push("loop condition".to_string());
+                flatten_events(condition_events, in_function, ws, nesting, out);
+                nesting.pop();
+                nesting.push("loop body".to_string());
                 flatten_events(body, in_function, ws, nesting, out);
+                nesting.pop();
+                nesting.push("loop update".to_string());
+                flatten_events(update_events, in_function, ws, nesting, out);
                 nesting.pop();
             }
             FlowEvent::Try {

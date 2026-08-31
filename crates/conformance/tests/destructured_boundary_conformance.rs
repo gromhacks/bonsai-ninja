@@ -80,7 +80,17 @@ fn collect_destructure_assignments<'a>(events: &'a [FlowEvent], output: &mut Vec
                 collect_destructure_assignments(then_events, output);
                 collect_destructure_assignments(else_events, output);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_destructure_assignments(condition_events, output);
+                collect_destructure_assignments(body, output);
+                collect_destructure_assignments(update_events, output);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_destructure_assignments(body, output);
             }
             FlowEvent::Try {

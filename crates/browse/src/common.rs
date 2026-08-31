@@ -490,7 +490,16 @@ pub(crate) fn collect_callees(events: &[bonsai_lang_api::FlowEvent], out: &mut V
                 collect_callees(then_events, out);
                 collect_callees(else_events, out);
             }
-            FlowEvent::Loop { body, .. } => collect_callees(body, out),
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_callees(condition_events, out);
+                collect_callees(body, out);
+                collect_callees(update_events, out);
+            }
             FlowEvent::Try {
                 body,
                 catch_events,

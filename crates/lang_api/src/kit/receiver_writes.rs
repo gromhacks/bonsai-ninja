@@ -94,9 +94,19 @@ pub fn collect_receiver_field_initializers(
                     collect_calls(then_events, out);
                     collect_calls(else_events, out);
                 }
-                crate::FlowEvent::Loop { body, .. }
-                | crate::FlowEvent::Defer { body, .. }
-                | crate::FlowEvent::Using { body, .. } => collect_calls(body, out),
+                crate::FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    collect_calls(condition_events, out);
+                    collect_calls(body, out);
+                    collect_calls(update_events, out);
+                }
+                crate::FlowEvent::Defer { body, .. } | crate::FlowEvent::Using { body, .. } => {
+                    collect_calls(body, out);
+                }
                 crate::FlowEvent::Try {
                     body,
                     catch_events,
@@ -167,9 +177,17 @@ pub fn collect_receiver_field_initializers(
                     collect_assignments(then_events, receiver_names, calls, out);
                     collect_assignments(else_events, receiver_names, calls, out);
                 }
-                crate::FlowEvent::Loop { body, .. }
-                | crate::FlowEvent::Defer { body, .. }
-                | crate::FlowEvent::Using { body, .. } => {
+                crate::FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    collect_assignments(condition_events, receiver_names, calls, out);
+                    collect_assignments(body, receiver_names, calls, out);
+                    collect_assignments(update_events, receiver_names, calls, out);
+                }
+                crate::FlowEvent::Defer { body, .. } | crate::FlowEvent::Using { body, .. } => {
                     collect_assignments(body, receiver_names, calls, out);
                 }
                 crate::FlowEvent::Try {
@@ -265,9 +283,38 @@ fn collect_receiver_field_writes_inner(
                     out,
                 );
             }
-            crate::FlowEvent::Loop { body, .. }
-            | crate::FlowEvent::Defer { body, .. }
-            | crate::FlowEvent::Using { body, .. } => {
+            crate::FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_receiver_field_writes_inner(
+                    condition_events,
+                    receiver_names,
+                    receiver_prefixes,
+                    receiver_idx,
+                    param_keys,
+                    out,
+                );
+                collect_receiver_field_writes_inner(
+                    body,
+                    receiver_names,
+                    receiver_prefixes,
+                    receiver_idx,
+                    param_keys,
+                    out,
+                );
+                collect_receiver_field_writes_inner(
+                    update_events,
+                    receiver_names,
+                    receiver_prefixes,
+                    receiver_idx,
+                    param_keys,
+                    out,
+                );
+            }
+            crate::FlowEvent::Defer { body, .. } | crate::FlowEvent::Using { body, .. } => {
                 collect_receiver_field_writes_inner(
                     body,
                     receiver_names,
@@ -356,9 +403,19 @@ pub fn collect_assign_targets<S: std::hash::BuildHasher>(
                 collect_assign_targets(then_events, out);
                 collect_assign_targets(else_events, out);
             }
-            crate::FlowEvent::Loop { body, .. }
-            | crate::FlowEvent::Defer { body, .. }
-            | crate::FlowEvent::Using { body, .. } => collect_assign_targets(body, out),
+            crate::FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_assign_targets(condition_events, out);
+                collect_assign_targets(body, out);
+                collect_assign_targets(update_events, out);
+            }
+            crate::FlowEvent::Defer { body, .. } | crate::FlowEvent::Using { body, .. } => {
+                collect_assign_targets(body, out);
+            }
             crate::FlowEvent::Try {
                 body,
                 catch_events,
@@ -407,9 +464,19 @@ pub fn insert_flow_field_assignments(
                 insert_flow_field_assignments(then_events, insertions);
                 insert_flow_field_assignments(else_events, insertions);
             }
-            crate::FlowEvent::Loop { body, .. }
-            | crate::FlowEvent::Defer { body, .. }
-            | crate::FlowEvent::Using { body, .. } => insert_flow_field_assignments(body, insertions),
+            crate::FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                insert_flow_field_assignments(condition_events, insertions);
+                insert_flow_field_assignments(body, insertions);
+                insert_flow_field_assignments(update_events, insertions);
+            }
+            crate::FlowEvent::Defer { body, .. } | crate::FlowEvent::Using { body, .. } => {
+                insert_flow_field_assignments(body, insertions);
+            }
             crate::FlowEvent::Try {
                 body,
                 catch_events,
@@ -477,9 +544,17 @@ pub fn qualify_implicit_member_assign_targets<F, SM, SE>(
                 qualify_implicit_member_assign_targets(then_events, members, excluded, qualify);
                 qualify_implicit_member_assign_targets(else_events, members, excluded, qualify);
             }
-            crate::FlowEvent::Loop { body, .. }
-            | crate::FlowEvent::Defer { body, .. }
-            | crate::FlowEvent::Using { body, .. } => {
+            crate::FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                qualify_implicit_member_assign_targets(condition_events, members, excluded, qualify);
+                qualify_implicit_member_assign_targets(body, members, excluded, qualify);
+                qualify_implicit_member_assign_targets(update_events, members, excluded, qualify);
+            }
+            crate::FlowEvent::Defer { body, .. } | crate::FlowEvent::Using { body, .. } => {
                 qualify_implicit_member_assign_targets(body, members, excluded, qualify);
             }
             crate::FlowEvent::Try {
@@ -517,9 +592,17 @@ pub fn rewrite_implicit_member_reads<F, SG, SL>(
                 rewrite_implicit_member_reads(then_events, getters, locals, call_for_name);
                 rewrite_implicit_member_reads(else_events, getters, locals, call_for_name);
             }
-            crate::FlowEvent::Loop { body, .. }
-            | crate::FlowEvent::Defer { body, .. }
-            | crate::FlowEvent::Using { body, .. } => {
+            crate::FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                rewrite_implicit_member_reads(condition_events, getters, locals, call_for_name);
+                rewrite_implicit_member_reads(body, getters, locals, call_for_name);
+                rewrite_implicit_member_reads(update_events, getters, locals, call_for_name);
+            }
+            crate::FlowEvent::Defer { body, .. } | crate::FlowEvent::Using { body, .. } => {
                 rewrite_implicit_member_reads(body, getters, locals, call_for_name);
             }
             crate::FlowEvent::Try {
@@ -652,9 +735,17 @@ pub fn qualify_receiver_field_expression_flows<S: std::hash::BuildHasher>(
                 qualify_receiver_field_expression_flows(then_events, fields, receiver);
                 qualify_receiver_field_expression_flows(else_events, fields, receiver);
             }
-            crate::FlowEvent::Loop { body, .. }
-            | crate::FlowEvent::Defer { body, .. }
-            | crate::FlowEvent::Using { body, .. } => {
+            crate::FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                qualify_receiver_field_expression_flows(condition_events, fields, receiver);
+                qualify_receiver_field_expression_flows(body, fields, receiver);
+                qualify_receiver_field_expression_flows(update_events, fields, receiver);
+            }
+            crate::FlowEvent::Defer { body, .. } | crate::FlowEvent::Using { body, .. } => {
                 qualify_receiver_field_expression_flows(body, fields, receiver);
             }
             crate::FlowEvent::Try {
@@ -764,9 +855,17 @@ fn collect_receiver_state_sources_inner(
                 collect_receiver_state_sources_inner(then_events, locals, implicit_receiver_names, out);
                 collect_receiver_state_sources_inner(else_events, locals, implicit_receiver_names, out);
             }
-            crate::FlowEvent::Loop { body, .. }
-            | crate::FlowEvent::Defer { body, .. }
-            | crate::FlowEvent::Using { body, .. } => {
+            crate::FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_receiver_state_sources_inner(condition_events, locals, implicit_receiver_names, out);
+                collect_receiver_state_sources_inner(body, locals, implicit_receiver_names, out);
+                collect_receiver_state_sources_inner(update_events, locals, implicit_receiver_names, out);
+            }
+            crate::FlowEvent::Defer { body, .. } | crate::FlowEvent::Using { body, .. } => {
                 collect_receiver_state_sources_inner(body, locals, implicit_receiver_names, out);
             }
             crate::FlowEvent::Try {

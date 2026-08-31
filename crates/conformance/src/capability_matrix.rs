@@ -274,9 +274,17 @@ fn nested_event_groups(event: &FlowEvent) -> Option<Vec<&[FlowEvent]>> {
             else_events,
             ..
         } => Some(vec![then_events.as_slice(), else_events.as_slice()]),
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-            Some(vec![body.as_slice()])
-        }
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => Some(vec![
+            condition_events.as_slice(),
+            body.as_slice(),
+            update_events.as_slice(),
+        ]),
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => Some(vec![body.as_slice()]),
         FlowEvent::Try {
             body,
             catch_events,

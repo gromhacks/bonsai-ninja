@@ -101,7 +101,17 @@ fn paths(events: &[FlowEvent], initial: &[BTreeSet<&'static str>]) -> Vec<BTreeS
                     .chain(paths(else_events, &out))
                     .collect();
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                out = paths(condition_events, &out);
+                out = paths(body, &out);
+                out = paths(update_events, &out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 out = paths(body, &out);
             }
             FlowEvent::Try {
@@ -143,7 +153,20 @@ fn find_catch_paths(
                     return Some(found);
                 }
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if let Some(found) = find_catch_paths(condition_events)
+                    .or_else(|| find_catch_paths(body))
+                    .or_else(|| find_catch_paths(update_events))
+                {
+                    return Some(found);
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if let Some(found) = find_catch_paths(body) {
                     return Some(found);
                 }

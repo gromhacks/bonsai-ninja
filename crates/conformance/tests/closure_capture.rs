@@ -38,7 +38,21 @@ fn references_name(events: &[FlowEvent], name: &str) -> bool {
                 else_events,
                 ..
             } => &[then_events.as_slice(), else_events.as_slice()],
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if references_name(condition_events, name)
+                    || references_name(body, name)
+                    || references_name(update_events, name)
+                {
+                    return true;
+                }
+                continue;
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if references_name(body, name) {
                     return true;
                 }
@@ -102,9 +116,17 @@ fn contains_call(events: &[FlowEvent], expected: &str) -> bool {
             else_events,
             ..
         } => contains_call(then_events, expected) || contains_call(else_events, expected),
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-            contains_call(body, expected)
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => {
+            contains_call(condition_events, expected)
+                || contains_call(body, expected)
+                || contains_call(update_events, expected)
         }
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => contains_call(body, expected),
         FlowEvent::Try {
             body,
             catch_events,

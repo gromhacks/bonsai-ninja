@@ -191,8 +191,15 @@ fn walk_assigns(
                 walk_assigns(then_events, in_fn, ws, name_matches, source_filter, out);
                 walk_assigns(else_events, in_fn, ws, name_matches, source_filter, out);
             }
-            FlowEvent::Loop { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                walk_assigns(condition_events, in_fn, ws, name_matches, source_filter, out);
                 walk_assigns(body, in_fn, ws, name_matches, source_filter, out);
+                walk_assigns(update_events, in_fn, ws, name_matches, source_filter, out);
             }
             FlowEvent::Try {
                 body,

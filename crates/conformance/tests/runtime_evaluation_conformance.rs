@@ -340,7 +340,17 @@ fn collect_calls(events: &[FlowEvent], out: &mut Vec<(Span, &'static str)>) {
                 collect_calls(then_events, out);
                 collect_calls(else_events, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_calls(condition_events, out);
+                collect_calls(body, out);
+                collect_calls(update_events, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_calls(body, out);
             }
             FlowEvent::Try {

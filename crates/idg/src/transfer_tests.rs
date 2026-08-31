@@ -1,6 +1,6 @@
 use super::*;
 use bonsai_common::{FileId, Span as CommonSpan, SymbolId};
-use bonsai_lang_api::{CallArg, CatchArmFact, ModulePath, Visibility};
+use bonsai_lang_api::{CallArg, CatchArmFact, LoopControlTarget, ModulePath, Visibility};
 
 fn span(lo: u64, hi: u64) -> CommonSpan {
     CommonSpan::new(FileId::new(0), lo, hi)
@@ -91,7 +91,7 @@ fn rendered_write_span(out: &TransferOutput, node_id: NodeId) -> Option<CommonSp
 fn rendered_catch_type(out: &TransferOutput, node_id: NodeId) -> Option<&str> {
     let node = out.nodes.get(node_id).expect("node exists");
     let place = out.places.get(node.place).expect("place exists");
-    let Place::Catch { ty } = place else {
+    let Place::Catch { ty, .. } = place else {
         return None;
     };
     out.names.get(ty.0)
@@ -4964,6 +4964,40 @@ fn try_catch_typed_match_emits_throw_to_catch_edge() {
 }
 
 #[test]
+fn handled_inner_throw_does_not_reach_outer_catch() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["payload".to_string()];
+    let sink_span = span(80, 90);
+    decl.flow_events = vec![FlowEvent::Try {
+        span: span(0, 100),
+        body: vec![FlowEvent::Try {
+            span: span(10, 60),
+            body: vec![FlowEvent::Throw {
+                span: span(20, 30),
+                value_name: Some("payload".to_string()),
+                thrown_type: Some("Handled".to_string()),
+            }],
+            catch_events: vec![assignment(span(40, 50), "inner", None)],
+            finally_events: Vec::new(),
+            catch_param: Some("inner".to_string()),
+            catch_types: vec!["Handled".to_string()],
+            catch_arms: Vec::new(),
+        }],
+        catch_events: vec![call_with_place(sink_span, "sink", "outer")],
+        finally_events: Vec::new(),
+        catch_param: Some("outer".to_string()),
+        catch_types: vec!["Handled".to_string()],
+        catch_arms: Vec::new(),
+    }];
+
+    let out = transfer_function_for(&decl);
+    assert!(
+        !transfer_reaches_call_arg(&out, 0, sink_span),
+        "a throw consumed by an inner matching handler must not be rebound by an outer handler"
+    );
+}
+
+#[test]
 fn typed_throw_connects_only_to_its_own_catch_arm() {
     let mut decl = empty_decl(1, "f");
     let first_arm = span(30, 55);
@@ -5283,6 +5317,256 @@ fn branch_walks_both_arms() {
     assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraAssign), 2);
 }
 
+fn assignment(span_value: CommonSpan, target: &str, source: Option<&str>) -> FlowEvent {
+    FlowEvent::Assign {
+        span: span_value,
+        target: target.to_string(),
+        source_name: source.map(str::to_string),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: source.into_iter().map(str::to_string).collect(),
+        declares_new_binding: false,
+        value_kind: Some(if source.is_some() {
+            AssignValueKind::Compound
+        } else {
+            AssignValueKind::Literal
+        }),
+    }
+}
+
+fn call_with_place(span_value: CommonSpan, callee: &str, place: &str) -> FlowEvent {
+    FlowEvent::Call {
+        span: span_value,
+        name: callee.to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            span: span(span_value.start + 1, span_value.end),
+            passing_mode: Default::default(),
+            name: None,
+            value_text: place.to_string(),
+            place: Some(place.to_string()),
+            source_names: vec![place.to_string()],
+        }],
+    }
+}
+
+fn transfer_reaches_call_arg(out: &TransferOutput, parameter: u32, call_span: CommonSpan) -> bool {
+    let source = out
+        .places
+        .places
+        .iter()
+        .position(|place| matches!(place, Place::Param { idx } if *idx == parameter))
+        .and_then(|place| {
+            out.nodes
+                .nodes
+                .iter()
+                .position(|node| node.place.0 as usize == place)
+                .map(|node| NodeId(u32::try_from(node).expect("node id")))
+        })
+        .expect("parameter node");
+    let target = out
+        .places
+        .places
+        .iter()
+        .position(|place| matches!(place, Place::CallArg { site, idx: 0 } if site.0 == call_span))
+        .and_then(|place| {
+            out.nodes
+                .nodes
+                .iter()
+                .position(|node| node.place.0 as usize == place)
+                .map(|node| NodeId(u32::try_from(node).expect("node id")))
+        })
+        .expect("call argument node");
+    let mut reached = std::collections::HashSet::from([source]);
+    loop {
+        let before = reached.len();
+        for edge in &out.edges {
+            if reached.contains(&edge.from) {
+                reached.insert(edge.to);
+            }
+        }
+        if reached.len() == before {
+            return reached.contains(&target);
+        }
+    }
+}
+
+#[test]
+fn breaking_branch_writer_does_not_reach_fallthrough_sink_inside_loop() {
+    let mut decl = empty_decl(1, "entry");
+    decl.params = vec!["seed".to_string(), "cond".to_string()];
+    let sink_span = span(70, 80);
+    decl.flow_events = vec![FlowEvent::Loop {
+        span: span(10, 100),
+        loop_kind: bonsai_lang_api::LoopKind::While,
+        label: None,
+        condition_events: Vec::new(),
+        update_events: Vec::new(),
+        body: vec![
+            FlowEvent::Branch {
+                span: span(20, 65),
+                condition: Some("cond".to_string()),
+                then_events: vec![
+                    assignment(span(25, 35), "value", Some("seed")),
+                    FlowEvent::Break {
+                        span: span(36, 40),
+                        target: None,
+                    },
+                ],
+                else_events: vec![assignment(span(50, 60), "value", None)],
+            },
+            call_with_place(sink_span, "sink", "value"),
+            FlowEvent::Break {
+                span: span(85, 90),
+                target: None,
+            },
+        ],
+    }];
+    let out = transfer_function_for(&decl);
+    assert!(
+        !transfer_reaches_call_arg(&out, 0, sink_span),
+        "a writer on the branch that exits the loop cannot reach a sink that only the fall-through arm executes"
+    );
+}
+
+#[test]
+fn breaking_branch_writer_reaches_sink_after_loop() {
+    let mut decl = empty_decl(1, "entry");
+    decl.params = vec!["seed".to_string(), "cond".to_string()];
+    let sink_span = span(110, 120);
+    decl.flow_events = vec![
+        assignment(span(1, 8), "value", None),
+        FlowEvent::Loop {
+            span: span(10, 100),
+            loop_kind: bonsai_lang_api::LoopKind::While,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
+            body: vec![FlowEvent::Branch {
+                span: span(20, 90),
+                condition: Some("cond".to_string()),
+                then_events: vec![
+                    assignment(span(25, 35), "value", Some("seed")),
+                    FlowEvent::Break {
+                        span: span(36, 40),
+                        target: None,
+                    },
+                ],
+                else_events: vec![FlowEvent::Continue {
+                    span: span(70, 78),
+                    target: None,
+                }],
+            }],
+        },
+        call_with_place(sink_span, "sink", "value"),
+    ];
+    let out = transfer_function_for(&decl);
+    assert!(
+        transfer_reaches_call_arg(&out, 0, sink_span),
+        "the same writer must remain live on the explicit break edge into the after-loop block"
+    );
+}
+
+#[test]
+fn labeled_break_writer_skips_inner_fallthrough_and_reaches_outer_exit() {
+    let mut decl = empty_decl(1, "entry");
+    decl.params = vec!["seed".to_string()];
+    let inner_sink = span(70, 80);
+    let outer_sink = span(120, 130);
+    decl.flow_events = vec![
+        assignment(span(1, 8), "value", None),
+        FlowEvent::Loop {
+            span: span(10, 110),
+            loop_kind: bonsai_lang_api::LoopKind::While,
+            label: Some("outer".to_string()),
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
+            body: vec![
+                FlowEvent::Loop {
+                    span: span(20, 60),
+                    loop_kind: bonsai_lang_api::LoopKind::While,
+                    label: Some("inner".to_string()),
+                    condition_events: Vec::new(),
+                    update_events: Vec::new(),
+                    body: vec![
+                        assignment(span(30, 40), "value", Some("seed")),
+                        FlowEvent::Break {
+                            span: span(45, 50),
+                            target: Some(LoopControlTarget::Label("outer".to_string())),
+                        },
+                    ],
+                },
+                call_with_place(inner_sink, "inner_sink", "value"),
+                FlowEvent::Break {
+                    span: span(90, 95),
+                    target: None,
+                },
+            ],
+        },
+        call_with_place(outer_sink, "outer_sink", "value"),
+    ];
+    let out = transfer_function_for(&decl);
+    assert!(
+        !transfer_reaches_call_arg(&out, 0, inner_sink),
+        "a writer exiting the named outer loop cannot reach inner-loop fallthrough"
+    );
+    assert!(
+        transfer_reaches_call_arg(&out, 0, outer_sink),
+        "the same writer must reach the named outer loop's after block"
+    );
+}
+
+#[test]
+fn lexical_level_break_writer_skips_inner_fallthrough_and_reaches_outer_exit() {
+    let mut decl = empty_decl(1, "entry");
+    decl.params = vec!["seed".to_string()];
+    let inner_sink = span(70, 80);
+    let outer_sink = span(120, 130);
+    decl.flow_events = vec![
+        assignment(span(1, 8), "value", None),
+        FlowEvent::Loop {
+            span: span(10, 110),
+            loop_kind: bonsai_lang_api::LoopKind::While,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
+            body: vec![
+                FlowEvent::Loop {
+                    span: span(20, 60),
+                    loop_kind: bonsai_lang_api::LoopKind::While,
+                    label: None,
+                    condition_events: Vec::new(),
+                    update_events: Vec::new(),
+                    body: vec![
+                        assignment(span(30, 40), "value", Some("seed")),
+                        FlowEvent::Break {
+                            span: span(45, 50),
+                            target: Some(LoopControlTarget::Levels(2)),
+                        },
+                    ],
+                },
+                call_with_place(inner_sink, "inner_sink", "value"),
+                FlowEvent::Break {
+                    span: span(90, 95),
+                    target: None,
+                },
+            ],
+        },
+        call_with_place(outer_sink, "outer_sink", "value"),
+    ];
+    let out = transfer_function_for(&decl);
+    assert!(
+        !transfer_reaches_call_arg(&out, 0, inner_sink),
+        "a level-two writer cannot reach the inner loop's fallthrough"
+    );
+    assert!(
+        transfer_reaches_call_arg(&out, 0, outer_sink),
+        "the same writer must reach the second enclosing loop's after block"
+    );
+}
+
 #[test]
 fn branch_return_in_one_arm_does_not_hide_yield_from_the_other_arm() {
     let mut decl = empty_decl(1, "f");
@@ -5313,6 +5597,9 @@ fn branch_return_in_one_arm_does_not_hide_yield_from_the_other_arm() {
         FlowEvent::Loop {
             span: span(25, 60),
             loop_kind: bonsai_lang_api::LoopKind::ForEach,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
             body: vec![FlowEvent::Branch {
                 span: span(25, 60),
                 condition: None,
@@ -5414,6 +5701,9 @@ fn loop_body_walks_through() {
     decl.flow_events = vec![FlowEvent::Loop {
         span: span(0, 60),
         loop_kind: bonsai_lang_api::LoopKind::While,
+        label: None,
+        condition_events: Vec::new(),
+        update_events: Vec::new(),
         body: vec![FlowEvent::Assign {
             span: span(10, 20),
             target: "x".to_string(),
@@ -5441,6 +5731,9 @@ fn loop_exit_preserves_zero_iteration_writers() {
         FlowEvent::Loop {
             span: span(10, 40),
             loop_kind: bonsai_lang_api::LoopKind::While,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
             body: vec![FlowEvent::Assign {
                 span: loop_write,
                 target: "x".to_string(),
@@ -5495,6 +5788,134 @@ fn loop_exit_preserves_zero_iteration_writers() {
 }
 
 #[test]
+fn post_test_loop_does_not_preserve_an_impossible_zero_iteration_writer() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["x".to_string()];
+    let loop_write = span(20, 30);
+    let sink_site = span(50, 60);
+    decl.flow_events = vec![
+        FlowEvent::Loop {
+            span: span(10, 40),
+            loop_kind: bonsai_lang_api::LoopKind::DoWhile,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
+            body: vec![FlowEvent::Assign {
+                span: loop_write,
+                target: "x".to_string(),
+                source_name: None,
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: Vec::new(),
+                declares_new_binding: false,
+                value_kind: Some(bonsai_lang_api::AssignValueKind::Literal),
+            }],
+        },
+        FlowEvent::Call {
+            span: sink_site,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(55, 56),
+                name: None,
+                value_text: "x".to_string(),
+                place: Some("x".to_string()),
+                source_names: Vec::new(),
+            }],
+        },
+    ];
+
+    let out = transfer_function_for(&decl);
+    let sink_arg = out
+        .call_sites
+        .iter()
+        .find(|site| site.site.0 == sink_site)
+        .and_then(|site| site.call_arg_nodes.first())
+        .copied()
+        .expect("sink arg node");
+    assert!(
+        out.edges
+            .iter()
+            .filter(|edge| edge.to == sink_arg && edge.meta.kind == IdgEdgeKind::IntraRead)
+            .all(|edge| rendered_write_span(&out, edge.from) != Some(decl.name_span)),
+        "a do/repeat body executes before its first condition test, so the pre-loop writer cannot bypass its clean overwrite"
+    );
+}
+
+#[test]
+fn unconditional_loop_without_break_makes_the_following_tail_unreachable() {
+    let mut decl = empty_decl(1, "f");
+    let sink_site = span(50, 60);
+    decl.flow_events = vec![
+        FlowEvent::Loop {
+            span: span(10, 40),
+            loop_kind: bonsai_lang_api::LoopKind::Loop,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
+            body: vec![FlowEvent::Call {
+                span: span(20, 30),
+                name: "tick".to_string(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Function,
+                args: Vec::new(),
+            }],
+        },
+        FlowEvent::Call {
+            span: sink_site,
+            name: "unreachable".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        },
+    ];
+
+    let out = transfer_function_for(&decl);
+    assert!(
+        out.call_sites.iter().all(|site| site.site.0 != sink_site),
+        "an unconditional loop has no implicit condition-false successor"
+    );
+}
+
+#[test]
+fn unconditional_loop_break_retains_the_following_tail() {
+    let mut decl = empty_decl(1, "f");
+    let sink_site = span(50, 60);
+    decl.flow_events = vec![
+        FlowEvent::Loop {
+            span: span(10, 40),
+            loop_kind: bonsai_lang_api::LoopKind::Loop,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
+            body: vec![FlowEvent::Break {
+                span: span(20, 30),
+                target: None,
+            }],
+        },
+        FlowEvent::Call {
+            span: sink_site,
+            name: "reachable".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        },
+    ];
+
+    let out = transfer_function_for(&decl);
+    assert!(
+        out.call_sites.iter().any(|site| site.site.0 == sink_site),
+        "an explicit break is the only ordinary successor of an unconditional loop"
+    );
+}
+
+#[test]
 fn deeply_nested_loops_establish_carry_edges_without_a_depth_ceiling() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["state".to_string(), "next".to_string()];
@@ -5531,6 +5952,9 @@ fn deeply_nested_loops_establish_carry_edges_without_a_depth_ceiling() {
         body = vec![FlowEvent::Loop {
             span: span(100 + depth, 200 + depth),
             loop_kind: bonsai_lang_api::LoopKind::While,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
             body,
         }];
     }
@@ -5833,11 +6257,11 @@ fn break_continue_lifecycle_emit_no_edges() {
     decl.flow_events = vec![
         FlowEvent::Break {
             span: span(10, 15),
-            label: None,
+            target: None,
         },
         FlowEvent::Continue {
             span: span(20, 28),
-            label: None,
+            target: None,
         },
     ];
     let out = transfer_function_for(&decl);

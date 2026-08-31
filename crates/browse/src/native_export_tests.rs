@@ -23,7 +23,7 @@ def process(value):
     let exported = native_export_json(&ws, dir.path(), false).expect("native export");
 
     assert_eq!(exported["schema"], "bonsai-native-export");
-    assert_eq!(exported["schema_version"], 9);
+    assert_eq!(exported["schema_version"], 10);
     let file = exported["files"]
         .as_array()
         .and_then(|files| {
@@ -34,7 +34,7 @@ def process(value):
         .expect("exported app.py");
     assert_eq!(
         file["path"], "app.py",
-        "native export v9 paths are portable and workspace-relative"
+        "native export v10 paths are portable and workspace-relative"
     );
     assert_portable_code_locations(&exported);
     let events = file["flow_events"].as_array().expect("flat flow event table");
@@ -670,5 +670,46 @@ fn entry_points_preserve_func_identity_when_names_and_lines_collide() {
     assert_eq!(
         parameter_sets,
         std::collections::BTreeSet::from([vec!["alpha"], vec!["beta"]])
+    );
+}
+
+#[test]
+fn native_export_retains_loop_and_control_target_labels() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("labels.js"),
+        "function labeled() { outer: while (ready()) { continue outer; break outer; } }\n",
+    )
+    .expect("write fixture");
+    std::fs::write(
+        dir.path().join("levels.php"),
+        "<?php\nfunction levels($x) { while ($x) { while ($x) { break 2; } } }\n",
+    )
+    .expect("write PHP fixture");
+    let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+    let exported = native_export_json(&ws, dir.path(), false).expect("native export");
+    let events = exported["files"]
+        .as_array()
+        .and_then(|files| files.iter().find(|file| file["path"] == "labels.js"))
+        .and_then(|file| file["flow_events"].as_array())
+        .expect("JavaScript flow events");
+    for kind in ["loop", "break", "continue"] {
+        assert!(
+            events
+                .iter()
+                .any(|event| event["kind"] == kind && event["label"] == "outer"),
+            "missing exported {kind} target label: {events:#?}"
+        );
+    }
+    let php_events = exported["files"]
+        .as_array()
+        .and_then(|files| files.iter().find(|file| file["path"] == "levels.php"))
+        .and_then(|file| file["flow_events"].as_array())
+        .expect("PHP flow events");
+    assert!(
+        php_events
+            .iter()
+            .any(|event| event["kind"] == "break" && event["levels"] == 2),
+        "missing exported lexical loop level: {php_events:#?}"
     );
 }

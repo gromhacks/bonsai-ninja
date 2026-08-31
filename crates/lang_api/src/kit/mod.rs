@@ -104,7 +104,17 @@ pub fn lower_adapter_local_breaks<S: std::hash::BuildHasher>(
                 lower_adapter_local_breaks(then_events, local_break_spans);
                 lower_adapter_local_breaks(else_events, local_break_spans);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                lower_adapter_local_breaks(condition_events, local_break_spans);
+                lower_adapter_local_breaks(body, local_break_spans);
+                lower_adapter_local_breaks(update_events, local_break_spans);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 lower_adapter_local_breaks(body, local_break_spans);
             }
             FlowEvent::Try {
@@ -216,7 +226,27 @@ pub fn normalize_variadic_builtin_flow(
                     read_builtins,
                 );
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                normalize_variadic_builtin_flow(
+                    condition_events,
+                    has_variadic_param,
+                    start_builtins,
+                    read_builtins,
+                );
+                normalize_variadic_builtin_flow(body, has_variadic_param, start_builtins, read_builtins);
+                normalize_variadic_builtin_flow(
+                    update_events,
+                    has_variadic_param,
+                    start_builtins,
+                    read_builtins,
+                );
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 normalize_variadic_builtin_flow(body, has_variadic_param, start_builtins, read_builtins);
             }
             FlowEvent::Try {
@@ -326,11 +356,18 @@ fn normalize_event_sequence_evaluation_order(events: &mut Vec<FlowEvent>, loop_b
                 normalize_event_sequence_evaluation_order(then_events, false);
                 normalize_event_sequence_evaluation_order(else_events, false);
             }
-            FlowEvent::Loop { body, .. } => {
-                // Loop lowerers deliberately append update facts after the
-                // body even though their source spans live in the header.
-                // Preserve that compiler-owned runtime phase order.
-                normalize_event_sequence_evaluation_order(body, true);
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                // Each compiler-owned runtime phase is normalized only
+                // within itself. Crossing a phase boundary based on source
+                // spans would corrupt post-test and continue semantics.
+                normalize_event_sequence_evaluation_order(condition_events, false);
+                normalize_event_sequence_evaluation_order(body, false);
+                normalize_event_sequence_evaluation_order(update_events, false);
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 normalize_event_sequence_evaluation_order(body, false);
@@ -522,7 +559,17 @@ fn flow_event_reads_name(event: &FlowEvent, name: &str) -> bool {
             then_events.iter().any(|event| flow_event_reads_name(event, name))
                 || else_events.iter().any(|event| flow_event_reads_name(event, name))
         }
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => condition_events
+            .iter()
+            .chain(body)
+            .chain(update_events)
+            .any(|event| flow_event_reads_name(event, name)),
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
             body.iter().any(|event| flow_event_reads_name(event, name))
         }
         FlowEvent::Try {
@@ -665,7 +712,17 @@ fn qualify_bare_hierarchy_member_events(
                 qualify_bare_hierarchy_member_events(catch_events, receiver_name, method_names);
                 qualify_bare_hierarchy_member_events(finally_events, receiver_name, method_names);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                qualify_bare_hierarchy_member_events(condition_events, receiver_name, method_names);
+                qualify_bare_hierarchy_member_events(body, receiver_name, method_names);
+                qualify_bare_hierarchy_member_events(update_events, receiver_name, method_names);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 qualify_bare_hierarchy_member_events(body, receiver_name, method_names);
             }
             _ => {}
@@ -706,7 +763,17 @@ pub fn annotate_tuple_call_result_bindings(
                 annotate_tuple_call_result_bindings(then_events, tree, src, handler);
                 annotate_tuple_call_result_bindings(else_events, tree, src, handler);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                annotate_tuple_call_result_bindings(condition_events, tree, src, handler);
+                annotate_tuple_call_result_bindings(body, tree, src, handler);
+                annotate_tuple_call_result_bindings(update_events, tree, src, handler);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 annotate_tuple_call_result_bindings(body, tree, src, handler);
             }
             FlowEvent::Try {
@@ -844,7 +911,17 @@ pub fn split_match_arms_in_branch_events(
                 split_match_arms_in_branch_events(else_events, arm_spans);
             }
             // Other containers may host a match expression — keep walking.
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                split_match_arms_in_branch_events(condition_events, arm_spans);
+                split_match_arms_in_branch_events(body, arm_spans);
+                split_match_arms_in_branch_events(update_events, arm_spans);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 split_match_arms_in_branch_events(body, arm_spans);
             }
             FlowEvent::Try {
@@ -1372,9 +1449,20 @@ pub fn complete_finite_literal_return_span(events: &[crate::FlowEvent]) -> Optio
                         return false;
                     }
                 }
-                crate::FlowEvent::Loop { body, .. }
-                | crate::FlowEvent::Defer { body, .. }
-                | crate::FlowEvent::Using { body, .. } => {
+                crate::FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    if !every_return_is_literal(condition_events, representative)
+                        || !every_return_is_literal(body, representative)
+                        || !every_return_is_literal(update_events, representative)
+                    {
+                        return false;
+                    }
+                }
+                crate::FlowEvent::Defer { body, .. } | crate::FlowEvent::Using { body, .. } => {
                     if !every_return_is_literal(body, representative) {
                         return false;
                     }
@@ -1485,9 +1573,20 @@ pub fn complete_finite_selection_return_span(
                         return false;
                     }
                 }
-                crate::FlowEvent::Loop { body, .. }
-                | crate::FlowEvent::Defer { body, .. }
-                | crate::FlowEvent::Using { body, .. } => {
+                crate::FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    if !every_return_is_finite(condition_events, selection_spans, representative)
+                        || !every_return_is_finite(body, selection_spans, representative)
+                        || !every_return_is_finite(update_events, selection_spans, representative)
+                    {
+                        return false;
+                    }
+                }
+                crate::FlowEvent::Defer { body, .. } | crate::FlowEvent::Using { body, .. } => {
                     if !every_return_is_finite(body, selection_spans, representative) {
                         return false;
                     }
@@ -1671,6 +1770,15 @@ pub type AssignmentPlaceExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<
 pub type StaticSubscriptKeyExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<String>;
 pub type ComputedSubscriptExtractor = for<'tree> fn(Node<'tree>) -> Option<(Node<'tree>, Node<'tree>)>;
 pub type ReferenceNameExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<String>;
+/// Adapter-owned decoder for source-language loop labels.
+pub type ControlLabelExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<String>;
+/// Adapter-owned decoder for abrupt-control targets that cannot be expressed
+/// by a common named label field (including PHP lexical levels).
+pub type ControlTargetExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<crate::LoopControlTarget>;
+/// Adapter-owned loop classifier for grammar nodes whose runtime form cannot
+/// be identified by node kind alone (for example postfix modifier loops that
+/// may be pre-test or post-test depending on their parsed body wrapper).
+pub type LoopKindExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<crate::LoopKind>;
 /// Adapter-owned exact place extraction for grammars that encode one or more
 /// projections as sibling CST nodes rather than a nested member expression.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1867,6 +1975,16 @@ pub struct GrammarHandler {
     /// body iteration. This is adapter-owned grammar metadata: shared
     /// lowering uses it only to preserve runtime phase order.
     pub loop_update_field_names: &'static [&'static str],
+    /// Ordered Tree-sitter fields that hold the runtime loop condition. The
+    /// shared lowering keeps these events in a distinct phase so post-test
+    /// loops and `continue` preserve source-language evaluation order.
+    pub loop_condition_field_names: &'static [&'static str],
+    /// Exact condition-node decoder for grammars that do not assign a field
+    /// to their loop condition.
+    pub loop_condition_extractor: Option<NodeListExtractor>,
+    /// Exact loop classifier for grammar nodes whose kind alone is
+    /// insufficient to distinguish pre-test from post-test execution.
+    pub loop_kind_extractor: Option<LoopKindExtractor>,
 
     // === Call / assignment / return / lambda shapes ===
     pub call_kinds: &'static [&'static str],
@@ -2123,6 +2241,10 @@ pub struct GrammarHandler {
 
     // === Try / catch / finally shapes ===
     pub try_kinds: &'static [&'static str],
+    /// Optional exact inclusion filter for a node in `try_kinds`. This lets
+    /// an adapter distinguish a true exception region from a transparent
+    /// grouping construct that shares the same grammar kind.
+    pub try_node_filter: Option<NodeFilter>,
     pub catch_kinds: &'static [&'static str],
     /// Exact grammar nodes that each own one mutually exclusive exception
     /// handler arm. Some grammars expose these directly as catch clauses;
@@ -2139,6 +2261,12 @@ pub struct GrammarHandler {
     pub continue_kinds: &'static [&'static str],
     /// Ordered fields that hold an optional break/continue label.
     pub control_label_field_names: &'static [&'static str],
+    /// Exact adapter-owned decoder for a labeled or lexical-level
+    /// break/continue target when the grammar does not expose a common label
+    /// field.
+    pub control_target_extractor: Option<ControlTargetExtractor>,
+    /// Exact adapter-owned decoder for the label that owns one loop node.
+    pub loop_label_extractor: Option<ControlLabelExtractor>,
     pub yield_kinds: &'static [&'static str],
     /// Ordered fields that hold a yielded expression.
     pub yield_value_field_names: &'static [&'static str],
@@ -2318,6 +2446,9 @@ pub const EMPTY_HANDLER: GrammarHandler = GrammarHandler {
     loop_body_kinds: &[],
     loop_header_container_kinds: &[],
     loop_update_field_names: &[],
+    loop_condition_field_names: &[],
+    loop_condition_extractor: None,
+    loop_kind_extractor: None,
     call_kinds: &[],
     constructor_call_kinds: &[],
     nested_call_component_kinds: &[],
@@ -2419,6 +2550,7 @@ pub const EMPTY_HANDLER: GrammarHandler = GrammarHandler {
     lambda_body_field_names: &[],
     lambda_body_kinds: &[],
     try_kinds: &[],
+    try_node_filter: None,
     catch_kinds: &[],
     exclusive_catch_arm_kinds: &[],
     finally_kinds: &[],
@@ -2427,6 +2559,8 @@ pub const EMPTY_HANDLER: GrammarHandler = GrammarHandler {
     break_kinds: &[],
     continue_kinds: &[],
     control_label_field_names: &[],
+    control_target_extractor: None,
+    loop_label_extractor: None,
     yield_kinds: &[],
     yield_value_field_names: &[],
     await_kinds: &[],
@@ -2644,6 +2778,9 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
     loop_body_kinds: &["block", "compound_statement", "statement", "expression_statement"],
     loop_header_container_kinds: &["for_clause", "for_loop_parts"],
     loop_update_field_names: &["update", "increment", "iterator"],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: None,
+    loop_kind_extractor: None,
     call_kinds: COMMON_CALL_KINDS,
     constructor_call_kinds: &[
         "new_expression",
@@ -3100,6 +3237,7 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         // catch/finally may follow.
         "try_with_resources_statement",
     ],
+    try_node_filter: None,
     catch_kinds: &[
         "catch_clause",
         "catch",
@@ -3143,6 +3281,8 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "next_statement",
     ],
     control_label_field_names: &["label"],
+    control_target_extractor: None,
+    loop_label_extractor: None,
     yield_kinds: &[
         "yield",
         "yield_statement",
@@ -3396,6 +3536,7 @@ impl GrammarHandler {
         fields!(branch_condition_field_names);
         fields!(loop_body_field_names);
         fields!(loop_update_field_names);
+        fields!(loop_condition_field_names);
         fields!(call_callee_field_names);
         fields!(call_receiver_field_names);
         fields!(call_member_field_names);
@@ -4305,7 +4446,17 @@ fn inject_local_closure_capture_environment(
                 inject_local_closure_capture_environment(then_events, binding, callable_span, captures);
                 inject_local_closure_capture_environment(else_events, binding, callable_span, captures);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                inject_local_closure_capture_environment(condition_events, binding, callable_span, captures);
+                inject_local_closure_capture_environment(body, binding, callable_span, captures);
+                inject_local_closure_capture_environment(update_events, binding, callable_span, captures);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 inject_local_closure_capture_environment(body, binding, callable_span, captures);
             }
             FlowEvent::Try {
@@ -4347,9 +4498,19 @@ fn local_callable_binding_for_span(events: &[FlowEvent], callable_span: Span) ->
                     visit(then_events, callable_span, best);
                     visit(else_events, callable_span, best);
                 }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => visit(body, callable_span, best),
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    visit(condition_events, callable_span, best);
+                    visit(body, callable_span, best);
+                    visit(update_events, callable_span, best);
+                }
+                FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                    visit(body, callable_span, best);
+                }
                 FlowEvent::Try {
                     body,
                     catch_events,
@@ -4386,7 +4547,17 @@ fn collect_assignment_targets_before(events: &[FlowEvent], before: u64, out: &mu
                 collect_assignment_targets_before(then_events, before, out);
                 collect_assignment_targets_before(else_events, before, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_assignment_targets_before(condition_events, before, out);
+                collect_assignment_targets_before(body, before, out);
+                collect_assignment_targets_before(update_events, before, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_assignment_targets_before(body, before, out);
             }
             FlowEvent::Try {
@@ -4466,7 +4637,17 @@ fn collect_flow_read_names(events: &[FlowEvent], out: &mut Vec<String>) {
                 collect_flow_read_names(then_events, out);
                 collect_flow_read_names(else_events, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_flow_read_names(condition_events, out);
+                collect_flow_read_names(body, out);
+                collect_flow_read_names(update_events, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_flow_read_names(body, out);
             }
             FlowEvent::Try {
@@ -4515,7 +4696,17 @@ fn inject_local_closure_capture_args(events: &mut [FlowEvent], binding: &str, ca
                 inject_local_closure_capture_args(then_events, binding, captures);
                 inject_local_closure_capture_args(else_events, binding, captures);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                inject_local_closure_capture_args(condition_events, binding, captures);
+                inject_local_closure_capture_args(body, binding, captures);
+                inject_local_closure_capture_args(update_events, binding, captures);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 inject_local_closure_capture_args(body, binding, captures);
             }
             FlowEvent::Try {
@@ -5809,6 +6000,8 @@ pub const fn with_fn_kinds_and_implicit_receivers(
     implicit_receiver_prefixes: &'static [&'static str],
 ) -> GrammarHandler {
     GrammarHandler {
+        control_target_extractor: GENERIC_HANDLER.control_target_extractor,
+        loop_label_extractor: GENERIC_HANDLER.loop_label_extractor,
         fn_kinds,
         class_kinds: GENERIC_HANDLER.class_kinds,
         class_decl_kinds: GENERIC_HANDLER.class_decl_kinds,
@@ -5846,6 +6039,9 @@ pub const fn with_fn_kinds_and_implicit_receivers(
         loop_body_kinds: GENERIC_HANDLER.loop_body_kinds,
         loop_header_container_kinds: GENERIC_HANDLER.loop_header_container_kinds,
         loop_update_field_names: GENERIC_HANDLER.loop_update_field_names,
+        loop_condition_field_names: GENERIC_HANDLER.loop_condition_field_names,
+        loop_condition_extractor: GENERIC_HANDLER.loop_condition_extractor,
+        loop_kind_extractor: GENERIC_HANDLER.loop_kind_extractor,
         call_kinds: GENERIC_HANDLER.call_kinds,
         constructor_call_kinds: GENERIC_HANDLER.constructor_call_kinds,
         nested_call_component_kinds: GENERIC_HANDLER.nested_call_component_kinds,
@@ -5947,6 +6143,7 @@ pub const fn with_fn_kinds_and_implicit_receivers(
         lambda_body_field_names: GENERIC_HANDLER.lambda_body_field_names,
         lambda_body_kinds: GENERIC_HANDLER.lambda_body_kinds,
         try_kinds: GENERIC_HANDLER.try_kinds,
+        try_node_filter: GENERIC_HANDLER.try_node_filter,
         catch_kinds: GENERIC_HANDLER.catch_kinds,
         exclusive_catch_arm_kinds: GENERIC_HANDLER.exclusive_catch_arm_kinds,
         finally_kinds: GENERIC_HANDLER.finally_kinds,
@@ -6255,9 +6452,19 @@ pub fn extract_call_argument_value_facts(
                     collect_requests(then_events, out);
                     collect_requests(else_events, out);
                 }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => collect_requests(body, out),
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    collect_requests(condition_events, out);
+                    collect_requests(body, out);
+                    collect_requests(update_events, out);
+                }
+                FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                    collect_requests(body, out);
+                }
                 FlowEvent::Try {
                     body,
                     catch_events,
@@ -6502,9 +6709,19 @@ pub fn populate_call_argument_static_values(
                     collect_requests(then_events, out);
                     collect_requests(else_events, out);
                 }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => collect_requests(body, out),
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    collect_requests(condition_events, out);
+                    collect_requests(body, out);
+                    collect_requests(update_events, out);
+                }
+                FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                    collect_requests(body, out);
+                }
                 FlowEvent::Try {
                     body,
                     catch_events,
@@ -7693,7 +7910,16 @@ pub fn extend_alias_map_with_flow_events<S: std::hash::BuildHasher>(
                     collect(out, then_events);
                     collect(out, else_events);
                 }
-                crate::FlowEvent::Loop { body, .. } => collect(out, body),
+                crate::FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    collect(out, condition_events);
+                    collect(out, body);
+                    collect(out, update_events);
+                }
                 crate::FlowEvent::Try {
                     body,
                     catch_events,
@@ -7950,7 +8176,17 @@ fn flow_events_assign_name_outside_imports(events: &[FlowEvent], name: &str, imp
             flow_events_assign_name_outside_imports(then_events, name, imports)
                 || flow_events_assign_name_outside_imports(else_events, name, imports)
         }
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => {
+            flow_events_assign_name_outside_imports(condition_events, name, imports)
+                || flow_events_assign_name_outside_imports(body, name, imports)
+                || flow_events_assign_name_outside_imports(update_events, name, imports)
+        }
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
             flow_events_assign_name_outside_imports(body, name, imports)
         }
         FlowEvent::Try {
@@ -9036,9 +9272,17 @@ fn receiver_field_write_directly_uses_parameter(
             receiver_field_write_directly_uses_parameter(then_events, field_write, parameter)
                 || receiver_field_write_directly_uses_parameter(else_events, field_write, parameter)
         }
-        crate::FlowEvent::Loop { body, .. }
-        | crate::FlowEvent::Defer { body, .. }
-        | crate::FlowEvent::Using { body, .. } => {
+        crate::FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => {
+            receiver_field_write_directly_uses_parameter(condition_events, field_write, parameter)
+                || receiver_field_write_directly_uses_parameter(body, field_write, parameter)
+                || receiver_field_write_directly_uses_parameter(update_events, field_write, parameter)
+        }
+        crate::FlowEvent::Defer { body, .. } | crate::FlowEvent::Using { body, .. } => {
             receiver_field_write_directly_uses_parameter(body, field_write, parameter)
         }
         crate::FlowEvent::Try {
@@ -9249,7 +9493,17 @@ fn flow_events_contain_callable_alias(events: &[FlowEvent], span: Span, target: 
             flow_events_contain_callable_alias(then_events, span, target, source)
                 || flow_events_contain_callable_alias(else_events, span, target, source)
         }
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => {
+            flow_events_contain_callable_alias(condition_events, span, target, source)
+                || flow_events_contain_callable_alias(body, span, target, source)
+                || flow_events_contain_callable_alias(update_events, span, target, source)
+        }
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
             flow_events_contain_callable_alias(body, span, target, source)
         }
         FlowEvent::Try {
@@ -9513,7 +9767,25 @@ fn collect_constructor_result_type_aliases_with_declared_types(
                 collect_constructor_result_type_aliases_with_declared_types(then_events, out, declared_types);
                 collect_constructor_result_type_aliases_with_declared_types(else_events, out, declared_types);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_constructor_result_type_aliases_with_declared_types(
+                    condition_events,
+                    out,
+                    declared_types,
+                );
+                collect_constructor_result_type_aliases_with_declared_types(body, out, declared_types);
+                collect_constructor_result_type_aliases_with_declared_types(
+                    update_events,
+                    out,
+                    declared_types,
+                );
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_constructor_result_type_aliases_with_declared_types(body, out, declared_types);
             }
             FlowEvent::Try {
@@ -9834,7 +10106,17 @@ fn collect_assignment_type_edges(
                 collect_assignment_type_edges(then_events, alias_edges, non_alias_targets);
                 collect_assignment_type_edges(else_events, alias_edges, non_alias_targets);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_assignment_type_edges(condition_events, alias_edges, non_alias_targets);
+                collect_assignment_type_edges(body, alias_edges, non_alias_targets);
+                collect_assignment_type_edges(update_events, alias_edges, non_alias_targets);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_assignment_type_edges(body, alias_edges, non_alias_targets);
             }
             FlowEvent::Try {
@@ -9882,7 +10164,17 @@ fn propose_call_result_type_aliases(
                 propose_call_result_type_aliases(then_events, returns, out);
                 propose_call_result_type_aliases(else_events, returns, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                propose_call_result_type_aliases(condition_events, returns, out);
+                propose_call_result_type_aliases(body, returns, out);
+                propose_call_result_type_aliases(update_events, returns, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 propose_call_result_type_aliases(body, returns, out);
             }
             FlowEvent::Try {
@@ -9951,7 +10243,17 @@ fn classify_flow_value_kinds(events: &mut [FlowEvent], call_bearing_assignments:
                 classify_flow_value_kinds(then_events, call_bearing_assignments);
                 classify_flow_value_kinds(else_events, call_bearing_assignments);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                classify_flow_value_kinds(condition_events, call_bearing_assignments);
+                classify_flow_value_kinds(body, call_bearing_assignments);
+                classify_flow_value_kinds(update_events, call_bearing_assignments);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 classify_flow_value_kinds(body, call_bearing_assignments);
             }
             FlowEvent::Try {
@@ -10199,7 +10501,35 @@ fn apply_call_receiver_types_to_events(
                     syntax,
                 );
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                apply_call_receiver_types_to_events(
+                    condition_events,
+                    aliases,
+                    implicit_receiver_types,
+                    class_facts,
+                    syntax,
+                );
+                apply_call_receiver_types_to_events(
+                    body,
+                    aliases,
+                    implicit_receiver_types,
+                    class_facts,
+                    syntax,
+                );
+                apply_call_receiver_types_to_events(
+                    update_events,
+                    aliases,
+                    implicit_receiver_types,
+                    class_facts,
+                    syntax,
+                );
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 apply_call_receiver_types_to_events(
                     body,
                     aliases,

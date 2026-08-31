@@ -53,6 +53,9 @@ fn loop_body(body: Vec<FlowEvent>) -> FlowEvent {
     FlowEvent::Loop {
         span: Span::new(FileId::INVALID, 0, 0),
         loop_kind: bonsai_lang_api::LoopKind::While,
+        label: None,
+        condition_events: Vec::new(),
+        update_events: Vec::new(),
         body,
     }
 }

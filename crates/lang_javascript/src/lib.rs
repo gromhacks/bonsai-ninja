@@ -41,6 +41,33 @@ fn javascript_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
         .flatten()
 }
 
+/// Return the exact label that lexically owns an ECMAScript loop. The label
+/// lives on the parent `labeled_statement`, while the loop itself is its
+/// parsed `body`; no source-token search is involved.
+pub fn ecmascript_loop_label(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let parent = node
+        .parent()
+        .filter(|parent| parent.kind() == "labeled_statement")?;
+    let body = parent.child_by_field_name("body")?;
+    if body.id() != node.id() {
+        return None;
+    }
+    let label = parent.child_by_field_name("label")?;
+    let label = node_text(&label, src).trim();
+    (!label.is_empty()).then(|| label.to_string())
+}
+
+/// Classify ECMAScript's grammar-level empty condition in `for (;;)`. The
+/// grammar emits an `empty_statement` placeholder, so absence cannot be
+/// inferred from a missing field alone.
+pub fn ecmascript_loop_kind(node: Node<'_>, _src: &[u8]) -> Option<bonsai_lang_api::LoopKind> {
+    (node.kind() == "for_statement"
+        && node
+            .child_by_field_name("condition")
+            .is_some_and(|condition| condition.kind() == "empty_statement"))
+    .then_some(bonsai_lang_api::LoopKind::Loop)
+}
+
 /// Classify ECMAScript expressions whose complete value role is proven by the
 /// CST. Calls remain call results: the callback sees the complete RHS node, so
 /// `file.name.trim()` is not confused with the `file.name` receiver nested
@@ -117,6 +144,8 @@ const ADDITIONAL_GRAMMAR_NODE_KINDS: &[(&str, &str)] = &[
     ("adapter_postprocessor", "jsx_opening_element"),
     ("adapter_postprocessor", "jsx_self_closing_element"),
     ("adapter_postprocessor", "lexical_declaration"),
+    ("loop-control-label", "labeled_statement"),
+    ("loop-control-label", "statement_identifier"),
     ("adapter_postprocessor", "member_expression"),
     ("adapter_postprocessor", "method_definition"),
     ("adapter_postprocessor", "named_imports"),
@@ -227,6 +256,9 @@ const HANDLER: GrammarHandler = GrammarHandler {
     loop_body_field_names: &["body"],
     loop_body_kinds: &["statement_block", "expression_statement"],
     loop_update_field_names: &["increment"],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: None,
+    loop_kind_extractor: Some(ecmascript_loop_kind),
     branch_arm_kinds: &[
         "statement_block",
         "expression_statement",
@@ -287,6 +319,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
     control_label_field_names: &["label"],
+    loop_label_extractor: Some(ecmascript_loop_label),
     yield_kinds: &["yield_expression"],
     yield_value_field_names: &["argument"],
     await_kinds: &["await_expression"],

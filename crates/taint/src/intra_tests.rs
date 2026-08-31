@@ -67,6 +67,9 @@ fn loop_body(body: Vec<FlowEvent>) -> FlowEvent {
     FlowEvent::Loop {
         span: span(),
         loop_kind: LoopKind::While,
+        label: None,
+        condition_events: Vec::new(),
+        update_events: Vec::new(),
         body,
     }
 }

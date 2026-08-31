@@ -110,7 +110,20 @@ fn find_probe(events: &[FlowEvent]) -> Option<(bonsai_common::Span, &[bonsai_lan
                     return Some(call);
                 }
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if let Some(call) = find_probe(condition_events)
+                    .or_else(|| find_probe(body))
+                    .or_else(|| find_probe(update_events))
+                {
+                    return Some(call);
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if let Some(call) = find_probe(body) {
                     return Some(call);
                 }

@@ -308,7 +308,22 @@ fn collect_matching_qualified_call_spans(
                 collect_matching_qualified_call_spans(then_events, query, bare_call_in_target_scope, spans);
                 collect_matching_qualified_call_spans(else_events, query, bare_call_in_target_scope, spans);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_matching_qualified_call_spans(
+                    condition_events,
+                    query,
+                    bare_call_in_target_scope,
+                    spans,
+                );
+                collect_matching_qualified_call_spans(body, query, bare_call_in_target_scope, spans);
+                collect_matching_qualified_call_spans(update_events, query, bare_call_in_target_scope, spans);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_matching_qualified_call_spans(body, query, bare_call_in_target_scope, spans);
             }
             FlowEvent::Try {
@@ -524,7 +539,17 @@ fn walk_flow_source_reads(events: &[FlowEvent], visit: &mut impl FnMut(&str, bon
                 walk_flow_source_reads(then_events, visit);
                 walk_flow_source_reads(else_events, visit);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                walk_flow_source_reads(condition_events, visit);
+                walk_flow_source_reads(body, visit);
+                walk_flow_source_reads(update_events, visit);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 walk_flow_source_reads(body, visit);
             }
             FlowEvent::Try {

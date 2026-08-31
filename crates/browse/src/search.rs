@@ -574,8 +574,15 @@ fn walk_flow_events_inner<M>(
                 walk_flow_events_inner(then_events, in_fn, ws, matcher, push);
                 walk_flow_events_inner(else_events, in_fn, ws, matcher, push);
             }
-            FlowEvent::Loop { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                walk_flow_events_inner(condition_events, in_fn, ws, matcher, push);
                 walk_flow_events_inner(body, in_fn, ws, matcher, push);
+                walk_flow_events_inner(update_events, in_fn, ws, matcher, push);
             }
             FlowEvent::Try {
                 body,
@@ -643,8 +650,15 @@ fn collect_explicit_flow_shadows(
                 collect_explicit_flow_shadows(then_events, in_fn, ws, shadows);
                 collect_explicit_flow_shadows(else_events, in_fn, ws, shadows);
             }
-            FlowEvent::Loop { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_explicit_flow_shadows(condition_events, in_fn, ws, shadows);
                 collect_explicit_flow_shadows(body, in_fn, ws, shadows);
+                collect_explicit_flow_shadows(update_events, in_fn, ws, shadows);
             }
             FlowEvent::Try {
                 body,

@@ -196,7 +196,17 @@ fn expand_paths(events: &[FlowEvent], initial: &[BTreeSet<&'static str>]) -> Vec
                 let else_paths = expand_paths(else_events, &paths);
                 paths = then_paths.into_iter().chain(else_paths).collect();
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                let condition_paths = expand_paths(condition_events, &paths);
+                let body_paths = expand_paths(body, &condition_paths);
+                paths.extend(expand_paths(update_events, &body_paths));
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 paths.extend(expand_paths(body, &paths));
             }
             FlowEvent::Try {

@@ -619,7 +619,50 @@ fn collect_decl_call_sites(
                     row,
                 );
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                let mut condition_external = external_receivers.clone();
+                collect_decl_call_sites(
+                    decl,
+                    condition_events,
+                    resolved_sites,
+                    unresolved_sites,
+                    alias_targets,
+                    workspace_module_tails,
+                    &mut condition_external,
+                    seen_sites,
+                    row,
+                );
+                let mut body_external = external_receivers.clone();
+                collect_decl_call_sites(
+                    decl,
+                    body,
+                    resolved_sites,
+                    unresolved_sites,
+                    alias_targets,
+                    workspace_module_tails,
+                    &mut body_external,
+                    seen_sites,
+                    row,
+                );
+                let mut update_external = external_receivers.clone();
+                collect_decl_call_sites(
+                    decl,
+                    update_events,
+                    resolved_sites,
+                    unresolved_sites,
+                    alias_targets,
+                    workspace_module_tails,
+                    &mut update_external,
+                    seen_sites,
+                    row,
+                );
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 let mut body_external = external_receivers.clone();
                 collect_decl_call_sites(
                     decl,

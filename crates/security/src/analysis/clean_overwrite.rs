@@ -2061,6 +2061,9 @@ mod retired_rendered_source_regressions {
                 FlowEvent::Loop {
                     span: span(file, loop_start, target_start),
                     loop_kind: LoopKind::While,
+                    label: None,
+                    condition_events: Vec::new(),
+                    update_events: Vec::new(),
                     body: vec![literal_assign(nested_span, "x")],
                 },
                 FlowEvent::Branch {

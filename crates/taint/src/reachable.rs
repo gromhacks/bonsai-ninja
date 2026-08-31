@@ -596,7 +596,16 @@ fn collect_flow_event_tokens_kinded(events: &[FlowEvent], tokens: &mut KindedTok
                 collect_flow_event_tokens_kinded(then_events, tokens);
                 collect_flow_event_tokens_kinded(else_events, tokens);
             }
-            FlowEvent::Loop { body, .. } => collect_flow_event_tokens_kinded(body, tokens),
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_flow_event_tokens_kinded(condition_events, tokens);
+                collect_flow_event_tokens_kinded(body, tokens);
+                collect_flow_event_tokens_kinded(update_events, tokens);
+            }
             FlowEvent::Try {
                 body,
                 catch_events,
@@ -991,8 +1000,15 @@ pub(crate) fn collect_assign_targets(
                 collect_assign_targets(then_events, out, include_source_calls);
                 collect_assign_targets(else_events, out, include_source_calls);
             }
-            FlowEvent::Loop { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_assign_targets(condition_events, out, include_source_calls);
                 collect_assign_targets(body, out, include_source_calls);
+                collect_assign_targets(update_events, out, include_source_calls);
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_assign_targets(body, out, include_source_calls);
@@ -1092,7 +1108,17 @@ fn collect_graph_seed_tokens(events: &[bonsai_lang_api::FlowEvent], out: &mut To
                 collect_graph_seed_tokens(then_events, out);
                 collect_graph_seed_tokens(else_events, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_graph_seed_tokens(condition_events, out);
+                collect_graph_seed_tokens(body, out);
+                collect_graph_seed_tokens(update_events, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_graph_seed_tokens(body, out);
             }
             FlowEvent::Try {
@@ -1232,7 +1258,16 @@ fn collect_flow_facts(events: &[bonsai_lang_api::FlowEvent], facts: &mut KindedT
                 collect_flow_facts(then_events, facts);
                 collect_flow_facts(else_events, facts);
             }
-            FlowEvent::Loop { body, .. } => collect_flow_facts(body, facts),
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_flow_facts(condition_events, facts);
+                collect_flow_facts(body, facts);
+                collect_flow_facts(update_events, facts);
+            }
             FlowEvent::Try {
                 body,
                 catch_events,
@@ -1634,7 +1669,17 @@ fn collect_equivalent_adapter_write_names(events: &[FlowEvent], requested: &[Str
                 collect_equivalent_adapter_write_names(then_events, requested, out);
                 collect_equivalent_adapter_write_names(else_events, requested, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_equivalent_adapter_write_names(condition_events, requested, out);
+                collect_equivalent_adapter_write_names(body, requested, out);
+                collect_equivalent_adapter_write_names(update_events, requested, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_equivalent_adapter_write_names(body, requested, out);
             }
             FlowEvent::Try {
@@ -1715,7 +1760,17 @@ fn collect_first_write_spans(
                 collect_first_write_spans(then_events, seed_names, out);
                 collect_first_write_spans(else_events, seed_names, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_first_write_spans(condition_events, seed_names, out);
+                collect_first_write_spans(body, seed_names, out);
+                collect_first_write_spans(update_events, seed_names, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_first_write_spans(body, seed_names, out);
             }
             FlowEvent::Try {
@@ -1761,7 +1816,17 @@ fn collect_seed_matching_call_spans(events: &[FlowEvent], seeds: &TokenSet, out:
                 collect_seed_matching_call_spans(then_events, seeds, out);
                 collect_seed_matching_call_spans(else_events, seeds, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_seed_matching_call_spans(condition_events, seeds, out);
+                collect_seed_matching_call_spans(body, seeds, out);
+                collect_seed_matching_call_spans(update_events, seeds, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_seed_matching_call_spans(body, seeds, out);
             }
             FlowEvent::Try {
@@ -1828,7 +1893,17 @@ fn collect_seed_matching_output_arg_names(events: &[FlowEvent], seeds: &TokenSet
                 collect_seed_matching_output_arg_names(then_events, seeds, out);
                 collect_seed_matching_output_arg_names(else_events, seeds, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_seed_matching_output_arg_names(condition_events, seeds, out);
+                collect_seed_matching_output_arg_names(body, seeds, out);
+                collect_seed_matching_output_arg_names(update_events, seeds, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_seed_matching_output_arg_names(body, seeds, out);
             }
             FlowEvent::Try {
@@ -3124,7 +3199,17 @@ fn collect_write_event_summaries(events: &[bonsai_lang_api::FlowEvent], out: &mu
                 collect_write_event_summaries(then_events, out);
                 collect_write_event_summaries(else_events, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_write_event_summaries(condition_events, out);
+                collect_write_event_summaries(body, out);
+                collect_write_event_summaries(update_events, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_write_event_summaries(body, out);
             }
             FlowEvent::Try {
@@ -4059,7 +4144,44 @@ fn walk_call_events_for_propagation(
                     grew,
                 );
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                walk_call_events_for_propagation(
+                    condition_events,
+                    caller,
+                    target_spans,
+                    propagations,
+                    idg,
+                    seed_nodes,
+                    applied,
+                    grew,
+                );
+                walk_call_events_for_propagation(
+                    body,
+                    caller,
+                    target_spans,
+                    propagations,
+                    idg,
+                    seed_nodes,
+                    applied,
+                    grew,
+                );
+                walk_call_events_for_propagation(
+                    update_events,
+                    caller,
+                    target_spans,
+                    propagations,
+                    idg,
+                    seed_nodes,
+                    applied,
+                    grew,
+                );
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 walk_call_events_for_propagation(
                     body,
                     caller,
@@ -5322,7 +5444,17 @@ fn collect_call_event_summaries(
                 collect_call_event_summaries(catch_events, receiver_facts, out);
                 collect_call_event_summaries(finally_events, receiver_facts, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_call_event_summaries(condition_events, receiver_facts, out);
+                collect_call_event_summaries(body, receiver_facts, out);
+                collect_call_event_summaries(update_events, receiver_facts, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_call_event_summaries(body, receiver_facts, out);
             }
             _ => {}

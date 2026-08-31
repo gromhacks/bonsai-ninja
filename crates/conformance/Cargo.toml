@@ -32,6 +32,7 @@ tree-sitter = { workspace = true }
 [dev-dependencies]
 bonsai_adapters = { package = "bonsai-ninja-adapters", path = "../adapters" }
 bonsai_cfg = { package = "bonsai-ninja-cfg", path = "../cfg" }
+bonsai_idg = { package = "bonsai-ninja-idg", path = "../idg" }
 serde_yaml = { workspace = true }
 
 [lints]

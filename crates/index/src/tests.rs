@@ -53,6 +53,46 @@ fn len_and_empty_track_live_decls_after_removal() {
 }
 
 #[test]
+fn remove_file_drops_only_its_reference_backlinks() {
+    let first_file = FileId::new(9);
+    let second_file = FileId::new(10);
+    let mut index = GlobalIndex::new();
+    for (file, at, target_name) in [
+        (first_file, 1_u64, "first_target"),
+        (second_file, 2_u64, "second_target"),
+    ] {
+        index.insert(DeclIndex {
+            file,
+            defs: vec![decl(file, 0, target_name)],
+            refs: vec![bonsai_lang_api::Ref {
+                span: Span::new(file, at, at + 1),
+                name: target_name.to_string(),
+                kind: bonsai_lang_api::RefKind::Call,
+                scope: None,
+                // Adapter references carry file-local declaration ids. The
+                // index remaps them to stable workspace ids during insert;
+                // seeding a pre-existing global id here would be an invalid
+                // compiler object and would correctly fail closed.
+                resolved: Some(SymbolId::new(0)),
+            }],
+            ..DeclIndex::default()
+        });
+    }
+    let first_target = index.find_by_name("first_target")[0];
+    let second_target = index.find_by_name("second_target")[0];
+
+    assert_eq!(index.refs_to(first_target).len(), 1);
+    assert_eq!(index.refs_to(second_target).len(), 1);
+    index.remove_file(first_file);
+    assert!(index.refs_to(first_target).is_empty());
+    let remaining = index.refs_to(second_target);
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].0, second_file);
+    index.remove_file(second_file);
+    assert!(index.refs_to(second_target).is_empty());
+}
+
+#[test]
 fn insert_dedupes_identical_adapter_declarations() {
     let file = FileId::new(11);
     let mut index = GlobalIndex::new();

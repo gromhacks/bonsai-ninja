@@ -459,9 +459,17 @@ fn build_intra_entry_graph(
                     out.extend(collect_thrown_value_names(then_events));
                     out.extend(collect_thrown_value_names(else_events));
                 }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Using { body, .. }
-                | FlowEvent::Defer { body, .. } => {
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    out.extend(collect_thrown_value_names(condition_events));
+                    out.extend(collect_thrown_value_names(body));
+                    out.extend(collect_thrown_value_names(update_events));
+                }
+                FlowEvent::Using { body, .. } | FlowEvent::Defer { body, .. } => {
                     out.extend(collect_thrown_value_names(body));
                 }
                 FlowEvent::Try {
@@ -626,9 +634,28 @@ fn build_intra_entry_graph(
                     };
                     env = merge_env(then_env, else_env);
                 }
-                FlowEvent::Loop { body, .. } => {
-                    let body_env = walk_events(body, graph, func, env.clone());
-                    env = merge_env(env, body_env);
+                FlowEvent::Loop {
+                    loop_kind,
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    let entry = env.clone();
+                    let iteration = if *loop_kind == bonsai_lang_api::LoopKind::DoWhile {
+                        let body_env = walk_events(body, graph, func, entry.clone());
+                        let update_env = walk_events(update_events, graph, func, body_env);
+                        walk_events(condition_events, graph, func, update_env)
+                    } else {
+                        let condition_env = walk_events(condition_events, graph, func, entry.clone());
+                        let body_env = walk_events(body, graph, func, condition_env);
+                        walk_events(update_events, graph, func, body_env)
+                    };
+                    env = if *loop_kind == bonsai_lang_api::LoopKind::DoWhile {
+                        iteration
+                    } else {
+                        merge_env(entry, iteration)
+                    };
                 }
                 FlowEvent::Try {
                     span,

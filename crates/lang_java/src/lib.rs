@@ -69,6 +69,29 @@ fn java_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
         .flatten()
 }
 
+fn java_control_target(node: Node<'_>, src: &[u8]) -> Option<bonsai_lang_api::LoopControlTarget> {
+    let mut cursor = node.walk();
+    let label = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "identifier")?;
+    let label = node_text(&label, src).trim();
+    (!label.is_empty()).then(|| bonsai_lang_api::LoopControlTarget::Label(label.to_string()))
+}
+
+fn java_loop_label(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let parent = node
+        .parent()
+        .filter(|parent| parent.kind() == "labeled_statement")?;
+    let mut cursor = parent.walk();
+    let mut children = parent.named_children(&mut cursor);
+    let label = children.next().filter(|child| child.kind() == "identifier")?;
+    if !children.any(|child| child.id() == node.id()) {
+        return None;
+    }
+    let label = node_text(&label, src).trim();
+    (!label.is_empty()).then(|| label.to_string())
+}
+
 fn java_pattern_bindings(node: Node<'_>) -> Vec<PatternBindingSite<'_>> {
     let Some(condition) = node.child_by_field_name("condition") else {
         return Vec::new();
@@ -221,6 +244,7 @@ const ADDITIONAL_GRAMMAR_NODE_KINDS: &[(&str, &str)] = &[
     ("adapter_postprocessor", "instanceof_expression"),
     ("adapter_postprocessor", "interface_declaration"),
     ("adapter_postprocessor", "lambda_expression"),
+    ("loop-control-label", "labeled_statement"),
     ("adapter_postprocessor", "local_variable_declaration"),
     ("adapter_postprocessor", "method_declaration"),
     ("adapter_postprocessor", "method_invocation"),
@@ -352,6 +376,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     loop_body_field_names: &["body"],
     loop_body_kinds: &["block", "expression_statement"],
     loop_update_field_names: &["update"],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: None,
     branch_arm_kinds: &["block", "expression_statement", "switch_block_statement_group"],
     exclusive_branch_arm_kinds: &["switch_block_statement_group", "switch_rule"],
     fallthrough_branch_arm_kinds: &["switch_block_statement_group"],
@@ -380,6 +406,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
     control_label_field_names: &[],
+    control_target_extractor: Some(java_control_target),
+    loop_label_extractor: Some(java_loop_label),
     yield_kinds: &["yield_statement"],
     yield_value_field_names: &["value"],
     try_body_field_names: &["body"],

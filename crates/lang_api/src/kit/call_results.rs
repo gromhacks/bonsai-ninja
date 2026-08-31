@@ -52,9 +52,17 @@ pub fn normalize_call_result_assignment_sources(events: &mut [crate::FlowEvent])
                 normalize_call_result_assignment_sources(then_events);
                 normalize_call_result_assignment_sources(else_events);
             }
-            crate::FlowEvent::Loop { body, .. }
-            | crate::FlowEvent::Defer { body, .. }
-            | crate::FlowEvent::Using { body, .. } => {
+            crate::FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                normalize_call_result_assignment_sources(condition_events);
+                normalize_call_result_assignment_sources(body);
+                normalize_call_result_assignment_sources(update_events);
+            }
+            crate::FlowEvent::Defer { body, .. } | crate::FlowEvent::Using { body, .. } => {
                 normalize_call_result_assignment_sources(body);
             }
             crate::FlowEvent::Try {

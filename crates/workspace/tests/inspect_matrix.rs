@@ -92,8 +92,15 @@ fn walk_find_calls_and_assigns(events: &[FlowEvent], q: &str, in_fn: &str, hits:
                 walk_find_calls_and_assigns(then_events, q, in_fn, hits);
                 walk_find_calls_and_assigns(else_events, q, in_fn, hits);
             }
-            FlowEvent::Loop { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                walk_find_calls_and_assigns(condition_events, q, in_fn, hits);
                 walk_find_calls_and_assigns(body, q, in_fn, hits);
+                walk_find_calls_and_assigns(update_events, q, in_fn, hits);
             }
             _ => {}
         }

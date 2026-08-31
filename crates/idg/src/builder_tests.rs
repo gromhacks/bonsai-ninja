@@ -377,6 +377,83 @@ fn call_arg_idx(segment: &IdgSegment, node: NodeId) -> Option<u32> {
     }
 }
 
+#[test]
+fn segment_endpoint_scan_index_preserves_canonical_node_and_edge_rows() {
+    let first_func = FuncId::new(0);
+    let second_func = FuncId::new(1);
+    let mut first = empty_decl(first_func.raw(), "first");
+    first.params = vec!["input".to_string()];
+    first.flow_events = vec![FlowEvent::Assign {
+        span: span(20, 30),
+        target: "copy".to_string(),
+        source_name: Some("input".to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: true,
+        value_kind: Some(AssignValueKind::Compound),
+    }];
+    let mut second = empty_decl(second_func.raw(), "second");
+    second.params = vec!["value".to_string()];
+    second.flow_events = vec![FlowEvent::Assign {
+        span: span(40, 50),
+        target: "result".to_string(),
+        source_name: Some("value".to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: true,
+        value_kind: Some(AssignValueKind::Compound),
+    }];
+    let ws = stitch_idg(
+        vec![transfer_function_for(&first), transfer_function_for(&second)],
+        &MockResolver::new(),
+        &StaticF2S(AHashMap::from([
+            (first_func, SegmentId(0)),
+            (second_func, SegmentId(0)),
+        ])),
+    );
+    let segment = ws.segment(SegmentId(0)).expect("shared segment");
+    let funcs = [first_func, second_func];
+    let index = SegmentEndpointScanIndex::new(segment, &funcs);
+
+    for func in funcs {
+        let expected = segment
+            .nodes
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(node, entry)| {
+                (entry.func == func).then(|| NodeId(u32::try_from(node).expect("test node id")))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(index.function_nodes(func), expected);
+    }
+    for node in 0..segment.nodes.nodes.len() {
+        let node = NodeId(u32::try_from(node).expect("test node id"));
+        let expected_incoming = segment
+            .edges
+            .iter()
+            .filter(|edge| edge.to == node)
+            .copied()
+            .collect::<Vec<_>>();
+        let expected_outgoing = segment
+            .edges
+            .iter()
+            .filter(|edge| edge.from == node)
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            index.incoming(segment, node).copied().collect::<Vec<_>>(),
+            expected_incoming
+        );
+        assert_eq!(
+            index.outgoing(segment, node).copied().collect::<Vec<_>>(),
+            expected_outgoing
+        );
+    }
+}
+
 fn param_idx(segment: &IdgSegment, node: NodeId) -> Option<u32> {
     match node_place(segment, node)? {
         Place::Param { idx } => Some(*idx),
@@ -3503,6 +3580,9 @@ fn later_field_write_flows_through_an_earlier_copy_only_via_a_structural_loop_ba
     decl.flow_events = vec![FlowEvent::Loop {
         span: span(10, 80),
         loop_kind: bonsai_lang_api::LoopKind::While,
+        label: None,
+        condition_events: Vec::new(),
+        update_events: Vec::new(),
         body: vec![
             FlowEvent::Assign {
                 span: span(20, 30),
@@ -3570,6 +3650,9 @@ fn loop_header_event_is_not_mistaken_for_a_loop_body_back_edge() {
         FlowEvent::Loop {
             span: span(10, 80),
             loop_kind: bonsai_lang_api::LoopKind::While,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
             body: vec![FlowEvent::Assign {
                 span: span(40, 50),
                 target: "b.cmd".to_string(),

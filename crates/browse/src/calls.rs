@@ -387,8 +387,22 @@ fn walk_calls(
                 walk_calls(then_events, caller, ws, callee_matches, wanted_call_kind, out);
                 walk_calls(else_events, caller, ws, callee_matches, wanted_call_kind, out);
             }
-            FlowEvent::Loop { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                walk_calls(
+                    condition_events,
+                    caller,
+                    ws,
+                    callee_matches,
+                    wanted_call_kind,
+                    out,
+                );
                 walk_calls(body, caller, ws, callee_matches, wanted_call_kind, out);
+                walk_calls(update_events, caller, ws, callee_matches, wanted_call_kind, out);
             }
             FlowEvent::Try {
                 body,

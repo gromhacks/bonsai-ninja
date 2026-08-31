@@ -95,6 +95,43 @@ fn extract_ruby_callable_reference(node: Node<'_>, src: &[u8]) -> Option<String>
 fn ruby_inline_closure_uses_yield(call: Node<'_>, block: Node<'_>, _src: &[u8]) -> bool {
     call.kind() == "call" && matches!(block.kind(), "block" | "do_block")
 }
+
+fn ruby_loop_kind(node: Node<'_>, _src: &[u8]) -> Option<bonsai_lang_api::LoopKind> {
+    if !matches!(node.kind(), "while_modifier" | "until_modifier") {
+        return None;
+    }
+    let body = node.child_by_field_name("body")?;
+    Some(if body.kind() == "begin" {
+        bonsai_lang_api::LoopKind::DoWhile
+    } else {
+        bonsai_lang_api::LoopKind::While
+    })
+}
+
+fn ruby_exception_region(node: Node<'_>) -> bool {
+    if !matches!(node.kind(), "begin" | "begin_block") {
+        return false;
+    }
+    let mut stack = Vec::new();
+    let mut cursor = node.walk();
+    stack.extend(node.named_children(&mut cursor));
+    while let Some(child) = stack.pop() {
+        if matches!(child.kind(), "rescue" | "ensure") {
+            return true;
+        }
+        // Nested executable scopes own their exception handlers. Do not let
+        // one make the outer grouping `begin` look like a try region.
+        if matches!(
+            child.kind(),
+            "method" | "singleton_method" | "class" | "module" | "lambda" | "block" | "do_block"
+        ) {
+            continue;
+        }
+        let mut cursor = child.walk();
+        stack.extend(child.named_children(&mut cursor));
+    }
+    false
+}
 const BASE_HANDLER: GrammarHandler = GrammarHandler {
     expression_value_kind_extractor: None,
     literal_value_kinds: &["nil", "integer", "float", "true", "false"],
@@ -179,7 +216,10 @@ const BASE_HANDLER: GrammarHandler = GrammarHandler {
     for_kinds: &[],
     foreach_kinds: &["for"],
     foreach_binding_extractor: Some(ruby_foreach_binding),
-    while_kinds: &["while", "until"],
+    while_kinds: &["while", "until", "while_modifier", "until_modifier"],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: None,
+    loop_kind_extractor: Some(ruby_loop_kind),
     return_kinds: &["return"],
     // In tree-sitter-ruby, both `do ... end` and `{ ... }` call-attached
     // blocks are anonymous callable syntax. They are never ordinary compound
@@ -187,6 +227,7 @@ const BASE_HANDLER: GrammarHandler = GrammarHandler {
     // return facts independently of the enclosing method.
     lambda_kinds: &["lambda", "block", "do_block"],
     try_kinds: &["begin", "begin_block"],
+    try_node_filter: Some(ruby_exception_region),
     catch_kinds: &["rescue"],
     exclusive_catch_arm_kinds: &["rescue"],
     finally_kinds: &["ensure"],

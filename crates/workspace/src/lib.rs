@@ -543,7 +543,20 @@ fn summary_output_shape(events: &[FlowEvent]) -> bool {
                     return true;
                 }
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if summary_output_shape(condition_events)
+                    || summary_output_shape(body)
+                    || summary_output_shape(update_events)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if summary_output_shape(body) {
                     return true;
                 }
@@ -699,7 +712,27 @@ fn call_event_at_span_passes_target_callback(
                     return true;
                 }
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if call_event_at_span_passes_target_callback(
+                    condition_events,
+                    call_span,
+                    callback_target_spans,
+                ) || call_event_at_span_passes_target_callback(body, call_span, callback_target_spans)
+                    || call_event_at_span_passes_target_callback(
+                        update_events,
+                        call_span,
+                        callback_target_spans,
+                    )
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if call_event_at_span_passes_target_callback(body, call_span, callback_target_spans) {
                     return true;
                 }
@@ -6544,7 +6577,22 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // AssignmentValueFact call span even when the Call event is nested under
     // try/await/control regions. This removes duplicate assignment-wide call
     // identities and keeps receiver slots disjoint from literal arguments.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 89;
+    // v90: structured transfer retains abrupt control exits as distinct
+    // writer states. Break/continue/return/throw facts can no longer leak into
+    // an unreachable lexical fallthrough, while loop back-edges reach the
+    // exact finite fixed point over the writer-node lattice.
+    // v91: escaping throws retain their typed per-site writer states and each
+    // catch place owns an exact handler/try identity. Hierarchy stitching
+    // targets only the nearest compatible lexical handler, so nested handlers
+    // with the same type cannot collapse into one dataflow node.
+    // v92: break/continue states retain their adapter-lowered label or lexical
+    // level through structured transfer. Named targets are consumed only by
+    // that loop; positive level targets decrement once per enclosing loop.
+    // v93: typed loop kinds retain runtime entry/exit semantics. Post-test
+    // loops execute before their first condition and unconditional loops have
+    // no fabricated condition-false successor; only an explicit break can
+    // make their lexical tail reachable.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 94;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 

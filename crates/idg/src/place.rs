@@ -19,10 +19,10 @@
 //!   specific call site (identified by its byte span).
 //! - [`Place::CallRet`] — the value returned from a specific call
 //!   site (i.e. what the caller's destination would receive).
-//! - [`Place::Throw`] — a value flowing into a `throw` statement
-//!   tagged with the thrown type.
-//! - [`Place::Catch`] — a value bound by a `catch` clause of a
-//!   particular type.
+//! - [`Place::Throw`] — a value flowing into one exact `throw`
+//!   statement, tagged with its type and compiler span.
+//! - [`Place::Catch`] — a value bound by one exact `catch` clause,
+//!   identified by both its declared type and compiler span.
 //! - [`Place::Yield`] / [`Place::Await`] — coroutine yield / await
 //!   sites; preserved so async flows stay accurate.
 //!
@@ -126,16 +126,26 @@ pub enum Place {
         site: CallSiteId,
     },
 
-    /// A value flowing into a `throw` statement of type `ty`.
+    /// A value flowing into one exact `throw` statement of type `ty`.
     Throw {
         /// Type of the value being thrown.
         ty: TypeId,
+        /// Exact compiler-emitted throw-expression span.
+        site: Span,
     },
 
-    /// A value bound by a `catch` clause of type `ty`.
+    /// A value bound by one exact `catch` clause of type `ty`.
+    ///
+    /// The handler span is part of the identity. Two nested or sibling
+    /// handlers commonly declare the same exception type; collapsing them by
+    /// type would create a false Throw -> outer/sibling Catch path.
     Catch {
         /// Type the catch clause matches.
         ty: TypeId,
+        /// Exact compiler-emitted handler-arm span.
+        site: Span,
+        /// Exact enclosing try-region span used for lexical handler lookup.
+        try_span: Span,
     },
 
     /// A value yielded from a coroutine (Python / Rust generators
@@ -254,8 +264,12 @@ impl fmt::Display for Place {
             }
             Self::CallArg { site, idx } => write!(f, "CallArg({site:?}@{idx})"),
             Self::CallRet { site } => write!(f, "CallRet({site:?})"),
-            Self::Throw { ty } => write!(f, "Throw(ty={})", ty.0),
-            Self::Catch { ty } => write!(f, "Catch(ty={})", ty.0),
+            Self::Throw { ty, site } => {
+                write!(f, "Throw(ty={}@{}..{})", ty.0, site.start, site.end)
+            }
+            Self::Catch { ty, site, .. } => {
+                write!(f, "Catch(ty={}@{}..{})", ty.0, site.start, site.end)
+            }
             Self::Yield => write!(f, "Yield"),
             Self::Await => write!(f, "Await"),
         }

@@ -138,9 +138,17 @@ fn contains_shape(events: &[FlowEvent], shape: Shape) -> bool {
                 else_events,
                 ..
             } => contains_shape(then_events, shape) || contains_shape(else_events, shape),
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                contains_shape(body, shape)
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                contains_shape(condition_events, shape)
+                    || contains_shape(body, shape)
+                    || contains_shape(update_events, shape)
             }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => contains_shape(body, shape),
             FlowEvent::Try {
                 body,
                 catch_events,

@@ -172,6 +172,28 @@ fn php_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
     }
 }
 
+/// Decode PHP's optional lexical loop level (`break 2`, `continue 2`) from
+/// the exact integer CST child. The adapter owns PHP literal syntax; shared
+/// CFG/IDG code receives only a language-neutral target depth.
+fn php_control_target(node: Node<'_>, src: &[u8]) -> Option<bonsai_lang_api::LoopControlTarget> {
+    let level = node.named_child(0).filter(|child| child.kind() == "integer")?;
+    let raw = node_text(&level, src).trim().replace('_', "");
+    let (digits, radix) = if let Some(digits) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        (digits, 16)
+    } else if let Some(digits) = raw.strip_prefix("0b").or_else(|| raw.strip_prefix("0B")) {
+        (digits, 2)
+    } else if let Some(digits) = raw.strip_prefix("0o").or_else(|| raw.strip_prefix("0O")) {
+        (digits, 8)
+    } else if raw.len() > 1 && raw.starts_with('0') {
+        (&raw[1..], 8)
+    } else {
+        (raw.as_str(), 10)
+    };
+    u32::from_str_radix(digits, radix)
+        .ok()
+        .map(bonsai_lang_api::LoopControlTarget::Levels)
+}
+
 /// Lower PHP's string-concatenation operator into complete ordered compiler
 /// facts. Unsupported operands reject the entire expression; downstream
 /// proofs never infer meaning from a partially lowered concatenation.
@@ -948,6 +970,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     loop_body_field_names: &["body"],
     loop_body_kinds: &["compound_statement", "expression_statement"],
     loop_update_field_names: &["update"],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: None,
     branch_arm_kinds: &["compound_statement", "else_clause", "else_if_clause"],
     exclusive_branch_arm_kinds: &["case_statement", "default_statement"],
     fallthrough_branch_arm_kinds: &["case_statement", "default_statement"],
@@ -978,6 +1002,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
     control_label_field_names: &[],
+    control_target_extractor: Some(php_control_target),
     yield_kinds: &["yield_expression"],
     yield_value_field_names: &["value"],
     try_body_field_names: &["body"],

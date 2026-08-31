@@ -361,13 +361,103 @@ fn nested_full_expression_edge_indexes_only_the_resolved_callee_event() {
     let caller_id = func_id(&idx, "caller");
     let field_id = func_id(&idx, "field");
     let graph = resolved_graph([(caller_id, field_id, outer_span)]);
-    let by_site = call_edges_for_caller(&graph, &idx, None, caller_id);
+    let by_site = call_edges_for_caller(&graph, &idx, None, None, caller_id);
 
     assert!(by_site.edges(inner_span).next().is_some());
     assert!(
         by_site.edges(outer_span).next().is_none(),
         "a resolved inner edge must not also resolve the containing host call"
     );
+}
+
+#[test]
+fn span_containment_index_matches_the_exact_call_site_contract() {
+    let file = FileId::new(41);
+    let other_file = FileId::new(42);
+    let spans = [
+        span(file.raw(), 0, 50),
+        span(file.raw(), 4, 12),
+        span(file.raw(), 4, 8),
+        span(file.raw(), 12, 20),
+        span(file.raw(), 15, 15),
+        span(file.raw(), 21, 49),
+        span(other_file.raw(), 4, 12),
+    ];
+    let index = SpanContainmentIndex::new(
+        spans
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(owner, span)| IndexedSpanOwner { span, owner }),
+    );
+
+    for query_file in [file, other_file] {
+        for start in 0..=52 {
+            for end in start..=52 {
+                let query = span(query_file.raw(), start, end);
+                let expected = spans
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(owner, candidate)| {
+                        call_site_spans_match(query, *candidate).then_some(owner)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    index.matching_owners(query),
+                    expected,
+                    "indexed containment differs for {query:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn callable_name_index_is_exactly_equivalent_to_structural_name_matching() {
+    let mut target = empty_decl(1, 0, "doThing");
+    target.qualified_name = Some("pkg::Owner::doThing:with:".to_string());
+    let other = empty_decl(2, 1, "other");
+    let global = build_index(vec![target, other]);
+    let target = func_id(&global, "doThing");
+    let other = func_id(&global, "other");
+    let aliases = AHashMap::from([(
+        target,
+        vec!["localAlias".to_string(), "module.localAlias".to_string()],
+    )]);
+    let included = AHashMap::from([(target, SegmentId(0)), (other, SegmentId(1))]);
+    let index = CallableNameIndex::new(&global, &aliases, &included);
+    let target_decl = global
+        .decl_of(SymbolId::new(target.raw()))
+        .expect("target declaration");
+    let accepted_names = [
+        target_decl.name.as_str(),
+        decl_call_identity(target_decl),
+        "localAlias",
+        "module.localAlias",
+    ];
+
+    for event_name in [
+        "doThing",
+        "Owner.doThing",
+        "doThing:with:",
+        "pkg::Owner::doThing:with:",
+        "localAlias",
+        "namespace::localAlias",
+        "other",
+        "doThings",
+        "",
+    ] {
+        let expected = accepted_names
+            .iter()
+            .any(|candidate| names_match_for_callee(candidate, event_name));
+        assert_eq!(
+            index.matches(target, event_name),
+            expected,
+            "compiled callable-name verdict differs for {event_name:?}"
+        );
+    }
+    assert!(index.matches(other, "other"));
+    assert!(!index.matches(other, "localAlias"));
 }
 
 #[test]
@@ -1580,6 +1670,75 @@ fn unresolved_call_skipped_silently() {
     let ws = build(&idx, &cg);
     assert_eq!(ws.segment_count(), 1);
     assert!(ws.cross_file().is_empty());
+}
+
+#[test]
+fn exception_hierarchy_stitch_uses_nearest_lexical_handler() {
+    let sink_span = span(0, 80, 90);
+    let mut function = empty_decl(1, 0, "dispatch");
+    function.params = vec!["payload".to_string()];
+    function.flow_events = vec![FlowEvent::Try {
+        span: span(0, 0, 100),
+        body: vec![FlowEvent::Try {
+            span: span(0, 10, 60),
+            body: vec![FlowEvent::Throw {
+                span: span(0, 20, 30),
+                value_name: Some("payload".to_string()),
+                thrown_type: Some("Handled".to_string()),
+            }],
+            catch_events: vec![FlowEvent::Assign {
+                span: span(0, 40, 50),
+                target: "inner".to_string(),
+                source_name: None,
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: Vec::new(),
+                declares_new_binding: false,
+                value_kind: Some(bonsai_lang_api::AssignValueKind::Literal),
+            }],
+            finally_events: Vec::new(),
+            catch_param: Some("inner".to_string()),
+            catch_types: vec!["Handled".to_string()],
+            catch_arms: Vec::new(),
+        }],
+        catch_events: vec![FlowEvent::Call {
+            span: sink_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(0, 81, 89),
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "outer".to_string(),
+                place: Some("outer".to_string()),
+                source_names: vec!["outer".to_string()],
+            }],
+        }],
+        finally_events: Vec::new(),
+        catch_param: Some("outer".to_string()),
+        catch_types: vec!["Handled".to_string()],
+        catch_arms: Vec::new(),
+    }];
+
+    let index = build_index(vec![function]);
+    let function = func_id(&index, "dispatch");
+    let workspace = build(&index, &ResolvedCallGraph::default());
+    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(index.clone()));
+    let seeds = service.param_nodes_for_names(function, &["payload".to_string()], &index);
+    let closure = service.forward_closure(&seeds);
+    let sink_nodes = service
+        .nodes_at_span(function, sink_span)
+        .into_iter()
+        .filter(|node| service.call_arg_identity(*node).is_some())
+        .collect::<Vec<_>>();
+
+    assert!(!sink_nodes.is_empty(), "fixture sink argument must be lowered");
+    assert!(
+        sink_nodes.iter().all(|node| !closure.contains(node)),
+        "a handled inner throw must not be stitched into a compatible outer catch"
+    );
 }
 
 #[test]

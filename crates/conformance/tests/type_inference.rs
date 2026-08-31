@@ -41,7 +41,20 @@ fn find_call<'a>(events: &'a [FlowEvent], name: &str) -> Option<&'a FlowEvent> {
                     return Some(call);
                 }
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if let Some(call) = find_call(condition_events, name)
+                    .or_else(|| find_call(body, name))
+                    .or_else(|| find_call(update_events, name))
+                {
+                    return Some(call);
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if let Some(call) = find_call(body, name) {
                     return Some(call);
                 }

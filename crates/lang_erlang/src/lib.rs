@@ -737,6 +737,8 @@ const PACK_NAME: &str = "erlang";
 // This adapter declares the complete production inventory so shared lowering
 // can emit case / if / try / receive flow without a cross-language fallback.
 const HANDLER: GrammarHandler = GrammarHandler {
+    control_target_extractor: None,
+    loop_label_extractor: None,
     expression_value_kind_extractor: None,
     literal_value_kinds: &["atom", "char", "float", "integer"],
     string_literal_kinds: &["string", "macro_string", "multi_string"],
@@ -794,6 +796,9 @@ const HANDLER: GrammarHandler = GrammarHandler {
     loop_body_kinds: &["clause_body"],
     loop_header_container_kinds: &[],
     loop_update_field_names: &[],
+    loop_condition_field_names: &[],
+    loop_condition_extractor: None,
+    loop_kind_extractor: None,
     branch_arm_kinds: &["cr_clause", "if_clause", "clause_body"],
     exclusive_branch_arm_kinds: &["cr_clause", "if_clause"],
     fallthrough_branch_arm_kinds: &[],
@@ -830,6 +835,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     throw_kinds: &[],
     lambda_kinds: &["anonymous_fun"],
     try_kinds: &["try_expr"],
+    try_node_filter: None,
     catch_kinds: &["catch_clause"],
     exclusive_catch_arm_kinds: &["catch_clause"],
     // tree-sitter-erlang names the `after` region `try_after` (not the

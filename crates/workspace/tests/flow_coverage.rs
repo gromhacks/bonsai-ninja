@@ -89,9 +89,17 @@ fn constructor_call_in(events: &[FlowEvent], needle: &str) -> bool {
             else_events,
             ..
         } => constructor_call_in(then_events, needle) || constructor_call_in(else_events, needle),
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-            constructor_call_in(body, needle)
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => {
+            constructor_call_in(condition_events, needle)
+                || constructor_call_in(body, needle)
+                || constructor_call_in(update_events, needle)
         }
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => constructor_call_in(body, needle),
         FlowEvent::Try {
             body,
             catch_events,
@@ -132,7 +140,17 @@ fn call_contains_named_arg(
                 contains(then_events, needle, arg_name, arg_text)
                     || contains(else_events, needle, arg_name, arg_text)
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                contains(condition_events, needle, arg_name, arg_text)
+                    || contains(body, needle, arg_name, arg_text)
+                    || contains(update_events, needle, arg_name, arg_text)
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 contains(body, needle, arg_name, arg_text)
             }
             FlowEvent::Try {
@@ -173,7 +191,17 @@ fn return_contains_text_in(events: &[FlowEvent], needle: &str) -> bool {
             else_events,
             ..
         } => return_contains_text_in(then_events, needle) || return_contains_text_in(else_events, needle),
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => {
+            return_contains_text_in(condition_events, needle)
+                || return_contains_text_in(body, needle)
+                || return_contains_text_in(update_events, needle)
+        }
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
             return_contains_text_in(body, needle)
         }
         FlowEvent::Try {
@@ -202,7 +230,17 @@ fn call_spans_containing(events: &[FlowEvent], needle: &str, spans: &mut Vec<bon
                 call_spans_containing(then_events, needle, spans);
                 call_spans_containing(else_events, needle, spans);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                call_spans_containing(condition_events, needle, spans);
+                call_spans_containing(body, needle, spans);
+                call_spans_containing(update_events, needle, spans);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 call_spans_containing(body, needle, spans);
             }
             FlowEvent::Try {

@@ -6,7 +6,7 @@ not duplicate dated performance history.
 
 ## Status
 
-The v0.2.10 candidate incorporates the expanded compiler, adapter, rulepack,
+The v0.2.11 candidate incorporates the expanded compiler, adapter, rulepack,
 CLI, cache, scheduling, and publication checks described below. Local status
 is determined from a fresh run of the listed commands; historical measurements
 are retained only where they document a reproducible scale baseline. A tag is
@@ -42,7 +42,7 @@ the current committed tree after every row passes:
 | 20 adapter/parser conformance suites | Passed |
 | Adapter `FlowEvent` behavioral audit | Passed |
 | Cross-language taint target | 1,386 tests passed, including 1,233 applicable scenario/language cells |
-| IDG, taint, resolver, callgraph, workspace, and 88 architecture invariants | Passed |
+| IDG, taint, resolver, callgraph, workspace, and architecture invariants | Passed |
 | Full optimized security package | Passed |
 | Rulepack taint replay | 0 errors, 0 warnings, 0 misses |
 | Release CLI command/language matrix | 1,320 combinations passed |
@@ -101,6 +101,10 @@ Release conformance enforces these product contracts:
   incompatible artifacts are rejected rather than reused.
 - Production taint is a sparse monotone IDG fixed point with no BFS name
   search, depth ceiling, iteration limit, file limit, or result cap.
+- Structured control retains exact adapter-owned destinations: post-test loops
+  execute before their first condition, unconditional loops have no fabricated
+  fallthrough, labels target the named loop, and PHP lexical levels are typed
+  depth facts rather than parsed strings in shared analysis.
 - Memory settings change scheduling, cache retention, or spill representation
   only. They do not change admitted facts or fixed-point scope.
 - Paging and diagnostic previews are presentation controls. Any truncation is
@@ -183,9 +187,11 @@ seconds. The suite owns every public leaf command in the curated root menu,
 including the full native export, and its help-derived invariant fails if a
 new command has no scale-test owner. The SLOs below include small host-noise
 buffers over the reviewed limits. They are evaluated only after exact work
-completes and never truncate or narrow semantic work. A separate 900-second
-test watchdog fails and terminates a probable hung subprocess; it cannot turn
-partial analyzer output into a pass.
+completes and never truncate or narrow semantic work. A separate subprocess
+watchdog fails and terminates a probable hang; it cannot turn partial analyzer
+output into a pass. The pinned local gate uses 900 seconds, while the slower
+shared release runner receives 1,800 seconds without relaxing any completed-
+operation SLO.
 For memory context, the prior instrumented
 August 20 empty-cache semantic run recorded 3,788,292,096 bytes maximum RSS
 and zero swaps; its fresh-process reopen used 99,287,040 bytes maximum RSS.
@@ -255,9 +261,10 @@ BONSAI_MEMORY_BUDGET_MB=3072 \
 ```
 
 The test normally waits for every command to finish before evaluating latency
-and completeness. Its independent 900-second subprocess watchdog exists only
-to turn a genuine hang into a failed test with captured stdout and stderr; a
-terminated process can never pass. Memory scheduling may serialize workers,
+and completeness. Its independent subprocess watchdog exists only to turn a
+genuine hang into a failed test with captured stdout and stderr; a terminated
+process can never pass. The default is 900 seconds and the slower shared
+release runner explicitly uses 1,800 seconds. Memory scheduling may serialize workers,
 but neither the product nor the gate caps files, rules, graph edges, closure
 steps, paths, or findings.
 
@@ -423,7 +430,7 @@ The release workflow verifies:
 - SARIF 2.1.0 parsing and code-flow metadata;
 - standalone HTML generation;
 - native JSON and graph export formats;
-- native JSON schema v9 validation across every language fixture and
+- native JSON schema v10 validation across every language fixture and
   materialized propagation mode;
 - stable IDs and page/cursor reopening;
 - the locked parser manifest contains every adapter grammar and all six native

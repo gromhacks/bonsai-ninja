@@ -86,9 +86,15 @@ fn find_call_span(events: &[bonsai_lang_api::FlowEvent], call_name: &str) -> Opt
                 else_events,
                 ..
             } => find_call_span(then_events, call_name).or_else(|| find_call_span(else_events, call_name)),
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                find_call_span(body, call_name)
-            }
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => find_call_span(condition_events, call_name)
+                .or_else(|| find_call_span(body, call_name))
+                .or_else(|| find_call_span(update_events, call_name)),
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => find_call_span(body, call_name),
             FlowEvent::Try {
                 body,
                 catch_events,

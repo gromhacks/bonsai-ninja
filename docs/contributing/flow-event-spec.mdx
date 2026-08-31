@@ -139,7 +139,10 @@ Adapter obligations:
 Loop {
   span,
   loop_kind: LoopKind,         // For | While | DoWhile | ForEach | Loop
+  label: Option<String>,       // adapter-normalized source label, if any
+  condition_events: Vec<FlowEvent>, // exact runtime condition/header phase
   body: Vec<FlowEvent>,
+  update_events: Vec<FlowEvent>,    // exact C-style update phase
 }
 ```
 
@@ -152,9 +155,24 @@ Adapter obligations:
   through the function's parameter list / scope chain (the loop
   binding is part of the surrounding `Decl::params` for some grammars,
   or is synthesized from the grammar's parsed binding and iterable nodes).
+- `condition_events`, `body`, and `update_events` are distinct runtime phases,
+  all lowered from exact Tree-sitter nodes. They are not reconstructed from
+  source text. Shared recursive consumers must visit all three. CFG and IDG
+  execution order depends on `LoopKind`: pre-test loops evaluate condition,
+  body, update; post-test loops evaluate body, update, condition. A `continue`
+  advances to the next required phase rather than jumping blindly to the body
+  or header.
 - `LoopKind::ForEach` is for explicit collection iteration; `For` is
-  C-style `for(init; test; step)`. `Loop` covers infinite/`loop` /
-  `while true`.
+  C-style `for(init; test; step)`. `DoWhile` is a post-test loop whose body
+  executes before the first condition check. `Loop` is an unconditional loop
+  with no implicit condition-false successor; only an explicit control
+  transfer can reach code after it. A language adapter may classify a
+  statically unconditional source form this way only when its syntax facts
+  prove that contract.
+- `label` is the exact adapter-owned identity of a labeled loop. Adapters
+  remove language-specific punctuation such as Rust's leading apostrophe or
+  Kotlin's trailing `@`; shared CFG and IDG lowering compare only this typed
+  compiler fact.
 
 ### `Assign`
 
@@ -329,13 +347,20 @@ Adapter obligations:
 ### `Break` / `Continue`
 
 ```text
-Break    { span, label: Option<String> }
-Continue { span, label: Option<String> }
+Break    { span, target: Option<LoopControlTarget> }
+Continue { span, target: Option<LoopControlTarget> }
+
+LoopControlTarget = Label(String) | Levels(u32)
 ```
 
-These are control-flow markers consumed by the CFG builder. Adapters
-include `label` when the source has a labeled break (Java/Kotlin
-labeled loops, Rust loop labels, Swift labeled `continue`).
+These are terminating control-flow facts consumed by both CFG and IDG
+lowering. `None` targets the nearest enclosing loop. `Label` carries an exact
+adapter-normalized label for languages with labeled control. `Levels` carries
+PHP's parsed lexical depth (`break 2`, `continue 2`) without encoding it as a
+string label. Shared analysis never parses source text or guesses a target:
+each enclosing loop consumes one level, and an unmatched/invalid target exits
+the current callable conservatively instead of being redirected to the
+nearest loop.
 
 ### `Yield`
 

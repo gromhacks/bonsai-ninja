@@ -56,7 +56,21 @@ fn flow_events_contain(events: &[FlowEvent], shape: AsyncShape) -> bool {
                 else_events,
                 ..
             } => &[then_events.as_slice(), else_events.as_slice()],
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if flow_events_contain(condition_events, shape)
+                    || flow_events_contain(body, shape)
+                    || flow_events_contain(update_events, shape)
+                {
+                    return true;
+                }
+                continue;
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if flow_events_contain(body, shape) {
                     return true;
                 }

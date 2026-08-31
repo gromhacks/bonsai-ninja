@@ -35,6 +35,36 @@ fn kotlin_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
     Some((binding, iterable))
 }
 
+/// Return the lexical label attached to one Kotlin loop.
+///
+/// Tree-sitter Kotlin represents `outer@ while (...)` as a `label` sibling
+/// immediately preceding the loop rather than as a field on the loop node.
+/// The adapter owns that grammar fact; shared control-flow only consumes the
+/// resulting language-neutral label identity.
+fn kotlin_loop_label(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let label = node
+        .prev_named_sibling()
+        .filter(|sibling| sibling.kind() == "label")?;
+    let text = node_text(&label, src).trim().trim_end_matches('@').trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn kotlin_loop_condition_nodes<'tree>(node: Node<'tree>, _src: &[u8]) -> Vec<Node<'tree>> {
+    if !matches!(node.kind(), "while_statement" | "do_while_statement") {
+        return Vec::new();
+    }
+    let mut cursor = node.walk();
+    let mut candidates = node
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() != "control_structure_body")
+        .collect::<Vec<_>>();
+    if node.kind() == "do_while_statement" {
+        candidates.pop().into_iter().collect()
+    } else {
+        candidates.into_iter().next().into_iter().collect()
+    }
+}
+
 /// Extract Kotlin's callee expression from its grammar-owned call shape.
 ///
 /// `call_expression` does not expose a named `function` field. Its first
@@ -271,6 +301,7 @@ const ADDITIONAL_GRAMMAR_NODE_KINDS: &[(&str, &str)] = &[
     ("adapter_postprocessor", "integer_literal"),
     ("adapter_postprocessor", "interface"),
     ("adapter_postprocessor", "jump_expression"),
+    ("loop-control-label", "label"),
     ("adapter_postprocessor", "lambda_literal"),
     ("adapter_postprocessor", "modifiers"),
     ("adapter_postprocessor", "navigation_expression"),
@@ -315,7 +346,11 @@ fn extract_kotlin_syntax_event(
     if node.kind() != "jump_expression" {
         return None;
     }
-    let keyword = node.child(0)?.kind();
+    // The grammar tokenizes labeled transfers as `break@` / `continue@`
+    // while unlabeled transfers use `break` / `continue`. Normalize that
+    // parser-owned token distinction before mapping it to language-neutral
+    // structured control.
+    let keyword = node.child(0)?.kind().trim_end_matches('@');
     let value = node.named_child(0);
     match keyword {
         "throw" => {
@@ -346,11 +381,15 @@ fn extract_kotlin_syntax_event(
         }
         "break" => Some(FlowEvent::Break {
             span: span_of(file, &node),
-            label: value.map(|value| node_text(&value, src).trim().to_string()),
+            target: value.map(|value| {
+                bonsai_lang_api::LoopControlTarget::Label(node_text(&value, src).trim().to_string())
+            }),
         }),
         "continue" => Some(FlowEvent::Continue {
             span: span_of(file, &node),
-            label: value.map(|value| node_text(&value, src).trim().to_string()),
+            target: value.map(|value| {
+                bonsai_lang_api::LoopControlTarget::Label(node_text(&value, src).trim().to_string())
+            }),
         }),
         _ => None,
     }
@@ -486,6 +525,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // without treating lambda parameters as returned values.
     lambda_body_kinds: &["lambda_literal", "anonymous_function", "statements"],
     syntax_event_extractor: Some(extract_kotlin_syntax_event),
+    loop_label_extractor: Some(kotlin_loop_label),
     argument_passing_mode_extractor: None,
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     runtime_type_guard_operators: &["is"],
@@ -518,6 +558,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     branch_condition_kinds: &["when_subject"],
     loop_body_field_names: &[],
     loop_body_kinds: &["control_structure_body", "statements"],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: Some(kotlin_loop_condition_nodes),
     branch_arm_kinds: &["control_structure_body", "statements", "when_entry"],
     exclusive_branch_arm_kinds: &["when_entry"],
     fallthrough_branch_arm_kinds: &[],

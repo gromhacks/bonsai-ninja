@@ -700,8 +700,21 @@ impl GlobalIndex {
                     }
                 }
             }
-            for list in self.refs_by_symbol.values_mut() {
-                list.retain(|(f, _)| *f != file);
+            let mut referenced_symbols = prev
+                .refs
+                .iter()
+                .filter_map(|reference| reference.resolved)
+                .collect::<Vec<_>>();
+            referenced_symbols.sort_unstable_by_key(|symbol| symbol.raw());
+            referenced_symbols.dedup();
+            for symbol in referenced_symbols {
+                let remove_bucket = self.refs_by_symbol.get_mut(&symbol).is_some_and(|list| {
+                    list.retain(|(reference_file, _)| *reference_file != file);
+                    list.is_empty()
+                });
+                if remove_bucket {
+                    self.refs_by_symbol.remove(&symbol);
+                }
             }
             // Tombstone the global slot table so a lingering SymbolId
             // from the removed file resolves to `None` rather than
@@ -1241,7 +1254,17 @@ fn collect_return_call_sites(events: &[FlowEvent], out: &mut Vec<Span>) {
                 collect_return_call_sites(then_events, out);
                 collect_return_call_sites(else_events, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_return_call_sites(condition_events, out);
+                collect_return_call_sites(body, out);
+                collect_return_call_sites(update_events, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_return_call_sites(body, out);
             }
             FlowEvent::Try {
@@ -1366,7 +1389,17 @@ fn collect_function_linkage_facts(
                 collect_function_linkage_facts(then_events, returned_call_sites, facts);
                 collect_function_linkage_facts(else_events, returned_call_sites, facts);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_function_linkage_facts(condition_events, returned_call_sites, facts);
+                collect_function_linkage_facts(body, returned_call_sites, facts);
+                collect_function_linkage_facts(update_events, returned_call_sites, facts);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_function_linkage_facts(body, returned_call_sites, facts);
             }
             FlowEvent::Try {
@@ -1503,7 +1536,17 @@ fn enrich_receiver_types_in_events(events: &mut [FlowEvent], bases_by_type: &AHa
                 enrich_receiver_types_in_events(then_events, bases_by_type);
                 enrich_receiver_types_in_events(else_events, bases_by_type);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                enrich_receiver_types_in_events(condition_events, bases_by_type);
+                enrich_receiver_types_in_events(body, bases_by_type);
+                enrich_receiver_types_in_events(update_events, bases_by_type);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 enrich_receiver_types_in_events(body, bases_by_type);
             }
             FlowEvent::Try {

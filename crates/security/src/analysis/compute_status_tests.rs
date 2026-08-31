@@ -1137,9 +1137,15 @@ fn call_event_by_tail<'a>(events: &'a [FlowEvent], tail: &str) -> Option<&'a Flo
                 else_events,
                 ..
             } => call_event_by_tail(then_events, tail).or_else(|| call_event_by_tail(else_events, tail)),
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                call_event_by_tail(body, tail)
-            }
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => call_event_by_tail(condition_events, tail)
+                .or_else(|| call_event_by_tail(body, tail))
+                .or_else(|| call_event_by_tail(update_events, tail)),
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => call_event_by_tail(body, tail),
             FlowEvent::Try {
                 body,
                 catch_events,

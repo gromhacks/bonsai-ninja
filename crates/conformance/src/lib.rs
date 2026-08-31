@@ -754,7 +754,17 @@ fn collect_control_and_call_facts<'a>(
                 collect_control_and_call_facts(then_events, calls, conditional_branches);
                 collect_control_and_call_facts(else_events, calls, conditional_branches);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_control_and_call_facts(condition_events, calls, conditional_branches);
+                collect_control_and_call_facts(body, calls, conditional_branches);
+                collect_control_and_call_facts(update_events, calls, conditional_branches);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_control_and_call_facts(body, calls, conditional_branches);
             }
             FlowEvent::Try {
@@ -913,7 +923,17 @@ fn validate_event_tree(file: FileId, source: &str, events: &[FlowEvent], owner: 
                 validate_event_tree(file, source, then_events, Some(span));
                 validate_event_tree(file, source, else_events, Some(span));
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                validate_event_tree(file, source, condition_events, Some(span));
+                validate_event_tree(file, source, body, Some(span));
+                validate_event_tree(file, source, update_events, Some(span));
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 validate_event_tree(file, source, body, Some(span));
             }
             FlowEvent::Try {

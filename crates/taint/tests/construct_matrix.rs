@@ -82,6 +82,9 @@ fn loop_body(body: Vec<FlowEvent>) -> FlowEvent {
     FlowEvent::Loop {
         span: span(),
         loop_kind: LoopKind::While,
+        label: None,
+        condition_events: Vec::new(),
+        update_events: Vec::new(),
         body,
     }
 }
@@ -146,14 +149,14 @@ fn await_event() -> FlowEvent {
 fn break_event() -> FlowEvent {
     FlowEvent::Break {
         span: span(),
-        label: None,
+        target: None,
     }
 }
 
 fn continue_event() -> FlowEvent {
     FlowEvent::Continue {
         span: span(),
-        label: None,
+        target: None,
     }
 }
 

@@ -53,7 +53,7 @@ views support graph tooling. These artifacts can be inputs to retrieval,
 training-data construction, evaluations, code-reasoning experiments, or
 tool-using agents; bonsai-ninja produces the evidence and does not train or
 validate a model by itself. The versioned native contract is published as
-[JSON Schema v9](schemas/bonsai-native-export-v9.schema.json).
+[JSON Schema v10](schemas/bonsai-native-export-v10.schema.json).
 
 Our small exploratory tests produced encouraging results, but they are not a
 general model-quality claim. We would love to see independent teams take the

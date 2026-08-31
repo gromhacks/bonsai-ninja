@@ -259,7 +259,7 @@ struct ExportTaintedArg {
     param_name: String,
 }
 
-/// Retained wire shape for the v9 schema's optional concrete flow rows.
+/// Retained wire shape for the v10 schema's optional concrete flow rows.
 /// Production export leaves this empty and publishes the exact relationship
 /// through `compressed_callgraph` instead.
 #[derive(Serialize)]
@@ -336,7 +336,9 @@ enum ExportFlowRegion {
     Root,
     Then,
     Else,
+    Condition,
     Body,
+    Update,
     Catch,
     Finally,
 }
@@ -379,6 +381,8 @@ enum ExportFlowEventPayload<'a> {
     Loop {
         span: Span,
         loop_kind: LoopKind,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<&'a str>,
     },
     Assign {
         span: Span,
@@ -435,11 +439,15 @@ enum ExportFlowEventPayload<'a> {
         span: Span,
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        levels: Option<u32>,
     },
     Continue {
         span: Span,
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        levels: Option<u32>,
     },
     Yield {
         span: Span,
@@ -550,12 +558,23 @@ fn flatten_flow_events<'a>(
             FlowEvent::Loop {
                 span,
                 loop_kind,
+                label,
+                condition_events,
+                update_events,
                 body,
             } => {
+                push_flow_region(&mut stack, update_events, event_id, ExportFlowRegion::Update);
                 push_flow_region(&mut stack, body, event_id, ExportFlowRegion::Body);
+                push_flow_region(
+                    &mut stack,
+                    condition_events,
+                    event_id,
+                    ExportFlowRegion::Condition,
+                );
                 ExportFlowEventPayload::Loop {
                     span: *span,
                     loop_kind: *loop_kind,
+                    label: label.as_deref(),
                 }
             }
             FlowEvent::Assign {
@@ -629,13 +648,23 @@ fn flatten_flow_events<'a>(
                     catch_arms,
                 }
             }
-            FlowEvent::Break { span, label } => ExportFlowEventPayload::Break {
+            FlowEvent::Break { span, target } => ExportFlowEventPayload::Break {
                 span: *span,
-                label: label.as_deref(),
+                label: target
+                    .as_ref()
+                    .and_then(bonsai_lang_api::LoopControlTarget::label),
+                levels: target
+                    .as_ref()
+                    .and_then(bonsai_lang_api::LoopControlTarget::levels),
             },
-            FlowEvent::Continue { span, label } => ExportFlowEventPayload::Continue {
+            FlowEvent::Continue { span, target } => ExportFlowEventPayload::Continue {
                 span: *span,
-                label: label.as_deref(),
+                label: target
+                    .as_ref()
+                    .and_then(bonsai_lang_api::LoopControlTarget::label),
+                levels: target
+                    .as_ref()
+                    .and_then(bonsai_lang_api::LoopControlTarget::levels),
             },
             FlowEvent::Yield {
                 span,
@@ -925,7 +954,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     let mut map = serializer.serialize_map(None)?;
 
     map.serialize_entry("schema", "bonsai-native-export")?;
-    map.serialize_entry("schema_version", &9_u32)?;
+    map.serialize_entry("schema_version", &10_u32)?;
     map.serialize_entry("engine_version", env!("CARGO_PKG_VERSION"))?;
     map.serialize_entry("workspace_root", &root.display().to_string())?;
     map.serialize_entry("generated_at_unix_ms", &generated_at_unix_ms())?;
@@ -2750,8 +2779,15 @@ fn collect_export_call_arg_texts(events: &[FlowEvent], out: &mut ahash::AHashMap
                 collect_export_call_arg_texts(catch_events, out);
                 collect_export_call_arg_texts(finally_events, out);
             }
-            FlowEvent::Loop { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_export_call_arg_texts(condition_events, out);
                 collect_export_call_arg_texts(body, out);
+                collect_export_call_arg_texts(update_events, out);
             }
             _ => {}
         }
@@ -3024,7 +3060,20 @@ fn flow_reads_token(events: &[FlowEvent], token: &str) -> bool {
                     return true;
                 }
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if flow_reads_token(condition_events, token)
+                    || flow_reads_token(body, token)
+                    || flow_reads_token(update_events, token)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if flow_reads_token(body, token) {
                     return true;
                 }
@@ -3109,8 +3158,15 @@ fn count_call_sites_for_export(events: &[bonsai_lang_api::FlowEvent], call_site_
                 count_call_sites_for_export(then_events, call_site_count);
                 count_call_sites_for_export(else_events, call_site_count);
             }
-            bonsai_lang_api::FlowEvent::Loop { body, .. } => {
+            bonsai_lang_api::FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                count_call_sites_for_export(condition_events, call_site_count);
                 count_call_sites_for_export(body, call_site_count);
+                count_call_sites_for_export(update_events, call_site_count);
             }
             bonsai_lang_api::FlowEvent::Try {
                 body,

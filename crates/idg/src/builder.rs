@@ -2227,6 +2227,14 @@ fn extend_callee_endpoints_for_segment(
     let Some(segment) = ws.segment(segment_id) else {
         return;
     };
+    // Endpoint extraction is a compiler pass over one segment, not one pass
+    // over the segment per callable. Large Java source files can contain
+    // hundreds of declarations; rescanning every node for every declaration
+    // (and every edge for every projected node) made this phase quadratic in
+    // the size of a file even though all identities were already lowered.
+    // Build a compact segment-local directory once and retain the original
+    // node/edge order within each row so this changes cost only, never facts.
+    let scan_index = SegmentEndpointScanIndex::new(segment, funcs);
     let yielded_nodes = collect_yield_value_nodes(segment);
     let returned_nodes = collect_return_value_nodes(segment);
     for &func in funcs {
@@ -2269,9 +2277,11 @@ fn extend_callee_endpoints_for_segment(
             .get(&func)
             .map(|data| data.params.clone())
             .unwrap_or_default();
-        let param_write_nodes = collect_non_entry_param_write_nodes(segment, func, &param_names, &params);
+        let function_nodes = scan_index.function_nodes(func);
+        let param_write_nodes =
+            collect_non_entry_param_write_nodes(segment, function_nodes, &scan_index, &param_names, &params);
         let capture_read_nodes = if capture_funcs.is_none_or(|targets| targets.contains(&func)) {
-            collect_unrooted_scalar_reads(segment, func)
+            collect_unrooted_scalar_reads_from_nodes(segment, function_nodes)
         } else {
             Vec::new()
         };
@@ -2288,8 +2298,13 @@ fn extend_callee_endpoints_for_segment(
         // resident graphs while the persisted path remained correct.
         let retain_projected_storage =
             capture_funcs.is_none_or(|targets| targets.contains(&func)) || retain_callback_map_storage;
-        let (projected_places, projected_read_consumers) =
-            collect_projected_stitch_places(segment, func, retain_projected_storage);
+        let (projected_places, projected_read_consumers) = collect_projected_stitch_places(
+            segment,
+            func,
+            function_nodes,
+            &scan_index,
+            retain_projected_storage,
+        );
         out.insert(
             func,
             CalleeEndpointInput {
@@ -2303,7 +2318,7 @@ fn extend_callee_endpoints_for_segment(
                 receiver_param_index: stitch_data.get(&func).and_then(|data| data.receiver_param_index),
                 receiver_consumer_nodes: stitch_data
                     .get(&func)
-                    .map(|data| collect_receiver_consumer_nodes(segment, func, data))
+                    .map(|data| collect_receiver_consumer_nodes(segment, func, function_nodes, data))
                     .unwrap_or_default(),
                 receiver_field_bases: stitch_data
                     .get(&func)
@@ -2332,18 +2347,128 @@ fn extend_callee_endpoints_for_segment(
     }
 }
 
+/// Segment-local node and edge directory used while compiling callee
+/// endpoints. The directory is deliberately ephemeral: stable compiler ids
+/// remain the semantic identity, while these ranges only prevent repeated
+/// scans of the same already-lowered segment.
+struct SegmentEndpointScanIndex {
+    function_rows: AHashMap<FuncId, usize>,
+    nodes_by_function: Vec<Vec<NodeId>>,
+    incoming_offsets: Vec<usize>,
+    incoming_edges: Vec<u32>,
+    outgoing_offsets: Vec<usize>,
+    outgoing_edges: Vec<u32>,
+}
+
+impl SegmentEndpointScanIndex {
+    fn new(segment: &IdgSegment, funcs: &[FuncId]) -> Self {
+        let mut function_rows = AHashMap::with_capacity(funcs.len());
+        let mut nodes_by_function = Vec::with_capacity(funcs.len());
+        for &func in funcs {
+            if function_rows.contains_key(&func) {
+                continue;
+            }
+            function_rows.insert(func, nodes_by_function.len());
+            nodes_by_function.push(Vec::new());
+        }
+        for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
+            let Some(&row) = function_rows.get(&node.func) else {
+                continue;
+            };
+            nodes_by_function[row].push(NodeId(
+                u32::try_from(node_index).expect("segment-local node count exceeds u32"),
+            ));
+        }
+
+        let node_count = segment.nodes.nodes.len();
+        let (incoming_offsets, incoming_edges) = Self::edge_directory(segment, node_count, |edge| edge.to);
+        let (outgoing_offsets, outgoing_edges) = Self::edge_directory(segment, node_count, |edge| edge.from);
+        Self {
+            function_rows,
+            nodes_by_function,
+            incoming_offsets,
+            incoming_edges,
+            outgoing_offsets,
+            outgoing_edges,
+        }
+    }
+
+    fn edge_directory(
+        segment: &IdgSegment,
+        node_count: usize,
+        endpoint: impl Fn(&IdgEdge) -> NodeId,
+    ) -> (Vec<usize>, Vec<u32>) {
+        let mut offsets = vec![0usize; node_count.saturating_add(1)];
+        for edge in &segment.edges {
+            let node = endpoint(edge).0 as usize;
+            if node < node_count {
+                offsets[node + 1] = offsets[node + 1].saturating_add(1);
+            }
+        }
+        for node in 1..offsets.len() {
+            offsets[node] = offsets[node].saturating_add(offsets[node - 1]);
+        }
+        let mut cursor = offsets[..node_count].to_vec();
+        let mut edges = vec![0u32; offsets.last().copied().unwrap_or(0)];
+        for (edge_index, edge) in segment.edges.iter().enumerate() {
+            let node = endpoint(edge).0 as usize;
+            if node >= node_count {
+                continue;
+            }
+            let slot = cursor[node];
+            edges[slot] = u32::try_from(edge_index).expect("segment-local edge count exceeds u32");
+            cursor[node] += 1;
+        }
+        (offsets, edges)
+    }
+
+    fn function_nodes(&self, func: FuncId) -> &[NodeId] {
+        self.function_rows
+            .get(&func)
+            .and_then(|row| self.nodes_by_function.get(*row))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn incoming<'a>(&'a self, segment: &'a IdgSegment, node: NodeId) -> impl Iterator<Item = &'a IdgEdge> {
+        self.edge_indices(node, &self.incoming_offsets, &self.incoming_edges)
+            .filter_map(|edge| segment.edges.get(edge as usize))
+    }
+
+    fn outgoing<'a>(&'a self, segment: &'a IdgSegment, node: NodeId) -> impl Iterator<Item = &'a IdgEdge> {
+        self.edge_indices(node, &self.outgoing_offsets, &self.outgoing_edges)
+            .filter_map(|edge| segment.edges.get(edge as usize))
+    }
+
+    fn edge_indices<'a>(
+        &'a self,
+        node: NodeId,
+        offsets: &'a [usize],
+        edges: &'a [u32],
+    ) -> impl Iterator<Item = u32> + 'a {
+        let node = node.0 as usize;
+        let range = offsets
+            .get(node)
+            .copied()
+            .zip(offsets.get(node + 1).copied())
+            .map_or(0..0, |(start, end)| start..end);
+        edges[range].iter().copied()
+    }
+}
+
 fn collect_projected_stitch_places(
     segment: &IdgSegment,
     func: FuncId,
+    function_nodes: &[NodeId],
+    scan_index: &SegmentEndpointScanIndex,
     retain_capture_storage: bool,
 ) -> (Vec<ProjectedPlaceInput>, Vec<ProjectedReadConsumerInput>) {
     let mut places = Vec::new();
     let mut read_consumers = Vec::new();
-    for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
-        if node.func != func {
+    for &node_id in function_nodes {
+        let Some(node) = segment.nodes.get(node_id) else {
             continue;
-        }
-        let node_id = NodeId(u32::try_from(node_index).expect("segment-local node count exceeds u32"));
+        };
         let Some(place) = segment.places.get(node.place) else {
             continue;
         };
@@ -2355,10 +2480,8 @@ fn collect_projected_stitch_places(
         }
         match place {
             Place::Write { span, .. } => {
-                let mut scalar_inputs = segment
-                    .edges
-                    .iter()
-                    .filter(|edge| edge.to == node_id)
+                let mut scalar_inputs = scan_index
+                    .incoming(segment, node_id)
                     .filter_map(|edge| {
                         let source = segment.nodes.get(edge.from)?;
                         if source.func != func {
@@ -2388,7 +2511,7 @@ fn collect_projected_stitch_places(
                     node: node_id,
                     scalar_inputs: Vec::new(),
                 });
-                for edge in segment.edges.iter().filter(|edge| edge.from == node_id) {
+                for edge in scan_index.outgoing(segment, node_id) {
                     read_consumers.push(ProjectedReadConsumerInput {
                         storage: storage.clone(),
                         use_span: edge.meta.via_span,
@@ -2404,11 +2527,28 @@ fn collect_projected_stitch_places(
 }
 
 fn collect_unrooted_scalar_reads(segment: &IdgSegment, func: FuncId) -> Vec<(String, NodeId)> {
+    let nodes = segment
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(node, entry)| {
+            (entry.func == func)
+                .then(|| NodeId(u32::try_from(node).expect("segment-local node count exceeds u32")))
+        })
+        .collect::<Vec<_>>();
+    collect_unrooted_scalar_reads_from_nodes(segment, &nodes)
+}
+
+fn collect_unrooted_scalar_reads_from_nodes(
+    segment: &IdgSegment,
+    function_nodes: &[NodeId],
+) -> Vec<(String, NodeId)> {
     let mut out = Vec::new();
-    for (node_idx, node) in segment.nodes.nodes.iter().enumerate() {
-        if node.func != func {
+    for &node_id in function_nodes {
+        let Some(node) = segment.nodes.get(node_id) else {
             continue;
-        }
+        };
         let Some(Place::Read { name, path }) = segment.places.get(node.place) else {
             continue;
         };
@@ -2419,7 +2559,7 @@ fn collect_unrooted_scalar_reads(segment: &IdgSegment, func: FuncId) -> Vec<(Str
             continue;
         };
         if !name.trim().is_empty() {
-            out.push((name.to_string(), NodeId(node_idx as u32)));
+            out.push((name.to_string(), node_id));
         }
     }
     out
@@ -2427,15 +2567,16 @@ fn collect_unrooted_scalar_reads(segment: &IdgSegment, func: FuncId) -> Vec<(Str
 
 fn collect_non_entry_param_write_nodes(
     segment: &IdgSegment,
-    func: FuncId,
+    function_nodes: &[NodeId],
+    scan_index: &SegmentEndpointScanIndex,
     param_names: &[String],
     params: &[NodeId],
 ) -> Vec<Vec<NodeId>> {
     let mut out = vec![Vec::new(); param_names.len()];
-    for (node_idx, node) in segment.nodes.nodes.iter().enumerate() {
-        if node.func != func {
+    for &write_node in function_nodes {
+        let Some(node) = segment.nodes.get(write_node) else {
             continue;
-        }
+        };
         let Some(Place::Write { name, path, .. }) = segment.places.get(node.place) else {
             continue;
         };
@@ -2451,13 +2592,11 @@ fn collect_non_entry_param_write_nodes(
         else {
             continue;
         };
-        let write_node = NodeId(node_idx as u32);
         let is_entry_binding = params.get(param_idx).is_some_and(|param_node| {
             !param_node.is_sentinel()
-                && segment
-                    .edges
-                    .iter()
-                    .any(|edge| edge.from == *param_node && edge.to == write_node)
+                && scan_index
+                    .incoming(segment, write_node)
+                    .any(|edge| edge.from == *param_node)
         });
         if !is_entry_binding {
             out[param_idx].push(write_node);
@@ -2501,6 +2640,7 @@ fn collect_return_value_nodes(segment: &IdgSegment) -> AHashSet<NodeId> {
 fn collect_receiver_consumer_nodes(
     segment: &IdgSegment,
     func: FuncId,
+    function_nodes: &[NodeId],
     data: &FunctionStitchData,
 ) -> Vec<NodeId> {
     let mut out = Vec::new();
@@ -2527,7 +2667,13 @@ fn collect_receiver_consumer_nodes(
     // instead; for implicit-`this` languages (Java/Kotlin/JS/C#/…) these
     // Read nodes are the only endpoint that lets a tainted caller
     // receiver (`args.method()`) flow into the method body.
-    for (pid_idx, place) in segment.places.places.iter().enumerate() {
+    for &node_id in function_nodes {
+        let Some(node) = segment.nodes.get(node_id) else {
+            continue;
+        };
+        let Some(place) = segment.places.get(node.place) else {
+            continue;
+        };
         let Place::Read { name, path } = place else {
             continue;
         };
@@ -2540,12 +2686,8 @@ fn collect_receiver_consumer_nodes(
         if !receiver_name_matches(name_text, &data.receiver_names) {
             continue;
         }
-        let pid = crate::node::PlaceId(pid_idx as u32);
-        let Some(node) = segment.nodes.lookup(func, pid) else {
-            continue;
-        };
-        if !node.is_sentinel() {
-            out.push(node);
+        if !node_id.is_sentinel() {
+            out.push(node_id);
         }
     }
     out.sort_by_key(|node| node.0);
@@ -2701,11 +2843,14 @@ fn remap_place_strids(place: &Place, strid_remap: &[bonsai_factstore::StrId]) ->
             path: map_path(path),
             span: *span,
         },
-        Place::Throw { ty } => Place::Throw {
+        Place::Throw { ty, site } => Place::Throw {
             ty: TypeId(map_one(ty.0)),
+            site: *site,
         },
-        Place::Catch { ty } => Place::Catch {
+        Place::Catch { ty, site, try_span } => Place::Catch {
             ty: TypeId(map_one(ty.0)),
+            site: *site,
+            try_span: *try_span,
         },
         // The remaining variants don't carry StrIds.
         Place::Param { idx } => Place::Param { idx: *idx },
@@ -7669,13 +7814,13 @@ fn write_place_storage_and_span(
 }
 
 fn stitch_debug_enabled() -> bool {
-    bonsai_diagnostics::debug::is_enabled("idg-build")
+    bonsai_diagnostics::debug::is_enabled("idg-stitch-detail")
 }
 
 fn stitch_debug_log(args: std::fmt::Arguments<'_>) {
     if stitch_debug_enabled() {
         let message = bonsai_diagnostics::debug::render_message(&args.to_string());
-        eprintln!("[idg-build] {message}");
+        eprintln!("[idg-stitch-detail] {message}");
     }
 }
 

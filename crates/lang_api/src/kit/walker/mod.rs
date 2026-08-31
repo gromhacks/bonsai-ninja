@@ -535,6 +535,25 @@ fn lower_loop(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<FlowEv
         || handler.is_do(kind)
         || handler.is_loop(kind)
     {
+        let has_foreach_binding = handler
+            .foreach_binding_extractor
+            .is_some_and(|extract| extract(node).is_some());
+        let mut loop_kind = handler
+            .loop_kind_extractor
+            .and_then(|extract| extract(node, src))
+            .unwrap_or_else(|| {
+                if handler.is_foreach(kind) || has_foreach_binding {
+                    LoopKind::ForEach
+                } else if handler.is_for(kind) {
+                    LoopKind::For
+                } else if handler.is_loop(kind) {
+                    LoopKind::Loop
+                } else if handler.is_do(kind) {
+                    LoopKind::DoWhile
+                } else {
+                    LoopKind::While
+                }
+            });
         let body_node = handler
             .loop_body_field_names
             .iter()
@@ -548,6 +567,8 @@ fn lower_loop(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<FlowEv
                     .find(|child| handler.loop_body_kinds.contains(&child.kind()))
             });
         let mut body = Vec::new();
+        let mut condition_events = Vec::new();
+        let mut update_events = Vec::new();
         if let Some(n) = body_node {
             walk_into(n, file, src, handler, class_names, &mut body, false);
             let body_id = n.id();
@@ -566,13 +587,54 @@ fn lower_loop(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<FlowEv
             }
             update_nodes.sort_by_key(|update| (update.start_byte(), update.end_byte()));
             update_nodes.dedup_by_key(|update| update.id());
+            let mut condition_nodes = Vec::new();
+            for field in handler.loop_condition_field_names {
+                let mut cursor = phase_owner.walk();
+                condition_nodes.extend(phase_owner.children_by_field_name(field, &mut cursor));
+            }
+            if let Some(extract) = handler.loop_condition_extractor {
+                condition_nodes.extend(extract(node, src));
+            }
+            condition_nodes.sort_by_key(|condition| (condition.start_byte(), condition.end_byte()));
+            condition_nodes.dedup_by_key(|condition| condition.id());
+            if loop_kind == LoopKind::For
+                && condition_nodes.is_empty()
+                && (!handler.loop_condition_field_names.is_empty()
+                    || handler.loop_condition_extractor.is_some())
+            {
+                // A grammar-proven C-style `for` with no condition has no
+                // implicit false edge. This is syntax semantics shared by
+                // adapters that explicitly expose a condition slot; it is
+                // not constant folding or a source-token guess.
+                loop_kind = LoopKind::Loop;
+            }
 
-            // A C-style update clause executes only after the first body
-            // iteration. Keep it inside the Loop body, after the parsed body,
-            // rather than walking source-order header children into the
-            // enclosing scope before the Loop event.
+            // Runtime loop phases remain distinct compiler facts. In
+            // particular, `continue` in a C-style for loop still executes
+            // the update, and `continue` in a post-test loop still evaluates
+            // the condition. Folding either phase into the body would make
+            // those control transfers skip required work.
+            for condition in &condition_nodes {
+                walk_into(
+                    *condition,
+                    file,
+                    src,
+                    handler,
+                    class_names,
+                    &mut condition_events,
+                    false,
+                );
+            }
             for update in &update_nodes {
-                walk_into(*update, file, src, handler, class_names, &mut body, false);
+                walk_into(
+                    *update,
+                    file,
+                    src,
+                    handler,
+                    class_names,
+                    &mut update_events,
+                    false,
+                );
             }
 
             let mut cursor = node.walk();
@@ -583,11 +645,19 @@ fn lower_loop(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<FlowEv
                 if header_node.is_some_and(|header| header.id() == child.id()) {
                     let mut header_cursor = child.walk();
                     for part in child.named_children(&mut header_cursor) {
-                        if !update_nodes.iter().any(|update| update.id() == part.id()) {
+                        if !update_nodes.iter().any(|update| update.id() == part.id())
+                            && !condition_nodes
+                                .iter()
+                                .any(|condition| condition.id() == part.id())
+                        {
                             walk_into(part, file, src, handler, class_names, out, false);
                         }
                     }
-                } else if !update_nodes.iter().any(|update| update.id() == child.id()) {
+                } else if !update_nodes.iter().any(|update| update.id() == child.id())
+                    && !condition_nodes
+                        .iter()
+                        .any(|condition| condition.id() == child.id())
+                {
                     walk_into(child, file, src, handler, class_names, out, false);
                 }
             }
@@ -597,20 +667,6 @@ fn lower_loop(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<FlowEv
                 walk_into(child, file, src, handler, class_names, &mut body, false);
             }
         }
-        let has_foreach_binding = handler
-            .foreach_binding_extractor
-            .is_some_and(|extract| extract(node).is_some());
-        let loop_kind = if handler.is_foreach(kind) || has_foreach_binding {
-            LoopKind::ForEach
-        } else if handler.is_for(kind) {
-            LoopKind::For
-        } else if handler.is_loop(kind) {
-            LoopKind::Loop
-        } else if handler.is_do(kind) {
-            LoopKind::DoWhile
-        } else {
-            LoopKind::While
-        };
         if loop_kind == LoopKind::ForEach {
             out.extend(extract_foreach_binding_assigns(file, &node, src, handler));
         }
@@ -618,6 +674,12 @@ fn lower_loop(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<FlowEv
         out.push(FlowEvent::Loop {
             span: span_of(file, &node),
             loop_kind,
+            label: handler
+                .loop_label_extractor
+                .and_then(|extract| extract(node, src))
+                .filter(|label| !label.is_empty()),
+            condition_events,
+            update_events,
             body,
         });
         return true;

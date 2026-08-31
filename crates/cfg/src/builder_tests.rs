@@ -1,6 +1,6 @@
 use super::*;
 use bonsai_common::{FileId, Span};
-use bonsai_lang_api::{CallKind, LoopKind};
+use bonsai_lang_api::{CallKind, LoopControlTarget, LoopKind};
 
 fn span(start: u32) -> Span {
     Span::new(FileId::new(0), u64::from(start), u64::from(start + 1))
@@ -97,14 +97,17 @@ fn loop_break_targets_after_block_and_continue_targets_header() {
         &[FlowEvent::Loop {
             span: span(10),
             loop_kind: LoopKind::While,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
             body: vec![
                 FlowEvent::Break {
                     span: span(11),
-                    label: None,
+                    target: None,
                 },
                 FlowEvent::Continue {
                     span: span(12),
-                    label: None,
+                    target: None,
                 },
             ],
         }],
@@ -134,6 +137,69 @@ fn loop_break_targets_after_block_and_continue_targets_header() {
 
     assert_eq!(break_block.successors, vec![after]);
     assert_eq!(continue_block.successors, vec![header]);
+}
+
+#[test]
+fn post_test_loop_enters_body_before_condition_header() {
+    let cfg = build_cfg_from_flow(
+        "f",
+        &[FlowEvent::Loop {
+            span: span(10),
+            loop_kind: LoopKind::DoWhile,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
+            body: vec![call_event(11, "body")],
+        }],
+    );
+    let entry = cfg.block(cfg.entry).expect("entry block");
+    let header = cfg
+        .blocks
+        .iter()
+        .find(|block| block.synthetic_kind == Some(SyntheticBlockKind::LoopHeader))
+        .expect("loop header");
+    let body = cfg
+        .blocks
+        .iter()
+        .find(|block| block.synthetic_kind == Some(SyntheticBlockKind::LoopBody))
+        .expect("loop body");
+
+    assert_eq!(entry.successors, vec![body.id]);
+    assert!(!entry.successors.contains(&header.id));
+    assert!(body.successors.contains(&header.id));
+}
+
+#[test]
+fn unconditional_loop_has_no_implicit_after_edge() {
+    let cfg = build_cfg_from_flow(
+        "f",
+        &[FlowEvent::Loop {
+            span: span(10),
+            loop_kind: LoopKind::Loop,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
+            body: vec![call_event(11, "body")],
+        }],
+    );
+    let header = cfg
+        .blocks
+        .iter()
+        .find(|block| block.synthetic_kind == Some(SyntheticBlockKind::LoopHeader))
+        .expect("loop header");
+    let body = cfg
+        .blocks
+        .iter()
+        .find(|block| block.synthetic_kind == Some(SyntheticBlockKind::LoopBody))
+        .expect("loop body");
+    let after = cfg
+        .blocks
+        .iter()
+        .find(|block| block.synthetic_kind == Some(SyntheticBlockKind::LoopAfter))
+        .expect("loop after");
+
+    assert_eq!(header.successors, vec![body.id]);
+    assert!(!header.successors.contains(&after.id));
 }
 
 #[test]
@@ -187,11 +253,14 @@ fn break_inside_try_finally_runs_cleanup_then_loop_after() {
         &[FlowEvent::Loop {
             span: span(10),
             loop_kind: LoopKind::While,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
             body: vec![try_finally(
                 11,
                 vec![FlowEvent::Break {
                     span: span(12),
-                    label: None,
+                    target: None,
                 }],
                 vec![call_event(13, "cleanup")],
             )],
@@ -223,11 +292,14 @@ fn continue_inside_try_finally_runs_cleanup_then_loop_header() {
         &[FlowEvent::Loop {
             span: span(10),
             loop_kind: LoopKind::While,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
             body: vec![try_finally(
                 11,
                 vec![FlowEvent::Continue {
                     span: span(12),
-                    label: None,
+                    target: None,
                 }],
                 vec![call_event(13, "cleanup")],
             )],
@@ -250,6 +322,154 @@ fn continue_inside_try_finally_runs_cleanup_then_loop_header() {
     assert_eq!(cleanup.synthetic_kind, Some(SyntheticBlockKind::Finally));
     assert!(block_has_call(cleanup, "cleanup"));
     assert_eq!(cleanup.successors, vec![header]);
+}
+
+#[test]
+fn labeled_break_targets_the_named_outer_loop() {
+    let cfg = build_cfg_from_flow(
+        "f",
+        &[FlowEvent::Loop {
+            span: span(10),
+            loop_kind: LoopKind::While,
+            label: Some("outer".to_string()),
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
+            body: vec![FlowEvent::Loop {
+                span: span(20),
+                loop_kind: LoopKind::While,
+                label: Some("inner".to_string()),
+                condition_events: Vec::new(),
+                update_events: Vec::new(),
+                body: vec![FlowEvent::Break {
+                    span: span(30),
+                    target: Some(LoopControlTarget::Label("outer".to_string())),
+                }],
+            }],
+        }],
+    );
+    let outer_after = cfg
+        .blocks
+        .iter()
+        .find(|block| block.label == "loop-after@10")
+        .expect("outer after block")
+        .id;
+    let break_block = cfg
+        .blocks
+        .iter()
+        .find(|block| block.terminator == Terminator::Break)
+        .expect("labeled break block");
+    assert_eq!(break_block.successors, vec![outer_after]);
+}
+
+#[test]
+fn labeled_continue_targets_the_named_outer_loop_header() {
+    let cfg = build_cfg_from_flow(
+        "f",
+        &[FlowEvent::Loop {
+            span: span(10),
+            loop_kind: LoopKind::While,
+            label: Some("outer".to_string()),
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
+            body: vec![FlowEvent::Loop {
+                span: span(20),
+                loop_kind: LoopKind::While,
+                label: Some("inner".to_string()),
+                condition_events: Vec::new(),
+                update_events: Vec::new(),
+                body: vec![FlowEvent::Continue {
+                    span: span(30),
+                    target: Some(LoopControlTarget::Label("outer".to_string())),
+                }],
+            }],
+        }],
+    );
+    let outer_header = cfg
+        .blocks
+        .iter()
+        .find(|block| block.label == "loop-header@10")
+        .expect("outer header block")
+        .id;
+    let continue_block = cfg
+        .blocks
+        .iter()
+        .find(|block| block.terminator == Terminator::Continue)
+        .expect("labeled continue block");
+    assert_eq!(continue_block.successors, vec![outer_header]);
+}
+
+#[test]
+fn lexical_level_break_targets_the_second_enclosing_loop() {
+    let cfg = build_cfg_from_flow(
+        "f",
+        &[FlowEvent::Loop {
+            span: span(10),
+            loop_kind: LoopKind::While,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
+            body: vec![FlowEvent::Loop {
+                span: span(20),
+                loop_kind: LoopKind::While,
+                label: None,
+                condition_events: Vec::new(),
+                update_events: Vec::new(),
+                body: vec![FlowEvent::Break {
+                    span: span(30),
+                    target: Some(LoopControlTarget::Levels(2)),
+                }],
+            }],
+        }],
+    );
+    let outer_after = cfg
+        .blocks
+        .iter()
+        .find(|block| block.label == "loop-after@10")
+        .expect("outer after block")
+        .id;
+    let break_block = cfg
+        .blocks
+        .iter()
+        .find(|block| block.terminator == Terminator::Break)
+        .expect("level break block");
+    assert_eq!(break_block.successors, vec![outer_after]);
+}
+
+#[test]
+fn lexical_level_continue_targets_the_second_enclosing_loop_header() {
+    let cfg = build_cfg_from_flow(
+        "f",
+        &[FlowEvent::Loop {
+            span: span(10),
+            loop_kind: LoopKind::While,
+            label: None,
+            condition_events: Vec::new(),
+            update_events: Vec::new(),
+            body: vec![FlowEvent::Loop {
+                span: span(20),
+                loop_kind: LoopKind::While,
+                label: None,
+                condition_events: Vec::new(),
+                update_events: Vec::new(),
+                body: vec![FlowEvent::Continue {
+                    span: span(30),
+                    target: Some(LoopControlTarget::Levels(2)),
+                }],
+            }],
+        }],
+    );
+    let outer_header = cfg
+        .blocks
+        .iter()
+        .find(|block| block.label == "loop-header@10")
+        .expect("outer header block")
+        .id;
+    let continue_block = cfg
+        .blocks
+        .iter()
+        .find(|block| block.terminator == Terminator::Continue)
+        .expect("level continue block");
+    assert_eq!(continue_block.successors, vec![outer_header]);
 }
 
 #[test]

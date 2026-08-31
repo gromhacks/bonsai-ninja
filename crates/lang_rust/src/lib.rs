@@ -285,6 +285,9 @@ const HANDLER: GrammarHandler = GrammarHandler {
     loop_body_kinds: &["block", "expression_statement"],
     loop_header_container_kinds: &[],
     loop_update_field_names: &[],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: None,
+    loop_kind_extractor: None,
     branch_arm_kinds: &["block", "match_arm"],
     exclusive_branch_arm_kinds: &["match_arm"],
     fallthrough_branch_arm_kinds: &[],
@@ -325,12 +328,15 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // `try { ... }` construct is a distinct `try_block`. Only the latter owns
     // a structured body and therefore lowers to the shared Try event.
     try_kinds: &["try_block"],
+    try_node_filter: None,
     catch_kinds: &[],
     exclusive_catch_arm_kinds: &[],
     finally_kinds: &[],
     break_kinds: &["break_expression"],
     continue_kinds: &["continue_expression"],
     control_label_field_names: &[],
+    control_target_extractor: Some(rust_control_target),
+    loop_label_extractor: Some(rust_loop_label),
     yield_kinds: &["yield_expression"],
     yield_value_field_names: &["value"],
     await_kinds: &["await_expression"],
@@ -358,6 +364,7 @@ const ADDITIONAL_GRAMMAR_NODE_KINDS: &[(&str, &str)] = &[
     ("pattern-bindings", "if_expression"),
     ("pattern-bindings", "while_expression"),
     ("pattern-bindings", "let_condition"),
+    ("loop-control-label", "label"),
     ("indirect-place", "unary_expression"),
     ("indirect-place", "reference_expression"),
     ("indirect-place-operator", "*"),
@@ -434,6 +441,27 @@ fn rust_argument_passing_mode(_argument: Node<'_>, value: Node<'_>) -> ArgumentP
     } else {
         ArgumentPassingMode::Value
     }
+}
+
+fn rust_label_text(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    let label = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "label")?;
+    let mut label_cursor = label.walk();
+    let identifier = label
+        .named_children(&mut label_cursor)
+        .find(|child| child.kind() == "identifier")?;
+    let label = node_text(&identifier, src).trim();
+    (!label.is_empty()).then(|| label.to_string())
+}
+
+fn rust_control_target(node: Node<'_>, src: &[u8]) -> Option<bonsai_lang_api::LoopControlTarget> {
+    rust_label_text(node, src).map(bonsai_lang_api::LoopControlTarget::Label)
+}
+
+fn rust_loop_label(node: Node<'_>, src: &[u8]) -> Option<String> {
+    rust_label_text(node, src)
 }
 
 #[derive(Debug, Default, Copy, Clone)]

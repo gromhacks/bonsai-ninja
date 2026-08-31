@@ -553,9 +553,16 @@ fn collect_event_kinds(events: &[FlowEvent], out: &mut BTreeSet<&'static str>) {
                 collect_event_kinds(then_events, out);
                 collect_event_kinds(else_events, out);
             }
-            FlowEvent::Loop { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
                 out.insert("Loop");
+                collect_event_kinds(condition_events, out);
                 collect_event_kinds(body, out);
+                collect_event_kinds(update_events, out);
             }
             FlowEvent::Assign { .. } => {
                 out.insert("Assign");
@@ -1071,6 +1078,51 @@ fn assert_finding_with_options(fixture: Fixture, options: TaintAnalysisOptions) 
         fixture.lang,
         fixture.name,
         matching
+    );
+}
+
+/// Security matching and the IDG are shared consumers of adapter-lowered IR.
+/// Keep calls in every loop phase visible to both: a source in the condition
+/// must reach the body, and a sink in the update clause must receive taint
+/// produced before the loop. This uses real JavaScript syntax; the all-language
+/// loop conformance gate separately proves that every applicable frontend emits
+/// the same typed condition/body/update contract.
+#[test]
+fn loop_condition_and_update_calls_reach_security_taint_analysis() {
+    let ws = workspace(&[(
+        "/app/loops.js",
+        r#"
+function conditionToBody() {
+  let value;
+  while ((value = source())) {
+    sink(value);
+  }
+}
+
+function beforeToUpdate() {
+  const value = source();
+  for (let i = 0; keepGoing(i); sink(value)) {
+    i += 1;
+  }
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &rulepack("javascript", "source", "sink"),
+        TaintAnalysisOptions::default(),
+    )
+    .expect("loop-phase taint analysis");
+    let sink_lines = report
+        .findings
+        .iter()
+        .map(|finding| finding.finding.sink.line)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        sink_lines,
+        BTreeSet::from([5, 11]),
+        "condition/body and preheader/update flows must both be reported: {:#?}",
+        report.findings
     );
 }
 
@@ -3175,9 +3227,13 @@ fn go_channel_yield_reaches_range_binding_in_exact_idg() {
                 else_events,
                 ..
             } => has_yield(then_events) || has_yield(else_events),
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                has_yield(body)
-            }
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => has_yield(condition_events) || has_yield(body) || has_yield(update_events),
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => has_yield(body),
             FlowEvent::Try {
                 body,
                 catch_events,

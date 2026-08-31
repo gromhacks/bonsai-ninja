@@ -74,6 +74,23 @@ The cross-language semantic suites add path and phase assertions:
   capture (C function pointers are explicitly classified as non-capturing);
 - `loop_control_conformance` proves `break` and `continue` terminate the rest
   of the loop body while preserving the correct loop-exit/header edges;
+- `loop_phase_conformance` partitions the complete language registry for
+  post-test loops, C-style update clauses, and conditionless loops. Every
+  applicable fixture runs valid source through its real Tree-sitter frontend,
+  adapter lowering, CFG construction, and IDG transfer. It proves body-before-
+  condition order for post-test forms, `continue -> update -> condition` for
+  C-style loops, and the absence of an invented false edge from an
+  unconditional loop. A shared architecture gate also rejects compiler
+  visitors that recurse into only `Loop::body` while ignoring condition or
+  update facts. A language-neutral browse/inspect gate proves those same
+  phase facts remain visible through public command surfaces, and a security
+  pipeline gate proves a condition source reaches the body while a preheader
+  source reaches a sink in the update clause;
+- `labeled_loop_control` proves that every language with labeled loop control
+  routes exact adapter-normalized labels to the named enclosing loop and that
+  PHP `break N` / `continue N` consume the requested lexical depth. It checks
+  both CFG edges and IDG taint transfer, so a nearest-loop fallback cannot
+  satisfy the gate;
 - `cleanup_semantics_conformance` proves `finally`/`ensure`/`after` cleanup is
   downstream of the protected body and that Go/Swift `defer` runs at scope
   exit rather than at its declaration;
@@ -110,6 +127,10 @@ cargo test -p bonsai-ninja-conformance --test multi_catch_path_conformance
 cargo test -p bonsai-ninja-conformance --test runtime_evaluation_conformance
 cargo test -p bonsai-ninja-conformance --test condition_expression_conformance
 cargo test -p bonsai-ninja-conformance --test loop_control_conformance
+cargo test -p bonsai-ninja-conformance --test loop_phase_conformance
+cargo test -p bonsai-ninja-browse --test loop_phase_surfaces
+cargo test -p bonsai-ninja-security --test security_pipeline_regressions loop_condition_and_update_calls_reach_security_taint_analysis
+cargo test -p bonsai-ninja-conformance --test labeled_loop_control
 cargo test -p bonsai-ninja-conformance --test cleanup_semantics_conformance
 cargo test -p bonsai-ninja-conformance --test async_runtime_conformance
 cargo test -p bonsai-ninja-conformance --test runtime_semantics_manifest

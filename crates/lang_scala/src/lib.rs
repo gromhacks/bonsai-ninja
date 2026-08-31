@@ -322,6 +322,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     loop_body_kinds: &["block"],
     loop_header_container_kinds: &[],
     loop_update_field_names: &[],
+    loop_condition_field_names: &["condition"],
     branch_arm_kinds: &["block", "case_clause"],
     exclusive_branch_arm_kinds: &["case_clause"],
     fallthrough_branch_arm_kinds: &[],
@@ -329,6 +330,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     foreach_kinds: &["for_expression"],
     foreach_binding_extractor: Some(scala_foreach_binding),
     while_kinds: &["while_expression"],
+    do_kinds: &["do_while_expression"],
     // `generic_function` is a type application used as the callee of an
     // enclosing `call_expression`; it is not a second runtime invocation.
     call_kinds: &["call_expression", "instance_expression"],

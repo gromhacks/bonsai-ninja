@@ -410,6 +410,29 @@ fn dart_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
     Some((binding, iterable))
 }
 
+fn dart_control_target(node: Node<'_>, src: &[u8]) -> Option<bonsai_lang_api::LoopControlTarget> {
+    let mut cursor = node.walk();
+    let label = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "identifier")?;
+    let label = node_text(&label, src).trim();
+    (!label.is_empty()).then(|| bonsai_lang_api::LoopControlTarget::Label(label.to_string()))
+}
+
+fn dart_loop_label(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let parent = node
+        .parent()
+        .filter(|parent| parent.kind() == "labeled_statement")?;
+    let mut cursor = parent.walk();
+    let mut children = parent.named_children(&mut cursor);
+    let label = children.next().filter(|child| child.kind() == "identifier")?;
+    if !children.any(|child| child.id() == node.id()) {
+        return None;
+    }
+    let label = node_text(&label, src).trim();
+    (!label.is_empty()).then(|| label.to_string())
+}
+
 fn dart_receiver_from_name(name: &str) -> Option<String> {
     name.rsplit_once('.')
         .map(|(receiver, _)| receiver.trim())
@@ -1296,6 +1319,9 @@ const HANDLER: GrammarHandler = GrammarHandler {
     loop_body_kinds: &["block", "expression_statement"],
     loop_header_container_kinds: &["for_loop_parts"],
     loop_update_field_names: &["update"],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: None,
+    loop_kind_extractor: None,
     call_kinds: &[],
     constructor_call_kinds: &[],
     nested_call_component_kinds: &[],
@@ -1348,6 +1374,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     lambda_body_field_names: &["body"],
     lambda_body_kinds: &["function_expression", "lambda_expression"],
     try_kinds: &["try_statement"],
+    try_node_filter: None,
     // `on Type catch (e)` is represented as sibling `type_identifier`,
     // `catch_clause`, and body nodes under the try statement. There is no
     // `on_part` wrapper in the parser shipped by this adapter.
@@ -1359,6 +1386,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
     control_label_field_names: &[],
+    control_target_extractor: Some(dart_control_target),
+    loop_label_extractor: Some(dart_loop_label),
     yield_kinds: &["yield_statement"],
     yield_value_field_names: &[],
     await_kinds: &["await_expression"],
@@ -1488,6 +1517,7 @@ impl LanguageAdapter for DartAdapter {
             ("custom lowering", "initialized_identifier_list"),
             ("custom lowering", "initialized_variable_definition"),
             ("custom lowering", "label"),
+            ("loop-control-label", "labeled_statement"),
             ("custom lowering", "library_import"),
             ("custom lowering", "method_signature"),
             ("custom lowering", "mixin_declaration"),

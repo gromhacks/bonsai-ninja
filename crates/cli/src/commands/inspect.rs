@@ -5765,7 +5765,17 @@ fn collect_explicit_call_hits<'a>(events: &'a [FlowEvent], out: &mut Vec<(&'a st
                 collect_explicit_call_hits(then_events, out);
                 collect_explicit_call_hits(else_events, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_explicit_call_hits(condition_events, out);
+                collect_explicit_call_hits(body, out);
+                collect_explicit_call_hits(update_events, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_explicit_call_hits(body, out);
             }
             FlowEvent::Try {
@@ -5930,8 +5940,31 @@ fn walk_flow_hits_inner<F>(
                     push_hit,
                 );
             }
-            FlowEvent::Loop { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                walk_flow_hits_inner(
+                    condition_events,
+                    in_fn_id,
+                    in_fn,
+                    context,
+                    explicit_calls,
+                    out,
+                    push_hit,
+                );
                 walk_flow_hits_inner(body, in_fn_id, in_fn, context, explicit_calls, out, push_hit);
+                walk_flow_hits_inner(
+                    update_events,
+                    in_fn_id,
+                    in_fn,
+                    context,
+                    explicit_calls,
+                    out,
+                    push_hit,
+                );
             }
             // Recurse into every event that carries nested flow events.
             // Previously this list stopped at Branch/Loop so any call /

@@ -34,9 +34,10 @@
 //! kills earlier writers' bridges (the engine's classic
 //! clean-overwrite kill semantics, structurally encoded).
 //!
-//! Loops emit the body once for may-run flows, then revisit the body
-//! with body-end writers live so reads can bind to values from the
-//! previous iteration. Duplicate transfer edges are suppressed.
+//! Loops solve the finite reaching-writer lattice to a fixed point. Body
+//! fallthrough and `continue` states return to the header, `break` states
+//! join only the after-loop block, and return/throw states escape the loop.
+//! Duplicate transfer edges are suppressed; there is no iteration cap.
 //!
 //! ## Evidence boundary
 //!

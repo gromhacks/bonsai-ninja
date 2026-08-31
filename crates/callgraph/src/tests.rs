@@ -3622,6 +3622,7 @@ fn qualified_receiver_type_does_not_dispatch_to_same_named_local_type() {
     )]);
     let mut method_cache =
         MethodCandidateCache::with_peer_class_index(build_shared_peer_class_index(&headers));
+    let mut semantic_receiver_fact_cache = SemanticReceiverFactCache::default();
     let flow_lookup = DeclFlowLookup::build(&remapped_entry.flow_events);
     let direct_targets = collect_receiver_method_targets(
         &headers,
@@ -3640,6 +3641,7 @@ fn qualified_receiver_type_does_not_dispatch_to_same_named_local_type() {
         },
         &flow_lookup,
         &mut method_cache,
+        &mut semantic_receiver_fact_cache,
     );
     let graph = ResolvedCallGraph::build_with_file_semantics_streaming(
         &headers,

@@ -141,6 +141,29 @@ fn swift_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
         .flatten()
 }
 
+/// Extract the optional target label from Swift's shared
+/// `control_transfer_statement` node. The same CST bucket also represents
+/// return/throw, so the generic walker calls this only after it has proven the
+/// leading control keyword is `break` or `continue`.
+fn swift_control_target(node: Node<'_>, src: &[u8]) -> Option<bonsai_lang_api::LoopControlTarget> {
+    let label = node
+        .child_by_field_name("result")
+        .or_else(|| node.named_child(0))?;
+    let text = node_text(&label, src).trim();
+    (!text.is_empty()).then(|| bonsai_lang_api::LoopControlTarget::Label(text.to_string()))
+}
+
+/// Swift labels are statement siblings (`outer: while ...`) rather than
+/// children of the loop node. Preserve that exact parser relationship in the
+/// adapter and expose only the normalized label to shared CFG/IDG lowering.
+fn swift_loop_label(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let label = node
+        .prev_named_sibling()
+        .filter(|sibling| sibling.kind() == "statement_label")?;
+    let text = node_text(&label, src).trim().trim_end_matches(':').trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 /// Swift call targets are complete first-child navigation expressions.
 /// Reading that grammar node directly avoids reconstructing its `target` and
 /// `navigation_suffix` fields as `receiver..member` in shared lowering.
@@ -622,6 +645,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     loop_body_kinds: &["statements"],
     loop_header_container_kinds: &[],
     loop_update_field_names: &[],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: None,
     branch_arm_kinds: &["statements", "switch_entry"],
     exclusive_branch_arm_kinds: &["switch_entry"],
     fallthrough_branch_arm_kinds: &[],
@@ -635,6 +660,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     compound_assignment_operators: &["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="],
     type_only_declaration_kinds: &[],
     return_kinds: &["control_transfer_statement"],
+    control_target_extractor: Some(swift_control_target),
+    loop_label_extractor: Some(swift_loop_label),
     lambda_kinds: &["lambda_literal"],
     try_kinds: &["try_expression", "do_statement"],
     try_body_field_names: &["body"],
@@ -770,6 +797,7 @@ impl LanguageAdapter for SwiftAdapter {
             ("custom lowering", "raw_string_literal"),
             ("custom lowering", "self_expression"),
             ("custom lowering", "simple_identifier"),
+            ("loop-control-label", "statement_label"),
             ("custom lowering", "statements"),
             ("custom lowering", "struct"),
             ("custom lowering", "switch_entry"),

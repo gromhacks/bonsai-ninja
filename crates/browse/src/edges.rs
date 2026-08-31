@@ -437,7 +437,20 @@ fn call_text_for_flow_event(events: &[FlowEvent], target: Span) -> Option<String
                     return Some(found);
                 }
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if let Some(found) = call_text_for_flow_event(condition_events, target)
+                    .or_else(|| call_text_for_flow_event(body, target))
+                    .or_else(|| call_text_for_flow_event(update_events, target))
+                {
+                    return Some(found);
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if let Some(found) = call_text_for_flow_event(body, target) {
                     return Some(found);
                 }

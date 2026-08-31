@@ -317,10 +317,11 @@ struct WorkspaceCalleeResolver<'a> {
     /// this, the strict declaration-name match in `resolve` rejects
     /// the alias-rewritten call site even though the callgraph
     /// already resolved the edge.
-    func_to_call_names: &'a AHashMap<FuncId, Vec<String>>,
+    callable_names: &'a CallableNameIndex,
     funcs_by_callback_name: &'a AHashMap<String, Vec<FuncId>>,
     file_to_directory: &'a AHashMap<FileId, String>,
     included_funcs: &'a AHashMap<FuncId, SegmentId>,
+    nested_callables: &'a NestedCallableIndex,
     file_to_language: &'a AHashMap<FileId, &'static str>,
     file_to_capabilities: &'a AHashMap<FileId, bonsai_lang_api::LanguageCapabilities>,
     class_symbols_by_name: &'a AHashMap<String, Vec<bonsai_common::SymbolId>>,
@@ -357,6 +358,63 @@ struct WorkspaceCalleeResolver<'a> {
     ancestor_dispatch_cache: RwLock<Option<CallerAncestorDispatch>>,
 }
 
+/// Exact per-file interval directory for executable declarations that can be
+/// used as inline callback values. It is built from the same stable `FuncId`
+/// set as the IDG segments. Callback span lookup therefore does not rescan a
+/// file's complete declaration table for every matched registration call.
+struct NestedCallableIndex {
+    by_file: AHashMap<FileId, Vec<(bonsai_common::Span, FuncId)>>,
+}
+
+impl NestedCallableIndex {
+    fn new(global: &GlobalIndex, included_funcs: &AHashMap<FuncId, SegmentId>) -> Self {
+        let mut by_file: AHashMap<FileId, Vec<(bonsai_common::Span, FuncId)>> = AHashMap::new();
+        for &func in included_funcs.keys() {
+            let symbol = bonsai_common::SymbolId::new(func.raw());
+            let Some(decl) = global.decl_of(symbol) else {
+                continue;
+            };
+            by_file.entry(decl.span.file).or_default().push((decl.span, func));
+        }
+        for rows in by_file.values_mut() {
+            rows.sort_unstable_by_key(|(span, func)| (span.start, span.end, func.raw()));
+        }
+        Self { by_file }
+    }
+
+    fn contained_descendants(
+        &self,
+        global: &GlobalIndex,
+        caller: FuncId,
+        query: bonsai_common::Span,
+    ) -> Vec<FuncId> {
+        let Some(rows) = self.by_file.get(&query.file) else {
+            return Vec::new();
+        };
+        let caller_symbol = bonsai_common::SymbolId::new(caller.raw());
+        let start = rows.partition_point(|(span, _)| span.start < query.start);
+        rows[start..]
+            .iter()
+            .take_while(|(span, _)| span.start <= query.end)
+            .filter_map(|(span, func)| {
+                if *func == caller || !span_contains(query, *span) {
+                    return None;
+                }
+                let mut parent = global
+                    .decl_of(bonsai_common::SymbolId::new(func.raw()))
+                    .and_then(|decl| decl.parent);
+                while let Some(symbol) = parent {
+                    if symbol == caller_symbol {
+                        return Some(*func);
+                    }
+                    parent = global.decl_of(symbol).and_then(|decl| decl.parent);
+                }
+                None
+            })
+            .collect()
+    }
+}
+
 /// Resolver memo scoped to the caller currently being stitched.
 ///
 /// Callers are consumed in stable `FuncId` order. Retaining answers for every
@@ -379,6 +437,11 @@ struct CallerAncestorDispatch {
 struct IndexedCallSiteEdge {
     site: bonsai_common::Span,
     edge: IndexedCallEdge,
+    /// One-time compiler-header verdict for an indirect edge. `None` is
+    /// reserved for resident/imported graphs that have no exact call-linkage
+    /// row at this site and therefore still require the compatibility check
+    /// against the live call event.
+    indirect_name_matches: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -393,15 +456,249 @@ struct CallerCallSiteEdges {
     rows: Vec<IndexedCallSiteEdge>,
 }
 
+/// Compact compiler name directory keyed by stable `FuncId`.
+///
+/// Callgraph construction has already proven symbol identity. The IDG only
+/// needs the existing structural tail-equivalence predicate to distinguish a
+/// host call from an indirect callable argument sharing its span. Compile
+/// declaration names, qualified callable identities, and exact import aliases
+/// once; stitching then performs an integer membership test instead of
+/// reparsing qualified strings for every edge.
+struct CallableNameIndex {
+    tail_ids: AHashMap<String, u32>,
+    offsets: Vec<usize>,
+    names: Vec<u32>,
+}
+
+impl CallableNameIndex {
+    fn new(
+        global: &GlobalIndex,
+        aliases: &AHashMap<FuncId, Vec<String>>,
+        included_funcs: &AHashMap<FuncId, SegmentId>,
+    ) -> Self {
+        let max_func = included_funcs
+            .keys()
+            .map(|func| func.raw() as usize)
+            .max()
+            .unwrap_or(0);
+        let mut tail_ids = AHashMap::new();
+        let mut rows = Vec::with_capacity(included_funcs.len().saturating_mul(2));
+        let mut add_name = |func: FuncId, name: &str| {
+            let tail = bonsai_common::short_qualified_tail(name);
+            if tail.is_empty() {
+                return;
+            }
+            let next_id = u32::try_from(tail_ids.len()).expect("callable name dictionary exceeds u32");
+            let id = *tail_ids.entry(tail.to_string()).or_insert(next_id);
+            rows.push((func.raw(), id));
+        };
+        for &func in included_funcs.keys() {
+            if let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) {
+                add_name(func, &decl.name);
+                add_name(func, decl_call_identity(decl));
+            }
+            if let Some(names) = aliases.get(&func) {
+                for name in names {
+                    add_name(func, name);
+                }
+            }
+        }
+        rows.sort_unstable();
+        rows.dedup();
+
+        let mut offsets = vec![0usize; max_func.saturating_add(2)];
+        for (func, _) in &rows {
+            let slot = (*func as usize)
+                .checked_add(1)
+                .expect("callable FuncId offset overflow");
+            offsets[slot] = offsets[slot]
+                .checked_add(1)
+                .expect("callable name row count overflow");
+        }
+        for slot in 1..offsets.len() {
+            offsets[slot] = offsets[slot]
+                .checked_add(offsets[slot - 1])
+                .expect("callable name offset overflow");
+        }
+        let names = rows.into_iter().map(|(_, name)| name).collect();
+        Self {
+            tail_ids,
+            offsets,
+            names,
+        }
+    }
+
+    fn matches(&self, func: FuncId, event_name: &str) -> bool {
+        let tail = bonsai_common::short_qualified_tail(event_name);
+        if tail.is_empty() {
+            return false;
+        }
+        let Some(name) = self.tail_ids.get(tail).copied() else {
+            return false;
+        };
+        let func = func.raw() as usize;
+        let Some((start, end)) = self
+            .offsets
+            .get(func)
+            .copied()
+            .zip(self.offsets.get(func + 1).copied())
+        else {
+            return false;
+        };
+        self.names[start..end].binary_search(&name).is_ok()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct IndexedSpanOwner {
+    span: bonsai_common::Span,
+    owner: usize,
+}
+
+/// One file's immutable interval directory for compiler-lowered spans.
+///
+/// Callgraph resolver spans and adapter call spans do not always use the same
+/// syntax-node boundary: either may contain the other. Querying both
+/// containment directions through this directory preserves that exact
+/// contract without rescanning every call in the function for every resolved
+/// edge.
+struct FileSpanContainmentIndex {
+    rows: Vec<IndexedSpanOwner>,
+    prefix_max_end: Vec<u64>,
+}
+
+impl FileSpanContainmentIndex {
+    fn new(mut rows: Vec<IndexedSpanOwner>) -> Self {
+        rows.sort_unstable_by_key(|row| (row.span.start, row.span.end, row.owner));
+        let mut prefix_max_end = Vec::with_capacity(rows.len());
+        let mut max_end = 0;
+        for row in &rows {
+            max_end = max_end.max(row.span.end);
+            prefix_max_end.push(max_end);
+        }
+        Self { rows, prefix_max_end }
+    }
+
+    fn matching_owners(&self, query: bonsai_common::Span, out: &mut Vec<usize>) {
+        // Spans contained by the query. The start-ordered range bounds the
+        // scan to syntax that can actually be nested in this resolver span.
+        let first_contained = self.rows.partition_point(|row| row.span.start < query.start);
+        let after_contained = self.rows.partition_point(|row| row.span.start <= query.end);
+        for row in &self.rows[first_contained..after_contained] {
+            if row.span.end <= query.end {
+                out.push(row.owner);
+            }
+        }
+
+        // Spans containing the query. Prefix maximum ends let the reverse
+        // walk stop as soon as no earlier interval can reach the query end.
+        let mut cursor = self.rows.partition_point(|row| row.span.start <= query.start);
+        while cursor > 0 {
+            let index = cursor - 1;
+            if self.prefix_max_end[index] < query.end {
+                break;
+            }
+            let row = self.rows[index];
+            if row.span.end >= query.end {
+                out.push(row.owner);
+            }
+            cursor = index;
+        }
+    }
+}
+
+struct SpanContainmentIndex {
+    by_file: AHashMap<FileId, FileSpanContainmentIndex>,
+}
+
+impl SpanContainmentIndex {
+    fn new(rows: impl IntoIterator<Item = IndexedSpanOwner>) -> Self {
+        let mut by_file: AHashMap<FileId, Vec<IndexedSpanOwner>> = AHashMap::new();
+        for row in rows {
+            by_file.entry(row.span.file).or_default().push(row);
+        }
+        Self {
+            by_file: by_file
+                .into_iter()
+                .map(|(file, rows)| (file, FileSpanContainmentIndex::new(rows)))
+                .collect(),
+        }
+    }
+
+    fn matching_owners(&self, query: bonsai_common::Span) -> Vec<usize> {
+        let mut out = Vec::new();
+        if let Some(index) = self.by_file.get(&query.file) {
+            index.matching_owners(query, &mut out);
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+/// Per-caller directory over the compact call-linkage header. This is built
+/// once before visiting that caller's resolved edges; it is an index over
+/// compiler facts, not a second resolution path.
+struct CallLinkageSiteIndex {
+    calls: SpanContainmentIndex,
+    arguments: SpanContainmentIndex,
+    exact_calls: AHashMap<bonsai_common::Span, Vec<usize>>,
+}
+
+impl CallLinkageSiteIndex {
+    fn new(calls: &[CallLinkageFact]) -> Self {
+        let mut exact_calls: AHashMap<bonsai_common::Span, Vec<usize>> = AHashMap::new();
+        for (owner, call) in calls.iter().enumerate() {
+            exact_calls.entry(call.span).or_default().push(owner);
+        }
+        let call_rows = calls.iter().enumerate().map(|(owner, call)| IndexedSpanOwner {
+            span: call.span,
+            owner,
+        });
+        let argument_rows = calls.iter().enumerate().flat_map(|(owner, call)| {
+            call.arg_spans
+                .iter()
+                .copied()
+                .map(move |span| IndexedSpanOwner { span, owner })
+        });
+        Self {
+            calls: SpanContainmentIndex::new(call_rows),
+            arguments: SpanContainmentIndex::new(argument_rows),
+            exact_calls,
+        }
+    }
+
+    fn matching_calls(&self, edge_span: bonsai_common::Span, include_arguments: bool) -> Vec<usize> {
+        if include_arguments {
+            self.arguments.matching_owners(edge_span)
+        } else {
+            self.calls.matching_owners(edge_span)
+        }
+    }
+
+    fn exact_calls(&self, site: bonsai_common::Span) -> &[usize] {
+        self.exact_calls.get(&site).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
 impl CallerCallSiteEdges {
     fn finish(&mut self) {
         self.rows.sort_unstable_by_key(caller_call_site_edge_sort_key);
-        self.rows.dedup_by(|left, right| {
-            left.site == right.site
-                && left.edge.to == right.edge.to
-                && left.edge.edge_kind == right.edge.edge_kind
-                && left.edge.precision == right.edge.precision
-        });
+        let mut merged: Vec<IndexedCallSiteEdge> = Vec::with_capacity(self.rows.len());
+        for row in self.rows.drain(..) {
+            if let Some(previous) = merged.last_mut().filter(|previous| {
+                previous.site == row.site
+                    && previous.edge.to == row.edge.to
+                    && previous.edge.edge_kind == row.edge.edge_kind
+                    && previous.edge.precision == row.edge.precision
+            }) {
+                previous.indirect_name_matches =
+                    merge_name_verdicts(previous.indirect_name_matches, row.indirect_name_matches);
+            } else {
+                merged.push(row);
+            }
+        }
+        self.rows = merged;
     }
 
     fn rows_at_site(&self, site: bonsai_common::Span) -> &[IndexedCallSiteEdge] {
@@ -413,6 +710,14 @@ impl CallerCallSiteEdges {
 
     fn edges(&self, site: bonsai_common::Span) -> impl Iterator<Item = &IndexedCallEdge> {
         self.rows_at_site(site).iter().map(|row| &row.edge)
+    }
+}
+
+fn merge_name_verdicts(left: Option<bool>, right: Option<bool>) -> Option<bool> {
+    match (left, right) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (None, _) | (_, None) => None,
+        (Some(false), Some(false)) => Some(false),
     }
 }
 
@@ -440,6 +745,7 @@ fn caller_call_site_edge_sort_key(row: &IndexedCallSiteEdge) -> (u32, u64, u64, 
 fn call_edges_for_caller(
     call_graph: &dyn CallGraphRelation,
     global: &GlobalIndex,
+    callable_names: Option<&CallableNameIndex>,
     included_funcs: Option<&AHashMap<FuncId, SegmentId>>,
     caller: FuncId,
 ) -> CallerCallSiteEdges {
@@ -454,6 +760,7 @@ fn call_edges_for_caller(
     let caller_symbol = bonsai_common::SymbolId::new(caller.raw());
     let caller_decl = global.decl_of(caller_symbol);
     let linkage_facts = global.linkage_facts(caller_symbol);
+    let linkage_index = linkage_facts.map(|facts| CallLinkageSiteIndex::new(&facts.calls));
     call_graph.visit_callees(caller, &mut |edge| {
         if included_funcs.is_some_and(|funcs| !funcs.contains_key(&edge.to)) {
             return;
@@ -479,6 +786,9 @@ fn call_edges_for_caller(
                 |facts| {
                     call_linkage_spans_matching_edge(
                         &facts.calls,
+                        linkage_index
+                            .as_ref()
+                            .expect("linkage index exists when linkage facts exist"),
                         edge.span,
                         target_name,
                         target_is_constructor,
@@ -493,20 +803,49 @@ fn call_edges_for_caller(
             out.rows.push(IndexedCallSiteEdge {
                 site: edge.span,
                 edge: indexed,
+                indirect_name_matches: None,
             });
         } else {
             // Once the AST identifies an owning call event, the raw resolver
             // span may cover a complete nested expression and must not also
             // be attributed to its containing host call.
-            out.rows.extend(
-                mapped_sites
-                    .into_iter()
-                    .map(|site| IndexedCallSiteEdge { site, edge: indexed }),
-            );
+            out.rows
+                .extend(mapped_sites.into_iter().map(|site| IndexedCallSiteEdge {
+                    site,
+                    edge: indexed,
+                    indirect_name_matches: linkage_facts.and_then(|facts| {
+                        (edge.kind == bonsai_callgraph::EdgeKind::Indirect).then(|| {
+                            linkage_index
+                                .as_ref()
+                                .expect("linkage index exists when linkage facts exist")
+                                .exact_calls(site)
+                                .iter()
+                                .filter_map(|call| facts.calls.get(*call))
+                                .any(|call| {
+                                    func_call_name_matches(global, callable_names, edge.to, &call.name)
+                                })
+                        })
+                    }),
+                }));
         }
     });
     out.finish();
     out
+}
+
+fn func_call_name_matches(
+    global: &GlobalIndex,
+    callable_names: Option<&CallableNameIndex>,
+    target: FuncId,
+    event_name: &str,
+) -> bool {
+    if let Some(callable_names) = callable_names {
+        return callable_names.matches(target, event_name);
+    }
+    let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(target.raw())) else {
+        return false;
+    };
+    decl_names_match_for_callee(decl, event_name)
 }
 
 fn call_event_spans_matching_edge(
@@ -545,21 +884,16 @@ fn call_event_spans_matching_edge(
 
 fn call_linkage_spans_matching_edge(
     calls: &[CallLinkageFact],
+    index: &CallLinkageSiteIndex,
     edge_span: bonsai_common::Span,
     target_name: Option<&str>,
     target_is_constructor: bool,
 ) -> Vec<bonsai_common::Span> {
     let collect = |include_arg_spans: bool| {
-        calls
-            .iter()
-            .filter(|call| {
-                call_site_spans_match(edge_span, call.span)
-                    || (include_arg_spans
-                        && call
-                            .arg_spans
-                            .iter()
-                            .any(|arg_span| call_site_spans_match(edge_span, *arg_span)))
-            })
+        index
+            .matching_calls(edge_span, include_arg_spans)
+            .into_iter()
+            .filter_map(|call_index| calls.get(call_index))
             .map(|call| {
                 let name_matches =
                     target_name.is_some_and(|target| names_match_for_callee(target, &call.name));
@@ -668,7 +1002,38 @@ fn collect_call_event_spans_matching_edge(
                     out,
                 );
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_call_event_spans_matching_edge(
+                    condition_events,
+                    edge_span,
+                    target_name,
+                    target_is_constructor,
+                    include_arg_spans,
+                    out,
+                );
+                collect_call_event_spans_matching_edge(
+                    body,
+                    edge_span,
+                    target_name,
+                    target_is_constructor,
+                    include_arg_spans,
+                    out,
+                );
+                collect_call_event_spans_matching_edge(
+                    update_events,
+                    edge_span,
+                    target_name,
+                    target_is_constructor,
+                    include_arg_spans,
+                    out,
+                );
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_call_event_spans_matching_edge(
                     body,
                     edge_span,
@@ -750,14 +1115,24 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                 // callable bindings and callback parameters are resolved by
                 // the dedicated fallbacks below.
                 if edge.edge_kind == bonsai_callgraph::EdgeKind::Indirect {
-                    self.push_resolved_edge_if_name_matches(
-                        &mut out,
-                        &mut seen,
-                        edge.to,
-                        edge.edge_kind,
-                        edge.precision,
-                        callee_name,
-                    );
+                    match row.indirect_name_matches {
+                        Some(true) => Self::push_resolved_edge(
+                            &mut out,
+                            &mut seen,
+                            edge.to,
+                            edge.edge_kind,
+                            edge.precision,
+                        ),
+                        Some(false) => {}
+                        None => self.push_resolved_edge_if_name_matches(
+                            &mut out,
+                            &mut seen,
+                            edge.to,
+                            edge.edge_kind,
+                            edge.precision,
+                            callee_name,
+                        ),
+                    }
                 } else {
                     Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.edge_kind, edge.precision);
                 }
@@ -1107,52 +1482,18 @@ impl WorkspaceCalleeResolver<'_> {
         // caller. This identifies the callable value; the matched transfer
         // rule remains the sole proof that the outer API invokes it.
         if out.is_empty() {
-            let caller_symbol = bonsai_common::SymbolId::new(caller.raw());
-            if let Some(file) = self.global.declaring_file(caller_symbol) {
-                let declarations = self.global.decls_in(file);
-                bonsai_diagnostics::debug_log!(
-                    "idg-build",
-                    "inline callback lookup caller={} arg={:?} decls={:?}",
-                    caller.raw(),
-                    arg_span,
-                    declarations
-                        .iter()
-                        .map(|decl| (&decl.name, decl.span, decl.parent.map(|parent| parent.raw())))
-                        .collect::<Vec<_>>()
-                );
-                for candidate in declarations {
-                    if candidate.symbol == caller_symbol
-                        || candidate.span.file != arg_span.file
-                        || candidate.span.start < arg_span.start
-                        || candidate.span.end > arg_span.end
-                    {
-                        continue;
-                    }
-                    let mut parent = candidate.parent;
-                    let mut nested = false;
-                    while let Some(symbol) = parent {
-                        if symbol == caller_symbol {
-                            nested = true;
-                            break;
-                        }
-                        parent = declarations
-                            .iter()
-                            .find(|decl| decl.symbol == symbol)
-                            .and_then(|decl| decl.parent)
-                            .or_else(|| self.global.decl_of(symbol).and_then(|decl| decl.parent));
-                    }
-                    if nested {
-                        let target = FuncId::new(candidate.symbol.raw());
-                        if self.funcs_share_language(caller, target) {
-                            Self::push_resolved_edge(
-                                &mut out,
-                                &mut seen,
-                                target,
-                                bonsai_callgraph::EdgeKind::Indirect,
-                                bonsai_common::Precision::Narrowed,
-                            );
-                        }
-                    }
+            for target in self
+                .nested_callables
+                .contained_descendants(self.global, caller, arg_span)
+            {
+                if self.funcs_share_language(caller, target) {
+                    Self::push_resolved_edge(
+                        &mut out,
+                        &mut seen,
+                        target,
+                        bonsai_callgraph::EdgeKind::Indirect,
+                        bonsai_common::Precision::Narrowed,
+                    );
                 }
             }
         }
@@ -1235,7 +1576,13 @@ impl WorkspaceCalleeResolver<'_> {
     }
 
     fn call_edges_for_caller(&self, caller: FuncId) -> CallerCallSiteEdges {
-        call_edges_for_caller(self.call_graph, self.global, Some(self.included_funcs), caller)
+        call_edges_for_caller(
+            self.call_graph,
+            self.global,
+            Some(self.callable_names),
+            Some(self.included_funcs),
+            caller,
+        )
     }
 
     fn callee_parent_is_declared_ancestor(&self, caller: FuncId, callee: FuncId) -> bool {
@@ -1306,20 +1653,7 @@ impl WorkspaceCalleeResolver<'_> {
         precision: bonsai_common::Precision,
         callee_name: &str,
     ) {
-        let Some(decl) = self.func_decl(to) else {
-            return;
-        };
-        let mut matched = decl_names_match_for_callee(decl, callee_name);
-        if !matched {
-            // Alias-aware fallback: each FuncId tracks every textual
-            // name it can be called as, built from import-alias maps.
-            // The callgraph already resolved this edge through the
-            // same alias maps, so when the bare decl name doesn't
-            // match, an alias-name match is legitimate.
-            if let Some(call_names) = self.func_to_call_names.get(&to) {
-                matched = call_names.iter().any(|n| names_match_for_callee(n, callee_name));
-            }
-        }
+        let mut matched = self.callable_names.matches(to, callee_name);
         // A site-specific direct/constructor callgraph edge already is the
         // compiler's resolution result. Constructor declarations are commonly
         // named `__init__`/`initialize` while the call expression is spelled
@@ -2193,7 +2527,17 @@ fn scan_call_site_arg_presence(
                 scan_call_site_arg_presence(then_events, span, saw_empty_match, saw_non_empty_match);
                 scan_call_site_arg_presence(else_events, span, saw_empty_match, saw_non_empty_match);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                scan_call_site_arg_presence(condition_events, span, saw_empty_match, saw_non_empty_match);
+                scan_call_site_arg_presence(body, span, saw_empty_match, saw_non_empty_match);
+                scan_call_site_arg_presence(update_events, span, saw_empty_match, saw_non_empty_match);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 scan_call_site_arg_presence(body, span, saw_empty_match, saw_non_empty_match);
             }
             FlowEvent::Try {
@@ -2258,9 +2602,20 @@ fn binding_is_reassigned_before(events: &[FlowEvent], binding: &str, at_span: bo
                     return true;
                 }
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. }
-                if event_precedes_use =>
-            {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } if event_precedes_use => {
+                if binding_is_reassigned_before(condition_events, binding, at_span)
+                    || binding_is_reassigned_before(body, binding, at_span)
+                    || binding_is_reassigned_before(update_events, binding, at_span)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } if event_precedes_use => {
                 if binding_is_reassigned_before(body, binding, at_span) {
                     return true;
                 }
@@ -2711,7 +3066,17 @@ fn collect_args_for_resolved_callee(
                 collect_args_for_resolved_callee(catch_events, arg_idx, site_targets_host, out);
                 collect_args_for_resolved_callee(finally_events, arg_idx, site_targets_host, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_args_for_resolved_callee(condition_events, arg_idx, site_targets_host, out);
+                collect_args_for_resolved_callee(body, arg_idx, site_targets_host, out);
+                collect_args_for_resolved_callee(update_events, arg_idx, site_targets_host, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_args_for_resolved_callee(body, arg_idx, site_targets_host, out);
             }
             _ => {}
@@ -3670,12 +4035,17 @@ where
         }
     }
     let alias_count: usize = func_to_call_names.values().map(Vec::len).sum();
+    let callable_names = CallableNameIndex::new(global, &func_to_call_names, &maps.func_to_seg);
+    let nested_callables = NestedCallableIndex::new(global, &maps.func_to_seg);
     idg_build_log(format_args!(
-        "call-name aliases: {:.3}s funcs={} aliases={}",
+        "call-name index: {:.3}s funcs={} aliases={} names={} rows={}",
         phase_started.elapsed().as_secs_f64(),
-        func_to_call_names.len(),
-        alias_count
+        maps.func_to_seg.len(),
+        alias_count,
+        callable_names.tail_ids.len(),
+        callable_names.names.len()
     ));
+    drop(func_to_call_names);
     let phase_started = Instant::now();
     let mut linkage_file_to_directory = maps.file_to_directory.clone();
     for file in global.all_files() {
@@ -3717,10 +4087,11 @@ where
     let resolver = WorkspaceCalleeResolver {
         call_graph,
         global,
-        func_to_call_names: &func_to_call_names,
+        callable_names: &callable_names,
         funcs_by_callback_name: &maps.funcs_by_callback_name,
         file_to_directory: &linkage_file_to_directory,
         included_funcs: &maps.func_to_seg,
+        nested_callables: &nested_callables,
         file_to_language: &maps.file_to_language,
         file_to_capabilities: &maps.file_to_capabilities,
         class_symbols_by_name: &class_symbols_by_name,
@@ -3970,18 +4341,10 @@ fn stitch_declared_exception_hierarchy_in_segment(
     // every throw/catch node turns this phase into O(nodes * edges) on a
     // large function even though each relevant edge has one endpoint.
     let mut throw_spans = vec![None; segment.nodes.nodes.len()];
-    let mut catch_try_spans = vec![None; segment.nodes.nodes.len()];
     for edge in &segment.edges {
         match edge.meta.kind {
             crate::edge::IdgEdgeKind::IntraThrow => {
                 if let Some(slot) = throw_spans.get_mut(edge.to.0 as usize) {
-                    if slot.is_none() {
-                        *slot = Some(edge.meta.via_span);
-                    }
-                }
-            }
-            crate::edge::IdgEdgeKind::IntraAssign => {
-                if let Some(slot) = catch_try_spans.get_mut(edge.from.0 as usize) {
                     if slot.is_none() {
                         *slot = Some(edge.meta.via_span);
                     }
@@ -3998,7 +4361,7 @@ fn stitch_declared_exception_hierarchy_in_segment(
             continue;
         };
         match place {
-            crate::place::Place::Throw { ty } => {
+            crate::place::Place::Throw { ty, .. } => {
                 let Some(span) = throw_spans[index] else {
                     continue;
                 };
@@ -4012,10 +4375,7 @@ fn stitch_declared_exception_hierarchy_in_segment(
                     span,
                 });
             }
-            crate::place::Place::Catch { ty } => {
-                let Some(try_span) = catch_try_spans[index] else {
-                    continue;
-                };
+            crate::place::Place::Catch { ty, try_span, .. } => {
                 let Some(name) = segment.strings.get(ty.0).map(str::to_string) else {
                     continue;
                 };
@@ -4023,7 +4383,7 @@ fn stitch_declared_exception_hierarchy_in_segment(
                     node: local,
                     func: node.func,
                     ty: name,
-                    try_span,
+                    try_span: *try_span,
                 });
             }
             _ => {}
@@ -4031,18 +4391,30 @@ fn stitch_declared_exception_hierarchy_in_segment(
     }
     let mut additions = Vec::new();
     for thrown in &throws {
-        for caught in &catches {
-            if thrown.func != caught.func
-                || thrown.span.file != caught.try_span.file
-                || thrown.span.start < caught.try_span.start
-                || thrown.span.end > caught.try_span.end
-            {
-                continue;
-            }
-            let Some(precision) = resolver.exception_type_assignability(thrown.func, &thrown.ty, &caught.ty)
-            else {
-                continue;
-            };
+        let compatible = catches.iter().filter_map(|caught| {
+            (thrown.func == caught.func
+                && thrown.span.file == caught.try_span.file
+                && thrown.span.start >= caught.try_span.start
+                && thrown.span.end <= caught.try_span.end)
+                .then(|| {
+                    resolver
+                        .exception_type_assignability(thrown.func, &thrown.ty, &caught.ty)
+                        .map(|precision| (caught, precision))
+                })
+                .flatten()
+        });
+        let compatible = compatible.collect::<Vec<_>>();
+        let Some(nearest_try_span) = compatible
+            .iter()
+            .map(|(caught, _)| caught.try_span)
+            .min_by_key(|span| span.end.saturating_sub(span.start))
+        else {
+            continue;
+        };
+        for (caught, precision) in compatible
+            .into_iter()
+            .filter(|(caught, _)| caught.try_span == nearest_try_span)
+        {
             let edge = crate::edge::IdgEdge {
                 from: thrown.node,
                 to: caught.node,
@@ -4780,7 +5152,20 @@ fn function_returns_accessor_named(events: &[bonsai_lang_api::FlowEvent], field_
                     return true;
                 }
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if function_returns_accessor_named(condition_events, field_name)
+                    || function_returns_accessor_named(body, field_name)
+                    || function_returns_accessor_named(update_events, field_name)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if function_returns_accessor_named(body, field_name) {
                     return true;
                 }
@@ -4890,7 +5275,20 @@ fn call_site_uses_declared_receiver(
                     return true;
                 }
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if call_site_uses_declared_receiver(condition_events, site, receiver_names)
+                    || call_site_uses_declared_receiver(body, site, receiver_names)
+                    || call_site_uses_declared_receiver(update_events, site, receiver_names)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if call_site_uses_declared_receiver(body, site, receiver_names) {
                     return true;
                 }
@@ -5915,7 +6313,17 @@ fn flow_events_contain_aggregate_assign(events: &[FlowEvent]) -> bool {
             flow_events_contain_aggregate_assign(then_events)
                 || flow_events_contain_aggregate_assign(else_events)
         }
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => {
+            flow_events_contain_aggregate_assign(condition_events)
+                || flow_events_contain_aggregate_assign(body)
+                || flow_events_contain_aggregate_assign(update_events)
+        }
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
             flow_events_contain_aggregate_assign(body)
         }
         FlowEvent::Try {
@@ -5991,7 +6399,17 @@ fn resolve_aggregate_assignments(
                 resolve_aggregate_assignments(then_events, aliases, layouts);
                 resolve_aggregate_assignments(else_events, aliases, layouts);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                resolve_aggregate_assignments(condition_events, aliases, layouts);
+                resolve_aggregate_assignments(body, aliases, layouts);
+                resolve_aggregate_assignments(update_events, aliases, layouts);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 resolve_aggregate_assignments(body, aliases, layouts);
             }
             FlowEvent::Try {

@@ -45,7 +45,16 @@ fn walk(events: &[FlowEvent], out: &mut Vec<String>) {
                 walk(then_events, out);
                 walk(else_events, out);
             }
-            FlowEvent::Loop { body, .. } => walk(body, out),
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                walk(condition_events, out);
+                walk(body, out);
+                walk(update_events, out);
+            }
             _ => {}
         }
     }

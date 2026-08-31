@@ -298,7 +298,17 @@ fn compact_flow_event_storage(event: &mut FlowEvent) {
             compact_flow_events(then_events);
             compact_flow_events(else_events);
         }
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => {
+            compact_flow_events(condition_events);
+            compact_flow_events(body);
+            compact_flow_events(update_events);
+        }
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
             compact_flow_events(body);
         }
         FlowEvent::Assign {
@@ -364,8 +374,10 @@ fn compact_flow_event_storage(event: &mut FlowEvent) {
             }
             catch_arms.shrink_to_fit();
         }
-        FlowEvent::Break { label, .. } | FlowEvent::Continue { label, .. } => {
-            compact_optional_string(label);
+        FlowEvent::Break { target, .. } | FlowEvent::Continue { target, .. } => {
+            if let Some(crate::LoopControlTarget::Label(label)) = target {
+                label.shrink_to_fit();
+            }
         }
         FlowEvent::Yield {
             value_text,

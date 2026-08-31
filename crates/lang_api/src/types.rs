@@ -418,6 +418,37 @@ pub struct AggregateLayout {
 /// One piece of control flow inside a function body. Kept as a tree so the
 /// cross-module tracer can walk branches and loops with real structure
 /// rather than a flat sequence of call sites.
+/// Exact lexical destination of a source-language `break` or `continue`.
+///
+/// Most languages either target the nearest loop or name a labeled loop.
+/// PHP additionally permits a positive lexical level (`break 2`). Adapters
+/// derive this typed identity from their CST; shared control-flow never parses
+/// source-language label or integer syntax.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum LoopControlTarget {
+    Label(String),
+    Levels(u32),
+}
+
+impl LoopControlTarget {
+    #[must_use]
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            Self::Label(label) => Some(label),
+            Self::Levels(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn levels(&self) -> Option<u32> {
+        match self {
+            Self::Levels(levels) => Some(*levels),
+            Self::Label(_) => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FlowEvent {
     Call {
@@ -455,6 +486,26 @@ pub enum FlowEvent {
     Loop {
         span: Span,
         loop_kind: LoopKind,
+        /// Source-language control label owned by this loop, when present.
+        /// Break/continue routing consumes this compiler fact; shared CFG/IDG
+        /// code never interprets language-specific label syntax.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        /// Runtime evaluation performed by the loop condition/header on
+        /// every condition check. Keeping this phase separate from `body`
+        /// is required for post-test loops and for `continue`: a continue in
+        /// `do/while` / `repeat/while` still evaluates the condition before
+        /// the next body iteration. Adapters lower the exact Tree-sitter
+        /// condition subtree; shared CFG/IDG consumers never recover it from
+        /// source text.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        condition_events: Vec<FlowEvent>,
+        /// Runtime update phase executed after a completed body iteration
+        /// and after `continue` in C-style `for` loops. This cannot be folded
+        /// into `body`: abrupt control from the body must still execute the
+        /// update before the next condition check.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        update_events: Vec<FlowEvent>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         body: Vec<FlowEvent>,
     },
@@ -628,13 +679,13 @@ pub enum FlowEvent {
     Break {
         span: Span,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        label: Option<String>,
+        target: Option<LoopControlTarget>,
     },
     /// `continue` or the equivalent skip-to-next-iteration form.
     Continue {
         span: Span,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        label: Option<String>,
+        target: Option<LoopControlTarget>,
     },
     /// `yield` / `yield from` — a suspend-and-emit edge. `value_text` is for
     /// rendering; semantic consumers use the adapter-lowered `value_flow`.
@@ -1074,9 +1125,17 @@ impl CompilerAttribution {
                         walk(then_events, receiver_facts, calls, return_spans, writes);
                         walk(else_events, receiver_facts, calls, return_spans, writes);
                     }
-                    FlowEvent::Loop { body, .. }
-                    | FlowEvent::Defer { body, .. }
-                    | FlowEvent::Using { body, .. } => {
+                    FlowEvent::Loop {
+                        condition_events,
+                        body,
+                        update_events,
+                        ..
+                    } => {
+                        walk(condition_events, receiver_facts, calls, return_spans, writes);
+                        walk(body, receiver_facts, calls, return_spans, writes);
+                        walk(update_events, receiver_facts, calls, return_spans, writes);
+                    }
+                    FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                         walk(body, receiver_facts, calls, return_spans, writes);
                     }
                     FlowEvent::Try {
@@ -1199,9 +1258,17 @@ impl CompilerSyntaxHeader {
                         collect_assignment_value_spans(then_events, assignment_values, out);
                         collect_assignment_value_spans(else_events, assignment_values, out);
                     }
-                    FlowEvent::Loop { body, .. }
-                    | FlowEvent::Defer { body, .. }
-                    | FlowEvent::Using { body, .. } => {
+                    FlowEvent::Loop {
+                        condition_events,
+                        body,
+                        update_events,
+                        ..
+                    } => {
+                        collect_assignment_value_spans(condition_events, assignment_values, out);
+                        collect_assignment_value_spans(body, assignment_values, out);
+                        collect_assignment_value_spans(update_events, assignment_values, out);
+                    }
+                    FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                         collect_assignment_value_spans(body, assignment_values, out);
                     }
                     FlowEvent::Try {
@@ -1354,9 +1421,17 @@ impl CompilerSyntaxHeader {
                         walk(then_events, projection);
                         walk(else_events, projection);
                     }
-                    FlowEvent::Loop { body, .. }
-                    | FlowEvent::Defer { body, .. }
-                    | FlowEvent::Using { body, .. } => {
+                    FlowEvent::Loop {
+                        condition_events,
+                        body,
+                        update_events,
+                        ..
+                    } => {
+                        walk(condition_events, projection);
+                        walk(body, projection);
+                        walk(update_events, projection);
+                    }
+                    FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                         walk(body, projection);
                     }
                     FlowEvent::Try {
@@ -1929,7 +2004,16 @@ fn collect_operations(events: &[FlowEvent], out: &mut Vec<Operation>) {
                 collect_operations(then_events, out);
                 collect_operations(else_events, out);
             }
-            FlowEvent::Loop { body, .. } => collect_operations(body, out),
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_operations(condition_events, out);
+                collect_operations(body, out);
+                collect_operations(update_events, out);
+            }
             FlowEvent::Assign {
                 span,
                 target,
@@ -3780,9 +3864,19 @@ impl CompilerBrowseHeader {
                         collect_flow(groups, then_events, enclosing);
                         collect_flow(groups, else_events, enclosing);
                     }
-                    FlowEvent::Loop { body, .. }
-                    | FlowEvent::Defer { body, .. }
-                    | FlowEvent::Using { body, .. } => collect_flow(groups, body, enclosing),
+                    FlowEvent::Loop {
+                        condition_events,
+                        body,
+                        update_events,
+                        ..
+                    } => {
+                        collect_flow(groups, condition_events, enclosing);
+                        collect_flow(groups, body, enclosing);
+                        collect_flow(groups, update_events, enclosing);
+                    }
+                    FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                        collect_flow(groups, body, enclosing);
+                    }
                     FlowEvent::Try {
                         body,
                         catch_events,

@@ -63,9 +63,17 @@ fn assigns(events: &[FlowEvent]) -> Vec<(String, Option<String>, Vec<String>)> {
                     rec(then_events, out);
                     rec(else_events, out);
                 }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => rec(body, out),
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    rec(condition_events, out);
+                    rec(body, out);
+                    rec(update_events, out);
+                }
+                FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => rec(body, out),
                 FlowEvent::Try {
                     body,
                     catch_events,
@@ -102,9 +110,17 @@ fn calls(events: &[FlowEvent]) -> Vec<(String, Vec<String>)> {
                     rec(then_events, out);
                     rec(else_events, out);
                 }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => rec(body, out),
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    rec(condition_events, out);
+                    rec(body, out);
+                    rec(update_events, out);
+                }
+                FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => rec(body, out),
                 FlowEvent::Try {
                     body,
                     catch_events,

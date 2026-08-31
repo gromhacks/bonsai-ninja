@@ -116,6 +116,7 @@ pub enum SyntheticBlockKind {
     BranchElse,
     LoopHeader,
     LoopBody,
+    LoopUpdate,
     LoopAfter,
     TryFork,
     TryBody,

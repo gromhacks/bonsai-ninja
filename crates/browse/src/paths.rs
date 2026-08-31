@@ -346,7 +346,38 @@ fn collect_terminal_call_targets_for_events(
                     out,
                 );
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_terminal_call_targets_for_events(
+                    func,
+                    enclosing_function,
+                    condition_events,
+                    matcher,
+                    format,
+                    out,
+                );
+                collect_terminal_call_targets_for_events(
+                    func,
+                    enclosing_function,
+                    body,
+                    matcher,
+                    format,
+                    out,
+                );
+                collect_terminal_call_targets_for_events(
+                    func,
+                    enclosing_function,
+                    update_events,
+                    matcher,
+                    format,
+                    out,
+                );
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_terminal_call_targets_for_events(
                     func,
                     enclosing_function,

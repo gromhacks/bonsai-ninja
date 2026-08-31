@@ -111,6 +111,50 @@ fn go_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
         .or_else(|| range.named_child(1))?;
     Some((binding, iterable))
 }
+
+/// Go's grammar stores the condition-only `for condition { ... }` form as
+/// the direct named child of `for_statement`; only the three-clause form has
+/// a `for_clause.condition` field. Surface that exact CST child so shared
+/// lowering can distinguish a pre-test loop from `for { ... }` without
+/// reading source tokens or API names.
+fn go_loop_condition_nodes<'tree>(node: Node<'tree>, _src: &[u8]) -> Vec<Node<'tree>> {
+    if node.kind() != "for_statement" {
+        return Vec::new();
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|child| !matches!(child.kind(), "block" | "for_clause" | "range_clause"))
+        .take(1)
+        .collect()
+}
+
+fn go_control_target(node: Node<'_>, src: &[u8]) -> Option<bonsai_lang_api::LoopControlTarget> {
+    let mut cursor = node.walk();
+    let label = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "label_name")?;
+    let label = node_text(&label, src).trim();
+    (!label.is_empty()).then(|| bonsai_lang_api::LoopControlTarget::Label(label.to_string()))
+}
+
+fn go_loop_label(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let parent = node
+        .parent()
+        .filter(|parent| parent.kind() == "labeled_statement")?;
+    let label = parent.child_by_field_name("label")?;
+    let owns_loop = {
+        let mut cursor = parent.walk();
+        let owns_loop = parent
+            .named_children(&mut cursor)
+            .any(|child| child.id() == node.id());
+        owns_loop
+    };
+    if !owns_loop {
+        return None;
+    }
+    let label = node_text(&label, src).trim();
+    (!label.is_empty()).then(|| label.to_string())
+}
 use tree_sitter::{Language, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("go");
@@ -214,6 +258,9 @@ const HANDLER: GrammarHandler = GrammarHandler {
     loop_body_kinds: &["block", "expression_statement"],
     loop_header_container_kinds: &["for_clause"],
     loop_update_field_names: &["update"],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: Some(go_loop_condition_nodes),
+    loop_kind_extractor: None,
     branch_arm_kinds: &[
         "block",
         "expression_case",
@@ -276,6 +323,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
     control_label_field_names: &["label"],
+    control_target_extractor: Some(go_control_target),
+    loop_label_extractor: Some(go_loop_label),
     defer_kinds: &["defer_statement"],
     ..bonsai_lang_api::EMPTY_HANDLER
 };
@@ -390,6 +439,8 @@ impl LanguageAdapter for GoAdapter {
             ("custom lowering", "interpreted_string_literal"),
             ("custom lowering", "interpreted_string_literal_content"),
             ("custom lowering", "keyed_element"),
+            ("loop-control-label", "label_name"),
+            ("loop-control-label", "labeled_statement"),
             ("custom lowering", "literal_element"),
             ("custom lowering", "literal_value"),
             ("custom lowering", "method_declaration"),

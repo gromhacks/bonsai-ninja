@@ -67,7 +67,16 @@ fn walk<F: FnMut(&FlowEvent)>(events: &[FlowEvent], f: &mut F) {
                 walk(then_events, f);
                 walk(else_events, f);
             }
-            FlowEvent::Loop { body, .. } => walk(body, f),
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                walk(condition_events, f);
+                walk(body, f);
+                walk(update_events, f);
+            }
             FlowEvent::Try {
                 body,
                 catch_events,

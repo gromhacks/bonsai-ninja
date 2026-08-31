@@ -476,7 +476,10 @@ use std::sync::{
 // v173: Perl finite-literal selection facts retain exact value replacement
 // through a non-mutating map/grep collection transform. Cached v172 bodies
 // can incorrectly retain the dynamic selection key as a value dependency.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 173;
+// v174: loop events retain adapter-lowered lexical labels and abrupt loop
+// transfers retain a typed label/lexical-level target. Cached v173 bodies
+// route every break/continue to the nearest loop.
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 175;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 105;

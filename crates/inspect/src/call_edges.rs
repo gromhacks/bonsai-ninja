@@ -144,8 +144,16 @@ pub fn find_call_span_by_name(events: &[FlowEvent], target: &str) -> Option<Span
                     return Some(s);
                 }
             }
-            FlowEvent::Loop { body, .. } => {
-                if let Some(s) = find_call_span_by_name(body, target) {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if let Some(s) = find_call_span_by_name(condition_events, target)
+                    .or_else(|| find_call_span_by_name(body, target))
+                    .or_else(|| find_call_span_by_name(update_events, target))
+                {
                     return Some(s);
                 }
             }

@@ -604,8 +604,10 @@ struct CallableTargetKey {
 
 #[derive(Clone, Debug, Default)]
 struct WorkspaceCallableBindingIndex {
-    by_module: AHashMap<(String, ModulePath), Option<FuncId>>,
-    by_file: AHashMap<(String, FileId), Option<FuncId>>,
+    by_module: AHashMap<ModulePath, AHashMap<String, Option<FuncId>>>,
+    by_file: AHashMap<FileId, AHashMap<String, Option<FuncId>>>,
+    methods_by_file: AHashMap<FileId, AHashMap<String, Option<FuncId>>>,
+    functions_by_file: AHashMap<FileId, Vec<(Span, FuncId)>>,
 }
 
 impl WorkspaceCallableBindingIndex {
@@ -619,30 +621,98 @@ impl WorkspaceCallableBindingIndex {
                 ) {
                     continue;
                 }
+                if decl.kind == DeclKind::Function {
+                    index
+                        .functions_by_file
+                        .entry(file)
+                        .or_default()
+                        .push((decl.span, FuncId::new(decl.symbol.raw())));
+                }
                 for name in callable_binding_index_names(decl) {
                     index.insert(file, &decl.module_path, name, FuncId::new(decl.symbol.raw()));
                 }
+                if decl.kind == DeclKind::Method {
+                    let func = FuncId::new(decl.symbol.raw());
+                    insert_unique_callable_binding(
+                        index.methods_by_file.entry(file).or_default(),
+                        decl.name.clone(),
+                        func,
+                    );
+                    if let Some(suffix) = decl.qualified_name.as_deref().and_then(|qualified| {
+                        bonsai_common::declaration_qualified_suffix(&decl.name, qualified)
+                    }) {
+                        insert_unique_callable_binding(
+                            index.methods_by_file.entry(file).or_default(),
+                            suffix.to_string(),
+                            func,
+                        );
+                    }
+                }
             }
+        }
+        for functions in index.functions_by_file.values_mut() {
+            functions.sort_unstable_by_key(|(span, func)| (span.start, span.end, func.raw()));
         }
         index
     }
 
     fn insert(&mut self, file: FileId, module: &ModulePath, name: String, func: FuncId) {
         if !module.is_empty() {
-            insert_unique_callable_binding(&mut self.by_module, (name.clone(), module.clone()), func);
+            insert_unique_callable_binding(
+                self.by_module.entry(module.clone()).or_default(),
+                name.clone(),
+                func,
+            );
         }
-        insert_unique_callable_binding(&mut self.by_file, (name, file), func);
+        insert_unique_callable_binding(self.by_file.entry(file).or_default(), name, func);
     }
 
     fn unique_local(&self, name: &str, caller_file: FileId, caller_module: &ModulePath) -> Option<FuncId> {
         if !caller_module.is_empty() {
-            if let Some(func) = self.by_module.get(&(name.to_string(), caller_module.clone())) {
+            if let Some(func) = self
+                .by_module
+                .get(caller_module)
+                .and_then(|bindings| bindings.get(name))
+            {
                 return *func;
             }
         }
         self.by_file
-            .get(&(name.to_string(), caller_file))
-            .and_then(|func| *func)
+            .get(&caller_file)
+            .and_then(|bindings| bindings.get(name))
+            .copied()
+            .flatten()
+    }
+
+    fn unique_method_in_file(&self, name: &str, file: FileId) -> Option<FuncId> {
+        self.methods_by_file
+            .get(&file)
+            .and_then(|bindings| bindings.get(name))
+            .copied()
+            .flatten()
+    }
+
+    fn functions_contained_in(&self, file: FileId, outer: Span) -> Vec<FuncId> {
+        let Some(functions) = self.functions_by_file.get(&file) else {
+            return Vec::new();
+        };
+        let start = functions.partition_point(|(span, _)| span.start < outer.start);
+        functions[start..]
+            .iter()
+            .take_while(|(span, _)| span.start <= outer.end)
+            .filter_map(|(span, func)| span_contains_or_equal(outer, *span).then_some(*func))
+            .collect()
+    }
+
+    fn contains_nested_function(&self, file: FileId, outer: Span, excluded: SymbolId) -> bool {
+        let Some(functions) = self.functions_by_file.get(&file) else {
+            return false;
+        };
+        let start = functions.partition_point(|(span, _)| span.start < outer.start);
+        functions[start..]
+            .iter()
+            .take_while(|(span, _)| span.start <= outer.end)
+            .any(|(span, func)| func.raw() != excluded.raw() && span_contains_or_equal(outer, *span))
     }
 }
 
@@ -2164,6 +2234,7 @@ fn resolve_file_call_edges(
         context.peer_class_index.clone(),
         context.interface_descendant_index.clone(),
     );
+    let mut semantic_receiver_fact_cache = SemanticReceiverFactCache::default();
     let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
     let mut callable_target_cache = CallableTargetCache::default();
     let mut local_cg = CallGraph::new();
@@ -2231,6 +2302,7 @@ fn resolve_file_call_edges(
             caller_capabilities: info.capabilities,
             language_for_file: &language_lookup,
             alias_index: &context.alias_index,
+            callable_index: &context.callable_index,
             build_targets: &context.build_targets,
             constructor_index: &context.constructor_index,
             class_ancestor_index: &context.class_ancestor_index,
@@ -2241,6 +2313,7 @@ fn resolve_file_call_edges(
             &resolution,
             &mut CallGraphBuildState {
                 method_candidate_cache: &mut method_candidate_cache,
+                semantic_receiver_fact_cache: &mut semantic_receiver_fact_cache,
                 workspace_module_cache: &mut workspace_module_cache,
                 callable_target_cache: &mut callable_target_cache,
                 graph: &mut local_cg,
@@ -2462,9 +2535,17 @@ fn decl_binding_shadows_name(decl: &Decl, name: &str) -> bool {
                 else_events,
                 ..
             } => events_shadow(then_events, name) || events_shadow(else_events, name),
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                events_shadow(body, name)
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                events_shadow(condition_events, name)
+                    || events_shadow(body, name)
+                    || events_shadow(update_events, name)
             }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => events_shadow(body, name),
             FlowEvent::Try {
                 body,
                 catch_events,
@@ -2802,7 +2883,17 @@ fn collect_callback_formal_facts(
                 collect_callback_formal_facts(caller, then_events, context, output);
                 collect_callback_formal_facts(caller, else_events, context, output);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_callback_formal_facts(caller, condition_events, context, output);
+                collect_callback_formal_facts(caller, body, context, output);
+                collect_callback_formal_facts(caller, update_events, context, output);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_callback_formal_facts(caller, body, context, output);
             }
             FlowEvent::Try {
@@ -3037,6 +3128,7 @@ struct CallResolutionContext<'a> {
     caller_capabilities: LanguageCapabilities,
     language_for_file: &'a dyn Fn(FileId) -> Option<&'static str>,
     alias_index: &'a WorkspaceAliasIndex,
+    callable_index: &'a WorkspaceCallableBindingIndex,
     build_targets: &'a BuildTargetIndex,
     constructor_index: &'a ConstructorIndex,
     class_ancestor_index: &'a ClassAncestorIndex,
@@ -3072,6 +3164,18 @@ struct DeclFlowLookup<'a> {
     assignments_by_target: AHashMap<String, Vec<&'a FlowEvent>>,
     calls_by_file: AHashMap<FileId, Vec<&'a FlowEvent>>,
     call_argument_spans: AHashMap<Span, Vec<Span>>,
+}
+
+/// Declaration-local semantic facts whose derivation performs workspace
+/// resolution. A method call can consult the same receiver assignment and
+/// nested-call return evidence during candidate discovery, assigned-receiver
+/// narrowing, and final semantic receiver narrowing. Re-resolving those
+/// immutable compiler facts in every stage is quadratic work on call-dense
+/// files; cache them by the exact caller/span/receiver identity instead.
+#[derive(Debug, Default)]
+struct SemanticReceiverFactCache {
+    assigned_type_names: AHashMap<(SymbolId, Span, String), Vec<String>>,
+    call_return_type_names: AHashMap<(SymbolId, Span), Vec<String>>,
 }
 
 impl<'a> DeclFlowLookup<'a> {
@@ -3131,9 +3235,17 @@ impl<'a> DeclFlowLookup<'a> {
                     self.record(then_events);
                     self.record(else_events);
                 }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => self.record(body),
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    self.record(condition_events);
+                    self.record(body);
+                    self.record(update_events);
+                }
+                FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => self.record(body),
                 FlowEvent::Try {
                     body,
                     catch_events,
@@ -3207,6 +3319,7 @@ impl<'a> DeclFlowLookup<'a> {
 
 struct CallGraphBuildState<'a> {
     method_candidate_cache: &'a mut MethodCandidateCache,
+    semantic_receiver_fact_cache: &'a mut SemanticReceiverFactCache,
     workspace_module_cache: &'a mut WorkspaceModuleTargetCache,
     callable_target_cache: &'a mut CallableTargetCache,
     graph: &'a mut CallGraph,
@@ -3492,6 +3605,7 @@ fn collect_ast_bound_call_candidates(
             context.caller_capabilities.module_path_syntax,
             context.flow_lookup,
             state.method_candidate_cache,
+            state.semantic_receiver_fact_cache,
         );
     }
     if values.is_empty() && facts.semantic_receiver.is_none() {
@@ -3515,6 +3629,7 @@ fn collect_ast_bound_call_candidates(
         values = collect_dynamic_param_receiver_method_target(
             context.global,
             context.caller_decl,
+            context.callable_index,
             facts.semantic_receiver,
             facts.name,
         );
@@ -3787,6 +3902,7 @@ fn resolve_and_emit_call_site(
     } = *facts;
     let CallGraphBuildState {
         method_candidate_cache,
+        semantic_receiver_fact_cache,
         graph: cg,
         unresolved_workspace_sites,
         ..
@@ -3839,6 +3955,7 @@ fn resolve_and_emit_call_site(
                 semantic_receiver,
                 span,
                 method_candidate_cache,
+                semantic_receiver_fact_cache,
                 &mut candidates,
             );
         }
@@ -3865,6 +3982,7 @@ fn resolve_and_emit_call_site(
                 context.class_ancestor_index,
                 state.timings,
                 method_candidate_cache,
+                semantic_receiver_fact_cache,
                 &mut candidates,
             );
         }
@@ -4015,6 +4133,7 @@ fn add_assignment_call_edges(
     } = *context;
     let CallGraphBuildState {
         method_candidate_cache,
+        semantic_receiver_fact_cache,
         workspace_module_cache,
         callable_target_cache,
         graph: cg,
@@ -4067,6 +4186,7 @@ fn add_assignment_call_edges(
             span,
             context.flow_lookup,
             method_candidate_cache,
+            semantic_receiver_fact_cache,
             &mut candidates,
         );
     }
@@ -4089,6 +4209,7 @@ fn add_assignment_call_edges(
             context.class_ancestor_index,
             state.timings,
             method_candidate_cache,
+            semantic_receiver_fact_cache,
             &mut candidates,
         );
     }
@@ -4165,8 +4286,15 @@ fn add_resolved_call_edges(
                 add_resolved_call_edges(then_events, context, state);
                 add_resolved_call_edges(else_events, context, state);
             }
-            FlowEvent::Loop { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                add_resolved_call_edges(condition_events, context, state);
                 add_resolved_call_edges(body, context, state);
+                add_resolved_call_edges(update_events, context, state);
             }
             FlowEvent::Try {
                 body,
@@ -4273,7 +4401,17 @@ fn assign_source_call_shadowed_by_explicit_call(
             assign_source_call_shadowed_by_explicit_call(then_events, source_call, assign_span)
                 || assign_source_call_shadowed_by_explicit_call(else_events, source_call, assign_span)
         }
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => {
+            assign_source_call_shadowed_by_explicit_call(condition_events, source_call, assign_span)
+                || assign_source_call_shadowed_by_explicit_call(body, source_call, assign_span)
+                || assign_source_call_shadowed_by_explicit_call(update_events, source_call, assign_span)
+        }
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
             assign_source_call_shadowed_by_explicit_call(body, source_call, assign_span)
         }
         FlowEvent::Try {
@@ -4456,7 +4594,17 @@ pub fn local_value_binding_shadows_callable(events: &[FlowEvent], name: &str, ca
             local_value_binding_shadows_callable(then_events, &target_name, call_span)
                 || local_value_binding_shadows_callable(else_events, &target_name, call_span)
         }
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => {
+            local_value_binding_shadows_callable(condition_events, &target_name, call_span)
+                || local_value_binding_shadows_callable(body, &target_name, call_span)
+                || local_value_binding_shadows_callable(update_events, &target_name, call_span)
+        }
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
             local_value_binding_shadows_callable(body, &target_name, call_span)
         }
         FlowEvent::Try {
@@ -5200,12 +5348,13 @@ pub fn collect_workspace_local_callable_bindings(
             // resolves. Without this, locally-bound lambdas invoked as
             // `f.accept(x)` / `f.call(x)` never enter the workspace
             // binding map and lambda bodies go unreachable.
-            let hosts_nested_callable =
-                decls.iter().any(|other| {
-                    other.symbol != decl.symbol
-                        && other.kind == DeclKind::Function
-                        && span_contains_or_equal(decl.span, other.span)
-                }) || flow_event_assignment_hosts_nested_callable(&decl.flow_events, decls, decl.symbol);
+            let hosts_nested_callable = callable_index.contains_nested_function(file, decl.span, decl.symbol)
+                || flow_event_assignment_hosts_nested_callable(
+                    &decl.flow_events,
+                    &callable_index,
+                    file,
+                    decl.symbol,
+                );
             if !hosts_nested_callable && !flow_events_contain_callable_reference_assignment(&decl.flow_events)
             {
                 continue;
@@ -5230,17 +5379,14 @@ pub fn collect_workspace_local_callable_bindings(
 
 fn flow_event_assignment_hosts_nested_callable(
     events: &[FlowEvent],
-    decls: &[Decl],
+    callable_index: &WorkspaceCallableBindingIndex,
+    file: FileId,
     caller: bonsai_common::SymbolId,
 ) -> bool {
     for event in events {
         match event {
             FlowEvent::Assign { span, .. } => {
-                if decls.iter().any(|candidate| {
-                    candidate.symbol != caller
-                        && candidate.kind == DeclKind::Function
-                        && span_contains_or_equal(*span, candidate.span)
-                }) {
+                if callable_index.contains_nested_function(file, *span, caller) {
                     return true;
                 }
             }
@@ -5249,14 +5395,32 @@ fn flow_event_assignment_hosts_nested_callable(
                 else_events,
                 ..
             } => {
-                if flow_event_assignment_hosts_nested_callable(then_events, decls, caller)
-                    || flow_event_assignment_hosts_nested_callable(else_events, decls, caller)
+                if flow_event_assignment_hosts_nested_callable(then_events, callable_index, file, caller)
+                    || flow_event_assignment_hosts_nested_callable(else_events, callable_index, file, caller)
                 {
                     return true;
                 }
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if flow_event_assignment_hosts_nested_callable(body, decls, caller) {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if flow_event_assignment_hosts_nested_callable(condition_events, callable_index, file, caller)
+                    || flow_event_assignment_hosts_nested_callable(body, callable_index, file, caller)
+                    || flow_event_assignment_hosts_nested_callable(
+                        update_events,
+                        callable_index,
+                        file,
+                        caller,
+                    )
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if flow_event_assignment_hosts_nested_callable(body, callable_index, file, caller) {
                     return true;
                 }
             }
@@ -5266,9 +5430,14 @@ fn flow_event_assignment_hosts_nested_callable(
                 finally_events,
                 ..
             } => {
-                if flow_event_assignment_hosts_nested_callable(body, decls, caller)
-                    || flow_event_assignment_hosts_nested_callable(catch_events, decls, caller)
-                    || flow_event_assignment_hosts_nested_callable(finally_events, decls, caller)
+                if flow_event_assignment_hosts_nested_callable(body, callable_index, file, caller)
+                    || flow_event_assignment_hosts_nested_callable(catch_events, callable_index, file, caller)
+                    || flow_event_assignment_hosts_nested_callable(
+                        finally_events,
+                        callable_index,
+                        file,
+                        caller,
+                    )
                 {
                     return true;
                 }
@@ -5306,7 +5475,20 @@ fn flow_events_contain_callable_reference_assignment(events: &[FlowEvent]) -> bo
                     return true;
                 }
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if flow_events_contain_callable_reference_assignment(condition_events)
+                    || flow_events_contain_callable_reference_assignment(body)
+                    || flow_events_contain_callable_reference_assignment(update_events)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if flow_events_contain_callable_reference_assignment(body) {
                     return true;
                 }
@@ -5434,7 +5616,16 @@ fn collect_local_callable_binding_uses(
                 collect_local_callable_binding_uses(then_events, capabilities, out);
                 collect_local_callable_binding_uses(else_events, capabilities, out);
             }
-            FlowEvent::Loop { body, .. } => collect_local_callable_binding_uses(body, capabilities, out),
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_local_callable_binding_uses(condition_events, capabilities, out);
+                collect_local_callable_binding_uses(body, capabilities, out);
+                collect_local_callable_binding_uses(update_events, capabilities, out);
+            }
             FlowEvent::Try {
                 body,
                 catch_events,
@@ -5520,7 +5711,9 @@ fn collect_local_callable_bindings_into(
                 if !local_callable_binding_target_is_used(target, callable_uses) {
                     continue;
                 }
-                if let Some(sym) = resolve_assigned_lambda_binding(global, caller_decl, target, *span) {
+                if let Some(sym) =
+                    resolve_assigned_lambda_binding(global, caller_decl, callable_index, target, *span)
+                {
                     insert_local_callable_binding(bindings, target, sym);
                     continue;
                 }
@@ -5612,9 +5805,36 @@ fn collect_local_callable_bindings_into(
                     bindings,
                 );
             }
-            FlowEvent::Loop { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_local_callable_bindings_into(
+                    condition_events,
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    alias_index,
+                    callable_index,
+                    capabilities,
+                    callable_uses,
+                    bindings,
+                );
                 collect_local_callable_bindings_into(
                     body,
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    alias_index,
+                    callable_index,
+                    capabilities,
+                    callable_uses,
+                    bindings,
+                );
+                collect_local_callable_bindings_into(
+                    update_events,
                     global,
                     caller_decl,
                     alias_targets,
@@ -5756,6 +5976,7 @@ fn local_callable_binding_lookup_keys(
 fn resolve_assigned_lambda_binding(
     global: &GlobalIndex,
     caller_decl: &Decl,
+    callable_index: Option<&WorkspaceCallableBindingIndex>,
     target: &str,
     assign_span: Span,
 ) -> Option<FuncId> {
@@ -5765,17 +5986,17 @@ fn resolve_assigned_lambda_binding(
     }
     let mut exact_candidates = Vec::new();
     let mut anonymous_candidates = Vec::new();
-    for decl in global.decls_in(caller_decl.span.file) {
+    for func in contained_function_ids(global, callable_index, caller_decl.span.file, assign_span) {
+        let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+            continue;
+        };
         if decl.symbol == caller_decl.symbol || decl.kind != DeclKind::Function {
             continue;
         }
-        if !span_contains_or_equal(assign_span, decl.span) {
-            continue;
-        }
         if decl.name == target {
-            exact_candidates.push(FuncId::new(decl.symbol.raw()));
+            exact_candidates.push(func);
         } else if decl.name.starts_with("<lambda@") {
-            anonymous_candidates.push(FuncId::new(decl.symbol.raw()));
+            anonymous_candidates.push(func);
         }
     }
     let candidates = if exact_candidates.is_empty() {
@@ -5817,7 +6038,10 @@ fn resolve_returned_lambda_factory_with_alias_index(
         return None;
     }
     let mut candidates = Vec::new();
-    for decl in global.decls_in(factory_decl.span.file) {
+    for func in contained_function_ids(global, callable_index, factory_decl.span.file, factory_decl.span) {
+        let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+            continue;
+        };
         if decl.symbol == factory_decl.symbol
             || decl.kind != DeclKind::Function
             || !decl.name.starts_with("<lambda@")
@@ -5828,13 +6052,34 @@ fn resolve_returned_lambda_factory_with_alias_index(
             .iter()
             .any(|span| span_contains_or_equal(*span, decl.span))
         {
-            candidates.push(FuncId::new(decl.symbol.raw()));
+            candidates.push(func);
         }
     }
     let [candidate] = candidates.as_slice() else {
         return None;
     };
     Some(*candidate)
+}
+
+fn contained_function_ids(
+    global: &GlobalIndex,
+    callable_index: Option<&WorkspaceCallableBindingIndex>,
+    file: FileId,
+    outer: Span,
+) -> Vec<FuncId> {
+    callable_index.map_or_else(
+        || {
+            global
+                .decls_in(file)
+                .iter()
+                .filter_map(|decl| {
+                    (decl.kind == DeclKind::Function && span_contains_or_equal(outer, decl.span))
+                        .then(|| FuncId::new(decl.symbol.raw()))
+                })
+                .collect()
+        },
+        |index| index.functions_contained_in(file, outer),
+    )
 }
 
 fn span_contains_or_equal(outer: Span, inner: Span) -> bool {
@@ -6021,6 +6266,7 @@ fn collect_receiver_method_targets(
     module_path_syntax: ModulePathSyntax,
     flow_lookup: &DeclFlowLookup<'_>,
     method_candidate_cache: &mut MethodCandidateCache,
+    semantic_fact_cache: &mut SemanticReceiverFactCache,
 ) -> Vec<FuncId> {
     if call_kind != CallKind::Method {
         return Vec::new();
@@ -6058,6 +6304,7 @@ fn collect_receiver_method_targets(
             receiver,
             Some(call_span),
             method_candidate_cache,
+            semantic_fact_cache,
         );
         for type_name in receiver_type_names_for_expr(caller_decl, alias_targets, receiver) {
             push_unique_string(&mut receiver_type_names, type_name);
@@ -6072,6 +6319,7 @@ fn collect_receiver_method_targets(
             flow_lookup,
             Some(call_span),
             method_candidate_cache,
+            semantic_fact_cache,
         ) {
             push_unique_string(&mut receiver_type_names, type_name);
         }
@@ -6480,10 +6728,37 @@ fn receiver_call_return_type_names(
     flow_lookup: &DeclFlowLookup<'_>,
     call_span: Option<Span>,
     method_candidate_cache: &mut MethodCandidateCache,
+    semantic_fact_cache: &mut SemanticReceiverFactCache,
 ) -> Vec<String> {
     let Some(call_span) = call_span else {
         return Vec::new();
     };
+    let key = (caller_decl.symbol, call_span);
+    if let Some(cached) = semantic_fact_cache.call_return_type_names.get(&key) {
+        return cached.clone();
+    }
+    let resolved = receiver_call_return_type_names_uncached(
+        global,
+        caller_decl,
+        alias_targets,
+        flow_lookup,
+        call_span,
+        method_candidate_cache,
+    );
+    semantic_fact_cache
+        .call_return_type_names
+        .insert(key, resolved.clone());
+    resolved
+}
+
+fn receiver_call_return_type_names_uncached(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    flow_lookup: &DeclFlowLookup<'_>,
+    call_span: Span,
+    method_candidate_cache: &mut MethodCandidateCache,
+) -> Vec<String> {
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
         return Vec::new();
     };
@@ -6574,7 +6849,17 @@ fn collect_call_events_within<'a>(events: &'a [FlowEvent], outer: Span, out: &mu
                 collect_call_events_within(then_events, outer, out);
                 collect_call_events_within(else_events, outer, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_call_events_within(condition_events, outer, out);
+                collect_call_events_within(body, outer, out);
+                collect_call_events_within(update_events, outer, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_call_events_within(body, outer, out);
             }
             FlowEvent::Try {
@@ -6672,7 +6957,17 @@ fn collect_return_expression_call_sites(events: &[FlowEvent], out: &mut AHashSet
                 collect_return_expression_call_sites(then_events, out);
                 collect_return_expression_call_sites(else_events, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_return_expression_call_sites(condition_events, out);
+                collect_return_expression_call_sites(body, out);
+                collect_return_expression_call_sites(update_events, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_return_expression_call_sites(body, out);
             }
             FlowEvent::Try {
@@ -6744,7 +7039,38 @@ fn collect_returned_constructor_type_names(
                     out,
                 );
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_returned_constructor_type_names(
+                    global,
+                    decl,
+                    alias_targets,
+                    condition_events,
+                    returned_call_sites,
+                    out,
+                );
+                collect_returned_constructor_type_names(
+                    global,
+                    decl,
+                    alias_targets,
+                    body,
+                    returned_call_sites,
+                    out,
+                );
+                collect_returned_constructor_type_names(
+                    global,
+                    decl,
+                    alias_targets,
+                    update_events,
+                    returned_call_sites,
+                    out,
+                );
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_returned_constructor_type_names(
                     global,
                     decl,
@@ -6924,8 +7250,52 @@ fn assigned_receiver_type_names(
     receiver: &str,
     call_span: Option<Span>,
     method_candidate_cache: &mut MethodCandidateCache,
+    semantic_fact_cache: &mut SemanticReceiverFactCache,
 ) -> Vec<String> {
     let receiver = normalize_receiver_alias_text(receiver);
+    if let Some(call_span) = call_span {
+        let key = (caller_decl.symbol, call_span, receiver.clone());
+        if let Some(cached) = semantic_fact_cache.assigned_type_names.get(&key) {
+            return cached.clone();
+        }
+        let resolved = assigned_receiver_type_names_uncached(
+            global,
+            caller_decl,
+            alias_targets,
+            flow_lookup,
+            &receiver,
+            Some(call_span),
+            method_candidate_cache,
+            semantic_fact_cache,
+        );
+        semantic_fact_cache
+            .assigned_type_names
+            .insert(key, resolved.clone());
+        return resolved;
+    }
+    assigned_receiver_type_names_uncached(
+        global,
+        caller_decl,
+        alias_targets,
+        flow_lookup,
+        &receiver,
+        None,
+        method_candidate_cache,
+        semantic_fact_cache,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assigned_receiver_type_names_uncached(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    flow_lookup: &DeclFlowLookup<'_>,
+    receiver: &str,
+    call_span: Option<Span>,
+    method_candidate_cache: &mut MethodCandidateCache,
+    semantic_fact_cache: &mut SemanticReceiverFactCache,
+) -> Vec<String> {
     let mut out = Vec::new();
     let mut best_distance = None;
     for event in flow_lookup.assignments_for_receiver(&receiver) {
@@ -6951,6 +7321,7 @@ fn assigned_receiver_type_names(
                 flow_lookup,
                 Some(*span),
                 method_candidate_cache,
+                semantic_fact_cache,
             ) {
                 push_assigned_receiver_type(&mut out, &mut best_distance, type_name, distance);
             }
@@ -6994,6 +7365,7 @@ fn retain_assigned_receiver_method_candidates(
     receiver: Option<&str>,
     call_span: Span,
     method_candidate_cache: &mut MethodCandidateCache,
+    semantic_fact_cache: &mut SemanticReceiverFactCache,
     candidates: &mut Vec<FuncId>,
 ) {
     if candidates.len() <= 1 {
@@ -7010,6 +7382,7 @@ fn retain_assigned_receiver_method_candidates(
         receiver,
         Some(call_span),
         method_candidate_cache,
+        semantic_fact_cache,
     );
     if assigned.is_empty() {
         return;
@@ -7051,6 +7424,7 @@ fn retain_semantic_receiver_evidenced_candidates(
     class_ancestor_index: &ClassAncestorIndex,
     timings: Option<&CallgraphResolutionTimings>,
     method_candidate_cache: &mut MethodCandidateCache,
+    semantic_fact_cache: &mut SemanticReceiverFactCache,
     candidates: &mut Vec<FuncId>,
 ) {
     if candidates.is_empty() || call_kind != CallKind::Method || alias_qualified_call {
@@ -7090,6 +7464,7 @@ fn retain_semantic_receiver_evidenced_candidates(
             call_span,
             flow_lookup,
             method_candidate_cache,
+            semantic_fact_cache,
         )
     };
     dedup_symbols(&mut receiver_class_symbols);
@@ -7142,6 +7517,7 @@ fn semantic_receiver_class_symbols(
     call_span: Span,
     flow_lookup: &DeclFlowLookup<'_>,
     method_candidate_cache: &mut MethodCandidateCache,
+    semantic_fact_cache: &mut SemanticReceiverFactCache,
 ) -> Vec<SymbolId> {
     let mut type_names = assigned_receiver_type_names(
         global,
@@ -7151,6 +7527,7 @@ fn semantic_receiver_class_symbols(
         receiver,
         Some(call_span),
         method_candidate_cache,
+        semantic_fact_cache,
     );
     for type_name in receiver_types {
         push_unique_string(&mut type_names, type_name.clone());
@@ -7168,6 +7545,7 @@ fn semantic_receiver_class_symbols(
         flow_lookup,
         Some(call_span),
         method_candidate_cache,
+        semantic_fact_cache,
     ) {
         push_unique_string(&mut type_names, type_name);
     }
@@ -7200,6 +7578,7 @@ fn retain_assigned_receiver_constructor_candidates(
     assign_span: &Span,
     flow_lookup: &DeclFlowLookup<'_>,
     method_candidate_cache: &mut MethodCandidateCache,
+    semantic_fact_cache: &mut SemanticReceiverFactCache,
     candidates: &mut Vec<FuncId>,
 ) {
     if candidates.len() <= 1 {
@@ -7213,6 +7592,7 @@ fn retain_assigned_receiver_constructor_candidates(
         "",
         Some(*assign_span),
         method_candidate_cache,
+        semantic_fact_cache,
     );
     if assigned.is_empty() {
         return;
@@ -7901,6 +8281,7 @@ fn collect_build_target_linked_callable_targets(
 fn collect_dynamic_param_receiver_method_target(
     global: &GlobalIndex,
     caller_decl: &Decl,
+    callable_index: &WorkspaceCallableBindingIndex,
     receiver: Option<&str>,
     name: &str,
 ) -> Vec<FuncId> {
@@ -7920,25 +8301,10 @@ fn collect_dynamic_param_receiver_method_target(
         return Vec::new();
     };
     let method_name = receiver_member_callee(name, &receiver);
-    let mut candidates = global
-        .decls_in(caller_file)
-        .iter()
-        .filter(|decl| {
-            matches!(decl.kind, DeclKind::Method)
-                && (decl.name == method_name
-                    || decl.qualified_name.as_deref().is_some_and(|qualified| {
-                        bonsai_common::declaration_qualified_suffix(&decl.name, qualified)
-                            == Some(method_name)
-                    }))
-        })
-        .map(|decl| FuncId::new(decl.symbol.raw()))
-        .collect::<Vec<_>>();
-    dedup_func_ids(&mut candidates);
-    if candidates.len() == 1 {
-        candidates
-    } else {
-        Vec::new()
-    }
+    callable_index
+        .unique_method_in_file(method_name, caller_file)
+        .into_iter()
+        .collect()
 }
 
 fn collect_implicit_receiver_method_targets(
@@ -8053,6 +8419,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
         Vec::new()
     };
     let mut method_candidate_cache = MethodCandidateCache::default();
+    let mut semantic_receiver_fact_cache = SemanticReceiverFactCache::default();
     let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
     let mut callable_target_cache = CallableTargetCache::default();
     let file_path_parts: AHashMap<FileId, Vec<String>> = AHashMap::new();
@@ -8098,6 +8465,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             caller_capabilities.module_path_syntax,
             &flow_lookup,
             &mut method_candidate_cache,
+            &mut semantic_receiver_fact_cache,
         );
     }
     if targets.is_empty() {
@@ -8212,6 +8580,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             semantic_receiver,
             call_span,
             &mut method_candidate_cache,
+            &mut semantic_receiver_fact_cache,
             &mut targets,
         );
         let receiver_supplied = semantic_receiver.is_some() || call_kind == CallKind::Method;
@@ -8521,16 +8890,43 @@ pub fn find_call_span_resolved(
                     return Some(span);
                 }
             }
-            FlowEvent::Loop { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
                 if let Some(span) = find_call_span_resolved(
-                    body,
+                    condition_events,
                     target_func,
                     target_name,
                     global,
                     aliases,
                     local_bindings,
                     caller_decl,
-                ) {
+                )
+                .or_else(|| {
+                    find_call_span_resolved(
+                        body,
+                        target_func,
+                        target_name,
+                        global,
+                        aliases,
+                        local_bindings,
+                        caller_decl,
+                    )
+                })
+                .or_else(|| {
+                    find_call_span_resolved(
+                        update_events,
+                        target_func,
+                        target_name,
+                        global,
+                        aliases,
+                        local_bindings,
+                        caller_decl,
+                    )
+                }) {
                     return Some(span);
                 }
             }

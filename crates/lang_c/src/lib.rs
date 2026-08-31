@@ -72,6 +72,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     loop_body_field_names: &["body"],
     loop_body_kinds: &["compound_statement", "expression_statement"],
     loop_update_field_names: &["update"],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: None,
     branch_arm_kinds: &["compound_statement", "expression_statement"],
     exclusive_branch_arm_kinds: &["case_statement"],
     fallthrough_branch_arm_kinds: &["case_statement"],

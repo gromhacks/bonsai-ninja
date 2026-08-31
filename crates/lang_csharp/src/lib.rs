@@ -397,6 +397,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     loop_body_field_names: &["body"],
     loop_body_kinds: &["block", "expression_statement"],
     loop_update_field_names: &["update"],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: None,
     branch_arm_kinds: &["block", "expression_statement", "switch_section"],
     exclusive_branch_arm_kinds: &["switch_section"],
     fallthrough_branch_arm_kinds: &[],

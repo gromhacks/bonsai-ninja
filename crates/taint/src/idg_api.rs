@@ -576,9 +576,19 @@ fn most_specific_sink_event(events: &[FlowEvent], sink_span: Span) -> Option<Sin
                     walk(then_events, sink_span, best);
                     walk(else_events, sink_span, best);
                 }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => walk(body, sink_span, best),
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    walk(condition_events, sink_span, best);
+                    walk(body, sink_span, best);
+                    walk(update_events, sink_span, best);
+                }
+                FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                    walk(body, sink_span, best);
+                }
                 FlowEvent::Try {
                     body,
                     catch_events,
@@ -626,9 +636,19 @@ fn latest_receiver_field_writes_before(
                     walk(then_events, receiver, before, out);
                     walk(else_events, receiver, before, out);
                 }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => walk(body, receiver, before, out),
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    walk(condition_events, receiver, before, out);
+                    walk(body, receiver, before, out);
+                    walk(update_events, receiver, before, out);
+                }
+                FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                    walk(body, receiver, before, out);
+                }
                 FlowEvent::Try {
                     body,
                     catch_events,

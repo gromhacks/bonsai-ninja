@@ -64,7 +64,7 @@ fn adapter_proven_local_break_truncates_only_its_structured_arm() {
                 },
                 FlowEvent::Break {
                     span: local_break,
-                    label: None,
+                    target: None,
                 },
                 FlowEvent::Call {
                     span: Span::new(file, 26, 30),
@@ -77,7 +77,7 @@ fn adapter_proven_local_break_truncates_only_its_structured_arm() {
             ],
             else_events: vec![FlowEvent::Break {
                 span: Span::new(file, 31, 35),
-                label: None,
+                target: None,
             }],
         },
         FlowEvent::Call {
@@ -2702,8 +2702,12 @@ fn evaluation_order_preserves_lowered_loop_body_before_textually_earlier_update(
     let loop_event = FlowEvent::Loop {
         span: Span::new(file, 10, 65),
         loop_kind: crate::LoopKind::For,
-        // The compiler lowering encodes runtime phase order: body, then update.
-        body: vec![body_call, header_update],
+        label: None,
+        condition_events: Vec::new(),
+        // The compiler lowering keeps the update phase distinct so continue
+        // cannot skip it.
+        update_events: vec![header_update],
+        body: vec![body_call],
     };
     let mut index = DeclIndex::default();
     index
@@ -2711,11 +2715,14 @@ fn evaluation_order_preserves_lowered_loop_body_before_textually_earlier_update(
         .push(m9_func_decl(1, "pipeline", None, vec![loop_event]));
 
     normalize_decl_event_evaluation_order(&mut index);
-    let FlowEvent::Loop { body, .. } = &index.defs[0].flow_events[0] else {
+    let FlowEvent::Loop {
+        body, update_events, ..
+    } = &index.defs[0].flow_events[0]
+    else {
         panic!("expected loop event");
     };
     assert!(matches!(&body[0], FlowEvent::Call { name, .. } if name == "consume"));
-    assert!(matches!(&body[1], FlowEvent::Assign { target, .. } if target == "value"));
+    assert!(matches!(&update_events[0], FlowEvent::Assign { target, .. } if target == "value"));
 }
 
 #[test]
@@ -2749,6 +2756,9 @@ fn evaluation_order_keeps_a_loop_assignment_after_its_nested_rhs_call() {
     let loop_event = FlowEvent::Loop {
         span: Span::new(file, 10, 90),
         loop_kind: crate::LoopKind::For,
+        label: None,
+        condition_events: Vec::new(),
+        update_events: Vec::new(),
         // A secondary adapter pass may append the nested call after the
         // enclosing assignment. AST containment still defines evaluator
         // order inside a loop body.

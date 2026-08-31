@@ -144,7 +144,20 @@ fn walk_events(events: &[FlowEvent], pred: &dyn Fn(&FlowEvent) -> bool) -> bool 
                     return true;
                 }
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                if walk_events(condition_events, pred)
+                    || walk_events(body, pred)
+                    || walk_events(update_events, pred)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if walk_events(body, pred) {
                     return true;
                 }

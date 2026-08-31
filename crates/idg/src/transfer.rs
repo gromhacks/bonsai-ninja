@@ -59,9 +59,10 @@
 //! - `Branch { then_events, else_events }` → walk both arms; the
 //!   union of edges is the merged post-state.
 //! - `Loop { body }` → preserve entry writers for the zero-iteration
-//!   exit, walk once for may-run edges, and replay once with body-end
-//!   writers live so loop-carried reads see the previous iteration.
-//!   Nested replay is flattened and duplicate edges are suppressed.
+//!   exit and compute the finite reaching-definition fixed point for the
+//!   loop header. Loop-carried reads therefore see every exact writer that
+//!   can reach a later iteration; convergence follows from the finite set of
+//!   interned writer nodes and is never enforced by an iteration cap.
 //! - `Defer { body }` → walk body normally; we don't separate
 //!   deferred edges from immediate ones in the IDG (path
 //!   sensitivity is a query-time concern, not a graph-construction
@@ -76,7 +77,7 @@ use bonsai_lang_api::{
     call_argument_value_fact, call_receiver_fact_for_span, kit::SYNTHETIC_TUPLE_RESULT_PREFIX,
     AssignValueKind, AssignmentValueFact, CallArg, CallArgumentValueFact, CallKind, CallReceiverFact,
     CallReceiverRole, Decl, DeclKind, ExpressionFlow, ExpressionProjection, FiniteLiteralSelectionFact,
-    FlowEvent,
+    FlowEvent, LoopControlTarget,
 };
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -1126,12 +1127,19 @@ impl FlowControlFacts {
                 }
             }
             match event {
-                FlowEvent::Loop { body, .. } => {
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
                     // Zero is the implicit non-loop root; stored contexts are
                     // one-based so loop-free functions allocate nothing.
                     let child_context = self.loop_context_parents.len() + 1;
                     self.loop_context_parents.push(loop_context);
+                    self.collect_events(condition_events, child_context);
                     self.collect_events(body, child_context);
+                    self.collect_events(update_events, child_context);
                 }
                 FlowEvent::Branch {
                     then_events,
@@ -1476,7 +1484,6 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
         call_receivers,
         call_argument_values,
         finite_literal_selections,
-        in_loop_replay: false,
     };
 
     // Seed the function's `Return` place defensively. Every
@@ -1576,9 +1583,17 @@ fn flow_events_contain_return(events: &[FlowEvent]) -> bool {
             else_events,
             ..
         } => flow_events_contain_return(then_events) || flow_events_contain_return(else_events),
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-            flow_events_contain_return(body)
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => {
+            flow_events_contain_return(condition_events)
+                || flow_events_contain_return(body)
+                || flow_events_contain_return(update_events)
         }
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => flow_events_contain_return(body),
         FlowEvent::Try {
             body,
             catch_events,
@@ -1626,9 +1641,19 @@ fn return_passthrough_param_indices(events: &[FlowEvent], params: &[String]) -> 
                     collect(then_events, params, out);
                     collect(else_events, params, out);
                 }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => collect(body, params, out),
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    collect(condition_events, params, out);
+                    collect(body, params, out);
+                    collect(update_events, params, out);
+                }
+                FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                    collect(body, params, out);
+                }
                 FlowEvent::Try {
                     body,
                     catch_events,
@@ -1686,7 +1711,17 @@ fn collect_return_field_projections(
                 collect_return_field_projections(then_events, receiver_names, out);
                 collect_return_field_projections(else_events, receiver_names, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_return_field_projections(condition_events, receiver_names, out);
+                collect_return_field_projections(body, receiver_names, out);
+                collect_return_field_projections(update_events, receiver_names, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_return_field_projections(body, receiver_names, out);
             }
             FlowEvent::Try {
@@ -1836,7 +1871,17 @@ fn collect_implicit_receiver_bases(events: &[FlowEvent], receiver_names: &[Strin
                 collect_implicit_receiver_bases(then_events, receiver_names, out);
                 collect_implicit_receiver_bases(else_events, receiver_names, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_implicit_receiver_bases(condition_events, receiver_names, out);
+                collect_implicit_receiver_bases(body, receiver_names, out);
+                collect_implicit_receiver_bases(update_events, receiver_names, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_implicit_receiver_bases(body, receiver_names, out);
             }
             FlowEvent::Try {
@@ -2183,13 +2228,6 @@ struct TransferCtx<'a> {
     /// Compiler-proven assignments whose dynamic key selects only among
     /// literal values. Sorted by assignment span for logarithmic lookup.
     finite_literal_selections: &'a [FiniteLiteralSelectionFact],
-    /// Whether the walker is replaying an enclosing loop body to establish
-    /// loop-carried edges. A nested loop encountered during replay gets one
-    /// body visit: its own normal visit already established its local carry
-    /// edges, while the enclosing replay supplies the outer-iteration state.
-    /// This keeps nested-loop transfer polynomial without imposing a semantic
-    /// nesting ceiling.
-    in_loop_replay: bool,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -2491,7 +2529,17 @@ fn collect_field_precise_container_assigns_into(
                 collect_field_precise_container_assigns_into(then_events, out);
                 collect_field_precise_container_assigns_into(else_events, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_field_precise_container_assigns_into(condition_events, out);
+                collect_field_precise_container_assigns_into(body, out);
+                collect_field_precise_container_assigns_into(update_events, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_field_precise_container_assigns_into(body, out);
             }
             FlowEvent::Try {
@@ -2601,9 +2649,19 @@ fn collect_field_precise_source_projections(
                     collect(then_events, methods, out);
                     collect(else_events, methods, out);
                 }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => collect(body, methods, out),
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    collect(condition_events, methods, out);
+                    collect(body, methods, out);
+                    collect(update_events, methods, out);
+                }
+                FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                    collect(body, methods, out);
+                }
                 FlowEvent::Try {
                     body,
                     catch_events,
@@ -2683,7 +2741,17 @@ fn collect_yield_callback_names_into(
                 collect_yield_callback_names_into(then_events, yielding_call_assignments, out);
                 collect_yield_callback_names_into(else_events, yielding_call_assignments, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_yield_callback_names_into(condition_events, yielding_call_assignments, out);
+                collect_yield_callback_names_into(body, yielding_call_assignments, out);
+                collect_yield_callback_names_into(update_events, yielding_call_assignments, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_yield_callback_names_into(body, yielding_call_assignments, out);
             }
             FlowEvent::Try {
@@ -2718,7 +2786,17 @@ fn collect_yield_result_call_assignments(events: &[FlowEvent], out: &mut Vec<(Sp
                 collect_yield_result_call_assignments(then_events, out);
                 collect_yield_result_call_assignments(else_events, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_yield_result_call_assignments(condition_events, out);
+                collect_yield_result_call_assignments(body, out);
+                collect_yield_result_call_assignments(update_events, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_yield_result_call_assignments(body, out);
             }
             FlowEvent::Try {
@@ -2744,9 +2822,17 @@ fn events_contain_yield(events: &[FlowEvent]) -> bool {
             else_events,
             ..
         } => events_contain_yield(then_events) || events_contain_yield(else_events),
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-            events_contain_yield(body)
+        FlowEvent::Loop {
+            condition_events,
+            body,
+            update_events,
+            ..
+        } => {
+            events_contain_yield(condition_events)
+                || events_contain_yield(body)
+                || events_contain_yield(update_events)
         }
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => events_contain_yield(body),
         FlowEvent::Try {
             body,
             catch_events,
@@ -2791,7 +2877,17 @@ fn collect_method_receiver_projections_into(
                 collect_method_receiver_projections_into(then_events, call_receivers, out);
                 collect_method_receiver_projections_into(else_events, call_receivers, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_method_receiver_projections_into(condition_events, call_receivers, out);
+                collect_method_receiver_projections_into(body, call_receivers, out);
+                collect_method_receiver_projections_into(update_events, call_receivers, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_method_receiver_projections_into(body, call_receivers, out);
             }
             FlowEvent::Try {
@@ -2917,9 +3013,205 @@ fn merge_writer_states(
     }
 }
 
+type WriterState = ahash::AHashMap<StrId, smallvec::SmallVec<[NodeId; 4]>>;
+type ControlExitStates = ahash::AHashMap<Option<LoopControlTarget>, WriterState>;
+
+#[derive(Clone)]
+struct ThrowExit {
+    site: ThrowSite,
+    writers: WriterState,
+}
+
+/// Reaching-definition states leaving one structured compiler region.
+///
+/// Keeping abrupt exits separate is the structured-HIR equivalent of the
+/// distinct successor edges in [`bonsai_cfg::Cfg`].  In particular, a write
+/// on a `break`/`return` arm must never be folded into the ordinary join state
+/// for statements that only the fall-through arm can execute.  Each slot is a
+/// may-state union: the IDG records value reachability, so one state per exit
+/// kind is sufficient and avoids path enumeration.
+#[derive(Default)]
+struct FlowExits {
+    fallthrough: Option<WriterState>,
+    breaks: ControlExitStates,
+    continues: ControlExitStates,
+    returns: Option<WriterState>,
+    throws: Vec<ThrowExit>,
+}
+
+#[derive(Copy, Clone)]
+enum FlowExitKind {
+    Fallthrough,
+    Return,
+}
+
+impl FlowExits {
+    fn fallthrough(state: WriterState) -> Self {
+        Self {
+            fallthrough: Some(state),
+            ..Self::default()
+        }
+    }
+
+    fn add(&mut self, kind: FlowExitKind, state: WriterState) {
+        let target = match kind {
+            FlowExitKind::Fallthrough => &mut self.fallthrough,
+            FlowExitKind::Return => &mut self.returns,
+        };
+        if let Some(current) = target {
+            merge_writer_states(current, state);
+        } else {
+            *target = Some(state);
+        }
+    }
+
+    fn add_break(&mut self, target: Option<LoopControlTarget>, state: WriterState) {
+        add_control_exit(&mut self.breaks, target, state);
+    }
+
+    fn add_continue(&mut self, target: Option<LoopControlTarget>, state: WriterState) {
+        add_control_exit(&mut self.continues, target, state);
+    }
+
+    fn add_throw(&mut self, site: ThrowSite, writers: WriterState) {
+        if let Some(existing) = self
+            .throws
+            .iter_mut()
+            .find(|existing| existing.site.throw_node == site.throw_node)
+        {
+            merge_writer_states(&mut existing.writers, writers);
+        } else {
+            self.throws.push(ThrowExit { site, writers });
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        for (kind, state) in [
+            (FlowExitKind::Fallthrough, other.fallthrough),
+            (FlowExitKind::Return, other.returns),
+        ] {
+            if let Some(state) = state {
+                self.add(kind, state);
+            }
+        }
+        merge_control_exits(&mut self.breaks, other.breaks);
+        merge_control_exits(&mut self.continues, other.continues);
+        for thrown in other.throws {
+            self.add_throw(thrown.site, thrown.writers);
+        }
+    }
+}
+
+fn add_control_exit(exits: &mut ControlExitStates, target: Option<LoopControlTarget>, state: WriterState) {
+    if let Some(current) = exits.get_mut(&target) {
+        merge_writer_states(current, state);
+    } else {
+        exits.insert(target, state);
+    }
+}
+
+fn merge_control_exits(target: &mut ControlExitStates, incoming: ControlExitStates) {
+    for (control_target, state) in incoming {
+        add_control_exit(target, control_target, state);
+    }
+}
+
+/// Remove the exits consumed by one lexical loop. An unlabeled transfer
+/// always targets the nearest loop; a transfer naming this loop's label also
+/// targets it. Every other label remains available to an enclosing loop.
+fn take_loop_control_exit(exits: &mut ControlExitStates, loop_label: Option<&str>) -> Option<WriterState> {
+    let mut consumed = exits.remove(&None);
+    if let Some(label) = loop_label {
+        if let Some(labeled) = exits.remove(&Some(LoopControlTarget::Label(label.to_string()))) {
+            if let Some(state) = &mut consumed {
+                merge_writer_states(state, labeled);
+            } else {
+                consumed = Some(labeled);
+            }
+        }
+    }
+    if let Some(level_one) = exits.remove(&Some(LoopControlTarget::Levels(1))) {
+        if let Some(state) = &mut consumed {
+            merge_writer_states(state, level_one);
+        } else {
+            consumed = Some(level_one);
+        }
+    }
+    let deeper = exits
+        .keys()
+        .filter_map(|target| match target {
+            Some(LoopControlTarget::Levels(levels)) if *levels > 1 => Some(*levels),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for levels in deeper {
+        if let Some(state) = exits.remove(&Some(LoopControlTarget::Levels(levels))) {
+            add_control_exit(exits, Some(LoopControlTarget::Levels(levels - 1)), state);
+        }
+    }
+    consumed
+}
+
+/// Route the exits of one loop phase. Fallthrough and a continue targeting
+/// this loop both advance to the next runtime phase; a matching break leaves
+/// the loop; returns, throws, and control targeting an outer loop remain
+/// escaped. The phase distinction is what makes `continue` execute a C-style
+/// update and a post-test condition without source-text interpretation.
+fn route_loop_phase_exits(
+    mut exits: FlowExits,
+    loop_label: Option<&str>,
+    escaped: &mut FlowExits,
+    loop_breaks: &mut WriterState,
+    has_loop_break: &mut bool,
+) -> Option<WriterState> {
+    let matching_break = take_loop_control_exit(&mut exits.breaks, loop_label);
+    let matching_continue = take_loop_control_exit(&mut exits.continues, loop_label);
+    merge_control_exits(&mut escaped.breaks, exits.breaks);
+    merge_control_exits(&mut escaped.continues, exits.continues);
+    if let Some(state) = matching_break {
+        *has_loop_break = true;
+        merge_writer_states(loop_breaks, state);
+    }
+    if let Some(state) = exits.returns {
+        escaped.add(FlowExitKind::Return, state);
+    }
+    for thrown in exits.throws {
+        escaped.add_throw(thrown.site, thrown.writers);
+    }
+    let mut next = exits.fallthrough;
+    if let Some(state) = matching_continue {
+        if let Some(current) = &mut next {
+            merge_writer_states(current, state);
+        } else {
+            next = Some(state);
+        }
+    }
+    next
+}
+
+fn walk_loop_phase(
+    events: &[FlowEvent],
+    input: Option<WriterState>,
+    loop_label: Option<&str>,
+    escaped: &mut FlowExits,
+    loop_breaks: &mut WriterState,
+    has_loop_break: &mut bool,
+    ctx: &mut TransferCtx<'_>,
+) -> Option<WriterState> {
+    let input = input?;
+    ctx.last_writer = input;
+    let exits = walk_events(events, ctx);
+    route_loop_phase_exits(exits, loop_label, escaped, loop_breaks, has_loop_break)
+}
+
 /// Walk a slice of FlowEvents, dispatching each to its handler.
-fn walk_events(events: &[FlowEvent], ctx: &mut TransferCtx<'_>) {
+fn walk_events(events: &[FlowEvent], ctx: &mut TransferCtx<'_>) -> FlowExits {
+    let mut escaped = FlowExits::default();
+    let mut falls_through = true;
     for (index, event) in events.iter().enumerate() {
+        if !falls_through {
+            break;
+        }
         let assign_call_site = assign_call_site_hint(
             events,
             index,
@@ -2927,12 +3219,34 @@ fn walk_events(events: &[FlowEvent], ctx: &mut TransferCtx<'_>) {
             ctx.flow_call_sites,
             Some(&ctx.lowered_call_sites),
         );
-        walk_event(event, assign_call_site, ctx);
+        let mut exits = walk_event(event, assign_call_site, ctx);
+        merge_control_exits(&mut escaped.breaks, std::mem::take(&mut exits.breaks));
+        merge_control_exits(&mut escaped.continues, std::mem::take(&mut exits.continues));
+        if let Some(state) = exits.returns.take() {
+            escaped.add(FlowExitKind::Return, state);
+        }
+        for thrown in exits.throws.drain(..) {
+            escaped.add_throw(thrown.site, thrown.writers);
+        }
+        if let Some(state) = exits.fallthrough.take() {
+            ctx.last_writer = state;
+        } else {
+            ctx.last_writer.clear();
+            falls_through = false;
+        }
     }
+    if falls_through {
+        escaped.fallthrough = Some(ctx.last_writer.clone());
+    }
+    escaped
 }
 
 /// Dispatch one FlowEvent to the appropriate handler.
-fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, ctx: &mut TransferCtx<'_>) {
+fn walk_event(
+    event: &FlowEvent,
+    assign_call_site: Option<AssignCallSiteHint>,
+    ctx: &mut TransferCtx<'_>,
+) -> FlowExits {
     match event {
         FlowEvent::Assign {
             span,
@@ -2962,7 +3276,7 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
                 *value_kind,
                 ctx,
             ) {
-                return;
+                return FlowExits::fallthrough(ctx.last_writer.clone());
             }
             walk_assign(
                 *span,
@@ -2976,13 +3290,17 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
                 assign_call_site,
                 ctx,
             );
+            FlowExits::fallthrough(ctx.last_writer.clone())
         }
         FlowEvent::AggregateAssign {
             span,
             target,
             value_flow,
             ..
-        } => emit_local_expression_aggregate(target, value_flow, *span, ctx),
+        } => {
+            emit_local_expression_aggregate(target, value_flow, *span, ctx);
+            FlowExits::fallthrough(ctx.last_writer.clone())
+        }
         FlowEvent::Call {
             span,
             name,
@@ -2990,15 +3308,18 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
             receiver_types,
             call_kind,
             args,
-        } => walk_call(
-            *span,
-            name,
-            receiver.as_deref(),
-            receiver_types,
-            *call_kind,
-            args,
-            ctx,
-        ),
+        } => {
+            walk_call(
+                *span,
+                name,
+                receiver.as_deref(),
+                receiver_types,
+                *call_kind,
+                args,
+                ctx,
+            );
+            FlowExits::fallthrough(ctx.last_writer.clone())
+        }
         FlowEvent::Return { span, value_flow, .. } => {
             let return_node = ctx.intern_node(Place::Return);
             let return_meta = crate::edge::EdgeMeta {
@@ -3018,68 +3339,158 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
                     meta: return_meta,
                 });
             }
+            let mut exits = FlowExits::default();
+            exits.add(FlowExitKind::Return, ctx.last_writer.clone());
+            exits
         }
         FlowEvent::Throw {
             span,
             value_name,
             thrown_type,
-        } => walk_throw(*span, value_name.as_deref(), thrown_type.as_deref(), ctx),
+        } => {
+            walk_throw(*span, value_name.as_deref(), thrown_type.as_deref(), ctx);
+            let mut exits = FlowExits::default();
+            let site = ctx
+                .out
+                .throw_sites
+                .last()
+                .cloned()
+                .expect("walk_throw records the typed throw endpoint");
+            exits.add_throw(site, ctx.last_writer.clone());
+            exits
+        }
         FlowEvent::Branch {
             span: _,
             condition: _,
             then_events,
             else_events,
         } => {
-            // Reachability is language semantics, not spelling: `0` is false
-            // in C/Python but true in Ruby, Lua, and Elixir. Until adapters
-            // carry an AST-derived constant value, conservatively join both
-            // grammar branches rather than dropping a real flow.
-            // SSA-style join: snapshot last_writer at branch entry,
-            // walk each arm with an independent copy, then merge by
-            // taking the union of writers per name. Either arm's
-            // writer remains "live" for code after the join, so a
-            // tainted write in one arm reaches downstream consumers
-            // even if the other arm wrote a clean value.
+            // Both syntactic arms remain feasible unless an adapter emits a
+            // constant-condition fact. Their *exit kinds* are not
+            // interchangeable, however: only fall-through definitions reach
+            // the ordinary join. Break/continue/return/throw states follow
+            // their explicit CFG successors and are carried separately.
             let entry = ctx.last_writer.clone();
-            walk_events(then_events, ctx);
-            let after_then = std::mem::replace(&mut ctx.last_writer, entry);
-            walk_events(else_events, ctx);
-            // Merge after_then into ctx.last_writer (which holds
-            // after_else): per-name union.
-            for (name, writers) in after_then {
-                let merged = ctx.last_writer.entry(name).or_default();
-                for w in writers {
-                    if !merged.contains(&w) {
-                        merged.push(w);
-                    }
-                }
-            }
+            ctx.last_writer = entry.clone();
+            let then_exits = walk_events(then_events, ctx);
+            ctx.last_writer = entry;
+            let else_exits = walk_events(else_events, ctx);
+            let mut exits = FlowExits::default();
+            exits.merge(then_exits);
+            exits.merge(else_exits);
+            ctx.last_writer = exits.fallthrough.clone().unwrap_or_default();
+            exits
         }
         FlowEvent::Loop {
             span: _,
-            loop_kind: _,
+            loop_kind,
+            label,
+            condition_events,
+            update_events,
             body,
         } => {
-            // A loop may execute zero or more times. Preserve its entry
-            // writer state for the zero-iteration exit, walk the body once
-            // for ordinary may-run edges, then replay it once so body reads
-            // observe prior-iteration writes. Stable node identities plus
-            // exact edge suppression make one replay sufficient for the
-            // structural closure.
-            //
-            // Nested loops do not recursively replay while an enclosing
-            // replay is active. They already established their local carry
-            // edges during the normal walk, and this visit lets those nodes
-            // observe the enclosing loop's carried state without 2^depth
-            // traversal or a correctness-reducing nesting cap.
-            let entry_writers = ctx.last_writer.clone();
-            walk_events(body, ctx);
-            if !ctx.in_loop_replay {
-                ctx.in_loop_replay = true;
-                walk_events(body, ctx);
-                ctx.in_loop_replay = false;
+            // Solve the loop header's reaching definitions to a real finite
+            // fixed point. The state lattice is finite (writer nodes are
+            // keyed by compiler spans), so this terminates without a depth or
+            // iteration cap. `break` states flow only to the after block;
+            // fall-through and `continue` states flow back to the header.
+            let entry = ctx.last_writer.clone();
+            let mut iteration_entry = entry.clone();
+            let mut escaped = FlowExits::default();
+            let mut loop_breaks = WriterState::default();
+            let mut has_loop_break = false;
+            let mut normal_exit = None;
+            loop {
+                let mut body_entry = Some(iteration_entry.clone());
+
+                // Pre-test conditions execute before every body iteration.
+                // The resulting state also represents the condition-false
+                // edge to code after the loop.
+                if !matches!(
+                    loop_kind,
+                    bonsai_lang_api::LoopKind::DoWhile | bonsai_lang_api::LoopKind::Loop
+                ) {
+                    body_entry = walk_loop_phase(
+                        condition_events,
+                        body_entry,
+                        label.as_deref(),
+                        &mut escaped,
+                        &mut loop_breaks,
+                        &mut has_loop_break,
+                        ctx,
+                    );
+                    normal_exit.clone_from(&body_entry);
+                }
+
+                let mut backedge = walk_loop_phase(
+                    body,
+                    body_entry,
+                    label.as_deref(),
+                    &mut escaped,
+                    &mut loop_breaks,
+                    &mut has_loop_break,
+                    ctx,
+                );
+                backedge = walk_loop_phase(
+                    update_events,
+                    backedge,
+                    label.as_deref(),
+                    &mut escaped,
+                    &mut loop_breaks,
+                    &mut has_loop_break,
+                    ctx,
+                );
+
+                // A post-test loop evaluates its condition after the body
+                // (and after any update phase). Continue reaches this phase,
+                // not the body entry directly.
+                if *loop_kind == bonsai_lang_api::LoopKind::DoWhile {
+                    backedge = walk_loop_phase(
+                        condition_events,
+                        backedge,
+                        label.as_deref(),
+                        &mut escaped,
+                        &mut loop_breaks,
+                        &mut has_loop_break,
+                        ctx,
+                    );
+                    normal_exit.clone_from(&backedge);
+                }
+
+                let mut next_entry = entry.clone();
+                if let Some(state) = backedge {
+                    merge_writer_states(&mut next_entry, state);
+                }
+                if next_entry == iteration_entry {
+                    break;
+                }
+                iteration_entry = next_entry;
             }
-            merge_writer_states(&mut ctx.last_writer, entry_writers);
+
+            // Pre-test loops may leave from the initial header without one
+            // body execution. Post-test loops can leave only from a body
+            // fallthrough/continue state. An unconditional `loop` has no
+            // ordinary exit at all. Explicit breaks join whichever normal
+            // exit exists, including an empty (clean) writer state.
+            let normal_exit = match loop_kind {
+                bonsai_lang_api::LoopKind::DoWhile => normal_exit,
+                bonsai_lang_api::LoopKind::Loop => None,
+                bonsai_lang_api::LoopKind::For
+                | bonsai_lang_api::LoopKind::While
+                | bonsai_lang_api::LoopKind::ForEach => normal_exit,
+            };
+            let after_loop = match (normal_exit, has_loop_break) {
+                (Some(mut normal), true) => {
+                    merge_writer_states(&mut normal, loop_breaks);
+                    Some(normal)
+                }
+                (Some(normal), false) => Some(normal),
+                (None, true) => Some(loop_breaks),
+                (None, false) => None,
+            };
+            ctx.last_writer = after_loop.clone().unwrap_or_default();
+            escaped.fallthrough = after_loop;
+            escaped
         }
         FlowEvent::Try {
             span,
@@ -3101,8 +3512,7 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
             },
             ctx,
         ),
-        FlowEvent::Defer { span: _, body } => walk_events(body, ctx),
-        FlowEvent::Using { span: _, body } => walk_events(body, ctx),
+        FlowEvent::Defer { span: _, body } | FlowEvent::Using { span: _, body } => walk_events(body, ctx),
         FlowEvent::Yield { span, value_flow, .. } => {
             let yield_meta = crate::edge::EdgeMeta {
                 precision: Precision::Exact,
@@ -3122,6 +3532,7 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
                 emit_expression_scalar_to_node(value_flow, to, yield_meta, ctx);
                 copy_expression_descendants_to_special_base(YIELD_FIELD_BASE, value_flow, *span, ctx);
             }
+            FlowExits::fallthrough(ctx.last_writer.clone())
         }
         FlowEvent::Await { span, value_name } => {
             if let Some(name) = value_name.as_deref() {
@@ -3139,13 +3550,19 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
                     );
                 }
             }
+            FlowExits::fallthrough(ctx.last_writer.clone())
         }
-        FlowEvent::Break { .. } | FlowEvent::Continue { .. } | FlowEvent::Lifecycle { .. } => {
-            // No dataflow edges from these events. Break/Continue
-            // affect control flow which the IDG models as graph
-            // reachability — the relevant edges live on the
-            // surrounding events.
+        FlowEvent::Break { target, .. } => {
+            let mut exits = FlowExits::default();
+            exits.add_break(target.clone(), ctx.last_writer.clone());
+            exits
         }
+        FlowEvent::Continue { target, .. } => {
+            let mut exits = FlowExits::default();
+            exits.add_continue(target.clone(), ctx.last_writer.clone());
+            exits
+        }
+        FlowEvent::Lifecycle { .. } => FlowExits::fallthrough(ctx.last_writer.clone()),
     }
 }
 
@@ -3591,7 +4008,17 @@ fn collect_assignment_call_sites(
                 collect_assignment_call_sites(then_events, assignment_values, flow_call_sites, out);
                 collect_assignment_call_sites(else_events, assignment_values, flow_call_sites, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_assignment_call_sites(condition_events, assignment_values, flow_call_sites, out);
+                collect_assignment_call_sites(body, assignment_values, flow_call_sites, out);
+                collect_assignment_call_sites(update_events, assignment_values, flow_call_sites, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_assignment_call_sites(body, assignment_values, flow_call_sites, out);
             }
             FlowEvent::Try {
@@ -3621,7 +4048,17 @@ fn collect_flow_call_sites(events: &[FlowEvent], out: &mut Vec<Span>) {
                 collect_flow_call_sites(then_events, out);
                 collect_flow_call_sites(else_events, out);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_flow_call_sites(condition_events, out);
+                collect_flow_call_sites(body, out);
+                collect_flow_call_sites(update_events, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_flow_call_sites(body, out);
             }
             FlowEvent::Try {
@@ -5380,12 +5817,12 @@ fn normalized_call_arg_storage_place(place: &str) -> &str {
 fn walk_throw(span: Span, value_name: Option<&str>, thrown_type: Option<&str>, ctx: &mut TransferCtx<'_>) {
     let ty_id = thrown_type.map(|t| TypeId(ctx.intern_name(t)));
     let throw_place = match ty_id {
-        Some(ty) => Place::Throw { ty },
+        Some(ty) => Place::Throw { ty, site: span },
         None => {
             // Untyped throw: use a sentinel "*" type id. Phase 3
             // treats this as a catch-all match.
             let star = TypeId(ctx.intern_name("*"));
-            Place::Throw { ty: star }
+            Place::Throw { ty: star, site: span }
         }
     };
     let throw_node = ctx.intern_node(throw_place);
@@ -5428,71 +5865,209 @@ fn walk_try(
     finally_events: &[FlowEvent],
     catch: TryCatchSpec<'_>,
     ctx: &mut TransferCtx<'_>,
-) {
-    // SSA-style join for try-catch: snapshot last_writer at try
-    // entry, walk body with an independent copy, then walk catch
-    // starting from the entry snapshot, then merge body+catch
-    // last_writer states. Either branch's writer remains live for
-    // post-`try` code, so a tainted write inside the body reaches
-    // downstream consumers even when the catch overwrites the same
-    // name with a clean value (and vice versa). Without this, a
-    // single-branch overwrite (e.g. `t = ""` in the catch arm)
-    // silently kills the body's tainted writer, making try/except
-    // act like a sanitizer for the source — not what the engine
-    // does and not what the audit tests expect.
+) -> FlowExits {
+    // Try/catch is a control-flow fork. Keep each exit class distinct just
+    // like the canonical CFG: only body/catch fall-through states reach the
+    // ordinary post-try join, while return/throw/break/continue states route
+    // through `finally` and retain their original destination.
     let entry_writers = ctx.last_writer.clone();
-    let throws_before = ctx.out.throw_sites.len();
-    walk_events(body, ctx);
-    let body_throws = ctx.out.throw_sites[throws_before..].to_vec();
+    ctx.last_writer = entry_writers.clone();
+    let mut body_exits = walk_events(body, ctx);
+    let body_throw_exits = std::mem::take(&mut body_exits.throws);
+    let body_throws = body_throw_exits
+        .iter()
+        .map(|thrown| thrown.site.clone())
+        .collect::<Vec<_>>();
     bridge_compound_throw_sources(body, &body_throws, ctx);
-    let after_body = std::mem::replace(&mut ctx.last_writer, entry_writers);
+    let has_catch = catch.param.is_some()
+        || !catch.types.is_empty()
+        || !catch.arms.is_empty()
+        || !catch_events.is_empty();
+    let mut combined = body_exits;
+    let mut definitely_caught = ahash::AHashSet::default();
 
     // New compiler objects retain each handler's exact span, binding and
     // declared types. The nested Branch shape in `catch_events` preserves
     // mutually exclusive bodies; pair the two representations without
     // parsing source text or interpreting language syntax here.
-    if let Some(arms) = catch_arm_event_slices(catch_events, catch.arms) {
-        let catch_entry = ctx.last_writer.clone();
-        let mut catch_exits = Vec::with_capacity(arms.len());
-        for (arm, arm_events) in arms {
-            ctx.last_writer = catch_entry.clone();
-            bind_catch_arm(
-                &body_throws,
-                &arm.types,
-                arm.parameter.as_deref(),
-                span,
-                arm.span,
-                ctx,
+    if has_catch {
+        let mut all_catch_exits = FlowExits::default();
+        if let Some(arms) = catch_arm_event_slices(catch_events, catch.arms) {
+            for (arm, arm_events) in arms {
+                let catch_type_ids = catch_type_ids(&arm.types, ctx);
+                ctx.last_writer =
+                    catch_entry_writer_state(&body_throw_exits, &catch_type_ids, &entry_writers);
+                record_definitely_caught_throws(
+                    &body_throw_exits,
+                    &catch_type_ids,
+                    arm.types.is_empty(),
+                    &mut definitely_caught,
+                );
+                bind_catch_arm(
+                    &body_throws,
+                    &arm.types,
+                    arm.parameter.as_deref(),
+                    span,
+                    arm.span,
+                    ctx,
+                );
+                let previous_receivers = ctx.catch_projection_receivers.clone();
+                if let Some(param) = arm.parameter.as_deref().filter(|param| !param.is_empty()) {
+                    let sid = ctx.intern_name(param);
+                    ctx.catch_projection_receivers.insert(sid);
+                }
+                let arm_exits = walk_events(arm_events, ctx);
+                ctx.catch_projection_receivers = previous_receivers;
+                all_catch_exits.merge(arm_exits);
+            }
+        } else {
+            // Compatibility path for compiler objects produced before
+            // arm-local facts existed, and for custom adapter lowerings not
+            // yet carrying them.
+            let catch_type_ids = catch_type_ids(catch.types, ctx);
+            ctx.last_writer = catch_entry_writer_state(&body_throw_exits, &catch_type_ids, &entry_writers);
+            record_definitely_caught_throws(
+                &body_throw_exits,
+                &catch_type_ids,
+                catch.types.is_empty(),
+                &mut definitely_caught,
             );
-            let previous_receivers = ctx.catch_projection_receivers.clone();
-            if let Some(param) = arm.parameter.as_deref().filter(|param| !param.is_empty()) {
+            bind_catch_arm(&body_throws, catch.types, catch.param, span, span, ctx);
+            let previous_catch_projection_receivers = ctx.catch_projection_receivers.clone();
+            if let Some(param) = catch.param.filter(|param| !param.is_empty()) {
                 let sid = ctx.intern_name(param);
                 ctx.catch_projection_receivers.insert(sid);
             }
-            walk_events(arm_events, ctx);
-            ctx.catch_projection_receivers = previous_receivers;
-            catch_exits.push(std::mem::take(&mut ctx.last_writer));
+            all_catch_exits = walk_events(catch_events, ctx);
+            ctx.catch_projection_receivers = previous_catch_projection_receivers;
         }
-        ctx.last_writer = after_body;
-        for catch_exit in catch_exits {
-            merge_writer_states(&mut ctx.last_writer, catch_exit);
-        }
-        walk_events(finally_events, ctx);
-        return;
+        combined.merge(all_catch_exits);
     }
 
-    // Compatibility path for compiler objects produced before arm-local
-    // facts existed, and for custom adapter lowerings not yet carrying them.
-    bind_catch_arm(&body_throws, catch.types, catch.param, span, span, ctx);
-    let previous_catch_projection_receivers = ctx.catch_projection_receivers.clone();
-    if let Some(param) = catch.param.filter(|param| !param.is_empty()) {
-        let sid = ctx.intern_name(param);
-        ctx.catch_projection_receivers.insert(sid);
+    for thrown in body_throw_exits {
+        if !definitely_caught.contains(&thrown.site.throw_node) {
+            combined.add_throw(thrown.site, thrown.writers);
+        }
     }
-    walk_events(catch_events, ctx);
-    ctx.catch_projection_receivers = previous_catch_projection_receivers;
-    merge_writer_states(&mut ctx.last_writer, after_body);
-    walk_events(finally_events, ctx);
+
+    let exits = apply_finally_to_exits(combined, finally_events, ctx);
+    ctx.last_writer = exits.fallthrough.clone().unwrap_or_default();
+    exits
+}
+
+fn catch_type_ids(catch_types: &[String], ctx: &mut TransferCtx<'_>) -> Vec<TypeId> {
+    catch_types
+        .iter()
+        .filter(|catch_type| !catch_type.is_empty())
+        .map(|catch_type| TypeId(ctx.intern_name(catch_type)))
+        .collect()
+}
+
+fn catch_entry_writer_state(
+    throws: &[ThrowExit],
+    catch_types: &[TypeId],
+    fallback: &WriterState,
+) -> WriterState {
+    let catch_all = catch_types.is_empty();
+    let mut matched = WriterState::default();
+    for thrown in throws.iter().filter(|thrown| {
+        catch_all
+            || thrown.site.thrown_type.is_none()
+            || thrown
+                .site
+                .thrown_type
+                .is_some_and(|ty| catch_types.contains(&ty))
+    }) {
+        merge_writer_states(&mut matched, thrown.writers.clone());
+    }
+    if matched.is_empty() && !throws.is_empty() {
+        // A distinct declared subtype can be proven only by the workspace
+        // hierarchy stitch. Preserve its pre-throw writers conservatively;
+        // the typed Throw->Catch edge remains the authority for the caught
+        // value itself.
+        for thrown in throws {
+            merge_writer_states(&mut matched, thrown.writers.clone());
+        }
+    }
+    if matched.is_empty() {
+        fallback.clone()
+    } else {
+        matched
+    }
+}
+
+fn record_definitely_caught_throws(
+    throws: &[ThrowExit],
+    catch_types: &[TypeId],
+    catch_all: bool,
+    out: &mut ahash::AHashSet<NodeId>,
+) {
+    for thrown in throws {
+        if catch_all
+            || thrown
+                .site
+                .thrown_type
+                .is_some_and(|ty| catch_types.contains(&ty))
+        {
+            out.insert(thrown.site.throw_node);
+        }
+    }
+}
+
+/// Execute one `finally` region for every distinct incoming control exit.
+/// A fall-through from `finally` resumes the incoming destination; an abrupt
+/// exit produced by `finally` overrides it. This is the same edge semantics
+/// encoded by the CFG builder's per-destination finally copies, expressed as
+/// sparse reaching-definition states rather than enumerated runtime paths.
+fn apply_finally_to_exits(
+    exits: FlowExits,
+    finally_events: &[FlowEvent],
+    ctx: &mut TransferCtx<'_>,
+) -> FlowExits {
+    if finally_events.is_empty() {
+        return exits;
+    }
+
+    let mut routed = FlowExits::default();
+    for (incoming_kind, state) in [
+        (FlowExitKind::Fallthrough, exits.fallthrough),
+        (FlowExitKind::Return, exits.returns),
+    ] {
+        let Some(state) = state else {
+            continue;
+        };
+        ctx.last_writer = state;
+        let mut cleanup = walk_events(finally_events, ctx);
+        if let Some(state) = cleanup.fallthrough.take() {
+            routed.add(incoming_kind, state);
+        }
+        routed.merge(cleanup);
+    }
+    for (target, state) in exits.breaks {
+        ctx.last_writer = state;
+        let mut cleanup = walk_events(finally_events, ctx);
+        if let Some(state) = cleanup.fallthrough.take() {
+            routed.add_break(target, state);
+        }
+        routed.merge(cleanup);
+    }
+    for (target, state) in exits.continues {
+        ctx.last_writer = state;
+        let mut cleanup = walk_events(finally_events, ctx);
+        if let Some(state) = cleanup.fallthrough.take() {
+            routed.add_continue(target, state);
+        }
+        routed.merge(cleanup);
+    }
+    for thrown in exits.throws {
+        ctx.last_writer = thrown.writers;
+        let mut cleanup = walk_events(finally_events, ctx);
+        if let Some(state) = cleanup.fallthrough.take() {
+            routed.add_throw(thrown.site, state);
+        }
+        routed.merge(cleanup);
+    }
+    routed
 }
 
 fn bind_catch_arm(
@@ -5508,7 +6083,11 @@ fn bind_catch_arm(
             continue;
         }
         let catch_ty = TypeId(ctx.intern_name(catch_type));
-        let catch_node = ctx.intern_node(Place::Catch { ty: catch_ty });
+        let catch_node = ctx.intern_node(Place::Catch {
+            ty: catch_ty,
+            site: arm_span,
+            try_span,
+        });
 
         for throw in body_throws {
             if let Some(precision) = thrown_type_catch_precision(throw.thrown_type, catch_ty) {
@@ -5552,7 +6131,11 @@ fn bind_catch_arm(
     // throw to a catch-all node, and bind the param if present.
     if catch_types.is_empty() && !body_throws.is_empty() {
         let any_ty = TypeId(ctx.intern_name("*"));
-        let catch_node = ctx.intern_node(Place::Catch { ty: any_ty });
+        let catch_node = ctx.intern_node(Place::Catch {
+            ty: any_ty,
+            site: arm_span,
+            try_span,
+        });
         for throw in body_throws {
             ctx.emit(IdgEdge {
                 from: throw.throw_node,
@@ -5684,7 +6267,17 @@ fn bridge_call_args_inside_throw(
                 bridge_call_args_inside_throw(then_events, throw_span, throw_node, ctx);
                 bridge_call_args_inside_throw(else_events, throw_span, throw_node, ctx);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                bridge_call_args_inside_throw(condition_events, throw_span, throw_node, ctx);
+                bridge_call_args_inside_throw(body, throw_span, throw_node, ctx);
+                bridge_call_args_inside_throw(update_events, throw_span, throw_node, ctx);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 bridge_call_args_inside_throw(body, throw_span, throw_node, ctx);
             }
             FlowEvent::Try {

@@ -8,7 +8,7 @@
 
 use crate::{BasicBlock, BasicBlockId, Cfg, SyntheticBlockKind, Terminator};
 use bonsai_common::Span;
-use bonsai_lang_api::FlowEvent;
+use bonsai_lang_api::{FlowEvent, LoopControlTarget};
 
 #[derive(Clone, Copy)]
 struct FinallyFrame<'a> {
@@ -39,7 +39,7 @@ pub fn build_cfg_from_flow_in_span(
     let exit = new_block(&mut blocks, "exit".into(), Some(SyntheticBlockKind::Exit));
     let entry = new_block(&mut blocks, "entry".into(), Some(SyntheticBlockKind::Entry));
 
-    let tail = walk(&normalized_events, entry, exit, &mut blocks, None);
+    let tail = walk(&normalized_events, entry, exit, &mut blocks, &[]);
     // Implicit fallthrough from the last real block into exit when
     // the function doesn't already end in a Return / Throw.
     link(&mut blocks, tail, exit);
@@ -104,10 +104,16 @@ pub fn normalize_deferred_scopes(events: &[FlowEvent]) -> Vec<FlowEvent> {
             FlowEvent::Loop {
                 span,
                 loop_kind,
+                label,
+                condition_events,
+                update_events,
                 body,
             } => lowered.push(FlowEvent::Loop {
                 span: *span,
                 loop_kind: *loop_kind,
+                label: label.clone(),
+                condition_events: normalize_deferred_scopes(condition_events),
+                update_events: normalize_deferred_scopes(update_events),
                 body: normalize_deferred_scopes(body),
             }),
             FlowEvent::Try {
@@ -223,13 +229,21 @@ fn prune_event(event: &FlowEvent) -> (FlowEvent, bool) {
         FlowEvent::Loop {
             span,
             loop_kind,
+            label,
+            condition_events,
+            update_events,
             body,
         } => {
+            let (condition_events, _) = prune_unreachable_sequence(condition_events);
+            let (update_events, _) = prune_unreachable_sequence(update_events);
             let (body, _) = prune_unreachable_sequence(body);
             (
                 FlowEvent::Loop {
                     span: *span,
                     loop_kind: *loop_kind,
+                    label: label.clone(),
+                    condition_events,
+                    update_events,
                     body,
                 },
                 // Without an adapter-emitted proof that a loop is infinite,
@@ -323,8 +337,9 @@ fn link(blocks: &mut [BasicBlock], from: usize, to: usize) {
 /// `walk` whenever it descends into a loop and consulted when the
 /// walker hits an early terminator.
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 struct LoopTargets {
+    label: Option<String>,
     break_to: usize,
     continue_to: usize,
 }
@@ -345,7 +360,7 @@ fn walk(
     current: usize,
     exit: usize,
     blocks: &mut Vec<BasicBlock>,
-    loop_targets: Option<LoopTargets>,
+    loop_targets: &[LoopTargets],
 ) -> usize {
     walk_with_finally(events, current, exit, blocks, loop_targets, &[])
 }
@@ -355,7 +370,7 @@ fn walk_with_finally<'a>(
     current: usize,
     exit: usize,
     blocks: &mut Vec<BasicBlock>,
-    loop_targets: Option<LoopTargets>,
+    loop_targets: &[LoopTargets],
     pending_finally: &[FinallyFrame<'a>],
 ) -> usize {
     let mut cur = current;
@@ -394,7 +409,14 @@ fn walk_with_finally<'a>(
                 link(blocks, else_tail, join);
                 cur = join;
             }
-            FlowEvent::Loop { span, body, .. } => {
+            FlowEvent::Loop {
+                span,
+                loop_kind,
+                label,
+                condition_events,
+                update_events,
+                body,
+            } => {
                 record_span(blocks, cur, span);
                 let header = new_block(
                     blocks,
@@ -411,22 +433,69 @@ fn walk_with_finally<'a>(
                     format!("loop-after@{}", span.start),
                     Some(SyntheticBlockKind::LoopAfter),
                 );
-                blocks[header].terminator = Terminator::LoopHeader;
-                link(blocks, cur, header);
-                link(blocks, header, body_id);
-                link(blocks, header, after);
+                let condition_tail = walk_with_finally(
+                    &condition_events,
+                    header,
+                    exit,
+                    blocks,
+                    loop_targets,
+                    pending_finally,
+                );
+                blocks[condition_tail].terminator = Terminator::LoopHeader;
+                // A post-test loop executes its body before evaluating the
+                // condition. Every other conditional loop enters through the
+                // header. `LoopKind::Loop` has no implicit condition-false
+                // edge at all; only an adapter-emitted `break` can reach its
+                // after block. These are typed compiler semantics, not a
+                // source-text test for `do`, `repeat`, or `loop`.
+                if loop_kind == bonsai_lang_api::LoopKind::DoWhile {
+                    link(blocks, cur, body_id);
+                } else {
+                    link(blocks, cur, header);
+                }
+                link(blocks, condition_tail, body_id);
+                if loop_kind != bonsai_lang_api::LoopKind::Loop {
+                    link(blocks, condition_tail, after);
+                }
+                let update_entry = if update_events.is_empty() {
+                    header
+                } else {
+                    new_block(
+                        blocks,
+                        format!("loop-update@{}", span.start),
+                        Some(SyntheticBlockKind::LoopUpdate),
+                    )
+                };
+                let mut nested_loop_targets = loop_targets.to_vec();
+                nested_loop_targets.push(LoopTargets {
+                    label,
+                    break_to: after,
+                    continue_to: if loop_kind == bonsai_lang_api::LoopKind::DoWhile {
+                        header
+                    } else {
+                        update_entry
+                    },
+                });
                 let body_tail = walk_with_finally(
                     &body,
                     body_id,
                     exit,
                     blocks,
-                    Some(LoopTargets {
-                        break_to: after,
-                        continue_to: header,
-                    }),
+                    &nested_loop_targets,
                     pending_finally,
                 );
-                link(blocks, body_tail, header);
+                link(blocks, body_tail, update_entry);
+                if !update_events.is_empty() {
+                    let update_tail = walk_with_finally(
+                        &update_events,
+                        update_entry,
+                        exit,
+                        blocks,
+                        &nested_loop_targets,
+                        pending_finally,
+                    );
+                    link(blocks, update_tail, header);
+                }
                 cur = after;
             }
             FlowEvent::Try {
@@ -518,16 +587,11 @@ fn walk_with_finally<'a>(
                     FlowEvent::Continue { .. } => Terminator::Continue,
                     _ => unreachable!(),
                 };
-                blocks[cur].events.push(terminal);
                 // When a finally is in flight, route every early
                 // exit through it so cleanup work runs before the
                 // edge to exit / loop target.
-                let final_target = match blocks[cur].terminator {
-                    Terminator::Break => loop_targets.map_or(exit, |t| t.break_to),
-                    Terminator::Continue => loop_targets.map_or(exit, |t| t.continue_to),
-                    Terminator::Return | Terminator::Throw => exit,
-                    _ => unreachable!(),
-                };
+                let final_target = control_transfer_target(&terminal, loop_targets, exit);
+                blocks[cur].events.push(terminal);
                 if pending_finally.is_empty() {
                     match blocks[cur].terminator {
                         Terminator::Break | Terminator::Continue => link(blocks, cur, final_target),
@@ -562,7 +626,7 @@ fn append_finally_path<'a>(
     final_target: usize,
     exit: usize,
     blocks: &mut Vec<BasicBlock>,
-    loop_targets: Option<LoopTargets>,
+    loop_targets: &[LoopTargets],
     pending_finally: &[FinallyFrame<'a>],
 ) {
     let mut cur = from;
@@ -585,6 +649,29 @@ fn append_finally_path<'a>(
         );
     }
     link(blocks, cur, final_target);
+}
+
+fn control_transfer_target(event: &FlowEvent, loop_targets: &[LoopTargets], exit: usize) -> usize {
+    let (target, select): (Option<&LoopControlTarget>, fn(&LoopTargets) -> usize) = match event {
+        FlowEvent::Break { target, .. } => (target.as_ref(), |loop_target| loop_target.break_to),
+        FlowEvent::Continue { target, .. } => (target.as_ref(), |loop_target| loop_target.continue_to),
+        FlowEvent::Return { .. } | FlowEvent::Throw { .. } => return exit,
+        _ => unreachable!("only abrupt control transfers have explicit targets"),
+    };
+    let selected = match target {
+        None => loop_targets.iter().next_back(),
+        Some(LoopControlTarget::Label(label)) => loop_targets
+            .iter()
+            .rev()
+            .find(|target| target.label.as_deref() == Some(label.as_str())),
+        Some(LoopControlTarget::Levels(levels)) => {
+            let level = usize::try_from(*levels)
+                .ok()
+                .and_then(|level| level.checked_sub(1));
+            level.and_then(|level| loop_targets.iter().rev().nth(level))
+        }
+    };
+    selected.map_or(exit, select)
 }
 
 /// Every `FlowEvent` carries a span; surface it so the builder can

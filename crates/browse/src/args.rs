@@ -283,8 +283,15 @@ fn walk_args(
                 walk_args(then_events, ws, callee_matches, value_matches, filters, out);
                 walk_args(else_events, ws, callee_matches, value_matches, filters, out);
             }
-            FlowEvent::Loop { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                walk_args(condition_events, ws, callee_matches, value_matches, filters, out);
                 walk_args(body, ws, callee_matches, value_matches, filters, out);
+                walk_args(update_events, ws, callee_matches, value_matches, filters, out);
             }
             FlowEvent::Try {
                 body,

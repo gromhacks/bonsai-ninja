@@ -6,6 +6,7 @@ use super::super::{
     GrammarHandler, Node,
 };
 use super::{walk_into, LoweringContext};
+use crate::LoopControlTarget;
 
 pub(super) fn lower_control_and_scope(
     node: Node<'_>,
@@ -20,29 +21,41 @@ pub(super) fn lower_control_and_scope(
     } = context;
     let kind = node.kind();
     if handler.is_break(kind) {
-        let label = handler
-            .control_label_field_names
-            .iter()
-            .find_map(|field| node.child_by_field_name(field))
-            .map(|n| node_text(&n, src).trim().to_string())
-            .filter(|s| !s.is_empty());
+        let target = handler
+            .control_target_extractor
+            .and_then(|extract| extract(node, src))
+            .or_else(|| {
+                handler
+                    .control_label_field_names
+                    .iter()
+                    .find_map(|field| node.child_by_field_name(field))
+                    .map(|n| node_text(&n, src).trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .map(LoopControlTarget::Label)
+            });
         out.push(FlowEvent::Break {
             span: span_of(file, &node),
-            label,
+            target,
         });
         return true;
     }
 
     if handler.is_continue(kind) {
-        let label = handler
-            .control_label_field_names
-            .iter()
-            .find_map(|field| node.child_by_field_name(field))
-            .map(|n| node_text(&n, src).trim().to_string())
-            .filter(|s| !s.is_empty());
+        let target = handler
+            .control_target_extractor
+            .and_then(|extract| extract(node, src))
+            .or_else(|| {
+                handler
+                    .control_label_field_names
+                    .iter()
+                    .find_map(|field| node.child_by_field_name(field))
+                    .map(|n| node_text(&n, src).trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .map(LoopControlTarget::Label)
+            });
         out.push(FlowEvent::Continue {
             span: span_of(file, &node),
-            label,
+            target,
         });
         return true;
     }
@@ -166,7 +179,7 @@ pub(super) fn lower_try(node: Node<'_>, context: LoweringContext<'_>, out: &mut 
         class_names,
     } = context;
     let kind = node.kind();
-    if handler.is_try(kind) {
+    if handler.is_try(kind) && handler.try_node_filter.is_none_or(|filter| filter(node)) {
         let mut body = Vec::new();
         let mut catch_events = Vec::new();
         let mut finally_events = Vec::new();
@@ -358,7 +371,7 @@ fn collect_exclusive_catch_arms<'tree>(protected: Node<'tree>, handler: &Grammar
             arms.push(node);
             continue;
         }
-        if handler.is_try(node.kind()) {
+        if handler.is_try(node.kind()) && handler.try_node_filter.is_none_or(|filter| filter(node)) {
             continue;
         }
         let mut cursor = node.walk();
@@ -399,13 +412,17 @@ pub(super) fn lower_function_exit(
         if leading.starts_with("break") {
             out.push(FlowEvent::Break {
                 span: span_of(file, &node),
-                label: None,
+                target: handler
+                    .control_target_extractor
+                    .and_then(|extract| extract(node, src)),
             });
             return true;
         } else if leading.starts_with("continue") {
             out.push(FlowEvent::Continue {
                 span: span_of(file, &node),
-                label: None,
+                target: handler
+                    .control_target_extractor
+                    .and_then(|extract| extract(node, src)),
             });
             return true;
         }

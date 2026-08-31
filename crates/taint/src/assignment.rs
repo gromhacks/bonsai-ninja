@@ -94,7 +94,17 @@ fn throw_taints_catch(events: &[FlowEvent], tainted: &TokenSet) -> bool {
             } if throw_taints_catch(then_events, tainted) || throw_taints_catch(else_events, tainted) => {
                 return true;
             }
-            FlowEvent::Loop { body, .. } if throw_taints_catch(body, tainted) => return true,
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } if throw_taints_catch(condition_events, tainted)
+                || throw_taints_catch(body, tainted)
+                || throw_taints_catch(update_events, tainted) =>
+            {
+                return true;
+            }
             // Nested try/catch/finally regions can also harbour the throw.
             FlowEvent::Try {
                 body,
@@ -203,15 +213,29 @@ fn walk_events(events: &[FlowEvent], tainted: &mut TokenSet) {
                 tainted.extend(then_taints);
                 tainted.extend(else_taints);
             }
-            FlowEvent::Loop { body, .. } => {
-                // Iterate loop bodies to a fixed point. The transfer
+            FlowEvent::Loop {
+                loop_kind,
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                // Iterate the compiler-lowered runtime phases to a fixed point. The transfer
                 // function is monotonic over a finite set of source
                 // names emitted by adapters, so convergence is quick
                 // and avoids assuming a fixed number of back-edge
                 // passes is enough for every loop shape.
                 loop {
                     let before = tainted.len();
-                    walk_events(body, tainted);
+                    if *loop_kind == bonsai_lang_api::LoopKind::DoWhile {
+                        walk_events(body, tainted);
+                        walk_events(update_events, tainted);
+                        walk_events(condition_events, tainted);
+                    } else {
+                        walk_events(condition_events, tainted);
+                        walk_events(body, tainted);
+                        walk_events(update_events, tainted);
+                    }
                     if tainted.len() == before {
                         break;
                     }

@@ -464,7 +464,17 @@ fn collect_structural_graph_facts(
                 collect_structural_graph_facts(then_events, facts);
                 collect_structural_graph_facts(else_events, facts);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_structural_graph_facts(condition_events, facts);
+                collect_structural_graph_facts(body, facts);
+                collect_structural_graph_facts(update_events, facts);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_structural_graph_facts(body, facts);
             }
             FlowEvent::Try {

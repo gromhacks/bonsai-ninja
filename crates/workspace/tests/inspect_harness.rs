@@ -108,7 +108,16 @@ fn collect_call_edges(
                 collect_call_edges(then_events, caller, aliases, map);
                 collect_call_edges(else_events, caller, aliases, map);
             }
-            FlowEvent::Loop { body, .. } => collect_call_edges(body, caller, aliases, map),
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_call_edges(condition_events, caller, aliases, map);
+                collect_call_edges(body, caller, aliases, map);
+                collect_call_edges(update_events, caller, aliases, map);
+            }
             FlowEvent::Try {
                 body,
                 catch_events,
@@ -442,7 +451,16 @@ fn collect_callees_events(events: &[bonsai_lang_api::FlowEvent], out: &mut Vec<S
                 collect_callees_events(then_events, out);
                 collect_callees_events(else_events, out);
             }
-            bonsai_lang_api::FlowEvent::Loop { body, .. } => collect_callees_events(body, out),
+            bonsai_lang_api::FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_callees_events(condition_events, out);
+                collect_callees_events(body, out);
+                collect_callees_events(update_events, out);
+            }
             bonsai_lang_api::FlowEvent::Try {
                 body,
                 catch_events,
@@ -842,7 +860,16 @@ fn walk_events_for_hits<F: Fn(&str) -> bool>(
                 walk_events_for_hits(then_events, in_fn, is_match, hits);
                 walk_events_for_hits(else_events, in_fn, is_match, hits);
             }
-            FlowEvent::Loop { body, .. } => walk_events_for_hits(body, in_fn, is_match, hits),
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                walk_events_for_hits(condition_events, in_fn, is_match, hits);
+                walk_events_for_hits(body, in_fn, is_match, hits);
+                walk_events_for_hits(update_events, in_fn, is_match, hits);
+            }
             FlowEvent::Try {
                 body,
                 catch_events,
@@ -937,7 +964,16 @@ fn find_call_in(events: &[FlowEvent], needle: &str, found: &mut bool) {
                 find_call_in(then_events, needle, found);
                 find_call_in(else_events, needle, found);
             }
-            FlowEvent::Loop { body, .. } => find_call_in(body, needle, found),
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                find_call_in(condition_events, needle, found);
+                find_call_in(body, needle, found);
+                find_call_in(update_events, needle, found);
+            }
             FlowEvent::Try {
                 body,
                 catch_events,

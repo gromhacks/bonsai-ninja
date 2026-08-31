@@ -95,9 +95,10 @@ const TYPESCRIPT_VOCAB: ModifierVocabulary = ModifierVocabulary {
 use bonsai_lang_javascript::{
     apply_ecmascript_assigned_member_callable_owners, apply_javascript_getter_property_sources,
     apply_js_ts_commonjs_named_export_aliases, apply_js_ts_default_export_aliases,
-    ecmascript_expression_value_kind, ecmascript_source_file_representation, ecmascript_static_scalar,
-    extract_ecmascript_pseudo_call, js_ts_imports, js_ts_module_segments, js_ts_require_calls,
-    normalize_node_builtin_scheme, populate_ecmascript_compiler_facts, JS_TS_MODULE_RESOLUTION_EXTENSIONS,
+    ecmascript_expression_value_kind, ecmascript_loop_kind, ecmascript_loop_label,
+    ecmascript_source_file_representation, ecmascript_static_scalar, extract_ecmascript_pseudo_call,
+    js_ts_imports, js_ts_module_segments, js_ts_require_calls, normalize_node_builtin_scheme,
+    populate_ecmascript_compiler_facts, JS_TS_MODULE_RESOLUTION_EXTENSIONS,
 };
 use tree_sitter::{Language, Tree};
 
@@ -167,6 +168,8 @@ declare_typescript_grammar_node_kinds! {
     ("adapter_postprocessor", "import_specifier"),
     ("adapter_postprocessor", "import_statement"),
     ("adapter_postprocessor", "lexical_declaration"),
+    ("loop-control-label", "labeled_statement"),
+    ("loop-control-label", "statement_identifier"),
     ("adapter_postprocessor", "member_expression"),
     ("adapter_postprocessor", "method_definition"),
     ("adapter_postprocessor", "method_signature"),
@@ -346,6 +349,9 @@ const COMMON_HANDLER: GrammarHandler = GrammarHandler {
     loop_body_field_names: &["body"],
     loop_body_kinds: &["statement_block", "expression_statement"],
     loop_update_field_names: &["increment"],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: None,
+    loop_kind_extractor: Some(ecmascript_loop_kind),
     branch_arm_kinds: &[
         "statement_block",
         "expression_statement",
@@ -378,6 +384,7 @@ const COMMON_HANDLER: GrammarHandler = GrammarHandler {
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
     control_label_field_names: &["label"],
+    loop_label_extractor: Some(ecmascript_loop_label),
     yield_kinds: &["yield_expression"],
     yield_value_field_names: &["argument"],
     await_kinds: &["await_expression"],

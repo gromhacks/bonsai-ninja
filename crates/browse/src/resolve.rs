@@ -289,8 +289,17 @@ fn collect_exact_named_call_sites(
                 collect_exact_named_call_sites(then_events, query, caller, ws, line_filter, out);
                 collect_exact_named_call_sites(else_events, query, caller, ws, line_filter, out);
             }
-            bonsai_lang_api::FlowEvent::Loop { body, .. }
-            | bonsai_lang_api::FlowEvent::Defer { body, .. }
+            bonsai_lang_api::FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_exact_named_call_sites(condition_events, query, caller, ws, line_filter, out);
+                collect_exact_named_call_sites(body, query, caller, ws, line_filter, out);
+                collect_exact_named_call_sites(update_events, query, caller, ws, line_filter, out);
+            }
+            bonsai_lang_api::FlowEvent::Defer { body, .. }
             | bonsai_lang_api::FlowEvent::Using { body, .. } => {
                 collect_exact_named_call_sites(body, query, caller, ws, line_filter, out);
             }

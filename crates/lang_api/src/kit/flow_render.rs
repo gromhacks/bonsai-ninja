@@ -44,7 +44,17 @@ pub fn for_each_flow_event<'a>(events: &'a [FlowEvent], visitor: &mut impl FnMut
                 for_each_flow_event(then_events, visitor);
                 for_each_flow_event(else_events, visitor);
             }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                for_each_flow_event(condition_events, visitor);
+                for_each_flow_event(body, visitor);
+                for_each_flow_event(update_events, visitor);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 for_each_flow_event(body, visitor);
             }
             FlowEvent::Try {

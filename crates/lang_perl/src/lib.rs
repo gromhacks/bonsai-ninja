@@ -86,6 +86,27 @@ use tree_sitter::{Language, Node, Tree};
 pub const LANG_ID: LanguageId = LanguageId::new("perl");
 const PACK_NAME: &str = "perl";
 
+fn perl_loop_kind(node: Node<'_>, _src: &[u8]) -> Option<bonsai_lang_api::LoopKind> {
+    if node.kind() == "cstyle_for_statement" {
+        let body = node.child_by_field_name("block");
+        let mut cursor = node.walk();
+        let has_header_expression = node
+            .named_children(&mut cursor)
+            .any(|child| body.is_none_or(|body| child.id() != body.id()));
+        return (!has_header_expression).then_some(bonsai_lang_api::LoopKind::Loop);
+    }
+    if node.kind() != "postfix_loop_expression" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let body = node.named_children(&mut cursor).next()?;
+    Some(if body.kind() == "do_expression" {
+        bonsai_lang_api::LoopKind::DoWhile
+    } else {
+        bonsai_lang_api::LoopKind::While
+    })
+}
+
 /// Lower Perl's shared `loopex_expression` CST bucket from the leading
 /// language keyword. Tree-sitter uses the same node kind for `last`, `next`,
 /// and `redo`, so the adapter must classify the runtime control effect rather
@@ -104,11 +125,41 @@ fn extract_perl_syntax_event(
         .child(0)
         .map(|child| child.kind())
         .or_else(|| node_text(&node, src).split_whitespace().next())?;
+    let target = perl_control_target(node, src);
     match keyword {
-        "last" => Some(FlowEvent::Break { span, label: None }),
-        "next" | "redo" => Some(FlowEvent::Continue { span, label: None }),
+        "last" => Some(FlowEvent::Break { span, target }),
+        "next" | "redo" => Some(FlowEvent::Continue { span, target }),
         _ => None,
     }
+}
+
+fn perl_control_target(node: Node<'_>, src: &[u8]) -> Option<bonsai_lang_api::LoopControlTarget> {
+    let mut cursor = node.walk();
+    let label = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "label");
+    label.and_then(|child| {
+        let text = node_text(&child, src).trim();
+        (!text.is_empty()).then(|| bonsai_lang_api::LoopControlTarget::Label(text.to_string()))
+    })
+}
+
+/// Perl places a labeled loop inside a `statement_label` wrapper. Resolve the
+/// exact `statement` field back to the loop being lowered so nested labels do
+/// not leak across adjacent statements.
+fn perl_loop_label(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let wrapper = node
+        .parent()
+        .filter(|parent| parent.kind() == "statement_label")?;
+    if wrapper
+        .child_by_field_name("statement")
+        .is_none_or(|statement| statement.id() != node.id())
+    {
+        return None;
+    }
+    let label = wrapper.child_by_field_name("label")?;
+    let text = node_text(&label, src).trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 fn perl_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
@@ -562,13 +613,21 @@ const HANDLER: GrammarHandler = GrammarHandler {
     for_kinds: &["cstyle_for_statement"],
     foreach_kinds: &["for_statement"],
     foreach_binding_extractor: Some(perl_foreach_binding),
-    while_kinds: &["loop_statement"],
+    while_kinds: &["loop_statement", "postfix_loop_expression"],
     do_kinds: &[],
     loop_kinds: &[],
     loop_body_field_names: &["body", "block"],
-    loop_body_kinds: &["block", "block_statement", "expression_statement"],
+    loop_body_kinds: &[
+        "do_expression",
+        "block",
+        "block_statement",
+        "expression_statement",
+    ],
     loop_header_container_kinds: &[],
     loop_update_field_names: &["iterator"],
+    loop_condition_field_names: &["condition"],
+    loop_condition_extractor: None,
+    loop_kind_extractor: Some(perl_loop_kind),
     call_kinds: &[
         "function_call_expression",
         "method_call_expression",
@@ -599,6 +658,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     transparent_expression_wrapper_kinds: &[],
     pseudo_call_extractor: Some(extract_perl_pseudo_call),
     syntax_event_extractor: Some(extract_perl_syntax_event),
+    control_target_extractor: Some(perl_control_target),
+    loop_label_extractor: Some(perl_loop_label),
     syntax_events_extractor: None,
     call_encoded_control_flow_extractor: None,
     pseudo_call_receiver_extractor: Some(perl_substitution_receiver),
@@ -623,6 +684,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     lambda_body_field_names: &["body"],
     lambda_body_kinds: &[],
     try_kinds: &["try_statement"],
+    try_node_filter: None,
     catch_kinds: &[],
     finally_kinds: &[],
     try_fallback_body_kinds: &["block"],
@@ -762,6 +824,7 @@ impl LanguageAdapter for PerlAdapter {
             ("custom lowering", "list_expression"),
             ("custom lowering", "lowprec_logical_expression"),
             ("custom lowering", "loopex_expression"),
+            ("loop-control-label", "label"),
             ("custom lowering", "map_grep_expression"),
             ("custom lowering", "match_regexp"),
             ("custom lowering", "method_call_expression"),
@@ -775,6 +838,7 @@ impl LanguageAdapter for PerlAdapter {
             ("custom lowering", "slurpy_parameter"),
             ("custom lowering", "string_content"),
             ("custom lowering", "string_literal"),
+            ("loop-control-label", "statement_label"),
             ("custom lowering", "substitution_regexp"),
             ("custom lowering", "undef"),
             ("custom lowering", "undef_expression"),
@@ -3173,10 +3237,16 @@ fn lower_perl_die_calls_to_throws(events: Vec<FlowEvent>) -> Vec<FlowEvent> {
             FlowEvent::Loop {
                 span,
                 loop_kind,
+                label,
+                condition_events,
+                update_events,
                 body,
             } => out.push(FlowEvent::Loop {
                 span,
                 loop_kind,
+                label,
+                condition_events: lower_perl_die_calls_to_throws(condition_events),
+                update_events: lower_perl_die_calls_to_throws(update_events),
                 body: lower_perl_die_calls_to_throws(body),
             }),
             FlowEvent::Try {
