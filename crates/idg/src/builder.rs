@@ -2431,17 +2431,16 @@ impl SegmentEndpointScanIndex {
     }
 
     fn incoming<'a>(&'a self, segment: &'a IdgSegment, node: NodeId) -> impl Iterator<Item = &'a IdgEdge> {
-        self.edge_indices(node, &self.incoming_offsets, &self.incoming_edges)
+        Self::edge_indices(node, &self.incoming_offsets, &self.incoming_edges)
             .filter_map(|edge| segment.edges.get(edge as usize))
     }
 
     fn outgoing<'a>(&'a self, segment: &'a IdgSegment, node: NodeId) -> impl Iterator<Item = &'a IdgEdge> {
-        self.edge_indices(node, &self.outgoing_offsets, &self.outgoing_edges)
+        Self::edge_indices(node, &self.outgoing_offsets, &self.outgoing_edges)
             .filter_map(|edge| segment.edges.get(edge as usize))
     }
 
     fn edge_indices<'a>(
-        &'a self,
         node: NodeId,
         offsets: &'a [usize],
         edges: &'a [u32],
@@ -2532,10 +2531,8 @@ fn collect_unrooted_scalar_reads(segment: &IdgSegment, func: FuncId) -> Vec<(Str
         .nodes
         .iter()
         .enumerate()
-        .filter_map(|(node, entry)| {
-            (entry.func == func)
-                .then(|| NodeId(u32::try_from(node).expect("segment-local node count exceeds u32")))
-        })
+        .filter(|(_, entry)| entry.func == func)
+        .map(|(node, _)| NodeId(u32::try_from(node).expect("segment-local node count exceeds u32")))
         .collect::<Vec<_>>();
     collect_unrooted_scalar_reads_from_nodes(segment, &nodes)
 }

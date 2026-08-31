@@ -272,6 +272,8 @@ pub fn apply_javascript_getter_property_sources(
 pub fn apply_js_ts_commonjs_named_export_aliases(
 pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tree, src: &[u8], file: FileId) {
 pub fn ecmascript_expression_value_kind(
+pub fn ecmascript_loop_kind(node: Node<'_>, _src: &[u8]) -> Option<bonsai_lang_api::LoopKind> {
+pub fn ecmascript_loop_label(node: Node<'_>, src: &[u8]) -> Option<String> {
 pub fn ecmascript_source_file_representation(path: &std::path::Path) -> SourceFileRepresentation {
 pub fn ecmascript_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
 pub fn ecmascript_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {

@@ -423,9 +423,8 @@ fn segment_endpoint_scan_index_preserves_canonical_node_and_edge_rows() {
             .nodes
             .iter()
             .enumerate()
-            .filter_map(|(node, entry)| {
-                (entry.func == func).then(|| NodeId(u32::try_from(node).expect("test node id")))
-            })
+            .filter(|(_, entry)| entry.func == func)
+            .map(|(node, _)| NodeId(u32::try_from(node).expect("test node id")))
             .collect::<Vec<_>>();
         assert_eq!(index.function_nodes(func), expected);
     }

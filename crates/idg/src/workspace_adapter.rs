@@ -4342,15 +4342,12 @@ fn stitch_declared_exception_hierarchy_in_segment(
     // large function even though each relevant edge has one endpoint.
     let mut throw_spans = vec![None; segment.nodes.nodes.len()];
     for edge in &segment.edges {
-        match edge.meta.kind {
-            crate::edge::IdgEdgeKind::IntraThrow => {
-                if let Some(slot) = throw_spans.get_mut(edge.to.0 as usize) {
-                    if slot.is_none() {
-                        *slot = Some(edge.meta.via_span);
-                    }
+        if edge.meta.kind == crate::edge::IdgEdgeKind::IntraThrow {
+            if let Some(slot) = throw_spans.get_mut(edge.to.0 as usize) {
+                if slot.is_none() {
+                    *slot = Some(edge.meta.via_span);
                 }
             }
-            _ => {}
         }
     }
     let mut throws = Vec::new();

@@ -7,3 +7,7 @@ publish = false
 [dependencies]
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
+
+# Keep the runnable example independent from the repository's publishable
+# workspace while still allowing `cargo` tooling to inspect it directly.
+[workspace]

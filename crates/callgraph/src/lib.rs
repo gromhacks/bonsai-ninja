@@ -6072,10 +6072,8 @@ fn contained_function_ids(
             global
                 .decls_in(file)
                 .iter()
-                .filter_map(|decl| {
-                    (decl.kind == DeclKind::Function && span_contains_or_equal(outer, decl.span))
-                        .then(|| FuncId::new(decl.symbol.raw()))
-                })
+                .filter(|decl| decl.kind == DeclKind::Function && span_contains_or_equal(outer, decl.span))
+                .map(|decl| FuncId::new(decl.symbol.raw()))
                 .collect()
         },
         |index| index.functions_contained_in(file, outer),
@@ -6296,11 +6294,14 @@ fn collect_receiver_method_targets(
         .with_module_path_syntax(module_path_syntax);
     let mut receiver_type_names = receiver_types.to_vec();
     if receiver_type_names.is_empty() {
-        receiver_type_names = assigned_receiver_type_names(
+        let type_context = AssignedReceiverTypeContext {
             global,
             caller_decl,
             alias_targets,
             flow_lookup,
+        };
+        receiver_type_names = assigned_receiver_type_names(
+            &type_context,
             receiver,
             Some(call_span),
             method_candidate_cache,
@@ -7242,11 +7243,15 @@ fn receiver_class_type_names_for_expr(
     out
 }
 
+struct AssignedReceiverTypeContext<'a> {
+    global: &'a GlobalIndex,
+    caller_decl: &'a Decl,
+    alias_targets: &'a AHashMap<String, AliasTarget>,
+    flow_lookup: &'a DeclFlowLookup<'a>,
+}
+
 fn assigned_receiver_type_names(
-    global: &GlobalIndex,
-    caller_decl: &Decl,
-    alias_targets: &AHashMap<String, AliasTarget>,
-    flow_lookup: &DeclFlowLookup<'_>,
+    context: &AssignedReceiverTypeContext<'_>,
     receiver: &str,
     call_span: Option<Span>,
     method_candidate_cache: &mut MethodCandidateCache,
@@ -7254,15 +7259,12 @@ fn assigned_receiver_type_names(
 ) -> Vec<String> {
     let receiver = normalize_receiver_alias_text(receiver);
     if let Some(call_span) = call_span {
-        let key = (caller_decl.symbol, call_span, receiver.clone());
+        let key = (context.caller_decl.symbol, call_span, receiver.clone());
         if let Some(cached) = semantic_fact_cache.assigned_type_names.get(&key) {
             return cached.clone();
         }
         let resolved = assigned_receiver_type_names_uncached(
-            global,
-            caller_decl,
-            alias_targets,
-            flow_lookup,
+            context,
             &receiver,
             Some(call_span),
             method_candidate_cache,
@@ -7274,10 +7276,7 @@ fn assigned_receiver_type_names(
         return resolved;
     }
     assigned_receiver_type_names_uncached(
-        global,
-        caller_decl,
-        alias_targets,
-        flow_lookup,
+        context,
         &receiver,
         None,
         method_candidate_cache,
@@ -7285,12 +7284,8 @@ fn assigned_receiver_type_names(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn assigned_receiver_type_names_uncached(
-    global: &GlobalIndex,
-    caller_decl: &Decl,
-    alias_targets: &AHashMap<String, AliasTarget>,
-    flow_lookup: &DeclFlowLookup<'_>,
+    context: &AssignedReceiverTypeContext<'_>,
     receiver: &str,
     call_span: Option<Span>,
     method_candidate_cache: &mut MethodCandidateCache,
@@ -7298,7 +7293,7 @@ fn assigned_receiver_type_names_uncached(
 ) -> Vec<String> {
     let mut out = Vec::new();
     let mut best_distance = None;
-    for event in flow_lookup.assignments_for_receiver(&receiver) {
+    for event in context.flow_lookup.assignments_for_receiver(receiver) {
         let FlowEvent::Assign {
             source_call,
             source_name,
@@ -7315,10 +7310,10 @@ fn assigned_receiver_type_names_uncached(
         let distance = call_span.map(|call_span| call_span.start.saturating_sub(span.start));
         if let Some(source_call) = source_call {
             for type_name in receiver_call_return_type_names(
-                global,
-                caller_decl,
-                alias_targets,
-                flow_lookup,
+                context.global,
+                context.caller_decl,
+                context.alias_targets,
+                context.flow_lookup,
                 Some(*span),
                 method_candidate_cache,
                 semantic_fact_cache,
@@ -7329,9 +7324,9 @@ fn assigned_receiver_type_names_uncached(
             // assignment (`x = DeclaredType(...)`) without a nested Call
             // event. Exact class identity proves the assigned result type.
             for type_name in constructor_type_names_from_call_fact(
-                global,
-                caller_decl,
-                alias_targets,
+                context.global,
+                context.caller_decl,
+                context.alias_targets,
                 source_call,
                 None,
                 std::iter::empty::<&str>(),
@@ -7344,7 +7339,7 @@ fn assigned_receiver_type_names_uncached(
             .chain(source_name.iter())
             .chain(source_names.iter())
         {
-            for type_name in type_names_for_binding(global, caller_decl, candidate) {
+            for type_name in type_names_for_binding(context.global, context.caller_decl, candidate) {
                 push_assigned_receiver_type(&mut out, &mut best_distance, type_name, distance);
             }
         }
@@ -7374,11 +7369,14 @@ fn retain_assigned_receiver_method_candidates(
     let Some(receiver) = receiver else {
         return;
     };
-    let assigned = assigned_receiver_type_names(
-        context.global,
-        context.caller_decl,
-        context.alias_targets,
+    let type_context = AssignedReceiverTypeContext {
+        global: context.global,
+        caller_decl: context.caller_decl,
+        alias_targets: context.alias_targets,
         flow_lookup,
+    };
+    let assigned = assigned_receiver_type_names(
+        &type_context,
         receiver,
         Some(call_span),
         method_candidate_cache,
@@ -7519,11 +7517,14 @@ fn semantic_receiver_class_symbols(
     method_candidate_cache: &mut MethodCandidateCache,
     semantic_fact_cache: &mut SemanticReceiverFactCache,
 ) -> Vec<SymbolId> {
-    let mut type_names = assigned_receiver_type_names(
+    let type_context = AssignedReceiverTypeContext {
         global,
         caller_decl,
         alias_targets,
         flow_lookup,
+    };
+    let mut type_names = assigned_receiver_type_names(
+        &type_context,
         receiver,
         Some(call_span),
         method_candidate_cache,
@@ -7584,11 +7585,14 @@ fn retain_assigned_receiver_constructor_candidates(
     if candidates.len() <= 1 {
         return;
     }
-    let assigned = assigned_receiver_type_names(
-        context.global,
-        context.caller_decl,
-        context.alias_targets,
+    let type_context = AssignedReceiverTypeContext {
+        global: context.global,
+        caller_decl: context.caller_decl,
+        alias_targets: context.alias_targets,
         flow_lookup,
+    };
+    let assigned = assigned_receiver_type_names(
+        &type_context,
         "",
         Some(*assign_span),
         method_candidate_cache,
