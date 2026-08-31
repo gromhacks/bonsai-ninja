@@ -269,6 +269,16 @@ fn security_analysis_help_documents_production_default_and_minified_opt_in() {
                 "security {action} help omitted `{expected}`:\n{help}"
             );
         }
+        if action == "taint-analysis" {
+            assert!(
+                help.contains("every sink severity"),
+                "security {action} help must document the all-severity production default:\n{help}"
+            );
+            assert!(
+                !help.contains("selects severity `high`"),
+                "security {action} help retained the obsolete high-only production default:\n{help}"
+            );
+        }
     }
 }
 

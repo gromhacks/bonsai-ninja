@@ -3085,8 +3085,8 @@ pub(crate) enum SecurityAction {
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
         /// Review defaults. `production` (the default) excludes common non-production
-        /// paths and selects severity `high`, trust `remote`, and context
-        /// `16k`; use `--profile all` to disable those review defaults, and
+        /// paths, keeps every sink severity, selects trust `remote`, and sets
+        /// context `16k`; use `--profile all` to disable those review defaults, and
         /// combine it with global `--minified-js` to admit minified bundles.
         /// Explicit flags override profile values.
         #[arg(long)]

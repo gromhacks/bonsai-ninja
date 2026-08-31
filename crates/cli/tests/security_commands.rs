@@ -3816,6 +3816,7 @@ def handle():
         "app.py",
         "src/main/java/com/example/app.py",
         "tests/test_app.py",
+        "test-fixtures/languages/python/app.py",
         "testdata/go_fixture.py",
         "src/test/java/AppTest.py",
         ".venv/lib/python/site-packages/pkg.py",
@@ -3883,6 +3884,7 @@ function handle(req) {
     );
     for excluded in [
         "tests/",
+        "test-fixtures/",
         "testdata/",
         "src/test/",
         ".venv/",

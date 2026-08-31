@@ -768,6 +768,16 @@ fn workspace_relative_test_filters_ignore_test_ancestors() {
         ),
         "--exclude-tests must still apply to test paths inside the selected workspace"
     );
+    assert!(
+        path_is_excluded_with_root(
+            Some(root),
+            "/repo/tests/chosen-workspace/test-fixtures/languages/python/app.py",
+            &[],
+            true,
+            patterns,
+        ),
+        "--exclude-tests must classify the repository-level test-fixtures layout"
+    );
 }
 
 #[test]

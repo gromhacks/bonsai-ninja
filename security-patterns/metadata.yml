@@ -214,6 +214,7 @@ profiles:
       - specs/
       - fixture/
       - fixtures/
+      - test-fixtures/
       - mock/
       - mocks/
       - sample/
@@ -313,6 +314,7 @@ test_path_patterns:
   - /testsuite/
   - /fixture/
   - /fixtures/
+  - /test-fixtures/
   - /mock/
   - /mocks/
   - /e2e/
