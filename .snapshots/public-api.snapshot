@@ -151,6 +151,7 @@ pub use string_pool::{StrId, StringPoolBuilder, StringPoolView};
 pub use writer::{FactStoreWriter, PreparedFactStoreEntry, PreparedFactStorePayload};
 
 === hash ===
+pub fn edge_id_low32(
 pub fn fnv1a_bytes64(bytes: &[u8]) -> u64 {
 pub fn fnv1a_low32(digest: u64) -> u32 {
 pub fn fnv1a_names64(names: &[String]) -> u64 {
