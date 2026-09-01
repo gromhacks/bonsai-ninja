@@ -10,6 +10,7 @@ use bonsai_db::AnalyzerDb;
 use bonsai_factstore::FactStoreError;
 use bonsai_hash::fnv1a_bytes64;
 use fs2::FileExt;
+use std::io;
 use std::path::{Path, PathBuf};
 
 const WORKSPACE_ROOT_MARKER: &str = ".workspace-root.v1";
@@ -21,6 +22,10 @@ const WORKSPACE_ROOT_MAGIC: &[u8] = b"BONSAI-WORKSPACE-ROOT\0\x01";
 // stale dependency semantics. Normal production opens register the marker
 // before any sidecar access.
 const UNBOUND_WORKSPACE_DEPENDENCY_FINGERPRINT: u64 = 0xd541_6f4a_21ce_b783;
+
+fn cache_path_error(error: io::Error, operation: &str, path: &Path) -> io::Error {
+    io::Error::new(error.kind(), format!("{operation} {}: {error}", path.display()))
+}
 
 pub(crate) fn workspace_content_fingerprint(db: &AnalyzerDb) -> u64 {
     let entries = db.vfs().all_files().into_iter().filter_map(|file| {
@@ -89,7 +94,8 @@ pub(crate) fn dependency_metadata_fingerprint_for_sidecar(sidecar: &Path) -> u64
 pub(crate) fn register_workspace_cache_root(workspace_root: &Path) -> std::io::Result<PathBuf> {
     let root = canonical_workspace_root(workspace_root);
     let cache_dir = workspace_bonsai_dir(&root);
-    std::fs::create_dir_all(&cache_dir)?;
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|error| cache_path_error(error, "creating workspace cache", &cache_dir))?;
 
     let lock_path = cache_dir.join(WORKSPACE_ROOT_LOCK);
     let lock = std::fs::OpenOptions::new()
@@ -97,8 +103,10 @@ pub(crate) fn register_workspace_cache_root(workspace_root: &Path) -> std::io::R
         .truncate(false)
         .read(true)
         .write(true)
-        .open(lock_path)?;
-    lock.lock_exclusive()?;
+        .open(&lock_path)
+        .map_err(|error| cache_path_error(error, "opening workspace-root lock", &lock_path))?;
+    lock.lock_exclusive()
+        .map_err(|error| cache_path_error(error, "locking workspace-root marker", &lock_path))?;
 
     let marker_path = cache_dir.join(WORKSPACE_ROOT_MARKER);
     let encoded = encode_workspace_root(&root);
@@ -122,19 +130,29 @@ pub(crate) fn register_workspace_cache_root(workspace_root: &Path) -> std::io::R
                 // cache (or an astronomically unlikely hash collision).
                 // Rebind it: every semantic sidecar also validates exact
                 // source paths/content and the manifest validates this root.
-                write_atomic_bytes(&marker_path, &encoded)?;
+                write_atomic_bytes(&marker_path, &encoded).map_err(|error| {
+                    cache_path_error(error, "rebinding workspace-root marker", &marker_path)
+                })?;
                 drop(lock);
                 return Ok(cache_dir);
             }
             // A corrupt/torn marker cannot safely identify any old sidecar.
             // Atomic replacement binds the directory; the resulting nonzero
             // dependency fingerprint rejects artifacts written without it.
-            write_atomic_bytes(&marker_path, &encoded)?;
+            write_atomic_bytes(&marker_path, &encoded)
+                .map_err(|error| cache_path_error(error, "repairing workspace-root marker", &marker_path))?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            write_atomic_bytes(&marker_path, &encoded)?;
+            write_atomic_bytes(&marker_path, &encoded)
+                .map_err(|error| cache_path_error(error, "creating workspace-root marker", &marker_path))?;
         }
-        Err(error) => return Err(error),
+        Err(error) => {
+            return Err(cache_path_error(
+                error,
+                "reading workspace-root marker",
+                &marker_path,
+            ));
+        }
     }
     drop(lock);
     Ok(cache_dir)

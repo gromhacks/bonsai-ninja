@@ -320,15 +320,30 @@ fn writable_default_workspace_bonsai_dir(
     temporary_root: &std::path::Path,
 ) -> std::path::PathBuf {
     let preferred = default_workspace_bonsai_dir(workspace_root, system_cache_root);
-    if ensure_cache_directory_writable(&preferred) {
+    if cache_destination_is_writable(&preferred) {
         return preferred;
     }
     let fallback = default_workspace_bonsai_dir(workspace_root, Some(temporary_root));
     // Let the eventual cache operation surface its normal I/O error if even
     // the platform temporary directory is unusable. Selection itself stays
     // infallible for compatibility with the existing path API.
-    let _ = ensure_cache_directory_writable(&fallback);
+    let _ = cache_destination_is_writable(&fallback);
     fallback
+}
+
+/// Prove that an existing cache destination is writable, or that its stable
+/// parent can accept a new destination. Probing the parent keeps a read-only
+/// path lookup from materializing the workspace-specific directory and, more
+/// importantly, prevents one process from deleting that directory while a
+/// peer compiler opens its root-binding lock inside it.
+fn cache_destination_is_writable(destination: &std::path::Path) -> bool {
+    if destination.is_dir() {
+        return ensure_cache_directory_writable(destination);
+    }
+    if destination.exists() {
+        return false;
+    }
+    destination.parent().is_some_and(ensure_cache_directory_writable)
 }
 
 /// Create `directory` when needed and prove that it accepts an atomic
@@ -338,7 +353,10 @@ fn writable_default_workspace_bonsai_dir(
 /// an existing read-only directory. Cache clients use this helper before
 /// selecting a default OS cache so sandboxed/service-account executions can
 /// fall back without mistaking a pre-existing directory for a writable one.
-/// The short-lived probe is process/thread unique and is always removed.
+/// The short-lived probe is process/thread unique and is always removed. The
+/// directory itself remains: removing a deterministic cache directory after
+/// probing it races another process that may already be opening a lock or
+/// publishing a sidecar beneath the same path.
 #[must_use]
 pub fn ensure_cache_directory_writable(directory: &std::path::Path) -> bool {
     use std::io::ErrorKind;
@@ -346,7 +364,6 @@ pub fn ensure_cache_directory_writable(directory: &std::path::Path) -> bool {
 
     static NEXT_PROBE: AtomicU64 = AtomicU64::new(0);
 
-    let existed = directory.is_dir();
     if std::fs::create_dir_all(directory).is_err() {
         return false;
     }
@@ -361,13 +378,6 @@ pub fn ensure_cache_directory_writable(directory: &std::path::Path) -> bool {
             Ok(file) => {
                 drop(file);
                 let cleaned = std::fs::remove_file(probe).is_ok();
-                if !existed {
-                    // Path selection must not turn a read-only command such
-                    // as `cache clear` into a cache-producing operation.
-                    // Remove only the final directory and only when it is
-                    // still empty; concurrent writers therefore win safely.
-                    let _ = std::fs::remove_dir(directory);
-                }
                 return cleaned;
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,

@@ -176,3 +176,26 @@ fn flow_ids_cache_no_deadlock_under_parallel_cold_hits() {
         });
     });
 }
+
+#[test]
+fn parallel_cold_workspace_opens_share_one_external_cache() {
+    let root = tempdir_for_test("bonsai-parallel-cold-open");
+    write_python_workspace(&root);
+    let external_cache = bonsai_common::workspace_bonsai_dir(&root);
+
+    assert_finishes_within("parallel cold workspace opens", || {
+        (0..PARALLEL_HITS).into_par_iter().for_each(|_| {
+            let workspace =
+                Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::query_only())
+                    .expect("parallel workspace open must share the cache binding");
+            assert_eq!(workspace.vfs().all_files().len(), 1);
+        });
+    });
+
+    assert!(
+        external_cache.join(".workspace-root.v1").is_file(),
+        "parallel cold opens must publish one complete workspace binding"
+    );
+    std::fs::remove_dir_all(&external_cache).ok();
+    std::fs::remove_dir_all(&root).ok();
+}

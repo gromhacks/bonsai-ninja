@@ -128,7 +128,7 @@ fn every_sanitizer_fixture_produces_a_raw_finding() {
     let Some(_) = bin_path() else { return };
     for lang in LANGS_WITH_DEFAULT_RAW_FINDING {
         let w = fixture_ws(lang);
-        let Some((out, _, code)) = run(&[
+        let Some((out, error, code)) = run(&[
             "security",
             &w,
             "taint-analysis",
@@ -140,7 +140,10 @@ fn every_sanitizer_fixture_produces_a_raw_finding() {
         ]) else {
             return;
         };
-        assert_eq!(code, 0, "[{lang}] sanitizer_test flows ec={code}");
+        assert_eq!(
+            code, 0,
+            "[{lang}] sanitizer_test flows ec={code}\nstderr:\n{error}"
+        );
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
         let rows = rows_of(&parsed);
         // Raw == not credit-cleared. After T101 the engine's
@@ -169,7 +172,7 @@ fn sanitized_paths_attach_sanitizer_evidence() {
     let Some(_) = bin_path() else { return };
     for lang in LANGS_WITH_SANITIZER_EVIDENCE {
         let w = fixture_ws(lang);
-        let Some((out, _, code)) = run(&[
+        let Some((out, error, code)) = run(&[
             "security",
             &w,
             "taint-analysis",
@@ -182,7 +185,10 @@ fn sanitized_paths_attach_sanitizer_evidence() {
         ]) else {
             return;
         };
-        assert_eq!(code, 0, "[{lang}] sanitizer_test flows ec={code}");
+        assert_eq!(
+            code, 0,
+            "[{lang}] sanitizer_test flows ec={code}\nstderr:\n{error}"
+        );
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
         let rows = rows_of(&parsed);
         let sanitized = rows

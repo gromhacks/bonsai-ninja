@@ -49,7 +49,7 @@ fn unwritable_default_cache_falls_back_without_global_environment_mutation() {
 }
 
 #[test]
-fn cache_writability_probe_rejects_a_file_and_cleans_up_after_success() {
+fn cache_writability_probe_rejects_a_file_and_preserves_shared_directory() {
     let root = std::env::temp_dir().join(format!(
         "bonsai-cache-probe-{}-{:?}",
         std::process::id(),
@@ -64,8 +64,8 @@ fn cache_writability_probe_rejects_a_file_and_cleans_up_after_success() {
     let absent = root.join("new-cache");
     assert!(ensure_cache_directory_writable(&absent));
     assert!(
-        !absent.exists(),
-        "probing an absent cache path must not materialize it"
+        absent.is_dir(),
+        "a writable cache directory must remain available for peer processes"
     );
     assert_eq!(
         std::fs::read_dir(&root)

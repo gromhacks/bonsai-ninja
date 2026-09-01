@@ -8,6 +8,10 @@
 use std::io::{self, Write};
 use std::path::Path;
 
+fn path_error(error: io::Error, operation: &str, path: &Path) -> io::Error {
+    io::Error::new(error.kind(), format!("{operation} {}: {error}", path.display()))
+}
+
 /// Write all `bytes` to a temporary file beside `path`, synchronize the
 /// file, atomically replace `path`, then synchronize the parent directory.
 ///
@@ -17,19 +21,28 @@ use std::path::Path;
 pub fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
     if let Some(parent) = parent {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| path_error(error, "creating atomic-write parent", parent))?;
     }
     let temp_parent = parent.unwrap_or_else(|| Path::new("."));
     let mut temp = tempfile::Builder::new()
         .prefix(".bonsai-atomic-")
-        .tempfile_in(temp_parent)?;
-    temp.write_all(bytes)?;
-    temp.flush()?;
-    temp.as_file().sync_all()?;
-    temp.persist(path).map_err(|error| error.error)?;
+        .tempfile_in(temp_parent)
+        .map_err(|error| path_error(error, "creating atomic-write staging file in", temp_parent))?;
+    temp.write_all(bytes)
+        .map_err(|error| path_error(error, "writing atomic staging file for", path))?;
+    temp.flush()
+        .map_err(|error| path_error(error, "flushing atomic staging file for", path))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|error| path_error(error, "syncing atomic staging file for", path))?;
+    temp.persist(path)
+        .map_err(|error| path_error(error.error, "publishing atomic file", path))?;
     if let Some(parent) = parent {
         if let Ok(directory) = std::fs::File::open(parent) {
-            directory.sync_all()?;
+            directory
+                .sync_all()
+                .map_err(|error| path_error(error, "syncing atomic-write parent", parent))?;
         }
     }
     Ok(())
