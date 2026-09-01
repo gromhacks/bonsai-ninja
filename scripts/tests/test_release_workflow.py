@@ -75,6 +75,34 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "the tag workflow must budget the measured sink-centric scale gate",
         )
 
+    def test_elasticsearch_semantic_slo_uses_completed_runner_measurement(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'BONSAI_ES_COLD_SEMANTIC_INDEX_MAX_SECS: "1200"',
+            workflow,
+            "the tag workflow must retain public-runner semantic headroom",
+        )
+        self.assertIn(
+            "999.71s",
+            workflow,
+            "semantic runner calibration must remain tied to completed exact work",
+        )
+        self.assertIn(
+            "strict 600s product/reference",
+            workflow,
+            "host calibration must not replace the product/reference SLO",
+        )
+
+    def test_elasticsearch_scale_tests_run_serially_in_release_ci(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "--test elasticsearch_large_repo -- --nocapture --test-threads=1",
+            workflow,
+            "large-repository SLOs must not compete with sibling scale cases",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -248,6 +248,13 @@ jobs:
           # measured shared-runner class plus ordinary hosted-runner headroom.
           BONSAI_ES_COLD_STRUCTURAL_INDEX_MAX_SECS: "300"
           BONSAI_ES_WARM_STRUCTURAL_INDEX_MAX_SECS: "30"
+          # The v0.2.11 tag runner completed the exact cold semantic build in
+          # 999.71s, while the pinned local reference completed the identical
+          # work in 425.55s. Preserve the strict 600s product/reference
+          # default; 1,200s is the measured public-runner class plus about 20%
+          # scheduling headroom. This assertion runs only after exact work and
+          # all semantic-generation integrity checks complete.
+          BONSAI_ES_COLD_SEMANTIC_INDEX_MAX_SECS: "1200"
           BONSAI_ES_COLD_TAINT_MAX_SECS: "125"
           BONSAI_ES_INSPECT_MAX_SECS: "85"
           BONSAI_ES_NAVIGATION_MAX_SECS: "55"
@@ -269,7 +276,7 @@ jobs:
         run: |
           rm -rf "$BONSAI_WORKSPACE_DIR"
           cargo test --release --locked -p bonsai-ninja \
-            --test elasticsearch_large_repo -- --nocapture
+            --test elasticsearch_large_repo -- --nocapture --test-threads=1
 
   build:
     name: build ${{ matrix.target }}

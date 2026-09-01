@@ -6,7 +6,7 @@ not duplicate dated performance history.
 
 ## Status
 
-The v0.2.11 candidate incorporates the expanded compiler, adapter, rulepack,
+The v0.2.12 candidate incorporates the expanded compiler, adapter, rulepack,
 CLI, cache, scheduling, and publication checks described below. Local status
 is determined from a fresh run of the listed commands; historical measurements
 are retained only where they document a reproducible scale baseline. A tag is
@@ -58,11 +58,12 @@ the current committed tree after every row passes:
 | Release binary build-path privacy | Passed |
 | Documentation structure, links, navigation, binary help claims, and skill copies | Passed |
 | Native archive checksum and fresh-profile relocation smoke | Passed on macOS arm64 |
-| Build-artifact size gate | 25.08 GiB / 32 GiB limit (`target`) |
+| Build-artifact size gate | 3.30 GiB / 32 GiB limit (`target` plus isolated release target) |
 
-The artifact measurement includes the complete current workspace test
-generations. It remains below the enforced local and CI budget; generated
-analysis caches and test outputs are not release inputs.
+The artifact measurement follows a completed exhaustive workspace test run,
+an explicit `cargo clean`, and the isolated privacy-safe release build. It
+remains below the enforced local and CI budget; generated analysis caches and
+test outputs are not release inputs.
 
 The rulepack replay command was:
 
@@ -179,10 +180,12 @@ after the gate.
 ## Large-workspace scale gate
 
 The required release test uses the sibling 30,055-source Elasticsearch
-checkout pinned by the release workflow at `e9741368da0`. On August 30, the
-current release candidate passed all 11 large-repository tests in 538.27
-seconds under the 3 GiB scheduler. An empty current-schema semantic generation
-took 439.03 seconds and a fresh process validated and reopened it in 2.42
+checkout pinned by the release workflow at `e9741368da0`. On August 31, the
+current release candidate passed all 11 large-repository tests in 1,131.62
+seconds under the 3 GiB scheduler. This duration includes the complete native
+export as well as every interactive and security surface. An empty
+current-schema semantic generation took 425.55 seconds and a fresh process
+validated and reopened it in 2.74
 seconds. The suite owns every public leaf command in the curated root menu,
 including the full native export, and its help-derived invariant fails if a
 new command has no scale-test owner. The SLOs below include small host-noise
@@ -191,22 +194,26 @@ completes and never truncate or narrow semantic work. A separate subprocess
 watchdog fails and terminates a probable hang; it cannot turn partial analyzer
 output into a pass. The pinned local gate uses 900 seconds, while the slower
 shared release runner receives 1,800 seconds without relaxing any completed-
-operation SLO.
+operation SLO. The shared release runner completed the same exact cold semantic
+generation in 999.71 seconds. Its independently tested runner-class threshold
+is therefore 1,200 seconds (about 20% headroom); the product/reference threshold
+remains 600 seconds. The release invocation uses one test thread so unrelated
+large-repository cases cannot distort one another's latency measurements.
 For memory context, the prior instrumented
 August 20 empty-cache semantic run recorded 3,788,292,096 bytes maximum RSS
 and zero swaps; its fresh-process reopen used 99,287,040 bytes maximum RSS.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
-| Fresh-cache structural index | 47.45 s | 100 s |
-| Warm structural index | 3.84 s | 12 s |
-| Cold semantic generation | 439.03 s | 600 s |
-| Fresh-process semantic reuse | 2.43 s | 18 s |
+| Fresh-cache structural index | 47.63 s | 100 s |
+| Warm structural index | 4.22 s | 12 s |
+| Cold semantic generation | 425.55 s | 600 s |
+| Fresh-process semantic reuse | 2.74 s | 18 s |
 | Default inspect | 0.89 s | 35 s |
 | Compiler-proven raw-taint inspect | 0.84 s | 35 s |
-| Fresh-cache production taint | 28.83 s | 50 s |
-| Warm production taint | 15.73 s | 35 s |
-| Sink-centric upstream analysis (5 matched endpoints) | 47.87 s | 70 s |
+| Fresh-cache production taint | 29.51 s | 50 s |
+| Warm production taint | 16.53 s | 35 s |
+| Sink-centric upstream analysis (5 matched endpoints) | 45.80 s | 70 s |
 | `tree --max-depth 1` | 0.11 s | 35 s |
 | Search | 1.07 s | 35 s |
 | Definitions | 1.05 s | 35 s |
@@ -240,8 +247,9 @@ and zero swaps; its fresh-process reopen used 99,287,040 bytes maximum RSS.
 | High-severity sink inventory | 1.04 s | 35 s |
 | Sanitizer inventory | 1.00 s | 35 s |
 | Dependency inventory | 1.11 s | 35 s |
-| Source-centric forward analysis | 4.96 s | 35 s |
+| Source-centric forward analysis | 4.89 s | 35 s |
 | Complete embedded rulepack audit | 28.95 s | 70 s |
+| Exact native export | 251.31 s | 300 s |
 
 The interactive rows above are the observed final gate values and may reuse a
 validated rendered-page entry from an earlier exact run. Separate runs with an
@@ -257,7 +265,7 @@ BONSAI_ELASTICSEARCH_ROOT=../elasticsearch \
 BONSAI_REQUIRE_ELASTICSEARCH_GATE=1 \
 BONSAI_MEMORY_BUDGET_MB=3072 \
   cargo test --release --locked -p bonsai-ninja \
-  --test elasticsearch_large_repo -- --nocapture
+  --test elasticsearch_large_repo -- --nocapture --test-threads=1
 ```
 
 The test normally waits for every command to finish before evaluating latency
@@ -271,8 +279,11 @@ steps, paths, or findings.
 The table records the default SLO class on the identified M1 Pro reference
 host. The tag workflow also runs the complete gate on GitHub's shared
 `ubuntu-22.04` runner with runner-class thresholds calibrated from complete
-exact runs. The first v0.2.6 tag attempt measured 255.94 seconds for the exact
-cold structural index, 1,162.71 seconds for cold semantic generation, 1.80
+exact runs. The v0.2.11 tag attempt completed the current cold semantic
+generation in 999.71 seconds; that measurement established the 1,200-second
+shared-runner threshold without changing the 600-second product/reference
+SLO. The first v0.2.6 tag attempt measured 255.94 seconds for the exact cold
+structural index, 1,162.71 seconds for cold semantic generation, 1.80
 seconds for fresh-process semantic reuse, 32.89 seconds for fresh-cache taint,
 62.89 seconds for raw-taint inspect, and 15.60 seconds for warm taint. All
 correctness checks passed; the cold structural measurement exceeded only the
