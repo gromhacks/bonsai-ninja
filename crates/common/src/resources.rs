@@ -75,6 +75,54 @@ const WEIGHTED_COMPILER_HEADROOM_DIVISOR: u64 = 4;
 const WEIGHTED_SYNTAX_HEADROOM_BYTES: u64 = 384 * BYTES_PER_MIB;
 const SOURCE_INGESTION_COPY_AMPLIFICATION: u64 = 2;
 const SOURCE_INGESTION_MIN_HEADROOM_BYTES: u64 = 128 * BYTES_PER_MIB;
+const DEFAULT_COMPILER_WORKER_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+/// Stack reservation for compiler workers that lower recursive source IR.
+///
+/// Tree-sitter parses iteratively, but adapter-owned structured regions and
+/// their typed flow-event trees are recursive source representations.
+/// Dedicated standard-library and Rayon pools must use the same reservation
+/// instead of falling back to the platform's much smaller spawned-thread
+/// default. The reservation is virtual address space and is committed on
+/// demand; it does not change compiler work or the memory-budget scheduler.
+#[must_use]
+pub fn compiler_worker_stack_bytes() -> usize {
+    configured_compiler_worker_stack_bytes(
+        std::env::var("BONSAI_COMPILER_STACK_BYTES")
+            .ok()
+            .or_else(|| std::env::var("BONSAI_RAYON_STACK_BYTES").ok())
+            .as_deref(),
+    )
+}
+
+fn configured_compiler_worker_stack_bytes(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value >= 1024 * 1024)
+        .unwrap_or(DEFAULT_COMPILER_WORKER_STACK_BYTES)
+}
+
+/// Run one ownership-transferring compiler phase on a named, stack-hardened
+/// scoped thread and return its exact result.
+///
+/// This is an allocation-reclamation boundary, not a semantic boundary. A
+/// panic is resumed on the caller exactly as it would be for `Scope::spawn`.
+pub fn run_scoped_compiler_phase<T, F>(name: &str, phase: F) -> T
+where
+    T: Send,
+    F: FnOnce() -> T + Send,
+{
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .name(name.to_string())
+            .stack_size(compiler_worker_stack_bytes())
+            .spawn_scoped(scope, phase)
+            .unwrap_or_else(|error| panic!("failed to spawn {name}: {error}"));
+        match worker.join() {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    })
+}
 
 /// Return the effective memory limit available to the analyzer process.
 ///
@@ -817,11 +865,12 @@ mod tests {
     use super::{
         callgraph_worker_count_for_limit, candidate_index_worker_count_for_limit,
         compiler_weighted_batches_for_limit, compiler_weighted_batches_for_limit_and_resident,
-        compiler_worker_count_for_limit, min_present, rooted_semantic_query_worker_count_for_limit,
-        source_ingestion_batches_for_limit_and_resident, streaming_compiler_body_working_memory_bytes,
-        syntax_weighted_batches_for_limit_and_resident, syntax_worker_count_for_limit,
-        syntax_worker_count_for_limit_and_resident, syntax_worker_count_for_sources_and_limit,
-        weighted_compiler_unit_bytes, worker_count_for_limit, SyntaxMemoryPermitPool, BYTES_PER_GIB,
+        compiler_worker_count_for_limit, configured_compiler_worker_stack_bytes, min_present,
+        rooted_semantic_query_worker_count_for_limit, source_ingestion_batches_for_limit_and_resident,
+        streaming_compiler_body_working_memory_bytes, syntax_weighted_batches_for_limit_and_resident,
+        syntax_worker_count_for_limit, syntax_worker_count_for_limit_and_resident,
+        syntax_worker_count_for_sources_and_limit, weighted_compiler_unit_bytes, worker_count_for_limit,
+        SyntaxMemoryPermitPool, BYTES_PER_GIB,
     };
     use super::{linux_cgroup_limit_paths, read_numeric_limit};
 
@@ -834,6 +883,23 @@ mod tests {
     #[test]
     fn worker_count_never_becomes_a_semantic_zero() {
         assert_eq!(worker_count_for_limit(16, u64::MAX, u64::MAX, Some(1)), 1);
+    }
+
+    #[test]
+    fn compiler_worker_stack_rejects_tiny_or_invalid_overrides() {
+        assert_eq!(configured_compiler_worker_stack_bytes(None), 64 * 1024 * 1024);
+        assert_eq!(
+            configured_compiler_worker_stack_bytes(Some("garbage")),
+            64 * 1024 * 1024
+        );
+        assert_eq!(
+            configured_compiler_worker_stack_bytes(Some("4096")),
+            64 * 1024 * 1024
+        );
+        assert_eq!(
+            configured_compiler_worker_stack_bytes(Some("8388608")),
+            8 * 1024 * 1024
+        );
     }
 
     #[test]

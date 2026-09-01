@@ -53,8 +53,6 @@ use commands::{
 };
 use help_theme::try_themed_help;
 
-const DEFAULT_RAYON_STACK_BYTES: usize = 64 * 1024 * 1024;
-
 // CLI-wide stdout counter + counted print macros — defined up top so
 // `cli_println!` / `cli_print!` are visible everywhere below (macro_rules
 // is lexically scoped). Stderr (progress bars, errors, footer) bypasses
@@ -1213,16 +1211,8 @@ fn real_main() -> Result<()> {
 fn install_global_rayon_pool() {
     let _ = rayon::ThreadPoolBuilder::new()
         .thread_name(|idx| format!("bonsai-worker-{idx}"))
-        .stack_size(configured_rayon_stack_bytes())
+        .stack_size(bonsai_common::compiler_worker_stack_bytes())
         .build_global();
-}
-
-fn configured_rayon_stack_bytes() -> usize {
-    std::env::var("BONSAI_RAYON_STACK_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value >= 1024 * 1024)
-        .unwrap_or(DEFAULT_RAYON_STACK_BYTES)
 }
 
 /// Stack size for the worker thread that runs the whole CLI. Larger than

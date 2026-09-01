@@ -4159,41 +4159,45 @@ where
         let (work_tx, work_rx) = mpsc::sync_channel::<AdmittedTransferWork<'_>>(transfer_workers);
         let (result_tx, result_rx) = mpsc::sync_channel::<CompletedTransferWork<'_>>(transfer_workers);
         let work_rx = Arc::new(Mutex::new(work_rx));
-        for _ in 0..transfer_workers {
+        for worker in 0..transfer_workers {
             let result_tx = result_tx.clone();
             let work_rx = Arc::clone(&work_rx);
             let transfer_inputs = &transfer_inputs;
             let transfer_matchers = &transfer_matchers;
             let aggregate_layouts = &aggregate_layouts;
-            scope.spawn(move || loop {
-                let work = {
-                    let receiver = work_rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    match receiver.recv() {
-                        Ok(work) => work,
-                        Err(_) => break,
+            std::thread::Builder::new()
+                .name(format!("bonsai-idg-transfer-{worker}"))
+                .stack_size(bonsai_common::compiler_worker_stack_bytes())
+                .spawn_scoped(scope, move || loop {
+                    let work = {
+                        let receiver = work_rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        match receiver.recv() {
+                            Ok(work) => work,
+                            Err(_) => break,
+                        }
+                    };
+                    let outcome = catch_unwind(AssertUnwindSafe(|| {
+                        lower_transfer_segment(
+                            global,
+                            transfer_options,
+                            transfer_matchers,
+                            aggregate_layouts,
+                            &transfer_inputs[work.index],
+                            body_for_file,
+                        )
+                    }));
+                    if result_tx
+                        .send(CompletedTransferWork {
+                            index: work.index,
+                            outcome,
+                            permit: work.permit,
+                        })
+                        .is_err()
+                    {
+                        break;
                     }
-                };
-                let outcome = catch_unwind(AssertUnwindSafe(|| {
-                    lower_transfer_segment(
-                        global,
-                        transfer_options,
-                        transfer_matchers,
-                        aggregate_layouts,
-                        &transfer_inputs[work.index],
-                        body_for_file,
-                    )
-                }));
-                if result_tx
-                    .send(CompletedTransferWork {
-                        index: work.index,
-                        outcome,
-                        permit: work.permit,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            });
+                })
+                .unwrap_or_else(|error| panic!("failed to spawn IDG transfer worker {worker}: {error}"));
         }
         drop(result_tx);
         let batches = OrderedTransferBatches::new(

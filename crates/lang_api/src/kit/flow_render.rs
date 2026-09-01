@@ -33,7 +33,9 @@ pub fn collect_return_spans(events: &[FlowEvent], out: &mut Vec<Span>) {
 /// Visit every typed flow event in deterministic pre-order, including nested
 /// branch, loop, defer, using, and try regions.
 pub fn for_each_flow_event<'a>(events: &'a [FlowEvent], visitor: &mut impl FnMut(&'a FlowEvent)) {
-    for event in events {
+    let mut pending = Vec::with_capacity(events.len());
+    pending.extend(events.iter().rev());
+    while let Some(event) = pending.pop() {
         visitor(event);
         match event {
             FlowEvent::Branch {
@@ -41,8 +43,8 @@ pub fn for_each_flow_event<'a>(events: &'a [FlowEvent], visitor: &mut impl FnMut
                 else_events,
                 ..
             } => {
-                for_each_flow_event(then_events, visitor);
-                for_each_flow_event(else_events, visitor);
+                pending.extend(else_events.iter().rev());
+                pending.extend(then_events.iter().rev());
             }
             FlowEvent::Loop {
                 condition_events,
@@ -50,12 +52,12 @@ pub fn for_each_flow_event<'a>(events: &'a [FlowEvent], visitor: &mut impl FnMut
                 update_events,
                 ..
             } => {
-                for_each_flow_event(condition_events, visitor);
-                for_each_flow_event(body, visitor);
-                for_each_flow_event(update_events, visitor);
+                pending.extend(update_events.iter().rev());
+                pending.extend(body.iter().rev());
+                pending.extend(condition_events.iter().rev());
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                for_each_flow_event(body, visitor);
+                pending.extend(body.iter().rev());
             }
             FlowEvent::Try {
                 body,
@@ -63,9 +65,9 @@ pub fn for_each_flow_event<'a>(events: &'a [FlowEvent], visitor: &mut impl FnMut
                 finally_events,
                 ..
             } => {
-                for_each_flow_event(body, visitor);
-                for_each_flow_event(catch_events, visitor);
-                for_each_flow_event(finally_events, visitor);
+                pending.extend(finally_events.iter().rev());
+                pending.extend(catch_events.iter().rev());
+                pending.extend(body.iter().rev());
             }
             _ => {}
         }
@@ -122,5 +124,33 @@ mod tests {
             assignment_trace_message("assign", "result", None, None, &[], &[]),
             "assign result"
         );
+    }
+
+    #[test]
+    fn flow_event_visit_uses_an_explicit_stack_for_deep_compiler_ir() {
+        let span = Span::new(bonsai_common::FileId::new(1), 1, 2);
+        let mut events = vec![FlowEvent::Return {
+            span,
+            value_kind: None,
+            value_name: None,
+            value_text: None,
+            value_flow: Default::default(),
+        }];
+        for _ in 0..4_096 {
+            events = vec![FlowEvent::Using { span, body: events }];
+        }
+
+        let mut visited = 0usize;
+        for_each_flow_event(&events, &mut |_| visited += 1);
+        assert_eq!(visited, 4_097);
+
+        // Consume the synthetic recursive owner iteratively as well. Generated
+        // enum Drop glue is outside the visitor contract and would otherwise
+        // make this test depend on the test harness thread's stack size.
+        while let Some(event) = events.pop() {
+            if let FlowEvent::Using { body, .. } = event {
+                events.extend(body);
+            }
+        }
     }
 }

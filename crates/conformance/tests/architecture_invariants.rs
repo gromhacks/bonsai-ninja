@@ -6577,6 +6577,69 @@ fn unified_taint_closure_is_uncapped_compiler_dataflow() {
     );
 }
 
+/// Every hidden compiler thread must inherit the stack reservation used by
+/// the public CLI worker. Platform-default scoped threads are too small for
+/// valid deeply nested adapter IR and abort the process before Rust can report
+/// a recoverable error.
+#[test]
+fn critical_compiler_workers_share_the_stack_hardened_execution_contract() {
+    let root = repo_root();
+    let resources = read(&root.join("crates/common/src/resources.rs"));
+    let compiler_objects = read(&root.join("crates/db/src/compiler_object.rs"));
+    let idg_adapter = read(&root.join("crates/idg/src/workspace_adapter.rs"));
+    let idg_service = read(&root.join("crates/idg/src/service.rs"));
+    let security_execution = read(&root.join("crates/security/src/analysis/execution.rs"));
+    let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
+    let security_matcher = read(&root.join("crates/security/src/matcher/mod.rs"));
+
+    let stack_contract = function_body(&resources, "compiler_worker_stack_bytes");
+    assert!(
+        stack_contract.contains("BONSAI_COMPILER_STACK_BYTES")
+            && stack_contract.contains("BONSAI_RAYON_STACK_BYTES")
+            && resources.contains("run_scoped_compiler_phase"),
+        "compiler workers must share one configurable stack reservation"
+    );
+
+    let compiler_worklist = function_body(&compiler_objects, "try_visit_parallel");
+    assert!(
+        compiler_worklist.contains("spawn_scoped")
+            && compiler_worklist.contains("compiler_worker_stack_bytes")
+            && compiler_worklist.contains("bonsai-compiler-object-"),
+        "compiler-object worklists must not use unnamed platform-default threads"
+    );
+
+    let idg_build = function_body(&idg_adapter, "build_with_file_info_and_options_scoped");
+    assert!(
+        idg_build.contains("spawn_scoped")
+            && idg_build.contains("compiler_worker_stack_bytes")
+            && idg_build.contains("bonsai-idg-transfer-"),
+        "IDG transfer lowering must run on named stack-hardened compiler workers"
+    );
+
+    let isolated = function_body(&idg_service, "run_isolated_compiler_phase");
+    let summaries = function_body(&idg_service, "compile_return_taint_param_indices");
+    assert!(
+        isolated.contains("run_scoped_compiler_phase")
+            && summaries.contains("compiler_worker_stack_bytes")
+            && summaries.contains("bonsai-idg-summary-"),
+        "IDG summary and query-accelerator phases must not reintroduce small default worker stacks"
+    );
+
+    for (name, source) in [
+        ("compiler objects", compiler_objects.as_str()),
+        ("IDG transfer", idg_adapter.as_str()),
+        ("IDG summaries", idg_service.as_str()),
+        ("security execution", security_execution.as_str()),
+        ("security analysis", security_analysis.as_str()),
+        ("security matcher", security_matcher.as_str()),
+    ] {
+        assert!(
+            !live_code(source).contains("scope.spawn("),
+            "{name} reintroduced an unnamed platform-default scoped compiler thread"
+        );
+    }
+}
+
 /// Public and contributor documentation is part of the architecture contract:
 /// stale scheduler flags or retired module paths would direct callers back to
 /// an engine that no longer exists.

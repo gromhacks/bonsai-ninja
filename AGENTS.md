@@ -89,6 +89,12 @@ complete cold pipeline. Memory scheduling may weight or serialize units, but
 must never cap semantic work. After the isolated workers finish, the parent
 validates that every sidecar describes one current workspace snapshot and
 reruns the exact sequence if a file changed between phases.
+All parser, compiler-object, IDG transfer, summary, accelerator, and matcher
+workers use the shared named compiler-thread stack contract; never launch
+source-IR work on an unnamed platform-default stack. Generic nested
+flow-event visitation uses an explicit heap worklist, and the ordinary gate
+must retain the deep Java semantic-build and deep typed-IDG lowering
+regressions.
 
 When a rulepack-only external type is required for receiver-state transfer,
 compile the complete rule match to exact AST call spans before IDG

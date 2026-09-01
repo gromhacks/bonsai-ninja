@@ -666,36 +666,40 @@ where
     }
 
     std::thread::scope(|scope| {
-        for _ in 0..worker_count {
+        for worker in 0..worker_count {
             let result_tx = result_tx.clone();
             let work_rx = &work_rx;
             let work = &work;
             let cancelled = &cancelled;
-            scope.spawn(move || loop {
-                if cancelled.load(Ordering::Acquire) {
-                    break;
-                }
-                let index = {
-                    let receiver = work_rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    match receiver.recv() {
-                        Ok(index) => index,
-                        Err(_) => break,
+            std::thread::Builder::new()
+                .name(format!("bonsai-compiler-object-{worker}"))
+                .stack_size(bonsai_common::compiler_worker_stack_bytes())
+                .spawn_scoped(scope, move || loop {
+                    if cancelled.load(Ordering::Acquire) {
+                        break;
                     }
-                };
-                if cancelled.load(Ordering::Acquire) {
-                    break;
-                }
-                let result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(index, &items[index])))
-                        .unwrap_or_else(|_| {
-                            Err(std::io::Error::other(format!(
-                                "compiler worker panicked for item {index}"
-                            )))
-                        });
-                if result_tx.send((index, result)).is_err() {
-                    break;
-                }
-            });
+                    let index = {
+                        let receiver = work_rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        match receiver.recv() {
+                            Ok(index) => index,
+                            Err(_) => break,
+                        }
+                    };
+                    if cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(index, &items[index])))
+                            .unwrap_or_else(|_| {
+                                Err(std::io::Error::other(format!(
+                                    "compiler worker panicked for item {index}"
+                                )))
+                            });
+                    if result_tx.send((index, result)).is_err() {
+                        break;
+                    }
+                })
+                .unwrap_or_else(|error| panic!("failed to spawn compiler-object worker {worker}: {error}"));
         }
         drop(result_tx);
 

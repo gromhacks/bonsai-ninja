@@ -6189,7 +6189,7 @@ fn workspace_parse_worker_stack_bytes() -> usize {
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
         .filter(|bytes| *bytes >= 1024 * 1024)
-        .unwrap_or(64 * 1024 * 1024)
+        .unwrap_or_else(bonsai_common::compiler_worker_stack_bytes)
 }
 
 fn trace_step_calls_symbol(step: &bonsai_trace::TraceStep, sink: &str) -> bool {

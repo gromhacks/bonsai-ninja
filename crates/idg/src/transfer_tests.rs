@@ -5987,6 +5987,35 @@ fn deeply_nested_loops_establish_carry_edges_without_a_depth_ceiling() {
 }
 
 #[test]
+fn deeply_nested_structured_regions_lower_without_exhausting_the_process_stack() {
+    let mut decl = empty_decl(1, "deep_regions");
+    let sink_site = span(40, 50);
+    let mut body = vec![FlowEvent::Call {
+        span: sink_site,
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: Vec::new(),
+    }];
+    for depth in 0..4_096_u64 {
+        body = vec![FlowEvent::Using {
+            span: span(100 + depth, 10_000 + depth),
+            body,
+        }];
+    }
+    decl.flow_events = body;
+
+    let out = bonsai_common::run_scoped_compiler_phase("bonsai-idg-deep-region-test", move || {
+        transfer_function_for(&decl)
+    });
+    assert!(
+        out.call_sites.iter().any(|site| site.site.0 == sink_site),
+        "the exact innermost call must survive every structured compiler region"
+    );
+}
+
+#[test]
 fn deep_return_projection_is_not_truncated() {
     let projection = return_field_projection(
         &bonsai_lang_api::ExpressionProjection {

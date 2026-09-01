@@ -2881,6 +2881,7 @@ fn inspect_taint_flows(
         rayon::ThreadPoolBuilder::new()
             .num_threads(workers)
             .thread_name(|index| format!("bonsai-inspect-flow-{index}"))
+            .stack_size(bonsai_common::compiler_worker_stack_bytes())
             .build()
             .expect("build memory-bounded inspect flow pool")
             .install(|| {

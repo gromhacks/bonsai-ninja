@@ -473,16 +473,20 @@ where
             let max_precision = request.max_precision;
             let source_funcs = &graph_roots;
             let sink_func_list = &sink_func_list;
-            let worker = scope.spawn(move || {
-                ws.source_reachable_resolved_call_graph_with_progress(
-                    source_funcs,
-                    sink_func_list,
-                    max_precision,
-                    || {
-                        let _ = tick_tx.send(());
-                    },
-                )
-            });
+            let worker = std::thread::Builder::new()
+                .name("bonsai-security-callgraph".to_string())
+                .stack_size(bonsai_common::compiler_worker_stack_bytes())
+                .spawn_scoped(scope, move || {
+                    ws.source_reachable_resolved_call_graph_with_progress(
+                        source_funcs,
+                        sink_func_list,
+                        max_precision,
+                        || {
+                            let _ = tick_tx.send(());
+                        },
+                    )
+                })
+                .expect("spawn security callgraph worker");
             while tick_rx.recv().is_ok() {
                 on_progress(AnalysisProgress::PhaseTicked);
             }
@@ -956,18 +960,22 @@ where
         let (tx, rx) = mpsc::channel();
         let mut groups = None;
         std::thread::scope(|scope| {
-            let worker = scope.spawn(|| {
-                pool.install(|| {
-                    source_groups
-                        .par_iter()
-                        .map(|group| {
-                            let out = executor.execute(group, idg_service);
-                            let _ = tx.send(());
-                            out
-                        })
-                        .collect::<Vec<_>>()
+            let worker = std::thread::Builder::new()
+                .name("bonsai-security-source-groups".to_string())
+                .stack_size(bonsai_common::compiler_worker_stack_bytes())
+                .spawn_scoped(scope, || {
+                    pool.install(|| {
+                        source_groups
+                            .par_iter()
+                            .map(|group| {
+                                let out = executor.execute(group, idg_service);
+                                let _ = tx.send(());
+                                out
+                            })
+                            .collect::<Vec<_>>()
+                    })
                 })
-            });
+                .expect("spawn security source-group coordinator");
             let mut completed = 0usize;
             while completed < expected_groups {
                 match rx.recv_timeout(Duration::from_millis(250)) {
@@ -1060,6 +1068,8 @@ where
     let rayon_pool = if worker_count > 1 && total_groups > 1 {
         rayon::ThreadPoolBuilder::new()
             .num_threads(worker_count)
+            .thread_name(|index| format!("bonsai-taint-source-{index}"))
+            .stack_size(bonsai_common::compiler_worker_stack_bytes())
             .build()
             .ok()
     } else {

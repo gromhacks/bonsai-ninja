@@ -1145,11 +1145,15 @@ where
     let result = std::thread::scope(|scope| {
         let (progress_tx, progress_rx) = mpsc::sync_channel::<()>(64);
         let worker_tx = progress_tx.clone();
-        let worker = scope.spawn(move || {
-            ws.db().ensure_compiler_object_session_with_progress(&files, || {
-                let _ = worker_tx.send(());
+        let worker = std::thread::Builder::new()
+            .name("bonsai-security-compiler-session".to_string())
+            .stack_size(bonsai_common::compiler_worker_stack_bytes())
+            .spawn_scoped(scope, move || {
+                ws.db().ensure_compiler_object_session_with_progress(&files, || {
+                    let _ = worker_tx.send(());
+                })
             })
-        });
+            .expect("spawn security compiler-session worker");
         drop(progress_tx);
         for () in progress_rx {
             on_progress(AnalysisProgress::PhaseTicked);
@@ -2820,24 +2824,33 @@ where
     let worker_count = source_analysis_worker_count();
     let mut grouped_candidates: Vec<(usize, Vec<SourceAnalysisCandidate>)> =
         if worker_count > 1 && source_groups.len() > 1 {
-            match rayon::ThreadPoolBuilder::new().num_threads(worker_count).build() {
+            match rayon::ThreadPoolBuilder::new()
+                .num_threads(worker_count)
+                .thread_name(|index| format!("bonsai-source-analysis-{index}"))
+                .stack_size(bonsai_common::compiler_worker_stack_bytes())
+                .build()
+            {
                 Ok(pool) => {
                     let (tx, rx) = mpsc::channel();
                     let mut groups = None;
                     std::thread::scope(|scope| {
-                        let worker = scope.spawn(|| {
-                            pool.install(|| {
-                                source_groups
-                                    .par_iter()
-                                    .enumerate()
-                                    .map(|(index, group)| {
-                                        let candidates = build_source_group_candidates(context, group);
-                                        let _ = tx.send(group.jobs.len());
-                                        (index, candidates)
-                                    })
-                                    .collect()
+                        let worker = std::thread::Builder::new()
+                            .name("bonsai-source-analysis-coordinator".to_string())
+                            .stack_size(bonsai_common::compiler_worker_stack_bytes())
+                            .spawn_scoped(scope, || {
+                                pool.install(|| {
+                                    source_groups
+                                        .par_iter()
+                                        .enumerate()
+                                        .map(|(index, group)| {
+                                            let candidates = build_source_group_candidates(context, group);
+                                            let _ = tx.send(group.jobs.len());
+                                            (index, candidates)
+                                        })
+                                        .collect()
+                                })
                             })
-                        });
+                            .expect("spawn source-analysis coordinator");
                         let mut completed = 0usize;
                         while completed < total_source_path_ticks {
                             match rx.recv_timeout(Duration::from_millis(250)) {

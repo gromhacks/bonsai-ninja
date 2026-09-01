@@ -666,11 +666,15 @@ where
         // work alter compiler scheduling.
         let (progress_tx, progress_rx) = std::sync::mpsc::sync_channel::<()>(64);
         let worker_tx = progress_tx.clone();
-        let worker = scope.spawn(move || {
-            ws.compiler_receiver_ancestry_with_progress(|| {
-                let _ = worker_tx.send(());
+        let worker = std::thread::Builder::new()
+            .name("bonsai-security-receiver-ancestry".to_string())
+            .stack_size(bonsai_common::compiler_worker_stack_bytes())
+            .spawn_scoped(scope, move || {
+                ws.compiler_receiver_ancestry_with_progress(|| {
+                    let _ = worker_tx.send(());
+                })
             })
-        });
+            .expect("spawn receiver-ancestry worker");
         drop(progress_tx);
         for () in progress_rx {
             on_completed();
@@ -1492,7 +1496,11 @@ where
 {
     let (tick_tx, tick_rx) = mpsc::channel();
     std::thread::scope(|scope| {
-        let worker = scope.spawn(move || worker(tick_tx));
+        let worker = std::thread::Builder::new()
+            .name("bonsai-security-progress".to_string())
+            .stack_size(bonsai_common::compiler_worker_stack_bytes())
+            .spawn_scoped(scope, move || worker(tick_tx))
+            .expect("spawn security progress worker");
         for _ in 0..item_count {
             if tick_rx.recv().is_err() {
                 break;
@@ -2043,28 +2051,32 @@ where
         let text_skipped_files = Arc::new(AtomicUsize::new(target_prefilter_skipped));
         let parsed_files_worker = parsed_files.clone();
         std::thread::scope(|scope| {
-            let worker = scope.spawn(move || {
-                let scan = || {
-                    use rayon::prelude::*;
-                    scan_plan
-                        .par_iter()
-                        .zip(source_bytes.par_iter())
-                        .flat_map_iter(|((file, rule_refs), source_bytes)| {
-                            let _memory_permit = memory_permits.acquire(*source_bytes);
-                            let (file_out, parsed) = scan_planned_file(*file, rule_refs);
-                            if parsed {
-                                parsed_files_worker.fetch_add(1, Ordering::Relaxed);
-                            }
-                            let _ = tick_tx.send(());
-                            file_out
-                        })
-                        .collect::<Vec<_>>()
-                };
-                match pool {
-                    Some(pool) => pool.install(scan),
-                    None => scan(),
-                }
-            });
+            let worker = std::thread::Builder::new()
+                .name("bonsai-security-match-coordinator".to_string())
+                .stack_size(bonsai_common::compiler_worker_stack_bytes())
+                .spawn_scoped(scope, move || {
+                    let scan = || {
+                        use rayon::prelude::*;
+                        scan_plan
+                            .par_iter()
+                            .zip(source_bytes.par_iter())
+                            .flat_map_iter(|((file, rule_refs), source_bytes)| {
+                                let _memory_permit = memory_permits.acquire(*source_bytes);
+                                let (file_out, parsed) = scan_planned_file(*file, rule_refs);
+                                if parsed {
+                                    parsed_files_worker.fetch_add(1, Ordering::Relaxed);
+                                }
+                                let _ = tick_tx.send(());
+                                file_out
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    match pool {
+                        Some(pool) => pool.install(scan),
+                        None => scan(),
+                    }
+                })
+                .expect("spawn security match coordinator");
             let mut completed = 0usize;
             while completed < scan_total {
                 match tick_rx.recv() {
@@ -2220,7 +2232,7 @@ fn matcher_worker_stack_bytes() -> usize {
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
         .filter(|bytes| *bytes >= 1024 * 1024)
-        .unwrap_or(16 * 1024 * 1024)
+        .unwrap_or_else(bonsai_common::compiler_worker_stack_bytes)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

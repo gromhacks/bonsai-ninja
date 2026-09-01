@@ -366,6 +366,16 @@ fixed-point scope. Do not replace this window with per-batch barriers, and do
 not parallelize an earlier ordered phase without measuring its effect on later
 memory admission in the complete cold pipeline.
 
+All parser, compiler-object, transfer, summary, accelerator, and matcher pools
+use the shared compiler-worker stack reservation. This is required because the
+typed structured source IR retains source nesting even though Tree-sitter's
+parser itself is iterative; platform-default spawned-thread stacks can abort
+on valid deeply nested input. Generic read-only flow-event visitation uses an
+explicit heap worklist, while stateful structured control lowering retains its
+exact recursive representation on stack-hardened named workers. The ordinary
+test gate includes a 2,048-region Java semantic build and a 4,096-region IDG
+lowering test so a new hidden default-stack thread cannot silently return.
+
 `index --semantic` runs compiler objects, callgraph, retrieval, linkage, and
 IDG as ordered worker processes. The IDG worker also compiles the default
 semantic contextual fixed point and compact node/function directories into an

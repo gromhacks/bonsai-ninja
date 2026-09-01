@@ -195,3 +195,68 @@ fn cache_rebuild_stats_and_clear_complete_on_a_many_file_workspace() {
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(cache);
 }
+
+#[test]
+fn deeply_nested_java_semantic_generation_is_stack_safe() {
+    const DEPTH: usize = 2_048;
+
+    let workspace = temp_workspace("deep-java");
+    let cache = temp_workspace("deep-java-sidecars");
+    let _ = std::fs::remove_dir_all(&workspace);
+    let _ = std::fs::remove_dir_all(&cache);
+    std::fs::create_dir_all(&workspace).expect("create deep Java workspace");
+
+    let mut source = String::from(
+        "package scale;\npublic final class Deep {\n  public static String evaluate(String value) {\n",
+    );
+    for _ in 0..DEPTH {
+        source.push_str("    if (value != null) {\n");
+    }
+    source.push_str("      return value.trim();\n");
+    for _ in 0..DEPTH {
+        source.push_str("    }\n");
+    }
+    source.push_str("    return \"\";\n  }\n}\n");
+    std::fs::write(workspace.join("Deep.java"), source).expect("write deep Java source");
+
+    let rebuilt = Command::new(bin_path())
+        .args([
+            "cache",
+            "rebuild",
+            workspace.to_str().expect("workspace utf8"),
+            "--no-color",
+            "--no-progress",
+        ])
+        .env("BONSAI_WORKSPACE_DIR", &cache)
+        .env("BONSAI_MEMORY_BUDGET_MB", "1024")
+        .output()
+        .expect("run deep Java semantic generation");
+    assert!(
+        rebuilt.status.success(),
+        "deep Java semantic generation failed with {}\nstdout:\n{}\nstderr:\n{}",
+        rebuilt.status,
+        String::from_utf8_lossy(&rebuilt.stdout),
+        String::from_utf8_lossy(&rebuilt.stderr)
+    );
+
+    let stats = Command::new(bin_path())
+        .args([
+            "cache",
+            "stats",
+            workspace.to_str().expect("workspace utf8"),
+            "--format",
+            "json",
+            "--no-color",
+            "--no-progress",
+        ])
+        .env("BONSAI_WORKSPACE_DIR", &cache)
+        .output()
+        .expect("read deep Java cache stats");
+    assert!(stats.status.success(), "deep Java cache stats failed: {stats:?}");
+    let stats: serde_json::Value = serde_json::from_slice(&stats.stdout).expect("deep Java cache stats JSON");
+    assert_eq!(stats["validation"]["semantic_ready"], true, "{stats}");
+    assert_eq!(stats["validation"]["structural_ready"], true, "{stats}");
+
+    let _ = std::fs::remove_dir_all(workspace);
+    let _ = std::fs::remove_dir_all(cache);
+}

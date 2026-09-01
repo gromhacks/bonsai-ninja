@@ -155,7 +155,8 @@ settings below.
 | `BONSAI_SECURITY_JOBS` | positive integer | available CPU count | Upper bound on the continuous security header/body CPU worklist. Source-size-weighted permits independently bound memory overlap, so small files can use available CPUs while a large file consumes more of the scheduling budget. It changes throughput only, never the scanned file, rule set, or derived evidence. |
 | `BONSAI_SOURCE_ANALYSIS_JOBS` | positive integer | available CPU count | Upper bound on concurrent source-analysis compiler units before the shared memory scheduler. |
 | `BONSAI_TAINT_ANALYSIS_JOBS` | positive integer | `RAYON_NUM_THREADS` or available CPU count | Upper bound on concurrent exact source closures. Constrained machines run the same closures serially. |
-| `BONSAI_SECURITY_STACK_BYTES` | integer bytes, at least 1 MiB | 16 MiB | Stack size for security matcher workers. |
+| `BONSAI_COMPILER_STACK_BYTES` | integer bytes, at least 1 MiB | 64 MiB | Shared virtual stack reservation for parser, compiler-object, IDG transfer, IDG summary, query-accelerator, and security matcher workers. Valid deeply nested typed IR must not inherit a platform's smaller spawned-thread default. Pages are committed on demand; this changes stack capacity, not analyzed work. |
+| `BONSAI_SECURITY_STACK_BYTES` | integer bytes, at least 1 MiB | compiler stack | Security-matcher-specific override of `BONSAI_COMPILER_STACK_BYTES`. |
 | `BONSAI_TAINT_GRAPH_CACHE_MB` | non-negative integer MiB | memory-budget-derived, normally 64 MiB without detection | Byte budget for decoded source-seeded graph retention. Oversize/evicted graphs are still computed and persisted exactly; only in-process reuse changes. |
 | `BONSAI_TAINT_GRAPH_CACHE_ENTRIES` | non-negative integer | 512 | Secondary entry-count bound for decoded taint graph retention. `0` disables resident retention, not analysis or persistence. |
 | `BONSAI_NO_DATAFLOW` | boolean-like | unset | Skip explicit dataflow prewarm and trace eager hydration. Query commands still compute required facts on demand. |
@@ -165,7 +166,7 @@ settings below.
 | `BONSAI_NO_CACHE` | boolean-like | unset | Run one exact invocation without loading or publishing reusable semantic sidecars. Command-local compiler memoization may still avoid duplicate parsing within that process and is discarded at exit. |
 | `BONSAI_TAINT_GRAPH_PERSIST` | boolean-like | enabled | Persist exact taint/source graph entries to mode/config-specific `$CACHE_DIR/taint_graph.v*.<mode>.<config>.factstore` files. Set to `0`, `false`, `no`, or `off` to opt out. |
 | `BONSAI_INCLUDE_MINIFIED_JS` | boolean-like | unset | Equivalent to global `--minified-js`. Include adapter-classified minified JavaScript/TypeScript in compiler-backed commands and inherited semantic worker processes. |
-| `BONSAI_RAYON_STACK_BYTES` | integer bytes | internal default | Rayon worker stack size override for very deep syntax trees. |
+| `BONSAI_RAYON_STACK_BYTES` | integer bytes, at least 1 MiB | unset | Compatibility alias for `BONSAI_COMPILER_STACK_BYTES` when the latter is unset. It applies to dedicated compiler threads as well as Rayon pools. |
 | `NO_COLOR` | boolean-like | unset | Disable color output. |
 | `NO_PROGRESS` | boolean-like | unset | Disable progress output. |
 

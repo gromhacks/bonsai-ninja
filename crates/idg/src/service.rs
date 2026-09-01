@@ -161,10 +161,7 @@ where
     T: Send,
     F: FnOnce() -> T + Send,
 {
-    std::thread::scope(|scope| match scope.spawn(phase).join() {
-        Ok(result) => result,
-        Err(payload) => std::panic::resume_unwind(payload),
-    })
+    bonsai_common::run_scoped_compiler_phase("bonsai-idg-compiler-phase", phase)
 }
 
 /// Provenance of a cross-function IDG propagation.
@@ -4806,6 +4803,7 @@ impl IdgQueryService {
                 rayon::ThreadPoolBuilder::new()
                     .num_threads(workers)
                     .thread_name(|index| format!("bonsai-idg-summary-{index}"))
+                    .stack_size(bonsai_common::compiler_worker_stack_bytes())
                     .build()
                     .expect("build memory-bounded IDG summary pool")
                     .install(|| symbolic_funcs.par_iter().filter_map(summarize).collect())
