@@ -135,15 +135,12 @@ class CratesIoRetryDelayTests(unittest.TestCase):
 
 
 class PublicationPreflightTests(unittest.TestCase):
-    def test_publish_preflights_every_archive_before_first_upload(self) -> None:
+    def test_publish_preflights_every_source_payload_before_first_upload(self) -> None:
         order = ["bonsai-ninja-a", "bonsai-ninja-b"]
-        excluded = {"bonsai-ninja-testkit"}
         with (
             mock.patch.object(publish_crates, "assert_clean_checkout"),
             mock.patch.object(publish_crates, "assert_registry_credentials"),
-            mock.patch.object(
-                publish_crates, "preflight_package_archives"
-            ) as preflight,
+            mock.patch.object(publish_crates, "preflight_package_sources") as preflight,
             mock.patch.object(
                 publish_crates, "registry_version_exists", return_value=False
             ),
@@ -155,13 +152,8 @@ class PublicationPreflightTests(unittest.TestCase):
                 order,
                 "0.2.10",
                 resume=False,
-                excluded_packages=excluded,
             )
-        preflight.assert_called_once_with(
-            order,
-            "0.2.10",
-            excluded_packages=excluded,
-        )
+        preflight.assert_called_once_with(order, "0.2.10")
         self.assertEqual(
             upload.call_args_list,
             [
@@ -170,53 +162,62 @@ class PublicationPreflightTests(unittest.TestCase):
             ],
         )
 
-    def test_preflight_packages_workspace_once_and_inspects_every_archive(self) -> None:
+    def test_preflight_lists_each_package_without_workspace_resolution(self) -> None:
         order = ["bonsai-ninja-a", "bonsai-ninja-b"]
-        excluded = {"bonsai-ninja-testkit", "bonsai-ninja-conformance"}
+
+        def package_list(*args: str, **kwargs: object) -> object:
+            self.assertNotIn("--workspace", args)
+            self.assertTrue(kwargs.get("capture"))
+            return mock.Mock(stdout="Cargo.toml\nsrc/lib.rs\n")
+
         with (
-            mock.patch.object(publish_crates, "run") as run,
             mock.patch.object(
-                publish_crates.Path,
-                "read_bytes",
-                side_effect=[b"archive-a", b"archive-b"],
-            ),
-            mock.patch.object(
-                publish_crates, "canonical_crate_contents"
-            ) as inspect,
-            mock.patch.object(publish_crates, "remove_package_artifacts") as remove,
+                publish_crates, "run", side_effect=package_list
+            ) as run,
             redirect_stdout(io.StringIO()),
         ):
-            publish_crates.preflight_package_archives(
-                order,
-                "0.2.10",
-                excluded_packages=excluded,
-            )
+            publish_crates.preflight_package_sources(order, "0.2.10")
 
-        run.assert_called_once_with(
-            "cargo",
-            "package",
-            "--workspace",
-            "--locked",
-            "--no-verify",
-            "--exclude",
-            "bonsai-ninja-conformance",
-            "--exclude",
-            "bonsai-ninja-testkit",
-        )
         self.assertEqual(
-            inspect.call_args_list,
+            run.call_args_list,
             [
-                mock.call(b"archive-a", expected_root="bonsai-ninja-a-0.2.10"),
-                mock.call(b"archive-b", expected_root="bonsai-ninja-b-0.2.10"),
+                mock.call(
+                    "cargo",
+                    "package",
+                    "-p",
+                    "bonsai-ninja-a",
+                    "--locked",
+                    "--no-verify",
+                    "--list",
+                    capture=True,
+                ),
+                mock.call(
+                    "cargo",
+                    "package",
+                    "-p",
+                    "bonsai-ninja-b",
+                    "--locked",
+                    "--no-verify",
+                    "--list",
+                    capture=True,
+                ),
             ],
         )
-        self.assertEqual(
-            remove.call_args_list,
-            [
-                mock.call("bonsai-ninja-a", "0.2.10"),
-                mock.call("bonsai-ninja-b", "0.2.10"),
-            ],
-        )
+
+    def test_preflight_rejects_unsafe_or_incomplete_source_lists(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            publish_crates.validate_package_file_list("demo", "../secret\nCargo.toml\n")
+        with self.assertRaisesRegex(ValueError, "omits Cargo.toml"):
+            publish_crates.validate_package_file_list("demo", "src/lib.rs\n")
+
+    def test_real_workspace_source_payloads_pass_publication_preflight(self) -> None:
+        data = publish_crates.metadata()
+        packages, version = publish_crates.publishable_packages(data)
+        order = publish_crates.publication_order(packages)
+        with redirect_stdout(io.StringIO()):
+            publish_crates.preflight_package_sources(order, version)
+        self.assertEqual(len(order), 45)
+        self.assertEqual(order[-1], "bonsai-ninja")
 
 
 class CanonicalCrateContentsTests(unittest.TestCase):

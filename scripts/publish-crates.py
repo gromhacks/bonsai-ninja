@@ -190,16 +190,6 @@ def publishable_packages(
     return packages, str(version)
 
 
-def workspace_package_names(data: dict[str, object]) -> set[str]:
-    """Return package names for workspace members, excluding external dependencies."""
-    member_ids = set(data["workspace_members"])  # type: ignore[arg-type]
-    return {
-        str(package["name"])
-        for package in data["packages"]  # type: ignore[index]
-        if package["id"] in member_ids
-    }
-
-
 def publication_order(packages: dict[str, dict[str, object]]) -> list[str]:
     dependencies: dict[str, set[str]] = {}
     for name, package in packages.items():
@@ -410,31 +400,54 @@ def assert_registry_credentials() -> None:
     )
 
 
-def preflight_package_archives(
-    order: list[str], version: str, *, excluded_packages: set[str]
-) -> None:
-    """Build and inspect every upload archive before the first publish.
+def validate_package_file_list(name: str, output: str) -> int:
+    """Validate Cargo's package source inventory and return its file count."""
+    paths = output.splitlines()
+    if not paths:
+        raise ValueError(f"{name}: cargo package --list returned no files")
 
-    Cargo must package the publishable workspace as one unit here. Packaging
-    crates individually cannot resolve an exact-version workspace dependency
-    until that dependency has already reached crates.io, which would defeat
-    the all-archives-before-upload safety property.
+    seen: set[str] = set()
+    for raw_path in paths:
+        path = PurePosixPath(raw_path)
+        if not raw_path or path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"{name}: unsafe package source path {raw_path!r}")
+        normalized = path.as_posix()
+        if normalized in seen:
+            raise ValueError(f"{name}: duplicate package source path {normalized!r}")
+        seen.add(normalized)
+
+    if "Cargo.toml" not in seen:
+        raise ValueError(f"{name}: package source inventory omits Cargo.toml")
+    return len(seen)
+
+
+def preflight_package_sources(order: list[str], version: str) -> None:
+    """Validate every package payload before the first irreversible upload.
+
+    A new exact-version workspace cannot build all final archives against
+    crates.io before its dependency crates exist there: Cargo normalizes path
+    dependencies to registry dependencies during packaging.  `--list` performs
+    Cargo's package source selection and manifest preparation without that
+    impossible registry-resolution step.  The final archive and compile
+    verification still happen inside `cargo publish`, in topological order.
     """
-    print("preflight: packaging every crate before publication", flush=True)
-    command = ["cargo", "package", "--workspace", "--locked", "--no-verify"]
-    for name in sorted(excluded_packages):
-        command.extend(("--exclude", name))
-
-    try:
-        run(*command)
-        for index, name in enumerate(order, start=1):
-            print(f"  [{index}/{len(order)}] {name} {version}", flush=True)
-            archive_path = ROOT / "target" / "package" / f"{name}-{version}.crate"
-            archive = archive_path.read_bytes()
-            canonical_crate_contents(archive, expected_root=f"{name}-{version}")
-    finally:
-        for name in order:
-            remove_package_artifacts(name, version)
+    print("preflight: validating every crate source payload", flush=True)
+    for index, name in enumerate(order, start=1):
+        completed = run(
+            "cargo",
+            "package",
+            "-p",
+            name,
+            "--locked",
+            "--no-verify",
+            "--list",
+            capture=True,
+        )
+        count = validate_package_file_list(name, completed.stdout)
+        print(
+            f"  [{index}/{len(order)}] {name} {version} ({count} files)",
+            flush=True,
+        )
 
 
 def publish(
@@ -442,15 +455,10 @@ def publish(
     version: str,
     *,
     resume: bool,
-    excluded_packages: set[str],
 ) -> None:
     assert_clean_checkout()
     assert_registry_credentials()
-    preflight_package_archives(
-        order,
-        version,
-        excluded_packages=excluded_packages,
-    )
+    preflight_package_sources(order, version)
     for index, name in enumerate(order, start=1):
         print(f"[{index}/{len(order)}] {name} {version}", flush=True)
         if registry_version_exists(name, version):
@@ -492,7 +500,6 @@ def main() -> int:
         workspace_metadata = metadata()
         packages, version = publishable_packages(workspace_metadata)
         order = publication_order(packages)
-        excluded_packages = workspace_package_names(workspace_metadata) - set(packages)
         print(f"crates.io: {len(order)} packages, version {version}")
         print("publication order:")
         for index, name in enumerate(order, start=1):
@@ -508,7 +515,6 @@ def main() -> int:
                 order,
                 version,
                 resume=args.resume,
-                excluded_packages=excluded_packages,
             )
     except (OSError, subprocess.CalledProcessError, tarfile.TarError, ValueError) as error:
         print(f"crates.io: {error}", file=sys.stderr)
