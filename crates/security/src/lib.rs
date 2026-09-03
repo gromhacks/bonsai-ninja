@@ -23,6 +23,7 @@ pub(crate) mod analysis;
 mod bundled;
 pub(crate) mod compile;
 pub(crate) mod deps;
+pub(crate) mod deps_analysis;
 pub(crate) mod finding;
 pub mod flow_evidence;
 pub mod loader;
@@ -47,12 +48,15 @@ pub use analysis::{
     PackTreeRule, PackValidationIssue, PackValidationReport, RulepackTaintTransfers,
     SecurityInventoryOptions, SecurityMatchRow, SinkAnalysisCandidate, SinkAnalysisFlow, SinkAnalysisOptions,
     SinkAnalysisReport, SourceAnalysisCandidate, SourceAnalysisOptions, SourceAnalysisReport,
-    SourceLineageLimits, SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions,
-    TaintAnalysisReport,
+    TaintAnalysisOptions, TaintAnalysisReport,
 };
 pub use bundled::bundled_rulepack_root;
 pub use compile::{compile_rule_to_inspect_args, CompiledRule};
 pub use deps::{build_inventory, DependencyInventory, DependencyRow};
+pub use deps_analysis::{
+    dependency_analysis, DependencyAnalysisCandidate, DependencyAnalysisOptions, DependencyAnalysisReport,
+    DependencyFunctionRow, DependencyUsageSite,
+};
 pub use finding::{
     compute_finding_id, AlternateTaintFlow, Finding, FindingMatch, FindingStatus, TaintFlowRef,
     TaintPropagationArg, TaintPropagationStep, TaintedArgInfo,

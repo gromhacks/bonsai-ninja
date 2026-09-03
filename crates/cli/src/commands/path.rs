@@ -83,10 +83,26 @@ pub(crate) fn cmd_path(root: &std::path::Path, options: PathCommandOptions<'_>) 
         ("to", options.to),
         ("regex", if options.regex { "1" } else { "0" }),
     ]);
-    let items = path_graph_items(&outcome);
+    // `--contains` / `--not-contains` select the complete corridor: a match
+    // on any node, edge, or terminal call keeps the whole path result, and a
+    // miss keeps none. Graph items are presentation rows of that one result.
+    let secondary = crate::filter::active();
+    let corridor_selected = !secondary.is_active() || secondary.matches_value(&outcome);
+    let items = if corridor_selected {
+        path_graph_items(&outcome)
+    } else {
+        Vec::new()
+    };
     match options.format {
-        BrowseFormat::Json => emit_path_json(root, &outcome, &options.paging_cfg, filters_hash),
-        BrowseFormat::Text => page_cache::emit_paged_text(
+        BrowseFormat::Json => emit_path_json(
+            root,
+            &outcome,
+            &items,
+            corridor_selected,
+            &options.paging_cfg,
+            filters_hash,
+        ),
+        BrowseFormat::Text => page_cache::emit_paged_text_prefiltered(
             root,
             &items,
             &options.paging_cfg,
@@ -94,7 +110,7 @@ pub(crate) fn cmd_path(root: &std::path::Path, options: PathCommandOptions<'_>) 
             filters_hash,
             path_item_cost,
             |items, info, _cfg| {
-                render_path_text(&outcome, items);
+                render_path_text(&outcome, items, corridor_selected);
                 render_paging_footer(info, "bonsai-ninja path <workspace> --from <A> --to <B>");
                 Ok(())
             },
@@ -124,32 +140,34 @@ fn endpoint_candidate_literals(from: &str, to: &str) -> Vec<String> {
 fn emit_path_json(
     root: &std::path::Path,
     outcome: &PathOutcome,
+    items: &[PathGraphItem],
+    corridor_selected: bool,
     paging_cfg: &paging::PagingConfig,
     filters_hash: u64,
 ) -> Result<()> {
-    if !paging_cfg.json_wrapped() {
-        cli_println!("{}", serde_json::to_string_pretty(outcome)?);
-        return Ok(());
-    }
-    let force_wrapper = paging_cfg.context.is_some()
-        || !matches!(paging_cfg.page, paging::PageArg::First)
-        || crate::filter::active().is_active();
-    page_cache::emit_paged_text(
+    page_cache::emit_paged_text_prefiltered(
         root,
-        &path_graph_items(outcome),
+        items,
         paging_cfg,
         "path",
         filters_hash,
         path_item_cost,
         |items, info, _cfg| {
-            if !force_wrapper && info.page_number == 1 && info.is_last {
-                cli_println!("{}", serde_json::to_string_pretty(outcome)?);
-                return Ok(());
+            let result_incomplete_reasons = paged_json_incomplete_reasons("path", info);
+            // The page is a window over one corridor graph. Group the paged
+            // rows back into the graph's own sections so JSON keeps the SDK
+            // `PathOutcome` shape (`nodes` / `edges` / `terminal_calls`)
+            // instead of a kind-tagged row list only the text table needs.
+            let mut nodes = Vec::new();
+            let mut edges = Vec::new();
+            let mut terminal_calls = Vec::new();
+            for item in items {
+                match item {
+                    PathGraphItem::Node(node) => nodes.push(node),
+                    PathGraphItem::Edge(edge) => edges.push(edge.as_ref()),
+                    PathGraphItem::TerminalCall(call) => terminal_calls.push(call),
+                }
             }
-            let mut reasons = outcome.analysis_incomplete_reasons.clone();
-            reasons.extend(paged_json_incomplete_reasons("path", info));
-            reasons.sort();
-            reasons.dedup();
             let wrapped = serde_json::json!({
                 "from": outcome.from,
                 "to": outcome.to,
@@ -161,12 +179,17 @@ fn emit_path_json(
                 "representation": outcome.representation,
                 "node_count": outcome.node_count,
                 "edge_count": outcome.edge_count,
-                "analysis_complete": reasons.is_empty(),
-                "analysis_incomplete_reasons": reasons,
-                "items": items,
+                "analysis_complete": outcome.analysis_complete,
+                "analysis_incomplete_reasons": outcome.analysis_incomplete_reasons,
+                "result_complete": result_incomplete_reasons.is_empty(),
+                "result_incomplete_reasons": result_incomplete_reasons,
+                "filter_matched": corridor_selected,
+                "nodes": nodes,
+                "edges": edges,
+                "terminal_calls": terminal_calls,
                 "page": page_info_to_json(info),
             });
-            cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
+            crate::output::emit_json_document(&wrapped)?;
             Ok(())
         },
     )
@@ -203,7 +226,7 @@ fn path_graph_items(outcome: &PathOutcome) -> Vec<PathGraphItem> {
         .collect()
 }
 
-fn render_path_text(outcome: &PathOutcome, items: &[PathGraphItem]) {
+fn render_path_text(outcome: &PathOutcome, items: &[PathGraphItem], corridor_selected: bool) {
     let u = ui();
     cli_println!();
     cli_println!(
@@ -253,13 +276,27 @@ fn render_path_text(outcome: &PathOutcome, items: &[PathGraphItem]) {
             cli_println!("{line}");
         }
     }
+    if !corridor_selected {
+        cli_println!();
+        cli_println!(
+            "{}",
+            u.dim("(the corridor does not match the active output filter; --contains selects the complete path)")
+        );
+        return;
+    }
     if items.is_empty() {
         cli_println!();
         cli_println!("{}", u.dim("(no semantic corridor matched)"));
         return;
     }
 
-    let mut table = u.table(&["kind", "from / symbol", "to / evidence", "location"]);
+    // Edge rows carry their stable `E:` id so a reader can reopen the exact
+    // compiler edge with `show E:<id>` / `dump-edges --edge`, the same fact
+    // JSON prints as `edge_id`.
+    let mut table = u.table_pinned(
+        &["kind", "from / symbol", "to / evidence", "location", "id"],
+        &["id"],
+    );
     for item in items {
         match item {
             PathGraphItem::Node(node) => table.add_row(vec![
@@ -267,6 +304,7 @@ fn render_path_text(outcome: &PathOutcome, items: &[PathGraphItem]) {
                 Cell::new(u.name(&node.name)),
                 Cell::new(u.dim("compiler declaration")),
                 Cell::new(u.path(&format!("{}:{}", short_file(&node.file), node.line))),
+                Cell::new(u.dim("-")),
             ]),
             PathGraphItem::Edge(edge) => table.add_row(vec![
                 Cell::new(u.kind("edge")),
@@ -278,6 +316,7 @@ fn render_path_text(outcome: &PathOutcome, items: &[PathGraphItem]) {
                     edge.call_line,
                     edge.call_column
                 ))),
+                Cell::new(u.dim(&edge.edge_id)),
             ]),
             PathGraphItem::TerminalCall(call) => table.add_row(vec![
                 Cell::new(u.kind("terminal-call")),
@@ -289,6 +328,7 @@ fn render_path_text(outcome: &PathOutcome, items: &[PathGraphItem]) {
                     call.line,
                     call.column
                 ))),
+                Cell::new(u.dim("-")),
             ]),
         };
     }

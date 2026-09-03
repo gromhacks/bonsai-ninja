@@ -14,7 +14,7 @@
 use ahash::{AHashMap, AHashSet};
 use bonsai_abstract_interp::{RawStep, RawTrace, StepKind, TraceLimits};
 use bonsai_callgraph::{EdgeKind, ResolvedCallGraph};
-use bonsai_common::{FuncId, Precision, Span, SymbolId, TraceStepId};
+use bonsai_common::{FuncId, Span, SymbolId, TraceStepId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
     assignment_trace_message, AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, LoopKind,
@@ -265,7 +265,7 @@ impl<'a> CrossModuleTracer<'a> {
 }
 
 impl<'a> TraceBuilder<'a> {
-    fn emit(&mut self, kind: StepKind, func: FuncId, span: Span, precision: Precision, msg: String) -> bool {
+    fn emit(&mut self, kind: StepKind, func: FuncId, span: Span, msg: String) -> bool {
         if self.opts.max_steps != 0 && self.next_step >= self.opts.max_steps {
             self.out.mark_truncated("max-steps");
             return false;
@@ -280,7 +280,6 @@ impl<'a> TraceBuilder<'a> {
             kind,
             span,
             func,
-            precision,
             message: msg,
         });
         self.next_step += 1;
@@ -357,7 +356,6 @@ impl<'a> TraceBuilder<'a> {
             StepKind::EnterFunction,
             func,
             decl.name_span,
-            Precision::Exact,
             format!("Enter function {}", decl.name),
         ) {
             self.frames.pop();
@@ -370,7 +368,6 @@ impl<'a> TraceBuilder<'a> {
             StepKind::Return,
             func,
             decl.name_span,
-            Precision::Exact,
             format!("Exit {}", decl.name),
         );
 
@@ -411,13 +408,7 @@ impl<'a> TraceBuilder<'a> {
                 else_events,
                 ..
             } => {
-                if !self.emit(
-                    StepKind::BranchSplit,
-                    func,
-                    *span,
-                    Precision::Exact,
-                    "Branch split".into(),
-                ) {
+                if !self.emit(StepKind::BranchSplit, func, *span, "Branch split".into()) {
                     return false;
                 }
                 // Walk both branches and tag the alternate arm with a
@@ -440,13 +431,7 @@ impl<'a> TraceBuilder<'a> {
                         if let Some(frame) = self.frames.last_mut() {
                             *frame = entry_frame.clone();
                         }
-                        if !self.emit(
-                            StepKind::BranchSplit,
-                            func,
-                            *span,
-                            Precision::Exact,
-                            "Else branch".into(),
-                        ) {
+                        if !self.emit(StepKind::BranchSplit, func, *span, "Else branch".into()) {
                             return false;
                         }
                         if !self.walk_events(else_events, func, depth) {
@@ -455,13 +440,7 @@ impl<'a> TraceBuilder<'a> {
                         }
                         let else_frame = self.frames.last().cloned().unwrap_or_default();
                         merged_frame.merge_alternative(&else_frame);
-                        if !self.emit(
-                            StepKind::Merge,
-                            func,
-                            *span,
-                            Precision::Exact,
-                            "Branch merge".into(),
-                        ) {
+                        if !self.emit(StepKind::Merge, func, *span, "Branch merge".into()) {
                             self.current_path = parent_path;
                             return false;
                         }
@@ -475,13 +454,7 @@ impl<'a> TraceBuilder<'a> {
                 if let Some(frame) = self.frames.last_mut() {
                     *frame = merged_frame;
                 }
-                if !self.emit(
-                    StepKind::Merge,
-                    func,
-                    *span,
-                    Precision::Exact,
-                    "Branch merge".into(),
-                ) {
+                if !self.emit(StepKind::Merge, func, *span, "Branch merge".into()) {
                     return false;
                 }
                 true
@@ -501,13 +474,7 @@ impl<'a> TraceBuilder<'a> {
                     LoopKind::DoWhile => "Loop enter (do-while)",
                     LoopKind::Loop => "Loop enter",
                 };
-                if !self.emit(
-                    StepKind::BranchSplit,
-                    func,
-                    *span,
-                    Precision::Exact,
-                    enter_msg.into(),
-                ) {
+                if !self.emit(StepKind::BranchSplit, func, *span, enter_msg.into()) {
                     return false;
                 }
                 let mut states = AHashSet::new();
@@ -553,7 +520,7 @@ impl<'a> TraceBuilder<'a> {
                         break;
                     }
                 }
-                self.emit(StepKind::Merge, func, *span, Precision::Exact, "Loop exit".into())
+                self.emit(StepKind::Merge, func, *span, "Loop exit".into())
             }
             FlowEvent::Assign {
                 span,
@@ -594,7 +561,6 @@ impl<'a> TraceBuilder<'a> {
                     StepKind::Assign,
                     func,
                     *span,
-                    Precision::Exact,
                     assignment_trace_message(
                         "Assign",
                         target,
@@ -609,15 +575,10 @@ impl<'a> TraceBuilder<'a> {
                 StepKind::Assign,
                 func,
                 *span,
-                Precision::Exact,
                 format!("Initialize aggregate {target}"),
             ),
-            FlowEvent::Return { span, .. } => {
-                self.emit(StepKind::Return, func, *span, Precision::Exact, "Return".into())
-            }
-            FlowEvent::Throw { span, .. } => {
-                self.emit(StepKind::Throw, func, *span, Precision::Exact, "Throw".into())
-            }
+            FlowEvent::Return { span, .. } => self.emit(StepKind::Return, func, *span, "Return".into()),
+            FlowEvent::Throw { span, .. } => self.emit(StepKind::Throw, func, *span, "Throw".into()),
             FlowEvent::Try {
                 span,
                 body,
@@ -625,7 +586,7 @@ impl<'a> TraceBuilder<'a> {
                 finally_events,
                 ..
             } => {
-                if !self.emit(StepKind::BranchSplit, func, *span, Precision::Exact, "Try".into()) {
+                if !self.emit(StepKind::BranchSplit, func, *span, "Try".into()) {
                     return false;
                 }
                 let parent_path = self.current_path;
@@ -665,7 +626,7 @@ impl<'a> TraceBuilder<'a> {
                             }
                         }
                         merged_frame.merge_alternative(&self.frames.last().cloned().unwrap_or_default());
-                        if !self.emit(StepKind::Merge, func, *span, Precision::Exact, "Try exit".into()) {
+                        if !self.emit(StepKind::Merge, func, *span, "Try exit".into()) {
                             self.current_path = parent_path;
                             return false;
                         }
@@ -675,13 +636,12 @@ impl<'a> TraceBuilder<'a> {
                 if let Some(frame) = self.frames.last_mut() {
                     *frame = merged_frame;
                 }
-                self.emit(StepKind::Merge, func, *span, Precision::Exact, "Try exit".into())
+                self.emit(StepKind::Merge, func, *span, "Try exit".into())
             }
             FlowEvent::Break { span, target } => self.emit(
                 StepKind::Diagnostic,
                 func,
                 *span,
-                Precision::Exact,
                 target
                     .as_ref()
                     .map(|target| match target {
@@ -696,7 +656,6 @@ impl<'a> TraceBuilder<'a> {
                 StepKind::Diagnostic,
                 func,
                 *span,
-                Precision::Exact,
                 target
                     .as_ref()
                     .map(|target| match target {
@@ -713,23 +672,14 @@ impl<'a> TraceBuilder<'a> {
                 StepKind::Yield,
                 func,
                 *span,
-                Precision::Exact,
                 value_text
                     .as_ref()
                     .map(|t| format!("Yield {t}"))
                     .unwrap_or_else(|| "Yield".into()),
             ),
-            FlowEvent::Await { span, .. } => {
-                self.emit(StepKind::Await, func, *span, Precision::Exact, "Await".into())
-            }
+            FlowEvent::Await { span, .. } => self.emit(StepKind::Await, func, *span, "Await".into()),
             FlowEvent::Defer { span, body } => {
-                if !self.emit(
-                    StepKind::BranchSplit,
-                    func,
-                    *span,
-                    Precision::Exact,
-                    "Defer".into(),
-                ) {
+                if !self.emit(StepKind::BranchSplit, func, *span, "Defer".into()) {
                     return false;
                 }
                 for e in body {
@@ -740,13 +690,7 @@ impl<'a> TraceBuilder<'a> {
                 true
             }
             FlowEvent::Using { span, body } => {
-                if !self.emit(
-                    StepKind::BranchSplit,
-                    func,
-                    *span,
-                    Precision::Exact,
-                    "Using".into(),
-                ) {
+                if !self.emit(StepKind::BranchSplit, func, *span, "Using".into()) {
                     return false;
                 }
                 for e in body {
@@ -754,13 +698,7 @@ impl<'a> TraceBuilder<'a> {
                         return false;
                     }
                 }
-                self.emit(
-                    StepKind::Merge,
-                    func,
-                    *span,
-                    Precision::Exact,
-                    "Using exit".into(),
-                )
+                self.emit(StepKind::Merge, func, *span, "Using exit".into())
             }
             FlowEvent::Lifecycle {
                 span,
@@ -770,7 +708,6 @@ impl<'a> TraceBuilder<'a> {
                 StepKind::Lifecycle,
                 func,
                 *span,
-                Precision::Exact,
                 format!("Lifecycle {name} -> {transition}"),
             ),
         }
@@ -782,7 +719,6 @@ impl<'a> TraceBuilder<'a> {
                 StepKind::Assign,
                 func,
                 site.span,
-                Precision::Exact,
                 format!("Indexed write {}", site.name),
             );
         }
@@ -842,7 +778,6 @@ impl<'a> TraceBuilder<'a> {
                 StepKind::Diagnostic,
                 func,
                 site.span,
-                Precision::Exact,
                 format!("Unresolved call {call_name}"),
             );
         }
@@ -857,10 +792,6 @@ impl<'a> TraceBuilder<'a> {
             resolved_calls.truncate(allowed);
         }
 
-        let precision = match display_kind {
-            CallKind::Constructor => Precision::Exact,
-            _ => Precision::Narrowed,
-        };
         let ret_label = if display_kind == CallKind::Constructor {
             format!("Return from new {}", site.name)
         } else {
@@ -872,7 +803,6 @@ impl<'a> TraceBuilder<'a> {
                 StepKind::BranchSplit,
                 func,
                 site.span,
-                Precision::Narrowed,
                 format!("Call target split {}", site.name),
             )
         {
@@ -885,7 +815,7 @@ impl<'a> TraceBuilder<'a> {
                 };
                 self.current_path = path;
             }
-            if !self.emit(StepKind::Call, func, site.span, precision, label.clone()) {
+            if !self.emit(StepKind::Call, func, site.span, label.clone()) {
                 self.current_path = parent_path;
                 return false;
             }
@@ -894,13 +824,7 @@ impl<'a> TraceBuilder<'a> {
                 self.current_path = parent_path;
                 return false;
             }
-            if !self.emit(
-                StepKind::Return,
-                func,
-                site.span,
-                Precision::Exact,
-                ret_label.clone(),
-            ) {
+            if !self.emit(StepKind::Return, func, site.span, ret_label.clone()) {
                 self.current_path = parent_path;
                 return false;
             }
@@ -921,7 +845,7 @@ impl<'a> TraceBuilder<'a> {
             let direct_site = edge.span == site.span;
             let callback_site = edge.kind == EdgeKind::Indirect && arg_spans.contains(&edge.span);
             let same_site = direct_site || callback_site;
-            if !edge.precision.is_semantic() || !same_site {
+            if !same_site {
                 continue;
             }
             seen.entry(SymbolId::new(edge.to.raw()))

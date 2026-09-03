@@ -5,7 +5,7 @@
 //! Row-shaped JSON and text output honor the token budget by default;
 //! `--all` / `--context uncapped` are the explicit exhaustive modes.
 
-use crate::args::{BrowseFormat, PrecisionFilter};
+use crate::args::BrowseFormat;
 use crate::footer::{render_paging_footer, render_truncation_notice};
 use crate::page_cache;
 use crate::paging;
@@ -16,7 +16,7 @@ use anyhow::Result;
 
 use super::browse::{effective_limit, truncate};
 use super::{
-    apply_text_limit, bonsai_for_cli, emit_json_paged_cached, emit_json_value_paged_cached, nearest_names,
+    apply_text_limit, bonsai_for_cli, emit_json_paged_cached, nearest_names,
     open_project_index_matching_literal, open_project_index_matching_path,
     open_project_index_only as open_project, open_project_index_only_with_rulepack, page_info_to_json,
     paged_json_incomplete_reasons, paging_with_row_limit, short_file,
@@ -55,9 +55,23 @@ pub(crate) fn cmd_dump_callgraph(
         };
         (rendered_name_len + r.file.len() + 24) as u64 + paging::TABLE_ROW_CHROME_BYTES
     };
+    // A cache-served summary parsed nothing in-process; only a fallback
+    // compile can have touched parser diagnostics.
+    let analysis_reasons = fallback_project
+        .as_ref()
+        .map(|(project, _footer)| super::touched_parser_incomplete_reasons(project.workspace()))
+        .unwrap_or_default();
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &rows, &paging_cfg, "dump-callgraph", filters_hash, cost)?;
+            emit_json_paged_cached(
+                root,
+                &rows,
+                &paging_cfg,
+                "dump-callgraph",
+                filters_hash,
+                cost,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
@@ -86,6 +100,7 @@ pub(crate) fn cmd_dump_callgraph(
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} functions)", rows.len())));
                     render_truncation_notice(shown.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja dump-callgraph <workspace>");
                     Ok(())
                 },
@@ -101,7 +116,6 @@ pub(crate) fn cmd_dump_edges(
     root: &std::path::Path,
     from_filter: Option<&str>,
     to_filter: Option<&str>,
-    precision_filter: Option<PrecisionFilter>,
     compact: bool,
     edge_id_filter: Option<&str>,
     limit: usize,
@@ -113,10 +127,6 @@ pub(crate) fn cmd_dump_edges(
     let filters = bonsai_sdk::EdgesFilters {
         from: from_filter,
         to: to_filter,
-        precision: precision_filter.map(|p| match p {
-            PrecisionFilter::Exact => bonsai_sdk::PrecisionClass::Exact,
-            PrecisionFilter::Narrowed => bonsai_sdk::PrecisionClass::Narrowed,
-        }),
         edge_id: edge_id_filter,
     };
     let stage = progress::ScopedSpinner::new("collecting semantic edges");
@@ -134,10 +144,6 @@ pub(crate) fn cmd_dump_edges(
     let filters_hash = paging::hash_filters(&[
         ("from", from_filter.unwrap_or("")),
         ("to", to_filter.unwrap_or("")),
-        (
-            "precision",
-            &precision_filter.map(|p| format!("{p:?}")).unwrap_or_default(),
-        ),
         ("compact", if compact { "1" } else { "0" }),
         ("edge_id", edge_id_filter.unwrap_or("")),
     ]);
@@ -152,9 +158,18 @@ pub(crate) fn cmd_dump_edges(
             + 32) as u64
             + paging::TABLE_ROW_CHROME_BYTES
     };
+    let analysis_reasons = super::touched_parser_incomplete_reasons(project.workspace());
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &records, &paging_cfg, "dump-edges", filters_hash, cost)?;
+            emit_json_paged_cached(
+                root,
+                &records,
+                &paging_cfg,
+                "dump-edges",
+                filters_hash,
+                cost,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
@@ -168,6 +183,7 @@ pub(crate) fn cmd_dump_edges(
                     let (shown, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     render_edge_records_text(&shown, compact, records.len());
                     render_truncation_notice(shown.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja dump-edges <workspace>");
                     Ok(())
                 },
@@ -206,9 +222,18 @@ pub(crate) fn cmd_dump_resolution(
     let cost = |row: &bonsai_sdk::ResolutionCoverageFileRow| {
         (row.file.len() + row.decls.len().saturating_mul(48) + 96) as u64 + paging::TABLE_ROW_CHROME_BYTES
     };
+    let analysis_reasons = super::touched_parser_incomplete_reasons(project.workspace());
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &rows, &paging_cfg, "dump-resolution", filters_hash, cost)?;
+            emit_json_paged_cached(
+                root,
+                &rows,
+                &paging_cfg,
+                "dump-resolution",
+                filters_hash,
+                cost,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
@@ -222,6 +247,7 @@ pub(crate) fn cmd_dump_resolution(
                     let (shown, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     render_resolution_coverage_text(&shown, rows.len());
                     render_truncation_notice(shown.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja dump-resolution <workspace>");
                     Ok(())
                 },
@@ -237,16 +263,26 @@ fn render_resolution_coverage_text(rows: &[bonsai_sdk::ResolutionCoverageFileRow
         cli_println!("{}", u.dim("(no resolution coverage rows matched)"));
         return;
     }
-    let mut table = u.table(&[
-        "file",
-        "funcs",
-        "calls",
-        "resolved",
-        "external",
-        "unresolved",
-        "coverage",
-        "gaps",
-    ]);
+    // File-level coverage: the same counters the JSON row carries, so a
+    // reader can see edge kinds and the dynamic/macro/receiver gap classes
+    // that explain an unresolved count instead of only the percentage.
+    let mut table = u.table_pinned(
+        &[
+            "file",
+            "funcs",
+            "calls",
+            "resolved",
+            "external",
+            "unresolved",
+            "edges d/v/i",
+            "dynamic",
+            "macro",
+            "recv gaps",
+            "coverage",
+            "gaps",
+        ],
+        &["file"],
+    );
     for row in rows {
         let gaps = if row.analysis_incomplete_reasons.is_empty() {
             String::new()
@@ -264,6 +300,17 @@ fn render_resolution_coverage_text(rows: &[bonsai_sdk::ResolutionCoverageFileRow
             } else {
                 u.warn(&row.unresolved_call_sites.to_string())
             }),
+            comfy_table::Cell::new(u.dim(&format!(
+                "{}/{}/{}",
+                row.direct_edges, row.virtual_edges, row.indirect_edges
+            ))),
+            comfy_table::Cell::new(u.dim(&row.dynamic_call_sites.to_string())),
+            comfy_table::Cell::new(u.dim(&row.macro_call_sites.to_string())),
+            comfy_table::Cell::new(if row.receiver_type_gaps == 0 {
+                u.dim("0")
+            } else {
+                u.warn(&row.receiver_type_gaps.to_string())
+            }),
             comfy_table::Cell::new(u.annotation(&format!("{:.1}%", row.coverage_percent))),
             comfy_table::Cell::new(if gaps.is_empty() {
                 u.dim("-")
@@ -273,6 +320,72 @@ fn render_resolution_coverage_text(rows: &[bonsai_sdk::ResolutionCoverageFileRow
         ]);
     }
     cli_println!("{table}");
+    // Declaration-level coverage: every function/method/constructor the
+    // JSON `decls` array reports, with its own counters and reasons.
+    if rows.iter().any(|row| !row.decls.is_empty()) {
+        cli_println!();
+        cli_println!("{}", u.heading("declarations"));
+        let mut decl_table = u.table_pinned(
+            &[
+                "file",
+                "declaration",
+                "kind",
+                "line",
+                "calls",
+                "resolved",
+                "external",
+                "unresolved",
+                "edges d/v/i",
+                "dynamic",
+                "macro",
+                "recv gaps",
+                "coverage",
+                "gaps",
+            ],
+            &["file", "declaration"],
+        );
+        for row in rows {
+            for decl in &row.decls {
+                let gaps = if decl.analysis_incomplete_reasons.is_empty() {
+                    String::new()
+                } else {
+                    decl.analysis_incomplete_reasons.join("; ")
+                };
+                decl_table.add_row(vec![
+                    comfy_table::Cell::new(u.path(&short_file(&row.file))),
+                    comfy_table::Cell::new(u.name(&decl.name)),
+                    comfy_table::Cell::new(u.kind(&decl.kind)),
+                    comfy_table::Cell::new(u.dim(&decl.line.to_string())),
+                    comfy_table::Cell::new(u.dim(&decl.call_sites.to_string())),
+                    comfy_table::Cell::new(u.dim(&decl.resolved_call_sites.to_string())),
+                    comfy_table::Cell::new(u.dim(&decl.external_call_sites.to_string())),
+                    comfy_table::Cell::new(if decl.unresolved_call_sites == 0 {
+                        u.dim("0")
+                    } else {
+                        u.warn(&decl.unresolved_call_sites.to_string())
+                    }),
+                    comfy_table::Cell::new(u.dim(&format!(
+                        "{}/{}/{}",
+                        decl.direct_edges, decl.virtual_edges, decl.indirect_edges
+                    ))),
+                    comfy_table::Cell::new(u.dim(&decl.dynamic_call_sites.to_string())),
+                    comfy_table::Cell::new(u.dim(&decl.macro_call_sites.to_string())),
+                    comfy_table::Cell::new(if decl.receiver_type_gaps == 0 {
+                        u.dim("0")
+                    } else {
+                        u.warn(&decl.receiver_type_gaps.to_string())
+                    }),
+                    comfy_table::Cell::new(u.annotation(&format!("{:.1}%", decl.coverage_percent))),
+                    comfy_table::Cell::new(if gaps.is_empty() {
+                        u.dim("-")
+                    } else {
+                        u.warn(&gaps)
+                    }),
+                ]);
+            }
+        }
+        cli_println!("{decl_table}");
+    }
     cli_println!("{}", u.dim(&format!("({total} files)")));
 }
 
@@ -284,22 +397,23 @@ fn render_edge_records_text(records: &[bonsai_sdk::EdgeRecord], compact: bool, t
     }
     if compact {
         // Compact one-line-per-edge render. Columns:
-        //   E:id  kind  precision  caller → callee (callee file:line)  call site
+        //   E:id  kind  evidence  caller → callee (callee file:line)  call site
         //
         // Callee file:line is included so virtual edges with multiple
         // candidates (same edge_id, different callee decls) stay
         // visually distinct — the column is what tells the reader
         // "this is one of N candidates" at a glance.
-        let mut table = u.table(&[
-            "edge",
-            "kind",
-            "precision",
-            "stage",
-            "conf",
-            "caller → callee",
-            "callee loc",
-            "call site",
-        ]);
+        let mut table = u.table_pinned(
+            &[
+                "edge",
+                "kind",
+                "evidence",
+                "caller → callee",
+                "callee loc",
+                "call site",
+            ],
+            &["edge"],
+        );
         for edge in records {
             let arrow_row = format!("{} → {}", edge.caller_name, edge.callee_name);
             let callee_loc = format!("{}:{}", short_file(&edge.callee_file), edge.callee_line);
@@ -307,9 +421,7 @@ fn render_edge_records_text(records: &[bonsai_sdk::EdgeRecord], compact: bool, t
             table.add_row(vec![
                 comfy_table::Cell::new(u.dim(&edge.edge_id)),
                 comfy_table::Cell::new(u.annotation(&edge.kind)),
-                comfy_table::Cell::new(precision_tag(u, &edge.precision)),
-                comfy_table::Cell::new(u.annotation(&edge.resolver_stage)),
-                comfy_table::Cell::new(u.dim(&edge.confidence.to_string())),
+                comfy_table::Cell::new(evidence_tag(u, &edge.resolver_stage)),
                 comfy_table::Cell::new(u.name(&arrow_row)),
                 comfy_table::Cell::new(u.path(&callee_loc)),
                 comfy_table::Cell::new(u.path(&call_site)),
@@ -324,11 +436,10 @@ fn render_edge_records_text(records: &[bonsai_sdk::EdgeRecord], compact: bool, t
     for edge in records {
         cli_println!();
         cli_println!(
-            "{} {} {} {}",
+            "{} {} {}",
             u.annotation(&edge.edge_id),
             u.annotation(&edge.kind),
-            precision_tag(u, &edge.precision),
-            u.annotation(&format!("{}:{}%", edge.resolver_stage, edge.confidence)),
+            evidence_tag(u, &edge.resolver_stage),
         );
         cli_println!(
             "  {} {} {}",
@@ -367,13 +478,25 @@ fn render_edge_records_text(records: &[bonsai_sdk::EdgeRecord], compact: bool, t
     cli_println!("{}", u.dim(&format!("({} edges)", records.len())));
 }
 
-/// Colorize precision/outcome tags. `exact` / `narrowed` stay dim;
-/// diagnostic-only states such as `ambiguous`, `over-approximate`,
-/// `unknown`, and `unresolved` get the palette's warning color.
-fn precision_tag(u: &Ui, precision: &str) -> String {
-    match precision {
-        "exact" | "narrowed" | "external" => u.dim(precision),
-        _ => u.warn(precision),
+/// Colorize a resolver outcome (`resolved`, `ambiguous`, `unresolved`, ...):
+/// a settled outcome stays dim, anything the resolver could not prove gets
+/// the palette's warning color.
+fn outcome_tag(u: &Ui, outcome: &str) -> String {
+    match outcome {
+        "resolved" | "exact" | "narrowed" | "external" => u.dim(outcome),
+        _ => u.warn(outcome),
+    }
+}
+
+/// One compiler graph, one evidence label per edge: the resolver stage
+/// that proved the target (`exact_symbol`, `receiver_type`, ...). The
+/// engine's per-edge provenance stays in JSON; the text view shows the
+/// same label.
+fn evidence_tag(u: &Ui, resolver_stage: &str) -> String {
+    if resolver_stage.is_empty() {
+        u.dim("resolved")
+    } else {
+        u.dim(resolver_stage)
     }
 }
 
@@ -452,13 +575,18 @@ pub(crate) fn cmd_dump_ast(
         1 + node.children.iter().map(node_count).sum::<usize>()
     }
     let cost = |d: &bonsai_sdk::AstFileDump| (d.path.len() + node_count(&d.root) * 180) as u64;
+    let analysis_reasons = super::touched_parser_incomplete_reasons(project.workspace());
     match format {
         BrowseFormat::Json => {
-            if paging_cfg.json_wrapped() {
-                emit_json_value_paged_cached(root_dir, &file_dumps, &paging_cfg, "dump-ast", filters_hash)?;
-            } else {
-                emit_json_paged_cached(root_dir, &file_dumps, &paging_cfg, "dump-ast", filters_hash, cost)?;
-            }
+            emit_json_paged_cached(
+                root_dir,
+                &file_dumps,
+                &paging_cfg,
+                "dump-ast",
+                filters_hash,
+                cost,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
             let units = ast_text_units(&file_dumps);
@@ -474,6 +602,7 @@ pub(crate) fn cmd_dump_ast(
                     for unit in paged {
                         cli_println!("{}", render_ast_text_unit(u, unit, compact));
                     }
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja dump-ast <workspace>");
                     Ok(())
                 },
@@ -635,7 +764,9 @@ pub(crate) fn cmd_dump_resolve(
     stage.finish();
 
     match format {
-        BrowseFormat::Json => cli_println!("{}", serde_json::to_string_pretty(&trace)?),
+        BrowseFormat::Json => {
+            crate::output::emit_json_document(&super::with_completeness(&serde_json::to_value(&trace)?))?;
+        }
         BrowseFormat::Text => render_resolve_trace_text(&trace, compact),
     }
 
@@ -671,7 +802,7 @@ fn render_resolve_compact(u: &Ui, trace: &bonsai_sdk::ResolveTrace) {
         u.name(&trace.query),
         u.dim(&file_tag),
         u.name(&trace.candidates.len().to_string()),
-        precision_tag(u, &trace.outcome),
+        outcome_tag(u, &trace.outcome),
     );
     render_resolve_incomplete_note(u, trace);
     if trace.candidates.is_empty() {
@@ -801,7 +932,7 @@ fn render_resolve_full(u: &Ui, trace: &bonsai_sdk::ResolveTrace) {
         "{} {} → {}",
         u.heading("  outcome:"),
         u.name(&format!("{} candidate(s)", trace.candidates.len())),
-        precision_tag(u, &trace.outcome),
+        outcome_tag(u, &trace.outcome),
     );
     cli_println!();
 
@@ -950,14 +1081,6 @@ fn render_taint_report_json_paged(
     paging_cfg: &paging::PagingConfig,
     filters_hash: u64,
 ) -> Result<()> {
-    if !paging_cfg.json_wrapped() {
-        cli_println!("{}", serde_json::to_string_pretty(report)?);
-        return Ok(());
-    }
-
-    let force_page_metadata = paging_cfg.context.is_some()
-        || !matches!(paging_cfg.page, paging::PageArg::First)
-        || crate::filter::active().is_active();
     page_cache::emit_paged_text(
         root,
         &report.records,
@@ -978,45 +1101,30 @@ fn render_taint_report_json_paged(
                 + record.call_file.len()
                 + record.call_code.len()
                 + record.edge_kind.len()
-                + record.edge_precision.len()
                 + arg_bytes
                 + 256) as u64
         },
         |records, info, _cfg| {
-            let presentation_complete = info.page_number == 1 && info.is_last;
-            if !force_page_metadata && presentation_complete {
-                cli_println!("{}", serde_json::to_string_pretty(report)?);
-                return Ok(());
-            }
-
-            let presentation_incomplete_reasons = paged_json_incomplete_reasons("dump-taint", info);
-            let mut semantic_incomplete_reasons = report.analysis_incomplete_reasons.clone();
-            if !report.analysis_complete && semantic_incomplete_reasons.is_empty() {
-                semantic_incomplete_reasons
+            let result_complete = info.page_number == 1 && info.is_last;
+            let result_incomplete_reasons = paged_json_incomplete_reasons("dump-taint", info);
+            let mut analysis_incomplete_reasons = report.analysis_incomplete_reasons.clone();
+            if !report.analysis_complete && analysis_incomplete_reasons.is_empty() {
+                analysis_incomplete_reasons
                     .push("dump-taint incomplete: unknown semantic reason".to_string());
             }
-            let mut combined_incomplete_reasons = semantic_incomplete_reasons.clone();
-            combined_incomplete_reasons.extend(presentation_incomplete_reasons.iter().cloned());
-            combined_incomplete_reasons.sort();
-            combined_incomplete_reasons.dedup();
 
             let payload = serde_json::json!({
                 "source": &report.source,
                 "seeds": &report.seeds,
-                "analysis_complete": report.analysis_complete
-                    && presentation_complete
-                    && combined_incomplete_reasons.is_empty(),
-                "analysis_incomplete_reasons": combined_incomplete_reasons,
-                "semantic_analysis_complete": report.analysis_complete,
-                "semantic_analysis_incomplete_reasons": semantic_incomplete_reasons,
-                "presentation_complete": presentation_complete,
-                "presentation_incomplete_reasons": presentation_incomplete_reasons,
-                "precision": &report.precision,
+                "analysis_complete": report.analysis_complete,
+                "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                "result_complete": result_complete,
+                "result_incomplete_reasons": result_incomplete_reasons,
                 "pairs_analyzed": report.pairs_analyzed,
                 "records": records,
                 "page": page_info_to_json(info),
             });
-            cli_println!("{}", serde_json::to_string_pretty(&payload)?);
+            crate::output::emit_json_document(&payload)?;
             Ok(())
         },
     )
@@ -1071,8 +1179,7 @@ fn taint_record_text_cost(record: &bonsai_sdk::TaintRecord) -> u64 {
         + record.callee_file.len()
         + record.call_file.len()
         + record.call_code.len()
-        + record.edge_kind.len()
-        + record.edge_precision.len();
+        + record.edge_kind.len();
     let args = record
         .tainted_args
         .iter()
@@ -1090,17 +1197,15 @@ fn render_taint_report_text(
     compact: bool,
 ) {
     let u = ui();
-    // Header — source, seed, precision, pair count.
+    // Header — source, seed, pair count.
     let mut seed_preview = report.seeds.clone();
     seed_preview.sort();
     cli_println!(
-        "{} {} {} {} {} {}",
+        "{} {} {} {}",
         u.label("taint"),
         u.name(&report.source),
         u.dim("seed:"),
         u.name(&format!("{{{}}}", seed_preview.join(", "))),
-        u.dim("→"),
-        precision_tag(u, &report.precision),
     );
     cli_println!(
         "  {} {} {} {}",
@@ -1130,14 +1235,10 @@ fn render_taint_report_text(
         return;
     }
     if compact {
-        let mut table = u.table(&[
-            "taint",
-            "kind",
-            "precision",
-            "caller → callee",
-            "args",
-            "call site",
-        ]);
+        let mut table = u.table_pinned(
+            &["taint", "kind", "caller → callee", "args", "call site"],
+            &["taint"],
+        );
         for record in records {
             let arrow = format!("{} → {}", record.caller_name, record.callee_name);
             let args: String = record
@@ -1150,7 +1251,6 @@ fn render_taint_report_text(
             table.add_row(vec![
                 comfy_table::Cell::new(u.dim(&record.taint_id)),
                 comfy_table::Cell::new(u.annotation(&record.edge_kind)),
-                comfy_table::Cell::new(precision_tag(u, &record.edge_precision)),
                 comfy_table::Cell::new(u.name(&arrow)),
                 comfy_table::Cell::new(u.annotation(&args)),
                 comfy_table::Cell::new(u.path(&call_site)),
@@ -1164,10 +1264,9 @@ fn render_taint_report_text(
     for record in records {
         cli_println!();
         cli_println!(
-            "{} {} {}",
+            "{} {}",
             u.annotation(&record.taint_id),
             u.annotation(&record.edge_kind),
-            precision_tag(u, &record.edge_precision),
         );
         cli_println!(
             "  {} {} {}",

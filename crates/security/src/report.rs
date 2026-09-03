@@ -114,7 +114,6 @@ pub(crate) struct TrainExample {
     pub tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub severity: Option<String>,
-    pub precision: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -156,7 +155,6 @@ pub fn render_train_json(report: &SecurityReport) -> String {
             payload_types: finding.source.payload_types.clone(),
             tag: finding.tag.clone(),
             severity: finding.severity.map(|severity| severity.as_str().to_string()),
-            precision: finding.precision.clone(),
         })
         .collect();
     let train = TrainReport {
@@ -215,7 +213,7 @@ pub fn render_grouped_text(report: &SecurityReport) -> String {
     output.push('\n');
     for finding in &report.findings {
         output.push_str(&format!(
-            "{}  [{}]  {} -> {}\n    at {}:{}:{}\n    status: {}\n    precision: {}\n",
+            "{}  [{}]  {} -> {}\n    at {}:{}:{}\n    status: {}\n",
             finding.finding_id,
             finding.severity.map_or("info", |severity| severity.as_str()),
             finding.source.rule_id,
@@ -224,7 +222,6 @@ pub fn render_grouped_text(report: &SecurityReport) -> String {
             finding.sink.line,
             finding.sink.column,
             finding.status.as_str(),
-            finding.precision,
         ));
         if !finding.sanitizers_seen.is_empty() {
             output.push_str("    sanitizers: ");
@@ -274,7 +271,7 @@ pub fn render_grouped_text(report: &SecurityReport) -> String {
 ///   label nodes without duplicating the sink result. (S4)
 /// - **`properties.bonsai`**: bonsai-specific metadata that doesn't
 ///   fit the SARIF schema cleanly — `finding_id`, `flow_id`,
-///   `group_id`, `precision`, `status`, `tainted_args`,
+///   `group_id`, `status`, `tainted_args`,
 ///   `chain_display`. Sanitizer rule ids are deduped. (S11)
 ///
 /// `runs[0].tool.driver` advertises every loaded rule via
@@ -363,9 +360,6 @@ pub(crate) fn render_sarif_with_provenance(
                 .and_then(|finding| finding.severity)
                 .map(security_severity_for_severity)
                 .unwrap_or("5.0");
-            let precision = representative
-                .map(|finding| sarif_precision_label(&finding.precision).to_string())
-                .unwrap_or_else(|| "medium".to_string());
             let rank = representative
                 .map(|finding| sarif_rank_for_severity(finding.severity))
                 .unwrap_or(50.0);
@@ -404,7 +398,9 @@ pub(crate) fn render_sarif_with_provenance(
                     "tags": tags,
                     "tag": tag,
                     "security-severity": security_severity,
-                    "precision": precision,
+                    // SARIF's own reportingDescriptor vocabulary: every emitted
+                    // finding is compiler-proven source-to-sink evidence.
+                    "precision": "high",
                 },
                 "relationships": relationships,
             })
@@ -572,17 +568,6 @@ fn security_severity_for_severity(severity: crate::rule::Severity) -> &'static s
         crate::rule::Severity::Medium => "5.5",
         crate::rule::Severity::Low => "2.5",
         crate::rule::Severity::Info => "1.0",
-    }
-}
-
-/// Normalize bonsai's precision labels to the SARIF ecosystem's
-/// common `precision` vocabulary.
-fn sarif_precision_label(precision: &str) -> &'static str {
-    match precision {
-        "exact" | "narrowed" => "high",
-        "over-approximate" => "medium",
-        "unknown" => "low",
-        _ => "medium",
     }
 }
 
@@ -800,7 +785,6 @@ fn finding_to_sarif_result(
                 "tag": finding.tag,
                 "cwe": finding.cwe,
                 "owasp": finding.owasp,
-                "precision": finding.precision,
                 "analysis_complete": finding.analysis_complete,
                 "analysis_incomplete_reasons": finding.analysis_incomplete_reasons,
                 "status": finding.status.as_str(),

@@ -41,7 +41,8 @@ AST, HIR, CFG, resolver, call-edge, and taint diagnostics.
 Use the same compiler facts to inventory sources, sinks, sanitizers, and
 dependencies, then prove modeled source-to-sink paths with the sparse IDG
 fixed point. Findings can be reviewed in the terminal, emitted as JSON or
-SARIF for automation, or shared as a standalone HTML report. The analysis is
+SARIF for automation, or rendered as an HTML report from the same canonical
+result. The analysis is
 evidence for human review—not a guarantee that code is safe—and completion
 metadata makes unresolved static behavior visible.
 
@@ -53,7 +54,7 @@ views support graph tooling. These artifacts can be inputs to retrieval,
 training-data construction, evaluations, code-reasoning experiments, or
 tool-using agents; bonsai-ninja produces the evidence and does not train or
 validate a model by itself. The versioned native contract is published as
-[JSON Schema v10](schemas/bonsai-native-export-v10.schema.json).
+[JSON Schema v11](schemas/bonsai-native-export-v11.schema.json).
 
 Our small exploratory tests produced encouraging results, but they are not a
 general model-quality claim. We would love to see independent teams take the
@@ -67,7 +68,7 @@ academic and independent labs, or local-model hobbyists.
 |---|---|
 | Tree-sitter compiler frontends | Parse 20 languages into typed declarations, calls, imports, values, control flow, and dataflow facts |
 | Focused `search`, `refs`, `calls`, and `read-file` | Retrieve a small, source-backed context slice before asking for heavier semantics |
-| Bounded `symbol-summary` and `inspect --graph-flow` packets | Retrieve source, signature, imports, direct resolved neighbors, and unresolved-call evidence without recursively expanding a call tree |
+| Bounded `symbol-summary` and `inspect` packets | Retrieve source, signature, imports, direct resolved neighbors, and unresolved-call evidence without recursively expanding a call tree |
 | Compiler-resolved `trace`, compressed `path`, and `slice` | Follow compiler-evidenced behavior across files and report unresolved dynamic edges instead of inventing them |
 | AST, HIR, CFG, resolver, edge, and taint diagnostics | Inspect both the target program and the analyzer's reasoning instead of guessing from text |
 | Sparse IDG taint fixed point | Complete source-to-sink reachability over the admitted static graph without a hidden depth, file, iteration, or result cap |
@@ -232,6 +233,10 @@ workflows.
 ./target/release/bonsai-ninja security ./my-app sink-analysis \
   --context 16k --no-color --no-progress
 
+# Triage one flagged dependency: import sites, bound names, calls, rule matches.
+./target/release/bonsai-ninja security ./my-app dependency-analysis \
+  --framework node-serialize --no-color --no-progress
+
 # Write every production-profile result to SARIF for CI.
 ./target/release/bonsai-ninja security ./my-app taint-analysis \
   --format sarif --all \
@@ -274,6 +279,7 @@ For any unfamiliar option, use the binary's `--help` and the
 | Security model or findings | `security` |
 | Downstream paths from sources | `security source-analysis` |
 | Upstream paths into sinks | `security sink-analysis` |
+| Where a flagged dependency is imported, bound, and called | `security dependency-analysis` |
 | Downstream graph artifact | `export` |
 
 `tree` is a direct filesystem walk. It does not initialize the compiler,

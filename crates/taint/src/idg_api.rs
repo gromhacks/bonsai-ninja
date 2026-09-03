@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::EdgeKind;
-use bonsai_common::{FuncId, Precision, Span};
+use bonsai_common::{FuncId, Span};
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::FlowEvent;
 
@@ -35,7 +35,6 @@ pub struct InterTaintConfig {
     pub call_result_passthroughs: Vec<CallResultPassthrough>,
     pub output_arg_flows: Vec<OutputArgFlow>,
     pub receiver_state_propagations: Vec<ReceiverStatePropagation>,
-    pub max_edge_precision: Option<Precision>,
 }
 
 impl Default for InterTaintConfig {
@@ -49,7 +48,6 @@ impl Default for InterTaintConfig {
             call_result_passthroughs: Vec::new(),
             output_arg_flows: Vec::new(),
             receiver_state_propagations: Vec::new(),
-            max_edge_precision: Some(Precision::Narrowed),
         }
     }
 }
@@ -198,7 +196,6 @@ pub struct InterTaintResult {
     pub per_function: AHashMap<FunctionSeed, IntraTaintResult>,
     pub call_records: Vec<CallPropagation>,
     pub tainted_calls: Vec<TaintedCall>,
-    pub precision: Precision,
     pub pairs_analyzed: u32,
 }
 
@@ -219,7 +216,6 @@ pub struct CallPropagation {
     pub call_span: Span,
     pub tainted_args: Vec<TaintedArg>,
     pub edge_kind: EdgeKind,
-    pub edge_precision: Precision,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -308,7 +304,7 @@ fn idg_backed_interprocedural_taint(
 pub(crate) fn idg_backed_interprocedural_taint_with_service(
     entry_func: FuncId,
     entry_sources: &TokenSet,
-    config: &InterTaintConfig,
+    _config: &InterTaintConfig,
     db: &AnalyzerDb,
     idg: &bonsai_idg::IdgQueryService,
 ) -> InterTaintResult {
@@ -333,8 +329,7 @@ pub(crate) fn idg_backed_interprocedural_taint_with_service(
             call_results_materialized: true,
             ..crate::IdgTaintTransfers::none()
         })
-        .with_global_index(global.as_ref())
-        .with_max_precision(config.max_edge_precision),
+        .with_global_index(global.as_ref()),
     );
     entry_taint_graph_to_inter_result(graph, entry_func, entry_sources)
 }
@@ -378,14 +373,12 @@ fn entry_taint_graph_to_inter_result(
             call_span: edge.call_span,
             tainted_args: edge.tainted_args,
             edge_kind: edge.edge_kind,
-            edge_precision: edge.precision,
         })
         .collect();
     InterTaintResult {
         per_function,
         call_records,
         tainted_calls: graph.tainted_calls,
-        precision: graph.precision,
         pairs_analyzed: graph.pairs_analyzed,
     }
 }
@@ -455,8 +448,7 @@ fn idg_backed_call_site_receives_taint(
             call_results_materialized: true,
             ..crate::IdgTaintTransfers::none()
         })
-        .with_global_index(global.as_ref())
-        .with_max_precision(config.max_edge_precision),
+        .with_global_index(global.as_ref()),
     );
     let spans_match = |candidate: Span| {
         candidate == sink_span

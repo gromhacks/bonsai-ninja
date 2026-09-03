@@ -76,8 +76,11 @@ fn repeated_short_names_keep_file_local_edges_at_scale() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let edges: Vec<serde_json::Value> =
-        serde_json::from_slice(&output.stdout).expect("scale dump-edges JSON");
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).expect("scale dump-edges JSON");
+    let edges: Vec<serde_json::Value> = envelope["rows"]
+        .as_array()
+        .cloned()
+        .expect("scale dump-edges rows");
     assert_eq!(
         edges.len(),
         SHARDS,
@@ -122,8 +125,11 @@ fn repeated_short_names_keep_file_local_edges_at_scale() {
         String::from_utf8_lossy(&reopened.stdout),
         String::from_utf8_lossy(&reopened.stderr)
     );
-    let reopened: Vec<serde_json::Value> =
-        serde_json::from_slice(&reopened.stdout).expect("scale show edge JSON");
+    let reopened: serde_json::Value = serde_json::from_slice(&reopened.stdout).expect("scale show edge JSON");
+    let reopened: Vec<serde_json::Value> = reopened["rows"]
+        .as_array()
+        .cloned()
+        .expect("scale show edge rows");
     assert_eq!(reopened.len(), 1, "stable edge id must reopen one row");
     assert_eq!(reopened[0]["edge_id"], edge_id, "wrong edge reopened");
 

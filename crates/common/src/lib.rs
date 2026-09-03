@@ -4,8 +4,6 @@
 //! - Stable numeric IDs (`FileId`, `FuncId`, ...). Keep these u32 for cache
 //!   friendliness; upgrade to u64 only if a workspace actually overflows.
 //! - [`Span`] byte ranges anchored to a `FileId`.
-//! - [`Precision`], the single vocabulary for "how sure are we about this
-//!   fact?" that every analyser must emit.
 //!
 //! Nothing in this crate depends on Tree-sitter or any language adapter; it is
 //! safe to depend on from every other crate.
@@ -17,7 +15,6 @@ pub mod ids;
 pub mod names;
 pub mod path_filter;
 pub mod policy;
-pub mod precision;
 pub mod resources;
 pub mod span;
 pub mod span_cache;
@@ -39,7 +36,6 @@ pub use path_filter::{
     workspace_relative_filter_path,
 };
 pub use policy::MATCHER_POLICY_FINGERPRINT;
-pub use precision::Precision;
 pub use resources::callgraph_worker_count;
 pub use resources::candidate_index_worker_count;
 pub use resources::compiler_weighted_batches;

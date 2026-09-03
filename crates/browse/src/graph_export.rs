@@ -8,7 +8,7 @@
 
 use crate::common::format_span;
 use crate::imports::{imports, ImportsFilters};
-use bonsai_common::{FuncId, Precision};
+use bonsai_common::FuncId;
 use bonsai_lang_api::{DeclKind, FlowEvent};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -17,7 +17,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-const GRAPH_EXPORT_SEMANTIC_MAX_PRECISION: Precision = Precision::Narrowed;
 const GRAPH_EXPORT_INCOMPLETE_REASON: &str = "graph database formats export semantic structural edges and local flow facts; exhaustive interprocedural taint propagation records are available in native JSON with --full-propagations";
 
 fn graph_export_analysis_incomplete_reasons() -> Vec<String> {
@@ -99,7 +98,7 @@ impl GraphProjection {
             }
         }
         // Hash key includes serialised properties so the same
-        // caller→callee pair with different precision tags gets
+        // caller→callee pair with different edge kinds gets
         // distinct edges.
         let key = format!(
             "{source}\0{target}\0{label}\0{}",
@@ -247,12 +246,7 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
     }
 
     let resolved = ws.cached_resolved_call_graph();
-    for edge in resolved
-        .inner()
-        .edges
-        .iter()
-        .filter(|edge| edge.precision <= GRAPH_EXPORT_SEMANTIC_MAX_PRECISION)
-    {
+    for edge in resolved.inner().edges.iter() {
         let Some(source) = func_ids.get(&edge.from.raw()) else {
             continue;
         };
@@ -263,21 +257,12 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
             source.clone(),
             target.clone(),
             "CALLS",
-            [
-                ("kind", Value::String(format!("{:?}", edge.kind).to_lowercase())),
-                (
-                    "precision",
-                    Value::String(format!("{:?}", edge.precision).to_lowercase()),
-                ),
-            ],
+            [("kind", Value::String(format!("{:?}", edge.kind).to_lowercase()))],
         );
     }
 
     let summary_funcs: Vec<FuncId> = func_ids.keys().copied().map(FuncId::new).collect();
-    let return_taint_by_func = idg.return_taint_param_indices_for_funcs_with_max_precision(
-        &summary_funcs,
-        Some(GRAPH_EXPORT_SEMANTIC_MAX_PRECISION),
-    );
+    let return_taint_by_func = idg.return_taint_param_indices_for_funcs(&summary_funcs);
 
     for file in ws.vfs().all_files() {
         let Some(index) = ws.exact_decl_index_shared(file) else {
@@ -352,7 +337,6 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
         workspace_id,
         "Workspace",
         [
-            ("semantic_max_precision", Value::String("narrowed".to_string())),
             ("taint_propagations_complete", Value::Bool(false)),
             ("analysis_complete", Value::Bool(false)),
             (

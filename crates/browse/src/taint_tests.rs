@@ -1,15 +1,5 @@
-use super::{aggregate_flow_precision, dump_taint, TaintFilters, TaintOutcome};
-use bonsai_common::Precision;
+use super::{dump_taint, TaintFilters, TaintOutcome};
 use bonsai_workspace::Workspace;
-
-#[test]
-fn aggregate_flow_precision_keeps_worst_semantic_precision() {
-    assert_eq!(
-        aggregate_flow_precision([Precision::Exact, Precision::Narrowed, Precision::Exact]),
-        Precision::Narrowed
-    );
-    assert_eq!(aggregate_flow_precision([]), Precision::Exact);
-}
 
 #[test]
 fn dump_taint_token_seed_policy_preserves_clean_overwrite() {

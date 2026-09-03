@@ -835,7 +835,7 @@ fn check_calls_include(ws: &str, lang: &str, callee_needle: &str) {
 
 /// Assert `inspect --query` emits a FLOW block for the target.
 fn check_inspect_reaches(ws: &str, lang: &str, query: &str) {
-    let Some((out, _, code)) = run(&["inspect", ws, "--query", query, "--graph-flow"]) else {
+    let Some((out, _, code)) = run(&["inspect", ws, "--query", query]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] inspect --query {query} ec={code}");
@@ -852,15 +852,7 @@ fn check_inspect_reaches(ws: &str, lang: &str, query: &str) {
 /// Assert `inspect --flow F:id` round-trips correctly for a flow
 /// surfaced from the initial query.
 fn check_flow_id_roundtrip(ws: &str, lang: &str, query: &str) {
-    let Some((out, _, _)) = run(&[
-        "inspect",
-        ws,
-        "--query",
-        query,
-        "--graph-flow",
-        "--format",
-        "json",
-    ]) else {
+    let Some((out, _, _)) = run(&["inspect", ws, "--query", query, "--format", "json"]) else {
         return;
     };
     let parsed: serde_json::Value = match serde_json::from_str(&out) {
@@ -884,8 +876,7 @@ fn check_flow_id_roundtrip(ws: &str, lang: &str, query: &str) {
         }
     }
     let Some(fid) = flow_id else { return };
-    let Some((round, _, code)) = run(&["inspect", ws, "--query", query, "--graph-flow", "--flow", &fid])
-    else {
+    let Some((round, _, code)) = run(&["inspect", ws, "--query", query, "--flow", &fid]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] --flow {fid} ec={code}");
@@ -922,7 +913,7 @@ fn check_trace_dot(ws: &str, lang: &str, handler: &str) {
 
 /// Assert `index` stats are populated (non-zero file + reparse count).
 fn check_index(ws: &str, lang: &str) {
-    let Some((out, _, code)) = run(&["index", ws]) else {
+    let Some((out, _, code)) = run(&["index", ws, "--format", "json"]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] index ec={code}");
@@ -998,7 +989,7 @@ fn check_export_taint_graph(ws: &str, lang: &str, min_functions: usize, expected
 /// Assert `dump-hir` emits a populated `flow_events` array.
 fn check_dump_hir(ws: &str, lang: &str, handler: &str) {
     let selector = diagnostic_handler_selector(lang, handler);
-    let Some((out, _, code)) = run(&["dump-hir", ws, &selector]) else {
+    let Some((out, _, code)) = run(&["dump-hir", ws, &selector, "--format", "json"]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] dump-hir ec={code}");
@@ -1013,7 +1004,7 @@ fn check_dump_hir(ws: &str, lang: &str, handler: &str) {
 /// Assert `dump-cfg` emits a populated `blocks` array.
 fn check_dump_cfg(ws: &str, lang: &str, handler: &str) {
     let selector = diagnostic_handler_selector(lang, handler);
-    let Some((out, _, code)) = run(&["dump-cfg", ws, &selector]) else {
+    let Some((out, _, code)) = run(&["dump-cfg", ws, &selector, "--format", "json"]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] dump-cfg ec={code}");
@@ -1054,7 +1045,6 @@ fn check_dump_edges(ws: &str, lang: &str, require_edges: bool) {
             "caller_name",
             "callee_name",
             "kind",
-            "precision",
             "resolver_stage",
             "evidence",
             "confidence",
@@ -1262,8 +1252,8 @@ fn check_dump_taint(ws: &str, lang: &str, handler: &str) {
         "[{lang}] dump-taint missing records"
     );
     assert!(
-        parsed.get("precision").is_some(),
-        "[{lang}] dump-taint missing precision"
+        parsed.get("precision").is_none(),
+        "[{lang}] dump-taint must not carry a precision label"
     );
     let complete = parsed
         .get("analysis_complete")
@@ -1579,7 +1569,7 @@ fn check_read_file_json_shape(ws: &str, lang: &str, handler: &str) {
     };
     assert_eq!(code, 0, "[{lang}] defs --name {handler} ec={code}");
     let defs: serde_json::Value = serde_json::from_str(&defs_out).unwrap();
-    let rows = defs.as_array().cloned().unwrap_or_default();
+    let rows = defs["rows"].as_array().cloned().unwrap_or_default();
     let row = rows
         .iter()
         .find(|r| {
@@ -1760,13 +1750,9 @@ fn check_security_sink_analysis(
                     .is_some_and(|origin| !origin.is_empty()),
                 "[{lang}] sink-analysis upstream lineage missing compiler origin: {flow}"
             );
-            let precision = flow
-                .get("precision")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
             assert!(
-                matches!(precision, "exact" | "narrowed"),
-                "[{lang}] sink-analysis surfaced non-semantic precision `{precision}`: {flow}"
+                flow.get("precision").is_none(),
+                "[{lang}] sink-analysis flows must not carry a precision label: {flow}"
             );
             assert!(
                 flow.get("chain_names")
@@ -1908,10 +1894,9 @@ fn check_security_source_analysis(ws: &str, lang: &str, expected_min: usize, exp
         }) {
             mentions_handler = true;
         }
-        let precision = flow.get("precision").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
-            matches!(precision, "exact" | "narrowed"),
-            "[{lang}] source-analysis surfaced non-semantic precision `{precision}`: {row}"
+            flow.get("precision").is_none(),
+            "[{lang}] source-analysis flows must not carry a precision label: {row}"
         );
     }
     assert!(
@@ -1957,10 +1942,9 @@ fn check_language_gauntlet_source_analysis(ws: &str, lang: &str) {
         let flow = row
             .get("flow")
             .unwrap_or_else(|| panic!("[{lang}] language_gauntlet source-analysis row missing flow: {row}"));
-        let precision = flow.get("precision").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
-            matches!(precision, "exact" | "narrowed"),
-            "[{lang}] language_gauntlet source-analysis surfaced non-semantic precision `{precision}`: {row}"
+            flow.get("precision").is_none(),
+            "[{lang}] language_gauntlet source-analysis flows must not carry a precision label: {row}"
         );
         let chain_len = flow.get("chain").and_then(|v| v.as_array()).map_or(0, Vec::len);
         if chain_len > 1 {
@@ -2018,13 +2002,9 @@ fn check_language_gauntlet_sink_analysis(ws: &str, lang: &str) {
             .and_then(|value| value.as_array())
             .unwrap_or_else(|| panic!("[{lang}] language_gauntlet sink row missing upstream_flows: {row}"));
         for flow in upstream {
-            let precision = flow
-                .get("precision")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
             assert!(
-                matches!(precision, "exact" | "narrowed"),
-                "[{lang}] language_gauntlet sink-analysis surfaced non-semantic precision `{precision}`: {flow}"
+                flow.get("precision").is_none(),
+                "[{lang}] language_gauntlet sink-analysis flows must not carry a precision label: {flow}"
             );
             if flow
                 .get("chain_names")
@@ -2489,6 +2469,8 @@ macro_rules! lang_matrix_tests {
                         &workspace_arg,
                         "--structural-only",
                         "--no-cache",
+                        "--format",
+                        "json",
                     ]) else {
                         return;
                     };
@@ -2699,7 +2681,7 @@ lang_matrix_tests! {
 /// Utility: run `inspect --query` against language_gauntlet and return stdout.
 fn language_gauntlet_inspect(query: &str) -> Option<String> {
     let w = ws("python", "language_gauntlet");
-    run(&["inspect", &w, "--query", query, "--graph-flow"]).map(|(o, _, _)| o)
+    run(&["inspect", &w, "--query", query]).map(|(o, _, _)| o)
 }
 
 /// Utility: run `dump-taint` seeded from the source and return stdout.
@@ -3269,11 +3251,10 @@ fn language_gauntlet_dump_taint_threads_every_cross_function_hop() {
 fn language_gauntlet_inspect_compact_surface_is_smaller_than_full() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "language_gauntlet");
-    let Some((full, _, _)) = run(&["inspect", &w, "--query", "execute", "--graph-flow"]) else {
+    let Some((full, _, _)) = run(&["inspect", &w, "--query", "execute"]) else {
         return;
     };
-    let Some((compact, _, _)) = run(&["inspect", &w, "--query", "execute", "--graph-flow", "--compact"])
-    else {
+    let Some((compact, _, _)) = run(&["inspect", &w, "--query", "execute", "--compact"]) else {
         return;
     };
     // Compact mode must drop body lines but keep FLOW / GROUP headers.
@@ -3851,17 +3832,10 @@ fn pagination_cursor_advances_correctly() {
 fn inspect_compact_keeps_headers_drops_bodies() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "micro");
-    let Some((compact, _, _)) = run(&[
-        "inspect",
-        &w,
-        "--query",
-        "handle_request",
-        "--graph-flow",
-        "--compact",
-    ]) else {
+    let Some((compact, _, _)) = run(&["inspect", &w, "--query", "handle_request", "--compact"]) else {
         return;
     };
-    let Some((full, _, _)) = run(&["inspect", &w, "--query", "handle_request", "--graph-flow"]) else {
+    let Some((full, _, _)) = run(&["inspect", &w, "--query", "handle_request"]) else {
         return;
     };
     assert!(compact.contains("FLOW 1"), "compact mode dropped FLOW header");
@@ -3881,15 +3855,8 @@ fn inspect_compact_keeps_headers_drops_bodies() {
 fn inspect_grouped_view_emits_group_blocks() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "micro");
-    let Some((out, _, code)) = run(&[
-        "inspect",
-        &w,
-        "--query",
-        "run_admin_command",
-        "--graph-flow",
-        "--view",
-        "grouped",
-    ]) else {
+    let Some((out, _, code)) = run(&["inspect", &w, "--query", "run_admin_command", "--view", "grouped"])
+    else {
         return;
     };
     assert_eq!(code, 0);
@@ -3897,27 +3864,6 @@ fn inspect_grouped_view_emits_group_blocks() {
         out.contains("GROUP") || out.contains("FLOW"),
         "grouped view empty"
     );
-}
-
-/// `dump-edges --precision narrowed` only returns narrowed semantic
-/// edges (precision filter works correctly).
-#[test]
-fn dump_edges_precision_filter_narrows() {
-    let Some(_) = bin_path() else { return };
-    let w = ws("python", "complex");
-    let Some((out, _, code)) = run(&["dump-edges", &w, "--precision", "narrowed", "--format", "json"]) else {
-        return;
-    };
-    assert_eq!(code, 0);
-    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    let rows = rows_of(&parsed);
-    for row in rows {
-        assert_eq!(
-            row.get("precision").and_then(|p| p.as_str()),
-            Some("narrowed"),
-            "precision filter let through wrong row: {row}"
-        );
-    }
 }
 
 /// `cache stats` runs cleanly without a workspace arg.

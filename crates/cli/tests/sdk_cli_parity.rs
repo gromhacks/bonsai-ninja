@@ -5,9 +5,7 @@
 //! analysis narrower and compare the machine-readable result to the
 //! corresponding `bonsai_sdk` facade call.
 
-use bonsai_sdk::{
-    Severity, SinkAnalysisOptions, SourceAnalysisOptions, SourceLineageLimits, TaintAnalysisOptions,
-};
+use bonsai_sdk::{Severity, SinkAnalysisOptions, SourceAnalysisOptions, TaintAnalysisOptions};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -351,12 +349,158 @@ fn assert_json_eq(label: &str, cli: Value, sdk: Value) {
     }
 }
 
+/// True when every fact in `sdk` is present in `cli` with the same value.
+///
+/// The CLI renders the SDK record plus presentation facts (source code,
+/// location strings, completeness and paging metadata). Parity means the
+/// CLI never drops or changes an SDK fact; it may add presentation fields.
+fn json_covers(cli: &Value, sdk: &Value) -> bool {
+    match (cli, sdk) {
+        (Value::Object(cli), Value::Object(sdk)) => sdk.iter().all(|(key, value)| {
+            cli.get(key)
+                .is_some_and(|candidate| json_covers(candidate, value))
+        }),
+        (Value::Array(cli), Value::Array(sdk)) => {
+            cli.len() == sdk.len() && cli.iter().zip(sdk).all(|(cli, sdk)| json_covers(cli, sdk))
+        }
+        _ => cli == sdk,
+    }
+}
+
+fn first_uncovered(cli: &Value, sdk: &Value, path: &str) -> Option<String> {
+    match (cli, sdk) {
+        (Value::Object(cli), Value::Object(sdk)) => sdk.iter().find_map(|(key, value)| {
+            let child = format!("{path}.{key}");
+            match cli.get(key) {
+                Some(candidate) => first_uncovered(candidate, value, &child),
+                None => Some(format!(
+                    "{child}: missing in CLI, sdk value={}",
+                    summarize_json(value)
+                )),
+            }
+        }),
+        (Value::Array(cli), Value::Array(sdk)) => {
+            if cli.len() != sdk.len() {
+                return Some(format!(
+                    "{path}: array length differs (cli {} vs sdk {})",
+                    cli.len(),
+                    sdk.len()
+                ));
+            }
+            cli.iter()
+                .zip(sdk)
+                .enumerate()
+                .find_map(|(index, (cli, sdk))| first_uncovered(cli, sdk, &format!("{path}[{index}]")))
+        }
+        _ if cli == sdk => None,
+        _ => Some(format!(
+            "{path}: cli={} sdk={}",
+            summarize_json(cli),
+            summarize_json(sdk)
+        )),
+    }
+}
+
+fn assert_json_covers(label: &str, cli: Value, sdk: Value) {
+    let cli = normalized_json(cli);
+    let sdk = normalized_json(sdk);
+    if let Some(diff) = first_uncovered(&cli, &sdk, "$") {
+        panic!("CLI JSON does not cover the SDK result for {label}: {diff}");
+    }
+}
+
+/// Every SDK row must be covered by exactly one CLI row, and the CLI must
+/// not add or drop rows.
 fn assert_json_rows_eq(label: &str, cli: Value, sdk: Value) {
+    // Row commands always print the canonical envelope; the SDK returns the
+    // bare row vector. Compare the rows themselves.
+    let cli = sorted_rows(rows_or_array(cli));
+    let sdk = sorted_rows(rows_or_array(sdk));
+    let cli_rows = cli
+        .as_array()
+        .unwrap_or_else(|| panic!("{label}: CLI rows are not an array: {}", summarize_json(&cli)));
+    let sdk_rows = sdk
+        .as_array()
+        .unwrap_or_else(|| panic!("{label}: SDK rows are not an array: {}", summarize_json(&sdk)));
     assert_eq!(
-        sorted_rows(cli),
-        sorted_rows(sdk),
-        "CLI/SDK JSON row mismatch for {label}"
+        cli_rows.len(),
+        sdk_rows.len(),
+        "CLI/SDK JSON row count mismatch for {label}\ncli: {}\nsdk: {}",
+        summarize_json(&cli),
+        summarize_json(&sdk)
     );
+    let mut remaining = cli_rows.clone();
+    for sdk_row in sdk_rows {
+        match remaining.iter().position(|cli_row| json_covers(cli_row, sdk_row)) {
+            Some(index) => {
+                remaining.remove(index);
+            }
+            None => {
+                let nearest = cli_rows
+                    .iter()
+                    .find_map(|cli_row| first_uncovered(cli_row, sdk_row, "$"))
+                    .unwrap_or_default();
+                panic!(
+                    "CLI/SDK JSON row mismatch for {label}: no CLI row covers SDK row {}\nfirst difference: {nearest}",
+                    summarize_json(sdk_row)
+                );
+            }
+        }
+    }
+}
+
+/// `context` renders the SDK semantic context as categorized rows plus the
+/// shared completeness/paging envelope.
+fn assert_context_covers(label: &str, cli: Value, sdk: Value) {
+    let cli = normalized_json(cli);
+    let sdk = normalized_json(sdk);
+    for key in ["workspace_root", "summary"] {
+        assert_eq!(cli[key], sdk[key], "{label}: `{key}` differs");
+    }
+    assert_eq!(
+        cli["analysis_incomplete_reasons"], sdk["incomplete_reasons"],
+        "{label}: incomplete reasons differ"
+    );
+    let rows = cli["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label}: context JSON lacks rows: {}", summarize_json(&cli)));
+    for (category, key) in [
+        ("module_root", "module_roots"),
+        ("dependency_root", "dependency_roots"),
+        ("generated_root", "generated_roots"),
+        ("excluded_root", "excluded_roots"),
+        ("toolchain_manifest", "toolchain_manifests"),
+        ("configured_source_variant", "configured_source_variants"),
+        ("source_transformation", "source_transformations"),
+    ] {
+        let expected = sdk[key].as_array().cloned().unwrap_or_default();
+        let actual = rows
+            .iter()
+            .filter(|row| row["category"] == category)
+            .map(|row| {
+                let mut row = row.clone();
+                if let Some(fields) = row.as_object_mut() {
+                    fields.remove("category");
+                }
+                row
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{label}: `{key}` row count differs\ncli: {}\nsdk: {}",
+            summarize_json(&cli),
+            summarize_json(&sdk)
+        );
+        for (row, value) in actual.iter().zip(&expected) {
+            assert!(
+                json_covers(row, value) || row.get("value") == Some(value),
+                "{label}: `{key}` entry not covered: cli={} sdk={}",
+                summarize_json(row),
+                summarize_json(value)
+            );
+        }
+    }
 }
 
 fn json_first_diff(left: &Value, right: &Value, path: &str) -> Option<String> {
@@ -446,10 +590,10 @@ fn normalized_index_stats(mut value: Value) -> Value {
 }
 
 fn assert_index_stats_eq(label: &str, cli: Value, sdk: Value) {
-    assert_eq!(
+    assert_json_covers(
+        &format!("{label} stats"),
         normalized_index_stats(cli),
         normalized_index_stats(sdk),
-        "CLI/SDK index stats mismatch for {label}"
     );
 }
 
@@ -619,7 +763,7 @@ fn taint_analysis_cli_flags_map_one_to_one_to_sdk_options() {
     for (name, cli_extra, sdk_options) in cases {
         let cli = cli_taint_json(workspace, &cli_extra);
         let sdk = sdk_taint_json(&project, sdk_options);
-        assert_eq!(cli, sdk, "taint-analysis CLI/SDK mismatch for {name}");
+        assert_json_rows_eq(&format!("taint-analysis {name}"), cli, sdk);
     }
 }
 
@@ -750,10 +894,7 @@ fn sdk_source_sigs(project: &bonsai_sdk::Project, options: SourceAnalysisOptions
 }
 
 fn source_analysis_all_options() -> SourceAnalysisOptions {
-    SourceAnalysisOptions {
-        lineage_limits: SourceLineageLimits::unbounded(),
-        ..Default::default()
-    }
+    SourceAnalysisOptions { ..Default::default() }
 }
 
 fn cli_source_json(workspace: &str, extra: &[&str]) -> Value {
@@ -785,7 +926,7 @@ fn index_and_diagnostics_cli_json_match_sdk_for_every_language() {
 
         assert_index_stats_eq(
             &format!("{lang} index"),
-            run_cli(&["index", ws_arg]),
+            run_cli(&["index", ws_arg, "--format", "json"]),
             serde_json::to_value(
                 bonsai_sdk::Bonsai::new()
                     .index(lang_workspace_path(lang))
@@ -795,9 +936,9 @@ fn index_and_diagnostics_cli_json_match_sdk_for_every_language() {
             .expect("stats json"),
         );
 
-        assert_json_eq(
+        assert_context_covers(
             &format!("{lang} context"),
-            run_cli(&["context", ws_arg]),
+            run_cli(&["context", ws_arg, "--format", "json"]),
             serde_json::to_value(project.semantic_context()).expect("context json"),
         );
 
@@ -808,9 +949,9 @@ fn index_and_diagnostics_cli_json_match_sdk_for_every_language() {
                 .parse(file)
                 .unwrap_or_else(|err| panic!("{lang} parse diagnostic input: {err}"));
         }
-        assert_json_eq(
+        assert_json_covers(
             &format!("{lang} diagnostics"),
-            run_cli(&["diagnostics", ws_arg]),
+            run_cli(&["diagnostics", ws_arg, "--format", "json"]),
             serde_json::to_value(project.diagnostics_report()).expect("diagnostics json"),
         );
     }
@@ -833,7 +974,7 @@ fn slice_cli_json_matches_sdk_facade() {
             ..Default::default()
         }))
         .expect("slice json");
-        assert_json_eq(&format!("{lang} slice"), cli.clone(), sdk);
+        assert_json_covers(&format!("{lang} slice"), cli.clone(), sdk);
         let slices = cli
             .get("slices")
             .and_then(Value::as_array)
@@ -865,7 +1006,7 @@ fn cache_commands_cli_json_match_sdk_facade() {
         stats.dataflow_factstore_sidecar_exists && !stats.dataflow_sidecar_exists,
         "fixture should have only the canonical dataflow factstore before clear: {stats:#?}"
     );
-    assert_json_eq(
+    assert_json_covers(
         "cache stats after SDK dataflow rebuild",
         run_cli(&["cache", "stats", root_arg, "--format", "json"]),
         serde_json::to_value(stats).expect("cache stats json"),
@@ -902,7 +1043,7 @@ fn cache_commands_cli_json_match_sdk_facade() {
         !stats.export_sidecar_exists,
         "CLI cache rebuild should warm export only with --export: {stats:#?}"
     );
-    assert_json_eq(
+    assert_json_covers(
         "cache stats after CLI rebuild",
         run_cli(&["cache", "stats", root_arg, "--format", "json"]),
         serde_json::to_value(&stats).expect("cache stats json"),
@@ -917,7 +1058,7 @@ fn cache_commands_cli_json_match_sdk_facade() {
         !stats.bonsai_dir_exists,
         "CLI cache clear should remove the SDK-visible .bonsai directory: {stats:#?}"
     );
-    assert_json_eq(
+    assert_json_covers(
         "cache stats after CLI clear",
         run_cli(&["cache", "stats", root_arg, "--format", "json"]),
         serde_json::to_value(&stats).expect("cache stats json"),
@@ -934,7 +1075,7 @@ fn cache_commands_cli_json_match_sdk_facade() {
         !stats.dataflow_sidecar_exists && !stats.dataflow_factstore_sidecar_exists,
         "SDK structural rebuild should match CLI rebuild and avoid full dataflow prewarm: {stats:#?}"
     );
-    assert_json_eq(
+    assert_json_covers(
         "cache stats after SDK rebuild",
         run_cli(&["cache", "stats", root_arg, "--format", "json"]),
         serde_json::to_value(stats).expect("cache stats json"),
@@ -1052,11 +1193,19 @@ fn sink_analysis_cli_flags_map_one_to_one_to_sdk_options() {
     let project = security_project();
     let workspace = "test-fixtures/languages/python/micro";
     let cases = [
-        ("default/all", vec!["--all"], SinkAnalysisOptions::default()),
+        (
+            "default/all",
+            vec!["--all"],
+            SinkAnalysisOptions {
+                include_security_source_flows: true,
+                ..Default::default()
+            },
+        ),
         (
             "source regex",
             vec!["--all", "--source", "^python\\.flask\\."],
             SinkAnalysisOptions {
+                include_security_source_flows: true,
                 source: Some("^python\\.flask\\.".to_string()),
                 ..Default::default()
             },
@@ -1065,6 +1214,7 @@ fn sink_analysis_cli_flags_map_one_to_one_to_sdk_options() {
             "sink regex",
             vec!["--all", "--sink", "^python\\.cmdi\\."],
             SinkAnalysisOptions {
+                include_security_source_flows: true,
                 sink: Some("^python\\.cmdi\\.".to_string()),
                 ..Default::default()
             },
@@ -1073,6 +1223,7 @@ fn sink_analysis_cli_flags_map_one_to_one_to_sdk_options() {
             "trust",
             vec!["--all", "--trust", "remote"],
             SinkAnalysisOptions {
+                include_security_source_flows: true,
                 trust: Some("remote".to_string()),
                 ..Default::default()
             },
@@ -1081,6 +1232,7 @@ fn sink_analysis_cli_flags_map_one_to_one_to_sdk_options() {
             "category",
             vec!["--all", "--category", "http-input"],
             SinkAnalysisOptions {
+                include_security_source_flows: true,
                 category: Some("http-input".to_string()),
                 ..Default::default()
             },
@@ -1089,6 +1241,7 @@ fn sink_analysis_cli_flags_map_one_to_one_to_sdk_options() {
             "severity",
             vec!["--all", "--severity", "critical"],
             SinkAnalysisOptions {
+                include_security_source_flows: true,
                 severity: Some(Severity::Critical),
                 ..Default::default()
             },
@@ -1097,6 +1250,7 @@ fn sink_analysis_cli_flags_map_one_to_one_to_sdk_options() {
             "tag",
             vec!["--all", "--tag", "command-injection"],
             SinkAnalysisOptions {
+                include_security_source_flows: true,
                 tag: Some("command-injection".to_string()),
                 ..Default::default()
             },
@@ -1105,6 +1259,7 @@ fn sink_analysis_cli_flags_map_one_to_one_to_sdk_options() {
             "inferred sources",
             vec!["--all", "--inferred-sources"],
             SinkAnalysisOptions {
+                include_security_source_flows: true,
                 include_inferred_sources: true,
                 ..Default::default()
             },
@@ -1112,10 +1267,10 @@ fn sink_analysis_cli_flags_map_one_to_one_to_sdk_options() {
     ];
 
     for (name, cli_extra, sdk_options) in cases {
-        assert_eq!(
+        assert_json_rows_eq(
+            &format!("sink-analysis {name}"),
             cli_sink_json(workspace, &cli_extra),
             sdk_sink_json(&project, sdk_options),
-            "sink-analysis CLI/SDK mismatch for {name}"
         );
     }
 }
@@ -1123,7 +1278,13 @@ fn sink_analysis_cli_flags_map_one_to_one_to_sdk_options() {
 #[test]
 fn sink_analysis_paged_cli_json_is_a_window_over_sdk_results() {
     let project = security_project();
-    let sdk_rows = sdk_sink_json(&project, Default::default());
+    let sdk_rows = sdk_sink_json(
+        &project,
+        SinkAnalysisOptions {
+            include_security_source_flows: true,
+            ..Default::default()
+        },
+    );
     let sdk_signatures: BTreeSet<_> = sdk_rows
         .as_array()
         .expect("SDK sink rows")
@@ -1157,15 +1318,21 @@ fn security_analysis_cli_json_matches_sdk_for_every_language() {
 
         let cli_taint = cli_taint_json(&workspace, &["--all"]);
         let sdk_taint = sdk_taint_json(&project, Default::default());
-        assert_eq!(cli_taint, sdk_taint, "{lang} taint-analysis CLI/SDK mismatch");
+        assert_json_rows_eq(&format!("{lang} taint-analysis"), cli_taint, sdk_taint);
 
         let cli_source = cli_source_sigs(cli_source_json(&workspace, &["--all"]));
         let sdk_source = sdk_source_sigs(&project, Default::default());
         assert_eq!(cli_source, sdk_source, "{lang} source-analysis CLI/SDK mismatch");
 
         let cli_sink = cli_sink_json(&workspace, &["--all"]);
-        let sdk_sink = sdk_sink_json(&project, Default::default());
-        assert_eq!(cli_sink, sdk_sink, "{lang} sink-analysis CLI/SDK mismatch");
+        let sdk_sink = sdk_sink_json(
+            &project,
+            SinkAnalysisOptions {
+                include_security_source_flows: true,
+                ..Default::default()
+            },
+        );
+        assert_json_rows_eq(&format!("{lang} sink-analysis"), cli_sink, sdk_sink);
     }
 }
 
@@ -1251,7 +1418,7 @@ fn security_pack_cli_json_matches_sdk() {
         serde_json::to_value(pack.inventory(options.clone()).expect("pack inventory")).expect("pack json"),
     );
 
-    assert_json_eq(
+    assert_json_covers(
         "security pack --audit",
         run_cli(&security_cli_args(
             workspace,
@@ -1261,7 +1428,7 @@ fn security_pack_cli_json_matches_sdk() {
         serde_json::to_value(pack.audit(Some("python")).expect("pack audit")).expect("audit json"),
     );
 
-    assert_json_eq(
+    assert_json_covers(
         "security pack --tree",
         run_cli(&security_cli_args(
             workspace,
@@ -1271,7 +1438,7 @@ fn security_pack_cli_json_matches_sdk() {
         serde_json::to_value(pack.tree(options.clone()).expect("pack tree")).expect("tree json"),
     );
 
-    assert_json_eq(
+    assert_json_covers(
         "security pack --validate",
         run_cli(&security_cli_args(
             workspace,
@@ -1415,7 +1582,7 @@ fn read_file_cli_json_matches_sdk_facade() {
     let project = security_project();
     let workspace = "test-fixtures/languages/python/micro";
 
-    assert_json_eq(
+    assert_json_covers(
         "python read-file",
         run_cli(&[
             "read-file",
@@ -1471,14 +1638,7 @@ fn inspect_structural_flow_ids_match_sdk_facade() {
     let workspace = "test-fixtures/languages/python/micro";
     let target = "run_admin_command";
     let cli = run_cli(&[
-        "inspect",
-        workspace,
-        "--query",
-        target,
-        "--graph-flow",
-        "--format",
-        "json",
-        "--all",
+        "inspect", workspace, "--query", target, "--format", "json", "--all",
     ]);
     let sdk_summaries = project
         .browse()
@@ -1792,9 +1952,9 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
         let entry = entry_symbol(lang);
         let diagnostic_entry = diagnostic_entry_symbol(lang);
 
-        assert_json_eq(
+        assert_json_covers(
             &format!("{lang} dump-hir"),
-            run_cli(&["dump-hir", ws_arg, &diagnostic_entry]),
+            run_cli(&["dump-hir", ws_arg, &diagnostic_entry, "--format", "json"]),
             serde_json::to_value(
                 project
                     .dump()
@@ -1804,9 +1964,9 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
             )
             .expect("hir json"),
         );
-        assert_json_eq(
+        assert_json_covers(
             &format!("{lang} dump-cfg"),
-            run_cli(&["dump-cfg", ws_arg, &diagnostic_entry]),
+            run_cli(&["dump-cfg", ws_arg, &diagnostic_entry, "--format", "json"]),
             serde_json::to_value(
                 project
                     .dump()
@@ -1837,7 +1997,7 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
         let path_project = sdk()
             .open_with_options(lang_workspace_path(lang), path_options)
             .unwrap_or_else(|err| panic!("open {lang} SDK path project: {err}"));
-        assert_json_eq(
+        assert_json_covers(
             &format!("{lang} path"),
             run_cli(&[
                 "path", ws_arg, "--from", entry, "--to", "verify", "--format", "json",
@@ -1900,7 +2060,7 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
                     panic!("{lang} sdk dump-resolve candidate not found")
                 }
             };
-        assert_json_eq(
+        assert_json_covers(
             &format!("{lang} dump-resolve"),
             run_cli(&["dump-resolve", ws_arg, entry, "--format", "json"]),
             serde_json::to_value(resolve).expect("resolve json"),
@@ -1920,7 +2080,7 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
             }
             bonsai_sdk::TaintOutcome::TaintIdNotFound => panic!("{lang} sdk dump-taint id not found"),
         };
-        assert_json_eq(
+        assert_json_covers(
             &format!("{lang} dump-taint"),
             run_cli(&[
                 "dump-taint",
@@ -1934,7 +2094,7 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
         );
 
         let trace_symbol = trace_source_symbol(lang);
-        assert_json_eq(
+        assert_json_covers(
             &format!("{lang} trace"),
             run_cli(&["trace", ws_arg, trace_symbol, "--format", "json"]),
             serde_json::to_value(

@@ -6,7 +6,7 @@
 //! selecting this renderer.
 
 use crate::ClassOut;
-use bonsai_common::{FileId, FuncId, Precision, Span, SpanMap, SymbolId};
+use bonsai_common::{FileId, FuncId, Span, SpanMap, SymbolId};
 use bonsai_idg::CrossCallEdge;
 use bonsai_lang_api::{
     AssignValueKind, CallArg, CallKind, CatchArmFact, DeclKind, ExpressionFlow, FlowEvent, LoopKind,
@@ -58,7 +58,6 @@ pub enum NativeExportProgress {
 
 #[derive(Copy, Clone, Debug, Serialize)]
 struct ExportAnalysisScope {
-    semantic_max_precision: &'static str,
     full_propagations: bool,
     complete_chains: bool,
     propagations_mode: &'static str,
@@ -89,7 +88,6 @@ struct ExportCallEdge<'a> {
     from: u32,
     to: u32,
     kind: &'static str,
-    precision: &'static str,
     resolver_stage: &'a str,
     evidence: &'a str,
     confidence: u8,
@@ -232,9 +230,6 @@ struct ExportTaintPropagationsRef<'a> {
     entry: &'a str,
     entry_file: &'a str,
     entry_line: u32,
-    /// Worst precision observed across any traversed resolver edge
-    /// during the interprocedural pass from this entry.
-    precision: &'static str,
     pairs_analyzed: u32,
     records: Vec<&'a ExportTaintRecord>,
 }
@@ -245,7 +240,6 @@ struct ExportTaintRecord {
     callee: String,
     call_line: u32,
     edge_kind: &'static str,
-    edge_precision: &'static str,
     /// One entry per positional argument that was tainted at the
     /// call site. Lets consumers correlate caller-local identifiers
     /// to the callee's parameter names they ended up in.
@@ -259,7 +253,7 @@ struct ExportTaintedArg {
     param_name: String,
 }
 
-/// Retained wire shape for the v10 schema's optional concrete flow rows.
+/// Retained wire shape for the v11 schema's optional concrete flow rows.
 /// Production export leaves this empty and publishes the exact relationship
 /// through `compressed_callgraph` instead.
 #[derive(Serialize)]
@@ -777,7 +771,6 @@ struct CallEdgeOut<'a> {
     callee_kind: &'static str,
     call_site_line: u32,
     call_site_column: u32,
-    precision: &'static str,
     resolver_stage: &'a str,
     evidence: &'a str,
     confidence: u8,
@@ -954,7 +947,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     let mut map = serializer.serialize_map(None)?;
 
     map.serialize_entry("schema", "bonsai-native-export")?;
-    map.serialize_entry("schema_version", &10_u32)?;
+    map.serialize_entry("schema_version", &11_u32)?;
     map.serialize_entry("engine_version", env!("CARGO_PKG_VERSION"))?;
     map.serialize_entry("workspace_root", &root.display().to_string())?;
     map.serialize_entry("generated_at_unix_ms", &generated_at_unix_ms())?;
@@ -1409,7 +1402,6 @@ fn export_phase_log(args: std::fmt::Arguments<'_>) {
     }
 }
 
-const EXPORT_SEMANTIC_FLOW_MAX_PRECISION: Precision = Precision::Narrowed;
 const COMPRESSED_CHAIN_ROWS_REASON: &str = "concrete path rows are not materialized in compressed_callgraph mode; the complete semantic chain language is represented by the exported function and resolved call-edge graph";
 const COMPRESSED_FLOW_ID_ROWS_REASON: &str = "concrete flow-id label rows are not materialized in compressed_callgraph mode; the complete semantic flow relation is represented by the exported function and resolved call-edge graph";
 
@@ -1423,7 +1415,6 @@ fn export_projection_idg_service(ws: &Workspace) -> Arc<bonsai_idg::IdgQueryServ
 
 fn export_analysis_scope(config: NativeExportConfig) -> ExportAnalysisScope {
     ExportAnalysisScope {
-        semantic_max_precision: export_precision_label(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
         full_propagations: config.full_propagations,
         // The wire field is retained for schema compatibility. Native export
         // always emits the exact compressed relation; there is no capped path
@@ -1698,10 +1689,7 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
             .iter()
             .map(|function| FuncId::new(function.func_id))
             .collect();
-        let return_taint_by_func = projection_idg.return_taint_param_indices_for_funcs_with_max_precision(
-            &summary_funcs,
-            Some(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
-        );
+        let return_taint_by_func = projection_idg.return_taint_param_indices_for_funcs(&summary_funcs);
         export_phase_log(format_args!(
             "taint.numeric_function_summaries: funcs={} rows={}",
             summary_funcs.len(),
@@ -1882,7 +1870,6 @@ fn export_structural_callgraph_count(ws: &Workspace, global: &bonsai_index::Glob
         ws.visit_persisted_callgraph_partitions(|_file, _nodes, outgoing, _incoming, _unresolved| {
             count += outgoing
                 .iter()
-                .filter(|edge| edge.precision.is_semantic())
                 .filter(|edge| {
                     global.decl_of(SymbolId::new(edge.from.raw())).is_some()
                         && global.decl_of(SymbolId::new(edge.to.raw())).is_some()
@@ -1896,7 +1883,6 @@ fn export_structural_callgraph_count(ws: &Workspace, global: &bonsai_index::Glob
         .inner()
         .edges
         .iter()
-        .filter(|edge| edge.precision.is_semantic())
         .filter(|edge| {
             global.decl_of(SymbolId::new(edge.from.raw())).is_some()
                 && global.decl_of(SymbolId::new(edge.to.raw())).is_some()
@@ -1924,7 +1910,7 @@ impl Serialize for ExportStructuralCallgraphStreaming<'_> {
                 if serialization_error.is_some() {
                     return;
                 }
-                for edge in outgoing.iter().filter(|edge| edge.precision.is_semantic()) {
+                for edge in outgoing.iter() {
                     let Some(caller_decl) = self.global.decl_of(SymbolId::new(edge.from.raw())) else {
                         continue;
                     };
@@ -1941,7 +1927,6 @@ impl Serialize for ExportStructuralCallgraphStreaming<'_> {
                         callee_kind: export_decl_kind_label(callee_decl.kind),
                         call_site_line,
                         call_site_column,
-                        precision: export_precision_label(edge.precision),
                         resolver_stage: edge.provenance.resolver_stage(),
                         evidence: edge.provenance.evidence(),
                         confidence: edge.provenance.confidence(),
@@ -1960,12 +1945,7 @@ impl Serialize for ExportStructuralCallgraphStreaming<'_> {
             Some(Err(error)) => return Err(<S::Error as serde::ser::Error>::custom(error)),
             None => {
                 let resolved = self.ws.cached_resolved_call_graph();
-                for edge in resolved
-                    .inner()
-                    .edges
-                    .iter()
-                    .filter(|edge| edge.precision.is_semantic())
-                {
+                for edge in resolved.inner().edges.iter() {
                     let Some(caller_decl) = self.global.decl_of(SymbolId::new(edge.from.raw())) else {
                         continue;
                     };
@@ -1982,7 +1962,6 @@ impl Serialize for ExportStructuralCallgraphStreaming<'_> {
                         callee_kind: export_decl_kind_label(callee_decl.kind),
                         call_site_line,
                         call_site_column,
-                        precision: export_precision_label(edge.precision),
                         resolver_stage: edge.provenance.resolver_stage(),
                         evidence: edge.provenance.evidence(),
                         confidence: edge.provenance.confidence(),
@@ -2012,21 +1991,13 @@ impl Serialize for ExportTaintCallEdgesStreaming<'_> {
         let mut count = 0usize;
         let count_result = self.ws.visit_persisted_callgraph_partitions(
             |_file, _nodes, outgoing, _incoming, _unresolved| {
-                count += outgoing
-                    .iter()
-                    .filter(|edge| edge.precision.is_semantic())
-                    .count();
+                count += outgoing.len();
             },
         );
         let persisted = matches!(count_result, Some(Ok(())));
         let fallback_graph = (!persisted).then(|| self.ws.cached_resolved_call_graph());
         if let Some(graph) = fallback_graph.as_ref() {
-            count = graph
-                .inner()
-                .edges
-                .iter()
-                .filter(|edge| edge.precision.is_semantic())
-                .count();
+            count = graph.inner().edges.len();
         }
         let mut sequence = serializer.serialize_seq(Some(count))?;
         let mut serialization_error = None;
@@ -2036,12 +2007,11 @@ impl Serialize for ExportTaintCallEdgesStreaming<'_> {
                     if serialization_error.is_some() {
                         return;
                     }
-                    for edge in outgoing.iter().filter(|edge| edge.precision.is_semantic()) {
+                    for edge in outgoing.iter() {
                         if let Err(error) = sequence.serialize_element(&ExportCallEdge {
                             from: edge.from.raw(),
                             to: edge.to.raw(),
                             kind: export_edge_kind_label(edge.kind),
-                            precision: export_taint_precision_label(edge.precision),
                             resolver_stage: edge.provenance.resolver_stage(),
                             evidence: edge.provenance.evidence(),
                             confidence: edge.provenance.confidence(),
@@ -2065,17 +2035,11 @@ impl Serialize for ExportTaintCallEdgesStreaming<'_> {
                 }
             }
         } else if let Some(graph) = fallback_graph.as_ref() {
-            for edge in graph
-                .inner()
-                .edges
-                .iter()
-                .filter(|edge| edge.precision.is_semantic())
-            {
+            for edge in graph.inner().edges.iter() {
                 sequence.serialize_element(&ExportCallEdge {
                     from: edge.from.raw(),
                     to: edge.to.raw(),
                     kind: export_edge_kind_label(edge.kind),
-                    precision: export_taint_precision_label(edge.precision),
                     resolver_stage: edge.provenance.resolver_stage(),
                     evidence: edge.provenance.evidence(),
                     confidence: edge.provenance.confidence(),
@@ -2209,47 +2173,43 @@ impl Serialize for ExportAssignChainsStreaming<'_> {
         let mut sequence = serializer.serialize_seq(None)?;
         let mut count = 0usize;
         self.idg
-            .try_visit_local_storage_taint_by_param_for_funcs_with_max_precision(
-                &funcs,
-                Some(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
-                |func, storage_by_param| {
-                    let Some(function) = functions_by_id.get(&func.raw()).copied() else {
-                        return Ok(());
-                    };
-                    let mut per_param = Vec::new();
-                    for (index, param) in function.params.iter().enumerate() {
-                        if param.is_empty() {
-                            continue;
-                        }
-                        let mut tainted: ahash::AHashSet<String> = storage_by_param
-                            .get(index)
-                            .into_iter()
-                            .flatten()
-                            .cloned()
-                            .collect();
-                        tainted.insert(param.clone());
-                        if tainted.len() <= 1 {
-                            continue;
-                        }
-                        let mut names: Vec<String> = tainted.into_iter().collect();
-                        names.sort();
-                        per_param.push(ExportAssignChainParam {
-                            param_index: index,
-                            param_name: param.clone(),
-                            tainted: names,
-                        });
+            .try_visit_local_storage_taint_by_param_for_funcs(&funcs, |func, storage_by_param| {
+                let Some(function) = functions_by_id.get(&func.raw()).copied() else {
+                    return Ok(());
+                };
+                let mut per_param = Vec::new();
+                for (index, param) in function.params.iter().enumerate() {
+                    if param.is_empty() {
+                        continue;
                     }
-                    if !per_param.is_empty() {
-                        sequence.serialize_element(&ExportAssignChain {
-                            func_id: function.func_id,
-                            function: function.name.clone(),
-                            per_param,
-                        })?;
-                        count += 1;
+                    let mut tainted: ahash::AHashSet<String> = storage_by_param
+                        .get(index)
+                        .into_iter()
+                        .flatten()
+                        .cloned()
+                        .collect();
+                    tainted.insert(param.clone());
+                    if tainted.len() <= 1 {
+                        continue;
                     }
-                    Ok(())
-                },
-            )?;
+                    let mut names: Vec<String> = tainted.into_iter().collect();
+                    names.sort();
+                    per_param.push(ExportAssignChainParam {
+                        param_index: index,
+                        param_name: param.clone(),
+                        tainted: names,
+                    });
+                }
+                if !per_param.is_empty() {
+                    sequence.serialize_element(&ExportAssignChain {
+                        func_id: function.func_id,
+                        function: function.name.clone(),
+                        per_param,
+                    })?;
+                    count += 1;
+                }
+                Ok(())
+            })?;
         export_phase_log(format_args!(
             "taint.assign_chains: {:.3}s count={}",
             phase_started.elapsed().as_secs_f64(),
@@ -2547,13 +2507,8 @@ fn export_taint_propagation_row_ref<'a>(
     entry_func: bonsai_common::FuncId,
 ) -> ExportTaintPropagationsRef<'a> {
     let seed_nodes = canonical_token_seed_nodes(idg, entry_func, &ep.params, global);
-    let mut cross_calls = idg.cross_call_edges_in_closure_with_max_precision(
-        &seed_nodes,
-        Some(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
-    );
+    let mut cross_calls = idg.cross_call_edges_in_closure(&seed_nodes);
     sort_cross_call_edges_for_export(&mut cross_calls);
-    let aggregate_precision =
-        crate::taint::aggregate_flow_precision(cross_calls.iter().map(|ce| ce.precision));
     let unique_pairs: ahash::AHashSet<(bonsai_common::FuncId, bonsai_common::FuncId)> =
         cross_calls.iter().map(|ce| (ce.caller, ce.callee)).collect();
     let pairs_analyzed = std::cmp::max(1, unique_pairs.len());
@@ -2566,7 +2521,6 @@ fn export_taint_propagation_row_ref<'a>(
         entry: &ep.function,
         entry_file: &ep.file,
         entry_line: ep.line,
-        precision: export_precision_label(aggregate_precision),
         pairs_analyzed: u32::try_from(pairs_analyzed).unwrap_or(u32::MAX),
         records,
     }
@@ -2594,7 +2548,6 @@ fn sort_cross_call_edges_for_export(cross_calls: &mut [CrossCallEdge]) {
             ce.call_span.file.raw(),
             ce.call_span.start,
             export_edge_kind_rank(ce.call_kind),
-            export_precision_rank(ce.precision),
             ce.arg_idx,
             ce.param_idx,
         )
@@ -2678,7 +2631,6 @@ fn export_taint_record_from_cross_call(
         callee: callee.name,
         call_line,
         edge_kind: export_edge_kind_label(edge.call_kind),
-        edge_precision: export_precision_label(edge.precision),
         tainted_args,
     })
 }
@@ -2832,35 +2784,6 @@ fn export_decl_kind_label(kind: DeclKind) -> &'static str {
         DeclKind::Import => "import",
         DeclKind::Field => "field",
         DeclKind::Other => "other",
-    }
-}
-
-/// Preserve the original native taint-edge wire spelling, which predates the
-/// hyphenated presentation label used by structural callgraph rows.
-fn export_taint_precision_label(precision: Precision) -> &'static str {
-    match precision {
-        Precision::Exact => "exact",
-        Precision::Narrowed => "narrowed",
-        Precision::OverApproximate => "overapproximate",
-        Precision::Unknown => "unknown",
-    }
-}
-
-fn export_precision_label(precision: Precision) -> &'static str {
-    match precision {
-        Precision::Exact => "exact",
-        Precision::Narrowed => "narrowed",
-        Precision::OverApproximate => "over-approximate",
-        Precision::Unknown => "unknown",
-    }
-}
-
-fn export_precision_rank(precision: Precision) -> u8 {
-    match precision {
-        Precision::Exact => 0,
-        Precision::Narrowed => 1,
-        Precision::OverApproximate => 2,
-        Precision::Unknown => 3,
     }
 }
 

@@ -15,7 +15,7 @@
 ///
 /// Inputs: just the chain's display names joined with `\0`. Same
 /// query + same workspace → same id across runs / cache modes /
-/// render modes / themes / precision changes.
+/// render modes / themes.
 #[must_use]
 pub fn compute_flow_id(chain_names: &[String]) -> String {
     format!("F:{:016x}", fnv1a_names64(chain_names))

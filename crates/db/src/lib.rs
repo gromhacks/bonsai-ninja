@@ -957,7 +957,7 @@ impl AnalyzerDb {
     /// returned when the function isn't in the global index (e.g. the
     /// caller passed a stale [`FuncId`]) — this is rare and safe:
     /// downstream consumers that walk the CFG will see no blocks and
-    /// report unknown precision.
+    /// report the function as incomplete.
     pub fn cfg(&self, func: FuncId) -> Arc<Cfg> {
         let decl = self.decl_for_func(func);
         let version = decl

@@ -343,22 +343,11 @@ def caller():
         .callees_of(caller)
         .find(|edge| edge.to == target)
         .expect("expected compiler-resolved caller → target edge");
-    assert_eq!(
-        edge.precision,
-        bonsai_common::Precision::Narrowed,
-        "single-candidate edge must retain Narrowed precision"
-    );
-
-    let driver = func_id(&ws, "driver");
-    let edges: Vec<_> = cache.resolved_graph().callees_of(driver).collect();
-    assert!(
-        edges.iter().all(|edge| edge.precision.is_semantic()),
-        "resolved graph must not expose over-approximate edges: {edges:?}"
-    );
+    assert_eq!(edge.to, target);
 }
 
 /// Spec compliance: unique resolution gets `EdgeKind::Direct` /
-/// `Precision::Narrowed`; ambiguous broad resolution is not emitted.
+/// a single resolved edge; ambiguous broad resolution is not emitted.
 #[test]
 fn resolved_graph_assigns_correct_precision() {
     // Build a graph where `caller` calls `target` and `target` is
@@ -375,7 +364,6 @@ def caller():
     let edges: Vec<_> = cache.resolved_graph().callers_of(target).collect();
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].kind, bonsai_callgraph::EdgeKind::Direct);
-    assert_eq!(edges[0].precision, bonsai_common::Precision::Narrowed);
 
     // A bare call with same-named candidates must not fan out into
     // over-approximate virtual edges.
@@ -397,10 +385,6 @@ def m_alias(): pass
     let cache2 = ChainCache::new(&ws2);
     let driver = func_id(&ws2, "driver");
     let edges: Vec<_> = cache2.resolved_graph().callees_of(driver).collect();
-    assert!(
-        edges.iter().all(|edge| edge.precision.is_semantic()),
-        "ambiguous broad resolution must not expose over-approximate edges: {edges:?}"
-    );
     assert!(edges.len() <= 1, "ambiguous call fanned out: {edges:?}");
 }
 
@@ -429,7 +413,6 @@ def driver(obj):
     let semantic_targets: ahash::AHashSet<_> = ws
         .resolved_call_graph()
         .callees_of(driver)
-        .filter(|edge| edge.precision.is_semantic())
         .map(|edge| edge.to)
         .collect();
     let non_semantic_targets: Vec<_> = targets
@@ -475,7 +458,6 @@ fn call_span_resolution_honors_query_scoped_graph() {
         to: helper,
         span,
         kind: bonsai_callgraph::EdgeKind::Direct,
-        precision: bonsai_common::Precision::Exact,
         provenance: bonsai_callgraph::EdgeProvenance::direct_symbol(),
     });
     let scoped = Arc::new(bonsai_callgraph::ResolvedCallGraph::from_call_graph(graph));

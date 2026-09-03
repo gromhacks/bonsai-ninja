@@ -90,7 +90,6 @@ fn sentinel_argument_uses_ast_receiver_but_return_does_not() {
         call_span,
         arg_idx: u32::MAX,
         param_idx: 0,
-        precision: Precision::Narrowed,
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         relation: bonsai_idg::CrossCallRelation::Argument,
     };
@@ -136,7 +135,6 @@ fn shared_state_call_establishes_lineage_without_claiming_a_tainted_argument() {
             call_span,
             arg_idx: u32::MAX,
             param_idx: u32::MAX,
-            precision: Precision::Narrowed,
             call_kind: bonsai_callgraph::EdgeKind::Direct,
             relation: bonsai_idg::CrossCallRelation::SharedStateCall,
         },
@@ -146,7 +144,6 @@ fn shared_state_call_establishes_lineage_without_claiming_a_tainted_argument() {
             call_span,
             arg_idx: u32::MAX,
             param_idx: u32::MAX,
-            precision: Precision::Narrowed,
             call_kind: bonsai_callgraph::EdgeKind::Direct,
             relation: bonsai_idg::CrossCallRelation::Return,
         },
@@ -502,113 +499,6 @@ fn call_target_component_filter_handles_common_qualified_forms() {
 }
 
 #[test]
-fn default_source_return_idg_query_is_semantic_only() {
-    let func = FuncId::new(7);
-    let mut segment = IdgSegment::new();
-    let param = segment.intern_place(Place::Param { idx: 0 });
-    let ret = segment.intern_place(Place::Return);
-    let param_node = segment.intern_node(func, param);
-    let ret_node = segment.intern_node(func, ret);
-    segment.add_edge(IdgEdge::new(
-        param_node,
-        ret_node,
-        bonsai_idg::EdgeMeta {
-            precision: Precision::OverApproximate,
-            kind: bonsai_idg::IdgEdgeKind::IntraReturn,
-            call_kind: bonsai_callgraph::EdgeKind::Indirect,
-            via_span: span(),
-        },
-    ));
-    segment.record_func(func);
-    let service = service_from_segment(segment);
-    let db = empty_db();
-
-    assert!(
-        source_seed_reaches_return_from_idg_query(
-            IdgReturnQuery::semantic(
-                IdgTaintSource::rule_match(func, &TokenSet::default(), None, &[]),
-                &[],
-                &db,
-                &service,
-            )
-            .with_max_precision(None),
-        ),
-        "explicit diagnostic precision scope can traverse the over-approximate edge"
-    );
-    assert!(
-        !source_seed_reaches_return_from_idg(func, &TokenSet::default(), None, &[], &[], &db, &service,),
-        "default public wrapper must not treat over-approximate IDG reachability as semantic"
-    );
-}
-
-#[test]
-fn default_entry_taint_graph_idg_query_is_semantic_only() {
-    let caller = FuncId::new(7);
-    let callee = FuncId::new(8);
-    let call_span = Span {
-        file: FileId::new(0),
-        start: 10,
-        end: 20,
-    };
-    let mut segment = IdgSegment::new();
-    let caller_param = segment.intern_place(Place::Param { idx: 0 });
-    let call_arg = segment.intern_place(Place::CallArg {
-        site: CallSiteId(call_span),
-        idx: 0,
-    });
-    let callee_param = segment.intern_place(Place::Param { idx: 0 });
-    let caller_param_node = segment.intern_node(caller, caller_param);
-    let call_arg_node = segment.intern_node(caller, call_arg);
-    let callee_param_node = segment.intern_node(callee, callee_param);
-    segment.add_edge(IdgEdge::intra_assign(caller_param_node, call_arg_node, call_span));
-    segment.add_edge(IdgEdge::inter_call_arg(
-        call_arg_node,
-        callee_param_node,
-        call_span,
-        Precision::OverApproximate,
-        bonsai_callgraph::EdgeKind::Indirect,
-    ));
-    segment.record_func(caller);
-    segment.record_func(callee);
-    let service = service_from_segment(segment);
-    let db = empty_db();
-
-    let diagnostic = entry_taint_graph_from_idg_query(
-        IdgTaintQuery::semantic(
-            IdgTaintSource::rule_match(caller, &TokenSet::default(), None, &[]),
-            &db,
-            &service,
-        )
-        .with_max_precision(None),
-    );
-    assert_eq!(
-        diagnostic.call_records.len(),
-        1,
-        "explicit diagnostic precision scope can expose the over-approximate call edge"
-    );
-
-    let precomposed = entry_taint_graph_from_idg_query(
-        IdgTaintQuery::semantic(
-            IdgTaintSource::precomposed(caller, &TokenSet::default(), &[]),
-            &db,
-            &service,
-        )
-        .with_max_precision(None),
-    );
-    assert!(
-        precomposed.call_records.is_empty(),
-        "an empty precomposed seed is exact and must not fall back to broader rule-match seeding"
-    );
-
-    let semantic = entry_taint_graph_from_idg(caller, &TokenSet::default(), None, &[], &[], &db, &service);
-    assert!(
-        semantic.call_records.is_empty(),
-        "default public wrapper must not expose over-approximate call edges as taint evidence"
-    );
-    assert_eq!(semantic.precision, Precision::Exact);
-}
-
-#[test]
 fn source_output_arg_names_keep_anchor_seed_precise() {
     let func = FuncId::new(7);
     let anchor = Span {
@@ -851,7 +741,6 @@ fn anchored_read_source_seeds_only_the_exact_nested_storage_read() {
     let outer_ret_node = segment.intern_node(func, outer_ret);
     let outer_write_node = segment.intern_node(func, outer_write);
     let source_meta = bonsai_idg::EdgeMeta {
-        precision: Precision::Exact,
         kind: bonsai_idg::IdgEdgeKind::IntraRead,
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         via_span: source_span,
@@ -1149,7 +1038,6 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
         }],
         &global,
         &service,
-        Some(Precision::Narrowed),
         None,
     );
 
@@ -1171,7 +1059,6 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
         }],
         &global,
         &service,
-        Some(Precision::Narrowed),
         None,
     );
 
@@ -1314,7 +1201,6 @@ fn rulepack_declared_arg_result_passthrough_accepts_descendant_container_input()
         }],
         &global,
         &service,
-        Some(Precision::Narrowed),
         None,
     );
 

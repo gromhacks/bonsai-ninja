@@ -187,16 +187,6 @@ impl PagingConfig {
             FormatClass::RenderOnly => None,
         }
     }
-
-    /// Should we emit the `{rows, page}` wrapper instead of a
-    /// bare array for programmatic formats? Default programmatic
-    /// output is budgeted, so it wraps. Explicitly uncapped output
-    /// (`--all`, `--context 0/all/uncapped`) keeps the historical
-    /// bare array shape.
-    pub(crate) fn json_wrapped(&self) -> bool {
-        matches!(self.format_class, FormatClass::Programmatic)
-            && (self.effective_budget().is_some() || !matches!(self.page, PageArg::First))
-    }
 }
 
 /// Build a paging config directly from raw CLI strings. This is used

@@ -51,7 +51,6 @@ fn sample_finding() -> Finding {
         hops: Vec::new(),
         tag: Some("command-injection".to_string()),
         severity: Some(Severity::Critical),
-        precision: "exact".to_string(),
         cwe: vec!["CWE-78".to_string()],
         owasp: vec!["A03".to_string()],
         status: FindingStatus::Unsanitized,
@@ -371,7 +370,6 @@ fn sarif_emits_alternate_routes_as_codeflows_on_one_result() {
             tainted_args: Vec::new(),
         }],
         status: FindingStatus::Unsanitized,
-        precision: "exact".to_string(),
     });
 
     let report = SecurityReport::new(vec![finding]);

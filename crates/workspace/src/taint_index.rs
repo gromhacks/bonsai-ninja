@@ -66,7 +66,7 @@ use std::sync::Arc;
 // RHS call spans for assignment-derived terminal calls.
 // v9 (2026-05-27): taint graph derives from the IDG, whose construction
 // and seeding changed enough that old graphs are no longer equivalent.
-pub const TAINT_GRAPH_CACHE_VERSION: u32 = 19;
+pub const TAINT_GRAPH_CACHE_VERSION: u32 = 20;
 
 /// Caller-defined table id stamped into the factstore header. 4 is
 /// the next slot after dataflow (2), value-flow (1), flow-ids (3).

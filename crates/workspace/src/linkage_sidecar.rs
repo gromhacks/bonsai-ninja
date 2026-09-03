@@ -56,7 +56,7 @@ use std::sync::Arc;
 /// declaration/type header and call-linkage payloads. File-local inventory
 /// scans can preserve cross-file receiver constraints without hydrating the
 /// complete global symbol table.
-pub const LINKAGE_CACHE_VERSION: u32 = 11;
+pub const LINKAGE_CACHE_VERSION: u32 = 12;
 
 const LINKAGE_TABLE_ID: u32 = 103;
 const METADATA_KEY: u64 = 0;

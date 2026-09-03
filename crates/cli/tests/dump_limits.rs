@@ -113,7 +113,7 @@ fn dump_edges_json_all_is_uncapped() {
     // Even with --limit 1, JSON returns everything. The Python micro
     // has more than one edge (handle_request calls get_user +
     // update_user at minimum), so >= 2 is a robust lower bound.
-    let count = v.as_array().map(Vec::len).unwrap_or(0);
+    let count = v["rows"].as_array().map(Vec::len).unwrap_or(0);
     assert!(
         count >= 2,
         "dump-edges JSON should ignore --limit; got {count} edges:\n{out}"
@@ -152,7 +152,7 @@ fn dump_callgraph_json_all_is_uncapped() {
     };
     let v: serde_json::Value =
         serde_json::from_str(&out).expect("dump-callgraph --format json returned invalid JSON");
-    let count = v.as_array().map(Vec::len).unwrap_or(0);
+    let count = v["rows"].as_array().map(Vec::len).unwrap_or(0);
     assert!(
         count >= 2,
         "dump-callgraph JSON should ignore --limit; got {count} rows:\n{out}"
@@ -195,7 +195,7 @@ fn dump_ast_json_all_is_uncapped() {
     };
     let v: serde_json::Value =
         serde_json::from_str(&out).expect("dump-ast --format json returned invalid JSON");
-    let count = v.as_array().map(Vec::len).unwrap_or(0);
+    let count = v["rows"].as_array().map(Vec::len).unwrap_or(0);
     assert!(
         count >= 2,
         "dump-ast JSON should ignore --limit; got {count} files:\n{out}"
@@ -425,7 +425,8 @@ fn imports_surface_the_specific_symbol_on_multi_symbol_lines() {
         .output()
         .expect("run bonsai-ninja");
     assert!(out.status.success(), "imports --format json failed");
-    let rows: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).expect("invalid imports JSON");
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).expect("invalid imports JSON");
+    let rows: Vec<serde_json::Value> = envelope["rows"].as_array().cloned().expect("imports rows");
     // Two symbols come from .auth_service on __init__.py:1.
     let init_auth: Vec<&serde_json::Value> = rows
         .iter()
@@ -477,7 +478,8 @@ fn dart_refs_find_calls_through_selector_walker() {
         .output()
         .expect("run bonsai-ninja");
     assert!(out.status.success(), "dart refs failed");
-    let rows: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).expect("invalid dart refs JSON");
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).expect("invalid dart refs JSON");
+    let rows: Vec<serde_json::Value> = envelope["rows"].as_array().cloned().expect("dart refs rows");
     assert!(
         rows.len() >= 2,
         "dart refs verifyToken should find >=2 calls; got {}:\n{rows:#?}",

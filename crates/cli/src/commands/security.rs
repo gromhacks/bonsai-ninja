@@ -18,9 +18,9 @@ mod progress_ui;
 use self::progress_ui::{ScopedProgress, SecurityAnalysisProgress};
 use crate::args::{BrowseFormat, SecurityAction, SecurityFormat};
 use crate::commands::{
-    emit_json_paged_cached, emit_json_value_paged_cached, open_project_index_filtered_paths,
-    open_project_index_matching_literal, open_project_index_only, page_info_to_json,
-    paged_json_incomplete_reasons, paging_from_cli, paging_with_row_limit,
+    emit_json_value_paged_cached, open_project_index_filtered_paths, open_project_index_matching_literal,
+    open_project_index_only, page_info_to_json, paged_json_incomplete_reasons, paging_from_cli,
+    paging_with_row_limit,
 };
 use crate::footer::{render_paging_footer, render_truncation_notice};
 use crate::page_cache;
@@ -28,38 +28,25 @@ use crate::paging;
 use crate::ui::{extension_for, Ui};
 use crate::{cli_print, cli_println, progress, ui};
 use anyhow::{bail, Context, Result};
-use bonsai_common::{FuncId, Precision, Span};
+use bonsai_common::{FuncId, Span};
 use bonsai_sdk::{
     load_rulepack, load_workspace_local_rules, parse_severity, security_match_rows, tree_file_rel,
     CombinedFindingWithChain, CombinedSourceAnalysisCandidate, DependencyInventoryOptions, DependencyRow,
     Finding, FindingMatch, FindingStatus, PackAuditReport, PackInventoryOptions, PackRuleRow, Rule, RuleKind,
     RuleMatch, Rulepack, RulepackMetadata, RuntimeDisabledRule, SecurityInventoryOptions, SecurityMatchRow,
     SecurityReport, Severity, SinkAnalysisCandidate, SinkAnalysisFlow, SinkAnalysisOptions,
-    SourceAnalysisOptions, SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions,
-    TaintAnalysisReport, TaintPropagationArg, TaintPropagationStep, TrustClass,
+    SourceAnalysisOptions, TaintAnalysisOptions, TaintAnalysisReport, TaintPropagationArg,
+    TaintPropagationStep, TrustClass,
 };
 use comfy_table::Cell;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-fn source_analysis_json_incomplete_reasons(
-    command: &str,
-    info: &paging::PageInfo,
-    _rows: &[CombinedSourceAnalysisFlow],
-    report_reasons: &[String],
-) -> Vec<String> {
-    let mut reasons = report_reasons.to_vec();
-    reasons.extend(paged_json_incomplete_reasons(command, info));
-    // A row can intentionally carry a bounded representative lineage while
-    // the compiler analysis that produced it is complete. Row-level lineage
-    // status remains serialized on the row; it is not an analysis failure.
-    reasons.sort();
-    reasons.dedup();
-    reasons
-}
-
-const TAINT_RENDER_CACHE_KIND: &str = "security/taint-analysis/render-report/v11";
+const TAINT_RENDER_CACHE_KIND: &str = "security/taint-analysis/render-report/v12";
+const SINK_ANALYSIS_CACHE_KIND: &str = "security/sink-analysis/report/v1";
+const SOURCE_ANALYSIS_CACHE_KIND: &str = "security/source-analysis/report/v1";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct TaintAnalysisRenderReport {
@@ -91,6 +78,12 @@ struct TaintAnalysisRenderReport {
 struct TaintAnalysisRenderFinding {
     #[serde(flatten)]
     finding: CombinedFindingWithChain,
+    /// Rulepack-owned prose and taxonomy used by every renderer. Keeping this
+    /// on the canonical row prevents text from possessing information that
+    /// JSON cannot expose and makes secondary filters operate on the complete
+    /// finding object.
+    #[serde(default)]
+    presentation: TaintFindingPresentation,
     /// Raw FuncIds for the representative chain. This stays internal:
     /// public JSON rows should not expose process-local function ids.
     #[serde(skip)]
@@ -128,12 +121,394 @@ struct TaintAnalysisRenderReportCache {
     bulk_flow_evidence: bool,
 }
 
+/// Complete sink-analysis report persisted under the analysis scope so every
+/// selector re-query is a view instead of a rerun. Chain functions are stored
+/// as raw ids; the keyed payload is invalidated with the workspace
+/// fingerprint, so those ids stay valid for the cached generation.
+#[derive(Serialize, Deserialize)]
+struct SinkAnalysisReportCache {
+    candidates: Vec<SinkAnalysisCandidateCache>,
+    source_rule_count: usize,
+    sink_rule_count: usize,
+    sanitizer_rule_count: usize,
+    #[serde(default)]
+    analysis_complete: bool,
+    #[serde(default)]
+    analysis_incomplete_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    runtime_disabled_rules: Vec<RuntimeDisabledRule>,
+}
+
+/// Complete source-analysis report persisted under the analysis scope.
+#[derive(Serialize, Deserialize)]
+struct SourceAnalysisReportCache {
+    candidates: Vec<SourceAnalysisCandidateCache>,
+    source_rule_count: usize,
+    #[serde(default)]
+    analysis_complete: bool,
+    #[serde(default)]
+    analysis_incomplete_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    runtime_disabled_rules: Vec<RuntimeDisabledRule>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SourceAnalysisCandidateCache {
+    source: FindingMatch,
+    chain_names: Vec<String>,
+    path: Vec<u32>,
+    flow_id: String,
+    taint_path: Vec<TaintPropagationStep>,
+    additional_sources: Vec<FindingMatch>,
+}
+
+impl From<&CombinedSourceAnalysisCandidate> for SourceAnalysisCandidateCache {
+    fn from(candidate: &CombinedSourceAnalysisCandidate) -> Self {
+        Self {
+            source: candidate.source.clone(),
+            chain_names: candidate.chain_names.clone(),
+            path: candidate.path.iter().map(|func| func.raw()).collect(),
+            flow_id: candidate.flow_id.clone(),
+            taint_path: candidate.taint_path.clone(),
+            additional_sources: candidate.additional_sources.clone(),
+        }
+    }
+}
+
+impl From<SourceAnalysisCandidateCache> for CombinedSourceAnalysisCandidate {
+    fn from(cached: SourceAnalysisCandidateCache) -> Self {
+        Self {
+            source: cached.source,
+            chain_names: cached.chain_names,
+            path: cached.path.into_iter().map(bonsai_common::FuncId::new).collect(),
+            flow_id: cached.flow_id,
+            taint_path: cached.taint_path,
+            additional_sources: cached.additional_sources,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SinkAnalysisCandidateCache {
+    sink: FindingMatch,
+    upstream_flows: Vec<SinkAnalysisFlowCache>,
+    security_source_flows: Vec<CombinedFindingWithChain>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SinkAnalysisFlowCache {
+    flow_id: String,
+    origin_function: String,
+    origin_file: String,
+    origin_line: u32,
+    chain_names: Vec<String>,
+    chain_func_ids: Vec<u32>,
+    taint_path: Vec<TaintPropagationStep>,
+    endpoint_only: bool,
+}
+
+impl From<&SinkAnalysisCandidate> for SinkAnalysisCandidateCache {
+    fn from(candidate: &SinkAnalysisCandidate) -> Self {
+        Self {
+            sink: candidate.sink.clone(),
+            upstream_flows: candidate
+                .upstream_flows
+                .iter()
+                .map(|flow| SinkAnalysisFlowCache {
+                    flow_id: flow.flow_id.clone(),
+                    origin_function: flow.origin_function.clone(),
+                    origin_file: flow.origin_file.clone(),
+                    origin_line: flow.origin_line,
+                    chain_names: flow.chain_names.clone(),
+                    chain_func_ids: flow.chain_funcs.iter().map(|func| func.raw()).collect(),
+                    taint_path: flow.taint_path.clone(),
+                    endpoint_only: flow.endpoint_only,
+                })
+                .collect(),
+            security_source_flows: candidate.security_source_flows.clone(),
+        }
+    }
+}
+
+impl From<SinkAnalysisCandidateCache> for SinkAnalysisCandidate {
+    fn from(cached: SinkAnalysisCandidateCache) -> Self {
+        Self {
+            sink: cached.sink,
+            upstream_flows: cached
+                .upstream_flows
+                .into_iter()
+                .map(|flow| bonsai_sdk::SinkAnalysisFlow {
+                    flow_id: flow.flow_id,
+                    origin_function: flow.origin_function,
+                    origin_file: flow.origin_file,
+                    origin_line: flow.origin_line,
+                    chain_names: flow.chain_names,
+                    chain_funcs: flow
+                        .chain_func_ids
+                        .into_iter()
+                        .map(bonsai_common::FuncId::new)
+                        .collect(),
+                    taint_path: flow.taint_path,
+                    endpoint_only: flow.endpoint_only,
+                })
+                .collect(),
+            security_source_flows: cached.security_source_flows,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct TaintAnalysisRenderFindingCache {
     #[serde(flatten)]
     finding: CombinedFindingWithChain,
+    #[serde(default)]
+    presentation: TaintFindingPresentation,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     chain_func_ids: Vec<u32>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct TaintFindingPresentation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    packages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    frameworks: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    rules: BTreeMap<String, TaintRulePresentation>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct TaintRulePresentation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    severity: Option<Severity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trust: Option<TrustClass>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cwe: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    owasp: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    packages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    frameworks: Vec<String>,
+}
+
+/// Render-only selection over one canonical taint result. None of these
+/// values changes compiler lowering, source/sink matching, or IDG closure;
+/// consequently none belongs in the semantic analysis cache key.
+#[derive(Clone)]
+struct TaintViewFilters {
+    source: Option<Regex>,
+    finding: Option<String>,
+    flow: Option<String>,
+    group: Option<String>,
+    trust: Option<String>,
+    category: Option<String>,
+    sink: Option<Regex>,
+    severity: Option<Severity>,
+    tag: Option<String>,
+    include_pattern_only: bool,
+    show_sanitized: bool,
+    /// Rule aliases from the loaded pack. `--source` / `--sink` selectors
+    /// match a rule by its canonical id or any alias, exactly like the SDK
+    /// analysis-level selectors, so a renamed rule keeps its old spelling.
+    aliases_by_rule: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl TaintViewFilters {
+    #[allow(clippy::too_many_arguments)]
+    fn compile(
+        pack: &Rulepack,
+        source: Option<&str>,
+        finding: Option<String>,
+        flow: Option<String>,
+        group: Option<String>,
+        trust: Option<String>,
+        category: Option<String>,
+        sink: Option<&str>,
+        severity: Option<Severity>,
+        tag: Option<String>,
+        include_pattern_only: bool,
+        show_sanitized: bool,
+    ) -> Result<Self> {
+        let source_regex = source
+            .map(Regex::new)
+            .transpose()
+            .with_context(|| format!("invalid --source regex `{}`", source.unwrap_or_default()))?;
+        let sink_regex = sink
+            .map(Regex::new)
+            .transpose()
+            .with_context(|| format!("invalid --sink regex `{}`", sink.unwrap_or_default()))?;
+        let aliases_by_rule = pack
+            .all_rules()
+            .into_iter()
+            .filter(|rule| !rule.aliases.is_empty())
+            .map(|rule| (rule.id.clone(), rule.aliases.clone()))
+            .collect();
+        Ok(Self {
+            source: source_regex,
+            finding,
+            flow,
+            group,
+            trust,
+            category,
+            sink: sink_regex,
+            severity,
+            tag,
+            include_pattern_only,
+            show_sanitized,
+            aliases_by_rule,
+        })
+    }
+
+    fn rule_matches(&self, regex: &Regex, rule_id: &str) -> bool {
+        regex.is_match(rule_id)
+            || self
+                .aliases_by_rule
+                .get(rule_id)
+                .is_some_and(|aliases| aliases.iter().any(|alias| regex.is_match(alias)))
+    }
+
+    fn has_identity_selector(&self) -> bool {
+        self.finding.is_some() || self.flow.is_some() || self.group.is_some()
+    }
+
+    /// Sink-analysis view: keep a sink when its rule/severity/tag pass, and
+    /// keep only the security-source proofs whose source passes the source
+    /// selectors. Source selectors never drop a sink; a sink with no matching
+    /// proof stays visible with its source-independent lineage.
+    fn retain_sink_candidate(&self, candidate: &mut SinkAnalysisCandidate) -> bool {
+        if self
+            .sink
+            .as_ref()
+            .is_some_and(|regex| !self.rule_matches(regex, &candidate.sink.rule_id))
+        {
+            return false;
+        }
+        if self
+            .severity
+            .is_some_and(|floor| candidate.sink.severity.is_none_or(|value| value < floor))
+        {
+            return false;
+        }
+        if self
+            .tag
+            .as_deref()
+            .is_some_and(|tag| candidate.sink.tag.as_deref() != Some(tag))
+        {
+            return false;
+        }
+        if self.source.is_some() || self.trust.is_some() || self.category.is_some() {
+            candidate
+                .security_source_flows
+                .retain(|proof| self.matches(proof));
+        }
+        true
+    }
+
+    /// Source-analysis view: keep a flow when its primary source or any
+    /// additional source passes the source rule / trust / category / tag
+    /// selectors. Sources are evidence and are never removed from a kept
+    /// flow.
+    fn retain_source_candidate(&self, candidate: &CombinedSourceAnalysisCandidate) -> bool {
+        std::iter::once(&candidate.source)
+            .chain(candidate.additional_sources.iter())
+            .any(|source| {
+                self.source
+                    .as_ref()
+                    .is_none_or(|regex| self.rule_matches(regex, &source.rule_id))
+                    && self
+                        .trust
+                        .as_deref()
+                        .is_none_or(|trust| source.trust.as_deref() == Some(trust))
+                    && self
+                        .category
+                        .as_deref()
+                        .is_none_or(|category| source.category.as_deref() == Some(category))
+                    && self
+                        .tag
+                        .as_deref()
+                        .is_none_or(|tag| source.tag.as_deref() == Some(tag))
+            })
+    }
+
+    fn matches(&self, combined: &CombinedFindingWithChain) -> bool {
+        let finding = &combined.finding;
+        if !self.include_pattern_only && finding.source.rule_id.starts_with("pattern:") {
+            return false;
+        }
+        if !self.show_sanitized && finding.status == FindingStatus::Sanitized {
+            return false;
+        }
+        if self
+            .severity
+            .is_some_and(|floor| finding.severity.is_none_or(|value| value < floor))
+        {
+            return false;
+        }
+        if self.finding.as_deref().is_some_and(|id| {
+            finding.finding_id != id && !combined.member_finding_ids.iter().any(|member| member == id)
+        }) {
+            return false;
+        }
+        if self
+            .flow
+            .as_deref()
+            .is_some_and(|id| !finding.flow_ids().any(|flow| flow == id))
+        {
+            return false;
+        }
+        if self
+            .group
+            .as_deref()
+            .is_some_and(|id| finding.group_id.as_deref() != Some(id))
+        {
+            return false;
+        }
+
+        let sources = std::iter::once(&finding.source)
+            .chain(combined.additional_sources.iter())
+            .chain(finding.alternate_flows.iter().map(|flow| &flow.source));
+        let source_matches = sources.clone().any(|source| {
+            self.source
+                .as_ref()
+                .is_none_or(|regex| self.rule_matches(regex, &source.rule_id))
+                && self
+                    .trust
+                    .as_deref()
+                    .is_none_or(|trust| source.trust.as_deref() == Some(trust))
+                && self
+                    .category
+                    .as_deref()
+                    .is_none_or(|category| source.category.as_deref() == Some(category))
+        });
+        if !source_matches {
+            return false;
+        }
+
+        let sinks = std::iter::once(&finding.sink).chain(combined.additional_sinks.iter());
+        if !sinks.clone().any(|sink| {
+            self.sink
+                .as_ref()
+                .is_none_or(|regex| self.rule_matches(regex, &sink.rule_id))
+                && self
+                    .tag
+                    .as_deref()
+                    .is_none_or(|tag| finding.tag.as_deref() == Some(tag) || sink.tag.as_deref() == Some(tag))
+        }) {
+            return false;
+        }
+        true
+    }
 }
 
 impl From<&TaintAnalysisRenderReport> for TaintAnalysisRenderReportCache {
@@ -145,6 +520,7 @@ impl From<&TaintAnalysisRenderReport> for TaintAnalysisRenderReportCache {
                 .iter()
                 .map(|item| TaintAnalysisRenderFindingCache {
                     finding: item.finding.clone(),
+                    presentation: item.presentation.clone(),
                     chain_func_ids: item.chain_func_ids.clone(),
                 })
                 .collect(),
@@ -165,6 +541,7 @@ impl From<TaintAnalysisRenderReportCache> for TaintAnalysisRenderReport {
                 .into_iter()
                 .map(|item| TaintAnalysisRenderFinding {
                     finding: item.finding,
+                    presentation: item.presentation,
                     chain_func_ids: item.chain_func_ids,
                     baseline_status: None,
                 })
@@ -195,7 +572,6 @@ struct TaintAnalysisSummary {
     severity_floor: Option<String>,
     severity_counts: BTreeMap<String, usize>,
     status_counts: BTreeMap<String, usize>,
-    precision_counts: BTreeMap<String, usize>,
     tag_counts: BTreeMap<String, usize>,
     language_counts: BTreeMap<String, usize>,
     source_rule_counts: BTreeMap<String, usize>,
@@ -274,6 +650,7 @@ fn cmd_security_with_profile_default(
         | SecurityAction::Sinks { rules_dir, .. }
         | SecurityAction::Sanitizers { rules_dir, .. }
         | SecurityAction::Deps { rules_dir, .. }
+        | SecurityAction::DependencyAnalysis { rules_dir, .. }
         | SecurityAction::TaintAnalysis { rules_dir, .. }
         | SecurityAction::SourceAnalysis { rules_dir, .. }
         | SecurityAction::SinkAnalysis { rules_dir, .. }
@@ -434,6 +811,31 @@ fn cmd_security_with_profile_default(
                 format,
             )
         }
+        SecurityAction::DependencyAnalysis {
+            rules_dir: _,
+            framework,
+            severity,
+            files,
+            exclude_files,
+            context,
+            page,
+            all,
+            format,
+            output: _,
+        } => {
+            let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
+            cmd_dependency_analysis(
+                workspace,
+                &pack,
+                &rules_dir,
+                framework,
+                severity,
+                files,
+                exclude_files,
+                paging_cfg,
+                format,
+            )
+        }
         SecurityAction::TaintAnalysis {
             rules_dir: _,
             profile,
@@ -564,14 +966,6 @@ fn cmd_security_with_profile_default(
             output: _,
         } => {
             let mut exclude_tests = false;
-            // The review profile's default trust boundary constrains source
-            // proofs only after the user requests that optional enrichment.
-            // A plain sink-centric query must not run a workspace-wide source
-            // matcher merely because the profile supplies `trust: remote`;
-            // its source-independent upstream compiler lineage is complete
-            // without that second analysis product.
-            let security_source_flows_requested =
-                source.is_some() || trust.is_some() || category.is_some() || inferred_sources;
             apply_profile(
                 &pack.metadata,
                 selected_security_profile(&pack.metadata, profile.as_deref(), apply_default_profile),
@@ -583,9 +977,6 @@ fn cmd_security_with_profile_default(
                     context: &mut context,
                 },
             )?;
-            if !security_source_flows_requested {
-                trust = None;
-            }
             let severity = parse_severity_flag(severity.as_deref())?;
             let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             cmd_sink_analysis(
@@ -612,6 +1003,9 @@ fn cmd_security_with_profile_default(
             category,
             kind,
             severity,
+            tag,
+            rule,
+            state,
             audit,
             tree,
             validate,
@@ -631,6 +1025,9 @@ fn cmd_security_with_profile_default(
                 category,
                 kind,
                 severity,
+                tag,
+                rule,
+                state,
                 audit,
                 tree,
                 validate,
@@ -761,6 +1158,7 @@ fn cmd_sources(
         .sources_with_progress(options, |event| analysis_progress.handle(event))?;
     render_match_table(
         workspace,
+        project.workspace(),
         "sources",
         &matches,
         pack,
@@ -936,6 +1334,7 @@ fn cmd_sinks(
     );
     let result = render_match_table(
         workspace,
+        project.workspace(),
         "sinks",
         &matches,
         pack,
@@ -1000,6 +1399,7 @@ fn cmd_sanitizers(
     )?;
     render_match_table(
         workspace,
+        project.workspace(),
         "sanitizers",
         &matches,
         pack,
@@ -1052,23 +1452,41 @@ fn cmd_deps(
         ("framework", framework.as_deref().unwrap_or("")),
         ("severity", severity.as_deref().unwrap_or("")),
     ]);
-    let cost = |r: &DependencyRow| dep_block_cost_bytes(r, pack);
+    let rows = dependency_presentation_rows(&inv.rows, pack);
+    let cost = |r: &DependencyPresentationRow| dep_block_cost_bytes(r);
 
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(
+            page_cache::emit_paged_text(
                 workspace,
-                &inv.rows,
+                &rows,
                 &paging_cfg,
                 "security/deps",
                 filters_hash,
                 cost,
+                |paged, info, _cfg| {
+                    let result_complete = info.page_number == 1 && info.is_last;
+                    let payload = serde_json::json!({
+                        "analysis_complete": true,
+                        "analysis_incomplete_reasons": [],
+                        "result_complete": result_complete,
+                        "result_incomplete_reasons": if result_complete {
+                            Vec::<String>::new()
+                        } else {
+                            paged_json_incomplete_reasons("security/deps", info)
+                        },
+                        "page": page_info_to_json(info),
+                        "rows": paged,
+                    });
+                    crate::output::emit_json_document(&payload)?;
+                    Ok(())
+                },
             )?;
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
                 workspace,
-                &inv.rows,
+                &rows,
                 &paging_cfg,
                 "security/deps",
                 filters_hash,
@@ -1080,7 +1498,7 @@ fn cmd_deps(
                     } else {
                         None
                     };
-                    let rows: Vec<DependencyRow> = if limit_eff == 0 {
+                    let rows: Vec<DependencyPresentationRow> = if limit_eff == 0 {
                         paged.to_vec()
                     } else {
                         paged.iter().take(limit_eff).cloned().collect()
@@ -1088,11 +1506,9 @@ fn cmd_deps(
                     let u = ui();
                     cli_println!(
                         "{}",
-                        u.dim(&format!("security deps — {} package(s)", inv.rows.len()))
+                        u.dim(&format!("security deps — {} package(s)", info.total_rows))
                     );
-                    for (idx, r) in rows.iter().enumerate() {
-                        render_dep_block(u, idx + 1, r, pack);
-                    }
+                    render_dependency_table(u, &rows);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja security <workspace> deps");
                     Ok(())
@@ -1149,18 +1565,42 @@ fn cmd_flows(
     // Render-time diff input — does NOT enter the analysis cache key.
     let baseline_ids = baseline.map(load_baseline_finding_ids).transpose()?;
     let include_pattern_only = include_pattern_only || matches!(format, SecurityFormat::Sarif);
-    // SEMANTIC analysis key: every input that changes the FINDING SET,
-    // and nothing else. Output-shaping flags (format, paging, the
-    // secondary `--contains` / `--not-contains` filters) are
-    // deliberately excluded so the cached analysis is reused when only
-    // the rendering changes. The `files`/`exclude_files`/
-    // `inferred_sources`/`exclude_tests` inputs MUST be here — they
-    // narrow the analysis, so omitting them would serve a stale result
-    // when they change.
+    let view_filters = TaintViewFilters::compile(
+        pack,
+        source.as_deref(),
+        finding.clone(),
+        flow.clone(),
+        group.clone(),
+        trust.clone(),
+        category.clone(),
+        sink.as_deref(),
+        sev_floor,
+        tag.clone(),
+        include_pattern_only,
+        show_sanitized,
+    )?;
+
+    // Semantic scope contains only inputs that change what the workspace
+    // is: file include/exclude scope, test exclusion, and inferred-source
+    // seeding. The complete report seeds every source rule and terminates at
+    // every sink rule; `--source`, `--trust`, `--category`, `--sink` (and the
+    // profile's trust default), severity, tag, stable-id, status,
+    // pattern-only, and text selectors are all views over that cached report
+    // and deliberately do not enter this key, so a narrowed re-query never
+    // reruns parsing, callgraph, IDG, or taint work.
     let files_filter = files.join(",");
     let exclude_files_filter = exclude_files.join(",");
-    let filters_hash = filter_signature(&[
+    let analysis_hash = filter_signature(&[
         ("kind", "taint-analysis"),
+        ("files", &files_filter),
+        ("exclude_files", &exclude_files_filter),
+        ("inferred_sources", if inferred_sources { "1" } else { "0" }),
+        ("exclude_tests", if exclude_tests { "1" } else { "0" }),
+    ]);
+    let analysis_hash_text = format!("{analysis_hash:016x}");
+    let secondary_hash_text = format!("{:016x}", crate::filter::active().signature());
+    let view_hash = filter_signature(&[
+        ("analysis", &analysis_hash_text),
         ("source", source.as_deref().unwrap_or("")),
         ("finding", finding.as_deref().unwrap_or("")),
         ("flow", flow.as_deref().unwrap_or("")),
@@ -1170,35 +1610,22 @@ fn cmd_flows(
         ("sink", sink.as_deref().unwrap_or("")),
         ("severity", severity.as_deref().unwrap_or("")),
         ("tag", tag.as_deref().unwrap_or("")),
-        ("files", &files_filter),
-        ("exclude_files", &exclude_files_filter),
-        ("inferred_sources", if inferred_sources { "1" } else { "0" }),
-        ("exclude_tests", if exclude_tests { "1" } else { "0" }),
         ("show_sanitized", if show_sanitized { "1" } else { "0" }),
         (
             "include_pattern_only",
             if include_pattern_only { "1" } else { "0" },
         ),
+        ("secondary", &secondary_hash_text),
     ]);
 
-    // `--explain` needs the project (to count source/sink match sites),
-    // so it bypasses the rendered-report fast path. SARIF is rendered
-    // directly from the raw security report, and finding-specific
-    // renders intentionally rerun the narrow request. Text `--all` can
-    // reuse compact cached findings because it attaches flow bodies
-    // lazily; JSON `--all` needs a payload saved with bulk flow
-    // evidence.
-    let needs_bulk_flow_evidence_cache =
-        !summary_only && matches!(format, SecurityFormat::Json) && paging_cfg.all;
-    if !explain
-        && !matches!(format, SecurityFormat::Sarif)
-        && finding.is_none()
-        && flow.is_none()
-        && group.is_none()
-    {
+    // `--explain` needs live endpoint inventories. Every ordinary render,
+    // including stable-id and SARIF views, reuses the same compact canonical
+    // report; flow bodies hydrate lazily from compiler objects for selected
+    // rows only.
+    if !explain && !matches!(format, SecurityFormat::Sarif) {
         if let Some(cached_report) = page_cache::read_keyed_payload::<TaintAnalysisRenderReportCache>(
             workspace,
-            filters_hash,
+            analysis_hash,
             TAINT_RENDER_CACHE_KIND,
         )? {
             let cached_report = TaintAnalysisRenderReport::from(cached_report);
@@ -1207,12 +1634,8 @@ fn cmd_flows(
                 tracing::debug!(
                     "ignoring taint render cache payload with summary count but no finding bodies"
                 );
-            } else if needs_bulk_flow_evidence_cache && !cached_report.bulk_flow_evidence {
-                tracing::debug!(
-                    "ignoring compact taint render cache payload for JSON --all bulk flow evidence"
-                );
             } else {
-                let cached_render_project = if matches!(format, SecurityFormat::Text) && !summary_only {
+                let cached_render_project = if !summary_only {
                     Some(if !files.is_empty() || !exclude_files.is_empty() {
                         open_security_project_filtered_paths(
                             workspace,
@@ -1239,7 +1662,9 @@ fn cmd_flows(
                     &paging_cfg,
                     summary_only,
                     format,
-                    filters_hash,
+                    analysis_hash,
+                    view_hash,
+                    &view_filters,
                     None,
                     baseline_ids.as_ref(),
                 )?;
@@ -1257,18 +1682,21 @@ fn cmd_flows(
     let mut analysis_progress = SecurityAnalysisProgress::new();
     let mut report = project.security().taint_analysis_with_phase_progress(
         TaintAnalysisOptions {
-            source: source.clone(),
-            flow_id: flow.clone(),
-            trust: trust.clone(),
-            category: category.clone(),
-            sink: sink.clone(),
-            severity: sev_floor,
-            tag: tag.clone(),
+            // The engine computes the complete report; every rule selector
+            // is applied as a view when rendering. `--explain` is the one
+            // live-inventory mode and keeps its selectors.
+            source: if explain { source.clone() } else { None },
+            flow_id: None,
+            trust: if explain { trust.clone() } else { None },
+            category: if explain { category.clone() } else { None },
+            sink: if explain { sink.clone() } else { None },
+            severity: if explain { sev_floor } else { None },
+            tag: if explain { tag.clone() } else { None },
             files: files.clone(),
             exclude_files: exclude_files.clone(),
             include_inferred_sources: inferred_sources,
-            include_pattern_only,
-            show_sanitized,
+            include_pattern_only: true,
+            show_sanitized: true,
             exclude_tests,
             attach_flow_evidence: false,
             taint_graph_resident_cache_entries: Some(0),
@@ -1276,21 +1704,7 @@ fn cmd_flows(
         |event| analysis_progress.handle(event),
     )?;
     let runtime_disabled_rules = report.runtime_disabled_rules.clone();
-    if let Some(finding_id) = finding.as_deref() {
-        filter_report_to_finding_id(&mut report, finding_id)?;
-    }
-    if let Some(flow_id) = flow.as_deref() {
-        ensure_report_has_security_flow_id(&report, flow_id)?;
-    }
-    if let Some(group_id) = group.as_deref() {
-        filter_report_to_security_group_id(&mut report, group_id)?;
-    }
-    let bulk_flow_evidence_attached = !summary_only
-        && (matches!(format, SecurityFormat::Sarif)
-            || paging_cfg.all
-            || finding.is_some()
-            || flow.is_some()
-            || group.is_some());
+    let bulk_flow_evidence_attached = matches!(format, SecurityFormat::Sarif);
     if bulk_flow_evidence_attached {
         attach_flow_evidence_to_report(project.workspace(), &mut report);
     }
@@ -1319,6 +1733,10 @@ fn cmd_flows(
             // and GitHub code scanning.
             // SARIF consumers expect the full result set in one
             // document; --all behavior is implicit.
+            report.findings.retain(|finding| {
+                view_filters.matches(finding) && crate::filter::active().matches_value(finding)
+            });
+            ensure_selected_taint_view_exists(report.findings.len(), &view_filters)?;
             let plain: Vec<Finding> = report.findings.iter().map(|f| f.finding.clone()).collect();
             // Drain runtime-disabled rules collected by the matcher
             // (invalid regex, etc.) so the SARIF report surfaces them
@@ -1339,6 +1757,7 @@ fn cmd_flows(
 
     let mut render_report = build_taint_render_report(
         report,
+        pack,
         /* include_findings = */ !summary_only || baseline_ids.is_some(),
         bulk_flow_evidence_attached,
     );
@@ -1352,7 +1771,7 @@ fn cmd_flows(
     });
     emit_taint_render_report(
         workspace,
-        if matches!(format, SecurityFormat::Text) && !summary_only {
+        if !summary_only {
             Some(project.workspace())
         } else {
             None
@@ -1362,7 +1781,9 @@ fn cmd_flows(
         &paging_cfg,
         summary_only,
         format,
-        filters_hash,
+        analysis_hash,
+        view_hash,
+        &view_filters,
         Some(&render_report),
         baseline_ids.as_ref(),
     )?;
@@ -1379,7 +1800,9 @@ fn emit_taint_render_report(
     paging_cfg: &paging::PagingConfig,
     summary_only: bool,
     format: SecurityFormat,
-    filters_hash: u64,
+    analysis_hash: u64,
+    view_hash: u64,
+    view_filters: &TaintViewFilters,
     cache_payload: Option<&TaintAnalysisRenderReport>,
     baseline_ids: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<()> {
@@ -1387,17 +1810,17 @@ fn emit_taint_render_report(
     // are RENDER-time: they shape what prints over an owned copy, while
     // `cache_payload` keeps pointing at the unfiltered, un-baselined
     // report — so the cached analysis is reused regardless of either.
-    let secondary = crate::filter::active();
-    let mut owned: Option<TaintAnalysisRenderReport> = None;
-    if secondary.is_active() {
-        owned = Some(filter_taint_render_report(report));
-    }
+    let mut owned = Some(filter_taint_render_report(
+        report,
+        render_workspace,
+        view_filters,
+    )?);
     if let Some(ids) = baseline_ids {
-        let target = owned.get_or_insert_with(|| report.clone());
+        let target = owned.as_mut().expect("filtered taint report is present");
         let diff = apply_baseline(target, ids);
         target.baseline = Some(diff);
     }
-    let report: &TaintAnalysisRenderReport = owned.as_ref().unwrap_or(report);
+    let report = owned.as_ref().expect("filtered taint report is present");
     emit_taint_render_report_inner(
         workspace,
         render_workspace,
@@ -1406,7 +1829,8 @@ fn emit_taint_render_report(
         paging_cfg,
         summary_only,
         format,
-        filters_hash,
+        analysis_hash,
+        view_hash,
         cache_payload,
     )
 }
@@ -1420,7 +1844,8 @@ fn emit_taint_render_report_inner(
     paging_cfg: &paging::PagingConfig,
     summary_only: bool,
     format: SecurityFormat,
-    filters_hash: u64,
+    analysis_hash: u64,
+    view_hash: u64,
     cache_payload: Option<&TaintAnalysisRenderReport>,
 ) -> Result<()> {
     match format {
@@ -1429,8 +1854,8 @@ fn emit_taint_render_report_inner(
             if let (Some(diff), Some(fields)) = (report.baseline.as_ref(), summary.as_object_mut()) {
                 fields.insert("baseline".to_string(), serde_json::to_value(diff)?);
             }
-            cli_println!("{}", serde_json::to_string_pretty(&summary)?);
-            save_taint_payload_if_requested(workspace, filters_hash, Vec::new(), None);
+            crate::output::emit_json_document(&summary)?;
+            save_taint_payload_if_requested(workspace, analysis_hash, view_hash, Vec::new(), None);
         }
         SecurityFormat::Text if summary_only => {
             let text = page_cache::capture(|| {
@@ -1440,24 +1865,31 @@ fn emit_taint_render_report_inner(
                 }
                 Ok(())
             })?;
-            save_taint_payload_if_requested(workspace, filters_hash, Vec::new(), None);
+            save_taint_payload_if_requested(workspace, analysis_hash, view_hash, Vec::new(), None);
             page_cache::emit_cached_text(&text)?;
         }
         SecurityFormat::Json => {
-            let (pages, current_page) = build_taint_json_pages(report, paging_cfg, filters_hash)?;
-            save_taint_payload_if_requested(workspace, filters_hash, pages.clone(), cache_payload);
+            let (pages, current_page) =
+                build_taint_json_pages(render_workspace, report, paging_cfg, view_hash)?;
+            save_taint_payload_if_requested(
+                workspace,
+                analysis_hash,
+                view_hash,
+                pages.clone(),
+                cache_payload,
+            );
             emit_cached_page(&pages, current_page)?;
         }
         SecurityFormat::Text => {
-            let (pages, current_page) = build_taint_text_pages(
+            let (pages, current_page) =
+                build_taint_text_pages(workspace, render_workspace, pack, report, paging_cfg, view_hash)?;
+            save_taint_payload_if_requested(
                 workspace,
-                render_workspace,
-                pack,
-                report,
-                paging_cfg,
-                filters_hash,
-            )?;
-            save_taint_payload_if_requested(workspace, filters_hash, pages.clone(), cache_payload);
+                analysis_hash,
+                view_hash,
+                pages.clone(),
+                cache_payload,
+            );
             emit_cached_page(&pages, current_page)?;
         }
         SecurityFormat::Sarif => {
@@ -1469,7 +1901,8 @@ fn emit_taint_render_report_inner(
 
 fn save_taint_payload_if_requested(
     workspace: &Path,
-    filters_hash: u64,
+    analysis_hash: u64,
+    view_hash: u64,
     pages: Vec<page_cache::CachedPage>,
     payload: Option<&TaintAnalysisRenderReport>,
 ) {
@@ -1477,7 +1910,7 @@ fn save_taint_payload_if_requested(
     // filter) — they ARE the shaped output, so each variant caches its
     // own bytes for an identical re-run.
     if !pages.is_empty() {
-        if let Err(e) = page_cache::save_pages(workspace, "security/taint-analysis", filters_hash, pages) {
+        if let Err(e) = page_cache::save_pages(workspace, "security/taint-analysis", view_hash, pages) {
             tracing::debug!("taint page cache save failed: {e}");
         }
     }
@@ -1489,7 +1922,7 @@ fn save_taint_payload_if_requested(
         if !cache_payload.bulk_flow_evidence {
             if let Ok(Some(existing)) = page_cache::read_keyed_payload::<TaintAnalysisRenderReportCache>(
                 workspace,
-                filters_hash,
+                analysis_hash,
                 TAINT_RENDER_CACHE_KIND,
             ) {
                 if existing.bulk_flow_evidence {
@@ -1498,7 +1931,7 @@ fn save_taint_payload_if_requested(
             }
         }
         if let Err(e) =
-            page_cache::save_keyed_payload(workspace, filters_hash, TAINT_RENDER_CACHE_KIND, &cache_payload)
+            page_cache::save_keyed_payload(workspace, analysis_hash, TAINT_RENDER_CACHE_KIND, &cache_payload)
         {
             tracing::debug!("taint report payload cache save failed: {e}");
         }
@@ -1510,53 +1943,6 @@ fn emit_cached_page(pages: &[page_cache::CachedPage], current_page: u64) -> Resu
         bail!("rendered taint page {current_page} missing from cache window");
     };
     page_cache::emit_cached_text(&page.text)?;
-    Ok(())
-}
-
-fn filter_report_to_finding_id(report: &mut TaintAnalysisReport, finding_id: &str) -> Result<()> {
-    report.findings.retain(|combined| {
-        combined.finding.finding_id == finding_id
-            || combined
-                .member_finding_ids
-                .iter()
-                .any(|member_id| member_id == finding_id)
-    });
-    if report.findings.is_empty() {
-        bail!(
-            "no finding matching `{finding_id}` in this workspace + filter combination. \
-             Finding ids are printed as `S:<hex>` in `security taint-analysis` text output \
-             and as `finding.finding_id` in JSON output."
-        );
-    }
-    Ok(())
-}
-
-fn ensure_report_has_security_flow_id(report: &TaintAnalysisReport, flow_id: &str) -> Result<()> {
-    if report
-        .findings
-        .iter()
-        .any(|combined| combined.finding.flow_ids().any(|candidate| candidate == flow_id))
-    {
-        return Ok(());
-    }
-    bail!(
-        "no security flow matching `{flow_id}` in this workspace + filter combination. \
-         Security flow ids are printed as `F:<hex>` in `security taint-analysis` text output \
-         and as `representative_flow_id` in JSON output."
-    );
-}
-
-fn filter_report_to_security_group_id(report: &mut TaintAnalysisReport, group_id: &str) -> Result<()> {
-    report
-        .findings
-        .retain(|combined| combined.finding.group_id.as_deref() == Some(group_id));
-    if report.findings.is_empty() {
-        bail!(
-            "no security flow group matching `{group_id}` in this workspace + filter combination. \
-             Security group ids are printed as `G:<hex>` in `security taint-analysis` text output \
-             and as `group_id` in JSON output."
-        );
-    }
     Ok(())
 }
 
@@ -1608,11 +1994,11 @@ fn build_taint_pages<C, R>(
     mut render_page: R,
 ) -> Result<(Vec<page_cache::CachedPage>, u64)>
 where
-    C: Fn(&TaintAnalysisRenderFinding) -> u64,
+    C: Fn(usize, &TaintAnalysisRenderFinding) -> u64,
     R: FnMut(&[usize], &paging::PageInfo, &paging::PagingConfig) -> Result<()>,
 {
     let indexed: Vec<usize> = (0..report.findings.len()).collect();
-    let cost = |finding_index: &usize| cost_finding(&report.findings[*finding_index]);
+    let cost = |finding_index: &usize| cost_finding(*finding_index, &report.findings[*finding_index]);
     let (_, current_info) = paging::paginate(
         &indexed,
         paging_cfg,
@@ -1642,29 +2028,51 @@ where
 }
 
 fn build_taint_json_pages(
+    render_workspace: Option<&bonsai_sdk::Workspace>,
     report: &TaintAnalysisRenderReport,
     paging_cfg: &paging::PagingConfig,
     filters_hash: u64,
 ) -> Result<(Vec<page_cache::CachedPage>, u64)> {
+    // JSON and text expose the same evidence. Compute exact serialized row
+    // costs one finding at a time so pagination remains correct without
+    // retaining every duplicated source body in memory.
+    let mut body_cache = render_workspace.map(bonsai_sdk::FlowBodyCache::new);
+    let mut row_costs = Vec::with_capacity(report.findings.len());
+    for (index, original) in report.findings.iter().enumerate() {
+        let mut item = original.clone();
+        if let Some(cache) = body_cache.as_mut() {
+            attach_flow_evidence_to_render_finding(cache, &mut item);
+        }
+        let row = taint_json_row(&item, index)?;
+        row_costs.push(serde_json::to_vec(&row)?.len() as u64 + paging::TABLE_ROW_CHROME_BYTES);
+    }
     build_taint_pages(
         report,
         paging_cfg,
         filters_hash,
-        taint_json_cost_bytes,
-        |paged_idx, info, page_cfg| render_taint_json_page(report, paged_idx, info, page_cfg),
+        |index, _finding| row_costs[index],
+        |paged_idx, info, page_cfg| {
+            render_taint_json_page(render_workspace, report, paged_idx, info, page_cfg)
+        },
     )
 }
 
 fn render_taint_json_page(
+    render_workspace: Option<&bonsai_sdk::Workspace>,
     report: &TaintAnalysisRenderReport,
     paged_idx: &[usize],
     info: &paging::PageInfo,
     _paging_cfg: &paging::PagingConfig,
 ) -> Result<()> {
-    // Serialize the render-finding wrapper (the finding fields are
-    // flattened in), so the `--baseline` `baseline_status` annotation
-    // rides along on each row when present.
-    let rows: Vec<&TaintAnalysisRenderFinding> = paged_idx.iter().map(|idx| &report.findings[*idx]).collect();
+    let mut body_cache = render_workspace.map(bonsai_sdk::FlowBodyCache::new);
+    let mut rows = Vec::with_capacity(paged_idx.len());
+    for index in paged_idx {
+        let mut item = report.findings[*index].clone();
+        if let Some(cache) = body_cache.as_mut() {
+            attach_flow_evidence_to_render_finding(cache, &mut item);
+        }
+        rows.push(taint_json_row(&item, *index)?);
+    }
     // Security JSON is always an envelope, including `--all`. A bare empty
     // array cannot distinguish a proven clean scan from parser/resolution
     // failure, which is unsafe for automation.
@@ -1672,12 +2080,12 @@ fn render_taint_json_page(
     if !report.analysis_complete && analysis_incomplete_reasons.is_empty() {
         analysis_incomplete_reasons.push("taint-analysis incomplete: unknown reason".to_string());
     }
-    analysis_incomplete_reasons.extend(paged_json_incomplete_reasons("security/taint-analysis", info));
-    analysis_incomplete_reasons.sort();
-    analysis_incomplete_reasons.dedup();
+    let result_incomplete_reasons = paged_json_incomplete_reasons("security/taint-analysis", info);
     let mut wrapped = serde_json::json!({
-        "analysis_complete": report.analysis_complete && analysis_incomplete_reasons.is_empty(),
+        "analysis_complete": report.analysis_complete,
         "analysis_incomplete_reasons": analysis_incomplete_reasons,
+        "result_complete": result_incomplete_reasons.is_empty(),
+        "result_incomplete_reasons": result_incomplete_reasons,
         "runtime_disabled_rules": report.runtime_disabled_rules,
         "summary": compact_taint_summary(&report.summary),
         "rows": rows,
@@ -1686,8 +2094,16 @@ fn render_taint_json_page(
     if let (Some(diff), Some(fields)) = (report.baseline.as_ref(), wrapped.as_object_mut()) {
         fields.insert("baseline".to_string(), serde_json::to_value(diff)?);
     }
-    cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
+    crate::output::emit_json_document(&wrapped)?;
     Ok(())
+}
+
+fn taint_json_row(item: &TaintAnalysisRenderFinding, index: usize) -> Result<serde_json::Value> {
+    let mut row = serde_json::to_value(item)?;
+    if let (Some(flow), Some(fields)) = (flow_from_finding_hops(&item.finding, index), row.as_object_mut()) {
+        fields.insert("flow".to_string(), serde_json::to_value(flow)?);
+    }
+    Ok(row)
 }
 
 fn build_taint_text_pages(
@@ -2191,6 +2607,7 @@ fn security_line_cost_bytes(line: &crate::commands::inspect::InspectLine) -> u64
 
 fn build_taint_render_report(
     report: TaintAnalysisReport,
+    pack: &Rulepack,
     include_findings: bool,
     bulk_flow_evidence: bool,
 ) -> TaintAnalysisRenderReport {
@@ -2211,8 +2628,10 @@ fn build_taint_render_report(
         .into_iter()
         .map(|finding| {
             let chain_func_ids = finding.chain_funcs.iter().map(|func| func.raw()).collect();
+            let presentation = taint_finding_presentation(&finding, pack);
             TaintAnalysisRenderFinding {
                 finding,
+                presentation,
                 chain_func_ids,
                 baseline_status: None,
             }
@@ -2226,6 +2645,64 @@ fn build_taint_render_report(
         runtime_disabled_rules: report.runtime_disabled_rules,
         bulk_flow_evidence,
         baseline: None,
+    }
+}
+
+fn taint_finding_presentation(
+    combined: &CombinedFindingWithChain,
+    pack: &Rulepack,
+) -> TaintFindingPresentation {
+    let finding = &combined.finding;
+    let mut rules = BTreeMap::new();
+    let mut add_rule = |matched: &FindingMatch| {
+        let Some(rule) = pack.find_rule_by_id(&matched.rule_id) else {
+            return;
+        };
+        rules
+            .entry(matched.rule_id.clone())
+            .or_insert_with(|| TaintRulePresentation {
+                title: rule.title.clone(),
+                description: rule.description.trim().to_string(),
+                tag: rule.tag.clone(),
+                severity: rule.severity,
+                trust: rule.trust,
+                category: rule.category.clone(),
+                cwe: rule.cwe.clone(),
+                owasp: rule.owasp.clone(),
+                packages: rule.packages.clone(),
+                frameworks: rule.frameworks.clone(),
+            });
+    };
+
+    add_rule(&finding.source);
+    for source in &combined.additional_sources {
+        add_rule(source);
+    }
+    for flow in &finding.alternate_flows {
+        add_rule(&flow.source);
+        for transform in &flow.taint_transforms_seen {
+            add_rule(transform);
+        }
+        for sanitizer in &flow.sanitizers_seen {
+            add_rule(sanitizer);
+        }
+    }
+    for transform in &finding.taint_transforms_seen {
+        add_rule(transform);
+    }
+    for sanitizer in &finding.sanitizers_seen {
+        add_rule(sanitizer);
+    }
+    add_rule(&finding.sink);
+    for sink in &combined.additional_sinks {
+        add_rule(sink);
+    }
+
+    TaintFindingPresentation {
+        summary: synth_summary(combined, pack),
+        packages: combined_sink_metadata(combined, pack, |rule| &rule.packages),
+        frameworks: combined_sink_metadata(combined, pack, |rule| &rule.frameworks),
+        rules,
     }
 }
 
@@ -2388,7 +2865,7 @@ fn emit_taint_explain(
                 "sink_site_preview": preview(&sink_sites),
             }
         });
-        cli_println!("{}", serde_json::to_string_pretty(&out)?);
+        crate::output::emit_json_document(&out)?;
         return Ok(());
     }
 
@@ -2471,7 +2948,6 @@ fn summarize_taint_findings<'a>(
         severity_floor: None,
         severity_counts: BTreeMap::new(),
         status_counts: BTreeMap::new(),
-        precision_counts: BTreeMap::new(),
         tag_counts: BTreeMap::new(),
         language_counts: BTreeMap::new(),
         source_rule_counts: BTreeMap::new(),
@@ -2487,7 +2963,6 @@ fn summarize_taint_findings<'a>(
             finding.severity.map_or("none", |severity| severity.as_str()),
         );
         inc_count(&mut summary.status_counts, finding.status.as_str());
-        inc_count(&mut summary.precision_counts, &finding.precision);
         inc_count(
             &mut summary.tag_counts,
             finding.tag.as_deref().unwrap_or("untagged"),
@@ -2524,14 +2999,31 @@ fn inc_count(counts: &mut BTreeMap<String, usize>, key: &str) {
 /// (source/sink rule ids, files, code text, chain) — what a developer
 /// greps for. Returns a fresh owned report; the caller keeps the
 /// original for caching.
-fn filter_taint_render_report(report: &TaintAnalysisRenderReport) -> TaintAnalysisRenderReport {
+fn filter_taint_render_report(
+    report: &TaintAnalysisRenderReport,
+    render_workspace: Option<&bonsai_sdk::Workspace>,
+    view: &TaintViewFilters,
+) -> Result<TaintAnalysisRenderReport> {
     let secondary = crate::filter::active();
-    let findings: Vec<TaintAnalysisRenderFinding> = report
-        .findings
-        .iter()
-        .filter(|rf| secondary.matches_value(&rf.finding))
-        .cloned()
-        .collect();
+    let mut body_cache = if secondary.is_active() {
+        render_workspace.map(bonsai_sdk::FlowBodyCache::new)
+    } else {
+        None
+    };
+    let mut findings = Vec::new();
+    for original in &report.findings {
+        if !view.matches(&original.finding) {
+            continue;
+        }
+        let mut finding = original.clone();
+        if let Some(cache) = body_cache.as_mut() {
+            attach_flow_evidence_to_render_finding(cache, &mut finding);
+        }
+        if secondary.matches_value(&finding.finding) {
+            findings.push(finding);
+        }
+    }
+    ensure_selected_taint_view_exists(findings.len(), view)?;
     let mut summary = summarize_taint_findings(
         findings.iter().map(|rf| &rf.finding),
         findings.len(),
@@ -2541,8 +3033,8 @@ fn filter_taint_render_report(report: &TaintAnalysisRenderReport) -> TaintAnalys
         report.analysis_complete,
         report.analysis_incomplete_reasons.clone(),
     );
-    summary.severity_floor.clone_from(&report.summary.severity_floor);
-    TaintAnalysisRenderReport {
+    summary.severity_floor = view.severity.map(|severity| severity.as_str().to_string());
+    Ok(TaintAnalysisRenderReport {
         summary,
         findings,
         analysis_complete: report.analysis_complete,
@@ -2550,7 +3042,23 @@ fn filter_taint_render_report(report: &TaintAnalysisRenderReport) -> TaintAnalys
         runtime_disabled_rules: report.runtime_disabled_rules.clone(),
         bulk_flow_evidence: report.bulk_flow_evidence,
         baseline: None,
+    })
+}
+
+fn ensure_selected_taint_view_exists(finding_count: usize, view: &TaintViewFilters) -> Result<()> {
+    if finding_count != 0 || !view.has_identity_selector() {
+        return Ok(());
     }
+    if let Some(id) = view.finding.as_deref() {
+        bail!("no finding matching `{id}` in this workspace");
+    }
+    if let Some(id) = view.flow.as_deref() {
+        bail!("no security flow matching `{id}` in this workspace");
+    }
+    if let Some(id) = view.group.as_deref() {
+        bail!("no security flow group matching `{id}` in this workspace");
+    }
+    Ok(())
 }
 
 fn flow_from_finding_hops(
@@ -2577,6 +3085,7 @@ fn flow_from_finding_hops(
         .hops
         .iter()
         .map(|hop| crate::commands::inspect::InspectFunctionRendered {
+            body_bytes: 0,
             module_path: hop.file.clone(),
             owners: Vec::new(),
             name: hop.function.clone(),
@@ -2596,6 +3105,7 @@ fn flow_from_finding_hops(
         })
         .collect::<Vec<_>>();
     let mut flow = crate::commands::InspectFlowRendered {
+        plan: None,
         flow_number,
         flow_label,
         flow_id: finding
@@ -2605,7 +3115,6 @@ fn flow_from_finding_hops(
             .unwrap_or_else(|| finding.finding.finding_id.clone()),
         chain_display: chain.join(" -> "),
         chain,
-        precision: precision_from_finding_label(&finding.finding.precision),
         functions,
     };
     annotate_taint_flow(
@@ -2631,6 +3140,7 @@ fn flow_from_sink_lineage_hops(
     let functions = hops
         .into_iter()
         .map(|hop| crate::commands::inspect::InspectFunctionRendered {
+            body_bytes: 0,
             module_path: hop.file,
             owners: Vec::new(),
             name: hop.function.clone(),
@@ -2650,12 +3160,12 @@ fn flow_from_sink_lineage_hops(
         })
         .collect();
     let mut rendered = crate::commands::InspectFlowRendered {
+        plan: None,
         flow_number: u32::try_from(idx + 1).unwrap_or(u32::MAX),
         flow_label: (idx + 1).to_string(),
         flow_id: lineage.flow_id.clone(),
         chain: lineage.chain_names.clone(),
         chain_display: lineage.chain_names.join(" -> "),
-        precision: lineage.precision,
         functions,
     };
     annotate_sink_lineage_flow(&mut rendered, &lineage.taint_path, sink);
@@ -2699,7 +3209,6 @@ fn render_taint_summary_text(summary: &TaintAnalysisSummary) {
     render_count_table(u, "tags", "tag", &summary.tag_counts, 20);
     render_count_table(u, "severities", "severity", &summary.severity_counts, 10);
     render_count_table(u, "statuses", "status", &summary.status_counts, 10);
-    render_count_table(u, "precision", "precision", &summary.precision_counts, 10);
     render_count_table(u, "sink rules", "sink", &summary.sink_rule_counts, 20);
     render_count_table(u, "source rules", "source", &summary.source_rule_counts, 20);
     render_count_table(u, "languages", "language", &summary.language_counts, 20);
@@ -2753,7 +3262,6 @@ fn compact_taint_summary(summary: &TaintAnalysisSummary) -> serde_json::Value {
         "severity_floor": summary.severity_floor,
         "severity_counts": summary.severity_counts,
         "status_counts": summary.status_counts,
-        "precision_counts": summary.precision_counts,
         "tag_counts": summary.tag_counts,
         "language_counts": summary.language_counts,
         "source_trust_counts": summary.source_trust_counts,
@@ -2827,6 +3335,74 @@ fn finding_shallow_cost_bytes(f: &CombinedFindingWithChain) -> u64 {
 
 // ---- sink-analysis — backward lineage into every selected sink ----
 
+#[derive(Clone, Serialize)]
+struct SinkAnalysisPresentationFlow {
+    flow_id: String,
+    origin_function: String,
+    origin_file: String,
+    origin_line: u32,
+    chain_names: Vec<String>,
+    taint_path: Vec<TaintPropagationStep>,
+    endpoint_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flow: Option<crate::commands::InspectFlowRendered>,
+}
+
+#[derive(Clone, Serialize)]
+struct SinkAnalysisPresentationCandidate {
+    sink_number: usize,
+    sink: FindingMatch,
+    upstream_flows: Vec<SinkAnalysisPresentationFlow>,
+    security_source_flows: Vec<CombinedFindingWithChain>,
+}
+
+fn render_sink_analysis_candidates(
+    ws: &bonsai_sdk::Workspace,
+    candidates: &[SinkAnalysisCandidate],
+    start_offset: u64,
+) -> Vec<SinkAnalysisPresentationCandidate> {
+    let mut body_cache = bonsai_sdk::FlowBodyCache::new(ws);
+    candidates
+        .iter()
+        .enumerate()
+        .map(|(candidate_index, candidate)| {
+            let sink_number = usize::try_from(start_offset)
+                .unwrap_or(usize::MAX)
+                .saturating_add(candidate_index)
+                .saturating_add(1);
+            let upstream_flows = candidate
+                .upstream_flows
+                .iter()
+                .enumerate()
+                .map(|(flow_index, lineage)| {
+                    let hops = body_cache.build_lineage_bodies(
+                        &lineage.chain_funcs,
+                        None,
+                        &lineage.taint_path,
+                        bonsai_sdk::SecurityFlowRole::Sink,
+                    );
+                    SinkAnalysisPresentationFlow {
+                        flow_id: lineage.flow_id.clone(),
+                        origin_function: lineage.origin_function.clone(),
+                        origin_file: lineage.origin_file.clone(),
+                        origin_line: lineage.origin_line,
+                        chain_names: lineage.chain_names.clone(),
+                        taint_path: lineage.taint_path.clone(),
+                        endpoint_only: lineage.endpoint_only,
+                        flow: flow_from_sink_lineage_hops(lineage, &candidate.sink, hops, flow_index),
+                    }
+                })
+                .collect();
+            SinkAnalysisPresentationCandidate {
+                sink_number,
+                sink: candidate.sink.clone(),
+                upstream_flows,
+                security_source_flows: candidate.security_source_flows.clone(),
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)] // Mirrors the explicit CLI/SDK option surface.
 fn cmd_sink_analysis(
     workspace: &Path,
@@ -2851,30 +3427,101 @@ fn cmd_sink_analysis(
         open_security_project(workspace, pack, rules_dir)?
     };
     let ws = project.workspace();
-    let mut analysis_progress = SecurityAnalysisProgress::new();
-    let report = project.security().sink_analysis_with_phase_progress(
-        SinkAnalysisOptions {
-            source: source.clone(),
-            trust: trust.clone(),
-            category: category.clone(),
-            sink: sink.clone(),
-            severity,
-            tag: tag.clone(),
-            files: files.clone(),
-            exclude_files: exclude_files.clone(),
-            exclude_tests,
-            include_inferred_sources: inferred_sources,
-        },
-        |event| analysis_progress.handle(event),
+    // Analysis scope is the workspace shape plus the sink set. Lineage is
+    // compiled per sink, and a complete every-sink object over a
+    // multi-million-line workspace runs for a quarter hour, so `--sink`
+    // chooses which sinks are compiled; severity, tag, and every source
+    // selector are views over that cached report, which carries the
+    // security-source proofs for every loaded source rule.
+    let files_filter = files.join(",");
+    let exclude_files_filter = exclude_files.join(",");
+    let analysis_hash = filter_signature(&[
+        ("kind", "sink-analysis"),
+        ("sink", sink.as_deref().unwrap_or("")),
+        ("files", &files_filter),
+        ("exclude_files", &exclude_files_filter),
+        ("exclude_tests", if exclude_tests { "1" } else { "0" }),
+        ("inferred_sources", if inferred_sources { "1" } else { "0" }),
+    ]);
+    let view = TaintViewFilters::compile(
+        pack,
+        source.as_deref(),
+        None,
+        None,
+        None,
+        trust.clone(),
+        category.clone(),
+        sink.as_deref(),
+        severity,
+        tag.clone(),
+        true,
+        true,
     )?;
-    let total_candidates = report.candidates.len();
-    let total_upstream_flows = report
-        .candidates
+    let cached: Option<SinkAnalysisReportCache> =
+        page_cache::read_keyed_payload(workspace, analysis_hash, SINK_ANALYSIS_CACHE_KIND)?;
+    let report = if let Some(cached) = cached {
+        let render_progress = ScopedProgress::new("reusing cached sink-analysis report");
+        let report = bonsai_sdk::SinkAnalysisReport {
+            candidates: cached
+                .candidates
+                .into_iter()
+                .map(SinkAnalysisCandidate::from)
+                .collect(),
+            source_rule_count: cached.source_rule_count,
+            sink_rule_count: cached.sink_rule_count,
+            sanitizer_rule_count: cached.sanitizer_rule_count,
+            analysis_complete: cached.analysis_complete,
+            analysis_incomplete_reasons: cached.analysis_incomplete_reasons,
+            runtime_disabled_rules: cached.runtime_disabled_rules,
+        };
+        render_progress.finish();
+        report
+    } else {
+        let mut analysis_progress = SecurityAnalysisProgress::new();
+        let report = project.security().sink_analysis_with_phase_progress(
+            SinkAnalysisOptions {
+                source: None,
+                trust: None,
+                category: None,
+                sink: sink.clone(),
+                severity: None,
+                tag: None,
+                files: files.clone(),
+                exclude_files: exclude_files.clone(),
+                exclude_tests,
+                include_inferred_sources: inferred_sources,
+                include_security_source_flows: true,
+            },
+            |event| analysis_progress.handle(event),
+        )?;
+        page_cache::save_keyed_payload(
+            workspace,
+            analysis_hash,
+            SINK_ANALYSIS_CACHE_KIND,
+            &SinkAnalysisReportCache {
+                candidates: report
+                    .candidates
+                    .iter()
+                    .map(SinkAnalysisCandidateCache::from)
+                    .collect(),
+                source_rule_count: report.source_rule_count,
+                sink_rule_count: report.sink_rule_count,
+                sanitizer_rule_count: report.sanitizer_rule_count,
+                analysis_complete: report.analysis_complete,
+                analysis_incomplete_reasons: report.analysis_incomplete_reasons.clone(),
+                runtime_disabled_rules: report.runtime_disabled_rules.clone(),
+            },
+        )?;
+        report
+    };
+    let mut candidates = report.candidates;
+    candidates.retain_mut(|candidate| view.retain_sink_candidate(candidate));
+    let total_candidates = candidates.len();
+    let total_upstream_flows = candidates
         .iter()
         .flat_map(|candidate| candidate.upstream_flows.iter())
         .count();
-    let total_security_source_flows = report
-        .candidates
+    let total_security_source_flows = candidates
         .iter()
         .flat_map(|candidate| candidate.security_source_flows.iter())
         .map(|flow| 1usize.saturating_add(flow.finding.alternate_flows.len()))
@@ -2885,7 +3532,20 @@ fn cmd_sink_analysis(
     let report_analysis_complete = report.analysis_complete;
     let report_analysis_incomplete_reasons = report.analysis_incomplete_reasons;
     let runtime_disabled_rules = report.runtime_disabled_rules;
-    let candidates = report.candidates;
+    // Secondary filtering is a view over the complete hydrated sink object:
+    // sink code, upstream lineage hops with their source lines, and any
+    // security-source proof. The engine candidate stores compact ids and
+    // spans, so hydrate each candidate first, keep the whole candidate when
+    // any field matches, and let paging render the selected set normally.
+    let secondary = crate::filter::active();
+    if secondary.is_active() {
+        candidates.retain(|candidate| {
+            render_sink_analysis_candidates(ws, std::slice::from_ref(candidate), 0)
+                .first()
+                .is_some_and(|rendered| secondary.matches_value(rendered))
+        });
+    }
+    let secondary_hash = format!("{:016x}", secondary.signature());
     let filters_hash = filter_signature(&[
         ("kind", "sink-analysis"),
         ("source", source.as_deref().unwrap_or("")),
@@ -2894,6 +3554,7 @@ fn cmd_sink_analysis(
         ("sink", sink.as_deref().unwrap_or("")),
         ("severity", severity.map(Severity::as_str).unwrap_or("")),
         ("tag", tag.as_deref().unwrap_or("")),
+        ("secondary", secondary_hash.as_str()),
     ]);
     let cost = |candidate: &SinkAnalysisCandidate| {
         serde_json::to_vec(candidate)
@@ -2902,7 +3563,7 @@ fn cmd_sink_analysis(
             .saturating_add(1_024)
     };
 
-    page_cache::emit_paged_text(
+    page_cache::emit_paged_text_prefiltered(
         workspace,
         &candidates,
         &paging_cfg,
@@ -2911,15 +3572,19 @@ fn cmd_sink_analysis(
         cost,
         |paged, info, _cfg| match format {
             BrowseFormat::Json => {
-                let mut reasons = report_analysis_incomplete_reasons.clone();
-                reasons.extend(paged_json_incomplete_reasons("security/sink-analysis", info));
-                reasons.sort();
-                reasons.dedup();
+                let rendered = render_sink_analysis_candidates(ws, paged, info.start_offset);
+                let result_complete = info.page_number == 1 && info.is_last;
                 let wrapped = serde_json::json!({
-                    "analysis_complete": report_analysis_complete && reasons.is_empty(),
-                    "analysis_incomplete_reasons": reasons,
+                    "analysis_complete": report_analysis_complete,
+                    "analysis_incomplete_reasons": report_analysis_incomplete_reasons,
+                    "result_complete": result_complete,
+                    "result_incomplete_reasons": if result_complete {
+                        Vec::<String>::new()
+                    } else {
+                        paged_json_incomplete_reasons("security/sink-analysis", info)
+                    },
                     "runtime_disabled_rules": &runtime_disabled_rules,
-                    "rows": paged,
+                    "rows": rendered,
                     "summary": {
                         "sink_count": total_candidates,
                         "upstream_flow_count": total_upstream_flows,
@@ -2931,26 +3596,28 @@ fn cmd_sink_analysis(
                     },
                     "page": page_info_to_json(info),
                 });
-                cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
+                crate::output::emit_json_document(&wrapped)?;
                 Ok(())
             }
-            BrowseFormat::Text => render_sink_analysis_text_page(
-                workspace,
-                ws,
-                pack,
-                paged,
-                info,
-                total_candidates,
-                total_upstream_flows,
-                total_security_source_flows,
-                source_rule_count,
-                sink_rule_count,
-                sanitizer_rule_count,
-                severity,
-                report_analysis_complete,
-                &report_analysis_incomplete_reasons,
-                &runtime_disabled_rules,
-            ),
+            BrowseFormat::Text => {
+                let rendered = render_sink_analysis_candidates(ws, paged, info.start_offset);
+                render_sink_analysis_text_page(
+                    workspace,
+                    pack,
+                    &rendered,
+                    info,
+                    total_candidates,
+                    total_upstream_flows,
+                    total_security_source_flows,
+                    source_rule_count,
+                    sink_rule_count,
+                    sanitizer_rule_count,
+                    severity,
+                    report_analysis_complete,
+                    &report_analysis_incomplete_reasons,
+                    &runtime_disabled_rules,
+                )
+            }
         },
     )
 }
@@ -2958,9 +3625,8 @@ fn cmd_sink_analysis(
 #[allow(clippy::too_many_arguments)] // Render context stays explicit for completeness metadata.
 fn render_sink_analysis_text_page(
     workspace: &Path,
-    ws: &bonsai_sdk::Workspace,
     pack: &Rulepack,
-    candidates: &[SinkAnalysisCandidate],
+    candidates: &[SinkAnalysisPresentationCandidate],
     info: &paging::PageInfo,
     total_candidates: usize,
     total_upstream_flows: usize,
@@ -2977,11 +3643,12 @@ fn render_sink_analysis_text_page(
     let severity_filter = severity_floor
         .map(|severity| format!(" · severity >= {}", severity.as_str()))
         .unwrap_or_default();
+    let source_proof_summary = format!("{total_security_source_flows} security-source proof(s)");
     cli_println!(
         "{}",
         u.dim(&format!(
             "security sink-analysis — {total_candidates} sink(s) · {total_upstream_flows} upstream flow(s) · \
-             {total_security_source_flows} security-source proof(s) · \
+             {source_proof_summary} · \
              {source_rule_count} source rule(s) · {sink_rule_count} sink rule(s) · \
              {sanitizer_rule_count} sanitizer rule(s) loaded{severity_filter}"
         ))
@@ -3006,12 +3673,8 @@ fn render_sink_analysis_text_page(
         );
     }
 
-    let mut body_cache = bonsai_sdk::FlowBodyCache::new(ws);
-    for (candidate_index, candidate) in candidates.iter().enumerate() {
-        let sink_number = usize::try_from(info.start_offset)
-            .unwrap_or(usize::MAX)
-            .saturating_add(candidate_index)
-            .saturating_add(1);
+    for candidate in candidates {
+        let sink_number = candidate.sink_number;
         let severity = candidate
             .sink
             .severity
@@ -3054,20 +3717,14 @@ fn render_sink_analysis_text_page(
                     String::new()
                 }
             );
-            let hops = body_cache.build_lineage_bodies(
-                &flow.chain_funcs,
-                None,
-                &flow.taint_path,
-                bonsai_sdk::SecurityFlowRole::Sink,
-            );
-            if let Some(rendered) = flow_from_sink_lineage_hops(flow, &candidate.sink, hops, flow_index) {
+            if let Some(rendered) = flow.flow.as_ref() {
                 let render_opts = crate::commands::InspectRenderOptions::default();
                 let mut local_seen: crate::commands::BodySet = ahash::AHashSet::new();
                 let heading = format!("SINK {sink_number} · UPSTREAM FLOW");
                 crate::commands::render_flow_block_with_heading(
                     u,
                     &render_opts,
-                    &rendered,
+                    rendered,
                     &candidate.sink.rule_id,
                     &mut local_seen,
                     &heading,
@@ -3095,10 +3752,17 @@ fn render_sink_analysis_text_page(
                     FindingStatus::Sanitized => u.dim("sanitized · review for bypass"),
                     FindingStatus::WrongContext => u.warn("wrong-context sanitizer"),
                 };
+                let mut ids = vec![finding.finding_id.clone()];
+                if let Some(flow_id) = finding.representative_flow_id.as_deref() {
+                    ids.push(flow_id.to_string());
+                }
+                if let Some(group_id) = finding.group_id.as_deref() {
+                    ids.push(group_id.to_string());
+                }
                 cli_println!(
                     "    {} {} · {} · {}",
                     u.name(&finding.source.rule_id),
-                    u.dim(finding.representative_flow_id.as_deref().unwrap_or("-")),
+                    u.dim(&ids.join(" ")),
                     status,
                     u.dim(&finding.chain_display.join(" → "))
                 );
@@ -3115,9 +3779,10 @@ struct CombinedSourceAnalysisFlow {
     source: FindingMatch,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     additional_sources: Vec<FindingMatch>,
+    /// Row-level completeness. Every recorded lineage is emitted, so a row
+    /// is complete exactly when the analysis that produced it was.
     analysis_complete: bool,
     analysis_incomplete_reasons: Vec<String>,
-    lineage: SourceLineageStatus,
     flow: crate::commands::InspectFlowRendered,
 }
 
@@ -3143,44 +3808,122 @@ fn cmd_source_analysis(
         open_security_project(workspace, pack, rules_dir)?
     };
     let ws = project.workspace();
-    let mut analysis_progress = SecurityAnalysisProgress::new();
-    let report = project.security().source_analysis_with_phase_progress(
-        SourceAnalysisOptions {
-            source: source.clone(),
-            trust: trust.clone(),
-            category: category.clone(),
-            tag: tag.clone(),
-            files: files.clone(),
-            exclude_files: exclude_files.clone(),
-            exclude_tests,
-            include_inferred_sources: inferred_sources,
-            lineage_limits: if paging_cfg.all {
-                bonsai_sdk::SourceLineageLimits::unbounded()
-            } else {
-                bonsai_sdk::SourceLineageLimits::bounded_default()
-            },
-        },
-        |event| analysis_progress.handle(event),
+    // Analysis scope is the workspace shape only; every rule selector is a
+    // view over the complete cached report.
+    let files_filter = files.join(",");
+    let exclude_files_filter = exclude_files.join(",");
+    let analysis_hash = filter_signature(&[
+        ("kind", "source-analysis"),
+        ("files", &files_filter),
+        ("exclude_files", &exclude_files_filter),
+        ("exclude_tests", if exclude_tests { "1" } else { "0" }),
+        ("inferred_sources", if inferred_sources { "1" } else { "0" }),
+    ]);
+    let view = TaintViewFilters::compile(
+        pack,
+        source.as_deref(),
+        None,
+        None,
+        None,
+        trust.clone(),
+        category.clone(),
+        None,
+        None,
+        tag.clone(),
+        true,
+        true,
     )?;
+    let cached: Option<SourceAnalysisReportCache> =
+        page_cache::read_keyed_payload(workspace, analysis_hash, SOURCE_ANALYSIS_CACHE_KIND)?;
+    let report = if let Some(cached) = cached {
+        let render_progress = ScopedProgress::new("reusing cached source-analysis report");
+        let report = bonsai_sdk::SourceAnalysisReport {
+            candidates: cached
+                .candidates
+                .into_iter()
+                .map(CombinedSourceAnalysisCandidate::from)
+                .collect(),
+            source_rule_count: cached.source_rule_count,
+            analysis_complete: cached.analysis_complete,
+            analysis_incomplete_reasons: cached.analysis_incomplete_reasons,
+            runtime_disabled_rules: cached.runtime_disabled_rules,
+        };
+        render_progress.finish();
+        report
+    } else {
+        let mut analysis_progress = SecurityAnalysisProgress::new();
+        let report = project.security().source_analysis_with_phase_progress(
+            SourceAnalysisOptions {
+                source: None,
+                trust: None,
+                category: None,
+                tag: None,
+                files: files.clone(),
+                exclude_files: exclude_files.clone(),
+                exclude_tests,
+                include_inferred_sources: inferred_sources,
+            },
+            |event| analysis_progress.handle(event),
+        )?;
+        page_cache::save_keyed_payload(
+            workspace,
+            analysis_hash,
+            SOURCE_ANALYSIS_CACHE_KIND,
+            &SourceAnalysisReportCache {
+                candidates: report
+                    .candidates
+                    .iter()
+                    .map(SourceAnalysisCandidateCache::from)
+                    .collect(),
+                source_rule_count: report.source_rule_count,
+                analysis_complete: report.analysis_complete,
+                analysis_incomplete_reasons: report.analysis_incomplete_reasons.clone(),
+                runtime_disabled_rules: report.runtime_disabled_rules.clone(),
+            },
+        )?;
+        report
+    };
     let source_rule_count = report.source_rule_count;
-    let lineage_summary = report.lineage_summary;
     let report_analysis_complete = report.analysis_complete;
     let mut report_analysis_incomplete_reasons = report.analysis_incomplete_reasons;
     let report_runtime_disabled_rules = report.runtime_disabled_rules;
     if !report_analysis_complete && report_analysis_incomplete_reasons.is_empty() {
         report_analysis_incomplete_reasons.push("source-analysis incomplete: unknown reason".to_string());
     }
-    // Secondary `--contains` / `--not-contains` filter, applied once to
-    // the candidate set that every render path (text + json) draws from.
     let mut candidates = report.candidates;
-    crate::filter::active().retain(&mut candidates);
+    candidates.retain(|candidate| view.retain_source_candidate(candidate));
+    // Secondary filtering is a view over the complete hydrated flow object.
+    // The engine candidate intentionally stores compact IDs/spans, so matching
+    // it directly would miss source code and annotations that both text and
+    // JSON render. Hydrate only when a secondary filter is active, retain the
+    // corresponding canonical candidate, then let paging render/renumber the
+    // selected flows normally.
+    let secondary = crate::filter::active();
+    if secondary.is_active() {
+        candidates = candidates
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, candidate)| {
+                render_source_analysis_candidate(
+                    ws,
+                    idx,
+                    &candidate,
+                    (report_analysis_complete, &report_analysis_incomplete_reasons),
+                )
+                .is_some_and(|rendered| secondary.matches_value(&rendered))
+                .then_some(candidate)
+            })
+            .collect();
+    }
 
+    let secondary_hash = format!("{:016x}", secondary.signature());
     let filters_hash = filter_signature(&[
         ("kind", "source-analysis"),
         ("source", source.as_deref().unwrap_or("")),
         ("trust", trust.as_deref().unwrap_or("")),
         ("category", category.as_deref().unwrap_or("")),
         ("tag", tag.as_deref().unwrap_or("")),
+        ("secondary", secondary_hash.as_str()),
     ]);
     let cost = |f: &CombinedSourceAnalysisCandidate| {
         (1200
@@ -3198,7 +3941,7 @@ fn cmd_source_analysis(
         BrowseFormat::Json => {
             // Security JSON always carries scan completeness, including
             // `--all`; an empty bare array would be ambiguous to automation.
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 workspace,
                 &candidates,
                 &paging_cfg,
@@ -3206,27 +3949,29 @@ fn cmd_source_analysis(
                 filters_hash,
                 cost,
                 |paged, info, _cfg| {
-                    let rendered = render_source_analysis_candidates(ws, paged, info.start_offset);
-                    let analysis_incomplete_reasons = source_analysis_json_incomplete_reasons(
-                        "security/source-analysis",
-                        info,
-                        &rendered,
-                        &report_analysis_incomplete_reasons,
+                    let rendered = render_source_analysis_candidates(
+                        ws,
+                        paged,
+                        info.start_offset,
+                        (report_analysis_complete, &report_analysis_incomplete_reasons),
                     );
+                    let result_incomplete_reasons =
+                        paged_json_incomplete_reasons("security/source-analysis", info);
+                    let result_complete = result_incomplete_reasons.is_empty();
                     let wrapped = serde_json::json!({
-                        "analysis_complete": report_analysis_complete
-                            && analysis_incomplete_reasons.is_empty(),
-                        "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                        "analysis_complete": report_analysis_complete,
+                        "analysis_incomplete_reasons": report_analysis_incomplete_reasons,
+                        "result_complete": result_complete,
+                        "result_incomplete_reasons": result_incomplete_reasons,
                         "runtime_disabled_rules": &report_runtime_disabled_rules,
                         "rows": rendered,
                         "summary": {
                             "source_flow_count": candidates.len(),
                             "source_rule_count": source_rule_count,
-                            "lineage": lineage_summary,
                         },
                         "page": page_info_to_json(info),
                     });
-                    cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
+                    crate::output::emit_json_document(&wrapped)?;
                     Ok(())
                 },
             )?;
@@ -3272,7 +4017,6 @@ fn cmd_source_analysis(
                         &info,
                         candidates.len(),
                         source_rule_count,
-                        lineage_summary,
                         report_analysis_complete,
                         &report_analysis_incomplete_reasons,
                         &report_runtime_disabled_rules,
@@ -3320,12 +4064,16 @@ fn render_source_analysis_text_page(
     info: &paging::PageInfo,
     total_candidates: usize,
     source_rule_count: usize,
-    lineage_summary: SourceLineageSummary,
     report_analysis_complete: bool,
     report_analysis_incomplete_reasons: &[String],
     runtime_disabled_rules: &[RuntimeDisabledRule],
 ) -> Result<()> {
-    let rendered = render_source_analysis_candidates(ws, candidates, info.start_offset);
+    let rendered = render_source_analysis_candidates(
+        ws,
+        candidates,
+        info.start_offset,
+        (report_analysis_complete, report_analysis_incomplete_reasons),
+    );
     let u = ui();
     cli_println!(
         "{}",
@@ -3355,19 +4103,6 @@ fn render_source_analysis_text_page(
             ))
         );
     }
-    if !lineage_summary.is_complete() {
-        let reason = format!(
-            "{} representative flow(s); {} truncated by hop budget; {} additional path(s) omitted; max {} hop(s), {} path(s) rendered per flow",
-            lineage_summary.incomplete_flows,
-            lineage_summary.truncated_hop_flows,
-            lineage_summary.omitted_paths,
-            lineage_summary.max_hops,
-            lineage_summary.max_paths,
-        );
-        for line in u.wrapped_warn_labeled_lines("lineage view truncated", &reason) {
-            cli_println!("{line}");
-        }
-    }
     let render_opts = crate::commands::InspectRenderOptions::default();
     for item in rendered.iter() {
         let source_number = item.flow.flow_number as usize;
@@ -3391,6 +4126,7 @@ fn render_source_analysis_candidates(
     ws: &bonsai_sdk::Workspace,
     candidates: &[CombinedSourceAnalysisCandidate],
     start_offset: u64,
+    completeness: (bool, &[String]),
 ) -> Vec<CombinedSourceAnalysisFlow> {
     candidates
         .iter()
@@ -3399,7 +4135,7 @@ fn render_source_analysis_candidates(
             let global_idx = usize::try_from(start_offset)
                 .unwrap_or(usize::MAX)
                 .saturating_add(idx);
-            render_source_analysis_candidate(ws, global_idx, item)
+            render_source_analysis_candidate(ws, global_idx, item, completeness)
         })
         .collect()
 }
@@ -3408,6 +4144,7 @@ fn render_source_analysis_candidate(
     ws: &bonsai_sdk::Workspace,
     idx: usize,
     item: &CombinedSourceAnalysisCandidate,
+    completeness: (bool, &[String]),
 ) -> Option<CombinedSourceAnalysisFlow> {
     let label = (idx + 1).to_string();
     let call_spans = security_flow_call_spans(ws, &item.path, &item.chain_names, &item.taint_path);
@@ -3417,7 +4154,6 @@ fn render_source_analysis_candidate(
         &call_spans,
         (idx + 1) as u32,
         &label,
-        item.precision,
         None,
         crate::commands::InspectFilters::default(),
         false,
@@ -3435,28 +4171,10 @@ fn render_source_analysis_candidate(
     Some(CombinedSourceAnalysisFlow {
         source: item.source.clone(),
         additional_sources: item.additional_sources.clone(),
-        analysis_complete: item.lineage.is_complete_default(),
-        analysis_incomplete_reasons: source_lineage_incomplete_reasons(item.lineage),
-        lineage: item.lineage,
+        analysis_complete: completeness.0,
+        analysis_incomplete_reasons: completeness.1.to_vec(),
         flow,
     })
-}
-
-fn source_lineage_incomplete_reasons(lineage: SourceLineageStatus) -> Vec<String> {
-    let mut reasons = Vec::new();
-    if lineage.truncated_hops {
-        reasons.push(format!("lineage truncated to {} hops", lineage.max_hops));
-    }
-    if lineage.omitted_paths > 0 {
-        reasons.push(format!(
-            "{} additional lineage path(s) omitted",
-            lineage.omitted_paths
-        ));
-    }
-    if !lineage.is_complete_default() && reasons.is_empty() {
-        reasons.push("lineage incomplete".to_string());
-    }
-    reasons
 }
 
 fn security_flow_call_spans(
@@ -3787,14 +4505,6 @@ fn render_source_analysis_header(
             "  {}    {}",
             u.dim("sources:"),
             u.dim(&(1 + item.additional_sources.len()).to_string())
-        );
-    }
-    if !item.lineage.is_complete_default() {
-        let parts = source_lineage_incomplete_reasons(item.lineage);
-        cli_println!(
-            "  {}   {}",
-            u.dim("lineage:"),
-            u.warn(&format!("representative ({})", parts.join("; ")))
         );
     }
     render_source_analysis_source(u, workspace, source, pack);
@@ -4401,35 +5111,12 @@ fn parse_severity_flag(flag: Option<&str>) -> Result<Option<Severity>> {
     }
 }
 
-fn precision_from_finding_label(label: &str) -> Precision {
-    match label {
-        "exact" => Precision::Exact,
-        "narrowed" => Precision::Narrowed,
-        "over-approximate" | "over_approximate" => Precision::OverApproximate,
-        "unknown" => Precision::Unknown,
-        _ => Precision::Unknown,
-    }
-}
-
 fn filter_signature(pairs: &[(&str, &str)]) -> u64 {
     paging::hash_filters(pairs)
 }
 
 fn effective_limit(limit: usize, cfg: &paging::PagingConfig) -> usize {
     crate::commands::browse::effective_limit(limit, cfg)
-}
-
-fn trust_str(t: TrustClass) -> &'static str {
-    match t {
-        TrustClass::Remote => "remote",
-        TrustClass::Local => "local",
-        TrustClass::Service => "service",
-        TrustClass::Ipc => "ipc",
-        TrustClass::Database => "database",
-        TrustClass::Library => "library",
-        TrustClass::Config => "config",
-        TrustClass::Physical => "physical",
-    }
 }
 
 fn security_display_file(workspace: &Path, file: &str) -> String {
@@ -4448,6 +5135,14 @@ fn meta_chip(u: &Ui, label: &str, value: String) -> String {
 }
 
 // ---- match-table renderer (sources + sinks) ----
+#[derive(Clone, Serialize)]
+struct SecurityMatchPresentationRow {
+    #[serde(flatten)]
+    matched: SecurityMatchRow,
+    location: String,
+    code: String,
+}
+
 /// Render `security sources` / `security sinks` matches as one inspect-
 /// style block per match — rule id + metadata chips, file:line:col +
 /// enclosing fn, syntax-highlighted source line, rule description.
@@ -4458,6 +5153,7 @@ fn meta_chip(u: &Ui, label: &str, value: String) -> String {
 #[allow(clippy::too_many_arguments)] // Shared renderer needs both workspace context and paging/cache keys.
 fn render_match_table(
     workspace: &Path,
+    compiler_workspace: &bonsai_sdk::Workspace,
     label: &str,
     matches: &[RuleMatch],
     pack: &Rulepack,
@@ -4467,46 +5163,75 @@ fn render_match_table(
     show_severity: bool,
     filters_hash: u64,
 ) -> Result<()> {
-    let cost = |m: &RuleMatch| {
-        (m.rule_id.len()
-            + m.language.len()
-            + m.file.len()
-            + m.match_text.len().min(120)
-            + m.enclosing_fn.as_deref().map_or(0, str::len)
-            + 160) as u64
-            + paging::TABLE_ROW_CHROME_BYTES // + allowance for description row
+    let rows = security_match_rows(pack, matches)
+        .into_iter()
+        .map(|matched| {
+            let location = format!(
+                "{}:{}:{}",
+                security_display_file(workspace, &matched.file),
+                matched.line,
+                matched.column
+            );
+            let code = crate::commands::browse::read_line(compiler_workspace, &matched.file, matched.line);
+            let code = if code.trim().is_empty() {
+                matched.text.clone()
+            } else {
+                code
+            };
+            SecurityMatchPresentationRow {
+                matched,
+                location,
+                code,
+            }
+        })
+        .collect::<Vec<_>>();
+    let cost = |row: &SecurityMatchPresentationRow| {
+        (row.matched.rule_id.len()
+            + row.matched.language.len()
+            + row.matched.file.len()
+            + row.matched.text.len()
+            + row.code.len()
+            + row.matched.enclosing_fn.as_deref().map_or(0, str::len)
+            + row.matched.description.as_deref().map_or(0, str::len)
+            + row.matched.packages.iter().map(String::len).sum::<usize>()
+            + row.matched.frameworks.iter().map(String::len).sum::<usize>()
+            + 320) as u64
+            + paging::TABLE_ROW_CHROME_BYTES
     };
+    let command = format!("security/{label}");
 
     match format {
         BrowseFormat::Json => {
-            let rows = security_match_rows(pack, matches);
-            let cost_row = |_: &SecurityMatchRow| 512u64;
-            let command = format!("security/{label}");
             page_cache::emit_paged_text(
                 workspace,
                 &rows,
                 &paging_cfg,
                 &command,
                 filters_hash,
-                cost_row,
+                cost,
                 |paged, info, _cfg| {
-                    let analysis_incomplete_reasons = paged_json_incomplete_reasons(&command, info);
+                    let result_complete = info.page_number == 1 && info.is_last;
                     let payload = serde_json::json!({
-                        "analysis_complete": analysis_incomplete_reasons.is_empty(),
-                        "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                        "analysis_complete": true,
+                        "analysis_incomplete_reasons": [],
+                        "result_complete": result_complete,
+                        "result_incomplete_reasons": if result_complete {
+                            Vec::<String>::new()
+                        } else {
+                            paged_json_incomplete_reasons(&command, info)
+                        },
                         "page": page_info_to_json(info),
                         "rows": paged,
                     });
-                    cli_println!("{}", serde_json::to_string_pretty(&payload)?);
+                    crate::output::emit_json_document(&payload)?;
                     Ok(())
                 },
             )?;
         }
         BrowseFormat::Text => {
-            let command = format!("security/{label}");
             page_cache::emit_paged_text(
                 workspace,
-                matches,
+                &rows,
                 &paging_cfg,
                 &command,
                 filters_hash,
@@ -4518,25 +5243,56 @@ fn render_match_table(
                     } else {
                         None
                     };
-                    let rows: Vec<RuleMatch> = if limit_eff == 0 {
+                    let rows: Vec<SecurityMatchPresentationRow> = if limit_eff == 0 {
                         paged.to_vec()
                     } else {
                         paged.iter().take(limit_eff).cloned().collect()
                     };
                     let u = ui();
-                    let block_label: String = match label {
-                        "sources" => "SOURCE".to_string(),
-                        "sinks" => "SINK".to_string(),
-                        "sanitizers" => "SANITIZER".to_string(),
-                        other => other.to_ascii_uppercase(),
-                    };
                     cli_println!(
                         "{}",
-                        u.dim(&format!("security {label} — {} match(es)", matches.len()))
+                        u.dim(&format!("security {label} — {} match(es)", info.total_rows))
                     );
-                    for (idx, m) in rows.iter().enumerate() {
-                        render_standalone_match(u, workspace, &block_label, idx + 1, m, pack, show_severity);
+                    let mut table = u.table_pinned(
+                        &["rule", "location", "in", "code", "metadata", "description"],
+                        &["rule"],
+                    );
+                    for row in &rows {
+                        let matched = &row.matched;
+                        let mut metadata = Vec::new();
+                        if show_severity {
+                            if let Some(severity) = matched.severity.as_deref() {
+                                metadata.push(format!("severity {severity}"));
+                            }
+                        }
+                        if let Some(trust) = matched.trust.as_deref() {
+                            metadata.push(format!("trust {trust}"));
+                        }
+                        if let Some(tag) = matched.tag.as_deref() {
+                            metadata.push(format!("tag {tag}"));
+                        }
+                        if let Some(category) = matched.category.as_deref() {
+                            metadata.push(format!("category {category}"));
+                        }
+                        if !matched.cwe.is_empty() {
+                            metadata.push(matched.cwe.join(", "));
+                        }
+                        if !matched.packages.is_empty() {
+                            metadata.push(format!("packages {}", matched.packages.join(", ")));
+                        }
+                        if !matched.frameworks.is_empty() {
+                            metadata.push(format!("frameworks {}", matched.frameworks.join(", ")));
+                        }
+                        table.add_row(vec![
+                            Cell::new(u.name(&matched.rule_id)),
+                            Cell::new(u.path(&row.location)),
+                            Cell::new(u.kind(matched.enclosing_fn.as_deref().unwrap_or("<module>"))),
+                            Cell::new(u.snippet(row.code.trim(), extension_for(&matched.file))),
+                            Cell::new(u.dim(&metadata.join(" · "))),
+                            Cell::new(u.dim(matched.description.as_deref().unwrap_or("-"))),
+                        ]);
                     }
+                    cli_println!("{table}");
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, &format!("bonsai-ninja security <workspace> {label}"));
                     Ok(())
@@ -4547,112 +5303,348 @@ fn render_match_table(
     Ok(())
 }
 
-/// One source / sink match rendered as an inspect-style block. Shares
-/// the visual shape of `render_match_row` (the per-side block inside a
-/// finding) so `security sinks` and `security taint-analysis`'s SINK
-/// sections read identically.
-fn render_standalone_match(
-    u: &Ui,
-    workspace: &Path,
-    label: &str,
-    idx: usize,
-    m: &RuleMatch,
-    pack: &Rulepack,
-    show_severity: bool,
-) {
-    let rule = pack.find_rule_by_id(&m.rule_id);
-    let mut chips: Vec<String> = Vec::new();
-    if show_severity {
-        let sev = rule.and_then(|r| r.severity.map(|s| s.as_str())).unwrap_or("-");
-        chips.push(meta_chip(u, "severity", severity_cell(u, sev)));
-    }
-    if let Some(trust) = rule.and_then(|r| r.trust) {
-        chips.push(meta_chip(u, "trust", u.dim(trust_str(trust))));
-    }
-    if let Some(cat) = rule.and_then(|r| r.category.as_deref()) {
-        chips.push(meta_chip(u, "category", u.dim(cat)));
-    }
-    if let Some(tag) = rule.and_then(|r| r.tag.as_deref()) {
-        chips.push(meta_chip(u, "tag", u.dim(tag)));
-    }
-    if let Some(r) = rule {
-        if !r.cwe.is_empty() {
-            chips.push(meta_chip(u, "cwe", u.dim(&r.cwe.join(", "))));
-        }
-        if !r.frameworks.is_empty() {
-            chips.push(meta_chip(u, "frameworks", u.dim(&r.frameworks.join(", "))));
-        }
-        if !r.packages.is_empty() {
-            chips.push(meta_chip(u, "packages", u.dim(&r.packages.join(", "))));
-        }
-    }
-    cli_println!();
-    cli_println!("{}  {}", u.kind(&format!("[{label} {idx}]")), u.name(&m.rule_id),);
-    if !chips.is_empty() {
-        for line in u.wrapped_dim_prefixed_lines(
-            "    meta: ",
-            &format!("    {} ", u.dim("meta:")),
-            "          ",
-            &chips.join(" · "),
-        ) {
-            cli_println!("{line}");
-        }
-    }
-    let loc = format!(
-        "{}:{}:{}",
-        security_display_file(workspace, &m.file),
-        m.line,
-        m.column
+#[derive(Clone, Serialize)]
+struct DependencyRulePresentation {
+    rule_id: String,
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    severity: Option<Severity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
+    description: String,
+}
+
+#[derive(Clone, Serialize)]
+struct DependencyPresentationRow {
+    language: String,
+    key: String,
+    rule_ids: Vec<String>,
+    signals: Vec<String>,
+    evidence_files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    severity: Option<Severity>,
+    tags: Vec<String>,
+    rules: Vec<DependencyRulePresentation>,
+}
+
+fn dependency_presentation_rows(rows: &[DependencyRow], pack: &Rulepack) -> Vec<DependencyPresentationRow> {
+    rows.iter()
+        .map(|row| {
+            let rules = row
+                .rule_ids
+                .iter()
+                .filter_map(|rule_id| pack.find_rule_by_id(rule_id))
+                .map(|rule| DependencyRulePresentation {
+                    rule_id: rule.id.clone(),
+                    kind: rule.kind.dir_name().to_string(),
+                    severity: rule.severity,
+                    tag: rule.tag.clone(),
+                    description: rule.description.clone(),
+                })
+                .collect();
+            DependencyPresentationRow {
+                language: row.language.clone(),
+                key: row.key.clone(),
+                rule_ids: row.rule_ids.clone(),
+                signals: row.signals.clone(),
+                evidence_files: row.evidence_files.clone(),
+                severity: row.severity,
+                tags: row.tags.clone(),
+                rules,
+            }
+        })
+        .collect()
+}
+
+/// `security deps` text table: one row per package, mirroring the
+/// `sinks` / `sources` inventory tables. JSON carries the same rows with the
+/// full per-rule role list; the table folds roles into counts by family.
+fn render_dependency_table(u: &Ui, rows: &[DependencyPresentationRow]) {
+    let mut table = u.table_pinned(
+        &[
+            "package", "lang", "severity", "roles", "signals", "evidence", "tags",
+        ],
+        &["package"],
     );
-    let in_fn = m
-        .enclosing_fn
-        .as_deref()
-        .map_or_else(|| "<module>".to_string(), |f| format!("in {f}"));
-    cli_println!(
-        "    {}  {}   ({})",
-        u.path(&loc),
-        u.dim(&in_fn),
-        u.dim(&m.language),
-    );
-    if !m.match_text.trim().is_empty() {
-        cli_println!("    {}", u.snippet(m.match_text.trim(), extension_for(&m.file)));
+    for row in rows {
+        let mut sources = 0usize;
+        let mut sinks = 0usize;
+        let mut sanitizers = 0usize;
+        let mut other = 0usize;
+        for rule in &row.rules {
+            match rule.kind.as_str() {
+                "sources" => sources += 1,
+                "sinks" => sinks += 1,
+                "sanitizers" => sanitizers += 1,
+                _ => other += 1,
+            }
+        }
+        let mut roles = Vec::new();
+        if sources > 0 {
+            roles.push(format!("{sources} source"));
+        }
+        if sinks > 0 {
+            roles.push(format!("{sinks} sink"));
+        }
+        if sanitizers > 0 {
+            roles.push(format!("{sanitizers} sanitizer"));
+        }
+        if other > 0 {
+            roles.push(format!("{other} typing"));
+        }
+        let severity = row
+            .severity
+            .map_or_else(|| u.dim("-"), |severity| severity_cell(u, severity.as_str()));
+        table.add_row(vec![
+            Cell::new(u.name(&row.key)),
+            Cell::new(u.kind(&row.language)),
+            Cell::new(severity),
+            Cell::new(u.dim(&roles.join(" · "))),
+            Cell::new(u.dim(&row.signals.join(", "))),
+            Cell::new(u.path(&row.evidence_files.join("\n"))),
+            Cell::new(u.dim(&row.tags.join(", "))),
+        ]);
     }
-    if let Some(r) = rule {
-        let desc = r.description.trim();
-        if !desc.is_empty() {
-            for line in u.wrapped_dim_prefixed_lines("    ", "    ", "    ", desc) {
+    cli_println!("{table}");
+    // Rule ids are identity facts; keep each id whole on its own wrapped
+    // line instead of breaking it inside a narrow table cell.
+    if rows.iter().any(|row| !row.rule_ids.is_empty()) {
+        cli_println!();
+        cli_println!("{}", u.label("RULES"));
+        for row in rows {
+            if row.rule_ids.is_empty() {
+                continue;
+            }
+            let prefix_plain = format!("  {}: ", row.key);
+            let prefix_styled = format!("  {} ", u.name(&format!("{}:", row.key)));
+            let continuation = " ".repeat(prefix_plain.len());
+            for line in u.wrapped_dim_prefixed_lines(
+                &prefix_plain,
+                &prefix_styled,
+                &continuation,
+                &row.rule_ids.join(", "),
+            ) {
                 cli_println!("{line}");
             }
         }
     }
 }
 
-/// Render one `security deps` package as an inspect-style block.
-/// Header with chips (severity / lang / tags / rule count / signals),
-/// evidence files (up to five, with `+N more` trailer), and one dim
-/// description line per unique rule that claimed the package — so
-/// reviewers see exactly why the pack cares about it without
-/// opening the YAML.
-fn render_dep_block(u: &Ui, idx: usize, r: &DependencyRow, pack: &Rulepack) {
-    let mut chips: Vec<String> = Vec::new();
-    if let Some(sev) = r.severity {
-        chips.push(meta_chip(u, "severity", severity_cell(u, sev.as_str())));
+// ---- dependency-analysis — where each flagged dependency is used ----
+#[allow(clippy::too_many_arguments)] // stable parameter list — one field per --flag
+fn cmd_dependency_analysis(
+    workspace: &Path,
+    pack: &Rulepack,
+    rules_dir: &Path,
+    framework: Option<String>,
+    severity: Option<String>,
+    files: Vec<String>,
+    exclude_files: Vec<String>,
+    paging_cfg: paging::PagingConfig,
+    format: BrowseFormat,
+) -> Result<()> {
+    let (project, _footer) = if !files.is_empty() || !exclude_files.is_empty() {
+        open_security_project_filtered_paths(workspace, pack, rules_dir, &files, &exclude_files)?
+    } else {
+        open_security_project(workspace, pack, rules_dir)?
+    };
+    let ws = project.workspace();
+    let collect_progress = ScopedProgress::new("collecting dependency usage");
+    let report = project
+        .security()
+        .dependency_analysis(bonsai_sdk::DependencyAnalysisOptions {
+            inventory: DependencyInventoryOptions {
+                framework: framework.clone(),
+                severity: parse_severity_flag(severity.as_deref())?,
+                files: files.clone(),
+                exclude_files: exclude_files.clone(),
+            },
+        })?;
+    collect_progress.finish();
+    let rows: Vec<DependencyAnalysisPresentation> = report
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let mut row = dependency_analysis_presentation(ws, workspace, pack, candidate);
+            row.dependency_number = index + 1;
+            row
+        })
+        .collect();
+    let total_sites: usize = rows.iter().map(|row| row.sites.len()).sum();
+    let total_functions: usize = rows.iter().map(|row| row.functions.len()).sum();
+    let filters_hash = filter_signature(&[
+        ("kind", "dependency-analysis"),
+        ("framework", framework.as_deref().unwrap_or("")),
+        ("severity", severity.as_deref().unwrap_or("")),
+    ]);
+    let cost = |row: &DependencyAnalysisPresentation| {
+        serde_json::to_vec(row)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(2_048)
+            .saturating_add(512)
+    };
+    let analysis_complete = report.analysis_complete;
+    let analysis_incomplete_reasons = report.analysis_incomplete_reasons.clone();
+    page_cache::emit_paged_text(
+        workspace,
+        &rows,
+        &paging_cfg,
+        "security/dependency-analysis",
+        filters_hash,
+        cost,
+        |paged, info, _cfg| match format {
+            BrowseFormat::Json => {
+                let result_complete = info.page_number == 1 && info.is_last;
+                let payload = serde_json::json!({
+                    "analysis_complete": analysis_complete,
+                    "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                    "result_complete": result_complete,
+                    "result_incomplete_reasons": if result_complete {
+                        Vec::<String>::new()
+                    } else {
+                        paged_json_incomplete_reasons("security/dependency-analysis", info)
+                    },
+                    "rows": paged,
+                    "summary": {
+                        "dependency_count": rows.len(),
+                        "site_count": total_sites,
+                        "function_count": total_functions,
+                        "severity_floor": severity.as_deref(),
+                    },
+                    "page": page_info_to_json(info),
+                });
+                crate::output::emit_json_document(&payload)?;
+                Ok(())
+            }
+            BrowseFormat::Text => {
+                let u = ui();
+                cli_println!(
+                    "{}",
+                    u.dim(&format!(
+                        "security dependency-analysis — {} package(s) · {total_sites} usage site(s) · {total_functions} callable(s)",
+                        rows.len()
+                    ))
+                );
+                if analysis_complete {
+                    cli_println!("{}", u.dim("analysis: complete"));
+                } else {
+                    cli_println!(
+                        "{}",
+                        u.warn(&format!(
+                            "analysis incomplete — {}",
+                            analysis_incomplete_reasons.join(", ")
+                        ))
+                    );
+                }
+                for row in paged {
+                    render_dependency_analysis_block(u, row);
+                }
+                render_paging_footer(info, "bonsai-ninja security <workspace> dependency-analysis");
+                Ok(())
+            }
+        },
+    )
+}
+
+#[derive(Clone, Serialize)]
+struct DependencyAnalysisSitePresentation {
+    kind: String,
+    location: String,
+    file: String,
+    line: u32,
+    column: u32,
+    text: String,
+    code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    in_function: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    via_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule_id: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct DependencyAnalysisPresentation {
+    /// 1-based position in the complete report; stable across pages.
+    dependency_number: usize,
+    dependency: DependencyPresentationRow,
+    bound_names: Vec<String>,
+    sites: Vec<DependencyAnalysisSitePresentation>,
+    functions: Vec<bonsai_sdk::DependencyFunctionRow>,
+}
+
+fn dependency_analysis_presentation(
+    ws: &bonsai_sdk::Workspace,
+    workspace: &Path,
+    pack: &Rulepack,
+    candidate: &bonsai_sdk::DependencyAnalysisCandidate,
+) -> DependencyAnalysisPresentation {
+    let dependency = dependency_presentation_rows(std::slice::from_ref(&candidate.dependency), pack)
+        .pop()
+        .expect("one presentation row per dependency");
+    let sites = candidate
+        .sites
+        .iter()
+        .map(|site| {
+            let code = crate::commands::browse::read_line(ws, &site.file, site.line);
+            DependencyAnalysisSitePresentation {
+                kind: site.kind.clone(),
+                location: format!(
+                    "{}:{}:{}",
+                    security_display_file(workspace, &site.file),
+                    site.line,
+                    site.column
+                ),
+                file: site.file.clone(),
+                line: site.line,
+                column: site.column,
+                text: site.text.clone(),
+                code: if code.trim().is_empty() {
+                    site.text.clone()
+                } else {
+                    code
+                },
+                in_function: site.in_function.clone(),
+                via_alias: site.via_alias.clone(),
+                rule_id: site.rule_id.clone(),
+            }
+        })
+        .collect();
+    DependencyAnalysisPresentation {
+        dependency_number: 0,
+        dependency,
+        bound_names: candidate.bound_names.clone(),
+        sites,
+        functions: candidate.functions.clone(),
     }
-    chips.push(meta_chip(u, "lang", u.dim(&r.language)));
-    if !r.tags.is_empty() {
-        chips.push(meta_chip(u, "tags", u.dim(&r.tags.join(", "))));
-    }
-    chips.push(meta_chip(u, "rules", u.dim(&r.rule_ids.len().to_string())));
-    if !r.signals.is_empty() {
-        let take: Vec<&str> = r.signals.iter().take(4).map(|s| s.as_str()).collect();
-        let mut joined = take.join(", ");
-        if r.signals.len() > 4 {
-            joined.push_str(&format!(", +{} more", r.signals.len() - 4));
-        }
-        chips.push(meta_chip(u, "signals", u.dim(&joined)));
-    }
+}
+
+fn render_dependency_analysis_block(u: &Ui, row: &DependencyAnalysisPresentation) {
+    let dependency = &row.dependency;
+    let severity = dependency
+        .severity
+        .map_or_else(|| "-".to_string(), |value| value.as_str().to_string());
     cli_println!();
-    cli_println!("{}  {}", u.kind(&format!("[PACKAGE {idx}]")), u.name(&r.key),);
+    cli_println!("{}", u.ruler('═', 70));
+    cli_println!(
+        "{} · {} · {}  {}",
+        u.annotation(&format!("PACKAGE {}", row.dependency_number)),
+        u.name(&dependency.key),
+        severity_cell(u, &severity),
+        u.dim(&dependency.language),
+    );
+    let mut chips = Vec::new();
+    if !dependency.signals.is_empty() {
+        chips.push(format!("signals {}", dependency.signals.join(", ")));
+    }
+    if !dependency.tags.is_empty() {
+        chips.push(format!("tags {}", dependency.tags.join(", ")));
+    }
+    if !row.bound_names.is_empty() {
+        chips.push(format!("bound as {}", row.bound_names.join(", ")));
+    }
+    chips.push(format!("rules {}", dependency.rules.len()));
     for line in u.wrapped_dim_prefixed_lines(
         "    meta: ",
         &format!("    {} ", u.dim("meta:")),
@@ -4661,57 +5653,77 @@ fn render_dep_block(u: &Ui, idx: usize, r: &DependencyRow, pack: &Rulepack) {
     ) {
         cli_println!("{line}");
     }
-
-    let shown: Vec<&String> = r.evidence_files.iter().take(5).collect();
-    for file in &shown {
-        cli_println!("    {}", u.path(file));
-    }
-    if r.evidence_files.len() > shown.len() {
+    if !dependency.evidence_files.is_empty() {
         cli_println!(
-            "    {}",
-            u.dim(&format!("… +{} more", r.evidence_files.len() - shown.len()))
+            "    {} {}",
+            u.label("EVIDENCE"),
+            u.path(&dependency.evidence_files.join(", "))
         );
     }
-
-    let mut seen_desc: ahash::AHashSet<String> = ahash::AHashSet::new();
-    for rid in &r.rule_ids {
-        if let Some(rule) = pack.find_rule_by_id(rid) {
-            let desc = rule.description.trim();
-            if !desc.is_empty() && seen_desc.insert(desc.to_string()) {
-                for line in u.wrapped_bullet_lines("·", desc) {
-                    cli_println!("{line}");
-                }
-            }
+    if row.sites.is_empty() {
+        cli_println!(
+            "    {}",
+            u.dim("no import, call, reference, or rule-match site in the analyzed files")
+        );
+    } else {
+        cli_println!("    {} ({})", u.label("USAGE SITES"), row.sites.len());
+        let mut table = u.table_pinned(&["kind", "location", "in", "via", "code"], &["kind"]);
+        for site in &row.sites {
+            let via = site
+                .rule_id
+                .as_deref()
+                .map(|rule| format!("rule {rule}"))
+                .or_else(|| site.via_alias.clone())
+                .unwrap_or_else(|| "-".to_string());
+            table.add_row(vec![
+                Cell::new(u.kind(&site.kind)),
+                Cell::new(u.path(&site.location)),
+                Cell::new(u.dim(site.in_function.as_deref().unwrap_or("<module>"))),
+                Cell::new(u.dim(&via)),
+                Cell::new(u.snippet(site.code.trim(), extension_for(&site.file))),
+            ]);
         }
+        cli_println!("{table}");
+    }
+    if !row.functions.is_empty() {
+        cli_println!("    {} ({})", u.label("CALLABLES"), row.functions.len());
+        let mut table = u.table_pinned(
+            &["callable", "location", "sites", "direct callers"],
+            &["callable"],
+        );
+        for function in &row.functions {
+            let callers = if function.direct_callers.is_empty() {
+                u.dim("(none resolved)")
+            } else {
+                u.dim(&function.direct_callers.join(", "))
+            };
+            table.add_row(vec![
+                Cell::new(u.name(&function.function)),
+                Cell::new(u.path(&format!("{}:{}", function.file, function.line))),
+                Cell::new(u.dim(&function.site_count.to_string())),
+                Cell::new(callers),
+            ]);
+        }
+        cli_println!("{table}");
     }
 }
 
-fn dep_block_cost_bytes(r: &DependencyRow, pack: &Rulepack) -> u64 {
+fn dep_block_cost_bytes(r: &DependencyPresentationRow) -> u64 {
     let chip_bytes = r.language.len()
         + r.key.len()
         + r.tags.iter().map(|s| s.len() + 2).sum::<usize>()
-        + r.signals.iter().take(4).map(|s| s.len() + 2).sum::<usize>()
-        + r.rule_ids.len().to_string().len()
+        + r.signals.iter().map(|s| s.len() + 2).sum::<usize>()
+        + r.rules.len().to_string().len()
         + 96;
-    let evidence_bytes = r
-        .evidence_files
-        .iter()
-        .take(5)
-        .map(|file| file.len() + 8)
-        .sum::<usize>()
-        + if r.evidence_files.len() > 5 { 32 } else { 0 };
-    let mut seen_desc: ahash::AHashSet<&str> = ahash::AHashSet::new();
+    let evidence_bytes = r.evidence_files.iter().map(|file| file.len() + 8).sum::<usize>();
     let description_bytes = r
-        .rule_ids
+        .rules
         .iter()
-        .filter_map(|rid| pack.find_rule_by_id(rid))
-        .map(|rule| rule.description.trim())
-        .filter(|desc| !desc.is_empty() && seen_desc.insert(*desc))
+        .map(|rule| rule.rule_id.len() + rule.description.trim().len() + 96)
         // Bullet rendering wraps descriptions and adds indentation on
         // each line. Description bytes dominate the block; a fixed
         // per-description allowance keeps pages under context without
         // wasting most of the requested budget.
-        .map(|desc| desc.len().saturating_add(64))
         .sum::<usize>();
     (chip_bytes + evidence_bytes + description_bytes) as u64 + paging::TABLE_ROW_CHROME_BYTES
 }
@@ -4728,6 +5740,9 @@ fn cmd_pack(
     category: Option<String>,
     kind: Option<String>,
     severity: Option<String>,
+    tag: Option<String>,
+    rule: Option<String>,
+    state: Option<String>,
     audit: bool,
     tree: bool,
     validate: bool,
@@ -4748,6 +5763,15 @@ fn cmd_pack(
         None => None,
     };
     let sev_floor = parse_severity_flag(severity.as_deref())?;
+    if let Some(pattern) = rule.as_deref() {
+        Regex::new(pattern).with_context(|| format!("invalid --rule regex `{pattern}`"))?;
+    }
+    let enabled_filter = match state.as_deref() {
+        Some("enabled") => Some(true),
+        Some("disabled") => Some(false),
+        Some(other) => anyhow::bail!("unknown --state `{other}` (expected enabled|disabled)"),
+        None => None,
+    };
 
     let pack_facade = bonsai_sdk::SecurityPack::new(pack);
     let pack_options = PackInventoryOptions {
@@ -4755,12 +5779,18 @@ fn cmd_pack(
         category: category.clone(),
         kind: kind_filter,
         severity: sev_floor,
+        tag: tag.clone(),
+        rule: rule.clone(),
+        enabled: enabled_filter,
         taint_replay_examples: taint_replay,
     };
     let base_filters_hash = filter_signature(&[
         ("kind", "pack"),
         ("lang", lang.as_deref().unwrap_or("")),
         ("category", category.as_deref().unwrap_or("")),
+        ("tag", tag.as_deref().unwrap_or("")),
+        ("rule", rule.as_deref().unwrap_or("")),
+        ("state", state.as_deref().unwrap_or("")),
         ("rkind", kind.as_deref().unwrap_or("")),
         ("severity", severity.as_deref().unwrap_or("")),
         ("taint_replay", if taint_replay { "1" } else { "0" }),
@@ -4827,14 +5857,16 @@ fn cmd_pack(
                 filters_hash,
                 cost_row,
                 |paged, info, _cfg| {
-                    let analysis_incomplete_reasons = paged_json_incomplete_reasons("security/pack", info);
+                    let result_incomplete_reasons = paged_json_incomplete_reasons("security/pack", info);
                     let payload = serde_json::json!({
-                        "analysis_complete": analysis_incomplete_reasons.is_empty(),
-                        "analysis_incomplete_reasons": analysis_incomplete_reasons,
-                        "page": page_info_to_json(info),
+                        "analysis_complete": true,
+                        "analysis_incomplete_reasons": [],
+                        "result_complete": result_incomplete_reasons.is_empty(),
+                        "result_incomplete_reasons": result_incomplete_reasons,
                         "rows": paged,
+                        "page": page_info_to_json(info),
                     });
-                    cli_println!("{}", serde_json::to_string_pretty(&payload)?);
+                    crate::output::emit_json_document(&payload)?;
                     Ok(())
                 },
             )?;
@@ -4861,9 +5893,89 @@ fn cmd_pack(
                         paged.iter().take(limit_eff).collect()
                     };
                     let u = ui();
-                    cli_println!("{}", u.dim(&format!("security pack — {row_count} rule(s)")));
-                    for (idx, r) in display_rows.iter().enumerate() {
-                        render_pack_rule_block(u, idx + 1, r);
+                    let enabled_count = display_rows.iter().filter(|row| row.enabled).count();
+                    let languages = display_rows
+                        .iter()
+                        .map(|row| row.language.as_str())
+                        .collect::<std::collections::BTreeSet<_>>();
+                    cli_println!(
+                        "{}",
+                        u.dim(&format!(
+                            "security pack — {row_count} rule(s) · {} enabled · {} disabled · {} language(s)",
+                            enabled_count,
+                            display_rows.len().saturating_sub(enabled_count),
+                            languages.len()
+                        ))
+                    );
+                    // The canonical rows are one flat sorted list (language,
+                    // kind, family, id). Text groups them the way the pack
+                    // is organized on disk — one table per language + kind —
+                    // so a reader can scan sources, sinks, and sanitizers
+                    // separately without losing any row field.
+                    let mut current_group: Option<(String, String)> = None;
+                    let mut table: Option<comfy_table::Table> = None;
+                    let flush = |table: &mut Option<comfy_table::Table>| {
+                        if let Some(table) = table.take() {
+                            cli_println!("{table}");
+                        }
+                    };
+                    for row in &display_rows {
+                        let group = (row.language.clone(), row.kind.clone());
+                        if current_group.as_ref() != Some(&group) {
+                            flush(&mut table);
+                            let group_rows = display_rows
+                                .iter()
+                                .filter(|candidate| {
+                                    candidate.language == group.0 && candidate.kind == group.1
+                                })
+                                .count();
+                            cli_println!();
+                            cli_println!(
+                                "{} {} {}",
+                                u.heading(&format!("{} · {}s", group.0, group.1)),
+                                u.dim("·"),
+                                u.dim(&format!("{group_rows} rule(s)"))
+                            );
+                            table = Some(u.table_pinned(
+                                &[
+                                    "rule",
+                                    "family",
+                                    "tag",
+                                    "severity",
+                                    "state",
+                                    "providers",
+                                    "description",
+                                ],
+                                &["rule"],
+                            ));
+                            current_group = Some(group);
+                        }
+                        let mut providers = row.packages.clone();
+                        for framework in &row.frameworks {
+                            if !providers.contains(framework) {
+                                providers.push(framework.clone());
+                            }
+                        }
+                        if let Some(table) = table.as_mut() {
+                            table.add_row(vec![
+                                Cell::new(u.name(&row.rule_id)),
+                                Cell::new(u.kind(&row.family)),
+                                Cell::new(u.dim(row.tag.as_deref().unwrap_or("-"))),
+                                Cell::new(severity_cell(u, row.severity.as_deref().unwrap_or("-"))),
+                                Cell::new(if row.enabled {
+                                    u.name("enabled")
+                                } else {
+                                    u.warn("disabled")
+                                }),
+                                Cell::new(u.dim(&providers.join(", "))),
+                                Cell::new(u.dim(&row.description)),
+                            ]);
+                        }
+                    }
+                    flush(&mut table);
+                    if display_rows.is_empty() {
+                        cli_println!();
+                        cli_println!("{}", u.dim("(no rules match the selected filters)"));
                     }
                     render_truncation_notice(display_rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja security <ws> pack");
@@ -4873,62 +5985,6 @@ fn cmd_pack(
         }
     }
     Ok(())
-}
-
-fn render_pack_rule_block(u: &Ui, idx: usize, r: &PackRuleRow) {
-    let sev = r.severity.as_deref().unwrap_or("-");
-    let state = if r.enabled { "enabled" } else { "disabled" };
-    let mut chips = vec![
-        meta_chip(u, "lang", u.dim(&r.language)),
-        meta_chip(u, "kind", u.kind(&r.kind)),
-        meta_chip(u, "family", u.kind(&r.family)),
-        meta_chip(u, "severity", severity_cell(u, sev)),
-        meta_chip(u, "state", u.dim(state)),
-    ];
-    if let Some(tag) = r.tag.as_deref().filter(|tag| !tag.is_empty()) {
-        chips.push(meta_chip(u, "tag", u.dim(tag)));
-    }
-
-    cli_println!();
-    cli_println!("{}  {}", u.kind(&format!("[RULE {idx}]")), u.name(&r.rule_id));
-    for line in u.wrapped_dim_prefixed_lines(
-        "    meta: ",
-        &format!("    {} ", u.dim("meta:")),
-        "          ",
-        &chips.join(" · "),
-    ) {
-        cli_println!("{line}");
-    }
-    if !r.packages.is_empty() {
-        for line in u.wrapped_dim_prefixed_lines(
-            "    packages: ",
-            &format!("    {} ", u.dim("packages:")),
-            "              ",
-            &r.packages.join(", "),
-        ) {
-            cli_println!("{line}");
-        }
-    }
-    if !r.frameworks.is_empty() {
-        for line in u.wrapped_dim_prefixed_lines(
-            "    frameworks: ",
-            &format!("    {} ", u.dim("frameworks:")),
-            "                ",
-            &r.frameworks.join(", "),
-        ) {
-            cli_println!("{line}");
-        }
-    }
-    if !r.description.trim().is_empty() {
-        for line in u.wrapped_dim_prefixed_lines(
-            "    description: ",
-            &format!("    {} ", u.dim("description:")),
-            "                 ",
-            r.description.trim(),
-        ) {
-            cli_println!("{line}");
-        }
-    }
 }
 
 fn render_pack_validation(
@@ -5026,12 +6082,36 @@ fn render_audit(
     let report = bonsai_sdk::SecurityPack::new(pack).audit(lang_filter)?;
 
     if matches!(format, BrowseFormat::Json) {
-        emit_json_value_paged_cached(
+        let row_cost = |language: &bonsai_sdk::PackAuditLanguage| {
+            serde_json::to_vec(language).map_or(512, |bytes| bytes.len() as u64 + 128)
+        };
+        page_cache::emit_paged_text(
             workspace,
-            &report,
+            &report.languages,
             paging_cfg,
             "security/pack/audit",
             filters_hash,
+            row_cost,
+            |languages, info, _cfg| {
+                let result_complete = info.page_number == 1 && info.is_last;
+                let payload = serde_json::json!({
+                    "analysis_complete": true,
+                    "analysis_incomplete_reasons": [],
+                    "result_complete": result_complete,
+                    "result_incomplete_reasons": if result_complete {
+                        Vec::<String>::new()
+                    } else {
+                        paged_json_incomplete_reasons("security/pack/audit", info)
+                    },
+                    "canonical_source_families": report.canonical_source_families,
+                    "canonical_sink_families": report.canonical_sink_families,
+                    "sink_family_short_labels": report.sink_family_short_labels,
+                    "languages": languages,
+                    "page": page_info_to_json(info),
+                });
+                crate::output::emit_json_document(&payload)?;
+                Ok(())
+            },
         )?;
         return Ok(());
     }
@@ -5216,7 +6296,34 @@ fn render_tree(
         // `PackInventoryOptions` would internally re-derive the
         // same `rules` slice — wasted work.
         let report = bonsai_sdk::SecurityPack::new(pack).tree_for_rules(rules)?;
-        emit_json_value_paged_cached(workspace, &report, paging_cfg, "security/pack/tree", filters_hash)?;
+        let row_cost = |language: &bonsai_sdk::PackTreeLanguage| {
+            serde_json::to_vec(language).map_or(512, |bytes| bytes.len() as u64 + 128)
+        };
+        page_cache::emit_paged_text(
+            workspace,
+            &report.languages,
+            paging_cfg,
+            "security/pack/tree",
+            filters_hash,
+            row_cost,
+            |languages, info, _cfg| {
+                let result_complete = info.page_number == 1 && info.is_last;
+                let payload = serde_json::json!({
+                    "analysis_complete": true,
+                    "analysis_incomplete_reasons": [],
+                    "result_complete": result_complete,
+                    "result_incomplete_reasons": if result_complete {
+                        Vec::<String>::new()
+                    } else {
+                        paged_json_incomplete_reasons("security/pack/tree", info)
+                    },
+                    "languages": languages,
+                    "page": page_info_to_json(info),
+                });
+                crate::output::emit_json_document(&payload)?;
+                Ok(())
+            },
+        )?;
         return Ok(());
     }
 
@@ -5268,16 +6375,21 @@ fn render_tree(
                 };
                 cli_println!("{}", u.dim(&header));
                 for r in file_rules {
-                    let sev = r
-                        .severity
-                        .map_or_else(|| "-".to_string(), |s| s.as_str().to_string());
-                    let on_marker = if r.enabled { u.name("on ") } else { u.warn("off") };
-                    cli_println!(
-                        "      {}  [{}]  {}",
-                        u.name(&r.id),
-                        severity_cell(u, &sev),
-                        on_marker
-                    );
+                    // Same facts as the JSON tree rule: id, severity (sinks
+                    // only), enabled state, and tag.
+                    let mut facts = Vec::new();
+                    if let Some(severity) = r.severity {
+                        facts.push(severity_cell(u, severity.as_str()));
+                    }
+                    facts.push(if r.enabled {
+                        u.name("enabled")
+                    } else {
+                        u.warn("disabled")
+                    });
+                    if let Some(tag) = r.tag.as_deref() {
+                        facts.push(u.dim(tag));
+                    }
+                    cli_println!("      {}  {}", u.name(&r.id), facts.join(&u.dim(" · ")));
                     total_rules += 1;
                 }
             }

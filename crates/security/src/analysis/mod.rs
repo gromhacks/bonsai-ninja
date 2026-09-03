@@ -31,7 +31,7 @@ use crate::sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recog
 use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
 use bonsai_common::{
-    path_filter_matches_with_root, workspace_relative_filter_path, FileId, FuncId, Precision, Span, SymbolId,
+    path_filter_matches_with_root, workspace_relative_filter_path, FileId, FuncId, Span, SymbolId,
 };
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
@@ -107,12 +107,6 @@ use validation::{lowercase_receiver_token_from_regex, regex_prefix_is_receiver_a
 
 type SourceMatchDedupeKey = (String, String, u64, u64, String);
 type SourceMatchDedupeValue<'a> = (usize, &'a RuleMatch, FuncId, u64);
-
-/// Public security analysis has one accuracy contract: findings must
-/// be backed by proven static evidence. Diagnostic-only precision
-/// classes can be retained internally for observability, but they do
-/// not become user-facing findings.
-pub(crate) const PUBLIC_SEMANTIC_MAX_PRECISION: Precision = Precision::Narrowed;
 
 /// Phase-aware progress event emitted by `run_taint_analysis_with_phase_progress`
 /// and `run_source_analysis_with_phase_progress`. Long-running phases
@@ -230,41 +224,6 @@ pub struct SourceAnalysisOptions {
     pub exclude_tests: bool,
     /// See `TaintAnalysisOptions::include_inferred_sources`.
     pub include_inferred_sources: bool,
-    /// Lineage evidence bounds for rendered source-flow paths. Default
-    /// command output keeps this representative and explicitly marks
-    /// omissions; callers that request an uncapped audit scope should
-    /// pass [`SourceLineageLimits::unbounded`].
-    pub lineage_limits: SourceLineageLimits,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SourceLineageLimits {
-    pub max_hops: usize,
-    pub max_paths: usize,
-}
-
-impl SourceLineageLimits {
-    #[must_use]
-    pub const fn bounded_default() -> Self {
-        Self {
-            max_hops: SOURCE_ANALYSIS_LINEAGE_RENDER_HOPS,
-            max_paths: SOURCE_ANALYSIS_LINEAGE_RENDER_PATHS,
-        }
-    }
-
-    #[must_use]
-    pub const fn unbounded() -> Self {
-        Self {
-            max_hops: usize::MAX,
-            max_paths: usize::MAX,
-        }
-    }
-}
-
-impl Default for SourceLineageLimits {
-    fn default() -> Self {
-        Self::bounded_default()
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -293,6 +252,12 @@ pub struct PackInventoryOptions {
     pub category: Option<String>,
     pub kind: Option<RuleKind>,
     pub severity: Option<Severity>,
+    /// Exact rule tag (`command-injection`, `http-input`, ...).
+    pub tag: Option<String>,
+    /// Rule id regex; matches the canonical id or any declared alias.
+    pub rule: Option<String>,
+    /// `Some(true)` keeps enabled rules only, `Some(false)` disabled only.
+    pub enabled: Option<bool>,
     /// When set, `validate_pack` replays each taint-dependent rule's
     /// positive `match_examples` through live taint analysis (seeding the
     /// example's inferred inputs as sources) and asserts the rule fires,
@@ -600,8 +565,6 @@ pub struct SourceAnalysisCandidate {
     pub flow_id: String,
     pub chain_names: Vec<String>,
     pub taint_path: Vec<TaintPropagationStep>,
-    pub precision: Precision,
-    pub lineage: SourceLineageStatus,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -611,127 +574,13 @@ pub struct CombinedSourceAnalysisCandidate {
     pub path: Vec<FuncId>,
     pub flow_id: String,
     pub taint_path: Vec<TaintPropagationStep>,
-    pub precision: Precision,
-    pub lineage: SourceLineageStatus,
     pub additional_sources: Vec<FindingMatch>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-pub struct SourceLineageStatus {
-    pub complete: bool,
-    pub truncated_hops: bool,
-    pub omitted_paths: usize,
-    pub emitted_paths: usize,
-    pub max_hops: usize,
-    pub max_paths: usize,
-}
-
-impl SourceLineageStatus {
-    fn complete() -> Self {
-        Self {
-            complete: true,
-            truncated_hops: false,
-            omitted_paths: 0,
-            emitted_paths: 0,
-            max_hops: SOURCE_ANALYSIS_LINEAGE_RENDER_HOPS,
-            max_paths: SOURCE_ANALYSIS_LINEAGE_RENDER_PATHS,
-        }
-    }
-
-    fn from_lineage(
-        emission: &SourceLineageEmission<'_>,
-        stats: SourceLineageEnumeration,
-        emitted_index: usize,
-    ) -> Self {
-        // Omitted paths are enumeration-level evidence, not a property
-        // of every emitted representative path. Attach them once so
-        // top-level summaries report the real omission count instead
-        // of multiplying it by the number of rows.
-        let omitted_paths = if emitted_index == 0 {
-            stats.omitted_paths
-        } else {
-            0
-        };
-        let incomplete = emission.truncated_hops || omitted_paths > 0;
-        Self {
-            complete: !incomplete,
-            truncated_hops: emission.truncated_hops,
-            omitted_paths,
-            emitted_paths: 1,
-            max_hops: stats.max_hops,
-            max_paths: stats.max_paths,
-        }
-    }
-
-    pub fn is_complete_default(&self) -> bool {
-        self.complete && !self.truncated_hops && self.omitted_paths == 0
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-pub struct SourceLineageSummary {
-    pub complete: bool,
-    pub incomplete_flows: usize,
-    pub truncated_hop_flows: usize,
-    pub omitted_paths: usize,
-    pub emitted_paths: usize,
-    pub max_hops: usize,
-    pub max_paths: usize,
-}
-
-impl Default for SourceLineageSummary {
-    fn default() -> Self {
-        Self {
-            complete: true,
-            incomplete_flows: 0,
-            truncated_hop_flows: 0,
-            omitted_paths: 0,
-            emitted_paths: 0,
-            max_hops: SOURCE_ANALYSIS_LINEAGE_RENDER_HOPS,
-            max_paths: SOURCE_ANALYSIS_LINEAGE_RENDER_PATHS,
-        }
-    }
-}
-
-impl SourceLineageSummary {
-    pub fn from_candidates(candidates: &[CombinedSourceAnalysisCandidate]) -> Self {
-        Self::from_statuses(candidates.iter().map(|candidate| candidate.lineage))
-    }
-
-    pub fn is_complete(&self) -> bool {
-        self.complete
-            && self.incomplete_flows == 0
-            && self.truncated_hop_flows == 0
-            && self.omitted_paths == 0
-    }
-
-    fn from_statuses<I>(statuses: I) -> Self
-    where
-        I: IntoIterator<Item = SourceLineageStatus>,
-    {
-        let mut summary = Self::default();
-        for status in statuses {
-            if !status.is_complete_default() {
-                summary.incomplete_flows = summary.incomplete_flows.saturating_add(1);
-            }
-            if status.truncated_hops {
-                summary.truncated_hop_flows = summary.truncated_hop_flows.saturating_add(1);
-            }
-            summary.omitted_paths = summary.omitted_paths.saturating_add(status.omitted_paths);
-            summary.emitted_paths = summary.emitted_paths.saturating_add(status.emitted_paths);
-            summary.max_hops = summary.max_hops.max(status.max_hops);
-            summary.max_paths = summary.max_paths.max(status.max_paths);
-        }
-        summary.complete = summary.incomplete_flows == 0;
-        summary
-    }
 }
 
 #[derive(Clone, Debug)]
 pub struct SourceAnalysisReport {
     pub candidates: Vec<CombinedSourceAnalysisCandidate>,
     pub source_rule_count: usize,
-    pub lineage_summary: SourceLineageSummary,
     /// True only when both the selected syntax scope and the emitted source
     /// lineage evidence were analyzed completely.
     pub analysis_complete: bool,
@@ -758,6 +607,10 @@ pub struct SinkAnalysisOptions {
     pub exclude_files: Vec<String>,
     pub exclude_tests: bool,
     pub include_inferred_sources: bool,
+    /// Attach security-source proofs for every loaded source rule even when
+    /// no source selector is given. The CLI sets this so the complete
+    /// sink-analysis object is computed once and every selector is a view.
+    pub include_security_source_flows: bool,
 }
 
 /// One source-independent compiler lineage feeding a selected sink.
@@ -777,7 +630,6 @@ pub struct SinkAnalysisFlow {
     #[serde(skip)]
     pub chain_funcs: Vec<FuncId>,
     pub taint_path: Vec<TaintPropagationStep>,
-    pub precision: Precision,
     pub endpoint_only: bool,
 }
 
@@ -805,14 +657,6 @@ pub struct SinkAnalysisReport {
     pub analysis_incomplete_reasons: Vec<String>,
     pub runtime_disabled_rules: Vec<RuntimeDisabledRule>,
 }
-
-// Rendering guard for the current source-flow report shape. Naively
-// enumerating every raw trace path can explode even in `examples/`;
-// the production-grade exactness follow-up is to report canonical
-// reachability summaries or stream an explicit incomplete marker,
-// not to silently materialize an unbounded path product in memory.
-const SOURCE_ANALYSIS_LINEAGE_RENDER_HOPS: usize = 6;
-const SOURCE_ANALYSIS_LINEAGE_RENDER_PATHS: usize = 24;
 
 struct SelectedTaintRules<'a> {
     sources: Vec<&'a Rule>,
@@ -931,8 +775,6 @@ where
     if let Some(flow_id) = options.flow_id.as_deref() {
         findings_raw.retain(|item| item.finding.representative_flow_id.as_deref() == Some(flow_id));
     }
-    findings_raw
-        .retain(|item| finding_precision_within(&item.finding.precision, PUBLIC_SEMANTIC_MAX_PRECISION));
     if !options.exclude_files.is_empty() || options.exclude_tests {
         findings_raw.retain(|item| {
             !finding_has_excluded_path(
@@ -1515,7 +1357,6 @@ where
         sinks: &sink_hits,
         sanitizers: &sanitizer_hits,
         pack,
-        max_precision: Some(PUBLIC_SEMANTIC_MAX_PRECISION),
         taint_graph_resident_cache_entries: options.taint_graph_resident_cache_entries,
         rulepack_typing: &rulepack_typing,
         on_progress: &mut on_progress,
@@ -1601,7 +1442,8 @@ where
     F: FnMut(AnalysisProgress),
 {
     let lineage_options = options.clone();
-    let collect_security_source_flows = options.source.is_some()
+    let collect_security_source_flows = options.include_security_source_flows
+        || options.source.is_some()
         || options.trust.is_some()
         || options.category.is_some()
         || options.include_inferred_sources;
@@ -1655,18 +1497,12 @@ fn sink_analysis_lineage_func_scope(
     sink_funcs: &AHashSet<FuncId>,
     global: &GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
-    max_precision: Option<Precision>,
 ) -> AHashSet<FuncId> {
-    let edge_allowed = |precision: Precision| max_precision.is_none_or(|max| precision <= max);
     let mut scope = sink_funcs.clone();
     let mut pending: Vec<FuncId> = sink_funcs.iter().copied().collect();
     pending.sort_unstable_by_key(|func| func.raw());
     while let Some(func) = pending.pop() {
-        let mut callers: Vec<FuncId> = call_graph
-            .callers_of(func)
-            .filter(|edge| edge_allowed(edge.precision))
-            .map(|edge| edge.from)
-            .collect();
+        let mut callers: Vec<FuncId> = call_graph.callers_of(func).map(|edge| edge.from).collect();
         callers.sort_unstable_by_key(|caller| caller.raw());
         callers.dedup();
         for caller in callers.into_iter().rev() {
@@ -1685,7 +1521,6 @@ fn sink_analysis_lineage_func_scope(
     while let Some(func) = provider_pending.pop() {
         let mut providers: Vec<FuncId> = call_graph
             .callees_of(func)
-            .filter(|edge| edge_allowed(edge.precision))
             .map(|edge| edge.to)
             .filter(|callee| sink_lineage_summary_provider(global, *callee))
             .collect();
@@ -1698,11 +1533,7 @@ fn sink_analysis_lineage_func_scope(
         }
     }
     bonsai_workspace::extend_func_set_with_semantic_callback_dispatchers(
-        &mut scope,
-        sink_funcs,
-        global,
-        call_graph,
-        max_precision,
+        &mut scope, sink_funcs, global, call_graph,
     );
     scope
 }
@@ -1770,7 +1601,6 @@ fn endpoint_only_sink_flow(
         chain_names,
         chain_funcs,
         taint_path,
-        precision: Precision::Exact,
         endpoint_only: true,
     }
 }
@@ -1915,12 +1745,7 @@ fn compile_sink_upstream_flows(
     on_progress(AnalysisProgress::PhaseTicked);
     let sink_funcs: AHashSet<FuncId> = attributed.iter().map(|(_, func, _)| *func).collect();
     let scope_started = Instant::now();
-    let lineage_scope = sink_analysis_lineage_func_scope(
-        &sink_funcs,
-        global.as_ref(),
-        call_graph.as_ref(),
-        Some(Precision::Narrowed),
-    );
+    let lineage_scope = sink_analysis_lineage_func_scope(&sink_funcs, global.as_ref(), call_graph.as_ref());
     bonsai_diagnostics::debug_log!(
         "security-phase",
         "sink lineage closure: sinks={} functions={} elapsed={:.3}s",
@@ -1980,7 +1805,6 @@ fn compile_sink_upstream_flows(
         callback_invocations: compiled_transfers.callback_invocations,
         output_arg_flows: compiled_transfers.output_arg_flows,
         receiver_state_propagations: compiled_transfers.receiver_state_propagations,
-        max_edge_precision: Some(Precision::Narrowed),
     };
     let release_started = Instant::now();
     crate::matcher::release_matcher_fact_caches();
@@ -2024,12 +1848,8 @@ fn compile_sink_upstream_flows(
 
     let target_spans: Vec<(FuncId, Span)> = attributed.iter().map(|(_, func, span)| (*func, *span)).collect();
     let (target_nodes, unresolved_target_funcs) = idg.nodes_and_unresolved_funcs_at_spans(&target_spans);
-    let relevance = idg.target_relevance_within_funcs_with_max_precision(
-        &target_nodes,
-        Some(&unresolved_target_funcs),
-        &lineage_scope,
-        graph_config.max_edge_precision,
-    );
+    let relevance =
+        idg.target_relevance_within_funcs(&target_nodes, Some(&unresolved_target_funcs), &lineage_scope);
     let origin_funcs = idg.funcs_admitted_by_target_relevance(&scoped_funcs, &relevance);
     let targets = IdgTaintTargets {
         nodes: Some(&target_nodes),
@@ -2075,7 +1895,6 @@ fn compile_sink_upstream_flows(
             .with_global_index(global.as_ref())
             .with_transfers(transfers)
             .with_targets(targets)
-            .with_max_precision(graph_config.max_edge_precision)
             .with_caches(caches),
         );
         let trace_index = trace_record_index(&graph.call_records);
@@ -2087,10 +1906,6 @@ fn compile_sink_upstream_flows(
             let Some(chain_funcs) = chain_funcs_for_lineage(&records, origin, terminal_call.caller) else {
                 continue;
             };
-            let precision = chain_precision_for_records(&records).meet(graph.precision);
-            if !precision.is_semantic() {
-                continue;
-            }
             let Some(chain_names) = chain_names_for_path(ws, global.as_ref(), &chain_funcs) else {
                 continue;
             };
@@ -2104,7 +1919,6 @@ fn compile_sink_upstream_flows(
                 chain_names,
                 chain_funcs,
                 taint_path,
-                precision,
                 endpoint_only: false,
             };
             for &sink_index in sink_indices {
@@ -2192,8 +2006,12 @@ fn build_sink_analysis_report(
                     security_source_flows: Vec::new(),
                 });
             // Finding-time constraint checks carry the exact tainted argument
-            // identities; prefer that richer endpoint over the inventory hit.
-            candidate.sink = sink.clone();
+            // identities. Keep the inventory hit as the endpoint identity
+            // (one sink fact regardless of whether proofs were collected) and
+            // attach the richer argument evidence to it.
+            if candidate.sink.tainted_args.is_empty() && !sink.tainted_args.is_empty() {
+                candidate.sink.tainted_args.clone_from(&sink.tainted_args);
+            }
             if combined.finding.source.origin == MatchOrigin::Pattern {
                 continue;
             }
@@ -2475,7 +2293,6 @@ where
         let fingerprint = taint_cache::scoped_config_fingerprint(
             context.pack,
             "source-analysis",
-            context.graph_config.max_edge_precision,
             &[],
             &[],
             context.transfer_options.semantic_fingerprint(),
@@ -2498,11 +2315,9 @@ where
     let mut source_starts: Vec<FuncId> = source_groups.iter().map(|group| group.start).collect();
     source_starts.sort_by_key(|func| func.raw());
     source_starts.dedup();
-    let reachable_call_graph = context.ws.source_reachable_resolved_call_graph(
-        &source_starts,
-        &[],
-        context.graph_config.max_edge_precision,
-    );
+    let reachable_call_graph = context
+        .ws
+        .source_reachable_resolved_call_graph(&source_starts, &[]);
     let source_call_graph = reachable_call_graph.graph;
     let resolution = ResolutionCoverage::from_graph(source_call_graph.as_ref(), reachable_call_graph.funcs);
     context
@@ -2520,12 +2335,7 @@ where
         let source_lineage_funcs = lineage_scope_by_start
             .entry(group.start)
             .or_insert_with(|| {
-                source_analysis_lineage_func_scope(
-                    group.start,
-                    context.global,
-                    source_call_graph.as_ref(),
-                    context.graph_config.max_edge_precision,
-                )
+                source_analysis_lineage_func_scope(group.start, context.global, source_call_graph.as_ref())
             })
             .clone();
         append_taint_target_key(
@@ -2550,7 +2360,6 @@ where
     let fingerprint = taint_cache::scoped_config_fingerprint(
         context.pack,
         "source-analysis",
-        context.graph_config.max_edge_precision,
         &scoped_files,
         &scoped_funcs,
         context.transfer_options.semantic_fingerprint(),
@@ -2592,7 +2401,6 @@ struct SourceLineageEnumerationContext<'a> {
     idg: &'a bonsai_idg::IdgQueryService,
     graph_config: &'a InterTaintConfig,
     caches: &'a InterTaintCaches,
-    lineage_limits: SourceLineageLimits,
 }
 
 fn build_source_group_candidates(
@@ -2650,7 +2458,6 @@ fn build_source_group_candidates(
                     lineage_funcs: group.lineage_funcs.as_ref(),
                     relevance: None,
                 })
-                .with_max_precision(context.graph_config.max_edge_precision)
                 .with_caches(context.caches),
             ));
             context
@@ -2662,13 +2469,7 @@ fn build_source_group_candidates(
     let mut candidates: Vec<SourceAnalysisCandidate> = Vec::new();
     for job in &group.jobs {
         let mut candidates_by_chain: AHashMap<Vec<String>, Vec<usize>> = AHashMap::new();
-        let (lineages, lineage_stats) = collect_tainted_source_lineages(
-            &graph.call_records,
-            job.start,
-            context.lineage_limits.max_hops,
-            context.lineage_limits.max_paths,
-        );
-        let mut emitted_lineage_rows = 0usize;
+        let lineages = collect_tainted_source_lineages(&graph.call_records, job.start);
         for emission in &lineages {
             let terminal = emission
                 .records
@@ -2682,10 +2483,6 @@ fn build_source_group_candidates(
                 continue;
             };
             let taint_path = taint_path_for_lineage(context.ws, context.global, &emission.records, None);
-            let precision = chain_precision_for_records(&emission.records);
-            if !precision.is_semantic() {
-                continue;
-            }
             let merge_target = candidates_by_chain.get(&chain_names).and_then(|indices| {
                 indices
                     .iter()
@@ -2696,12 +2493,6 @@ fn build_source_group_candidates(
                 let candidate = &mut candidates[candidate_index];
                 merge_equivalent_taint_path(&mut candidate.taint_path, &taint_path);
                 candidate.flow_id = flow_id_for_taint_path(&candidate.chain_names, &candidate.taint_path);
-                candidate.precision = candidate.precision.meet(precision);
-                merge_source_lineage_status(
-                    &mut candidate.lineage,
-                    SourceLineageStatus::from_lineage(emission, lineage_stats, emitted_lineage_rows),
-                );
-                emitted_lineage_rows = emitted_lineage_rows.saturating_add(1);
                 continue;
             }
             let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
@@ -2715,10 +2506,7 @@ fn build_source_group_candidates(
                 flow_id,
                 chain_names,
                 taint_path,
-                precision,
-                lineage: SourceLineageStatus::from_lineage(emission, lineage_stats, emitted_lineage_rows),
             });
-            emitted_lineage_rows = emitted_lineage_rows.saturating_add(1);
         }
         if lineages.is_empty() {
             let path = vec![job.start];
@@ -2733,8 +2521,6 @@ fn build_source_group_candidates(
                 flow_id,
                 chain_names,
                 taint_path,
-                precision: Precision::Exact,
-                lineage: SourceLineageStatus::complete(),
             });
         }
     }
@@ -2795,9 +2581,8 @@ fn canonicalize_source_candidates(
             candidate.source.column,
             displayed_chain_key(&candidate.chain_names),
         );
-        if let Some(&index) = seen.get(&dedupe_key) {
-            merge_source_lineage_status(&mut candidates[index].lineage, candidate.lineage);
-            candidates[index].precision = candidates[index].precision.meet(candidate.precision);
+        if seen.contains_key(&dedupe_key) {
+            continue;
         } else {
             let index = candidates.len();
             seen.insert(dedupe_key, index);
@@ -3070,7 +2855,6 @@ where
         callback_invocations: compiled_transfers.callback_invocations,
         output_arg_flows: compiled_transfers.output_arg_flows,
         receiver_state_propagations: compiled_transfers.receiver_state_propagations,
-        max_edge_precision: Some(Precision::Narrowed),
     };
     // Exact source-seeded graphs are cached through the workspace
     // `TaintGraphIndex`, which is bounded in memory and keyed by a
@@ -3144,7 +2928,6 @@ where
                 idg,
                 graph_config: &source_graph_config,
                 caches: source_graph_caches,
-                lineage_limits: options.lineage_limits,
             },
             &source_groups,
             source_hits.len(),
@@ -3165,7 +2948,6 @@ where
         });
     }
     let candidates = combine_source_analysis_candidates(candidates);
-    let lineage_summary = SourceLineageSummary::from_candidates(&candidates);
     let runtime_disabled_rules = crate::matcher::drain_runtime_disabled_rules();
     let mut analysis_incomplete_reasons: BTreeSet<String> =
         workspace_analysis_incomplete_reasons(ws, &scan_files, source_scope.resolution())
@@ -3180,17 +2962,11 @@ where
         analysis_incomplete_reasons
             .insert(format!("runtime-disabled-rules:{}", runtime_disabled_rules.len()));
     }
-    // Lineage limits bound only the representative paths materialised for the
-    // renderer. The sparse fixed point above is still exact and complete, so a
-    // truncated presentation must not be reported as a compiler/analysis gap.
-    // `lineage_summary` and each candidate's `SourceLineageStatus` retain the
-    // explicit hop/path omissions for consumers that need to request `--all`.
     let analysis_incomplete_reasons: Vec<String> = analysis_incomplete_reasons.into_iter().collect();
     finish_taint_cache_write_through(ws, source_scope.cache_persist_started, &mut on_progress);
     Ok(SourceAnalysisReport {
         candidates,
         source_rule_count: sources.len(),
-        lineage_summary,
         analysis_complete: analysis_incomplete_reasons.is_empty(),
         analysis_incomplete_reasons,
         runtime_disabled_rules,
@@ -4035,31 +3811,14 @@ fn func_id_for_match(ws: &Workspace, hit: &RuleMatch) -> Option<FuncId> {
 
 struct SourceLineageEmission<'a> {
     records: Vec<&'a TaintedCallEdge>,
-    truncated_hops: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct SourceLineageEnumeration {
-    emitted_paths: usize,
-    omitted_paths: usize,
-    truncated_paths: usize,
-    max_hops: usize,
-    max_paths: usize,
 }
 
 fn collect_tainted_source_lineages<'a>(
     records: &'a [TaintedCallEdge],
     source: FuncId,
-    max_extra: usize,
-    max_paths: usize,
-) -> (Vec<SourceLineageEmission<'a>>, SourceLineageEnumeration) {
-    let mut stats = SourceLineageEnumeration {
-        max_hops: max_extra,
-        max_paths,
-        ..Default::default()
-    };
-    if max_extra == 0 || max_paths == 0 || !records.iter().any(|record| record.trace_id != 0) {
-        return (Vec::new(), stats);
+) -> Vec<SourceLineageEmission<'a>> {
+    if !records.iter().any(|record| record.trace_id != 0) {
+        return Vec::new();
     }
     let child_trace_ids: AHashSet<u64> = records
         .iter()
@@ -4088,39 +3847,18 @@ fn collect_tainted_source_lineages<'a>(
     let mut out = Vec::new();
     let mut seen: AHashSet<Vec<u64>> = AHashSet::new();
     for endpoint in endpoints {
-        let Some(mut lineage) = lineage_records_for_trace_id_indexed(&by_id, endpoint.trace_id) else {
+        let Some(lineage) = lineage_records_for_trace_id_indexed(&by_id, endpoint.trace_id) else {
             continue;
         };
         if lineage.first().is_none_or(|record| record.caller != source) {
             continue;
         }
-        let truncated_hops = lineage.len() > max_extra;
-        if lineage.len() > max_extra {
-            lineage.truncate(max_extra);
-        }
         let key: Vec<u64> = lineage.iter().map(|record| record.trace_id).collect();
         if !key.is_empty() && seen.insert(key) {
-            if out.len() < max_paths {
-                if truncated_hops {
-                    stats.truncated_paths += 1;
-                }
-                out.push(SourceLineageEmission {
-                    records: lineage,
-                    truncated_hops,
-                });
-                stats.emitted_paths += 1;
-            } else {
-                stats.omitted_paths += 1;
-            }
+            out.push(SourceLineageEmission { records: lineage });
         }
     }
-    (out, stats)
-}
-
-fn chain_precision_for_records(records: &[&TaintedCallEdge]) -> Precision {
-    records.iter().fold(Precision::Exact, |precision, record| {
-        precision.meet(record.precision)
-    })
+    out
 }
 
 #[derive(Clone, Debug)]
@@ -4190,7 +3928,6 @@ struct CallEvidence {
     chain_funcs: Vec<FuncId>,
     sanitizer_candidate_funcs: Vec<FuncId>,
     chain_names: Vec<String>,
-    chain_precision: Precision,
     taint_path: Vec<TaintPropagationStep>,
     sink_tainted_args: Vec<TaintedArgInfo>,
 }
@@ -4204,7 +3941,7 @@ fn build_call_evidence<'a>(
     call: &TaintedCall,
 ) -> Option<CallEvidence> {
     let original_records = lineage_records_for_call_indexed(trace_index, call).unwrap_or_default();
-    let (chain_funcs, sanitizer_candidate_funcs, chain_precision, taint_path) =
+    let (chain_funcs, sanitizer_candidate_funcs, taint_path) =
         if let Some(primary) = chain_funcs_for_lineage(&original_records, source_func, call.caller) {
             let mut records = original_records;
             let sanitizer_candidate_funcs =
@@ -4237,14 +3974,8 @@ fn build_call_evidence<'a>(
                     None => chain_funcs = primary,
                 }
             }
-            let chain_precision = chain_precision_for_records(&records);
             let taint_path = taint_path_for_lineage(ws, global, &records, Some(call));
-            (
-                chain_funcs,
-                sanitizer_candidate_funcs,
-                chain_precision,
-                taint_path,
-            )
+            (chain_funcs, sanitizer_candidate_funcs, taint_path)
         } else {
             // A resolved callgraph route proves control connectivity, not the
             // route taken by this tainted value. Substituting an arbitrary
@@ -4255,9 +3986,6 @@ fn build_call_evidence<'a>(
             // emitted.
             return None;
         };
-    if !chain_precision.is_semantic() {
-        return None;
-    }
     let chain_names = chain_names_for_path(ws, global, &chain_funcs)?;
     let sink_decl = ws.exact_decl(SymbolId::new(call.caller.raw()));
     let sink_events = sink_decl.as_deref().map(|decl| decl.flow_events.as_slice());
@@ -4287,7 +4015,6 @@ fn build_call_evidence<'a>(
         chain_funcs,
         sanitizer_candidate_funcs,
         chain_names,
-        chain_precision,
         taint_path,
         sink_tainted_args,
     })
@@ -4462,9 +4189,7 @@ fn semantic_callgraph_has_edge(
     caller: FuncId,
     callee: FuncId,
 ) -> bool {
-    call_graph
-        .callees_of(caller)
-        .any(|edge| edge.to == callee && edge.precision.is_semantic())
+    call_graph.callees_of(caller).any(|edge| edge.to == callee)
 }
 
 fn rewrite_chain_with_canonical_path(
@@ -4519,7 +4244,6 @@ mod positional_index_regression_tests {
                 place: Some(format!("arg{index}")),
                 source_names: vec![format!("arg{index}")],
             }],
-            precision: Precision::Exact,
             edge_kind: bonsai_callgraph::EdgeKind::Direct,
         }
     }
@@ -4542,20 +4266,6 @@ fn chain_synth_count(chain: &[FuncId], index: &CanonicalChainIndex<'_>) -> usize
         }
     }
     count
-}
-
-/// Search `all_records` for a path from `source_func` to
-/// `terminal_func` with the fewest synthetic hops, then the fewest total
-/// hops. The finite graph and best-cost table terminate cycles without a
-/// fixed depth limit or path-vector cloning.
-#[cfg(test)]
-fn best_chain_through_real_edges(
-    index: &CanonicalChainIndex<'_>,
-    source_func: FuncId,
-    terminal_func: FuncId,
-) -> Option<Vec<FuncId>> {
-    let tree = canonical_best_tree(index, source_func);
-    canonical_chain_from_tree(&tree, source_func, terminal_func)
 }
 
 fn canonical_best_tree(index: &CanonicalChainIndex<'_>, source_func: FuncId) -> CanonicalBestTree {
@@ -4904,7 +4614,7 @@ fn func_display_name_with_site(ws: &Workspace, global: &bonsai_index::GlobalInde
     }
 }
 
-fn resolve_span_location(ws: &Workspace, span: Span) -> (String, u32, u32) {
+pub(crate) fn resolve_span_location(ws: &Workspace, span: Span) -> (String, u32, u32) {
     let file = span.file;
     let path = ws
         .vfs()
@@ -5166,8 +4876,6 @@ fn combine_source_analysis_candidates(
     for item in flows {
         let key = item.flow_id.clone();
         if let Some(&idx) = index.get(&key) {
-            merge_source_lineage_status(&mut groups[idx].lineage, item.lineage);
-            groups[idx].precision = groups[idx].precision.meet(item.precision);
             if !same_source_site(&groups[idx].source, &item.source)
                 && !groups[idx]
                     .additional_sources
@@ -5186,21 +4894,10 @@ fn combine_source_analysis_candidates(
             path: item.path,
             flow_id: item.flow_id,
             taint_path: item.taint_path,
-            precision: item.precision,
-            lineage: item.lineage,
             additional_sources: Vec::new(),
         });
     }
     groups
-}
-
-fn merge_source_lineage_status(current: &mut SourceLineageStatus, incoming: SourceLineageStatus) {
-    current.complete = current.complete && incoming.complete;
-    current.truncated_hops = current.truncated_hops || incoming.truncated_hops;
-    current.omitted_paths = current.omitted_paths.saturating_add(incoming.omitted_paths);
-    current.emitted_paths = current.emitted_paths.saturating_add(incoming.emitted_paths);
-    current.max_hops = current.max_hops.max(incoming.max_hops);
-    current.max_paths = current.max_paths.max(incoming.max_paths);
 }
 
 fn chain_names_for_path(
@@ -5976,7 +5673,6 @@ fn extend_implicit_context_findings(
                     hops: Vec::new(),
                     tag: sink_rule.tag.clone(),
                     severity: sink_rule.severity,
-                    precision: precision_label(Precision::Narrowed).to_string(),
                     cwe: sink_rule.cwe.clone(),
                     owasp: sink_rule.owasp.clone(),
                     status: FindingStatus::Unsanitized,
@@ -6060,7 +5756,6 @@ fn merge_finding_into_group(group: &mut CombinedFindingWithChain, mut incoming: 
         chain_display: incoming.chain_display.clone(),
         taint_path: incoming.taint_path.clone(),
         status: incoming.status,
-        precision: incoming.precision.clone(),
     };
     if incoming_flow.flow_id != group.finding.representative_flow_id
         && !group
@@ -6183,7 +5878,6 @@ fn finalize_combined_finding(group: &mut CombinedFindingWithChain) {
         chain_display: group.finding.chain_display.clone(),
         taint_path: group.finding.taint_path.clone(),
         status: group.finding.status,
-        precision: group.finding.precision.clone(),
     };
     let mut retained_routes: Vec<AlternateTaintFlow> = Vec::new();
     for route in std::mem::take(&mut group.finding.alternate_flows) {
@@ -6537,7 +6231,7 @@ fn preferred_helper_return_feeds_transport(
     let exact_call_spans = ws
         .cached_resolved_call_graph()
         .callees_of(caller_func)
-        .filter(|edge| edge.to == preferred_func && edge.precision.is_semantic())
+        .filter(|edge| edge.to == preferred_func)
         .map(|edge| edge.span)
         .collect::<AHashSet<_>>();
     let Some(snapshot) = ws.vfs().snapshot(caller.span.file).ok() else {
@@ -7339,7 +7033,7 @@ fn sanitizer_is_helper_return_reaching_tainted_sink_arg(context: HelperSanitizer
         }) {
             let targets = call_graph
                 .callees_of(sink_func)
-                .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, helper_call_span))
+                .filter(|edge| spans_overlap(edge.span, helper_call_span))
                 .map(|edge| edge.to)
                 .collect::<AHashSet<_>>();
             if targets.len() != 1 || !targets.contains(&helper_func) {
@@ -7411,10 +7105,9 @@ fn helper_functions_reaching_tainted_sink_args(
     let mut helpers = call_graph
         .callees_of(sink_func)
         .filter(|edge| {
-            edge.precision.is_semantic()
-                && call_sites
-                    .iter()
-                    .any(|call_site| spans_overlap(edge.span, *call_site))
+            call_sites
+                .iter()
+                .any(|call_site| spans_overlap(edge.span, *call_site))
         })
         .map(|edge| edge.to)
         .collect::<Vec<_>>();
@@ -7443,11 +7136,7 @@ fn predicate_helper_functions_before_sink(
 ) -> Vec<FuncId> {
     let mut helpers = call_graph
         .callees_of(sink_func)
-        .filter(|edge| {
-            edge.precision.is_semantic()
-                && edge.span.file == sink.span.file
-                && edge.span.start < sink.span.start
-        })
+        .filter(|edge| edge.span.file == sink.span.file && edge.span.start < sink.span.start)
         .filter_map(|edge| {
             let helper = ws.exact_decl(SymbolId::new(edge.to.raw()))?;
             let index = ws.exact_decl_index_shared(helper.span.file)?;
@@ -8198,7 +7887,6 @@ fn sanitizer_predicate_helper_guards_sink(
         .callees_of(context.sink_func)
         .filter(|edge| {
             edge.to == sanitizer_func
-                && edge.precision.is_semantic()
                 && edge.span.file == sink.span.file
                 && edge.span.start < sink.span.start
         })
@@ -9020,33 +8708,6 @@ fn source_sink_flow_emission_key(
         snk.span.end,
         call.parent_trace_id,
     )
-}
-
-/// Stable label for a `Precision` value. Used in the rendered finding
-/// (`precision: exact` / `narrowed` / `over-approximate` /
-/// `unknown`).
-fn precision_label(precision: Precision) -> &'static str {
-    match precision {
-        Precision::Exact => "exact",
-        Precision::Narrowed => "narrowed",
-        Precision::OverApproximate => "over-approximate",
-        Precision::Unknown => "unknown",
-    }
-}
-
-fn precision_from_label(label: &str) -> Option<Precision> {
-    match label {
-        "exact" => Some(Precision::Exact),
-        "narrowed" => Some(Precision::Narrowed),
-        "over-approximate" | "over_approximate" => Some(Precision::OverApproximate),
-        "unknown" => Some(Precision::Unknown),
-        _ => None,
-    }
-}
-
-fn finding_precision_within(label: &str, max_precision: Precision) -> bool {
-    precision_from_label(label)
-        .is_some_and(|precision| precision.is_proven_static_evidence() && precision <= max_precision)
 }
 
 fn flow_id_for_taint_path(chain_names: &[String], taint_path: &[TaintPropagationStep]) -> String {
@@ -9985,7 +9646,7 @@ fn enrich_callback_invocation_hosts(
         return;
     }
     let global = ws.compiler_linkage_index();
-    let graph = ws.resolved_call_graph_direct_neighborhood(&callers, Some(Precision::Narrowed));
+    let graph = ws.resolved_call_graph_direct_neighborhood(&callers);
     for invocation in invocations {
         let mut hosts = Vec::new();
         let mut resolved_callback_targets = Vec::new();
@@ -10600,6 +10261,11 @@ fn receiver_state_propagation_from_rule(rule: &Rule) -> Option<ReceiverStateProp
 }
 
 pub fn select_pack_rules<'a>(pack: &'a Rulepack, options: &PackInventoryOptions) -> Vec<&'a Rule> {
+    // An invalid regex selects nothing rather than everything; the CLI
+    // validates the pattern up front so users get the parse error.
+    let rule_regex = options.rule.as_deref().map(|pattern| {
+        regex::Regex::new(pattern).unwrap_or_else(|_| regex::Regex::new("$^").expect("never-matching regex"))
+    });
     let mut rules: Vec<&Rule> = pack
         .all_rules()
         .into_iter()
@@ -10615,6 +10281,18 @@ pub fn select_pack_rules<'a>(pack: &'a Rulepack, options: &PackInventoryOptions)
                 .category
                 .as_deref()
                 .is_none_or(|category| rule_matches_category(pack, rule, category))
+        })
+        .filter(|rule| {
+            options
+                .tag
+                .as_deref()
+                .is_none_or(|tag| rule.tag.as_deref() == Some(tag))
+        })
+        .filter(|rule| options.enabled.is_none_or(|enabled| rule.enabled == enabled))
+        .filter(|rule| {
+            rule_regex.as_ref().is_none_or(|regex| {
+                regex.is_match(&rule.id) || rule.aliases.iter().any(|alias| regex.is_match(alias))
+            })
         })
         .collect();
     rules.sort_by(|a, b| {
@@ -10633,14 +10311,6 @@ pub fn select_pack_rules<'a>(pack: &'a Rulepack, options: &PackInventoryOptions)
     });
     rules
 }
-
-#[cfg(test)]
-#[path = "semantic_options_tests.rs"]
-mod semantic_options_tests;
-
-#[cfg(test)]
-#[path = "source_lineage_tests.rs"]
-mod source_lineage_tests;
 
 #[cfg(test)]
 #[path = "finding_completeness_tests.rs"]

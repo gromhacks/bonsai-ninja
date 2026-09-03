@@ -102,9 +102,9 @@ gaps affect it:
 - **`bases = —` / `super_dispatch = —`:** virtual dispatch on this
   language's class hierarchy may not have enough type evidence to emit
   a complete semantic edge. Public analysis must report that gap as
-  incomplete instead of emitting wider candidate sets as findings.
-  `OverApproximate` remains an internal diagnostic precision class and
-  is rejected by user-facing flow/security commands.
+  incomplete instead of emitting wider candidate sets as findings. The
+  resolver never emits an unexplained multi-candidate edge; the gap is
+  reported as an incompleteness reason.
 - **`receiver_field_writes = —`:** taint that flows through
   `self.field = x` and is later read by another method on the same
   object won't be tracked. Cross-method same-class flows degrade —

@@ -24,8 +24,8 @@ use bonsai_security::{
     ReceiverFactoryGuardSemantics, RelativePathContainmentGuardSemantics, RequiredAggregateFieldSemantics,
     RequiredCallArgumentSemantics, RequiredNamedArgumentSemantics, RequiredReceiverCallSemantics, Rule,
     RuleConstraint, RuleKind, RuleTarget, Rulepack, SinkAnalysisOptions, SourceAnalysisOptions,
-    SourceLineageLimits, TaintAnalysisOptions, TrustClass, UrlAddressParserSemantics, UrlComponentSemantics,
-    UrlDnsGuardSemantics, UrlGuardRootSemantics, UrlHostAllowlistSemantics, UrlNetworkGuardSemantics,
+    TaintAnalysisOptions, TrustClass, UrlAddressParserSemantics, UrlComponentSemantics, UrlDnsGuardSemantics,
+    UrlGuardRootSemantics, UrlHostAllowlistSemantics, UrlNetworkGuardSemantics,
     UrlReconstructionGuardSemantics, UrlRedirectGuardSemantics, UrlSchemeGuardSemantics,
 };
 use bonsai_taint::{compose_idg_seed_nodes, ensure_idg_service, IdgSeedRequest, TokenSet};
@@ -308,8 +308,7 @@ func sendDynamic(client: OpenAIProtocol, prompt: String) async throws {
         global.as_ref(),
         idg.as_ref(),
     );
-    let closure =
-        idg.forward_closure_with_max_precision(&seed_nodes, Some(bonsai_common::Precision::Narrowed));
+    let closure = idg.forward_closure(&seed_nodes);
     let tainted_inputs = idg.tainted_call_args_in_reachable_nodes(&closure);
     assert!(
         tainted_inputs
@@ -332,8 +331,7 @@ func sendDynamic(client: OpenAIProtocol, prompt: String) async throws {
         global.as_ref(),
         idg.as_ref(),
     );
-    let dynamic_closure =
-        idg.forward_closure_with_max_precision(&dynamic_seeds, Some(bonsai_common::Precision::Narrowed));
+    let dynamic_closure = idg.forward_closure(&dynamic_seeds);
     let dynamic_inputs = idg.tainted_call_args_in_reachable_nodes(&dynamic_closure);
     assert!(
         dynamic_inputs
@@ -1071,9 +1069,7 @@ fn assert_finding_with_options(fixture: Fixture, options: TaintAnalysisOptions) 
         report.findings
     );
     assert!(
-        matching
-            .iter()
-            .any(|finding| matches!(finding.finding.precision.as_str(), "exact" | "narrowed")),
+        !matching.is_empty(),
         "{} {}: supported source-to-sink flow must remain proven; matching findings={:#?}",
         fixture.lang,
         fixture.name,
@@ -2080,7 +2076,6 @@ fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
             *label == "scope"
                 && detail.contains("taint-analysis source_matches=")
                 && detail.contains("static_evidence=compiler-proven")
-                && !detail.contains("max_precision")
         }),
         "taint-analysis should report the public static-evidence contract through SDK progress notes: {notes:#?}"
     );
@@ -2328,43 +2323,20 @@ fn source_analysis_render_hop_limit_does_not_limit_analyzed_scope() {
 
     let ws = workspace(&[("/app/deep.py", source.as_str())]);
     let pack = rulepack("python", "source", "sink");
-    let bounded = bonsai_security::run_source_analysis(&ws, &pack, SourceAnalysisOptions::default())
-        .expect("bounded source analysis");
-
+    let report = bonsai_security::run_source_analysis(&ws, &pack, SourceAnalysisOptions::default())
+        .expect("source analysis");
     assert!(
-        bounded
-            .candidates
-            .iter()
-            .any(|candidate| candidate.lineage.truncated_hops),
-        "the complete analyzed graph must expose that the representative six-hop rendering truncated a deeper flow: {:#?}",
-        bounded.candidates
-    );
-    assert!(
-        !bounded.lineage_summary.is_complete(),
-        "a truncated representative lineage must be reported as incomplete"
-    );
-
-    let unbounded = bonsai_security::run_source_analysis(
-        &ws,
-        &pack,
-        SourceAnalysisOptions {
-            lineage_limits: SourceLineageLimits::unbounded(),
-            ..Default::default()
-        },
-    )
-    .expect("unbounded source analysis");
-    assert!(
-        unbounded
+        report
             .candidates
             .iter()
             .any(|candidate| candidate.chain_names.last().is_some_and(|name| name == "hop8")),
-        "rendering without limits must expose the analyzed terminal hop: {:#?}",
-        unbounded.candidates
+        "every recorded lineage is emitted; the eight-hop flow must reach its terminal hop: {:#?}",
+        report.candidates
     );
     assert!(
-        unbounded.lineage_summary.is_complete(),
-        "an unbounded rendering over the same complete graph must be complete: {:#?}",
-        unbounded.lineage_summary
+        report.analysis_complete,
+        "an uncapped lineage over a complete graph must be complete: {:#?}",
+        report.analysis_incomplete_reasons
     );
 }
 
@@ -2821,14 +2793,6 @@ fn language_gauntlet_security_pipeline_covers_every_language_and_flow_event_kind
                 report.findings
             );
         }
-        assert!(
-            report
-                .findings
-                .iter()
-                .all(|finding| finding.finding.precision != "unknown"),
-            "{lang}: taint precision must never silently degrade to unknown; findings={:#?}",
-            report.findings
-        );
     }
 
     for required in REQUIRED_LANGUAGE_GAUNTLET_EVENT_UNION {
@@ -3168,7 +3132,7 @@ fn cpp_language_gauntlet_relevance_matches_the_exact_forward_closure() {
         points(&sink_nodes),
         points(&closure)
     );
-    let relevance = idg.target_relevance_with_max_precision(&sink_nodes, None, None);
+    let relevance = idg.target_relevance(&sink_nodes, None);
     assert!(
         relevance.admits_any(&seed_nodes),
         "backward target relevance must be a conservative inverse of the exact forward closure; seeds={:#?}; sinks={:#?}",
@@ -4369,8 +4333,7 @@ fn tainted_inline_return_is_a_sink() {
         report
             .findings
             .iter()
-            .any(|finding| finding.finding.sink.file.contains("page.ts")
-                && matches!(finding.finding.precision.as_str(), "exact" | "narrowed")),
+            .any(|finding| finding.finding.sink.file.contains("page.ts")),
         "expected tainted return sink finding, got {:#?}",
         report.findings
     );

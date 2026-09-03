@@ -3,7 +3,7 @@
 //! round-trips with the same shape.
 
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
-use bonsai_common::{FileId, FuncId, Precision, Span};
+use bonsai_common::{FileId, FuncId, Span};
 use bonsai_idg::dict::{NodeDict, PlaceDict};
 use bonsai_idg::edge::EdgeMeta;
 use bonsai_idg::edge::IdgEdgeKind;
@@ -68,13 +68,7 @@ fn two_file_workspace_roundtrips_through_disk() {
     ws.cross_file_mut().push(CrossFileEdge {
         from_segment: id_a,
         to_segment: id_b,
-        edge: IdgEdge::inter_call_arg(
-            n_a_arg,
-            n_b_param,
-            span(0, 100, 110),
-            Precision::Exact,
-            CallEdgeKind::Direct,
-        ),
+        edge: IdgEdge::inter_call_arg(n_a_arg, n_b_param, span(0, 100, 110), CallEdgeKind::Direct),
     });
 
     // ─── Verify integrity ──────────────────────────────────────
@@ -129,7 +123,6 @@ fn hot_reload_invalidates_only_affected_cross_file_edges() {
             NodeId(0),
             NodeId(0),
             EdgeMeta {
-                precision: Precision::Exact,
                 kind: IdgEdgeKind::InterCallArg,
                 call_kind: CallEdgeKind::Direct,
                 via_span: span(0, 0, 1),
@@ -222,7 +215,6 @@ fn cross_file_id_zero_segment_does_not_alias_uninserted_segment() {
             NodeId(0),
             NodeId(0),
             EdgeMeta {
-                precision: Precision::Exact,
                 kind: IdgEdgeKind::InterCallArg,
                 call_kind: CallEdgeKind::Direct,
                 via_span: span(0, 0, 1),

@@ -382,49 +382,14 @@ fn adapter_flow_event_audit_tracks_current_flow_event_enum() {
 
 #[test]
 fn public_security_accuracy_contract_is_semantic_only() {
-    let precision = read("crates/common/src/precision.rs");
+    let invariants = read("crates/conformance/tests/architecture_invariants.rs");
     assert_contains_all(
-        "shared precision contract",
-        &precision,
+        "one-precision-level invariant",
+        &invariants,
         &[
-            "Public security findings have a single accuracy contract",
-            "is_proven_static_evidence",
-            "is_diagnostic_only",
-            "OverApproximate",
-            "Unknown",
-        ],
-    );
-
-    let analysis = read("crates/security/src/analysis/mod.rs");
-    assert_contains_all(
-        "security analysis semantic-only contract",
-        &analysis,
-        &[
-            "PUBLIC_SEMANTIC_MAX_PRECISION",
-            "one accuracy contract",
-            "finding_precision_within",
-            "precision.is_proven_static_evidence()",
-        ],
-    );
-
-    let semantic_tests = read("crates/security/src/analysis/semantic_options_tests.rs");
-    assert_contains_all(
-        "semantic precision option tests",
-        &semantic_tests,
-        &[
-            "taint_analysis_has_one_public_semantic_contract",
-            "PUBLIC_SEMANTIC_MAX_PRECISION",
-            "Precision::OverApproximate > PUBLIC_SEMANTIC_MAX_PRECISION",
-        ],
-    );
-
-    let status_tests = read("crates/security/src/analysis/compute_status_tests.rs");
-    assert_contains_all(
-        "finding precision filter tests",
-        &status_tests,
-        &[
-            "diagnostic-only precision must never become public finding evidence",
-            "unknown precision must remain diagnostic-only",
+            "compiler_has_one_precision_level",
+            "max_precision",
+            "PrecisionClass",
         ],
     );
 

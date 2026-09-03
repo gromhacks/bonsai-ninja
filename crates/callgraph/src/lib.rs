@@ -1,7 +1,7 @@
 //! Cross-function call graph + cached summaries (spec §15, §16).
 //!
 //! The call graph is a directed multi-graph from `FuncId` to `FuncId`. Each
-//! edge carries its precision so downstream queries can decide how much to
+//! edge carries its kind and provenance so downstream queries can decide how much to
 //! trust it. Summaries are compositional cached facts derived from a
 //! function's CFG plus the summaries of every target it calls.
 
@@ -10,7 +10,7 @@ pub mod chains;
 pub use chains::PathTruncation;
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{qualified_names_match, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
+use bonsai_common::{qualified_names_match, short_qualified_tail, FileId, FuncId, Span, SymbolId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
     collect_return_spans, AliasTarget, AssignValueKind, CallArg, CallArgumentValueFact, CallKind,
@@ -40,7 +40,7 @@ use std::sync::Arc;
 #[serde(rename_all = "snake_case")]
 pub enum EdgeKind {
     /// Name uniquely resolved to one callee (single matching
-    /// decl in the global index). Carries [`Precision::Narrowed`].
+    /// decl in the global index).
     Direct,
     /// Name resolved to multiple semantically explained candidate
     /// callees, such as typed virtual dispatch or C preprocessor
@@ -58,15 +58,15 @@ pub enum EdgeKind {
 }
 
 /// One resolved edge in the call graph: a single
-/// `FuncId → FuncId` link with the kind, precision, and provenance the
-/// resolver assigned at build time.
+/// `FuncId → FuncId` link with the kind and provenance the resolver
+/// assigned at build time. Every edge is proven from syntax and call flow;
+/// unproven call sites are recorded as unresolved diagnostics, never edges.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CallEdge {
     pub from: FuncId,
     pub to: FuncId,
     pub span: Span,
     pub kind: EdgeKind,
-    pub precision: Precision,
     #[serde(default)]
     pub provenance: EdgeProvenance,
 }
@@ -372,7 +372,6 @@ impl CallGraph {
                     && existing.span.file == edge.span.file
                     && existing.span.start == edge.span.start
                     && existing.kind == edge.kind
-                    && existing.precision == edge.precision
             })
         }) {
             return;
@@ -1071,10 +1070,10 @@ fn sorted_slices_intersect(left: &[u32], right: &[u32]) -> bool {
 /// function's `flow_events` that the resolver mapped to one or more
 /// concrete `FuncId`s. Resolution rules:
 ///
-/// - exactly one candidate → [`EdgeKind::Direct`] / [`Precision::Narrowed`]
+/// - exactly one candidate → [`EdgeKind::Direct`]
 /// - semantically explained multiple candidates (typed virtual dispatch,
 ///   build-compatible C declaration families) →
-///   [`EdgeKind::Virtual`] / [`Precision::Narrowed`]
+///   [`EdgeKind::Virtual`]
 /// - unresolved broad multiple candidates → not recorded
 /// - zero candidates → not recorded (the call escapes to an unknown
 ///   target — the caller's flow events still surface the textual call
@@ -1393,12 +1392,11 @@ impl ResolvedCallGraph {
     /// reachability admits only those nodes from the source set. Work is
     /// linear in the selected graph and has no depth, path, or result cap.
     #[must_use]
-    pub fn between(&self, starts: &[FuncId], targets: &[FuncId], max_precision: Option<Precision>) -> Self {
+    pub fn between(&self, starts: &[FuncId], targets: &[FuncId]) -> Self {
         if starts.is_empty() || targets.is_empty() {
             return Self::default();
         }
 
-        let edge_allowed = |edge: &CallEdge| max_precision.is_none_or(|max| edge.precision <= max);
         let mut can_reach_target = AHashSet::new();
         let mut reverse = Vec::new();
         for &target in targets {
@@ -1407,7 +1405,7 @@ impl ResolvedCallGraph {
             }
         }
         while let Some(func) = reverse.pop() {
-            for edge in self.callers_of(func).filter(|edge| edge_allowed(edge)) {
+            for edge in self.callers_of(func) {
                 if can_reach_target.insert(edge.from) {
                     reverse.push(edge.from);
                 }
@@ -1424,7 +1422,7 @@ impl ResolvedCallGraph {
         while let Some(func) = forward.pop() {
             for edge in self
                 .callees_of(func)
-                .filter(|edge| edge_allowed(edge) && can_reach_target.contains(&edge.to))
+                .filter(|edge| can_reach_target.contains(&edge.to))
             {
                 if included.insert(edge.to) {
                     forward.push(edge.to);
@@ -1442,7 +1440,7 @@ impl ResolvedCallGraph {
             .cg
             .edges
             .iter()
-            .filter(|edge| edge_allowed(edge) && included.contains(&edge.from) && included.contains(&edge.to))
+            .filter(|edge| included.contains(&edge.from) && included.contains(&edge.to))
             .cloned()
             .collect();
         let local_bindings = self
@@ -2128,7 +2126,7 @@ impl ResolvedCallGraph {
     }
 
     /// All `(caller, edge)` pairs that target `func`. Exposes the edge
-    /// so chain enumeration can carry precision through the walk.
+    /// so chain enumeration can walk it.
     pub fn callers_of(&self, func: FuncId) -> impl Iterator<Item = &CallEdge> + '_ {
         self.cg.callers(func)
     }
@@ -2650,7 +2648,6 @@ impl CallbackExecutionAccumulator {
                     && existing.span.file == candidate.span.file
                     && existing.span.start == candidate.span.start
                     && existing.kind == candidate.kind
-                    && existing.precision == candidate.precision
             })
         });
         edges
@@ -2737,7 +2734,6 @@ impl CallbackExecutionAccumulator {
             to: target,
             span,
             kind: EdgeKind::Indirect,
-            precision: Precision::Narrowed,
             provenance: EdgeProvenance::callable_value(
                 "formal invocation resolved from compiler-bound callable argument",
             ),
@@ -4064,8 +4060,7 @@ fn emit_call_site_candidate_edges(
         &candidates,
         context.caller_capabilities.callable_declaration_family,
     );
-    let Some((kind, precision)) = semantic_edge_shape(candidates.len(), semantic_virtual || same_decl_family)
-    else {
+    let Some(kind) = semantic_edge_shape(candidates.len(), semantic_virtual || same_decl_family) else {
         unresolved_workspace_sites.push(UnresolvedWorkspaceCallSite {
             caller: context.from,
             span: facts.span,
@@ -4088,7 +4083,6 @@ fn emit_call_site_candidate_edges(
             to,
             span: facts.span,
             kind,
-            precision,
             provenance: provenance.clone(),
         });
     }
@@ -4237,7 +4231,7 @@ fn add_assignment_call_edges(
             &candidates,
             caller_capabilities.callable_declaration_family,
         );
-        let Some((kind, precision)) = semantic_edge_shape(candidates.len(), same_decl_family) else {
+        let Some(kind) = semantic_edge_shape(candidates.len(), same_decl_family) else {
             unresolved_workspace_sites.push(UnresolvedWorkspaceCallSite {
                 caller: from,
                 span: *span,
@@ -4257,7 +4251,6 @@ fn add_assignment_call_edges(
                 to,
                 span: *span,
                 kind,
-                precision,
                 provenance: provenance.clone(),
             });
         }
@@ -4826,11 +4819,11 @@ fn candidate_set_is_function_clause_family(global: &GlobalIndex, candidates: &[F
 fn semantic_edge_shape(
     candidate_count: usize,
     semantically_explained_multi_candidate: bool,
-) -> Option<(EdgeKind, Precision)> {
+) -> Option<EdgeKind> {
     match candidate_count {
         0 => None,
-        1 => Some((EdgeKind::Direct, Precision::Narrowed)),
-        _ if semantically_explained_multi_candidate => Some((EdgeKind::Virtual, Precision::Narrowed)),
+        1 => Some(EdgeKind::Direct),
+        _ if semantically_explained_multi_candidate => Some(EdgeKind::Virtual),
         _ => None,
     }
 }

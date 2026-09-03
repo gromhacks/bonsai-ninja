@@ -71,7 +71,7 @@
 //!   lowering into the generator's yield places.
 //! - `Await { value_name }` → `Read(name) → Place::Await`.
 
-use bonsai_common::{FuncId, Precision, Span};
+use bonsai_common::{FuncId, Span};
 use bonsai_factstore::{StrId, StringPoolBuilder};
 use bonsai_lang_api::{
     call_argument_value_fact, call_receiver_fact_for_span, kit::SYNTHETIC_TUPLE_RESULT_PREFIX,
@@ -144,7 +144,7 @@ pub struct TransferOptions {
     pub symbolic_field_languages: Vec<String>,
     /// When a call result cannot be resolved to a workspace body,
     /// conservatively carry its explicit arguments (and a syntax-classified
-    /// method receiver) into the result at narrowed precision. This name-
+    /// method receiver) into the result as resolved evidence. This name-
     /// agnostic unknown-code summary is independent of exact receiver-state
     /// mutation compatibility below.
     pub include_unresolved_call_result_passthrough: bool,
@@ -946,7 +946,7 @@ pub struct CallSiteRef {
     pub site: CallSiteId,
     /// Callee name as the adapter saw it. Phase 3 resolves this
     /// against the workspace `ResolvedCallGraph` to a list of
-    /// candidate `FuncId`s with their precision.
+    /// candidate `FuncId`s.
     pub callee_name: String,
     /// Adapter rendering of the receiver for resolution and diagnostics.
     /// Value-flow lowering uses `receiver_storage_base`, which comes from
@@ -1515,13 +1515,12 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
         let param_node = ctx.intern_node(Place::Param { idx: param_idx });
         let entry_write = ctx.write_node(param_name, decl.name_span);
         ctx.commit_writer(param_name, entry_write);
-        // Param(idx) → Write(param_name, entry_span). Precision::Exact:
-        // parameter binding is a structural language guarantee.
+        // Param(idx) → Write(param_name, entry_span): parameter binding is
+        // a structural language guarantee.
         ctx.emit(IdgEdge {
             from: param_node,
             to: entry_write,
             meta: crate::edge::EdgeMeta {
-                precision: Precision::Exact,
                 kind: IdgEdgeKind::IntraAssign,
                 call_kind: bonsai_callgraph::EdgeKind::Direct,
                 via_span: decl.name_span,
@@ -1986,7 +1985,6 @@ fn emit_receiver_field_writes(decl: &Decl, ctx: &mut TransferCtx<'_>) {
         }
         let (write_node, is_field_write) = build_target_node(target, write.span, ctx);
         let edge_meta = crate::edge::EdgeMeta {
-            precision: Precision::Exact,
             kind: if is_field_write {
                 IdgEdgeKind::IntraFieldWrite
             } else {
@@ -2068,7 +2066,6 @@ fn bridge_compound_expression_calls(ctx: &mut TransferCtx<'_>) {
                     from: inner.call_ret_node,
                     to: outer_arg_node,
                     meta: crate::edge::EdgeMeta {
-                        precision: Precision::Narrowed,
                         kind: IdgEdgeKind::IntraRead,
                         call_kind: bonsai_callgraph::EdgeKind::Direct,
                         via_span: inner_site_span,
@@ -3323,7 +3320,6 @@ fn walk_event(
         FlowEvent::Return { span, value_flow, .. } => {
             let return_node = ctx.intern_node(Place::Return);
             let return_meta = crate::edge::EdgeMeta {
-                precision: Precision::Exact,
                 kind: IdgEdgeKind::IntraReturn,
                 call_kind: bonsai_callgraph::EdgeKind::Direct,
                 via_span: *span,
@@ -3515,7 +3511,6 @@ fn walk_event(
         FlowEvent::Defer { span: _, body } | FlowEvent::Using { span: _, body } => walk_events(body, ctx),
         FlowEvent::Yield { span, value_flow, .. } => {
             let yield_meta = crate::edge::EdgeMeta {
-                precision: Precision::Exact,
                 kind: IdgEdgeKind::IntraYield,
                 call_kind: bonsai_callgraph::EdgeKind::Direct,
                 via_span: *span,
@@ -3542,7 +3537,6 @@ fn walk_event(
                         name,
                         to,
                         crate::edge::EdgeMeta {
-                            precision: Precision::Exact,
                             kind: IdgEdgeKind::IntraAwait,
                             call_kind: bonsai_callgraph::EdgeKind::Direct,
                             via_span: *span,
@@ -3607,7 +3601,6 @@ fn is_compiled_source_callback_binding(
 /// pass must first prove their field identity from a parsed type layout.
 fn emit_local_expression_aggregate(base: &str, flow: &ExpressionFlow, span: Span, ctx: &mut TransferCtx<'_>) {
     let field_meta = crate::edge::EdgeMeta {
-        precision: Precision::Exact,
         kind: IdgEdgeKind::IntraFieldWrite,
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         via_span: span,
@@ -3659,7 +3652,6 @@ fn emit_expression_aggregate(
     }
 
     let field_meta = crate::edge::EdgeMeta {
-        precision: Precision::Exact,
         kind: IdgEdgeKind::IntraFieldWrite,
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         via_span: span,
@@ -3794,7 +3786,6 @@ fn emit_spread_field_copies_to_special_base(
     copies.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
 
     let meta = crate::edge::EdgeMeta {
-        precision: Precision::Exact,
         kind: IdgEdgeKind::IntraFieldWrite,
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         via_span: span,
@@ -4288,7 +4279,6 @@ fn walk_assign(
     }
 
     let edge_meta = crate::edge::EdgeMeta {
-        precision: Precision::Exact,
         kind: assign_kind,
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         via_span: span,
@@ -4413,7 +4403,6 @@ fn walk_assign(
                         arg,
                         arg_node,
                         crate::edge::EdgeMeta {
-                            precision: Precision::Exact,
                             kind: IdgEdgeKind::IntraRead,
                             call_kind: bonsai_callgraph::EdgeKind::Direct,
                             via_span: span,
@@ -4477,7 +4466,6 @@ fn walk_assign(
                 if let Some((_, receiver_flow)) = indexed_source_call_receiver {
                     let receiver_node = ctx.intern_node(Place::CallArg { site, idx: u32::MAX });
                     let receiver_meta = crate::edge::EdgeMeta {
-                        precision: Precision::Exact,
                         kind: IdgEdgeKind::IntraRead,
                         call_kind: bonsai_callgraph::EdgeKind::Direct,
                         via_span: site_span,
@@ -4561,7 +4549,6 @@ fn walk_assign(
                 target,
                 receiver_arg,
                 crate::edge::EdgeMeta {
-                    precision: Precision::Exact,
                     kind: IdgEdgeKind::IntraRead,
                     call_kind: bonsai_callgraph::EdgeKind::Direct,
                     via_span: hint.site_span,
@@ -4591,7 +4578,6 @@ fn apply_receiver_state_propagation_write(
     };
     let receiver_write = ctx.write_node(receiver, span);
     let meta = crate::edge::EdgeMeta {
-        precision: Precision::Narrowed,
         kind: IdgEdgeKind::IntraAssign,
         call_kind: bonsai_callgraph::EdgeKind::Unknown,
         via_span: span,
@@ -4788,7 +4774,6 @@ fn walk_call(
                 from: inner_ret,
                 to: result_write,
                 meta: crate::edge::EdgeMeta {
-                    precision: Precision::Exact,
                     kind: IdgEdgeKind::IntraAssign,
                     call_kind: bonsai_callgraph::EdgeKind::Direct,
                     via_span: arg.span,
@@ -4817,7 +4802,6 @@ fn walk_call(
         // gives the IDG closure parity with the engine's name-based
         // propagation.
         let arg_meta = crate::edge::EdgeMeta {
-            precision: Precision::Exact,
             kind: IdgEdgeKind::IntraRead,
             call_kind: bonsai_callgraph::EdgeKind::Direct,
             // The call event span identifies the callee syntax, while a
@@ -4877,7 +4861,6 @@ fn walk_call(
                 from: inner_ret,
                 to: arg_node,
                 meta: crate::edge::EdgeMeta {
-                    precision: Precision::Exact,
                     kind: IdgEdgeKind::IntraAssign,
                     call_kind: bonsai_callgraph::EdgeKind::Direct,
                     via_span: arg.span,
@@ -4929,7 +4912,6 @@ fn walk_call(
                 1,
                 write_node,
                 crate::edge::EdgeMeta {
-                    precision: Precision::Exact,
                     kind: IdgEdgeKind::IntraAssign,
                     call_kind: bonsai_callgraph::EdgeKind::Direct,
                     via_span: span,
@@ -4947,7 +4929,6 @@ fn walk_call(
     // nesting, and sink arguments share the same operand -> result dataflow.
     if matches!(call_kind, CallKind::Operator | CallKind::IndexWrite) {
         let meta = crate::edge::EdgeMeta {
-            precision: Precision::Exact,
             kind: IdgEdgeKind::IntraAssign,
             call_kind: bonsai_callgraph::EdgeKind::Direct,
             via_span: span,
@@ -4987,7 +4968,6 @@ fn walk_call(
             && (receiver_flow.is_some() || receiver.is_some_and(|recv| !recv.is_empty()))
         {
             let recv_meta = crate::edge::EdgeMeta {
-                precision: Precision::Exact,
                 kind: IdgEdgeKind::IntraRead,
                 call_kind: bonsai_callgraph::EdgeKind::Direct,
                 via_span: span,
@@ -5179,7 +5159,6 @@ fn apply_call_result_passthrough_edges(
         return;
     }
     let meta = crate::edge::EdgeMeta {
-        precision: Precision::Narrowed,
         kind: IdgEdgeKind::IntraAssign,
         call_kind: bonsai_callgraph::EdgeKind::Unknown,
         via_span: span,
@@ -5236,7 +5215,6 @@ fn apply_yield_callback_call(
     }
     let yield_node = ctx.intern_node(Place::Yield);
     let meta = crate::edge::EdgeMeta {
-        precision: Precision::Exact,
         kind: IdgEdgeKind::IntraYield,
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         via_span: span,
@@ -5335,7 +5313,6 @@ fn apply_output_arg_flow_call(
         }
         let (write_node, _) = build_target_node(output, span, ctx);
         let meta = crate::edge::EdgeMeta {
-            precision: Precision::Narrowed,
             kind: IdgEdgeKind::IntraAssign,
             call_kind: bonsai_callgraph::EdgeKind::Unknown,
             via_span: span,
@@ -5404,7 +5381,6 @@ fn apply_receiver_state_propagation_call(
     }
     let (write_node, _) = build_target_node(receiver, span, ctx);
     let meta = crate::edge::EdgeMeta {
-        precision: Precision::Narrowed,
         kind: IdgEdgeKind::IntraAssign,
         call_kind: bonsai_callgraph::EdgeKind::Unknown,
         via_span: span,
@@ -5471,7 +5447,6 @@ fn apply_inline_source_callback_param_bindings(
                 from: call_ret_node,
                 to: binding,
                 meta: crate::edge::EdgeMeta {
-                    precision: Precision::Exact,
                     kind: IdgEdgeKind::InterSourceCallback,
                     call_kind: bonsai_callgraph::EdgeKind::Direct,
                     via_span: span,
@@ -5519,7 +5494,6 @@ fn apply_clean_output_overwrite_call(
     }
     let (write_node, _) = build_target_node(output, span, ctx);
     let meta = crate::edge::EdgeMeta {
-        precision: Precision::Exact,
         kind: IdgEdgeKind::IntraAssign,
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         via_span: span,
@@ -5832,7 +5806,6 @@ fn walk_throw(span: Span, value_name: Option<&str>, thrown_type: Option<&str>, c
                 name,
                 throw_node,
                 crate::edge::EdgeMeta {
-                    precision: Precision::Exact,
                     kind: IdgEdgeKind::IntraThrow,
                     call_kind: bonsai_callgraph::EdgeKind::Direct,
                     via_span: span,
@@ -6090,12 +6063,11 @@ fn bind_catch_arm(
         });
 
         for throw in body_throws {
-            if let Some(precision) = thrown_type_catch_precision(throw.thrown_type, catch_ty) {
+            if thrown_type_reaches_catch(throw.thrown_type, catch_ty) {
                 ctx.emit(IdgEdge {
                     from: throw.throw_node,
                     to: catch_node,
                     meta: crate::edge::EdgeMeta {
-                        precision,
                         kind: IdgEdgeKind::IntraThrow,
                         call_kind: bonsai_callgraph::EdgeKind::Direct,
                         via_span: throw.span,
@@ -6112,7 +6084,6 @@ fn bind_catch_arm(
                     from: catch_node,
                     to: bind_target,
                     meta: crate::edge::EdgeMeta {
-                        precision: Precision::Exact,
                         kind: IdgEdgeKind::IntraAssign,
                         call_kind: bonsai_callgraph::EdgeKind::Direct,
                         // The write node retains the exact handler-arm span.
@@ -6141,7 +6112,6 @@ fn bind_catch_arm(
                 from: throw.throw_node,
                 to: catch_node,
                 meta: crate::edge::EdgeMeta {
-                    precision: Precision::Exact,
                     kind: IdgEdgeKind::IntraThrow,
                     call_kind: bonsai_callgraph::EdgeKind::Direct,
                     via_span: throw.span,
@@ -6156,7 +6126,6 @@ fn bind_catch_arm(
                     from: catch_node,
                     to: bind_target,
                     meta: crate::edge::EdgeMeta {
-                        precision: Precision::Exact,
                         kind: IdgEdgeKind::IntraAssign,
                         call_kind: bonsai_callgraph::EdgeKind::Direct,
                         via_span: try_span,
@@ -6238,7 +6207,6 @@ fn bridge_call_args_inside_throw(
                         arg,
                         argument,
                         crate::edge::EdgeMeta {
-                            precision: Precision::Exact,
                             kind: IdgEdgeKind::IntraRead,
                             call_kind: bonsai_callgraph::EdgeKind::Direct,
                             via_span: arg.span,
@@ -6250,7 +6218,6 @@ fn bridge_call_args_inside_throw(
                         index,
                         throw_node,
                         crate::edge::EdgeMeta {
-                            precision: Precision::Exact,
                             kind: IdgEdgeKind::IntraThrow,
                             call_kind: bonsai_callgraph::EdgeKind::Direct,
                             via_span: throw_span,
@@ -6295,15 +6262,15 @@ fn bridge_call_args_inside_throw(
     }
 }
 
-fn thrown_type_catch_precision(thrown_type: Option<TypeId>, catch_ty: TypeId) -> Option<Precision> {
+fn thrown_type_reaches_catch(thrown_type: Option<TypeId>, catch_ty: TypeId) -> bool {
     match thrown_type {
-        Some(thrown) if thrown == catch_ty => Some(Precision::Exact),
+        Some(thrown) if thrown == catch_ty => true,
         // Distinct syntax types are not assignable merely because both are
         // exception-shaped names. The workspace pass consults declared base
         // types and adds a precise subtype edge when the AST hierarchy proves
-        // it. An untyped throw remains conservative.
-        Some(_) => None,
-        None => Some(Precision::Narrowed),
+        // it. An untyped throw remains conservative and reaches the catch.
+        Some(_) => false,
+        None => true,
     }
 }
 

@@ -318,7 +318,6 @@ impl<'a> ChainCache<'a> {
         let out: Vec<FuncId> = self
             .resolved_graph()
             .callees_of(func)
-            .filter(|edge| edge.precision.is_semantic())
             .map(|edge| edge.to)
             .collect();
         if !self.disabled {

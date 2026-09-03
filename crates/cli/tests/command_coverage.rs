@@ -160,7 +160,11 @@ fn output_path_writes_selected_json_format_and_leaves_stdout_empty() {
     );
     let written = std::fs::read_to_string(&out_path).expect("read output file");
     let parsed: serde_json::Value = serde_json::from_str(&written).expect("output file JSON");
-    assert!(parsed.as_array().is_some_and(|rows| !rows.is_empty()));
+    assert!(
+        parsed["rows"].as_array().is_some_and(|rows| !rows.is_empty()),
+        "output file must carry the canonical rows envelope: {parsed}"
+    );
+    assert_eq!(parsed["analysis_complete"], true, "{parsed}");
     let _ = std::fs::remove_file(out_path);
 }
 
@@ -244,7 +248,7 @@ fn export_output_path_streams_native_json() {
 }
 
 #[test]
-fn html_output_is_a_complete_themed_report_without_extra_analysis() {
+fn html_output_is_rendered_from_the_canonical_defs_result() {
     let Some(bin) = bin_path() else {
         return;
     };
@@ -256,8 +260,6 @@ fn html_output_is_a_complete_themed_report_without_extra_analysis() {
             ws.to_str().unwrap(),
             "--html-output",
             out_path.to_str().unwrap(),
-            "--theme",
-            "moss",
             "--no-progress",
         ])
         .env("COLUMNS", "200")
@@ -277,10 +279,11 @@ fn html_output_is_a_complete_themed_report_without_extra_analysis() {
     let written = std::fs::read_to_string(&out_path).expect("read HTML output file");
     for required in [
         "<!doctype html>",
-        "<title>bonsai-ninja report</title>",
-        "Moss theme",
+        "<title>bonsai-ninja defs</title>",
         "verify_token",
-        "</pre></main>",
+        "handle_request",
+        "<table>",
+        "analysis complete",
         "</body></html>",
     ] {
         assert_contains(&written, required, "defs --html-output");
@@ -288,6 +291,10 @@ fn html_output_is_a_complete_themed_report_without_extra_analysis() {
     assert!(
         !written.contains("\u{1b}["),
         "HTML output must not contain terminal ANSI escapes"
+    );
+    assert!(
+        !written.contains("</pre></main>"),
+        "HTML output must be rendered from the canonical result, not an escaped transcript"
     );
     let _ = std::fs::remove_file(out_path);
 }
@@ -297,7 +304,7 @@ fn html_output_is_a_complete_themed_report_without_extra_analysis() {
 #[test]
 fn one_shot_index_reports_every_file_without_retaining_local_ir() {
     let ws = ws();
-    let Some(out) = run(&["index", ws.to_str().unwrap()]) else {
+    let Some(out) = run(&["index", ws.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
     let stats: serde_json::Value = serde_json::from_str(&out).expect("one-shot index output must be JSON");
@@ -318,7 +325,7 @@ fn one_shot_index_reports_every_file_without_retaining_local_ir() {
 #[test]
 fn diagnostics_exits_clean_with_no_errors() {
     let ws = ws();
-    let Some(out) = run(&["diagnostics", ws.to_str().unwrap()]) else {
+    let Some(out) = run(&["diagnostics", ws.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
     // python micro is a clean fixture — every file parses.
@@ -372,7 +379,9 @@ fn defs_json_output_parses_and_has_fields() {
     };
     let v: serde_json::Value =
         serde_json::from_str(&out).unwrap_or_else(|e| panic!("defs json invalid: {e}\n{out}"));
-    let arr = v.as_array().expect("defs json is array");
+    assert_eq!(v["analysis_complete"], true, "{v}");
+    assert_eq!(v["result_complete"], true, "{v}");
+    let arr = v["rows"].as_array().expect("defs json rows");
     assert_eq!(arr.len(), 6, "expected 6 defs, got {}", arr.len());
     for item in arr {
         for field in &["name", "kind", "file", "line", "column"] {
@@ -403,7 +412,8 @@ fn entrypoints_json_output_parses_and_has_fields() {
     };
     let v: serde_json::Value =
         serde_json::from_str(&out).unwrap_or_else(|e| panic!("entrypoints json invalid: {e}\n{out}"));
-    let arr = v.as_array().expect("entrypoints json is array");
+    assert_eq!(v["analysis_complete"], true, "{v}");
+    let arr = v["rows"].as_array().expect("entrypoints json rows");
     assert!(
         arr.iter()
             .any(|item| item.get("name").and_then(|v| v.as_str()) == Some("handle_request")),
@@ -745,13 +755,7 @@ fn slice_resolves_an_unambiguous_symbol_without_line() {
 
 #[test]
 fn inspect_verify_token_finds_decl_and_direct_evidence() {
-    let Some(out) = run(&[
-        "inspect",
-        ws().to_str().unwrap(),
-        "--query",
-        "verify_token",
-        "--graph-flow",
-    ]) else {
+    let Some(out) = run(&["inspect", ws().to_str().unwrap(), "--query", "verify_token"]) else {
         return;
     };
     assert_contains(&out, "decl hit(s)", "inspect verify_token");
@@ -780,7 +784,13 @@ fn inspect_reports_uncapped_total() {
 
 #[test]
 fn dump_hir_verify_token_renders_flow_events() {
-    let Some(out) = run(&["dump-hir", ws().to_str().unwrap(), "verify_token"]) else {
+    let Some(out) = run(&[
+        "dump-hir",
+        ws().to_str().unwrap(),
+        "verify_token",
+        "--format",
+        "json",
+    ]) else {
         return;
     };
     assert_contains(&out, "\"name\": \"verify_token\"", "dump-hir");
@@ -792,7 +802,13 @@ fn dump_hir_verify_token_renders_flow_events() {
 
 #[test]
 fn dump_cfg_verify_token_shows_blocks() {
-    let Some(out) = run(&["dump-cfg", ws().to_str().unwrap(), "verify_token"]) else {
+    let Some(out) = run(&[
+        "dump-cfg",
+        ws().to_str().unwrap(),
+        "verify_token",
+        "--format",
+        "json",
+    ]) else {
         return;
     };
     assert_contains(&out, "\"function\": \"verify_token\"", "dump-cfg");
@@ -821,12 +837,18 @@ fn dump_callgraph_lists_all_functions() {
 // -------- dump-edges --------
 
 #[test]
-fn dump_edges_renders_edge_ids_and_precision() {
+fn dump_edges_renders_edge_ids_and_evidence() {
     let Some(out) = run(&["dump-edges", ws().to_str().unwrap()]) else {
         return;
     };
     assert_contains(&out, "E:", "dump-edges");
-    assert_contains(&out, "narrowed", "dump-edges");
+    // One compiler graph: edges show how the resolver proved the target,
+    // never an accuracy mode.
+    assert_contains(&out, "exact_symbol", "dump-edges");
+    assert!(
+        !out.contains("narrowed") && !out.contains("precision"),
+        "dump-edges text must not present exact/narrowed modes: {out}"
+    );
     // The three intra-workspace edges: handle_request → get_user,
     // handle_request → update_user, update_user → verify_token,
     // get_user → verify_token, update_user → run_admin_command.
@@ -845,20 +867,15 @@ fn dump_edges_renders_edge_ids_and_precision() {
 }
 
 #[test]
-fn dump_edges_rejects_broad_precision() {
-    let Some((_stdout, stderr)) = run_fail(&[
-        "dump-edges",
-        ws().to_str().unwrap(),
-        "--precision",
-        "over-approximate",
-    ]) else {
+fn dump_edges_has_no_precision_mode_switch() {
+    let Some((_stdout, stderr)) =
+        run_fail(&["dump-edges", ws().to_str().unwrap(), "--precision", "narrowed"])
+    else {
         return;
     };
     assert!(
-        stderr.contains("invalid value")
-            && stderr.contains("exact")
-            && stderr.contains("narrowed"),
-        "dump-edges should reject broad precision in clap and list the complete semantic precision surface:\n{stderr}"
+        stderr.contains("unexpected argument '--precision'"),
+        "dump-edges must reject a precision mode switch at the parser:\n{stderr}"
     );
 }
 
@@ -875,8 +892,9 @@ fn dump_resolution_reports_per_file_call_coverage() {
     ]) else {
         return;
     };
-    let rows: serde_json::Value = serde_json::from_str(&out).expect("dump-resolution JSON");
-    let rows = rows.as_array().expect("dump-resolution rows");
+    let envelope: serde_json::Value = serde_json::from_str(&out).expect("dump-resolution JSON");
+    assert_eq!(envelope["result_complete"], true, "{envelope}");
+    let rows = envelope["rows"].as_array().expect("dump-resolution rows");
     assert!(!rows.is_empty(), "dump-resolution returned no rows:\n{out}");
     let gateway = rows
         .iter()

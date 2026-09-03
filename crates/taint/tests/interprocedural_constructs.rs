@@ -1840,18 +1840,12 @@ fn java_language_gauntlet_record_field_reaches_execute_without_tainting_siblings
         .flat_map(|file| global.functions_in(file))
         .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw()))
         .collect::<ahash::AHashSet<_>>();
-    let relevance = idg.target_relevance_within_funcs_with_max_precision(
-        &sink_nodes,
-        None,
-        &lineage_funcs,
-        Some(bonsai_common::Precision::Narrowed),
-    );
-    let targeted = idg.forward_closure_evidence_rooted_at_func_within_funcs_and_relevance_with_max_precision(
+    let relevance = idg.target_relevance_within_funcs(&sink_nodes, None, &lineage_funcs);
+    let targeted = idg.forward_closure_evidence_rooted_at_func_within_funcs_and_relevance(
         &anchored_nodes,
         handle,
         &lineage_funcs,
         Some(&relevance),
-        Some(bonsai_common::Precision::Narrowed),
     );
     assert!(
         targeted.nodes.iter().any(|node| sink_nodes.contains(node)),

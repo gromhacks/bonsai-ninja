@@ -203,7 +203,6 @@ pub fn paths(ws: &Workspace, filters: &PathFilters<'_>) -> Result<PathOutcome, r
         .inner()
         .edges
         .iter()
-        .filter(|edge| edge.precision.is_semantic())
         .filter_map(|edge| {
             let row = edge_record_from_graph_nodes(ws, &path_graph.graph, edge);
             if row.is_none() {
@@ -461,8 +460,7 @@ fn semantic_path_graph(
     let mut idg_semantic_edges = 0usize;
     if let Some(idg) = warmed_idg {
         idg_available = true;
-        for edge in idg.semantic_cross_call_edges_with_max_precision(Some(bonsai_common::Precision::Narrowed))
-        {
+        for edge in idg.semantic_cross_call_edges() {
             if !idg_cross_call_is_structural_path_edge(edge) {
                 continue;
             }
@@ -478,7 +476,7 @@ fn semantic_path_graph(
         base.callable_argument_records().to_vec(),
         base.unresolved_workspace_site_records().to_vec(),
     )
-    .between(starts, targets, Some(bonsai_common::Precision::Narrowed));
+    .between(starts, targets);
     SemanticPathGraph {
         graph,
         backends,
@@ -488,9 +486,7 @@ fn semantic_path_graph(
 }
 
 fn idg_cross_call_is_structural_path_edge(edge: CrossCallEdge) -> bool {
-    edge.relation.is_renderable_call()
-        && edge.precision.is_semantic()
-        && (edge.arg_idx != u32::MAX || edge.param_idx != u32::MAX)
+    edge.relation.is_renderable_call() && (edge.arg_idx != u32::MAX || edge.param_idx != u32::MAX)
 }
 
 fn call_edge_from_idg_cross_call(edge: CrossCallEdge) -> CallEdge {
@@ -512,7 +508,6 @@ fn call_edge_from_idg_cross_call(edge: CrossCallEdge) -> CallEdge {
         to: edge.callee,
         span: edge.call_span,
         kind: edge.call_kind,
-        precision: edge.precision,
         provenance: EdgeProvenance::new("idg_cross_call", evidence, 88),
     }
 }
@@ -548,7 +543,7 @@ fn finalize_outcome(
 mod tests {
     use super::*;
     use bonsai_callgraph::EdgeKind;
-    use bonsai_common::{FileId, Precision, Span};
+    use bonsai_common::{FileId, Span};
 
     fn cross_call(arg_idx: u32, param_idx: u32) -> CrossCallEdge {
         CrossCallEdge {
@@ -557,7 +552,6 @@ mod tests {
             call_span: Span::new(FileId::new(1), 10, 20),
             arg_idx,
             param_idx,
-            precision: Precision::Narrowed,
             call_kind: EdgeKind::Direct,
             relation: bonsai_idg::CrossCallRelation::Argument,
         }
@@ -762,9 +756,5 @@ mod tests {
             u32::MAX,
             u32::MAX
         )));
-
-        let mut over = cross_call(0, 0);
-        over.precision = Precision::OverApproximate;
-        assert!(!idg_cross_call_is_structural_path_edge(over));
     }
 }

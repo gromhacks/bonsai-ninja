@@ -843,7 +843,7 @@ fn dependency_target_keys_by_language(pack: &Rulepack) -> AHashMap<String, AHash
     out
 }
 
-fn import_package_candidates(
+pub(crate) fn import_package_candidates(
     imported: &str,
     semantics: &crate::loader::PackageMatchSemantics,
 ) -> Vec<String> {

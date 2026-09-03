@@ -12,7 +12,7 @@ pub use state::{Constraint, ExecState, Frame, RelationOp, RelationTerm, ValueRel
 pub use value::{AbstractValue, BoolDomain, IntRange, Nullness};
 
 use bonsai_cfg::{Cfg, Terminator};
-use bonsai_common::{BasicBlockId, FuncId, Precision, Span, TraceStepId};
+use bonsai_common::{BasicBlockId, FuncId, Span, TraceStepId};
 use bonsai_lang_api::{assignment_trace_message, FlowEvent};
 use serde::{Deserialize, Serialize};
 
@@ -68,7 +68,6 @@ pub struct RawStep {
     pub kind: StepKind,
     pub span: Span,
     pub func: FuncId,
-    pub precision: Precision,
     pub message: String,
 }
 
@@ -156,7 +155,6 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
     let emit = |kind: StepKind,
                 path_id: u32,
                 span: Span,
-                precision: Precision,
                 message: String,
                 trace: &mut RawTrace,
                 next_step: &mut u32| {
@@ -170,7 +168,6 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
             kind,
             span,
             func,
-            precision,
             message,
         });
         *next_step += 1;
@@ -182,7 +179,6 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
         1,
         cfg.block(cfg.entry)
             .map_or(Span::new(bonsai_common::FileId::INVALID, 0, 0), |b| b.span),
-        Precision::Exact,
         format!("enter {}", func),
         &mut trace,
         &mut next_step,
@@ -214,7 +210,6 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
                     StepKind::Merge,
                     path_id,
                     block.span,
-                    Precision::Narrowed,
                     "merge abstract state".into(),
                     &mut trace,
                     &mut next_step,
@@ -228,12 +223,11 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
 
         for event in &block.events {
             apply_event(&mut state, event);
-            let (kind, precision, message) = classify_event(event);
+            let (kind, message) = classify_event(event);
             if !emit(
                 kind,
                 path_id,
                 flow_event_span(event),
-                precision,
                 message,
                 &mut trace,
                 &mut next_step,
@@ -284,7 +278,6 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
                     StepKind::BranchSplit,
                     path_id,
                     block.span,
-                    Precision::Exact,
                     "branch".into(),
                     &mut trace,
                     &mut next_step,
@@ -424,16 +417,13 @@ fn value_from_text(state: &ExecState, raw: &str) -> AbstractValue {
 
 /// Map a [`FlowEvent`] variant onto the interpreter's step vocabulary.
 ///
-/// Precision defaults to semantic facts only. Concrete events are
-/// `Exact`; CFG-level joins that merge multiple feasible states are
-/// `Narrowed`.
 /// Branch / Loop / Try events are handled by the CFG builder and
 /// never appear in a block's `events`; the catch-all renders them as
 /// a `Diagnostic` so the interpreter still advances if one slips
 /// through.
-fn classify_event(event: &FlowEvent) -> (StepKind, Precision, String) {
+fn classify_event(event: &FlowEvent) -> (StepKind, String) {
     match event {
-        FlowEvent::Call { name, .. } => (StepKind::Call, Precision::Exact, format!("call {name}")),
+        FlowEvent::Call { name, .. } => (StepKind::Call, format!("call {name}")),
         FlowEvent::Assign {
             target,
             source_name,
@@ -443,7 +433,6 @@ fn classify_event(event: &FlowEvent) -> (StepKind, Precision, String) {
             ..
         } => (
             StepKind::Assign,
-            Precision::Exact,
             assignment_trace_message(
                 "assign",
                 target,
@@ -453,25 +442,22 @@ fn classify_event(event: &FlowEvent) -> (StepKind, Precision, String) {
                 source_names,
             ),
         ),
-        FlowEvent::Return { .. } => (StepKind::Return, Precision::Exact, "return".into()),
-        FlowEvent::Throw { .. } => (StepKind::Throw, Precision::Exact, "throw".into()),
-        FlowEvent::Await { .. } => (StepKind::Await, Precision::Exact, "await".into()),
+        FlowEvent::Return { .. } => (StepKind::Return, "return".into()),
+        FlowEvent::Throw { .. } => (StepKind::Throw, "throw".into()),
+        FlowEvent::Await { .. } => (StepKind::Await, "await".into()),
         FlowEvent::Yield { value_text, .. } => (
             StepKind::Yield,
-            Precision::Exact,
             match value_text {
                 Some(text) => format!("yield {text}"),
                 None => "yield".to_string(),
             },
         ),
-        FlowEvent::Break { .. } => (StepKind::Diagnostic, Precision::Exact, "break".into()),
-        FlowEvent::Continue { .. } => (StepKind::Diagnostic, Precision::Exact, "continue".into()),
-        FlowEvent::Lifecycle { name, transition, .. } => (
-            StepKind::Lifecycle,
-            Precision::Exact,
-            format!("lifecycle {name} -> {transition}"),
-        ),
-        other => (StepKind::Diagnostic, Precision::Exact, format!("{other:?}")),
+        FlowEvent::Break { .. } => (StepKind::Diagnostic, "break".into()),
+        FlowEvent::Continue { .. } => (StepKind::Diagnostic, "continue".into()),
+        FlowEvent::Lifecycle { name, transition, .. } => {
+            (StepKind::Lifecycle, format!("lifecycle {name} -> {transition}"))
+        }
+        other => (StepKind::Diagnostic, format!("{other:?}")),
     }
 }
 

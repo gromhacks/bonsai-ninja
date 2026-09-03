@@ -4,14 +4,12 @@
 //! represents "the value at `from` flows to the position `to`."
 //! Every edge carries:
 //!
-//! - precision (Exact / Narrowed / OverApprox / Unknown), inherited
-//!   from the resolver that built it.
 //! - kind (intra-procedural assign, call-arg, return, throw/catch),
 //!   so renderers and queries can filter by edge type.
 //! - the originating source span (for path rendering).
 
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
-use bonsai_common::{Precision, Span};
+use bonsai_common::Span;
 use bonsai_lang_api::FlowEdgeKind;
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +37,7 @@ pub enum IdgEdgeKind {
     /// A throw event flowing into the function's `Place::Throw(ty)`.
     IntraThrow = 3,
     /// `caller.CallArg(site, i)` → `callee.Param(i)`. The actual
-    /// call-edge precision (Direct / Virtual / etc.) lives on
+    /// call-edge classification (Direct / Virtual / etc.) lives on
     /// [`EdgeMeta::call_kind`].
     InterCallArg = 4,
     /// `callee.Return` → `caller.CallRet(site)`.
@@ -283,9 +281,6 @@ impl IdgEdgeKind {
 /// in the on-disk encoding.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EdgeMeta {
-    /// Precision floor for this edge. Conservatively computed at
-    /// build time — every consumer reads it as-is.
-    pub precision: Precision,
     /// Kind of program-level relationship.
     pub kind: IdgEdgeKind,
     /// Sub-classifier for inter-procedural edges. For intra edges
@@ -305,7 +300,7 @@ pub struct IdgEdge {
     pub from: NodeId,
     /// Destination node.
     pub to: NodeId,
-    /// Edge metadata (precision, kind, call sub-kind, source span).
+    /// Edge metadata (kind, call sub-kind, source span).
     pub meta: EdgeMeta,
 }
 
@@ -316,15 +311,13 @@ impl IdgEdge {
         Self { from, to, meta }
     }
 
-    /// Construct an intra-procedural assignment edge with `Exact`
-    /// precision.
+    /// Construct an intra-procedural assignment edge.
     #[must_use]
     pub const fn intra_assign(from: NodeId, to: NodeId, span: Span) -> Self {
         Self {
             from,
             to,
             meta: EdgeMeta {
-                precision: Precision::Exact,
                 kind: IdgEdgeKind::IntraAssign,
                 call_kind: CallEdgeKind::Direct,
                 via_span: span,
@@ -332,22 +325,14 @@ impl IdgEdge {
         }
     }
 
-    /// Construct an inter-procedural call-arg edge with the given
-    /// precision (typically inherited from the resolver) and call
+    /// Construct an inter-procedural call-arg edge with the given call
     /// sub-kind (Direct / Virtual / Indirect / Unknown).
     #[must_use]
-    pub const fn inter_call_arg(
-        from: NodeId,
-        to: NodeId,
-        span: Span,
-        precision: Precision,
-        call_kind: CallEdgeKind,
-    ) -> Self {
+    pub const fn inter_call_arg(from: NodeId, to: NodeId, span: Span, call_kind: CallEdgeKind) -> Self {
         Self {
             from,
             to,
             meta: EdgeMeta {
-                precision,
                 kind: IdgEdgeKind::InterCallArg,
                 call_kind,
                 via_span: span,
@@ -363,14 +348,12 @@ impl IdgEdge {
         from: NodeId,
         to: NodeId,
         span: Span,
-        precision: Precision,
         call_kind: CallEdgeKind,
     ) -> Self {
         Self {
             from,
             to,
             meta: EdgeMeta {
-                precision,
                 kind: IdgEdgeKind::InterSourceCallback,
                 call_kind,
                 via_span: span,
@@ -380,18 +363,11 @@ impl IdgEdge {
 
     /// Construct an inter-procedural return edge.
     #[must_use]
-    pub const fn inter_return(
-        from: NodeId,
-        to: NodeId,
-        span: Span,
-        precision: Precision,
-        call_kind: CallEdgeKind,
-    ) -> Self {
+    pub const fn inter_return(from: NodeId, to: NodeId, span: Span, call_kind: CallEdgeKind) -> Self {
         Self {
             from,
             to,
             meta: EdgeMeta {
-                precision,
                 kind: IdgEdgeKind::InterReturn,
                 call_kind,
                 via_span: span,
@@ -401,18 +377,11 @@ impl IdgEdge {
 
     /// Construct an inter-procedural yield-to-consumer edge.
     #[must_use]
-    pub const fn inter_yield(
-        from: NodeId,
-        to: NodeId,
-        span: Span,
-        precision: Precision,
-        call_kind: CallEdgeKind,
-    ) -> Self {
+    pub const fn inter_yield(from: NodeId, to: NodeId, span: Span, call_kind: CallEdgeKind) -> Self {
         Self {
             from,
             to,
             meta: EdgeMeta {
-                precision,
                 kind: IdgEdgeKind::InterYield,
                 call_kind,
                 via_span: span,

@@ -2,7 +2,7 @@ use super::*;
 use crate::IdgQueryService;
 use ahash::AHashMap;
 use bonsai_callgraph::{CallEdge, CallGraph, EdgeKind, EdgeProvenance, ResolvedCallGraph};
-use bonsai_common::{Precision, Span, SymbolId};
+use bonsai_common::{Span, SymbolId};
 use bonsai_lang_api::{Decl, DeclKind, FlowEvent, ModulePath, Visibility};
 
 struct TestCallGraphRelation {
@@ -310,7 +310,6 @@ fn resolved_graph(edges: impl IntoIterator<Item = (FuncId, FuncId, Span)>) -> Re
             to,
             span,
             kind: EdgeKind::Direct,
-            precision: Precision::Narrowed,
             provenance: EdgeProvenance::direct_symbol(),
         });
     }
@@ -989,7 +988,6 @@ fn nested_indirect_constructor_edge_does_not_replace_outer_class_call() {
         to: unrelated_ctor_id,
         span: arg_span,
         kind: EdgeKind::Indirect,
-        precision: Precision::Narrowed,
         provenance: EdgeProvenance::callable_value("nested callable argument"),
     });
     let ws = build(&idx, &ResolvedCallGraph::from_call_graph(cg));
@@ -1116,7 +1114,6 @@ fn higher_order_callback_binding_stays_in_same_directory_scope() {
             to,
             span: call_span,
             kind: EdgeKind::Direct,
-            precision: Precision::Narrowed,
             provenance: EdgeProvenance::direct_symbol(),
         });
         cg.add_edge(CallEdge {
@@ -1124,7 +1121,6 @@ fn higher_order_callback_binding_stays_in_same_directory_scope() {
             to: callback,
             span: callback_span,
             kind: EdgeKind::Indirect,
-            precision: Precision::Narrowed,
             provenance: EdgeProvenance::callable_value("argument resolved as callable reference"),
         });
     }
@@ -1227,7 +1223,6 @@ fn higher_order_callback_stitches_invocation_arg_to_bound_function_param() {
         to: run_cb_id,
         span: span(0, 20, 30),
         kind: EdgeKind::Direct,
-        precision: Precision::Narrowed,
         provenance: EdgeProvenance::direct_symbol(),
     });
     cg.add_edge(CallEdge {
@@ -1235,7 +1230,6 @@ fn higher_order_callback_stitches_invocation_arg_to_bound_function_param() {
         to: executor_id,
         span: span(0, 21, 29),
         kind: EdgeKind::Indirect,
-        precision: Precision::Narrowed,
         provenance: EdgeProvenance::callable_value("argument resolved as callable reference"),
     });
     let cg = ResolvedCallGraph::from_call_graph(cg);
@@ -1337,7 +1331,6 @@ fn local_callable_argument_carries_exact_capture_environment_through_higher_orde
             to: apply_id,
             span: span(0, 20, 35),
             kind: EdgeKind::Direct,
-            precision: Precision::Exact,
             provenance: EdgeProvenance::direct_symbol(),
         });
         // Production callgraphs also retain the exact callable-valued
@@ -1348,7 +1341,6 @@ fn local_callable_argument_carries_exact_capture_environment_through_higher_orde
             to: render_id,
             span: span(0, 27, 33),
             kind: EdgeKind::Indirect,
-            precision: Precision::Narrowed,
             provenance: EdgeProvenance::callable_value("argument resolved as callable reference"),
         });
         let relation = TestCallGraphRelation {
@@ -1399,7 +1391,6 @@ fn local_callable_argument_carries_exact_capture_environment_through_higher_orde
             to: apply_id,
             span: span(0, 20, 35),
             kind: EdgeKind::Direct,
-            precision: Precision::Exact,
             provenance: EdgeProvenance::direct_symbol(),
         });
         let no_binding = TestCallGraphRelation {
@@ -1431,7 +1422,6 @@ fn local_callable_argument_carries_exact_capture_environment_through_higher_orde
             to: alternate_render_id,
             span: span(0, 27, 33),
             kind: EdgeKind::Indirect,
-            precision: Precision::Narrowed,
             provenance: EdgeProvenance::callable_value("ambiguous callable argument"),
         });
         let ambiguous_binding = TestCallGraphRelation {

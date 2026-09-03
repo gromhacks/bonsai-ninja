@@ -10,7 +10,7 @@ use crate::CallEdge;
 #[cfg(test)]
 use crate::ResolvedCallGraph;
 #[cfg(test)]
-use bonsai_common::{FuncId, Precision};
+use bonsai_common::FuncId;
 #[cfg(test)]
 use std::cmp::Ordering;
 
@@ -24,7 +24,6 @@ use std::cmp::Ordering;
 pub struct ResolvedPath {
     pub funcs: Vec<FuncId>,
     pub edges: Vec<CallEdge>,
-    pub precision: Precision,
 }
 
 /// Why a bounded diagnostic path query may have returned fewer paths than
@@ -63,8 +62,8 @@ impl PathTruncation {
 ///
 /// This walks only `Exact` / `Narrowed` edges. It never widens an
 /// unresolved call into a guessed edge, and every result carries the
-/// weakest precision observed on the path. Results are ranked before
-/// returning by hop count, precision, and stable FuncId order.
+/// path. Results are ranked before returning by hop count and stable
+/// FuncId order.
 #[must_use]
 #[cfg(test)]
 pub fn enumerate_paths_resolved(
@@ -88,11 +87,7 @@ pub fn enumerate_paths_resolved(
     let mut reverse_work = vec![to];
     can_reach_target.insert(to);
     while let Some(callee) = reverse_work.pop() {
-        let mut callers: Vec<FuncId> = cg
-            .callers_of(callee)
-            .filter(|edge| edge.precision.is_semantic())
-            .map(|edge| edge.from)
-            .collect();
+        let mut callers: Vec<FuncId> = cg.callers_of(callee).map(|edge| edge.from).collect();
         callers.sort_unstable_by_key(|func| func.raw());
         callers.dedup();
         for caller in callers {
@@ -111,7 +106,6 @@ pub fn enumerate_paths_resolved(
         funcs: vec![from],
         edges: Vec::new(),
         seen: initial_seen,
-        precision: Precision::Exact,
         order: 0,
     });
     let mut next_order = 1usize;
@@ -137,7 +131,6 @@ pub fn enumerate_paths_resolved(
                 results.push(ResolvedPath {
                     funcs: state.funcs,
                     edges: state.edges,
-                    precision: state.precision,
                 });
             }
             continue;
@@ -151,7 +144,7 @@ pub fn enumerate_paths_resolved(
 
         let mut edges: Vec<&CallEdge> = cg
             .callees_of(current)
-            .filter(|edge| edge.precision.is_semantic() && can_reach_target.contains(&edge.to))
+            .filter(|edge| can_reach_target.contains(&edge.to))
             .collect();
         edges.sort_by_key(|edge| {
             (
@@ -160,7 +153,6 @@ pub fn enumerate_paths_resolved(
                 edge.span.start,
                 edge.span.end,
                 edge_kind_rank(edge.kind),
-                precision_rank(edge.precision),
             )
         });
         for edge in edges {
@@ -173,12 +165,10 @@ pub fn enumerate_paths_resolved(
             next_edges.push(edge.clone());
             let mut next_seen = state.seen.clone();
             next_seen.insert(edge.to);
-            let next_precision = state.precision.meet(edge.precision);
             queue.push(PathState {
                 funcs: next_funcs,
                 edges: next_edges,
                 seen: next_seen,
-                precision: next_precision,
                 order: next_order,
             });
             next_order = next_order.saturating_add(1);
@@ -189,7 +179,6 @@ pub fn enumerate_paths_resolved(
         a.edges
             .len()
             .cmp(&b.edges.len())
-            .then_with(|| precision_rank(a.precision).cmp(&precision_rank(b.precision)))
             .then_with(|| a.funcs.cmp(&b.funcs))
     });
     (results, truncation)
@@ -201,7 +190,6 @@ struct PathState {
     funcs: Vec<FuncId>,
     edges: Vec<CallEdge>,
     seen: ahash::AHashSet<FuncId>,
-    precision: Precision,
     order: usize,
 }
 
@@ -215,9 +203,7 @@ impl PathState {
 #[cfg(test)]
 impl PartialEq for PathState {
     fn eq(&self, other: &Self) -> bool {
-        self.hops() == other.hops()
-            && precision_rank(self.precision) == precision_rank(other.precision)
-            && self.order == other.order
+        self.hops() == other.hops() && self.order == other.order
     }
 }
 
@@ -237,7 +223,6 @@ impl Ord for PathState {
         other
             .hops()
             .cmp(&self.hops())
-            .then_with(|| precision_rank(other.precision).cmp(&precision_rank(self.precision)))
             .then_with(|| other.order.cmp(&self.order))
     }
 }
@@ -267,15 +252,5 @@ fn edge_kind_rank(kind: crate::EdgeKind) -> u8 {
         crate::EdgeKind::Virtual => 1,
         crate::EdgeKind::Indirect => 2,
         crate::EdgeKind::Unknown => 3,
-    }
-}
-
-#[cfg(test)]
-fn precision_rank(precision: Precision) -> u8 {
-    match precision {
-        Precision::Exact => 0,
-        Precision::Narrowed => 1,
-        Precision::OverApproximate => 2,
-        Precision::Unknown => 3,
     }
 }

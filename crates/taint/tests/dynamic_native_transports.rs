@@ -171,7 +171,7 @@ fn render(values: Vec<String>) -> Html<String> {
         .expect("Html call");
     let idg = ensure_idg_service(&db);
     let target_nodes = idg.nodes_at_span(entry, html_span);
-    let relevance = idg.target_relevance_with_max_precision(&target_nodes, None, None);
+    let relevance = idg.target_relevance(&target_nodes, None);
     let target_points = target_nodes
         .iter()
         .filter_map(|node| idg.resolve_point(*node))

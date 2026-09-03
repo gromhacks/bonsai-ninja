@@ -59,6 +59,26 @@ impl SecondaryFilter {
         !self.contains.is_empty() || !self.not_contains.is_empty()
     }
 
+    /// Stable view fingerprint for pagination/cursor identities. Secondary
+    /// filters never belong in an analysis key, but two differently filtered
+    /// views must not share page cursors.
+    pub(crate) fn signature(&self) -> u64 {
+        let mut hasher = bonsai_hash::Hasher::new();
+        for value in &self.contains {
+            hasher.absorb(b"contains");
+            hasher.absorb_separator();
+            hasher.absorb(value.as_bytes());
+            hasher.absorb_separator();
+        }
+        for value in &self.not_contains {
+            hasher.absorb(b"not-contains");
+            hasher.absorb_separator();
+            hasher.absorb(value.as_bytes());
+            hasher.absorb_separator();
+        }
+        hasher.finish()
+    }
+
     /// True when `haystack` (already the row's combined searchable
     /// text) satisfies every `--contains` and no `--not-contains`.
     pub(crate) fn matches_text(&self, haystack: &str) -> bool {

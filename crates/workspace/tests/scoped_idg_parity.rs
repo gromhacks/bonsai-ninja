@@ -204,20 +204,13 @@ fn file_function_scoped_idg_matches_complete_java_record_flow() {
             })
         })
         .collect();
-    let relevance = scoped.target_relevance_within_funcs_with_max_precision(
-        &sink_nodes,
-        None,
+    let relevance = scoped.target_relevance_within_funcs(&sink_nodes, None, &allowed);
+    let closure = scoped.forward_closure_evidence_rooted_at_func_within_funcs_and_relevance(
+        &seeds,
+        handle,
         &allowed,
-        Some(bonsai_common::Precision::Narrowed),
+        Some(&relevance),
     );
-    let closure = scoped
-        .forward_closure_evidence_rooted_at_func_within_funcs_and_relevance_with_max_precision(
-            &seeds,
-            handle,
-            &allowed,
-            Some(&relevance),
-            Some(bonsai_common::Precision::Narrowed),
-        );
     assert!(
         closure.nodes.iter().any(|node| sink_nodes.contains(node)),
         "scoped IDG must preserve the same compiler-proven Java record path as the complete graph; seeds={:?}; targets={:?}; closure={:?}",

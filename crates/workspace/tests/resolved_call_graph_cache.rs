@@ -158,8 +158,7 @@ fn source_reachable_summary_fixed_point_promotes_already_reached_callers() {
     let relay = func("relay");
     let outer = func("outer");
 
-    let reachable =
-        ws.source_reachable_resolved_call_graph(&[source], &[], Some(bonsai_common::Precision::Narrowed));
+    let reachable = ws.source_reachable_resolved_call_graph(&[source], &[]);
     assert!(
         reachable.funcs.contains(&relay),
         "ordinary forward edge reaches relay"
@@ -199,11 +198,7 @@ fn source_reachable_target_return_corridor_reaches_order_independent_fixed_point
     // The declarations deliberately put target2 -> target1 before
     // target1 -> source. A single insertion-order pass misses target2; the
     // compiler relation must converge independently of AST declaration order.
-    let reachable = ws.source_reachable_resolved_call_graph(
-        &[source],
-        &[target1, target2],
-        Some(bonsai_common::Precision::Narrowed),
-    );
+    let reachable = ws.source_reachable_resolved_call_graph(&[source], &[target1, target2]);
     assert!(reachable.funcs.contains(&target1));
     assert!(reachable.funcs.contains(&target2));
     assert_eq!(reachable.reached_targets, 2);
@@ -240,11 +235,7 @@ fn source_reachable_callback_forwarding_matches_cold_and_warm_compiler_graphs() 
         let entry = func("entry");
         let run = func("run");
         let executor = func("executor");
-        let reachable = workspace.source_reachable_resolved_call_graph(
-            &[entry],
-            &[],
-            Some(bonsai_common::Precision::Narrowed),
-        );
+        let reachable = workspace.source_reachable_resolved_call_graph(&[entry], &[]);
         assert!(
             reachable.funcs.contains(&executor),
             "the callback target must enter the exact source-reachable scope"
@@ -292,14 +283,10 @@ fn source_reachable_progress_counts_each_compiled_caller_file_once() {
         bonsai_common::FuncId::new(symbol.raw())
     };
     let completed = std::sync::atomic::AtomicU64::new(0);
-    let reachable = ws.source_reachable_resolved_call_graph_with_progress(
-        &[func("source")],
-        &[func("sink")],
-        Some(bonsai_common::Precision::Narrowed),
-        || {
+    let reachable =
+        ws.source_reachable_resolved_call_graph_with_progress(&[func("source")], &[func("sink")], || {
             completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        },
-    );
+        });
 
     assert_eq!(completed.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert_eq!(reachable.files.len(), 1);
@@ -334,11 +321,7 @@ fn source_reachable_target_return_corridor_compiles_cross_file_callers() {
     };
     let source = func("produce");
     let target = func("target");
-    let reachable = ws.source_reachable_resolved_call_graph(
-        &[source],
-        &[target],
-        Some(bonsai_common::Precision::Narrowed),
-    );
+    let reachable = ws.source_reachable_resolved_call_graph(&[source], &[target]);
 
     assert!(
         reachable.funcs.contains(&target),
@@ -384,7 +367,6 @@ fn persisted_source_reachable_scope_matches_cold_compiler_fixed_point() {
     let cold_scope = cold.source_reachable_resolved_call_graph(
         &[cold_func("source")],
         &[cold_func("target1"), cold_func("target2")],
-        Some(bonsai_common::Precision::Narrowed),
     );
     cold.save_callgraph_sidecar(&root)
         .expect("persist complete callgraph");
@@ -403,7 +385,6 @@ fn persisted_source_reachable_scope_matches_cold_compiler_fixed_point() {
                 edge.span.start,
                 edge.span.end,
                 edge.kind as u8,
-                edge.precision.rank(),
             )
         })
         .collect::<Vec<_>>();
@@ -427,7 +408,6 @@ fn persisted_source_reachable_scope_matches_cold_compiler_fixed_point() {
     let warm_scope = warm.source_reachable_resolved_call_graph_with_progress(
         &[warm_func("source")],
         &[warm_func("target1"), warm_func("target2")],
-        Some(bonsai_common::Precision::Narrowed),
         || {
             warm_completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         },
@@ -445,7 +425,6 @@ fn persisted_source_reachable_scope_matches_cold_compiler_fixed_point() {
                 edge.span.start,
                 edge.span.end,
                 edge.kind as u8,
-                edge.precision.rank(),
             )
         })
         .collect::<Vec<_>>();
@@ -534,7 +513,6 @@ fn persisted_graph_retains_factory_receiver_dispatch_used_by_scoped_security() {
     let scope = warm.source_reachable_resolved_call_graph(
         &[warm_func("app.Storage.persist")],
         &[warm_func("app.Executor.execute")],
-        Some(bonsai_common::Precision::Narrowed),
     );
     assert_eq!(scope.reached_targets, 1);
     assert!(scope
@@ -573,11 +551,7 @@ fn target_emission_corridor_compiles_only_targets_and_ast_output_providers() {
     let leaf = func("leaf");
     let provider = func("provider");
 
-    let corridor = ws.target_emission_resolved_call_graph(
-        &[target],
-        &[target],
-        Some(bonsai_common::Precision::Narrowed),
-    );
+    let corridor = ws.target_emission_resolved_call_graph(&[target], &[target]);
     assert!(corridor.funcs.contains(&target));
     assert!(
         corridor.funcs.contains(&provider),
@@ -845,7 +819,7 @@ fn disconnected_persisted_endpoints_reopen_as_an_exact_empty_query_workspace() {
     assert_eq!(targets.len(), 1);
 
     let scoped = candidates
-        .source_target_query_workspace(&sources, &targets, Some(bonsai_common::Precision::Narrowed))
+        .source_target_query_workspace(&sources, &targets)
         .expect("a fresh empty corridor is an exact answer, not a cache miss");
 
     assert_eq!(scoped.stats().files, 2);

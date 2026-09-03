@@ -52,9 +52,9 @@ ignores development-only edges, and rejects upward production edges.
 
 **`crates/common`** carries the workspace's stable IDs (`FileId`, `FuncId`,
 `SymbolId`, `BasicBlockId`, `TypeId`, `ValueId`, `TraceStepId`, `PackageId`)
-and metadata primitives. Every fact crossing a layer boundary carries a
-`Precision` from the lattice `Exact < Narrowed < OverApproximate < Unknown`,
-so consumers always know the confidence of what they're looking at. Spans
+and metadata primitives. The compiler has one precision level: a fact is in
+the graph only when it follows from syntax and resolved call flow, and call
+edges carry resolver provenance rather than a precision label. Spans
 are half-open byte ranges, line/column lookups go through a thread-local
 LRU cache.
 
@@ -728,7 +728,7 @@ multi-gigabyte temporary copy beside the requested output.
 
 **`crates/retrieval`** is a fact-backed candidate index, not an evidence
 engine. It persists `FactDoc` records in the external workspace cache with stable fact ids,
-source spans, language/file/symbol metadata, provenance, precision,
+source spans, language/file/symbol metadata, provenance,
 static-limit/incomplete metadata, normalized search text, content
 fingerprints, and pipeline fingerprints. Source files are first-class
 `kind=file` documents in the same sidecar, so file lookup is cached without
@@ -771,7 +771,7 @@ edges.
 Used by `taint` and by `dump-cfg`.
 
 **`crates/callgraph`** walks the resolved graph and surfaces
-`(caller, callee, precision, provenance)` edges, with virtual-dispatch
+`(caller, callee, kind, provenance)` edges, with virtual-dispatch
 expansion via the bases facts. Provenance records the resolver stage,
 evidence, and confidence for each accepted edge; dump, SDK, and export
 surfaces forward that metadata without re-resolving. It also binds local
@@ -785,7 +785,7 @@ plus warmed IDG cross-call edges when an IDG sidecar has been hydrated.
 Forward/reverse fixed points retain every compiler-proven node and edge that is
 both reachable from a selected source and able to reach a selected target.
 The command never enumerates concrete path combinations, so diamonds and
-cycles remain linear in graph size. Edge precision and resolver provenance
+cycles remain linear in graph size. Edge kind and resolver provenance
 stay attached to the compressed relation. Missing IDG facts or resolution
 gaps mark the result incomplete rather than widening missing calls into
 guessed evidence. When the target pattern matches an indexed call site but no
@@ -863,7 +863,7 @@ boolean domains, string length ranges, nullness / nullable values, bounded
 literal sets, and simple path relations such as `idx < len` or `ptr !=
 null`. The trace runner uses the same lattice at CFG joins, so branch-local
 numeric facts widen into ranges instead of collapsing straight to unknown.
-Security, browse, and export consumers should add precision by consuming
+Security, browse, and export consumers should sharpen results by consuming
 these shared facts rather than inventing command- or language-specific
 domains.
 
@@ -882,8 +882,7 @@ default semantic CSR and compact identity directories without reopening every
 IDG segment. A valid canonical graph without that optional accelerator builds
 the same forward/backward adjacency in two streaming passes on demand. Neither
 path stages a second workspace-sized endpoint vector, performs name search, or
-changes the edge set. Non-default precision adjacency remains lazy so unused
-diagnostic modes do not duplicate the graph in memory or on disk. A dense
+changes the edge set. A dense
 function corridor may reuse an already-prewarmed global representation while
 the closure still enforces the exact admitted function set at every
 transition; cold and genuinely narrow corridors retain sparse projections.
@@ -903,7 +902,7 @@ params/assignment-target/bare-call-argument seed logic. Sub-modules:
 - `text.rs` — text-level normalisation shared with adapters (the engine
   side of the qualified-text canonicalisation).
 - `value_flow.rs` — value-flow graph used by `dump-edges` and the
-  precision-narrowing path.
+  call-site narrowing path.
 
 ## Workspace facade
 

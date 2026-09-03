@@ -11,9 +11,10 @@ use std::io::Write as _;
 use std::process::Command;
 use std::time::Duration;
 
-use crate::args::SemanticWorkerPhase;
+use crate::args::{BrowseFormat, SemanticWorkerPhase};
 use crate::cli_println;
-use crate::{page_cache, paging, progress};
+use crate::{page_cache, paging, progress, ui};
+use comfy_table::Cell;
 
 use super::{
     bonsai_for_cli, not_found_with_suggestions, open_project_dataflow_prewarm,
@@ -32,6 +33,7 @@ pub(crate) struct IndexCommandOptions {
     pub(crate) semantic: bool,
     pub(crate) semantic_worker: Option<SemanticWorkerPhase>,
     pub(crate) structural_only: bool,
+    pub(crate) format: BrowseFormat,
 }
 
 pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) -> Result<()> {
@@ -57,9 +59,8 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
             })
             .map(|sidecar| (sidecar.name.clone(), sidecar.bytes))
             .collect::<std::collections::BTreeMap<_, _>>();
-        cli_println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
+        emit_index_value(
+            &json!({
                 "mode": "semantic",
                 "files": manifest.workspace_sources.files,
                 "include_minified_sources": manifest.include_minified_sources,
@@ -68,8 +69,9 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
                 "manifest_status": result.stats.validation.manifest_status.as_str(),
                 "cache_bytes": result.stats.total_bytes,
                 "ready_sidecars": ready_sidecars,
-            }))?
-        );
+            }),
+            options.format,
+        )?;
         flush_stdout()?;
         return Ok(());
     }
@@ -107,17 +109,17 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
                 "compiler cache/source inventory mismatch: generation has {files} files, metadata scan found {}",
                 context.summary.indexed_files
             );
-            cli_println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
+            emit_index_value(
+                &json!({
                     "files": files,
                     "include_minified_sources": include_minified_sources,
                     "compiler_cache": "hit",
                     "compiler_objects": files,
                     "parsed_files": 0,
                     "semantic_context": context.summary,
-                }))?
-            );
+                }),
+                options.format,
+            )?;
             flush_stdout()?;
             return Ok(());
         }
@@ -129,17 +131,17 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
             .save_compiler_object_sidecar_with_progress(root, || compiler.inc(1));
         compiler.finish_and_clear();
         compiler_result?;
-        cli_println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
+        emit_index_value(
+            &json!({
                 "files": stats.files,
                 "include_minified_sources": stats.include_minified_sources,
                 "compiler_cache": "rebuilt",
                 "compiler_objects": stats.files,
                 "parsed_files": stats.files,
                 "semantic_context": stats.semantic_context,
-            }))?
-        );
+            }),
+            options.format,
+        )?;
         flush_stdout()?;
         return Ok(());
     }
@@ -151,36 +153,36 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
     let stage = progress::ScopedSpinner::new("collecting index stats");
     let stats = project.stats();
     stage.finish();
-    cli_println!("{}", serde_json::to_string_pretty(&stats)?);
+    emit_index_value(&serde_json::to_value(stats)?, options.format)?;
     flush_stdout()?;
     if !options.watch {
         return Ok(());
     }
-    cli_println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
+    emit_index_value(
+        &json!({
             "event": "watching",
             "workspace": root.display().to_string(),
             "interval_ms": options.interval_ms,
-        }))?
-    );
+        }),
+        options.format,
+    )?;
     flush_stdout()?;
     let interval = Duration::from_millis(options.interval_ms.max(100));
     loop {
         std::thread::sleep(interval);
         let report = project.refresh_from_disk()?;
         if report.changed() {
-            cli_println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
+            emit_index_value(
+                &json!({
                     "event": "reindexed",
                     "added": report.added,
                     "modified": report.modified,
                     "removed": report.removed,
                     "dataflow_entries_built": report.dataflow_entries_built,
                     "stats": project.stats(),
-                }))?
-            );
+                }),
+                options.format,
+            )?;
             flush_stdout()?;
         }
     }
@@ -240,7 +242,7 @@ pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<SemanticWar
 /// Publish the compact semantic generation needed by exact graph-navigation
 /// queries, without also building or mapping the workspace IDG.
 ///
-/// Target-oriented `inspect --graph-flow` needs compiler objects, the
+/// Target-oriented `inspect` needs compiler objects, the
 /// partitioned call graph, retrieval candidates, and stable linkage headers.
 /// Building those phases in isolated processes keeps parser and graph
 /// allocator peaks from accumulating in one long-lived CLI process. The
@@ -628,7 +630,87 @@ fn context_row_json_cost(row: &ContextRow) -> u64 {
         .saturating_add(16) as u64
 }
 
-pub(crate) fn cmd_context(root: &std::path::Path, paging_cfg: paging::PagingConfig) -> Result<()> {
+fn emit_index_value(value: &serde_json::Value, format: BrowseFormat) -> Result<()> {
+    if crate::filter::active().is_active() && !crate::filter::active().matches_value(value) {
+        match format {
+            BrowseFormat::Json => crate::output::emit_json_document(&super::filtered_out_document(value))?,
+            BrowseFormat::Text => cli_println!("no index result matches the active output filter"),
+        }
+        return Ok(());
+    }
+    match format {
+        BrowseFormat::Json => crate::output::emit_json_document(&super::with_completeness(value))?,
+        BrowseFormat::Text => render_flat_json_text("index", value),
+    }
+    Ok(())
+}
+
+/// Readable fact table for one flat compiler/index object: every scalar
+/// leaf becomes a `dotted.path → value` row, so the text view exposes the
+/// same facts as the JSON object without printing a JSON blob.
+fn render_flat_json_text(title: &str, value: &serde_json::Value) {
+    let u = ui();
+    cli_println!();
+    cli_println!("{}", u.heading(title));
+    let mut facts = Vec::new();
+    flatten_json_value("", value, &mut facts);
+    let mut table = u.table(&["fact", "value"]);
+    for (name, value) in facts {
+        table.add_row(vec![Cell::new(u.kind(&name)), Cell::new(value)]);
+    }
+    cli_println!("{table}");
+}
+
+/// Flatten nested JSON into `(dotted.path, rendered value)` facts. Scalar
+/// lists render inline; lists of objects index their members.
+fn flatten_json_value(prefix: &str, value: &serde_json::Value, out: &mut Vec<(String, String)>) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if fields.is_empty() {
+                out.push((prefix.to_string(), "(none)".to_string()));
+            }
+            for (key, child) in fields {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten_json_value(&path, child, out);
+            }
+        }
+        serde_json::Value::Array(items) if items.iter().all(|item| !item.is_object() && !item.is_array()) => {
+            let rendered = items.iter().map(flat_scalar_text).collect::<Vec<_>>().join(", ");
+            out.push((
+                prefix.to_string(),
+                if rendered.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    rendered
+                },
+            ));
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                flatten_json_value(&format!("{prefix}[{index}]"), item, out);
+            }
+        }
+        other => out.push((prefix.to_string(), flat_scalar_text(other))),
+    }
+}
+
+fn flat_scalar_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Null => "-".to_string(),
+        other => compact_json(other),
+    }
+}
+
+pub(crate) fn cmd_context(
+    root: &std::path::Path,
+    paging_cfg: paging::PagingConfig,
+    format: BrowseFormat,
+) -> Result<()> {
     // Workspace context is a filesystem/path fact. It does not inspect
     // declarations, so do not read source contents into a VFS or invoke
     // Tree-sitter for a metadata-only command.
@@ -638,11 +720,6 @@ pub(crate) fn cmd_context(root: &std::path::Path, paging_cfg: paging::PagingConf
         .semantic_context_for_root(root)
         .map_err(|error| anyhow::anyhow!("collecting context for {}: {error}", root.display()))?;
     stage.finish();
-    if !paging_cfg.json_wrapped() {
-        cli_println!("{}", serde_json::to_string_pretty(&context)?);
-        flush_stdout()?;
-        return Ok(());
-    }
 
     let mut rows = Vec::with_capacity(
         context.module_roots.len()
@@ -684,9 +761,8 @@ pub(crate) fn cmd_context(root: &std::path::Path, paging_cfg: paging::PagingConf
 
     let workspace_root = context.workspace_root.clone();
     let summary = context.summary;
+    let summary_value = serde_json::to_value(summary)?;
     let semantic_incomplete_reasons = context.incomplete_reasons.clone();
-    let canonical_context = context.clone();
-    let force_wrapper = paging_cfg.context.is_some() || !matches!(paging_cfg.page, paging::PageArg::First);
     let filters_hash = paging::hash_filters(&[("command", "context")]);
     page_cache::emit_paged_text(
         root,
@@ -695,24 +771,91 @@ pub(crate) fn cmd_context(root: &std::path::Path, paging_cfg: paging::PagingConf
         "context",
         filters_hash,
         context_row_json_cost,
-        |slice, info, _cfg| {
-            let page_complete = info.page_number == 1 && info.is_last;
-            if !force_wrapper && page_complete {
-                cli_println!("{}", serde_json::to_string_pretty(&canonical_context)?);
-                return Ok(());
+        |slice, info, _cfg| match format {
+            BrowseFormat::Json => {
+                // One document shape for every page count: the canonical
+                // context facts as categorized rows plus completeness and
+                // paging metadata.
+                let result_incomplete_reasons = paged_json_incomplete_reasons("context", info);
+                let wrapped = serde_json::json!({
+                    "workspace_root": workspace_root,
+                    "summary": summary,
+                    "analysis_complete": semantic_incomplete_reasons.is_empty(),
+                    "analysis_incomplete_reasons": semantic_incomplete_reasons,
+                    "result_complete": result_incomplete_reasons.is_empty(),
+                    "result_incomplete_reasons": result_incomplete_reasons,
+                    "rows": slice,
+                    "page": page_info_to_json(info),
+                });
+                crate::output::emit_json_document(&wrapped)?;
+                Ok(())
             }
-            let mut analysis_incomplete_reasons = semantic_incomplete_reasons.clone();
-            analysis_incomplete_reasons.extend(paged_json_incomplete_reasons("context", info));
-            let wrapped = serde_json::json!({
-                "workspace_root": workspace_root,
-                "summary": summary,
-                "analysis_complete": semantic_incomplete_reasons.is_empty() && page_complete,
-                "analysis_incomplete_reasons": analysis_incomplete_reasons,
-                "rows": slice,
-                "page": page_info_to_json(info),
-            });
-            cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
-            Ok(())
+            BrowseFormat::Text => {
+                let u = ui();
+                cli_println!();
+                cli_println!("{}", u.heading("workspace context"));
+                cli_println!(
+                    "  {} {}",
+                    u.label("workspace root"),
+                    u.path(workspace_root.as_deref().unwrap_or("-"))
+                );
+                let status = if semantic_incomplete_reasons.is_empty() {
+                    u.name("complete")
+                } else {
+                    u.warn("incomplete")
+                };
+                cli_println!("  {} {}", u.label("analysis"), status);
+                if !semantic_incomplete_reasons.is_empty() {
+                    for line in u.wrapped_warn_labeled_lines(
+                        "analysis incomplete",
+                        &semantic_incomplete_reasons.join("; "),
+                    ) {
+                        cli_println!("{line}");
+                    }
+                }
+                let mut summary_facts = Vec::new();
+                flatten_json_value("", &summary_value, &mut summary_facts);
+                let mut summary_table = u.table(&["summary", "value"]);
+                for (name, value) in summary_facts {
+                    summary_table.add_row(vec![Cell::new(u.kind(&name)), Cell::new(value)]);
+                }
+                cli_println!("{summary_table}");
+                if slice.is_empty() {
+                    cli_println!();
+                    cli_println!(
+                        "{}",
+                        u.dim("(no module, dependency, generated, excluded, toolchain, or variant roots)")
+                    );
+                } else {
+                    cli_println!();
+                    let mut table = u.table(&["category", "fact", "value"]);
+                    for row in slice {
+                        let mut facts = Vec::new();
+                        flatten_json_value("", &row.value, &mut facts);
+                        if facts.is_empty() {
+                            table.add_row(vec![
+                                Cell::new(u.kind(row.category)),
+                                Cell::new(u.dim("-")),
+                                Cell::new(u.dim("-")),
+                            ]);
+                        }
+                        for (index, (name, value)) in facts.into_iter().enumerate() {
+                            table.add_row(vec![
+                                Cell::new(if index == 0 {
+                                    u.kind(row.category)
+                                } else {
+                                    String::new()
+                                }),
+                                Cell::new(u.dim(&name)),
+                                Cell::new(value),
+                            ]);
+                        }
+                    }
+                    cli_println!("{table}");
+                }
+                crate::footer::render_paging_footer(info, "bonsai-ninja context <workspace>");
+                Ok(())
+            }
         },
     )?;
     flush_stdout()?;
@@ -724,7 +867,287 @@ fn flush_stdout() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn cmd_diagnostics(root: &std::path::Path) -> Result<()> {
+fn emit_complete_value(title: &str, value: &serde_json::Value, format: BrowseFormat) -> Result<()> {
+    if crate::filter::active().is_active() && !crate::filter::active().matches_value(value) {
+        match format {
+            BrowseFormat::Json => crate::output::emit_json_document(&super::filtered_out_document(value))?,
+            BrowseFormat::Text => {
+                cli_println!("no {title} result matches the active output filter");
+            }
+        }
+        return Ok(());
+    }
+    match format {
+        BrowseFormat::Json => crate::output::emit_json_document(&super::with_completeness(value))?,
+        BrowseFormat::Text => match title {
+            "compiler diagnostics" => render_diagnostics_text(value),
+            "compiler HIR" => render_hir_text(value),
+            "compiler CFG" => render_cfg_text(value),
+            _ => render_flat_json_text(title, value),
+        },
+    }
+    Ok(())
+}
+
+fn render_diagnostics_text(value: &serde_json::Value) {
+    let u = ui();
+    cli_println!();
+    cli_println!("{}", u.heading("compiler diagnostics"));
+    let languages = value["workspace_languages"]
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let diagnostics = value["diagnostics"].as_array().map_or(0, Vec::len);
+    let files = value["diagnostic_files"].as_array().map_or(0, Vec::len);
+    cli_println!(
+        "  {} {}    {} {}    {} {}",
+        u.label("languages"),
+        u.name(if languages.is_empty() { "-" } else { &languages }),
+        u.label("diagnostics"),
+        u.name(&diagnostics.to_string()),
+        u.label("files"),
+        u.name(&files.to_string())
+    );
+    if let Some(capabilities) = value["adapter_capabilities"].as_array() {
+        for capability in capabilities {
+            let language = capability["display_name"]
+                .as_str()
+                .or_else(|| capability["language"].as_str())
+                .unwrap_or("-");
+            let extensions = capability["file_extensions"]
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            cli_println!();
+            cli_println!(
+                "{}  {}",
+                u.name(language),
+                u.dim(&format!(
+                    "extensions: {}",
+                    if extensions.is_empty() { "-" } else { &extensions }
+                ))
+            );
+            let mut table = u.table(&["capability", "support / evidence"]);
+            if let Some(object) = capability.as_object() {
+                for (name, detail) in object {
+                    if matches!(name.as_str(), "display_name" | "language" | "file_extensions") {
+                        continue;
+                    }
+                    let rendered = detail
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| compact_json(detail));
+                    table.add_row(vec![Cell::new(u.kind(name)), Cell::new(rendered)]);
+                }
+            }
+            cli_println!("{table}");
+        }
+    }
+    if let Some(rows) = value["diagnostics"].as_array().filter(|rows| !rows.is_empty()) {
+        let mut table = u.table(&["#", "diagnostic"]);
+        for (index, row) in rows.iter().enumerate() {
+            table.add_row(vec![
+                Cell::new((index + 1).to_string()),
+                Cell::new(compact_json(row)),
+            ]);
+        }
+        cli_println!("{table}");
+    }
+}
+
+fn render_hir_text(value: &serde_json::Value) {
+    let u = ui();
+    let qualified = value["qualified_name"]
+        .as_str()
+        .or_else(|| value["name"].as_str())
+        .unwrap_or("<unknown>");
+    cli_println!();
+    cli_println!("{}", u.heading(&format!("HIR {qualified}")));
+    cli_println!(
+        "  {} {}    {} {}    {} {}",
+        u.label("kind"),
+        u.kind(value["kind"].as_str().unwrap_or("-")),
+        u.label("params"),
+        u.name(&compact_json(&value["params"])),
+        u.label("status"),
+        analysis_status(value)
+    );
+    cli_println!(
+        "  {} {}    {} {}",
+        u.label("span"),
+        u.path(&span_text(&value["span"])),
+        u.label("body"),
+        u.path(&span_text(&value["body_span"]))
+    );
+    render_incomplete_reasons(value);
+    if let Some(aliases) = value["type_aliases"].as_array().filter(|rows| !rows.is_empty()) {
+        let mut table = u.table(&["typed value", "type"]);
+        for alias in aliases {
+            table.add_row(vec![
+                Cell::new(u.name(alias["name"].as_str().unwrap_or("-"))),
+                Cell::new(u.kind(alias["type_name"].as_str().unwrap_or("-"))),
+            ]);
+        }
+        cli_println!("{table}");
+    }
+    render_event_table(
+        "FLOW EVENTS",
+        value["flow_events"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+    );
+}
+
+fn render_cfg_text(value: &serde_json::Value) {
+    let u = ui();
+    let function = value["function"].as_str().unwrap_or("<unknown>");
+    cli_println!();
+    cli_println!("{}", u.heading(&format!("CFG {function}")));
+    cli_println!(
+        "  {} {}    {} {}    {} {}    {} {}",
+        u.label("entry"),
+        u.name(&value["entry"].to_string()),
+        u.label("exit"),
+        u.name(&value["exit"].to_string()),
+        u.label("blocks"),
+        u.name(&value["blocks"].as_array().map_or(0, Vec::len).to_string()),
+        u.label("status"),
+        analysis_status(value)
+    );
+    render_incomplete_reasons(value);
+    if let Some(blocks) = value["blocks"].as_array() {
+        let mut table = u.table(&[
+            "block",
+            "label / kind",
+            "terminator",
+            "successors",
+            "events",
+            "span",
+        ]);
+        for block in blocks {
+            table.add_row(vec![
+                Cell::new(u.name(&block["id"].to_string())),
+                Cell::new(format!(
+                    "{} · {}",
+                    block["label"].as_str().unwrap_or("-"),
+                    block["synthetic_kind"].as_str().unwrap_or("-")
+                )),
+                Cell::new(compact_json(&block["terminator"])),
+                Cell::new(compact_json(&block["successors"])),
+                Cell::new(block["events"].as_array().map_or(0, Vec::len).to_string()),
+                Cell::new(u.path(&span_text(&block["span"]))),
+            ]);
+        }
+        cli_println!("{table}");
+        for block in blocks {
+            let Some(events) = block["events"].as_array().filter(|events| !events.is_empty()) else {
+                continue;
+            };
+            render_event_table(
+                &format!(
+                    "BLOCK {} · {}",
+                    block["id"],
+                    block["label"].as_str().unwrap_or("-")
+                ),
+                events,
+            );
+        }
+    }
+}
+
+fn render_event_table(title: &str, events: &[serde_json::Value]) {
+    let u = ui();
+    cli_println!();
+    cli_println!("{}", u.label(title));
+    if events.is_empty() {
+        cli_println!("{}", u.dim("(none)"));
+        return;
+    }
+    let mut table = u.table(&["#", "event", "span", "compiler facts"]);
+    for (index, event) in events.iter().enumerate() {
+        let (kind, payload) = event
+            .as_object()
+            .and_then(|object| object.iter().next())
+            .map_or(("unknown", event), |(kind, payload)| (kind.as_str(), payload));
+        let span = payload
+            .get("span")
+            .map(span_text)
+            .unwrap_or_else(|| "-".to_string());
+        let mut facts = payload.clone();
+        if let Some(object) = facts.as_object_mut() {
+            object.remove("span");
+        }
+        // One `path: value` line per compiler fact. The JSON object is the
+        // canonical record; the text view flattens it so a reader never has
+        // to parse a JSON blob inside a table cell.
+        let mut flat = Vec::new();
+        flatten_json_value("", &facts, &mut flat);
+        let facts_cell = if flat.is_empty() {
+            u.dim("-")
+        } else {
+            flat.iter()
+                .map(|(name, value)| format!("{}: {value}", u.dim(name)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        table.add_row(vec![
+            Cell::new((index + 1).to_string()),
+            Cell::new(u.kind(kind)),
+            Cell::new(u.path(&span)),
+            Cell::new(facts_cell),
+        ]);
+    }
+    cli_println!("{table}");
+}
+
+fn analysis_status(value: &serde_json::Value) -> String {
+    let u = ui();
+    if value["analysis_complete"].as_bool().unwrap_or(false) {
+        u.name("complete")
+    } else {
+        u.warn("incomplete")
+    }
+}
+
+fn render_incomplete_reasons(value: &serde_json::Value) {
+    let Some(reasons) = value["analysis_incomplete_reasons"]
+        .as_array()
+        .filter(|rows| !rows.is_empty())
+    else {
+        return;
+    };
+    let text = reasons
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>()
+        .join("; ");
+    for line in ui().wrapped_warn_labeled_lines("analysis incomplete", &text) {
+        cli_println!("{line}");
+    }
+}
+
+fn span_text(span: &serde_json::Value) -> String {
+    if !span.is_object() {
+        return compact_json(span);
+    }
+    format!("file {} bytes {}..{}", span["file"], span["start"], span["end"])
+}
+
+fn compact_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_string())
+}
+
+pub(crate) fn cmd_diagnostics(root: &std::path::Path, format: BrowseFormat) -> Result<()> {
     let (project, _footer) = open_project_index_only(root)?;
     let file_count = project.workspace().vfs().file_count();
     let bar = progress::progress_bar("collecting diagnostics", file_count as u64);
@@ -733,11 +1156,11 @@ pub(crate) fn cmd_diagnostics(root: &std::path::Path) -> Result<()> {
     // then repeated the frontend work while collecting adapter diagnostics.
     let report = project.diagnostics_report_with_progress(|| bar.inc(1));
     bar.finish_and_clear();
-    cli_println!("{}", serde_json::to_string_pretty(&report)?);
+    emit_complete_value("compiler diagnostics", &serde_json::to_value(&report)?, format)?;
     Ok(())
 }
 
-pub(crate) fn cmd_dump_hir(root: &std::path::Path, symbol: &str) -> Result<()> {
+pub(crate) fn cmd_dump_hir(root: &std::path::Path, symbol: &str, format: BrowseFormat) -> Result<()> {
     let (project, _footer) = open_project_for_dump_target(root, symbol)?;
     let ws = project.workspace();
     let stage = progress::ScopedSpinner::new("building HIR dump");
@@ -747,11 +1170,11 @@ pub(crate) fn cmd_dump_hir(root: &std::path::Path, symbol: &str) -> Result<()> {
         .map_err(|err| anyhow::anyhow!("dump-hir: {err}"))?
         .ok_or_else(|| not_found_with_suggestions(ws, symbol))?;
     stage.finish();
-    cli_println!("{}", serde_json::to_string_pretty(&dump)?);
+    emit_complete_value("compiler HIR", &serde_json::to_value(&dump)?, format)?;
     Ok(())
 }
 
-pub(crate) fn cmd_dump_cfg(root: &std::path::Path, symbol: &str) -> Result<()> {
+pub(crate) fn cmd_dump_cfg(root: &std::path::Path, symbol: &str, format: BrowseFormat) -> Result<()> {
     let (project, _footer) = open_project_for_dump_target(root, symbol)?;
     let ws = project.workspace();
     let stage = progress::ScopedSpinner::new("building CFG dump");
@@ -761,7 +1184,7 @@ pub(crate) fn cmd_dump_cfg(root: &std::path::Path, symbol: &str) -> Result<()> {
         .map_err(|err| anyhow::anyhow!("dump-cfg: {err}"))?
         .ok_or_else(|| not_found_with_suggestions(ws, symbol))?;
     stage.finish();
-    cli_println!("{}", serde_json::to_string_pretty(&cfg)?);
+    emit_complete_value("compiler CFG", &serde_json::to_value(&cfg)?, format)?;
     Ok(())
 }
 

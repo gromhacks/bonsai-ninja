@@ -318,26 +318,6 @@ fn effective_budget_respects_format_class() {
 }
 
 #[test]
-fn json_wrapped_by_default_unless_explicitly_uncapped() {
-    // Default programmatic output is token-budgeted, so it includes
-    // page metadata and a rows array.
-    let cfg = PagingConfig::new(None, PageArg::First, None, false, FormatClass::Programmatic);
-    assert!(cfg.json_wrapped());
-    // Explicit --context → wrap.
-    let cfg_ctx = PagingConfig::new(Some(1024), PageArg::First, None, false, FormatClass::Programmatic);
-    assert!(cfg_ctx.json_wrapped());
-    // Explicit --page → wrap.
-    let cfg_page = PagingConfig::new(None, PageArg::Number(2), None, false, FormatClass::Programmatic);
-    assert!(cfg_page.json_wrapped());
-    // Explicit uncapped output keeps the historical bare array shape.
-    let cfg_all = PagingConfig::new(None, PageArg::First, None, true, FormatClass::Programmatic);
-    assert!(!cfg_all.json_wrapped());
-    // Text mode never JSON-wraps.
-    let cfg_text = PagingConfig::new(Some(1024), PageArg::Number(2), None, false, FormatClass::Text);
-    assert!(!cfg_text.json_wrapped());
-}
-
-#[test]
 fn hash_filters_is_stable_and_order_sensitive() {
     let a = hash_filters(&[("kind", "function"), ("file", "gateway.py")]);
     let b = hash_filters(&[("kind", "function"), ("file", "gateway.py")]);

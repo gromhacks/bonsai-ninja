@@ -174,8 +174,7 @@ fn render_scope_note(detail: &str) -> String {
             "source_matches" => parts.push(counted(value, "source match", "source matches")),
             "endpoint_files" => parts.push(counted(value, "endpoint file", "endpoint files")),
             "source_languages" => parts.push(counted(value, "source language", "source languages")),
-            "max_precision" => parts.push(format!("static evidence {}", humanize_precision_value(value))),
-            "static_evidence" => parts.push(format!("static evidence {}", humanize_precision_value(value))),
+            "static_evidence" => parts.push(format!("static evidence {}", humanize_evidence_value(value))),
             "sink_matches" => parts.push(counted(value, "sink match", "sink matches")),
             "sanitizer_matches" => parts.push(counted(value, "sanitizer match", "sanitizer matches")),
             "pattern_sinks" => parts.push(counted(value, "pattern sink", "pattern sinks")),
@@ -268,7 +267,7 @@ fn humanize_subject(subject: &str) -> String {
     subject.replace('-', " ")
 }
 
-fn humanize_precision_value(value: &str) -> String {
+fn humanize_evidence_value(value: &str) -> String {
     value.replace('+', " + ").replace('_', "-")
 }
 
@@ -313,7 +312,6 @@ mod tests {
             rendered,
             "taint analysis scope: 3 source matches · 8 endpoint files · 1 source language · static evidence compiler-proven"
         );
-        assert!(!rendered.contains("max_precision"));
     }
 
     #[test]

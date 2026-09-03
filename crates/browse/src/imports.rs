@@ -524,7 +524,10 @@ pub fn imports(ws: &Workspace, f: &ImportsFilters<'_>) -> Result<Vec<ImportOut>,
                     }
                 }
                 per_file.push(ImportOut {
-                    file: path.clone(),
+                    // Every browse row names its file workspace-relative
+                    // (`format_span` convention); the absolute VFS path is
+                    // only used above for filters and module resolution.
+                    file: crate::common::workspace_relative_path(ws, &path),
                     module: imp.module.clone(),
                     alias: imp.alias.clone(),
                     original_name: imp.original_name.clone(),

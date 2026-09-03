@@ -36,8 +36,9 @@ pub(crate) use bonsai_sdk::{
 pub(crate) use browse::{
     apply_text_limit, cmd_args, cmd_calls, cmd_classes, cmd_comments, cmd_defs, cmd_entrypoints, cmd_imports,
     cmd_operations, cmd_refs, cmd_search, cmd_strings, cmd_symbol_summary, cmd_vars, emit_json_paged_cached,
-    emit_json_value_paged_cached, page_info_to_json, paged_json_incomplete_reasons, paging_from_cli,
-    paging_from_cli_output, paging_with_row_limit, short_file, truncate,
+    emit_json_value_paged_cached, emit_json_value_paged_cached_prefiltered, one_line_preview,
+    page_info_to_json, paged_json_incomplete_reasons, paging_from_cli, paging_from_cli_output,
+    paging_with_row_limit, short_file, truncate,
 };
 pub(crate) use cache::cmd_cache;
 pub(crate) use diagnostics::{
@@ -501,6 +502,107 @@ fn render_workspace_cache_note(cache: &str, status: WorkspaceCacheStatus, entrie
 
 fn counted_usize(value: usize, singular: &str, plural: &str) -> String {
     format!("{value} {}", if value == 1 { singular } else { plural })
+}
+
+/// One atomic command result with the shared completeness contract.
+///
+/// The native object keeps its own fields; `analysis_complete` /
+/// `analysis_incomplete_reasons` are preserved when the compiler reported
+/// them and default to complete otherwise, and `result_complete` is true
+/// because atomic documents are never paged. Row commands build the same
+/// keys through their paging envelope instead.
+pub(crate) fn with_completeness(value: &serde_json::Value) -> serde_json::Value {
+    let mut fields = match value {
+        serde_json::Value::Object(fields) => fields.clone(),
+        other => {
+            let mut fields = serde_json::Map::new();
+            fields.insert("value".to_string(), other.clone());
+            fields
+        }
+    };
+    fields
+        .entry("analysis_complete".to_string())
+        .or_insert(serde_json::Value::Bool(true));
+    fields
+        .entry("analysis_incomplete_reasons".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    fields.insert("result_complete".to_string(), serde_json::Value::Bool(true));
+    fields.insert("result_incomplete_reasons".to_string(), serde_json::json!([]));
+    serde_json::Value::Object(fields)
+}
+
+/// The same completeness contract when the secondary output filter did not
+/// select an atomic result: analysis facts are reported, the selected value
+/// is null, and `matched` says why.
+pub(crate) fn filtered_out_document(value: &serde_json::Value) -> serde_json::Value {
+    let analysis_complete = value
+        .get("analysis_complete")
+        .cloned()
+        .unwrap_or(serde_json::Value::Bool(true));
+    let analysis_incomplete_reasons = value
+        .get("analysis_incomplete_reasons")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    serde_json::json!({
+        "analysis_complete": analysis_complete,
+        "analysis_incomplete_reasons": analysis_incomplete_reasons,
+        "result_complete": true,
+        "result_incomplete_reasons": [],
+        "matched": false,
+        "value": null,
+    })
+}
+
+/// Parser-coverage reasons for the compiler objects this command touched.
+///
+/// Every compiler object publishes its exact parser diagnostics into the
+/// in-process sink when it is lowered or loaded from the sidecar, so this
+/// is a free lookup — no file is parsed merely to answer it — and it reports
+/// the same `syntax-error-files:N` / `parse-failed-files:N` /
+/// `parse-timeout-files:N` reasons as the exhaustive workspace audit, scoped
+/// to the files the inventory actually examined. A lightweight inventory
+/// must never claim a complete analysis over a file it could not parse.
+pub(crate) fn touched_parser_incomplete_reasons(ws: &Workspace) -> Vec<String> {
+    let mut syntax_error_files = ahash::AHashSet::default();
+    let mut parse_failed_files = ahash::AHashSet::default();
+    let mut parse_timeout_files = ahash::AHashSet::default();
+    for diagnostic in ws.db().diagnostics() {
+        match diagnostic.code.as_deref() {
+            Some("syntax-error") => {
+                syntax_error_files.insert(diagnostic.span.file);
+            }
+            Some("parse-failed") => {
+                parse_failed_files.insert(diagnostic.span.file);
+            }
+            Some("parse-timeout") => {
+                parse_timeout_files.insert(diagnostic.span.file);
+            }
+            _ => {}
+        }
+    }
+    let mut reasons = Vec::new();
+    if !parse_failed_files.is_empty() {
+        reasons.push(format!("parse-failed-files:{}", parse_failed_files.len()));
+    }
+    if !parse_timeout_files.is_empty() {
+        reasons.push(format!("parse-timeout-files:{}", parse_timeout_files.len()));
+    }
+    if !syntax_error_files.is_empty() {
+        reasons.push(format!("syntax-error-files:{}", syntax_error_files.len()));
+    }
+    reasons
+}
+
+/// Text counterpart of the JSON `analysis_incomplete_reasons` field for
+/// row commands: printed under the table so a human sees the same fact.
+pub(crate) fn render_analysis_incomplete_notice(reasons: &[String]) {
+    if reasons.is_empty() {
+        return;
+    }
+    let u = crate::ui();
+    for line in u.wrapped_warn_labeled_lines("analysis incomplete", &reasons.join("; ")) {
+        crate::cli_println!("{line}");
+    }
 }
 
 /// Render a span as `(path, line, column)`. Used by every browse /

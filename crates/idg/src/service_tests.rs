@@ -2,7 +2,7 @@ use super::*;
 use crate::workspace_adapter;
 use crate::{SymbolicFieldGraph, SymbolicFieldTransform, SymbolicFieldTransformKind, NO_SYMBOLIC_STRING};
 use bonsai_callgraph::{CallEdge, CallGraph, EdgeKind, EdgeProvenance, ResolvedCallGraph};
-use bonsai_common::{Precision, SymbolId};
+use bonsai_common::SymbolId;
 use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FieldWrite, FlowEvent, ModulePath, Visibility};
 
 fn span(file: u32, start: u64, end: u64) -> Span {
@@ -79,7 +79,7 @@ fn symbolic_field_demand_is_single_flight_across_rooted_workers() {
                 let barrier = Arc::clone(&barrier);
                 scope.spawn(move || {
                     barrier.wait();
-                    IdgQueryService::ensure_symbolic_field_demand(&runtime, Some(Precision::Narrowed))
+                    IdgQueryService::ensure_symbolic_field_demand(&runtime)
                 })
             })
             .collect::<Vec<_>>();
@@ -89,9 +89,9 @@ fn symbolic_field_demand_is_single_flight_across_rooted_workers() {
             .collect::<Vec<_>>()
     });
 
-    let published = runtime.field_demands[2]
+    let published = runtime.field_demands[0]
         .get()
-        .expect("narrowed demand must be published once");
+        .expect("field demand must be published once");
     assert!(demands.iter().all(|demand| Arc::ptr_eq(demand, published)));
     assert!(
         published.is_empty(),
@@ -119,14 +119,12 @@ fn contextual_boundary_demand_remaps_only_synthetic_same_site_endpoints() {
         argument,
         parameter,
         site,
-        Precision::Exact,
         EdgeKind::Direct,
     ));
     segment.add_edge(IdgEdge::inter_call_arg(
         argument,
         synthetic,
         site,
-        Precision::Exact,
         EdgeKind::Direct,
     ));
     segment.record_func(caller);
@@ -136,7 +134,7 @@ fn contextual_boundary_demand_remaps_only_synthetic_same_site_endpoints() {
     let mut workspace = IdgWorkspace::new();
     workspace.register_segment(segment);
     let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
-    let runtime = service.build_contextual_summary_runtime(&[], Some(Precision::Narrowed), None);
+    let runtime = service.build_contextual_summary_runtime(&[], None);
     let mut rows = Vec::new();
     runtime
         .calls_by_from
@@ -204,7 +202,6 @@ fn contextual_fixed_width_rows_round_trip_every_boundary_field() {
         call_span: span(3, 101, 149),
         arg_idx: 7,
         param_idx: 9,
-        precision: Precision::OverApproximate,
         call_kind: CallEdgeKind::Indirect,
         relation: CrossCallRelation::Capture,
     };
@@ -621,7 +618,6 @@ fn symbolic_call_provenance_uses_ast_argument_and_formal_slots() {
         exact_field: NO_SYMBOLIC_STRING,
         call_span,
         write_span: call_span,
-        precision: Precision::Exact,
         call_kind: EdgeKind::Direct,
         kind: SymbolicFieldTransformKind::Argument,
         arg_idx: 0,
@@ -731,7 +727,6 @@ fn resolved_graph(edges: impl IntoIterator<Item = (FuncId, FuncId, Span)>) -> Re
             to,
             span,
             kind: EdgeKind::Direct,
-            precision: Precision::Narrowed,
             provenance: EdgeProvenance::direct_symbol(),
         });
     }
@@ -852,9 +847,7 @@ fn persisted_query_accelerator_restores_exact_narrowed_runtime() {
             .contextual_summaries
             .read();
         assert!(matches!(
-            contextual
-                .get(&Some(Precision::Narrowed))
-                .map(|runtime| &runtime.reach),
+            contextual.as_ref().map(|runtime| &runtime.reach),
             Some(ContextualReach::Paged { .. })
         ));
     }
@@ -869,10 +862,9 @@ fn persisted_query_accelerator_restores_exact_narrowed_runtime() {
     );
     let allowed = AHashSet::from([func]);
     assert!(loaded
-        .forward_closure_within_funcs_with_max_precision(&params, &allowed, Some(Precision::Narrowed),)
+        .forward_closure_within_funcs(&params, &allowed)
         .contains(&return_node));
-    let relevance =
-        loaded.target_relevance_with_max_precision(&[return_node], None, Some(Precision::Narrowed));
+    let relevance = loaded.target_relevance(&[return_node], None);
     assert!(relevance.admits_any(&params));
     assert!(
         loaded.scoped_contextual_summary.lock().is_none(),
@@ -1005,21 +997,18 @@ fn persisted_query_accelerator_accepts_source_oriented_return_evidence() {
         caller_arg,
         callee_param,
         call_span,
-        Precision::Exact,
         EdgeKind::Direct,
     ));
     segment.add_edge(IdgEdge::inter_return(
         callee_return,
         caller_ret,
         call_span,
-        Precision::Exact,
         EdgeKind::Direct,
     ));
     segment.add_edge(IdgEdge::inter_call_arg(
         unrelated_arg,
         callee_param,
         unrelated_span,
-        Precision::Exact,
         EdgeKind::Direct,
     ));
     segment.record_func(caller);
@@ -1044,7 +1033,7 @@ fn persisted_query_accelerator_accepts_source_oriented_return_evidence() {
     let loaded = IdgQueryService::load_from_disk(&sidecar, 0xCA11_AB1E, Arc::new(GlobalIndex::new()))
         .expect("load accelerated sidecar")
         .expect("current accelerated sidecar");
-    let evidence = loaded.semantic_cross_call_edges_with_max_precision(Some(Precision::Narrowed));
+    let evidence = loaded.semantic_cross_call_edges();
     assert!(evidence.iter().any(|edge| {
         edge.relation == CrossCallRelation::Return
             && edge.caller == callee
@@ -1052,13 +1041,8 @@ fn persisted_query_accelerator_accepts_source_oriented_return_evidence() {
             && edge.call_span == call_span
     }));
     let allowed: AHashSet<_> = [caller, callee, unrelated_caller].into_iter().collect();
-    let relevance = loaded.target_relevance_from_source_within_funcs_with_max_precision(
-        caller,
-        &[WsNodeId(caller_ret.0)],
-        None,
-        &allowed,
-        Some(Precision::Narrowed),
-    );
+    let relevance =
+        loaded.target_relevance_from_source_within_funcs(caller, &[WsNodeId(caller_ret.0)], None, &allowed);
     assert!(
         relevance.admits_any(&[WsNodeId(caller_arg.0)]),
         "source-rooted reverse return must activate the exact callee and return through its matching argument"
@@ -1068,45 +1052,29 @@ fn persisted_query_accelerator_accepts_source_oriented_return_evidence() {
         "a shared callee must not pull an unrelated caller into a source-rooted target proof"
     );
 
-    let unrooted = loaded.forward_closure_evidence_within_funcs_with_max_precision(
-        &[WsNodeId(callee_param.0)],
-        &allowed,
-        Some(Precision::Narrowed),
-    );
+    let unrooted = loaded.forward_closure_evidence_within_funcs(&[WsNodeId(callee_param.0)], &allowed);
     assert!(
         unrooted.nodes.contains(&WsNodeId(caller_ret.0)),
         "a rule-matched source in a helper may flow into each resolved caller"
     );
-    let rooted = loaded
-        .forward_closure_evidence_rooted_at_func_within_funcs_and_relevance_with_max_precision(
-            &[WsNodeId(callee_param.0)],
-            callee,
-            &allowed,
-            None,
-            Some(Precision::Narrowed),
-        );
+    let rooted = loaded.forward_closure_evidence_rooted_at_func_within_funcs_and_relevance(
+        &[WsNodeId(callee_param.0)],
+        callee,
+        &allowed,
+        None,
+    );
     assert!(rooted.nodes.contains(&WsNodeId(callee_return.0)));
     assert!(
         !rooted.nodes.contains(&WsNodeId(caller_ret.0)),
         "an entry-rooted query must not escape into an unrelated caller"
     );
     assert_eq!(
-        loaded.rooted_scalar_target_precheck_with_max_precision(
-            &[WsNodeId(caller_arg.0)],
-            caller,
-            &[WsNodeId(caller_ret.0)],
-            Some(Precision::Narrowed),
-        ),
+        loaded.rooted_scalar_target_precheck(&[WsNodeId(caller_arg.0)], caller, &[WsNodeId(caller_ret.0)],),
         Some(true),
         "contextual scalar summaries must preserve exact callee-return reachability"
     );
     assert_eq!(
-        loaded.rooted_scalar_target_precheck_with_max_precision(
-            &[WsNodeId(caller_ret.0)],
-            caller,
-            &[WsNodeId(caller_arg.0)],
-            Some(Precision::Narrowed),
-        ),
+        loaded.rooted_scalar_target_precheck(&[WsNodeId(caller_ret.0)], caller, &[WsNodeId(caller_arg.0)],),
         Some(false),
         "the scalar summary precheck must provide an exact negative proof"
     );
@@ -1220,7 +1188,6 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
         exact_field: NO_SYMBOLIC_STRING,
         call_span: span(0, 20, 25),
         write_span: span(0, 20, 25),
-        precision: Precision::Exact,
         call_kind: EdgeKind::Direct,
         kind: SymbolicFieldTransformKind::Argument,
         arg_idx: 0,
@@ -1233,7 +1200,6 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
         exact_field: NO_SYMBOLIC_STRING,
         call_span: span(0, 26, 29),
         write_span: span(0, 26, 29),
-        precision: Precision::Exact,
         call_kind: EdgeKind::Direct,
         kind: SymbolicFieldTransformKind::Argument,
         arg_idx: 0,
@@ -1246,7 +1212,6 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
         exact_field: NO_SYMBOLIC_STRING,
         call_span: span(0, 32, 35),
         write_span: span(0, 32, 35),
-        precision: Precision::Exact,
         call_kind: EdgeKind::Direct,
         kind: SymbolicFieldTransformKind::Argument,
         arg_idx: 0,
@@ -1259,7 +1224,6 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
         exact_field: NO_SYMBOLIC_STRING,
         call_span: span(0, 36, 39),
         write_span: span(0, 36, 39),
-        precision: Precision::Exact,
         call_kind: EdgeKind::Direct,
         kind: SymbolicFieldTransformKind::Argument,
         arg_idx: 0,
@@ -1270,8 +1234,7 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
 
     let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
     let params = service.param_nodes_of(caller);
-    let evidence =
-        service.forward_closure_evidence_with_max_precision(&[params[0]], Some(Precision::Narrowed));
+    let evidence = service.forward_closure_evidence(&[params[0]]);
     let reached: AHashSet<WsNodeId> = service.forward_closure(&[params[0]]).into_iter().collect();
     let unrelated_reached: AHashSet<WsNodeId> = service.forward_closure(&[params[1]]).into_iter().collect();
     let callee_return = service.return_node_of(callee).expect("callee return");
@@ -1297,11 +1260,7 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
     );
 
     let allowed_funcs: AHashSet<FuncId> = [caller, middle].into_iter().collect();
-    let scoped = service.forward_closure_evidence_within_funcs_with_max_precision(
-        &[params[0]],
-        &allowed_funcs,
-        Some(Precision::Narrowed),
-    );
+    let scoped = service.forward_closure_evidence_within_funcs(&[params[0]], &allowed_funcs);
     assert!(
         !scoped.nodes.contains(&callee_return),
         "a compiler-proven function scope must reject symbolic transforms into unrelated functions"
@@ -1317,19 +1276,13 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
     );
     assert!(
         service
-            .forward_target_nodes_cut_within_funcs_with_max_precision(
-                &[params[0]],
-                &[callee_return],
-                &allowed_funcs,
-                Some(Precision::Narrowed),
-            )
+            .forward_target_nodes_cut_within_funcs(&[params[0]], &[callee_return], &allowed_funcs,)
             .is_empty(),
         "a target outside the compiler-proven scope must not admit the broader graph"
     );
 
     let all_funcs: AHashSet<FuncId> = [caller, middle, callee].into_iter().collect();
-    let relevance =
-        service.target_relevance_with_max_precision(&[callee_return], None, Some(Precision::Narrowed));
+    let relevance = service.target_relevance(&[callee_return], None);
     assert!(
         relevance.admits_any(&[params[0]]),
         "backward relevance must retain the AST-derived symbolic target path"
@@ -1346,12 +1299,8 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
         vec![caller, callee],
         "source prefiltering must preserve input order and every function that owns a relevant seed node"
     );
-    let relevant = service.forward_closure_evidence_within_funcs_and_relevance_with_max_precision(
-        &[params[0]],
-        &all_funcs,
-        &relevance,
-        Some(Precision::Narrowed),
-    );
+    let relevant =
+        service.forward_closure_evidence_within_funcs_and_relevance(&[params[0]], &all_funcs, &relevance);
     assert!(relevant.nodes.contains(&callee_return));
     assert_eq!(
         relevant
@@ -1368,12 +1317,7 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
     );
 
     let corridor_funcs: AHashSet<FuncId> = [caller, middle].into_iter().collect();
-    let corridor_relevance = service.target_relevance_within_funcs_with_max_precision(
-        &[callee_return],
-        None,
-        &corridor_funcs,
-        Some(Precision::Narrowed),
-    );
+    let corridor_relevance = service.target_relevance_within_funcs(&[callee_return], None, &corridor_funcs);
     assert!(
         !corridor_relevance.admits_any(&[params[0]]),
         "a target outside the compiler corridor must not contribute demand to that corridor"
@@ -1422,7 +1366,6 @@ fn symbolic_read_consumption_preserves_write_order_for_earlier_copies() {
         exact_field: NO_SYMBOLIC_STRING,
         call_span: span(0, 10, 11),
         write_span: span(0, 10, 11),
-        precision: Precision::Exact,
         call_kind: EdgeKind::Direct,
         kind: SymbolicFieldTransformKind::Copy,
         arg_idx: u32::MAX,
@@ -1514,7 +1457,6 @@ fn target_relevance_reverses_exact_scalar_field_returns() {
         exact_field,
         call_span,
         write_span: caller_write_span,
-        precision: Precision::Exact,
         call_kind: EdgeKind::Direct,
         kind: SymbolicFieldTransformKind::ScalarReturn,
         arg_idx: u32::MAX,
@@ -1527,18 +1469,14 @@ fn target_relevance_reverses_exact_scalar_field_returns() {
     let params = service.param_nodes_of(callee);
     let target = service.return_node_of(caller).expect("caller return");
     let allowed_funcs: AHashSet<FuncId> = [callee, caller].into_iter().collect();
-    let relevance = service.target_relevance_with_max_precision(&[target], None, Some(Precision::Narrowed));
+    let relevance = service.target_relevance(&[target], None);
     assert!(relevance.admits_any(&[params[0]]));
     assert!(
         !relevance.admits_any(&[params[1]]),
         "the inverse scalar-return relation must retain only the exact consumed suffix"
     );
-    let evidence = service.forward_closure_evidence_within_funcs_and_relevance_with_max_precision(
-        &[params[0]],
-        &allowed_funcs,
-        &relevance,
-        Some(Precision::Narrowed),
-    );
+    let evidence =
+        service.forward_closure_evidence_within_funcs_and_relevance(&[params[0]], &allowed_funcs, &relevance);
     assert!(evidence.nodes.contains(&target));
     assert_eq!(evidence.cross_calls.len(), 1);
     assert_eq!(evidence.cross_calls[0].relation, CrossCallRelation::Return);
@@ -1562,11 +1500,7 @@ fn target_relevance_keeps_scalar_seeds_for_unmodeled_projected_places() {
     let mut workspace = IdgWorkspace::new();
     workspace.register_segment(segment);
     let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
-    let relevance = service.target_relevance_with_max_precision(
-        &[WsNodeId(projected.0)],
-        None,
-        Some(Precision::Narrowed),
-    );
+    let relevance = service.target_relevance(&[WsNodeId(projected.0)], None);
 
     assert!(
         !relevance.pruning_complete,
@@ -1629,8 +1563,7 @@ fn compiler_return_summary_preserves_positions_above_u8_range() {
     let (idx, ws) = build(vec![decl]);
     let func = func_id(&idx, "wide_return");
     let service = IdgQueryService::new(ws, idx);
-    let summaries =
-        service.return_taint_param_indices_for_funcs_with_max_precision(&[func], Some(Precision::Narrowed));
+    let summaries = service.return_taint_param_indices_for_funcs(&[func]);
     assert_eq!(summaries.get(&func), Some(&vec![299]));
 }
 
@@ -1685,52 +1618,6 @@ fn template_interpolation_param_reaches_return() {
 }
 
 #[test]
-fn forward_closure_with_max_precision_prunes_worse_edges() {
-    let func = FuncId::new(7);
-    let mut seg = crate::segment::IdgSegment::new();
-    let p0 = seg.intern_place(Place::Param { idx: 0 });
-    let p1 = seg.intern_place(Place::Write {
-        name: 1,
-        path: Default::default(),
-        span: span(0, 10, 20),
-    });
-    let p2 = seg.intern_place(Place::Return);
-    let n0 = seg.intern_node(func, p0);
-    let n1 = seg.intern_node(func, p1);
-    let n2 = seg.intern_node(func, p2);
-    seg.add_edge(IdgEdge::intra_assign(n0, n1, span(0, 10, 20)));
-    seg.add_edge(IdgEdge::new(
-        n1,
-        n2,
-        crate::edge::EdgeMeta {
-            precision: Precision::OverApproximate,
-            kind: crate::edge::IdgEdgeKind::IntraAssign,
-            call_kind: bonsai_callgraph::EdgeKind::Indirect,
-            via_span: span(0, 20, 30),
-        },
-    ));
-    seg.record_func(func);
-    let mut ws = IdgWorkspace::new();
-    ws.register_segment(seg);
-    let svc = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
-
-    let seed = svc.param_nodes_of(func);
-    let default = svc.forward_closure(&seed);
-    let full = svc.forward_closure_with_max_precision(&seed, None);
-    let strict = svc.forward_closure_with_max_precision(&seed, Some(Precision::Narrowed));
-    let ret = svc.return_node_of(func).unwrap();
-    assert!(!default.contains(&ret), "default closure must be semantic-only");
-    assert!(
-        full.contains(&ret),
-        "explicit diagnostic closure should traverse every edge"
-    );
-    assert!(
-        !strict.contains(&ret),
-        "strict closure must not traverse an over-approximate edge"
-    );
-}
-
-#[test]
 fn target_node_cut_accepts_exact_unresolved_aggregate_argument_evidence() {
     let func = FuncId::new(8);
     let call_span = span(0, 40, 55);
@@ -1755,7 +1642,6 @@ fn target_node_cut_accepts_exact_unresolved_aggregate_argument_evidence() {
         field_write,
         call_arg,
         crate::edge::EdgeMeta {
-            precision: Precision::Exact,
             kind: crate::edge::IdgEdgeKind::IntraAggregateConsume,
             call_kind: EdgeKind::Direct,
             via_span: call_span,
@@ -1777,18 +1663,9 @@ fn target_node_cut_accepts_exact_unresolved_aggregate_argument_evidence() {
         "call-argument identity must come from the unified compiler index"
     );
     let allowed_funcs: AHashSet<FuncId> = [func].into_iter().collect();
-    let scoped_relevance = service.target_relevance_within_funcs_with_max_precision(
-        &target_nodes,
-        None,
-        &allowed_funcs,
-        Some(Precision::Narrowed),
-    );
-    let scoped = service.forward_closure_within_funcs_and_relevance_with_max_precision(
-        &seeds,
-        &allowed_funcs,
-        &scoped_relevance,
-        Some(Precision::Narrowed),
-    );
+    let scoped_relevance = service.target_relevance_within_funcs(&target_nodes, None, &allowed_funcs);
+    let scoped =
+        service.forward_closure_within_funcs_and_relevance(&seeds, &allowed_funcs, &scoped_relevance);
     assert_eq!(
         service.tainted_call_args_in_reachable_nodes_for_funcs(&scoped, Some(&allowed_funcs)),
         vec![(func, call_span, 0)],
@@ -1803,8 +1680,7 @@ fn target_node_cut_accepts_exact_unresolved_aggregate_argument_evidence() {
         target_nodes.iter().all(|target| !scalar.contains(target)),
         "aggregate-consumption evidence must not become scalar reachability"
     );
-    let cut =
-        service.forward_target_nodes_cut_with_max_precision(&seeds, &target_nodes, Some(Precision::Narrowed));
+    let cut = service.forward_target_nodes_cut(&seeds, &target_nodes);
     assert_eq!(
         cut, scalar,
         "the exact argument evidence must satisfy the target cut"
@@ -1813,18 +1689,12 @@ fn target_node_cut_accepts_exact_unresolved_aggregate_argument_evidence() {
         service.tainted_call_args_in_reachable_nodes(&cut),
         vec![(func, call_span, 0)]
     );
-    let relevance =
-        service.target_relevance_with_max_precision(&target_nodes, None, Some(Precision::Narrowed));
+    let relevance = service.target_relevance(&target_nodes, None);
     assert!(
         relevance.admits_any(&seeds),
         "aggregate-consumption targets must reverse to their exact scalar inputs"
     );
-    let relevant = service.forward_closure_within_funcs_and_relevance_with_max_precision(
-        &seeds,
-        &allowed_funcs,
-        &relevance,
-        Some(Precision::Narrowed),
-    );
+    let relevant = service.forward_closure_within_funcs_and_relevance(&seeds, &allowed_funcs, &relevance);
     assert_eq!(relevant, scalar);
     assert_eq!(
         service.tainted_call_args_in_reachable_nodes(&relevant),
@@ -1910,17 +1780,15 @@ fn within_function_closure_excludes_reachable_callee_nodes() {
             caller_write_node,
             callee_param_node,
             span(0, 20, 30),
-            Precision::Exact,
             bonsai_callgraph::EdgeKind::Direct,
         ),
     });
     let svc = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
     let seed = svc.param_nodes_of(caller);
 
-    let global = svc.forward_closure_with_max_precision(&seed, Some(Precision::Narrowed));
+    let global = svc.forward_closure(&seed);
     let allowed_funcs: AHashSet<FuncId> = [caller].into_iter().collect();
-    let local =
-        svc.forward_closure_within_funcs_with_max_precision(&seed, &allowed_funcs, Some(Precision::Narrowed));
+    let local = svc.forward_closure_within_funcs(&seed, &allowed_funcs);
     assert_eq!(global.len(), 3);
     assert_eq!(local.len(), 2);
     assert!(local
@@ -1937,12 +1805,8 @@ fn within_function_closure_excludes_reachable_callee_nodes() {
 
     let all_funcs: AHashSet<FuncId> = [caller, callee].into_iter().collect();
     assert_eq!(
-        svc.cross_call_edges_in_reachable_nodes_filtered_with_max_precision(
-            &global,
-            Some(Precision::Narrowed),
-            Some(&all_funcs),
-        ),
-        svc.cross_call_edges_in_reachable_nodes_with_max_precision(&global, Some(Precision::Narrowed),),
+        svc.cross_call_edges_in_reachable_nodes_filtered(&global, Some(&all_funcs),),
+        svc.cross_call_edges_in_reachable_nodes(&global),
         "demand-decoded scoped cross-call evidence must equal the canonical global evidence"
     );
     let scoped_calls = svc.scoped_cross_calls.lock();
@@ -1953,57 +1817,9 @@ fn within_function_closure_excludes_reachable_callee_nodes() {
 
     let targets: AHashSet<FuncId> = [callee].into_iter().collect();
     assert_eq!(
-        svc.semantic_function_corridor_with_max_precision(&[caller], &targets, Some(Precision::Narrowed),),
+        svc.semantic_function_corridor(&[caller], &targets),
         [caller, callee].into_iter().collect(),
         "the numeric semantic corridor must retain the complete caller-to-callee path"
-    );
-}
-
-#[test]
-fn cross_call_edges_in_closure_with_max_precision_prunes_worse_edges() {
-    let caller = FuncId::new(7);
-    let callee = FuncId::new(8);
-    let call_span = span(0, 20, 30);
-    let mut seg = crate::segment::IdgSegment::new();
-    let call_arg = seg.intern_place(Place::CallArg {
-        site: crate::place::CallSiteId(call_span),
-        idx: 0,
-    });
-    let callee_param = seg.intern_place(Place::Param { idx: 0 });
-    let call_arg_node = seg.intern_node(caller, call_arg);
-    let callee_param_node = seg.intern_node(callee, callee_param);
-    seg.add_edge(IdgEdge::inter_call_arg(
-        call_arg_node,
-        callee_param_node,
-        call_span,
-        Precision::OverApproximate,
-        bonsai_callgraph::EdgeKind::Indirect,
-    ));
-    seg.record_func(caller);
-    seg.record_func(callee);
-    let mut ws = IdgWorkspace::new();
-    ws.register_segment(seg);
-    let svc = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
-    let unified = svc.ensure_unified();
-    let seed = IdgQueryService::ws_node_for(&unified, SegmentId(0), call_arg_node)
-        .expect("call-arg node should be addressable");
-
-    let default = svc.cross_call_edges_in_closure(&[seed]);
-    let full = svc.cross_call_edges_in_closure_with_max_precision(&[seed], None);
-    let semantic = svc.cross_call_edges_in_closure_with_max_precision(&[seed], Some(Precision::Narrowed));
-
-    assert!(
-        default.is_empty(),
-        "default closure must not expose an over-approximate propagation edge"
-    );
-    assert_eq!(
-        full.len(),
-        1,
-        "explicit diagnostic closure should expose the diagnostic edge"
-    );
-    assert!(
-        semantic.is_empty(),
-        "semantic closure must not expose an over-approximate propagation edge"
     );
 }
 
@@ -2070,14 +1886,12 @@ fn compiler_return_summaries_compose_calls_and_mutual_recursion() {
         f_arg,
         g_param,
         f_calls_g,
-        Precision::Exact,
         EdgeKind::Direct,
     ));
     segment.add_edge(IdgEdge::inter_return(
         g_return,
         f_call_ret,
         f_calls_g,
-        Precision::Exact,
         EdgeKind::Direct,
     ));
 
@@ -2087,14 +1901,12 @@ fn compiler_return_summaries_compose_calls_and_mutual_recursion() {
         g_arg,
         f_param,
         g_calls_f,
-        Precision::Exact,
         EdgeKind::Direct,
     ));
     segment.add_edge(IdgEdge::inter_return(
         f_return,
         g_call_ret,
         g_calls_f,
-        Precision::Exact,
         EdgeKind::Direct,
     ));
     // The concrete base arm in g seeds the mutually-recursive fixed point.
@@ -2106,24 +1918,19 @@ fn compiler_return_summaries_compose_calls_and_mutual_recursion() {
     workspace.register_segment(segment);
     let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
     let only_f = AHashSet::from_iter([f]);
-    let narrow = service.return_taint_param_indices_for_funcs_within_funcs_with_max_precision(
-        &[f],
-        &only_f,
-        Some(Precision::Narrowed),
-    );
+    let narrow = service.return_taint_param_indices_for_funcs_within_funcs(&[f], &only_f);
     assert_eq!(
         narrow.get(&f),
         Some(&Vec::new()),
         "excluding the recursive callee changes only this explicit compiler scope"
     );
     assert!(
-        service.return_summaries.lock().is_empty(),
+        service.return_summaries.lock().covered.is_empty(),
         "a scoped negative must never populate the canonical global cache"
     );
     let full_scope = AHashSet::from_iter([f, g]);
     let unified = service.ensure_unified();
-    let contextual =
-        service.ensure_contextual_summary_runtime(&unified, Some(Precision::Narrowed), Some(&full_scope));
+    let contextual = service.ensure_contextual_summary_runtime(&unified, Some(&full_scope));
     let compiled_batch = Arc::clone(
         &service
             .scoped_contextual_summary
@@ -2132,15 +1939,10 @@ fn compiler_return_summaries_compose_calls_and_mutual_recursion() {
             .expect("full scoped compiler batch")
             .batch,
     );
-    let scoped = service.return_taint_param_indices_for_funcs_within_funcs_with_max_precision(
-        &[f, g],
-        &full_scope,
-        Some(Precision::Narrowed),
-    );
+    let scoped = service.return_taint_param_indices_for_funcs_within_funcs(&[f, g], &full_scope);
     assert_eq!(scoped.get(&f), Some(&vec![0]));
     assert_eq!(scoped.get(&g), Some(&vec![0]));
-    let contextual_after =
-        service.ensure_contextual_summary_runtime(&unified, Some(Precision::Narrowed), Some(&full_scope));
+    let contextual_after = service.ensure_contextual_summary_runtime(&unified, Some(&full_scope));
     let cached_after = service.scoped_contextual_summary.lock();
     let cached_after = cached_after.as_ref().expect("reused scoped compiler batch");
     assert!(Arc::ptr_eq(&contextual, &contextual_after));
@@ -2148,55 +1950,17 @@ fn compiler_return_summaries_compose_calls_and_mutual_recursion() {
         Arc::ptr_eq(&compiled_batch, &cached_after.batch),
         "return attribution must reuse the target-cut compiler batch"
     );
-    let summaries =
-        service.return_taint_param_indices_for_funcs_with_max_precision(&[f, g], Some(Precision::Narrowed));
+    let summaries = service.return_taint_param_indices_for_funcs(&[f, g]);
 
     assert_eq!(summaries.get(&f), Some(&vec![0]));
     assert_eq!(summaries.get(&g), Some(&vec![0]));
-    let cached = service
-        .return_summaries
-        .lock()
-        .get(&Some(Precision::Narrowed))
-        .map(|cache| cache.covered.clone())
-        .expect("precision cache");
+    let cached = service.return_summaries.lock().covered.clone();
     assert_eq!(cached, AHashSet::from_iter([f, g]));
     assert_eq!(
-        service
-            .return_taint_param_indices_for_funcs_with_max_precision(&[f], Some(Precision::Narrowed))
-            .get(&f),
+        service.return_taint_param_indices_for_funcs(&[f]).get(&f),
         Some(&vec![0]),
         "single-function consumers must reuse the prewarmed compiler summary"
     );
-}
-
-#[test]
-fn compiler_return_summaries_respect_the_precision_scope() {
-    let func = FuncId::new(72);
-    let mut segment = crate::segment::IdgSegment::new();
-    let param_place = segment.intern_place(Place::Param { idx: 0 });
-    let return_place = segment.intern_place(Place::Return);
-    let param = segment.intern_node(func, param_place);
-    let ret = segment.intern_node(func, return_place);
-    segment.add_edge(IdgEdge::new(
-        param,
-        ret,
-        crate::edge::EdgeMeta {
-            precision: Precision::OverApproximate,
-            kind: crate::edge::IdgEdgeKind::IntraReturn,
-            call_kind: EdgeKind::Indirect,
-            via_span: span(0, 20, 30),
-        },
-    ));
-    segment.record_func(func);
-    let mut workspace = IdgWorkspace::new();
-    workspace.register_segment(segment);
-    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
-
-    let semantic =
-        service.return_taint_param_indices_for_funcs_with_max_precision(&[func], Some(Precision::Narrowed));
-    let diagnostic = service.return_taint_param_indices_for_funcs_with_max_precision(&[func], None);
-    assert!(semantic.get(&func).is_some_and(Vec::is_empty));
-    assert_eq!(diagnostic.get(&func), Some(&vec![0]));
 }
 
 #[test]
@@ -2280,14 +2044,12 @@ fn symbolic_return_summary_matches_the_originating_call_site() {
         callee_return,
         first_ret,
         first_call,
-        Precision::Exact,
         EdgeKind::Direct,
     ));
     segment.add_edge(IdgEdge::inter_return(
         callee_return,
         second_ret,
         second_call,
-        Precision::Exact,
         EdgeKind::Direct,
     ));
     segment.record_func(caller);
@@ -2306,7 +2068,6 @@ fn symbolic_return_summary_matches_the_originating_call_site() {
             exact_field: NO_SYMBOLIC_STRING,
             call_span,
             write_span: call_span,
-            precision: Precision::Exact,
             call_kind: EdgeKind::Direct,
             kind: SymbolicFieldTransformKind::Argument,
             arg_idx: 0,
@@ -2321,8 +2082,7 @@ fn symbolic_return_summary_matches_the_originating_call_site() {
         .save_to_disk(&sidecar, 0x51DE_CAFE)
         .expect("save symbolic query sidecar");
     let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
-    let summaries =
-        service.return_taint_param_indices_for_funcs_with_max_precision(&[caller], Some(Precision::Narrowed));
+    let summaries = service.return_taint_param_indices_for_funcs(&[caller]);
 
     assert_eq!(
         summaries.get(&caller),
@@ -2348,8 +2108,7 @@ fn symbolic_return_summary_matches_the_originating_call_site() {
         .expect("open symbolic query sidecar")
         .expect("current symbolic query sidecar");
     let paged = IdgQueryService::new(Arc::new(paged), Arc::new(GlobalIndex::new()));
-    let paged_summaries =
-        paged.return_taint_param_indices_for_funcs_with_max_precision(&[caller], Some(Precision::Narrowed));
+    let paged_summaries = paged.return_taint_param_indices_for_funcs(&[caller]);
     assert_eq!(paged_summaries.get(&caller), Some(&vec![1]));
     let paged_params = paged.param_nodes_of(caller);
     let paged_return = paged.return_node_of(caller).expect("paged caller return");
@@ -2393,7 +2152,6 @@ fn local_storage_summaries_never_absorb_callee_storage() {
         call_arg,
         callee_param,
         call_span,
-        Precision::Exact,
         EdgeKind::Direct,
     ));
     segment.add_edge(IdgEdge::intra_assign(callee_param, deep, span(0, 50, 60)));
@@ -2403,10 +2161,7 @@ fn local_storage_summaries_never_absorb_callee_storage() {
     workspace.register_segment(segment);
     let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
 
-    let summaries = service.local_storage_taint_by_param_for_funcs_with_max_precision(
-        &[caller, callee],
-        Some(Precision::Narrowed),
-    );
+    let summaries = service.local_storage_taint_by_param_for_funcs(&[caller, callee]);
     assert_eq!(summaries.get(&caller), Some(&vec![vec!["before".to_string()]]));
     assert_eq!(summaries.get(&callee), Some(&vec![vec!["deep".to_string()]]));
 }
@@ -3892,8 +3647,7 @@ fn returned_container_field_forwards_through_constructor_receiver_state() {
     target_funcs.insert(func_id(&idx, "entry"));
     target_funcs.insert(func_id(&idx, "persist"));
     target_funcs.insert(func_id(&idx, "execute"));
-    let cut =
-        svc.forward_target_func_cut_with_max_precision(&raw_seed, &target_funcs, Some(Precision::Narrowed));
+    let cut = svc.forward_target_func_cut(&raw_seed, &target_funcs);
     let cut_calls = svc.tainted_call_args_in_reachable_nodes(&cut);
     assert!(
         cut_calls

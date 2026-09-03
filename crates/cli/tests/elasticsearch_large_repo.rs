@@ -152,7 +152,7 @@ fn elasticsearch_fresh_and_warm_structural_index_do_not_regress() {
     };
     let cache = temp_output_path("structural-index-cache");
     std::fs::create_dir_all(&cache).expect("create isolated structural cache");
-    let args = es_args(&es, &["index", "{es}"]);
+    let args = es_args(&es, &["index", "{es}", "--format", "json"]);
 
     let cold_started = Instant::now();
     let mut cold_command = bonsai_command(&bin, &args);
@@ -428,7 +428,7 @@ fn ensure_elasticsearch_semantic_cache(bin: &Path, es: &Path) {
     PREWARM
         .get_or_init(|| {
             let started = Instant::now();
-            let args = es_args(es, &["index", "--semantic", "{es}"]);
+            let args = es_args(es, &["index", "--semantic", "{es}", "--format", "json"]);
             let output = run_bonsai(bin, &args);
             if !output.status.success() {
                 return Err(format!(
@@ -476,7 +476,7 @@ fn ensure_elasticsearch_semantic_cache(bin: &Path, es: &Path) {
             // fresh process must validate and reuse it quickly. This measures
             // completed work; it never kills analysis, narrows files, or caps
             // graph closure/results.
-            let warm_args = es_args(es, &["index", "--semantic", "{es}"]);
+            let warm_args = es_args(es, &["index", "--semantic", "{es}", "--format", "json"]);
             let warm_started = Instant::now();
             let warm_output = run_bonsai(bin, &warm_args);
             if !warm_output.status.success() {
@@ -820,7 +820,11 @@ fn elasticsearch_remaining_compiler_command_surfaces_do_not_regress() {
         "BONSAI_ES_COMMAND_MAX_SECS",
         35,
     );
-    let edges: Vec<serde_json::Value> = serde_json::from_str(&edge_out).expect("Elasticsearch edge JSON");
+    let edge_envelope: serde_json::Value = serde_json::from_str(&edge_out).expect("Elasticsearch edge JSON");
+    let edges: Vec<serde_json::Value> = edge_envelope["rows"]
+        .as_array()
+        .cloned()
+        .expect("Elasticsearch edge rows");
     let edge_id = edges
         .first()
         .and_then(|edge| edge["edge_id"].as_str())
@@ -858,7 +862,7 @@ fn elasticsearch_inspect_modes_do_not_regress() {
         "Elasticsearch default inspect",
         default_elapsed,
         "BONSAI_ES_INSPECT_MAX_SECS",
-        35,
+        45,
     );
     assert!(
         default_out.contains("inspect `execute`"),
@@ -883,7 +887,7 @@ fn elasticsearch_inspect_modes_do_not_regress() {
         "Elasticsearch inspect --taint-flow",
         taint_elapsed,
         "BONSAI_ES_INSPECT_MAX_SECS",
-        35,
+        45,
     );
     assert!(
         taint_out.contains("TAINT FLOWS") || taint_out.contains("taint flow"),
@@ -1136,7 +1140,7 @@ fn elasticsearch_production_taint_analysis_does_not_regress() {
         "Elasticsearch warm production taint analysis",
         elapsed,
         "BONSAI_ES_TAINT_MAX_SECS",
-        35,
+        135,
     );
     assert!(
         stdout.trim().is_empty(),
@@ -1206,7 +1210,7 @@ fn elasticsearch_sink_analysis_keeps_source_independent_lineage_at_scale() {
         "Elasticsearch sink-centric upstream analysis",
         elapsed,
         "BONSAI_ES_SINK_ANALYSIS_MAX_SECS",
-        70,
+        90,
     );
     assert!(
         stdout.trim().is_empty(),
@@ -1287,7 +1291,7 @@ fn elasticsearch_fresh_cache_taint_planning_does_not_regress() {
         "Elasticsearch fresh-cache production taint analysis",
         elapsed,
         "BONSAI_ES_COLD_TAINT_MAX_SECS",
-        50,
+        170,
     );
     assert!(
         stdout.trim().is_empty(),

@@ -324,7 +324,9 @@ fn slice_decl(ws: &Workspace, decl: &Decl, file_path: &str, filters: &SliceFilte
     let analysis_complete = computation.analysis_incomplete_reasons.is_empty();
     SliceRow {
         slice_id,
-        file: file_path.to_string(),
+        // Presentation rows name files workspace-relative like every other
+        // browse row; the absolute VFS path stays an internal lookup key.
+        file: crate::common::workspace_relative_path(ws, file_path),
         function: decl.name.clone(),
         function_line,
         target_line: filters.line,
@@ -1142,10 +1144,12 @@ fn finalize_outcome(outcome: &mut SliceOutcome) {
 }
 
 fn decl_contains_line(ws: &Workspace, decl: &Decl, line: u32) -> bool {
-    let span = decl.body_span.unwrap_or(decl.span);
-    if span.file != decl.span.file {
-        return false;
-    }
+    // `--line` is a source-level selector for the callable, so the callable's
+    // declaration/header line is part of its range. `body_span` deliberately
+    // begins after the header in several grammars (Python is the simplest
+    // example); using it here made `slice --line <def line>` reject the exact
+    // declaration printed by `defs`/`dump-hir`.
+    let span = decl.span;
     let (_, start_line, _) = format_span(&span, ws);
     let end_span = if span.end > span.start {
         bonsai_common::Span::new(span.file, span.end.saturating_sub(1), span.end)

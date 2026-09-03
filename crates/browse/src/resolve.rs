@@ -161,7 +161,7 @@ fn exact_call_site_resolution(
             if partition_file != file {
                 return;
             }
-            for edge in outgoing.iter().filter(|edge| edge.precision.is_semantic()) {
+            for edge in outgoing.iter() {
                 let key = (edge.from, edge.span);
                 if let Some(targets) = targets_by_site.get_mut(&key) {
                     targets.push(edge.to);
@@ -188,12 +188,7 @@ fn exact_call_site_resolution(
         }
         None => {
             let graph = ws.resolved_call_graph_for_files(&[file]);
-            for edge in graph
-                .inner()
-                .edges
-                .iter()
-                .filter(|edge| edge.precision.is_semantic())
-            {
+            for edge in graph.inner().edges.iter() {
                 let key = (edge.from, edge.span);
                 if let Some(targets) = targets_by_site.get_mut(&key) {
                     targets.push(edge.to);

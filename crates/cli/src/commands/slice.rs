@@ -72,13 +72,6 @@ fn emit_slice_json(
     paging_cfg: &paging::PagingConfig,
     filters_hash: u64,
 ) -> Result<()> {
-    if !paging_cfg.json_wrapped() {
-        cli_println!("{}", serde_json::to_string_pretty(outcome)?);
-        return Ok(());
-    }
-    let force_wrapper = paging_cfg.context.is_some()
-        || !matches!(paging_cfg.page, paging::PageArg::First)
-        || crate::filter::active().is_active();
     page_cache::emit_paged_text(
         root,
         &outcome.slices,
@@ -87,14 +80,7 @@ fn emit_slice_json(
         filters_hash,
         slice_cost,
         |slices, info, _cfg| {
-            if !force_wrapper && info.page_number == 1 && info.is_last {
-                cli_println!("{}", serde_json::to_string_pretty(outcome)?);
-                return Ok(());
-            }
-            let mut reasons = outcome.analysis_incomplete_reasons.clone();
-            reasons.extend(paged_json_incomplete_reasons("slice", info));
-            reasons.sort();
-            reasons.dedup();
+            let result_incomplete_reasons = paged_json_incomplete_reasons("slice", info);
             let wrapped = serde_json::json!({
                 "symbol": outcome.symbol,
                 "line": outcome.line,
@@ -103,12 +89,14 @@ fn emit_slice_json(
                 "slice_count": outcome.slice_count,
                 "max_steps": outcome.max_steps,
                 "backends": outcome.backends,
-                "analysis_complete": reasons.is_empty(),
-                "analysis_incomplete_reasons": reasons,
+                "analysis_complete": outcome.analysis_complete,
+                "analysis_incomplete_reasons": outcome.analysis_incomplete_reasons,
+                "result_complete": result_incomplete_reasons.is_empty(),
+                "result_incomplete_reasons": result_incomplete_reasons,
                 "slices": slices,
                 "page": page_info_to_json(info),
             });
-            cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
+            crate::output::emit_json_document(&wrapped)?;
             Ok(())
         },
     )

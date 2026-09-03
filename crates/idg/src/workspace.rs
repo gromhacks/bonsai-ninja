@@ -334,10 +334,6 @@ pub struct FieldFlowLink {
     /// synthetic call_span so `taint_path_identity_tokens` and
     /// chain `F:` ids stay stable.
     pub via_span: bonsai_common::Span,
-    /// Precision of the synthetic field-flow hop. Receiver-call
-    /// field propagation is narrowed by a concrete call site;
-    /// broad peer-method field bucketing remains diagnostic-only.
-    pub precision: bonsai_common::Precision,
 }
 
 #[derive(Clone, Debug)]
@@ -2780,7 +2776,7 @@ const IDG_WORKSPACE_TABLE_ID: u32 = 101;
 // storage through the spooled endpoint directory and use the compiler-owned
 // argument span as their evaluation boundary. A v25 graph can decode while
 // lacking those inter-callback edges, so it must never be reused.
-const IDG_WORKSPACE_VERSION: u32 = 27;
+const IDG_WORKSPACE_VERSION: u32 = 28;
 const IDG_QUERY_ACCELERATOR_CONTAINER_VERSION: u32 = 1;
 const IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES: u64 = 256 * 1024 * 1024;
 

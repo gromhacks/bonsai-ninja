@@ -7,7 +7,7 @@
 pub mod render;
 
 use bonsai_abstract_interp::{RawStep, RawTrace, StepKind, TraceLimits};
-use bonsai_common::{FuncId, Precision, Span, SpanMap};
+use bonsai_common::{FuncId, Span, SpanMap};
 use bonsai_vfs::Vfs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -122,7 +122,6 @@ pub struct TraceSummary {
     pub total_paths: usize,
     pub explored_paths: usize,
     pub truncated_paths: usize,
-    pub precision: Precision,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -160,7 +159,6 @@ pub struct TraceStep {
     pub code: String,
     pub state_before: Option<u32>,
     pub state_after: Option<u32>,
-    pub precision: Precision,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
 }
@@ -242,7 +240,6 @@ pub struct PathSummary {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path_constraints: Vec<String>,
     pub terminated_by: PathTermination,
-    pub precision: Precision,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,7 +309,6 @@ impl std::fmt::Debug for FinalizeCtx<'_> {
 /// spans to file paths / line-columns via the VFS.
 pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
     let mut steps: Vec<TraceStep> = Vec::with_capacity(raw.steps.len());
-    let mut precision = Precision::Exact;
     let mut span_caches: ahash::AHashMap<bonsai_common::FileId, SpanMap> = ahash::AHashMap::new();
     let mut analysis_incomplete_reasons = raw.incomplete_reasons.clone();
 
@@ -324,8 +320,7 @@ pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
         let module = (ctx.func_module)(raw_step.func).map_or_else(String::new, |module| {
             portable_trace_path(ctx.workspace_root, &module)
         });
-        let public_step = public_semantic_step(raw_step, &mut analysis_incomplete_reasons);
-        precision = precision.meet(public_step.precision);
+        let public_step = public_step(raw_step);
         // u64 ids prevent the wrap-to-zero / collapse-to-MAX hazards
         // that u32 step counters had on very large traces.
         let id = idx as u64;
@@ -346,7 +341,6 @@ pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
             code,
             state_before: None,
             state_after: None,
-            precision: public_step.precision,
             notes: public_step.notes,
         });
     }
@@ -382,7 +376,6 @@ pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
                 )
             })
             .count(),
-        precision,
     };
 
     TraceResult {
@@ -420,26 +413,17 @@ fn portable_trace_path(workspace_root: &str, path: &str) -> String {
 struct PublicStep {
     kind: TraceStepKind,
     message: String,
-    precision: Precision,
     notes: Vec<String>,
 }
 
-fn public_semantic_step(raw_step: &RawStep, incomplete_reasons: &mut Vec<String>) -> PublicStep {
-    if !raw_step.precision.is_semantic() {
-        incomplete_reasons.push(format!("diagnostic-precision-step:{:?}", raw_step.kind));
-        return PublicStep {
-            kind: TraceStepKind::Diagnostic,
-            message: format!("Suppressed diagnostic-precision {:?} step", raw_step.kind),
-            precision: Precision::Exact,
-            notes: Vec::new(),
-        };
-    }
-
+/// Every interpreter step is compiler-proven; unresolved calls arrive as
+/// explicit `Diagnostic` steps by kind, so the public step is a direct
+/// projection of the raw step.
+fn public_step(raw_step: &RawStep) -> PublicStep {
     PublicStep {
         kind: map_step_kind(raw_step.kind),
         message: raw_step.message.clone(),
-        precision: raw_step.precision,
-        notes: notes_for(raw_step),
+        notes: Vec::new(),
     }
 }
 
@@ -458,7 +442,6 @@ pub fn truncate_after_step(result: &mut TraceResult, step_index: usize) {
         result.summary.total_paths = 0;
         result.summary.explored_paths = 0;
         result.summary.truncated_paths = 0;
-        result.summary.precision = Precision::Exact;
         return;
     }
     let keep = step_index.saturating_add(1).min(result.steps.len());
@@ -483,10 +466,6 @@ pub fn truncate_after_step(result: &mut TraceResult, step_index: usize) {
             )
         })
         .count();
-    result.summary.precision = result
-        .steps
-        .iter()
-        .fold(Precision::Exact, |acc, step| acc.meet(step.precision));
 }
 
 /// Mark the path containing the final retained step with its semantic outcome.
@@ -569,8 +548,7 @@ fn trace_edges(steps: &[TraceStep]) -> Vec<TraceEdge> {
 }
 
 /// Group the linear `steps` into per-path summaries. Each summary
-/// records first/last step ids, accumulated precision, and the
-/// reason the path terminated (Throw / Return / DepthLimit when the
+/// records first/last step ids and the reason the path terminated (Throw / Return / DepthLimit when the
 /// trace was budget-truncated).
 fn path_summaries(steps: &[TraceStep], truncated: bool) -> Vec<PathSummary> {
     let mut by_path: ahash::AHashMap<u64, Vec<&TraceStep>> = ahash::AHashMap::new();
@@ -583,9 +561,6 @@ fn path_summaries(steps: &[TraceStep], truncated: bool) -> Vec<PathSummary> {
             path_steps.sort_by_key(|step| step.id);
             let first = path_steps.first()?;
             let last = path_steps.last()?;
-            let precision = path_steps
-                .iter()
-                .fold(Precision::Exact, |acc, step| acc.meet(step.precision));
             Some(PathSummary {
                 path_id,
                 first_step: first.id,
@@ -602,7 +577,6 @@ fn path_summaries(steps: &[TraceStep], truncated: bool) -> Vec<PathSummary> {
                 } else {
                     PathTermination::Unknown
                 },
-                precision,
             })
         })
         .collect();
@@ -647,16 +621,6 @@ fn edge_kind(from: &TraceStep, _to: &TraceStep) -> TraceEdgeKind {
         TraceStepKind::Merge => TraceEdgeKind::Merge,
         _ => TraceEdgeKind::Next,
     }
-}
-
-/// Renderer-facing notes attached to a single step. Currently only
-/// surfaces non-Exact precision so a CLI consumer can flag it.
-fn notes_for(step: &RawStep) -> Vec<String> {
-    let mut notes = Vec::new();
-    if step.precision != Precision::Exact {
-        notes.push(format!("precision: {:?}", step.precision));
-    }
-    notes
 }
 
 /// Resolve a byte-range [`Span`] to a [`SourceSpan`] with line/col

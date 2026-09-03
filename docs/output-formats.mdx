@@ -10,15 +10,61 @@ with `--output-path <PATH>`. This replaces shell redirection for JSON,
 SARIF, DOT, GraphML, Cypher, and text output; progress and diagnostics
 still use stderr.
 
-Use the global `--html-output <PATH>` option for a standalone themed HTML
-report of any command's human-readable view. HTML output escapes source text,
-contains no scripts or external assets, and does not change the command's
-analysis scope. `--html-output` and `--output-path` are mutually exclusive.
+Use the global `--html-output <PATH>` option for a self-contained HTML report
+rendered from the command's canonical JSON result. The command runs in its
+JSON mode, and the same document `--format json` would print is rendered as
+completeness badges, fact lists, tables (flat rows), cards (nested records),
+and `<pre>` code blocks — so the report holds exactly the facts JSON holds for
+the same filters and page. HTML output escapes source text, contains no
+scripts or external assets, and does not change the command's analysis scope.
+`--html-output` and `--output-path` are mutually exclusive, and `export`,
+`cache clear`, and `cache rebuild` do not produce HTML.
 
 ```bash
 bonsai-ninja security ./src taint-analysis \
   --html-output bonsai-security.html
 ```
+
+## JSON envelope
+
+Every command prints one canonical document shape regardless of how many
+results it holds. Row commands (browse inventories, dumps, security
+inventories, analyses) wrap their rows:
+
+```json
+{
+  "analysis_complete": true,
+  "analysis_incomplete_reasons": [],
+  "result_complete": false,
+  "result_incomplete_reasons": ["paged defs result incomplete: page 1 of 3; continue with --page P:1f2e3d4c or pass --all"],
+  "rows": [],
+  "page": {"number": 1, "total_pages": 3, "cursor": "P:9a8b7c6d", "next_cursor": "P:1f2e3d4c", "is_last": false, "budget_exceeded": false}
+}
+```
+
+Commands with sectioned results keep the same completeness and `page`
+fields next to their own sections (`inspect`: `decl_hits` / `hits` /
+`taint_flows`; `trace`: `paths` / `steps` / `edges` / `states`; `path`:
+`nodes` / `edges` / `terminal_calls`; `slice`: `slices`). Atomic documents
+(`dump-hir`, `dump-cfg`, `diagnostics`, `index`, `read-file`, `show`,
+`cache stats`) carry the completeness fields on the object itself. Empty,
+single, multiple, filtered, and paged results all keep the same shape; a
+structured object is never split into serialized lines, and one object that
+exceeds the context budget is kept whole with `page.budget_exceeded: true`.
+
+The two completeness axes are independent. `analysis_complete` reports the
+compiler/analysis outcome (parser failures, unresolved evidence, engine
+limits) and never changes with paging or filters. `result_complete` reports
+whether the printed document contains every selected result; only paging or
+an explicit presentation cap can make it false, and a filter with zero
+matches is still complete. Text output prints the same two facts in its
+header and footer.
+
+Secondary filters (`--contains` / `--not-contains`) select complete semantic
+objects after the analysis has run: a match anywhere inside a finding, trace,
+path corridor, inspect hit, slice, sink-analysis candidate, or read-file view
+keeps the whole object, and the filter is applied exactly once, never to the
+child rows of an already selected parent.
 
 Text and row/object JSON commands are token-budgeted by default. Small
 JSON results keep their native shape; larger results return page metadata
@@ -100,8 +146,8 @@ in-memory JSON document.
 
 ### Native JSON schema
 
-The committed Draft 2020-12 schema for native export v10 is
-[`schemas/bonsai-native-export-v10.schema.json`](../schemas/bonsai-native-export-v10.schema.json).
+The committed Draft 2020-12 schema for native export v11 is
+[`schemas/bonsai-native-export-v11.schema.json`](../schemas/bonsai-native-export-v11.schema.json).
 It defines the top-level document, compiler file tables, normalized flow-event
 variants, callgraph rows, completeness fields, and IDG/taint projections. The
 release archive includes this file under `schemas/`.
@@ -115,7 +161,7 @@ against the committed schema, and rejects unknown top-level fields.
 ```bash
 bonsai-ninja export ./src --format json --output-path bonsai-export.json
 # Validate bonsai-export.json with any Draft 2020-12 JSON Schema validator
-# against schemas/bonsai-native-export-v10.schema.json.
+# against schemas/bonsai-native-export-v11.schema.json.
 ```
 
 Treat a whole-repository native export as a bulk artifact, not as model prompt
@@ -144,8 +190,8 @@ steps, completeness metadata, and stable IDs.
 
 Use `security taint-analysis --summary --format json` when a tool only
 needs aggregate triage counts. Summary mode emits the summary object
-directly, including severity, status, precision, tag, language, source
-rule, and sink rule counts, without paged finding rows.
+directly, including severity, status, tag, language, source rule, and
+sink rule counts, without paged finding rows.
 
 Every security finding text block prints its stable `S:` finding ID plus its
 representative `F:` flow ID and `G:` group ID before the evidence body. Native

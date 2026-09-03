@@ -12,7 +12,7 @@
 //! to their least fixed point without an iteration or graph-size cap.
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{FuncId, Precision, Span};
+use bonsai_common::{FuncId, Span};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -639,10 +639,6 @@ impl CompactAddressPager {
     }
 }
 
-fn edge_is_within_precision(edge: &IdgEdge, max_precision: Option<Precision>) -> bool {
-    max_precision.is_none_or(|max| edge.meta.precision <= max)
-}
-
 fn summary_segments(workspace: &IdgWorkspace, scope_funcs: Option<&AHashSet<FuncId>>) -> Vec<SegmentId> {
     let mut segments: Vec<SegmentId> = match scope_funcs {
         Some(funcs) => funcs
@@ -662,7 +658,6 @@ fn build_local_summary_inputs(
     workspace: &IdgWorkspace,
     segments: &[SegmentId],
     scope_funcs: Option<&AHashSet<FuncId>>,
-    max_precision: Option<Precision>,
 ) -> LocalSummaryInputs {
     let mut layouts = AHashMap::default();
     let mut addresses = CompactAddressPager::new(workspace.segment_count());
@@ -714,7 +709,7 @@ fn build_local_summary_inputs(
             });
         }
         addresses.write_page(segment_id, &segment_addresses);
-        let base_edges = BaseEdgePage::from_by_func(segment_base_edges(&segment, &layouts, max_precision));
+        let base_edges = BaseEdgePage::from_by_func(segment_base_edges(&segment, &layouts));
         base_pages.write_page(segment_id, &base_edges);
         for edge in &segment.edges {
             record_call_boundary(
@@ -723,7 +718,6 @@ fn build_local_summary_inputs(
                 &segment_addresses,
                 &segment_addresses,
                 edge,
-                max_precision,
                 scope_funcs,
             );
         }
@@ -753,11 +747,9 @@ fn record_call_boundary(
     from_addresses: &[CompactAddress],
     to_addresses: &[CompactAddress],
     edge: &IdgEdge,
-    max_precision: Option<Precision>,
     scope_funcs: Option<&AHashSet<FuncId>>,
 ) {
-    if !edge_is_within_precision(edge, max_precision) || edge.meta.kind == IdgEdgeKind::IntraAggregateConsume
-    {
+    if edge.meta.kind == IdgEdgeKind::IntraAggregateConsume {
         return;
     }
     let Some(from) = compact_address(from_addresses, edge.from) else {
@@ -865,7 +857,6 @@ fn build_call_boundaries(input_rows: BoundaryPairSpool, output_rows: BoundaryPai
 fn segment_base_edges(
     segment: &IdgSegment,
     layouts: &AHashMap<FuncId, FunctionLayout>,
-    max_precision: Option<Precision>,
 ) -> AHashMap<FuncId, Vec<(u32, u32)>> {
     let mut next_compact: AHashMap<FuncId, u32> = AHashMap::default();
     let mut addresses = Vec::with_capacity(segment.nodes.nodes.len());
@@ -881,10 +872,7 @@ fn segment_base_edges(
 
     let mut by_func: AHashMap<FuncId, Vec<(u32, u32)>> = AHashMap::default();
     for edge in &segment.edges {
-        if !edge_is_within_precision(edge, max_precision)
-            || edge.meta.kind == IdgEdgeKind::IntraAggregateConsume
-            || !edge.meta.kind.is_intra()
-        {
+        if edge.meta.kind == IdgEdgeKind::IntraAggregateConsume || !edge.meta.kind.is_intra() {
             continue;
         }
         let Some((from_func, from)) = addresses.get(edge.from.0 as usize).copied().flatten() else {
@@ -1019,12 +1007,8 @@ pub(crate) struct ContextualSummaryEdge {
     pub(crate) to: NodeId,
 }
 
-pub(crate) fn return_taint_param_indices(
-    workspace: &IdgWorkspace,
-    funcs: &[FuncId],
-    max_precision: Option<Precision>,
-) -> ReturnSummaryBatch {
-    return_taint_param_indices_in_scope(workspace, funcs, None, max_precision)
+pub(crate) fn return_taint_param_indices(workspace: &IdgWorkspace, funcs: &[FuncId]) -> ReturnSummaryBatch {
+    return_taint_param_indices_in_scope(workspace, funcs, None)
 }
 
 /// Compile the same monotone function summaries inside an exact compiler
@@ -1035,7 +1019,6 @@ pub(crate) fn return_taint_param_indices_in_scope(
     workspace: &IdgWorkspace,
     funcs: &[FuncId],
     scope_funcs: Option<&AHashSet<FuncId>>,
-    max_precision: Option<Precision>,
 ) -> ReturnSummaryBatch {
     let segments = summary_segments(workspace, scope_funcs);
     let LocalSummaryInputs {
@@ -1044,7 +1027,7 @@ pub(crate) fn return_taint_param_indices_in_scope(
         mut base_pages,
         mut boundary_inputs,
         mut boundary_outputs,
-    } = build_local_summary_inputs(workspace, &segments, scope_funcs, max_precision);
+    } = build_local_summary_inputs(workspace, &segments, scope_funcs);
     bonsai_diagnostics::debug_log!(
         "idg-summary",
         "ordinary layout functions={} nodes={} params={} outputs={}",
@@ -1097,7 +1080,6 @@ pub(crate) fn return_taint_param_indices_in_scope(
                     &pages.from,
                     &pages.to,
                     &edge.edge,
-                    max_precision,
                     scope_funcs,
                 );
             }
@@ -1157,8 +1139,7 @@ pub(crate) fn return_taint_param_indices_in_scope(
     let requested_set: AHashSet<FuncId> = requested.iter().copied().collect();
     let mut indices: AHashMap<FuncId, Vec<u32>> =
         requested.iter().copied().map(|func| (func, Vec::new())).collect();
-    let symbolic_consumers =
-        symbolic_consumer_nodes_streaming(workspace, &segments, scope_funcs, max_precision);
+    let symbolic_consumers = symbolic_consumer_nodes_streaming(workspace, &segments, scope_funcs);
     bonsai_diagnostics::debug_log!(
         "idg-summary",
         "symbolic consumers functions={} nodes={}",
@@ -1303,7 +1284,6 @@ fn symbolic_consumer_nodes_streaming(
     workspace: &IdgWorkspace,
     segments: &[SegmentId],
     scope_funcs: Option<&AHashSet<FuncId>>,
-    max_precision: Option<Precision>,
 ) -> AHashMap<FuncId, Vec<u32>> {
     let symbolic = workspace.symbolic_field();
     if !workspace.has_symbolic_transforms() {
@@ -1316,7 +1296,6 @@ fn symbolic_consumer_nodes_streaming(
                 transforms
                     .iter()
                     .filter(|transform| transform.kind == SymbolicFieldTransformKind::ScalarReturn)
-                    .filter(|transform| max_precision.is_none_or(|max| transform.precision <= max))
                     .filter(|transform| {
                         scope_funcs.is_none_or(|scope| {
                             symbolic
@@ -1396,10 +1375,9 @@ fn storage_name(workspace: &IdgWorkspace, segment_id: SegmentId, place_id: Place
 pub(crate) fn local_storage_taint_by_param(
     workspace: &IdgWorkspace,
     funcs: &[FuncId],
-    max_precision: Option<Precision>,
 ) -> AHashMap<FuncId, Vec<Vec<String>>> {
     let mut all_flows = AHashMap::with_capacity(funcs.len());
-    try_visit_local_storage_taint_by_param(workspace, funcs, max_precision, |func, flows| {
+    try_visit_local_storage_taint_by_param(workspace, funcs, |func, flows| {
         all_flows.insert(func, flows);
         Result::<(), std::convert::Infallible>::Ok(())
     })
@@ -1415,7 +1393,6 @@ pub(crate) fn local_storage_taint_by_param(
 pub(crate) fn try_visit_local_storage_taint_by_param<E>(
     workspace: &IdgWorkspace,
     funcs: &[FuncId],
-    max_precision: Option<Precision>,
     mut visit: impl FnMut(FuncId, Vec<Vec<String>>) -> Result<(), E>,
 ) -> Result<(), E> {
     let mut requested_by_segment: AHashMap<SegmentId, Vec<FuncId>> = AHashMap::default();
@@ -1451,9 +1428,6 @@ pub(crate) fn try_visit_local_storage_taint_by_param<E>(
             addresses[node_index] = Some((node.func, compact));
         }
         for edge in &segment.edges {
-            if !edge_is_within_precision(edge, max_precision) {
-                continue;
-            }
             let Some((from_func, from)) = addresses.get(edge.from.0 as usize).copied().flatten() else {
                 continue;
             };

@@ -305,7 +305,7 @@ fn add_callback_name_index_entry(index: &mut AHashMap<String, Vec<FuncId>>, func
 ///
 /// For caller `f` with a flow-event call to "g", this walks
 /// the relation's callees for `f` and returns every edge whose target
-/// has the declared name "g". The edge's `(kind, precision)` are
+/// has the declared name "g". The edge's kind and provenance are
 /// passed through verbatim — this is **not** a re-resolution, just
 /// a filter over already-resolved candidates.
 struct WorkspaceCalleeResolver<'a> {
@@ -448,7 +448,6 @@ struct IndexedCallSiteEdge {
 struct IndexedCallEdge {
     to: FuncId,
     edge_kind: bonsai_callgraph::EdgeKind,
-    precision: bonsai_common::Precision,
 }
 
 struct CallerCallSiteEdges {
@@ -690,7 +689,6 @@ impl CallerCallSiteEdges {
                 previous.site == row.site
                     && previous.edge.to == row.edge.to
                     && previous.edge.edge_kind == row.edge.edge_kind
-                    && previous.edge.precision == row.edge.precision
             }) {
                 previous.indirect_name_matches =
                     merge_name_verdicts(previous.indirect_name_matches, row.indirect_name_matches);
@@ -725,7 +723,7 @@ fn call_site_key(site: bonsai_common::Span) -> (u32, u64, u64) {
     (site.file.raw(), site.start, site.end)
 }
 
-fn caller_call_site_edge_sort_key(row: &IndexedCallSiteEdge) -> (u32, u64, u64, u32, u8, u8) {
+fn caller_call_site_edge_sort_key(row: &IndexedCallSiteEdge) -> (u32, u64, u64, u32, u8) {
     let edge_kind = match row.edge.edge_kind {
         bonsai_callgraph::EdgeKind::Direct => 0,
         bonsai_callgraph::EdgeKind::Virtual => 1,
@@ -738,7 +736,6 @@ fn caller_call_site_edge_sort_key(row: &IndexedCallSiteEdge) -> (u32, u64, u64, 
         row.site.end,
         row.edge.to.raw(),
         edge_kind,
-        row.edge.precision.rank(),
     )
 }
 
@@ -768,7 +765,6 @@ fn call_edges_for_caller(
         let indexed = IndexedCallEdge {
             to: edge.to,
             edge_kind: edge.kind,
-            precision: edge.precision,
         };
         let target_decl = global.decl_of(bonsai_common::SymbolId::new(edge.to.raw()));
         let target_name = target_decl.map(decl_call_identity);
@@ -1090,17 +1086,13 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         call_kind: bonsai_lang_api::CallKind,
     ) -> Vec<ResolvedCallee> {
         let mut out = Vec::new();
-        let mut seen: ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind, bonsai_common::Precision)> =
-            ahash::AHashSet::default();
+        let mut seen: ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind)> = ahash::AHashSet::default();
         let had_exact_edges = self.with_call_edges_at_site(caller, site, |exact_edges| {
             if exact_edges.is_empty() {
                 return false;
             }
             for row in exact_edges {
                 let edge = row.edge;
-                if !edge.precision.is_semantic() {
-                    continue;
-                }
                 if !self.funcs_share_language(caller, edge.to) {
                     continue;
                 }
@@ -1116,25 +1108,18 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                 // the dedicated fallbacks below.
                 if edge.edge_kind == bonsai_callgraph::EdgeKind::Indirect {
                     match row.indirect_name_matches {
-                        Some(true) => Self::push_resolved_edge(
-                            &mut out,
-                            &mut seen,
-                            edge.to,
-                            edge.edge_kind,
-                            edge.precision,
-                        ),
+                        Some(true) => Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.edge_kind),
                         Some(false) => {}
                         None => self.push_resolved_edge_if_name_matches(
                             &mut out,
                             &mut seen,
                             edge.to,
                             edge.edge_kind,
-                            edge.precision,
                             callee_name,
                         ),
                     }
                 } else {
-                    Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.edge_kind, edge.precision);
+                    Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.edge_kind);
                 }
             }
             true
@@ -1144,21 +1129,17 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                 if !call_site_spans_match(edge.span, site) {
                     return;
                 }
-                if !edge.precision.is_semantic() {
-                    return;
-                }
                 if !self.funcs_share_language(caller, edge.to) {
                     return;
                 }
                 if edge.kind == bonsai_callgraph::EdgeKind::Indirect {
-                    Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.kind, edge.precision);
+                    Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.kind);
                 } else {
                     self.push_resolved_edge_if_name_matches(
                         &mut out,
                         &mut seen,
                         edge.to,
                         edge.kind,
-                        edge.precision,
                         callee_name,
                     );
                 }
@@ -1223,7 +1204,6 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                             &mut seen,
                             func,
                             bonsai_callgraph::EdgeKind::Indirect,
-                            bonsai_common::Precision::Narrowed,
                         );
                     }
                 }
@@ -1273,7 +1253,6 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                     out.push(ResolvedCallee {
                         func: candidate_func,
                         edge_kind: bonsai_callgraph::EdgeKind::Indirect,
-                        precision: bonsai_common::Precision::Narrowed,
                     });
                 }
             }
@@ -1438,7 +1417,6 @@ impl WorkspaceCalleeResolver<'_> {
                         &mut seen,
                         target,
                         bonsai_callgraph::EdgeKind::Indirect,
-                        bonsai_common::Precision::Narrowed,
                     );
                 } else if span.start <= arg_span.start && span.end >= arg_span.end {
                     enclosing.push(target);
@@ -1446,13 +1424,7 @@ impl WorkspaceCalleeResolver<'_> {
             });
         if out.is_empty() {
             for target in enclosing {
-                Self::push_resolved_edge(
-                    &mut out,
-                    &mut seen,
-                    target,
-                    bonsai_callgraph::EdgeKind::Indirect,
-                    bonsai_common::Precision::Narrowed,
-                );
+                Self::push_resolved_edge(&mut out, &mut seen, target, bonsai_callgraph::EdgeKind::Indirect);
             }
         }
         // Resident/custom call graphs may predate the compact callable-
@@ -1466,12 +1438,11 @@ impl WorkspaceCalleeResolver<'_> {
                     || edge.span.file != arg_span.file
                     || edge.span.start < arg_span.start
                     || edge.span.end > arg_span.end
-                    || !edge.precision.is_semantic()
                     || !self.funcs_share_language(caller, edge.to)
                 {
                     return;
                 }
-                Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.kind, edge.precision);
+                Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.kind);
             });
         }
         // A rule-declared external/runtime API can prove that an inline
@@ -1492,7 +1463,6 @@ impl WorkspaceCalleeResolver<'_> {
                         &mut seen,
                         target,
                         bonsai_callgraph::EdgeKind::Indirect,
-                        bonsai_common::Precision::Narrowed,
                     );
                 }
             }
@@ -1629,28 +1599,22 @@ impl WorkspaceCalleeResolver<'_> {
 
     fn push_resolved_edge(
         out: &mut Vec<ResolvedCallee>,
-        seen: &mut ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind, bonsai_common::Precision)>,
+        seen: &mut ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind)>,
         to: FuncId,
         edge_kind: bonsai_callgraph::EdgeKind,
-        precision: bonsai_common::Precision,
     ) {
-        let candidate_key = (to, edge_kind, precision);
+        let candidate_key = (to, edge_kind);
         if seen.insert(candidate_key) {
-            out.push(ResolvedCallee {
-                func: to,
-                edge_kind,
-                precision,
-            });
+            out.push(ResolvedCallee { func: to, edge_kind });
         }
     }
 
     fn push_resolved_edge_if_name_matches(
         &self,
         out: &mut Vec<ResolvedCallee>,
-        seen: &mut ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind, bonsai_common::Precision)>,
+        seen: &mut ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind)>,
         to: FuncId,
         edge_kind: bonsai_callgraph::EdgeKind,
-        precision: bonsai_common::Precision,
         callee_name: &str,
     ) {
         let mut matched = self.callable_names.matches(to, callee_name);
@@ -1666,7 +1630,7 @@ impl WorkspaceCalleeResolver<'_> {
             matched = true;
         }
         if matched {
-            Self::push_resolved_edge(out, seen, to, edge_kind, precision);
+            Self::push_resolved_edge(out, seen, to, edge_kind);
         }
     }
 
@@ -1803,7 +1767,6 @@ impl WorkspaceCalleeResolver<'_> {
                         candidates.push(ResolvedCallee {
                             func: *func,
                             edge_kind: bonsai_callgraph::EdgeKind::Indirect,
-                            precision: bonsai_common::Precision::Narrowed,
                         });
                     }
                 }
@@ -1859,22 +1822,17 @@ impl WorkspaceCalleeResolver<'_> {
 }
 
 impl<'a> WorkspaceCalleeResolver<'a> {
-    fn exception_type_assignability(
-        &self,
-        func: FuncId,
-        thrown: &str,
-        caught: &str,
-    ) -> Option<bonsai_common::Precision> {
+    fn exception_type_assignability(&self, func: FuncId, thrown: &str, caught: &str) -> bool {
         let thrown = bonsai_lang_api::kit::canonical_simple_type_name(thrown);
         let caught = bonsai_lang_api::kit::canonical_simple_type_name(caught);
         if thrown.is_empty() || caught.is_empty() {
-            return None;
+            return false;
         }
         if thrown == caught {
-            return Some(bonsai_common::Precision::Exact);
+            return true;
         }
         let Some(scope) = self.func_scope(func) else {
-            return Some(bonsai_common::Precision::Narrowed);
+            return true;
         };
         let thrown_decls = self
             .class_symbols_by_name_scope
@@ -1885,12 +1843,12 @@ impl<'a> WorkspaceCalleeResolver<'a> {
             .class_symbols_by_name_scope
             .get(&(caught.clone(), scope.clone()))
             .is_some_and(|decls| !decls.is_empty());
-        // Missing dependencies are an explicit unknown-type boundary. Keep a
-        // narrowed edge rather than pretending two external spellings are
+        // Missing dependencies are an explicit unknown-type boundary. Keep
+        // the edge rather than pretending two external spellings are
         // disjoint; when both declarations are present, their parsed base
         // graph can prove assignability or disjointness exactly.
         if thrown_decls.is_empty() || !caught_is_declared {
-            return Some(bonsai_common::Precision::Narrowed);
+            return true;
         }
         let mut frontier = thrown_decls;
         let mut visited = AHashSet::new();
@@ -1904,14 +1862,14 @@ impl<'a> WorkspaceCalleeResolver<'a> {
             for base in &decl.bases {
                 let base = bonsai_lang_api::kit::canonical_simple_type_name(base);
                 if base == caught {
-                    return Some(bonsai_common::Precision::Exact);
+                    return true;
                 }
                 if let Some(symbols) = self.class_symbols_by_name_scope.get(&(base, scope.clone())) {
                     frontier.extend(symbols.iter().copied());
                 }
             }
         }
-        None
+        false
     }
 
     fn callback_candidate_funcs_for_bound_name(
@@ -2245,7 +2203,6 @@ impl<'a> WorkspaceCalleeResolver<'a> {
                             out.push(ResolvedCallee {
                                 func,
                                 edge_kind: bonsai_callgraph::EdgeKind::Indirect,
-                                precision: bonsai_common::Precision::Narrowed,
                             });
                         }
                     }
@@ -2324,7 +2281,6 @@ impl<'a> WorkspaceCalleeResolver<'a> {
                     out.push(ResolvedCallee {
                         func,
                         edge_kind: bonsai_callgraph::EdgeKind::Indirect,
-                        precision: bonsai_common::Precision::Narrowed,
                     });
                 }
                 return;
@@ -4392,35 +4348,29 @@ fn stitch_declared_exception_hierarchy_in_segment(
     }
     let mut additions = Vec::new();
     for thrown in &throws {
-        let compatible = catches.iter().filter_map(|caught| {
-            (thrown.func == caught.func
+        let compatible = catches.iter().filter(|caught| {
+            thrown.func == caught.func
                 && thrown.span.file == caught.try_span.file
                 && thrown.span.start >= caught.try_span.start
-                && thrown.span.end <= caught.try_span.end)
-                .then(|| {
-                    resolver
-                        .exception_type_assignability(thrown.func, &thrown.ty, &caught.ty)
-                        .map(|precision| (caught, precision))
-                })
-                .flatten()
+                && thrown.span.end <= caught.try_span.end
+                && resolver.exception_type_assignability(thrown.func, &thrown.ty, &caught.ty)
         });
         let compatible = compatible.collect::<Vec<_>>();
         let Some(nearest_try_span) = compatible
             .iter()
-            .map(|(caught, _)| caught.try_span)
+            .map(|caught| caught.try_span)
             .min_by_key(|span| span.end.saturating_sub(span.start))
         else {
             continue;
         };
-        for (caught, precision) in compatible
+        for caught in compatible
             .into_iter()
-            .filter(|(caught, _)| caught.try_span == nearest_try_span)
+            .filter(|caught| caught.try_span == nearest_try_span)
         {
             let edge = crate::edge::IdgEdge {
                 from: thrown.node,
                 to: caught.node,
                 meta: crate::edge::EdgeMeta {
-                    precision,
                     kind: crate::edge::IdgEdgeKind::IntraThrow,
                     call_kind: bonsai_callgraph::EdgeKind::Direct,
                     via_span: thrown.span,
@@ -4866,14 +4816,7 @@ fn stitch_receiver_method_propagation(
                 let mut emitted_link_for_call = false;
                 for (recv_ws, callee_target) in recv_slots {
                     if let Some(target) = callee_target {
-                        add_edge_between_ws_nodes(
-                            ws,
-                            &offsets,
-                            recv_ws,
-                            target,
-                            IdgEdgeKind::IntraRead,
-                            bonsai_common::Precision::Narrowed,
-                        );
+                        add_edge_between_ws_nodes(ws, &offsets, recv_ws, target, IdgEdgeKind::IntraRead);
                     } else {
                         for read_ws in &read_nodes {
                             add_edge_between_ws_nodes(
@@ -4882,7 +4825,6 @@ fn stitch_receiver_method_propagation(
                                 recv_ws,
                                 *read_ws,
                                 IdgEdgeKind::IntraRead,
-                                bonsai_common::Precision::Narrowed,
                             );
                         }
                     }
@@ -4909,7 +4851,6 @@ fn stitch_receiver_method_propagation(
                             writer_ws_node: recv_ws.0,
                             reader_ws_node: read_nodes.first().map(|w| w.0).unwrap_or(0),
                             via_span: recv_span,
-                            precision: bonsai_common::Precision::Narrowed,
                         });
                         emitted_link_for_call = true;
                     }
@@ -5718,14 +5659,7 @@ fn stitch_receiver_field_flow(
                     if !funcs_share_language(global, file_to_language, *w_func, *r_func) {
                         continue;
                     }
-                    add_edge_between_ws_nodes(
-                        ws,
-                        &offsets,
-                        *w_ws,
-                        *r_ws,
-                        IdgEdgeKind::IntraAssign,
-                        bonsai_common::Precision::Narrowed,
-                    );
+                    add_edge_between_ws_nodes(ws, &offsets, *w_ws, *r_ws, IdgEdgeKind::IntraAssign);
                     // Record the link so the query layer can lift
                     // it into a synthetic CrossCallEdge for the
                     // security-analysis lineage walk. Without this
@@ -5746,7 +5680,6 @@ fn stitch_receiver_field_flow(
                         writer_ws_node: w_ws.0,
                         reader_ws_node: r_ws.0,
                         via_span: writer_span,
-                        precision: bonsai_common::Precision::Narrowed,
                     });
                 }
             }
@@ -5911,7 +5844,6 @@ fn add_edge_between_ws_nodes(
     from: crate::WsNodeId,
     to: crate::WsNodeId,
     kind: crate::edge::IdgEdgeKind,
-    precision: bonsai_common::Precision,
 ) {
     let Some((from_seg, from_local)) = ws_node_to_local(ws, offsets, from) else {
         return;
@@ -5923,7 +5855,6 @@ fn add_edge_between_ws_nodes(
         from: from_local,
         to: to_local,
         meta: crate::edge::EdgeMeta {
-            precision,
             kind,
             call_kind: bonsai_callgraph::EdgeKind::Indirect,
             via_span: bonsai_common::Span::new(bonsai_common::FileId::new(0), 0, 0),

@@ -23,7 +23,7 @@
 //! `ValueFlowGraph` shape is a public type many consumers depend on).
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{wire, FileId, FuncId, Precision, Span};
+use bonsai_common::{wire, FileId, FuncId, Span};
 use bonsai_factstore::{StrId, StringPoolView};
 use bonsai_taint::{ValueFlowEdge, ValueFlowGraph, ValueFlowNode, ValueFlowNodeKind};
 use serde::{Deserialize, Serialize};
@@ -127,7 +127,6 @@ struct OnDiskEntry {
     /// ascending so encoding is deterministic across runs.
     forward: Vec<(u32, Vec<u32>)>,
     backward: Vec<(u32, Vec<u32>)>,
-    precision: Precision,
     /// Sorted ascending so encoding is deterministic.
     returning_seeds: Vec<u32>,
 }
@@ -151,7 +150,6 @@ struct OnDiskEdge {
     via_span_file: u32,
     via_span_start: u64,
     via_span_end: u64,
-    precision: Precision,
 }
 
 fn build_on_disk<F>(entry: &ValueFlowEntry, intern: &mut F) -> OnDiskEntry
@@ -192,7 +190,7 @@ where
         .collect();
 
     // Step 2: dedup edges. Two edges are "equal" when their
-    // `from`, `to`, `precision`, and `via_span` match — same as
+    // `from`, `to`, and `via_span` match — same as
     // `ValueFlowEdge`'s `Eq`.
     let mut edge_to_idx: AHashMap<ValueFlowEdge, u32> = AHashMap::new();
     let mut edges_in_order: Vec<ValueFlowEdge> = Vec::new();
@@ -211,7 +209,6 @@ where
             via_span_file: e.via_span.file.raw(),
             via_span_start: e.via_span.start,
             via_span_end: e.via_span.end,
-            precision: e.precision,
         })
         .collect();
 
@@ -229,7 +226,6 @@ where
         edges,
         forward,
         backward,
-        precision: entry.graph.precision,
         returning_seeds,
     }
 }
@@ -337,7 +333,6 @@ impl OnDiskEntry {
             edges.push(ValueFlowEdge {
                 from,
                 to,
-                precision: edge.precision,
                 via_span: Span::new(
                     FileId::new(edge.via_span_file),
                     edge.via_span_start,
@@ -350,7 +345,6 @@ impl OnDiskEntry {
         // AHashSet so we don't rely on insertion order from the disk
         // record.
         let mut graph = ValueFlowGraph::new();
-        graph.precision = self.precision;
         for node in &nodes {
             graph.nodes.insert(node.clone());
         }

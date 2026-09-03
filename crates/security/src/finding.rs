@@ -262,8 +262,7 @@ pub struct Finding {
     /// Whether this finding's source-to-sink evidence was computed to
     /// completion for the requested semantic scope. Public findings are
     /// emitted only from complete semantic evidence; the explicit field keeps
-    /// downstream consumers from having to infer that from absence of broad
-    /// precision.
+    /// downstream consumers from having to infer it from the rendered rows.
     pub analysis_complete: bool,
     /// Machine-readable reasons when `analysis_complete` is false. Kept even
     /// when empty so JSON consumers can treat taint-analysis and
@@ -291,7 +290,6 @@ pub struct Finding {
     pub tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub severity: Option<Severity>,
-    pub precision: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cwe: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -323,7 +321,6 @@ impl Finding {
             chain_display: &self.chain_display,
             taint_path: &self.taint_path,
             status: self.status,
-            precision: &self.precision,
         })
         .chain(self.alternate_flows.iter().map(|flow| TaintFlowRef {
             source: &flow.source,
@@ -334,7 +331,6 @@ impl Finding {
             chain_display: &flow.chain_display,
             taint_path: &flow.taint_path,
             status: flow.status,
-            precision: &flow.precision,
         }))
     }
 
@@ -371,16 +367,13 @@ pub struct AlternateTaintFlow {
     /// least-mitigated status across all routes.
     #[serde(default)]
     pub status: FindingStatus,
-    /// Static precision for this route, kept paired with its source and path.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub precision: String,
 }
 
 /// Borrowed view of one complete route on a [`Finding`].
 ///
 /// Consumers use this instead of separately special-casing the
 /// representative route and `alternate_flows`, which keeps source, argument,
-/// sanitizer, status, and precision evidence aligned.
+/// sanitizer, and status evidence aligned.
 #[derive(Copy, Clone, Debug)]
 pub struct TaintFlowRef<'a> {
     pub source: &'a FindingMatch,
@@ -391,7 +384,6 @@ pub struct TaintFlowRef<'a> {
     pub chain_display: &'a [String],
     pub taint_path: &'a [TaintPropagationStep],
     pub status: FindingStatus,
-    pub precision: &'a str,
 }
 
 /// Serde callback for `#[serde(skip_serializing_if = "is_false")]` —

@@ -121,31 +121,29 @@ interpolated variable in `source_names`; literal text stays inert.
 
 ## 4. Public analysis accepts one compiler-proven evidence class
 
-Every fact crossing an analysis boundary carries a `Precision` from the lattice
-`Exact < Narrowed < OverApproximate < Unknown`. This is internal proof
-provenance, not a user-selectable precision mode. Public analysis has one
-contract: admit compiler-proven evidence and reject guessed evidence.
+The compiler has one precision level. A call edge, taint step, or flow either
+follows from syntax and resolved call flow or it does not exist; there is no
+precision lattice, no `max_precision` knob, and no diagnostic edge class that
+public commands have to filter. Public analysis has one contract: admit
+compiler-proven evidence and reject guessed evidence.
 
-- Direct structural facts and fully resolved edges → Exact.
+- Direct structural facts and fully resolved edges are emitted with their
+  resolver provenance (`resolver_stage`, `evidence`, `confidence`).
 - Edges narrowed by aliases, receiver types, module paths, build targets, or
-  declared virtual dispatch semantics → Narrowed.
+  declared virtual dispatch semantics are emitted the same way; the provenance
+  says how the target was proven.
 - Multiple candidates are allowed only when the language facts explain that set
   semantically, such as typed virtual dispatch over the known receiver family
   or same-scope overloads. If declared argument/parameter types identify one
   overload, dispatch must narrow to that candidate instead of flowing through
   siblings.
 - Unresolved, dynamic, budget-truncated, or contextless matches are not evidence.
-  They must be omitted from semantic results and surfaced through explicit
+  They are never materialized as edges; they are surfaced through explicit
   incompleteness/debug metadata instead of being widened into findings.
-- `meet(a, b)` returns the worse semantic precision across a proven chain; if a
-  chain would require `OverApproximate` or `Unknown`, the public command must not
-  report it as a finding or flow.
 
-Findings and flow exports render `precision` only to explain whether admitted
-compiler evidence was direct (`exact`) or constraint-refined (`narrowed`). The
-labels never select different work or finding sets. Diagnostic broad classes
-may exist internally for cache round-trips or debugging, but they are not
-acceptable as user-facing analysis results.
+Findings and flow exports carry the per-edge resolver provenance so a reader
+can reproduce how each hop was proven. No output carries a precision label,
+and no command accepts a precision filter or override.
 
 ## 5. Content-addressed caching
 
@@ -416,9 +414,6 @@ The justification typically takes one of three shapes:
   is `#[doc(hidden)]` and consumed by browse output / CLI
   trace-source resolution where cross-context candidate
   enumeration is acceptable.
-- **Diagnostic-only compatibility paths** — compatibility or debug-only code
-  may parse broad precision labels, but public analysis commands must
-  filter them out or report explicit incompleteness.
 
 A site that doesn't fit one of these shapes is almost certainly
 a bug — replace it with `resolve_callable_with_context`.

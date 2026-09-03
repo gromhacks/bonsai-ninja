@@ -139,14 +139,12 @@ class and verify each box.
 - [ ] **SDK parity intact.** `cargo test -p bonsai-ninja --test
       sdk_cli_parity`.
 - [ ] **Pagination still works** for the affected command.
-- [ ] **Inspect mode contract holds.** Default targeted queries are a light
-      indexed syntax/source view. `--taint-flow` requests raw taint paths, and
-      `--graph-flow` requests one bounded source/evidence unit per callable.
-      Structural inspect and browse summaries never enumerate recursive call
-      paths; `path` returns an exact compressed endpoint corridor. These flags
-      change output scope, not the single compiler-proven static-evidence
-      contract. `Exact` and `Narrowed` remain proof-provenance labels, not
-      analysis modes.
+- [ ] **Inspect mode contract holds.** Every matching callable carries one
+      bounded compiler evidence unit (a stable `F:` flow); `--taint-flow`
+      adds raw taint paths. Structural inspect and browse summaries never
+      enumerate recursive call paths; `path` returns an exact compressed
+      endpoint corridor. There is one compiler-proven static-evidence
+      contract and no precision label or accuracy mode on any surface.
 - [ ] **Stable ID routing holds.** `show F:`, `show G:`, `show T:`,
       `show E:`, `show N:`, `show S:`, and resolver-scoped `show R:`
       delegate to the expected owner command.

@@ -60,7 +60,7 @@ fn cache_stats(workspace: Option<std::path::PathBuf>, format: BrowseFormat) -> R
     let stats = cache.stats()?;
     stage.finish();
     if matches!(format, BrowseFormat::Json) {
-        cli_println!("{}", serde_json::to_string_pretty(&stats)?);
+        crate::output::emit_json_document(&super::with_completeness(&serde_json::to_value(&stats)?))?;
         return Ok(());
     }
     print_kv("scope", "in-process (per command invocation)");

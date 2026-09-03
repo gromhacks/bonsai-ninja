@@ -12,8 +12,8 @@ use bonsai_sdk::{FlowEntryExit, InlinedDecl, LineMark, MarkKind, ReadFileFilters
 use std::path::{Path, PathBuf};
 
 use super::{
-    emit_json_value_paged_cached, open_project_index_matching_literal, open_project_index_matching_path,
-    open_project_index_only, open_project_index_only_with_rulepack,
+    emit_json_value_paged_cached_prefiltered, open_project_index_matching_literal,
+    open_project_index_matching_path, open_project_index_only, open_project_index_only_with_rulepack,
 };
 use crate::args::BrowseFormat;
 use crate::cli_println;
@@ -66,12 +66,31 @@ pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
     let out = project.browse().read_file(filters)?;
     stage.finish();
 
+    // `read-file` is one connected compiler object. Secondary filters select
+    // that parent object; they must never slice away unrelated source lines,
+    // marks, callers, callees, or findings after one child value matched.
+    let secondary = crate::filter::active();
+    if secondary.is_active() && !secondary.matches_value(&out) {
+        match args.format {
+            BrowseFormat::Json => crate::output::emit_json_document(&serde_json::json!({
+                "analysis_complete": out.analysis_complete,
+                "analysis_incomplete_reasons": out.analysis_incomplete_reasons,
+                "result_complete": true,
+                "result_incomplete_reasons": [],
+                "matched": false,
+                "value": null,
+            }))?,
+            BrowseFormat::Text => cli_println!("no read-file view matches the active output filter"),
+        }
+        return Ok(());
+    }
+
     match args.format {
         BrowseFormat::Json => {
             let filters_hash = read_file_filters_hash(&args);
             let cfg = paging::config_from_raw(args.context, args.page, args.all, FormatClass::Programmatic)
                 .map_err(|e| anyhow::anyhow!(e))?;
-            emit_json_value_paged_cached(args.workspace, &out, &cfg, "read-file", filters_hash)?;
+            emit_json_value_paged_cached_prefiltered(args.workspace, &out, &cfg, "read-file", filters_hash)?;
         }
         BrowseFormat::Text => {
             let filters_hash = read_file_filters_hash(&args);
@@ -447,7 +466,7 @@ fn render_text_paged(
         Ok(())
     })?;
     let lines: Vec<String> = rendered.lines().map(str::to_string).collect();
-    page_cache::emit_paged_text(
+    page_cache::emit_paged_text_prefiltered(
         workspace,
         &lines,
         &cfg,

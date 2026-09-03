@@ -107,7 +107,7 @@ use std::sync::Arc;
 // v13 (2026-07-18): metadata and graph payloads are independent factstore
 // entries, so freshness checks do not recursively decode millions of edges.
 // v12 (2026-07-16): MessagePack replaced the retired binary codec.
-pub const CALLGRAPH_CACHE_VERSION: u32 = 39;
+pub const CALLGRAPH_CACHE_VERSION: u32 = 40;
 
 const CALLGRAPH_TABLE_ID: u32 = 102;
 const METADATA_KEY: u64 = 0;
@@ -521,7 +521,6 @@ impl CallgraphQueryService {
             let mut caller_pairs = partition
                 .incoming
                 .iter()
-                .filter(|edge| edge.precision.is_semantic())
                 .map(|edge| (edge.to, edge.from))
                 .collect::<Vec<_>>();
             caller_pairs.sort_unstable_by_key(|(callee, caller)| (callee.raw(), caller.raw()));
@@ -529,7 +528,6 @@ impl CallgraphQueryService {
             let mut outgoing_pairs = partition
                 .outgoing
                 .iter()
-                .filter(|edge| edge.precision.is_semantic())
                 .map(|edge| (edge.from, edge.to))
                 .collect::<Vec<_>>();
             outgoing_pairs.sort_unstable_by_key(|(caller, callee)| (caller.raw(), callee.raw()));
@@ -599,7 +597,7 @@ impl CallgraphQueryService {
         for (file, targets) in by_file {
             let partition = self.partition(FileId::new(file))?;
             for edge in partition.incoming {
-                if edge.precision.is_semantic() && targets.contains(&edge.to) {
+                if targets.contains(&edge.to) {
                     called.insert(edge.to);
                 }
             }
@@ -608,14 +606,6 @@ impl CallgraphQueryService {
     }
 
     pub(crate) fn materialize_reachable(&self, starts: &[FuncId]) -> std::io::Result<ResolvedCallGraph> {
-        self.materialize_reachable_with_max_precision(starts, None)
-    }
-
-    pub(crate) fn materialize_reachable_with_max_precision(
-        &self,
-        starts: &[FuncId],
-        max_precision: Option<bonsai_common::Precision>,
-    ) -> std::io::Result<ResolvedCallGraph> {
         let mut stack = starts.to_vec();
         stack.sort_unstable_by_key(|func| func.raw());
         stack.dedup();
@@ -641,11 +631,7 @@ impl CallgraphQueryService {
             let partition = loaded
                 .get(&file.raw())
                 .expect("partition inserted for reachable node");
-            for edge in partition
-                .outgoing
-                .iter()
-                .filter(|edge| edge.from == function && max_precision.is_none_or(|max| edge.precision <= max))
-            {
+            for edge in partition.outgoing.iter().filter(|edge| edge.from == function) {
                 edges.push(edge.clone());
                 if !visited.contains(&edge.to) {
                     stack.push(edge.to);
@@ -697,7 +683,6 @@ impl CallgraphQueryService {
     pub(crate) fn materialize_direct_neighborhood(
         &self,
         functions: &[FuncId],
-        max_precision: Option<bonsai_common::Precision>,
     ) -> std::io::Result<ResolvedCallGraph> {
         if functions.is_empty() {
             return Ok(ResolvedCallGraph::from_persisted_parts(
@@ -725,15 +710,19 @@ impl CallgraphQueryService {
         let mut adjacent = requested.clone();
         for (file, file_functions) in &requested_by_file {
             let partition = self.partition(FileId::new(*file))?;
-            for edge in partition.outgoing.iter().filter(|edge| {
-                file_functions.contains(&edge.from) && max_precision.is_none_or(|max| edge.precision <= max)
-            }) {
+            for edge in partition
+                .outgoing
+                .iter()
+                .filter(|edge| file_functions.contains(&edge.from))
+            {
                 adjacent.insert(edge.to);
                 edges.push(edge.clone());
             }
-            for edge in partition.incoming.iter().filter(|edge| {
-                file_functions.contains(&edge.to) && max_precision.is_none_or(|max| edge.precision <= max)
-            }) {
+            for edge in partition
+                .incoming
+                .iter()
+                .filter(|edge| file_functions.contains(&edge.to))
+            {
                 adjacent.insert(edge.from);
                 edges.push(edge.clone());
             }
@@ -747,7 +736,6 @@ impl CallgraphQueryService {
                 edge.span.start,
                 edge.span.end,
                 edge.kind as u8,
-                edge.precision.rank(),
             )
         };
         edges.sort_unstable_by_key(edge_key);
@@ -821,7 +809,6 @@ impl CallgraphQueryService {
     pub(crate) fn materialize_reaching_with_direct_callees(
         &self,
         targets: &[FuncId],
-        max_precision: Option<bonsai_common::Precision>,
     ) -> std::io::Result<ResolvedCallGraph> {
         if targets.is_empty() {
             return Ok(ResolvedCallGraph::from_persisted_parts(
@@ -834,7 +821,7 @@ impl CallgraphQueryService {
         }
 
         let mut edges = Vec::new();
-        let functions = self.visit_reaching_with_direct_callees(targets, max_precision, |edge| {
+        let functions = self.visit_reaching_with_direct_callees(targets, |edge| {
             edges.push(edge.clone());
         })?;
 
@@ -846,7 +833,6 @@ impl CallgraphQueryService {
                 edge.span.start,
                 edge.span.end,
                 edge.kind as u8,
-                edge.precision.rank(),
             )
         };
         edges.sort_unstable_by_key(edge_key);
@@ -917,15 +903,13 @@ impl CallgraphQueryService {
     pub(crate) fn reaching_functions_with_direct_callees(
         &self,
         targets: &[FuncId],
-        max_precision: Option<bonsai_common::Precision>,
     ) -> std::io::Result<AHashSet<FuncId>> {
-        self.visit_reaching_with_direct_callees(targets, max_precision, |_| {})
+        self.visit_reaching_with_direct_callees(targets, |_| {})
     }
 
     fn visit_reaching_with_direct_callees(
         &self,
         targets: &[FuncId],
-        max_precision: Option<bonsai_common::Precision>,
         mut visit_edge: impl FnMut(&CallEdge),
     ) -> std::io::Result<AHashSet<FuncId>> {
         let target_set = targets.iter().copied().collect::<AHashSet<_>>();
@@ -956,16 +940,20 @@ impl CallgraphQueryService {
             // reverse visited set could suppress a real predecessor work item
             // when that same function also calls a target.
             if outgoing_target_files.insert(file) {
-                for edge in partition.outgoing.iter().filter(|edge| {
-                    target_set.contains(&edge.from) && max_precision.is_none_or(|max| edge.precision <= max)
-                }) {
+                for edge in partition
+                    .outgoing
+                    .iter()
+                    .filter(|edge| target_set.contains(&edge.from))
+                {
                     visit_edge(edge);
                     direct_callees.insert(edge.to);
                 }
             }
-            for edge in partition.incoming.iter().filter(|edge| {
-                requested.contains(&edge.to) && max_precision.is_none_or(|max| edge.precision <= max)
-            }) {
+            for edge in partition
+                .incoming
+                .iter()
+                .filter(|edge| requested.contains(&edge.to))
+            {
                 visit_edge(edge);
                 if !functions.insert(edge.from) {
                     continue;
@@ -998,15 +986,6 @@ impl CallgraphQueryService {
         starts: &[FuncId],
         targets: &[FuncId],
     ) -> std::io::Result<ResolvedCallGraph> {
-        self.materialize_between_with_max_precision(starts, targets, None)
-    }
-
-    pub(crate) fn materialize_between_with_max_precision(
-        &self,
-        starts: &[FuncId],
-        targets: &[FuncId],
-        max_precision: Option<bonsai_common::Precision>,
-    ) -> std::io::Result<ResolvedCallGraph> {
         if starts.is_empty() || targets.is_empty() {
             return Ok(ResolvedCallGraph::from_persisted_parts(
                 Vec::new(),
@@ -1035,9 +1014,11 @@ impl CallgraphQueryService {
             functions.dedup();
             let requested = functions.into_iter().collect::<AHashSet<_>>();
             let partition = self.partition(FileId::new(file))?;
-            for edge in partition.incoming.iter().filter(|edge| {
-                requested.contains(&edge.to) && max_precision.is_none_or(|max| edge.precision <= max)
-            }) {
+            for edge in partition
+                .incoming
+                .iter()
+                .filter(|edge| requested.contains(&edge.to))
+            {
                 if !can_reach_target.insert(edge.from) {
                     continue;
                 }
@@ -1107,11 +1088,11 @@ impl CallgraphQueryService {
                     .filter(|site| requested.contains(&site.caller))
                     .copied(),
             );
-            for edge in partition.outgoing.iter().filter(|edge| {
-                requested.contains(&edge.from)
-                    && can_reach_target.contains(&edge.to)
-                    && max_precision.is_none_or(|max| edge.precision <= max)
-            }) {
+            for edge in partition
+                .outgoing
+                .iter()
+                .filter(|edge| requested.contains(&edge.from) && can_reach_target.contains(&edge.to))
+            {
                 edges.push(edge.clone());
                 if !visited.insert(edge.to) {
                     continue;
@@ -2124,7 +2105,7 @@ fn name_bucket_body_hash(key: u64) -> u64 {
     (u64::from(CALLGRAPH_CACHE_VERSION) << 32) ^ key
 }
 
-fn edge_sort_key(edge: &CallEdge) -> (u32, u32, u32, u64, u64, u8, u8) {
+fn edge_sort_key(edge: &CallEdge) -> (u32, u32, u32, u64, u64, u8) {
     (
         edge.from.raw(),
         edge.to.raw(),
@@ -2132,7 +2113,6 @@ fn edge_sort_key(edge: &CallEdge) -> (u32, u32, u32, u64, u64, u8, u8) {
         edge.span.start,
         edge.span.end,
         edge.kind as u8,
-        edge.precision.rank(),
     )
 }
 
@@ -2182,7 +2162,7 @@ fn factstore_io(error: bonsai_factstore::FactStoreError) -> std::io::Error {
 mod tests {
     use super::*;
     use bonsai_callgraph::{EdgeKind, EdgeProvenance};
-    use bonsai_common::{Precision, Span};
+    use bonsai_common::Span;
     use bonsai_lang_api::{DeclKind, LanguageRegistry};
     use bonsai_vfs::Vfs;
 
@@ -2197,13 +2177,12 @@ mod tests {
         }
     }
 
-    fn edge(from: u32, to: u32, caller_file: u32, precision: Precision) -> CallEdge {
+    fn edge(from: u32, to: u32, caller_file: u32) -> CallEdge {
         CallEdge {
             from: FuncId::new(from),
             to: FuncId::new(to),
             span: Span::new(FileId::new(caller_file), 10, 14),
             kind: EdgeKind::Direct,
-            precision,
             provenance: EdgeProvenance::direct_symbol(),
         }
     }
@@ -2310,14 +2289,9 @@ mod tests {
             node(3, 3, "end"),
             node(4, 4, "unrelated_start"),
             node(5, 5, "unrelated_end"),
-            node(6, 6, "diagnostic_only_target"),
+            node(6, 6, "side_target"),
         ];
-        let edges = vec![
-            edge(1, 2, 1, Precision::Exact),
-            edge(2, 3, 2, Precision::Narrowed),
-            edge(4, 5, 4, Precision::Exact),
-            edge(1, 6, 1, Precision::OverApproximate),
-        ];
+        let edges = vec![edge(1, 2, 1), edge(2, 3, 2), edge(4, 5, 4), edge(1, 6, 1)];
         let graph = ResolvedCallGraph::from_persisted_parts(
             nodes,
             edges,
@@ -2432,7 +2406,7 @@ mod tests {
             .expect("query incoming partitions");
         assert_eq!(
             called,
-            [FuncId::new(2), FuncId::new(3), FuncId::new(5)]
+            [FuncId::new(2), FuncId::new(3), FuncId::new(5), FuncId::new(6)]
                 .into_iter()
                 .collect()
         );
@@ -2443,8 +2417,8 @@ mod tests {
                 .into_iter()
                 .map(|row| (row.function.raw(), row.callers, row.outgoing))
                 .collect::<Vec<_>>(),
-            vec![(1, 0, 1), (2, 1, 1), (3, 1, 0), (4, 0, 1), (5, 1, 0), (6, 0, 0),],
-            "summary degrees must deduplicate semantic endpoints and exclude over-approximate edges"
+            vec![(1, 0, 2), (2, 1, 1), (3, 1, 0), (4, 0, 1), (5, 1, 0), (6, 1, 0),],
+            "summary degrees must deduplicate semantic endpoints"
         );
 
         let mut visited_files = Vec::new();
@@ -2514,7 +2488,7 @@ mod tests {
         assert_eq!(between.unresolved_workspace_site_records().len(), 1);
 
         let reaching = service
-            .materialize_reaching_with_direct_callees(&[FuncId::new(2)], None)
+            .materialize_reaching_with_direct_callees(&[FuncId::new(2)])
             .expect("query complete callers and direct callees");
         assert_eq!(
             reaching
@@ -2531,21 +2505,14 @@ mod tests {
         );
         assert_eq!(
             service
-                .reaching_functions_with_direct_callees(&[FuncId::new(2)], None)
+                .reaching_functions_with_direct_callees(&[FuncId::new(2)])
                 .expect("query exact target lineage functions"),
             reaching.nodes().iter().map(|node| node.func).collect(),
             "function-only lineage must admit exactly the materialized graph functions"
         );
-        assert_eq!(
-            service
-                .reaching_functions_with_direct_callees(&[FuncId::new(2)], Some(Precision::Exact),)
-                .expect("query precision-narrowed target lineage functions"),
-            [FuncId::new(1), FuncId::new(2)].into_iter().collect(),
-            "the function-only query must preserve the exact precision predicate"
-        );
 
         let neighborhood = service
-            .materialize_direct_neighborhood(&[FuncId::new(2)], None)
+            .materialize_direct_neighborhood(&[FuncId::new(2)])
             .expect("query direct compiler neighborhood");
         assert_eq!(
             neighborhood
@@ -2603,11 +2570,7 @@ mod tests {
         // would incorrectly stop the exact fixed point at function 2.
         let graph = ResolvedCallGraph::from_persisted_parts(
             vec![node(1, 1, "target"), node(2, 2, "cycle"), node(3, 3, "root")],
-            vec![
-                edge(1, 2, 1, Precision::Exact),
-                edge(2, 1, 2, Precision::Exact),
-                edge(3, 2, 3, Precision::Exact),
-            ],
+            vec![edge(1, 2, 1), edge(2, 1, 2), edge(3, 2, 3)],
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -2618,7 +2581,7 @@ mod tests {
 
         assert_eq!(
             service
-                .reaching_functions_with_direct_callees(&[FuncId::new(1)], None)
+                .reaching_functions_with_direct_callees(&[FuncId::new(1)])
                 .expect("query cyclic target lineage"),
             [FuncId::new(1), FuncId::new(2), FuncId::new(3)]
                 .into_iter()
@@ -2626,13 +2589,12 @@ mod tests {
         );
     }
 
-    fn call_edge_semantic_tuple(edge: &CallEdge) -> (FuncId, FuncId, Span, EdgeKind, Precision, String, u8) {
+    fn call_edge_semantic_tuple(edge: &CallEdge) -> (FuncId, FuncId, Span, EdgeKind, String, u8) {
         (
             edge.from,
             edge.to,
             edge.span,
             edge.kind,
-            edge.precision,
             edge.provenance.resolver_stage().to_string(),
             edge.provenance.confidence(),
         )

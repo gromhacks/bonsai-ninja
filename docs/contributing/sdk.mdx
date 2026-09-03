@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
                  finding.finding_id,
                  finding.source.rule_id,
                  finding.sink.rule_id,
-                 finding.precision);
+                 finding.status.as_str());
     }
 
     let summary = project.browse().symbol_summaries(Some("os.system"), false)?;
@@ -363,13 +363,11 @@ let taint = project.dump().taint(bonsai_sdk::TaintFilters {
 ```
 
 `edges` returns the same `EdgeRecord` rows as `dump-edges --format json`,
-including stable `E:` ids, precision, resolver stage, evidence, and
-confidence.
+including stable `E:` ids, resolver stage, evidence, and confidence.
 
 `TaintReport` carries `analysis_complete` and
 `analysis_incomplete_reasons` alongside the propagation records so SDK
-callers do not have to infer completeness from precision labels or rendered
-row counts.
+callers do not have to infer completeness from rendered row counts.
 
 ### Export
 
@@ -380,13 +378,13 @@ let graphml = project.export().graphml()?;
 let cypher = project.export().cypher()?;
 ```
 
-Native JSON schema v10 emits workspace-relative code locations, typed
+Native JSON schema v11 emits workspace-relative code locations, typed
 loop-control targets, and one top-level absolute `workspace_root`. SDK
 consumers should join locations to that root only at
 the filesystem boundary; storing or comparing location identities by absolute
 host path is unsupported. Explicit export-cache rebuilds validate the schema
 version before reuse. The complete machine-readable contract is
-[`schemas/bonsai-native-export-v10.schema.json`](../../schemas/bonsai-native-export-v10.schema.json).
+[`schemas/bonsai-native-export-v11.schema.json`](../../schemas/bonsai-native-export-v11.schema.json).
 
 ---
 
@@ -528,7 +526,7 @@ multiple bonsai crates as dependencies:
 - From `bonsai_lang_api`: `LanguageRegistry`, `LanguageId`, `Decl`,
   `DeclKind`, `FlowEvent`, `CallArg`, `CallKind`, `ImportSpec`, `RefKind`
 - From `bonsai_security`: `Rule`, `RuleKind`, `Rulepack`, `Finding`,
-  `FindingMatch`, `Severity`, `Precision`, `TaintAnalysisReport`,
+  `FindingMatch`, `Severity`, `TaintAnalysisReport`,
   `SourceAnalysisReport`, `SinkAnalysisOptions`, `SinkAnalysisCandidate`,
   `SinkAnalysisReport`
 - From `bonsai_inspect`: `InspectFilters`, `FactKindFilter`, `FilterHit`,

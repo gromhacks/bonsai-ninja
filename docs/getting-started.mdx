@@ -220,7 +220,7 @@ A security finding includes:
 - `G:` finding-group ID;
 - tainted argument and propagation steps;
 - sanitizer or taint-transform evidence;
-- precision and completeness metadata.
+- completeness metadata.
 
 Reopen evidence with:
 
@@ -233,14 +233,15 @@ Reopen evidence with:
   --context 16k --no-color --no-progress
 ```
 
-`inspect` is rulepack-free by default. Add `--graph-flow` for one bounded
-source/evidence unit per matching callable or `--taint-flow` for raw
-taint-engine paths. Those flags change requested output scope, not accuracy.
+`inspect` is rulepack-free and attaches one bounded compiler evidence unit
+(a stable `F:` flow) to every matching callable by default. Add `--taint-flow`
+for raw taint-engine paths. That flag changes requested output scope, not
+accuracy.
 
 For symbol lookup, start with plain `inspect`, `refs`, or `calls`. Use
 `symbol-summary` for source, signature, imports, direct resolved neighbors,
-and unresolved-call evidence around one callable. `--graph-flow` adds that
-bounded evidence to inspect rows and never recursively enumerates call paths.
+and unresolved-call evidence around one callable. Inspect rows carry the same
+bounded evidence and never recursively enumerate call paths.
 If both ends are known, use `path --from ... --to ...` for the exact compressed
 compiler corridor or `trace --from ... --to ...` to interpret it.
 

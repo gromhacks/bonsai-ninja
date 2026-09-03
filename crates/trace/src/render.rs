@@ -14,7 +14,7 @@ pub fn to_text(trace: &TraceResult) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "Trace: {}\nLanguage: {}\nPrecision: {:?}\nPaths explored: {}\nTruncated paths: {}\n",
+        "Trace: {}\nLanguage: {}\nPaths explored: {}\nTruncated paths: {}\n",
         trace
             .query
             .entry_symbol
@@ -22,7 +22,6 @@ pub fn to_text(trace: &TraceResult) -> String {
             .or(trace.query.target_symbol.as_deref())
             .unwrap_or("<unknown>"),
         trace.summary.language,
-        trace.summary.precision,
         trace.summary.explored_paths,
         trace.summary.truncated_paths,
     );
@@ -47,11 +46,7 @@ pub fn to_text(trace: &TraceResult) -> String {
 
 fn write_step(out: &mut String, step: &TraceStep) {
     use std::fmt::Write as _;
-    let label = if step.precision.is_semantic() {
-        human_label(step.kind, &step.message, &step.function)
-    } else {
-        "Suppressed diagnostic-precision trace step".to_string()
-    };
+    let label = human_label(step.kind, &step.message, &step.function);
     let _ = writeln!(out, "  [{}] {}", step.order, label);
     let _ = writeln!(
         out,

@@ -24,7 +24,7 @@
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
-use bonsai_common::{current_process_resident_bytes, FileId, FuncId, Precision, Span};
+use bonsai_common::{current_process_resident_bytes, FileId, FuncId, Span};
 use bonsai_index::GlobalIndex;
 use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
@@ -51,8 +51,6 @@ use crate::workspace::{
     CompiledQueryAccelerator, CompiledQueryAcceleratorBlob, CompiledQueryAcceleratorFrame, IdgWorkspace,
     PersistedQueryAcceleratorParts, QueryAcceleratorBlobKind, QueryAcceleratorBlobReader, SegmentId,
 };
-
-const SEMANTIC_MAX_PRECISION: Precision = Precision::Narrowed;
 
 /// A renderable program point: the (function, span, place) triple
 /// every consumer eventually reports back to its UI / report layer.
@@ -124,8 +122,6 @@ pub struct CrossCallEdge {
     /// Zero-based formal position, or `u32::MAX` when no scalar formal slot
     /// represents the relation.
     pub param_idx: u32,
-    /// Resolver/evidence precision.
-    pub precision: Precision,
     /// Resolved call classification.
     pub call_kind: bonsai_callgraph::EdgeKind,
     /// Compiler relation represented by this propagation.
@@ -212,8 +208,7 @@ struct UnifiedAddressSpace {
     call_args: CallArgIdentityIndex,
     params: ParamIdentityIndex,
     unfiltered_reach: RwLock<Option<Arc<ReachabilityIndex>>>,
-    precision_reach: RwLock<AHashMap<Precision, Arc<ReachabilityIndex>>>,
-    contextual_summaries: RwLock<AHashMap<Option<Precision>, Arc<ContextualSummaryRuntime>>>,
+    contextual_summaries: RwLock<Option<Arc<ContextualSummaryRuntime>>>,
     cross_calls_by_from: RwLock<Option<Arc<CrossCallsByFrom>>>,
     symbolic_runtime: OnceLock<Arc<SymbolicRuntimeIndex>>,
 }
@@ -223,14 +218,13 @@ struct UnifiedAddressSpace {
 /// same immutable graph generation; it never admits or suppresses a semantic
 /// edge. Keeping the wire version separate lets us evolve this acceleration
 /// layer without conflating it with the canonical workspace IDG ABI.
-const IDG_QUERY_ACCELERATOR_VERSION: u32 = 5;
+const IDG_QUERY_ACCELERATOR_VERSION: u32 = 6;
 const IDG_QUERY_CORE_MAGIC: [u8; 8] = *b"BNSIQC01";
 const IDG_QUERY_CORE_COUNT_FIELDS: usize = 12;
 const IDG_QUERY_CORE_HEADER_BYTES: u64 = 8 + 4 + 1 + 3 + 4 + (IDG_QUERY_CORE_COUNT_FIELDS as u64 * 8);
 
 struct PersistedQueryAccelerator {
     version: u32,
-    max_precision: Precision,
     segment_count: u32,
     segment_bases: Box<[u32]>,
     func_segments: Box<[u32]>,
@@ -749,14 +743,14 @@ struct SymbolicRuntimeIndex {
     reverse_scalar_transforms: ReverseScalarTransformIndex,
     fact_pages: Mutex<SymbolicFactPager>,
     transforms: Mutex<SymbolicTransformPager>,
-    /// One immutable backward-demand fixed point per precision contract.
+    /// One immutable backward-demand fixed point.
     ///
     /// Rooted query batches call this relation concurrently. `OnceLock`
     /// provides single-flight publication: one worker compiles a precision's
     /// exact relation while its peers wait for and share the same value.
     /// A check-then-compute mutex map allowed every worker to perform the
     /// complete fixed point before only one result won insertion.
-    field_demands: [OnceLock<Arc<SymbolicFieldDemand>>; 5],
+    field_demands: [OnceLock<Arc<SymbolicFieldDemand>>; 1],
 }
 
 // Version 5 retains the exact positional argument/parameter slots on
@@ -767,7 +761,7 @@ struct SymbolicRuntimeIndex {
 // Older accelerators remain semantically valid as IDG bodies, but must rebuild
 // this derived query product before symbolic closure can distinguish a real
 // `sink(record)` read from a scalar carrier used by a resolved local call.
-const SYMBOLIC_RUNTIME_ACCELERATOR_VERSION: u32 = 5;
+const SYMBOLIC_RUNTIME_ACCELERATOR_VERSION: u32 = 6;
 
 #[derive(serde::Serialize)]
 struct PersistedSymbolicRuntimeRef<'a> {
@@ -1421,8 +1415,8 @@ impl SymbolicFactPager {
     }
 }
 
-const SYMBOLIC_TRANSFORM_BYTES: usize = 60;
-const SYMBOLIC_TRANSFORM_RUN_BYTES: usize = 72;
+const SYMBOLIC_TRANSFORM_BYTES: usize = 59;
+const SYMBOLIC_TRANSFORM_RUN_BYTES: usize = SYMBOLIC_TRANSFORM_BYTES + 12;
 const SYMBOLIC_TRANSFORM_RUN_ROWS: usize = 100_000;
 const SYMBOLIC_TRANSFORM_READ_ROWS: usize = 1_024;
 
@@ -1456,20 +1450,6 @@ impl PartialOrd for SymbolicTransformRunRow {
 impl Ord for SymbolicTransformRunRow {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         (self.source, self.ordinal).cmp(&(other.source, other.ordinal))
-    }
-}
-
-fn encode_precision(precision: Precision) -> u8 {
-    precision.rank()
-}
-
-fn decode_precision(value: u8) -> Precision {
-    match value {
-        0 => Precision::Exact,
-        1 => Precision::Narrowed,
-        2 => Precision::OverApproximate,
-        3 => Precision::Unknown,
-        _ => panic!("invalid compact symbolic precision"),
     }
 }
 
@@ -1517,7 +1497,6 @@ fn encode_symbolic_transform(out: &mut Vec<u8>, transform: &crate::symbolic::Sym
     out.extend_from_slice(&transform.write_span.file.raw().to_le_bytes());
     out.extend_from_slice(&transform.write_span.start.to_le_bytes());
     out.extend_from_slice(&transform.write_span.end.to_le_bytes());
-    out.push(encode_precision(transform.precision));
     out.push(encode_call_kind(transform.call_kind));
     out.push(encode_transform_kind(transform.kind));
     out.extend_from_slice(&transform.arg_idx.to_le_bytes());
@@ -1535,12 +1514,11 @@ fn decode_symbolic_transform(record: &[u8], source: u32) -> crate::symbolic::Sym
         exact_field: word(4),
         call_span: Span::new(FileId::new(word(8)), wide(12), wide(20)),
         write_span: Span::new(FileId::new(word(28)), wide(32), wide(40)),
-        precision: decode_precision(record[48]),
-        call_kind: decode_call_kind(record[49]),
-        kind: decode_transform_kind(record[50]),
-        arg_idx: word(51),
-        param_idx: word(55),
-        allow_out_of_order_source: record[59] != 0,
+        call_kind: decode_call_kind(record[48]),
+        kind: decode_transform_kind(record[49]),
+        arg_idx: word(50),
+        param_idx: word(54),
+        allow_out_of_order_source: record[58] != 0,
     }
 }
 
@@ -1803,19 +1781,13 @@ impl SymbolicTransformPager {
                             transform.write_span,
                             transform.source,
                             transform.exact_field,
-                            transform.precision,
                         );
                     } else {
                         assert!(
                             (transform.target as usize) < base_count,
                             "reverse symbolic transform target exceeds base dictionary"
                         );
-                        reverse.push(
-                            transform.target,
-                            transform.source,
-                            transform.precision,
-                            transform.kind,
-                        );
+                        reverse.push(transform.target, transform.source, transform.kind);
                     }
                     spool.push(transform);
                 }
@@ -1907,7 +1879,6 @@ mod compact_symbolic_transform_tests {
     fn transform(
         source: u32,
         target: u32,
-        precision: Precision,
         call_kind: CallEdgeKind,
         kind: SymbolicFieldTransformKind,
     ) -> crate::symbolic::SymbolicFieldTransform {
@@ -1917,7 +1888,6 @@ mod compact_symbolic_transform_tests {
             exact_field: target.wrapping_add(17),
             call_span: Span::new(FileId::new(target.wrapping_add(3)), 19, u64::from(target) + 41),
             write_span: Span::new(FileId::new(target.wrapping_add(5)), 23, u64::from(target) + 47),
-            precision,
             call_kind,
             kind,
             arg_idx: target.wrapping_add(7),
@@ -1928,12 +1898,6 @@ mod compact_symbolic_transform_tests {
 
     #[test]
     fn compact_symbolic_transform_round_trips_every_algebraic_variant() {
-        let precisions = [
-            Precision::Exact,
-            Precision::Narrowed,
-            Precision::OverApproximate,
-            Precision::Unknown,
-        ];
         let call_kinds = [
             CallEdgeKind::Direct,
             CallEdgeKind::Virtual,
@@ -1948,14 +1912,8 @@ mod compact_symbolic_transform_tests {
             SymbolicFieldTransformKind::ReceiverMutation,
             SymbolicFieldTransformKind::Copy,
         ];
-        for (index, ((precision, call_kind), kind)) in precisions
-            .into_iter()
-            .cycle()
-            .zip(call_kinds.into_iter().cycle())
-            .zip(transform_kinds)
-            .enumerate()
-        {
-            let expected = transform(13, index as u32 + 29, precision, call_kind, kind);
+        for (index, (call_kind, kind)) in call_kinds.into_iter().cycle().zip(transform_kinds).enumerate() {
+            let expected = transform(13, index as u32 + 29, call_kind, kind);
             let mut encoded = Vec::new();
             encode_symbolic_transform(&mut encoded, &expected);
             assert_eq!(encoded.len(), SYMBOLIC_TRANSFORM_BYTES);
@@ -1972,7 +1930,6 @@ mod compact_symbolic_transform_tests {
             spool.push(transform(
                 source,
                 index as u32,
-                Precision::Narrowed,
                 CallEdgeKind::Direct,
                 SymbolicFieldTransformKind::Copy,
             ));
@@ -2237,7 +2194,6 @@ impl SparseHeapEdges {
                     call.call_span,
                     call.arg_idx,
                     call.param_idx,
-                    call.precision,
                     call.relation,
                 )
             });
@@ -2409,9 +2365,9 @@ fn paged_csr_is_valid(csr: &PagedEdgeCsr, node_count: usize) -> bool {
                 .saturating_mul(std::mem::size_of::<u32>() as u64)
 }
 
-const CONTEXTUAL_RUNTIME_ACCELERATOR_VERSION: u32 = 1;
-const CONTEXTUAL_HEAP_EDGE_BYTES: usize = 44;
-const CONTEXTUAL_BOUNDARY_EDGE_BYTES: usize = 72;
+const CONTEXTUAL_RUNTIME_ACCELERATOR_VERSION: u32 = 2;
+const CONTEXTUAL_HEAP_EDGE_BYTES: usize = 4 + 1 + CROSS_CALL_BYTES;
+const CONTEXTUAL_BOUNDARY_EDGE_BYTES: usize = 32 + 1 + CROSS_CALL_BYTES;
 
 #[derive(serde::Serialize)]
 struct PersistedContextualRuntimeRef<'a> {
@@ -2669,6 +2625,10 @@ fn visit_paged_rows<T>(
     }
 }
 
+/// Encoded width of one cross-call row: caller, callee, span, arg/param
+/// indices, call kind, and relation.
+const CROSS_CALL_BYTES: usize = 38;
+
 fn encode_cross_call(output: &mut Vec<u8>, call: CrossCallEdge) {
     output.extend_from_slice(&call.caller.raw().to_le_bytes());
     output.extend_from_slice(&call.callee.raw().to_le_bytes());
@@ -2677,13 +2637,12 @@ fn encode_cross_call(output: &mut Vec<u8>, call: CrossCallEdge) {
     output.extend_from_slice(&call.call_span.end.to_le_bytes());
     output.extend_from_slice(&call.arg_idx.to_le_bytes());
     output.extend_from_slice(&call.param_idx.to_le_bytes());
-    output.push(encode_precision(call.precision));
     output.push(encode_call_kind(call.call_kind));
     output.push(encode_cross_call_relation(call.relation));
 }
 
 fn decode_cross_call(row: &[u8]) -> CrossCallEdge {
-    debug_assert_eq!(row.len(), 39);
+    debug_assert_eq!(row.len(), CROSS_CALL_BYTES);
     let word = |start| u32::from_le_bytes(row[start..start + 4].try_into().expect("word bytes"));
     let wide = |start| u64::from_le_bytes(row[start..start + 8].try_into().expect("wide bytes"));
     CrossCallEdge {
@@ -2692,9 +2651,8 @@ fn decode_cross_call(row: &[u8]) -> CrossCallEdge {
         call_span: Span::new(FileId::new(word(8)), wide(12), wide(20)),
         arg_idx: word(28),
         param_idx: word(32),
-        precision: decode_precision(row[36]),
-        call_kind: decode_call_kind(row[37]),
-        relation: decode_cross_call_relation(row[38]),
+        call_kind: decode_call_kind(row[36]),
+        relation: decode_cross_call_relation(row[37]),
     }
 }
 
@@ -2726,12 +2684,12 @@ fn encode_optional_cross_call(output: &mut Vec<u8>, call: Option<CrossCallEdge>)
     if let Some(call) = call {
         encode_cross_call(output, call);
     } else {
-        output.resize(output.len() + 39, 0);
+        output.resize(output.len() + CROSS_CALL_BYTES, 0);
     }
 }
 
 fn decode_optional_cross_call(row: &[u8]) -> Option<CrossCallEdge> {
-    (row.first().copied() == Some(1)).then(|| decode_cross_call(&row[1..40]))
+    (row.first().copied() == Some(1)).then(|| decode_cross_call(&row[1..=CROSS_CALL_BYTES]))
 }
 
 fn encode_heap_boundary_edge(output: &mut Vec<u8>, edge: &HeapBoundaryEdge) {
@@ -2743,7 +2701,7 @@ fn decode_heap_boundary_edge(row: &[u8]) -> HeapBoundaryEdge {
     debug_assert_eq!(row.len(), CONTEXTUAL_HEAP_EDGE_BYTES);
     HeapBoundaryEdge {
         target: WsNodeId(u32::from_le_bytes(row[..4].try_into().expect("node bytes"))),
-        cross_call: decode_optional_cross_call(&row[4..44]),
+        cross_call: decode_optional_cross_call(&row[4..CONTEXTUAL_HEAP_EDGE_BYTES]),
     }
 }
 
@@ -2768,7 +2726,7 @@ fn decode_context_boundary_edge(row: &[u8]) -> ContextBoundaryEdge {
             span: Span::new(FileId::new(word(8)), wide(12), wide(20)),
         },
         target: NodeId(word(28)),
-        cross_call: decode_optional_cross_call(&row[32..72]),
+        cross_call: decode_optional_cross_call(&row[32..CONTEXTUAL_BOUNDARY_EDGE_BYTES]),
     }
 }
 
@@ -2835,13 +2793,11 @@ impl PersistedQueryAccelerator {
             ));
         }
         let version = read_core_u32(&mut reader)?;
-        let mut precision = [0_u8; 1];
-        reader.read_exact(&mut precision)?;
-        let mut reserved = [0_u8; 3];
+        let mut reserved = [0_u8; 4];
         reader.read_exact(&mut reserved)?;
-        if precision[0] != encode_precision(SEMANTIC_MAX_PRECISION) || reserved != [0; 3] {
+        if reserved != [0; 4] {
             return Err(invalid_query_accelerator(
-                "workspace IDG query accelerator precision header mismatch",
+                "workspace IDG query accelerator reserved header mismatch",
             ));
         }
         let segment_count = read_core_u32(&mut reader)?;
@@ -2895,7 +2851,6 @@ impl PersistedQueryAccelerator {
         };
         let decoded = Self {
             version,
-            max_precision: SEMANTIC_MAX_PRECISION,
             segment_count,
             segment_bases,
             func_segments,
@@ -2915,7 +2870,6 @@ impl PersistedQueryAccelerator {
             .map_err(|_| invalid_query_accelerator("query accelerator segment count exceeds usize"))?;
         let node_count = self.segment_bases.last().copied().unwrap_or(0) as usize;
         let segment_layout_valid = self.version == IDG_QUERY_ACCELERATOR_VERSION
-            && self.max_precision == SEMANTIC_MAX_PRECISION
             && segment_count == workspace.segment_count()
             && self.segment_bases.len() == segment_count.saturating_add(1)
             && self.segment_bases.first().copied() == Some(0)
@@ -2991,8 +2945,7 @@ impl PersistedQueryAccelerator {
             call_args: self.call_args,
             params: self.params,
             unfiltered_reach: RwLock::new(None),
-            precision_reach: RwLock::new(AHashMap::new()),
-            contextual_summaries: RwLock::new(AHashMap::new()),
+            contextual_summaries: RwLock::new(None),
             cross_calls_by_from: RwLock::new(None),
             symbolic_runtime: OnceLock::new(),
         }
@@ -3059,7 +3012,7 @@ fn encode_query_accelerator_core(
     let mut writer = BufWriter::with_capacity(1024 * 1024, file);
     writer.write_all(&IDG_QUERY_CORE_MAGIC)?;
     writer.write_all(&IDG_QUERY_ACCELERATOR_VERSION.to_le_bytes())?;
-    writer.write_all(&[encode_precision(SEMANTIC_MAX_PRECISION), 0, 0, 0])?;
+    writer.write_all(&[0, 0, 0, 0])?;
     writer.write_all(&segment_count.to_le_bytes())?;
     let counts = [
         unified.segment_bases.len(),
@@ -3428,7 +3381,6 @@ impl ContextualReach {
 
 #[derive(Copy, Clone)]
 struct SymbolicClosurePolicy<'a> {
-    max_precision: Option<Precision>,
     /// Exact compiler-derived function scope for a targeted query. `None`
     /// retains the ordinary whole-graph closure. Unlike a work budget, this
     /// is a semantic graph predicate: every admitted function runs to fixed
@@ -4161,7 +4113,6 @@ fn record_symbolic_cross_call(
         call_span: transform.call_span,
         arg_idx,
         param_idx,
-        precision: transform.precision,
         call_kind: transform.call_kind,
         relation,
     });
@@ -4202,7 +4153,7 @@ pub struct IdgQueryService {
     /// actually requests them. Scoped queries compile only their exact
     /// function corridor from canonical IDG bodies.
     persisted_query_accelerator: Option<PersistedQueryAcceleratorParts>,
-    return_summaries: Mutex<AHashMap<Option<Precision>, ReturnSummaryCache>>,
+    return_summaries: Mutex<ReturnSummaryCache>,
     /// One exact function-summary corridor is retained separately from the
     /// canonical global cache. A scoped negative must never become a global
     /// negative merely because a callee lived outside an earlier query.
@@ -4221,14 +4172,12 @@ pub struct IdgQueryService {
 }
 
 struct ScopedContextualSummaryCache {
-    max_precision: Option<Precision>,
     funcs: Box<[FuncId]>,
     runtime: Arc<ContextualSummaryRuntime>,
     batch: Arc<crate::function_summary::ReturnSummaryBatch>,
 }
 
 struct ScopedReturnSummaryCache {
-    max_precision: Option<Precision>,
     funcs: Box<[FuncId]>,
     values: AHashMap<FuncId, Vec<u32>>,
 }
@@ -4333,7 +4282,7 @@ impl IdgQueryService {
             global,
             unified: RwLock::new(unified),
             persisted_query_accelerator,
-            return_summaries: Mutex::new(AHashMap::new()),
+            return_summaries: Mutex::new(ReturnSummaryCache::default()),
             scoped_return_summaries: Mutex::new(None),
             scoped_contextual_summary: Mutex::new(None),
             scoped_symbolic_runtime: Mutex::new(None),
@@ -4366,8 +4315,7 @@ impl IdgQueryService {
         // publication spool, then release its live runtime before compiling
         // the second. Available memory changes only phase overlap, never the
         // graph or fixed-point scope.
-        let contextual_runtime =
-            self.ensure_contextual_summary_runtime(&unified, Some(SEMANTIC_MAX_PRECISION), None);
+        let contextual_runtime = self.ensure_contextual_summary_runtime(&unified, None);
         bonsai_diagnostics::debug_log!(
             "idg-query",
             "compile accelerator contextual-runtime-ready rss_mib={}",
@@ -4382,10 +4330,7 @@ impl IdgQueryService {
             "compile accelerator contextual-encoded rss_mib={}",
             current_process_resident_bytes().map_or(0, |bytes| bytes / (1024 * 1024))
         );
-        unified
-            .contextual_summaries
-            .write()
-            .remove(&Some(SEMANTIC_MAX_PRECISION));
+        unified.contextual_summaries.write().take();
         drop(contextual_runtime);
         bonsai_diagnostics::debug_log!(
             "idg-query",
@@ -4529,23 +4474,15 @@ impl IdgQueryService {
         *self.unified.write() = None;
     }
 
-    /// Compute parameter-to-return summaries for `funcs` inside the requested
-    /// precision scope.
+    /// Compute parameter-to-return summaries for `funcs`.
     ///
     /// Each function is compacted to a function-local CSR. Resolved call
     /// inputs and outputs are then composed with a monotone summary worklist,
     /// so recursion reaches a complete least fixed point without allocating a
     /// workspace-sized closure per function or applying an iteration cap.
-    pub fn return_taint_param_indices_for_funcs_with_max_precision(
-        &self,
-        funcs: &[FuncId],
-        max_precision: Option<Precision>,
-    ) -> AHashMap<FuncId, Vec<u32>> {
-        self.ensure_return_taint_summaries(funcs, max_precision);
-        let summaries = self.return_summaries.lock();
-        let Some(cache) = summaries.get(&max_precision) else {
-            return AHashMap::new();
-        };
+    pub fn return_taint_param_indices_for_funcs(&self, funcs: &[FuncId]) -> AHashMap<FuncId, Vec<u32>> {
+        self.ensure_return_taint_summaries(funcs);
+        let cache = self.return_summaries.lock();
         funcs
             .iter()
             .copied()
@@ -4558,12 +4495,8 @@ impl IdgQueryService {
     /// Broad semantic consumers call this once for their exact compiler scope.
     /// Later single-function queries reuse the same immutable facts rather
     /// than rebuilding the workspace summary fixed point per source.
-    pub fn prewarm_return_taint_param_indices_for_funcs_with_max_precision(
-        &self,
-        funcs: &[FuncId],
-        max_precision: Option<Precision>,
-    ) {
-        self.ensure_return_taint_summaries(funcs, max_precision);
+    pub fn prewarm_return_taint_param_indices_for_funcs(&self, funcs: &[FuncId]) {
+        self.ensure_return_taint_summaries(funcs);
     }
 
     /// Compute parameter-to-return summaries inside one exact compiler
@@ -4574,13 +4507,12 @@ impl IdgQueryService {
     /// results are kept separate from global summaries: excluding a function
     /// changes the compiler program being queried, never the amount of work
     /// performed within that program.
-    pub fn return_taint_param_indices_for_funcs_within_funcs_with_max_precision(
+    pub fn return_taint_param_indices_for_funcs_within_funcs(
         &self,
         funcs: &[FuncId],
         allowed_funcs: &AHashSet<FuncId>,
-        max_precision: Option<Precision>,
     ) -> AHashMap<FuncId, Vec<u32>> {
-        self.ensure_scoped_return_taint_summaries(allowed_funcs, max_precision);
+        self.ensure_scoped_return_taint_summaries(allowed_funcs);
         let cache = self.scoped_return_summaries.lock();
         let Some(cache) = cache.as_ref() else {
             return AHashMap::new();
@@ -4592,31 +4524,27 @@ impl IdgQueryService {
             .collect()
     }
 
-    fn ensure_scoped_return_taint_summaries(
-        &self,
-        allowed_funcs: &AHashSet<FuncId>,
-        max_precision: Option<Precision>,
-    ) {
+    fn ensure_scoped_return_taint_summaries(&self, allowed_funcs: &AHashSet<FuncId>) {
         let mut funcs: Vec<FuncId> = allowed_funcs.iter().copied().collect();
         funcs.sort_unstable_by_key(|func| func.raw());
         funcs.dedup();
         let mut cache = self.scoped_return_summaries.lock();
-        if cache.as_ref().is_some_and(|cache| {
-            cache.max_precision == max_precision && cache.funcs.as_ref() == funcs.as_slice()
-        }) {
+        if cache
+            .as_ref()
+            .is_some_and(|cache| cache.funcs.as_ref() == funcs.as_slice())
+        {
             return;
         }
-        let values = self.compile_return_taint_param_indices(&funcs, max_precision, Some(allowed_funcs));
+        let values = self.compile_return_taint_param_indices(&funcs, Some(allowed_funcs));
         *cache = Some(ScopedReturnSummaryCache {
-            max_precision,
             funcs: funcs.into_boxed_slice(),
             values,
         });
     }
 
-    fn ensure_return_taint_summaries(&self, funcs: &[FuncId], max_precision: Option<Precision>) {
+    fn ensure_return_taint_summaries(&self, funcs: &[FuncId]) {
         let mut caches = self.return_summaries.lock();
-        let cache = caches.entry(max_precision).or_default();
+        let cache = &mut *caches;
         let mut missing: Vec<FuncId> = funcs
             .iter()
             .copied()
@@ -4627,7 +4555,7 @@ impl IdgQueryService {
         if missing.is_empty() {
             return;
         }
-        let mut compiled = self.compile_return_taint_param_indices(&missing, max_precision, None);
+        let mut compiled = self.compile_return_taint_param_indices(&missing, None);
         for func in missing {
             cache
                 .values
@@ -4639,7 +4567,6 @@ impl IdgQueryService {
     fn compile_return_taint_param_indices(
         &self,
         funcs: &[FuncId],
-        max_precision: Option<Precision>,
         allowed_funcs: Option<&AHashSet<FuncId>>,
     ) -> AHashMap<FuncId, Vec<u32>> {
         let summary_started = std::time::Instant::now();
@@ -4650,9 +4577,7 @@ impl IdgQueryService {
             let cache = self.scoped_contextual_summary.lock();
             cache
                 .as_ref()
-                .filter(|cache| {
-                    cache.max_precision == max_precision && cache.funcs.as_ref() == scope.as_slice()
-                })
+                .filter(|cache| cache.funcs.as_ref() == scope.as_slice())
                 .map(|cache| (Arc::clone(&cache.batch), Arc::clone(&cache.runtime)))
         });
         let (mut batch, cached_contextual_runtime) = if let Some((batch, runtime)) = cached_scoped {
@@ -4664,7 +4589,6 @@ impl IdgQueryService {
                         &self.workspace,
                         funcs,
                         allowed_funcs,
-                        max_precision,
                     )
                 }),
                 None,
@@ -4690,7 +4614,6 @@ impl IdgQueryService {
                 run_isolated_compiler_phase(|| {
                     Arc::new(self.build_contextual_summary_runtime_with_reverse(
                         &batch.contextual_edges,
-                        max_precision,
                         false,
                         allowed_funcs,
                     ))
@@ -4748,11 +4671,10 @@ impl IdgQueryService {
                         .collect();
                     let reaches_return = |seeds: &[WsNodeId]| {
                         closure_runs.fetch_add(1, AtomicOrdering::Relaxed);
-                        self.contextual_forward_closure_for_summary_with_max_precision(
+                        self.contextual_forward_closure_for_summary(
                             seeds,
                             func,
                             symbolic_callees.as_ref(),
-                            max_precision,
                             contextual_runtime.as_ref(),
                             allowed_funcs,
                         )
@@ -4821,12 +4743,11 @@ impl IdgQueryService {
         batch.indices
     }
 
-    fn contextual_forward_closure_for_summary_with_max_precision(
+    fn contextual_forward_closure_for_summary(
         &self,
         seeds: &[WsNodeId],
         root: FuncId,
         summary_callees: &AHashMap<FuncId, Vec<FuncId>>,
-        max_precision: Option<Precision>,
         contextual: &ContextualSummaryRuntime,
         allowed_funcs: Option<&AHashSet<FuncId>>,
     ) -> Vec<WsNodeId> {
@@ -4837,7 +4758,6 @@ impl IdgQueryService {
             &contextual.reach,
             &seed_nodes,
             SymbolicClosurePolicy {
-                max_precision,
                 allowed_funcs,
                 target_relevance: None,
                 summary_callees: Some(summary_callees),
@@ -4857,32 +4777,24 @@ impl IdgQueryService {
     ///
     /// The outer vector is indexed by parameter position. Traversal uses a
     /// compact CSR and bitset sized to the owning function, never to the whole
-    /// workspace. All retained edges run to closure; `max_precision` filters
-    /// evidence strength rather than limiting semantic work.
-    pub fn local_storage_taint_by_param_for_funcs_with_max_precision(
+    /// workspace. All retained edges run to closure.
+    pub fn local_storage_taint_by_param_for_funcs(
         &self,
         funcs: &[FuncId],
-        max_precision: Option<Precision>,
     ) -> AHashMap<FuncId, Vec<Vec<String>>> {
-        crate::function_summary::local_storage_taint_by_param(&self.workspace, funcs, max_precision)
+        crate::function_summary::local_storage_taint_by_param(&self.workspace, funcs)
     }
 
     /// Stream the same exact function-local summaries as
-    /// [`Self::local_storage_taint_by_param_for_funcs_with_max_precision`]
+    /// [`Self::local_storage_taint_by_param_for_funcs`]
     /// while retaining only one source segment's compact graphs and one
     /// function's rendered result at a time.
-    pub fn try_visit_local_storage_taint_by_param_for_funcs_with_max_precision<E>(
+    pub fn try_visit_local_storage_taint_by_param_for_funcs<E>(
         &self,
         funcs: &[FuncId],
-        max_precision: Option<Precision>,
         visit: impl FnMut(FuncId, Vec<Vec<String>>) -> Result<(), E>,
     ) -> Result<(), E> {
-        crate::function_summary::try_visit_local_storage_taint_by_param(
-            &self.workspace,
-            funcs,
-            max_precision,
-            visit,
-        )
+        crate::function_summary::try_visit_local_storage_taint_by_param(&self.workspace, funcs, visit)
     }
 
     /// Resolve a [`PointRef`] back from a [`WsNodeId`].
@@ -4919,63 +4831,23 @@ impl IdgQueryService {
     ///
     /// This is the default evidence-producing reachability surface.
     /// Diagnostic callers that need to inspect weaker edges must call
-    /// [`Self::forward_closure_with_max_precision`] explicitly.
+    /// [`Self::forward_closure`] explicitly.
     ///
     /// Returns the set of [`WsNodeId`]s in the closure (always
     /// includes the seeds themselves).
-    pub fn forward_closure(&self, seeds: &[WsNodeId]) -> Vec<WsNodeId> {
-        self.forward_closure_with_max_precision(seeds, Some(SEMANTIC_MAX_PRECISION))
-    }
-
-    fn forward_closure_unfiltered(&self, seeds: &[WsNodeId]) -> Vec<WsNodeId> {
-        let unified = self.ensure_unified();
-        let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
-        let contextual = self.ensure_contextual_summary_runtime(&unified, None, None);
-        self.symbolic_forward_closure_nodes(
-            &unified,
-            &contextual.reach,
-            &seed_nodes,
-            SymbolicClosurePolicy {
-                max_precision: None,
-                allowed_funcs: None,
-                target_relevance: None,
-                summary_callees: None,
-                summary_root: None,
-                contextual: Some(contextual.as_ref()),
-                activate_seed_callers: true,
-            },
-            None,
-        )
-        .into_iter()
-        .map(|n| WsNodeId(n.0))
-        .collect()
-    }
-
-    /// Forward closure constrained to edges whose precision is at or
-    /// below `max_precision`. `None` is an explicit diagnostic
-    /// unfiltered closure and must not be used as user-visible
-    /// evidence.
+    /// Forward closure over every compiler-proven edge.
     ///
-    /// This is still exact for the requested precision scope: every
-    /// retained edge is explored to fixpoint, and every excluded edge
-    /// is outside the caller's declared precision contract.
-    pub fn forward_closure_with_max_precision(
-        &self,
-        seeds: &[WsNodeId],
-        max_precision: Option<Precision>,
-    ) -> Vec<WsNodeId> {
-        let Some(max_precision) = max_precision else {
-            return self.forward_closure_unfiltered(seeds);
-        };
+    /// This is exact: every
+    /// edge is explored to fixpoint.
+    pub fn forward_closure(&self, seeds: &[WsNodeId]) -> Vec<WsNodeId> {
         let unified = self.ensure_unified();
-        let contextual = self.ensure_contextual_summary_runtime(&unified, Some(max_precision), None);
+        let contextual = self.ensure_contextual_summary_runtime(&unified, None);
         let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
         self.symbolic_forward_closure_nodes(
             &unified,
             &contextual.reach,
             &seed_nodes,
             SymbolicClosurePolicy {
-                max_precision: Some(max_precision),
                 allowed_funcs: None,
                 target_relevance: None,
                 summary_callees: None,
@@ -4996,25 +4868,23 @@ impl IdgQueryService {
     /// call contexts, heap transitions, and symbolic field facts owned by an
     /// admitted function run to fixed point. Security uses it after deriving
     /// a complete source-to-sink corridor from the resolved call graph.
-    pub fn forward_closure_within_funcs_with_max_precision(
+    pub fn forward_closure_within_funcs(
         &self,
         seeds: &[WsNodeId],
         allowed_funcs: &AHashSet<FuncId>,
-        max_precision: Option<Precision>,
     ) -> Vec<WsNodeId> {
-        self.forward_closure_within_func_scope(seeds, allowed_funcs, None, max_precision)
+        self.forward_closure_within_func_scope(seeds, allowed_funcs, None)
     }
 
     /// Exact function-scoped closure additionally restricted by a reusable
     /// target relevance proof.
-    pub fn forward_closure_within_funcs_and_relevance_with_max_precision(
+    pub fn forward_closure_within_funcs_and_relevance(
         &self,
         seeds: &[WsNodeId],
         allowed_funcs: &AHashSet<FuncId>,
         target_relevance: &IdgTargetRelevance,
-        max_precision: Option<Precision>,
     ) -> Vec<WsNodeId> {
-        self.forward_closure_within_func_scope(seeds, allowed_funcs, Some(target_relevance), max_precision)
+        self.forward_closure_within_func_scope(seeds, allowed_funcs, Some(target_relevance))
     }
 
     fn forward_closure_within_func_scope(
@@ -5022,20 +4892,18 @@ impl IdgQueryService {
         seeds: &[WsNodeId],
         allowed_funcs: &AHashSet<FuncId>,
         target_relevance: Option<&IdgTargetRelevance>,
-        max_precision: Option<Precision>,
     ) -> Vec<WsNodeId> {
         if seeds.is_empty() || allowed_funcs.is_empty() {
             return Vec::new();
         }
         let unified = self.ensure_unified();
-        let contextual = self.ensure_contextual_summary_runtime(&unified, max_precision, Some(allowed_funcs));
+        let contextual = self.ensure_contextual_summary_runtime(&unified, Some(allowed_funcs));
         let seed_nodes: Vec<NodeId> = seeds.iter().map(|node| NodeId(node.0)).collect();
         self.symbolic_forward_closure_nodes(
             &unified,
             &contextual.reach,
             &seed_nodes,
             SymbolicClosurePolicy {
-                max_precision,
                 allowed_funcs: Some(allowed_funcs),
                 target_relevance,
                 summary_callees: None,
@@ -5055,23 +4923,18 @@ impl IdgQueryService {
     ///
     /// This is the provenance-preserving query used by taint/reporting
     /// consumers. It runs the same finite compiler fixed point as
-    /// [`Self::forward_closure_with_max_precision`]; it does not perform a
+    /// [`Self::forward_closure`]; it does not perform a
     /// second graph traversal or infer transitions from identifier text.
-    pub fn forward_closure_evidence_with_max_precision(
-        &self,
-        seeds: &[WsNodeId],
-        max_precision: Option<Precision>,
-    ) -> IdgClosureEvidence {
-        self.forward_closure_evidence_in_func_scope(seeds, max_precision, None, None, None)
+    pub fn forward_closure_evidence(&self, seeds: &[WsNodeId]) -> IdgClosureEvidence {
+        self.forward_closure_evidence_in_func_scope(seeds, None, None, None)
     }
 
     /// Provenance-preserving counterpart to
-    /// [`Self::forward_closure_within_funcs_with_max_precision`].
-    pub fn forward_closure_evidence_within_funcs_with_max_precision(
+    /// [`Self::forward_closure_within_funcs`].
+    pub fn forward_closure_evidence_within_funcs(
         &self,
         seeds: &[WsNodeId],
         allowed_funcs: &AHashSet<FuncId>,
-        max_precision: Option<Precision>,
     ) -> IdgClosureEvidence {
         if seeds.is_empty() || allowed_funcs.is_empty() {
             return IdgClosureEvidence {
@@ -5079,17 +4942,16 @@ impl IdgQueryService {
                 cross_calls: Vec::new(),
             };
         }
-        self.forward_closure_evidence_in_func_scope(seeds, max_precision, Some(allowed_funcs), None, None)
+        self.forward_closure_evidence_in_func_scope(seeds, Some(allowed_funcs), None, None)
     }
 
     /// Provenance-preserving exact closure using both a compiler function
     /// corridor and a reusable target relevance proof.
-    pub fn forward_closure_evidence_within_funcs_and_relevance_with_max_precision(
+    pub fn forward_closure_evidence_within_funcs_and_relevance(
         &self,
         seeds: &[WsNodeId],
         allowed_funcs: &AHashSet<FuncId>,
         target_relevance: &IdgTargetRelevance,
-        max_precision: Option<Precision>,
     ) -> IdgClosureEvidence {
         if seeds.is_empty() || allowed_funcs.is_empty() {
             return IdgClosureEvidence {
@@ -5097,13 +4959,7 @@ impl IdgQueryService {
                 cross_calls: Vec::new(),
             };
         }
-        self.forward_closure_evidence_in_func_scope(
-            seeds,
-            max_precision,
-            Some(allowed_funcs),
-            Some(target_relevance),
-            None,
-        )
+        self.forward_closure_evidence_in_func_scope(seeds, Some(allowed_funcs), Some(target_relevance), None)
     }
 
     /// Provenance-preserving closure whose call stack is rooted at one
@@ -5117,13 +4973,12 @@ impl IdgQueryService {
     /// any resolved caller. This distinction is semantic query scope, not a
     /// traversal limit: every state reachable from the rooted call stack runs
     /// to the same fixed point.
-    pub fn forward_closure_evidence_rooted_at_func_within_funcs_and_relevance_with_max_precision(
+    pub fn forward_closure_evidence_rooted_at_func_within_funcs_and_relevance(
         &self,
         seeds: &[WsNodeId],
         root: FuncId,
         allowed_funcs: &AHashSet<FuncId>,
         target_relevance: Option<&IdgTargetRelevance>,
-        max_precision: Option<Precision>,
     ) -> IdgClosureEvidence {
         if seeds.is_empty() || allowed_funcs.is_empty() || !allowed_funcs.contains(&root) {
             return IdgClosureEvidence {
@@ -5131,25 +4986,18 @@ impl IdgQueryService {
                 cross_calls: Vec::new(),
             };
         }
-        self.forward_closure_evidence_in_func_scope(
-            seeds,
-            max_precision,
-            Some(allowed_funcs),
-            target_relevance,
-            Some(root),
-        )
+        self.forward_closure_evidence_in_func_scope(seeds, Some(allowed_funcs), target_relevance, Some(root))
     }
 
     /// Unscoped compiler-program counterpart to
-    /// [`Self::forward_closure_evidence_rooted_at_func_within_funcs_and_relevance_with_max_precision`].
+    /// [`Self::forward_closure_evidence_rooted_at_func_within_funcs_and_relevance`].
     /// The root still constrains call-stack direction; every function reached
     /// through an exact call boundary remains eligible.
-    pub fn forward_closure_evidence_rooted_at_func_and_relevance_with_max_precision(
+    pub fn forward_closure_evidence_rooted_at_func_and_relevance(
         &self,
         seeds: &[WsNodeId],
         root: FuncId,
         target_relevance: Option<&IdgTargetRelevance>,
-        max_precision: Option<Precision>,
     ) -> IdgClosureEvidence {
         if seeds.is_empty() {
             return IdgClosureEvidence {
@@ -5157,7 +5005,7 @@ impl IdgQueryService {
                 cross_calls: Vec::new(),
             };
         }
-        self.forward_closure_evidence_in_func_scope(seeds, max_precision, None, target_relevance, Some(root))
+        self.forward_closure_evidence_in_func_scope(seeds, None, target_relevance, Some(root))
     }
 
     /// Prove whether an entry-rooted scalar query can reach one of its exact
@@ -5169,12 +5017,11 @@ impl IdgQueryService {
     /// the caller must run the full symbolic/contextual fixed point. A
     /// positive scalar proof is only a candidate and is likewise confirmed by
     /// the full closure so provenance and cross-call evidence stay complete.
-    pub fn rooted_scalar_target_precheck_with_max_precision(
+    pub fn rooted_scalar_target_precheck(
         &self,
         seeds: &[WsNodeId],
         root: FuncId,
         target_nodes: &[WsNodeId],
-        max_precision: Option<Precision>,
     ) -> Option<bool> {
         if seeds.is_empty() || target_nodes.is_empty() {
             return Some(false);
@@ -5192,7 +5039,7 @@ impl IdgQueryService {
             .map(|node| NodeId(node.0))
             .map(|node| (Self::ws_node_func(&unified, node) == Some(root)).then_some(node.0))
             .collect::<Option<_>>()?;
-        let contextual = self.ensure_contextual_summary_runtime(&unified, max_precision, None);
+        let contextual = self.ensure_contextual_summary_runtime(&unified, None);
         let runtime = self.ensure_symbolic_runtime(&unified, None);
         let mut reached = AHashSet::with_capacity(seeds.len());
         let mut pending = Vec::with_capacity(seeds.len());
@@ -5236,14 +5083,13 @@ impl IdgQueryService {
     fn forward_closure_evidence_in_func_scope(
         &self,
         seeds: &[WsNodeId],
-        max_precision: Option<Precision>,
         allowed_funcs: Option<&AHashSet<FuncId>>,
         target_relevance: Option<&IdgTargetRelevance>,
         root: Option<FuncId>,
     ) -> IdgClosureEvidence {
         let unified = self.ensure_unified();
         let seed_nodes: Vec<NodeId> = seeds.iter().map(|node| NodeId(node.0)).collect();
-        let contextual = self.ensure_contextual_summary_runtime(&unified, max_precision, allowed_funcs);
+        let contextual = self.ensure_contextual_summary_runtime(&unified, allowed_funcs);
         // One transform can fire for every access-path field and caller
         // context. Cross-call evidence is transform identity, not fixed-point
         // multiplicity, so deduplicate at insertion instead of retaining
@@ -5255,7 +5101,6 @@ impl IdgQueryService {
                 &contextual.reach,
                 &seed_nodes,
                 SymbolicClosurePolicy {
-                    max_precision,
                     allowed_funcs,
                     target_relevance,
                     summary_callees: None,
@@ -5276,7 +5121,6 @@ impl IdgQueryService {
                 edge.call_span,
                 edge.arg_idx,
                 edge.param_idx,
-                edge.precision,
                 edge.relation,
             )
         });
@@ -5289,12 +5133,7 @@ impl IdgQueryService {
     /// target-function cut: the latter may legitimately include callees that
     /// flow back into the target, while this API never leaves the function's
     /// compiler-derived node set.
-    pub fn forward_closure_within_func_with_max_precision(
-        &self,
-        seeds: &[WsNodeId],
-        func: FuncId,
-        max_precision: Option<Precision>,
-    ) -> Vec<WsNodeId> {
+    pub fn forward_closure_within_func(&self, seeds: &[WsNodeId], func: FuncId) -> Vec<WsNodeId> {
         if seeds.is_empty() {
             return Vec::new();
         }
@@ -5304,7 +5143,7 @@ impl IdgQueryService {
         };
         let allowed = NodeBitSet::from_seed(Self::unified_node_count(&unified), func_nodes);
         let seed_nodes: Vec<NodeId> = seeds.iter().map(|node| NodeId(node.0)).collect();
-        self.forward_closure_nodes_within(&unified, &seed_nodes, &allowed, max_precision)
+        self.forward_closure_nodes_within(&unified, &seed_nodes, &allowed)
             .into_iter()
             .map(|node| WsNodeId(node.0))
             .collect()
@@ -5316,17 +5155,16 @@ impl IdgQueryService {
     /// Security scopes the service to its source/sink callgraph corridor
     /// before querying, so returning the complete realizable closure retains
     /// symbolic path evidence that a raw backward graph cut cannot see.
-    pub fn forward_target_func_cut_with_max_precision(
+    pub fn forward_target_func_cut(
         &self,
         seeds: &[WsNodeId],
         target_funcs: &AHashSet<FuncId>,
-        max_precision: Option<Precision>,
     ) -> Vec<WsNodeId> {
         if seeds.is_empty() || target_funcs.is_empty() {
             return Vec::new();
         }
         let unified = self.ensure_unified();
-        let closure = self.forward_closure_with_max_precision(seeds, max_precision);
+        let closure = self.forward_closure(seeds);
         if closure.iter().any(|node| {
             unified
                 .node_funcs
@@ -5341,17 +5179,12 @@ impl IdgQueryService {
 
     /// Context-matched forward closure when at least one concrete target IDG
     /// node is reached; otherwise empty.
-    pub fn forward_target_nodes_cut_with_max_precision(
-        &self,
-        seeds: &[WsNodeId],
-        target_nodes: &[WsNodeId],
-        max_precision: Option<Precision>,
-    ) -> Vec<WsNodeId> {
+    pub fn forward_target_nodes_cut(&self, seeds: &[WsNodeId], target_nodes: &[WsNodeId]) -> Vec<WsNodeId> {
         if seeds.is_empty() || target_nodes.is_empty() {
             return Vec::new();
         }
         let targets: AHashSet<WsNodeId> = target_nodes.iter().copied().collect();
-        let closure = self.forward_closure_with_max_precision(seeds, max_precision);
+        let closure = self.forward_closure(seeds);
         if self.closure_reaches_target_nodes(&closure, &targets) {
             closure
         } else {
@@ -5363,19 +5196,17 @@ impl IdgQueryService {
     ///
     /// The returned closure is complete for `allowed_funcs`; an empty result
     /// means no requested scalar or aggregate-consumption target was reached.
-    pub fn forward_target_nodes_cut_within_funcs_with_max_precision(
+    pub fn forward_target_nodes_cut_within_funcs(
         &self,
         seeds: &[WsNodeId],
         target_nodes: &[WsNodeId],
         allowed_funcs: &AHashSet<FuncId>,
-        max_precision: Option<Precision>,
     ) -> Vec<WsNodeId> {
         if seeds.is_empty() || target_nodes.is_empty() || allowed_funcs.is_empty() {
             return Vec::new();
         }
         let targets: AHashSet<WsNodeId> = target_nodes.iter().copied().collect();
-        let closure =
-            self.forward_closure_within_funcs_with_max_precision(seeds, allowed_funcs, max_precision);
+        let closure = self.forward_closure_within_funcs(seeds, allowed_funcs);
         if self.closure_reaches_target_nodes(&closure, &targets) {
             closure
         } else {
@@ -5391,39 +5222,31 @@ impl IdgQueryService {
     /// ordering are intentionally ignored, making this a conservative
     /// superset suitable for pruning exact forward closures. No language
     /// names, API inventories, depth limits, or result caps participate.
-    pub fn target_relevance_with_max_precision(
+    pub fn target_relevance(
         &self,
         target_nodes: &[WsNodeId],
         target_funcs: Option<&AHashSet<FuncId>>,
-        max_precision: Option<Precision>,
     ) -> IdgTargetRelevance {
-        self.target_relevance_in_func_scope(target_nodes, target_funcs, None, None, max_precision)
+        self.target_relevance_in_func_scope(target_nodes, target_funcs, None, None)
     }
 
     /// Compile a backward demand relation inside an exact compiler function
     /// corridor.
     ///
     /// This is the demand-analysis counterpart to
-    /// [`Self::forward_closure_within_funcs_and_relevance_with_max_precision`].
+    /// [`Self::forward_closure_within_funcs_and_relevance`].
     /// It is useful when one workspace graph serves many independent source
     /// queries: each query receives only the target facts in its proven
     /// callgraph corridor instead of inheriting demand from unrelated sinks.
     /// The function set is a semantic graph slice, not a work budget; every
     /// admitted node and symbolic fact runs to the same least fixed point.
-    pub fn target_relevance_within_funcs_with_max_precision(
+    pub fn target_relevance_within_funcs(
         &self,
         target_nodes: &[WsNodeId],
         target_funcs: Option<&AHashSet<FuncId>>,
         allowed_funcs: &AHashSet<FuncId>,
-        max_precision: Option<Precision>,
     ) -> IdgTargetRelevance {
-        self.target_relevance_in_func_scope(
-            target_nodes,
-            target_funcs,
-            Some(allowed_funcs),
-            None,
-            max_precision,
-        )
+        self.target_relevance_in_func_scope(target_nodes, target_funcs, Some(allowed_funcs), None)
     }
 
     /// Compile a source-rooted backward demand proof for one syntax owner.
@@ -5434,21 +5257,14 @@ impl IdgQueryService {
     /// context-matched forward closure: unrelated callers of a shared helper
     /// never enter the proof, while every provider reachable from `source`
     /// remains admitted to the same uncapped fixed point.
-    pub fn target_relevance_from_source_within_funcs_with_max_precision(
+    pub fn target_relevance_from_source_within_funcs(
         &self,
         source: FuncId,
         target_nodes: &[WsNodeId],
         target_funcs: Option<&AHashSet<FuncId>>,
         allowed_funcs: &AHashSet<FuncId>,
-        max_precision: Option<Precision>,
     ) -> IdgTargetRelevance {
-        self.target_relevance_in_func_scope(
-            target_nodes,
-            target_funcs,
-            Some(allowed_funcs),
-            Some(source),
-            max_precision,
-        )
+        self.target_relevance_in_func_scope(target_nodes, target_funcs, Some(allowed_funcs), Some(source))
     }
 
     /// Keep only source functions that own at least one node in an exact
@@ -5484,10 +5300,9 @@ impl IdgQueryService {
         target_funcs: Option<&AHashSet<FuncId>>,
         allowed_funcs: Option<&AHashSet<FuncId>>,
         source_root: Option<FuncId>,
-        max_precision: Option<Precision>,
     ) -> IdgTargetRelevance {
         let unified = self.ensure_unified();
-        let contextual = self.ensure_contextual_summary_runtime(&unified, max_precision, allowed_funcs);
+        let contextual = self.ensure_contextual_summary_runtime(&unified, allowed_funcs);
         let runtime = self.ensure_symbolic_runtime(&unified, allowed_funcs);
         let symbolic = self.workspace.symbolic_field();
         let mut worklist = TargetRelevanceWorklist::new(Self::unified_node_count(&unified));
@@ -5591,9 +5406,6 @@ impl IdgQueryService {
                         runtime
                             .reverse_scalar_transforms
                             .visit_incoming(target, write_span, |row| {
-                                if max_precision.is_some_and(|max| row.precision > max) {
-                                    return;
-                                }
                                 let Some(field) = symbolic
                                     .string(row.exact_field)
                                     .and_then(|field| runtime.field_id(field))
@@ -5641,9 +5453,6 @@ impl IdgQueryService {
                     }
                 });
                 runtime.reverse_transforms.visit_incoming(base, |row| {
-                    if max_precision.is_some_and(|max| row.precision > max) {
-                        return;
-                    }
                     let activates_provider = matches!(
                         row.kind,
                         SymbolicFieldTransformKind::Return
@@ -5683,9 +5492,6 @@ impl IdgQueryService {
                     }
                 });
                 runtime.reverse_transforms.visit_incoming(base, |row| {
-                    if max_precision.is_some_and(|max| row.precision > max) {
-                        return;
-                    }
                     let activates_provider = matches!(
                         row.kind,
                         SymbolicFieldTransformKind::Return
@@ -5728,19 +5534,18 @@ impl IdgQueryService {
 
     /// Context-matched forward closure when a concrete target node or fallback
     /// target function is reached; otherwise empty.
-    pub fn forward_target_nodes_and_funcs_cut_with_max_precision(
+    pub fn forward_target_nodes_and_funcs_cut(
         &self,
         seeds: &[WsNodeId],
         target_nodes: &[WsNodeId],
         target_funcs: &AHashSet<FuncId>,
-        max_precision: Option<Precision>,
     ) -> Vec<WsNodeId> {
         if seeds.is_empty() || (target_nodes.is_empty() && target_funcs.is_empty()) {
             return Vec::new();
         }
         let unified = self.ensure_unified();
         let targets: AHashSet<WsNodeId> = target_nodes.iter().copied().collect();
-        let closure = self.forward_closure_with_max_precision(seeds, max_precision);
+        let closure = self.forward_closure(seeds);
         let reaches_target = closure.iter().any(|node| {
             unified
                 .node_funcs
@@ -5792,7 +5597,7 @@ impl IdgQueryService {
     /// Does any path lead from `from` to `to`?
     #[must_use]
     pub fn reaches(&self, from: WsNodeId, to: WsNodeId) -> bool {
-        self.forward_closure_unfiltered(&[from]).contains(&to)
+        self.forward_closure(&[from]).contains(&to)
     }
 
     /// Find every IDG node in `func` whose place is a `Place::Read`
@@ -6514,18 +6319,10 @@ impl IdgQueryService {
     ///
     /// Result is sorted by `(caller_func, call_span.start, arg_idx)`
     /// for deterministic grouping.
+    /// Tainted call arguments reachable from `seeds`: the forward closure
+    /// followed by the call-argument projection.
     pub fn tainted_call_args_in_closure(&self, seeds: &[WsNodeId]) -> Vec<(FuncId, Span, u32)> {
-        self.tainted_call_args_in_closure_with_max_precision(seeds, Some(SEMANTIC_MAX_PRECISION))
-    }
-
-    /// Same as [`Self::tainted_call_args_in_closure`], but computes
-    /// the seed closure inside a precision scope.
-    pub fn tainted_call_args_in_closure_with_max_precision(
-        &self,
-        seeds: &[WsNodeId],
-        max_precision: Option<Precision>,
-    ) -> Vec<(FuncId, Span, u32)> {
-        let closure = self.forward_closure_with_max_precision(seeds, max_precision);
+        let closure = self.forward_closure(seeds);
         self.tainted_call_args_in_reachable_nodes(&closure)
     }
 
@@ -6874,7 +6671,6 @@ impl IdgQueryService {
                 edge.callee.raw(),
                 edge.call_span,
                 edge.param_idx,
-                edge.precision,
             )
         });
         boundaries.dedup();
@@ -7193,21 +6989,12 @@ impl IdgQueryService {
     /// Used by value-flow / dataflow consumers as the IDG-native
     /// replacement for the legacy engine's `result.call_records`
     /// list.
-    pub fn cross_call_edges_in_closure(&self, seeds: &[WsNodeId]) -> Vec<CrossCallEdge> {
-        self.cross_call_edges_in_closure_with_max_precision(seeds, Some(SEMANTIC_MAX_PRECISION))
-    }
-
-    /// Same as [`Self::cross_call_edges_in_closure`], but computes
-    /// the closure itself inside a precision scope. This is the
-    /// semantic flow surface used by review/security/export callers:
-    /// exact and semantically narrowed edges are walked to fixpoint,
+    /// Cross-call edges traversed by the forward closure of `seeds`. This
+    /// is the semantic flow surface used by review/security/export callers:
+    /// resolved edges are walked to fixpoint,
     /// while weaker diagnostic edges are not traversed.
-    pub fn cross_call_edges_in_closure_with_max_precision(
-        &self,
-        seeds: &[WsNodeId],
-        max_precision: Option<Precision>,
-    ) -> Vec<CrossCallEdge> {
-        let evidence = self.forward_closure_evidence_with_max_precision(seeds, max_precision);
+    pub fn cross_call_edges_in_closure(&self, seeds: &[WsNodeId]) -> Vec<CrossCallEdge> {
+        let evidence = self.forward_closure_evidence(seeds);
         let mut edges = evidence.cross_calls;
         edges.sort_unstable_by_key(|edge| {
             (
@@ -7216,7 +7003,6 @@ impl IdgQueryService {
                 edge.call_span,
                 edge.arg_idx,
                 edge.param_idx,
-                edge.precision,
                 edge.relation,
             )
         });
@@ -7226,46 +7012,28 @@ impl IdgQueryService {
 
     /// Same as [`Self::cross_call_edges_in_closure`], but consumes a
     /// closure the caller already computed.
+    /// Cross-call edges whose endpoints both lie inside `closure`.
     pub fn cross_call_edges_in_reachable_nodes(&self, closure: &[WsNodeId]) -> Vec<CrossCallEdge> {
-        self.cross_call_edges_in_reachable_nodes_with_max_precision(closure, Some(SEMANTIC_MAX_PRECISION))
+        self.cross_call_edges_in_reachable_nodes_filtered(closure, None)
     }
 
-    /// Same as [`Self::cross_call_edges_in_reachable_nodes`], but
-    /// drops cross-call rows outside the caller's precision scope.
-    pub fn cross_call_edges_in_reachable_nodes_with_max_precision(
-        &self,
-        closure: &[WsNodeId],
-        max_precision: Option<Precision>,
-    ) -> Vec<CrossCallEdge> {
-        self.cross_call_edges_in_reachable_nodes_filtered_with_max_precision(closure, max_precision, None)
-    }
-
-    /// Same as [`Self::cross_call_edges_in_reachable_nodes_with_max_precision`],
+    /// Same as [`Self::cross_call_edges_in_reachable_nodes`],
     /// but keeps only rows whose caller and callee are both inside
     /// `lineage_funcs` when supplied.
-    pub fn cross_call_edges_in_reachable_nodes_filtered_with_max_precision(
+    pub fn cross_call_edges_in_reachable_nodes_filtered(
         &self,
         closure: &[WsNodeId],
-        max_precision: Option<Precision>,
         lineage_funcs: Option<&AHashSet<FuncId>>,
     ) -> Vec<CrossCallEdge> {
         let unified = self.ensure_unified();
         if let Some(lineage_funcs) = lineage_funcs {
-            return self.cross_call_edges_in_reachable_nodes_scoped(
-                &unified,
-                closure,
-                max_precision,
-                lineage_funcs,
-            );
+            return self.cross_call_edges_in_reachable_nodes_scoped(&unified, closure, lineage_funcs);
         }
         let cross_calls_by_from = self.ensure_cross_calls_by_from(&unified);
         let mut out = Vec::new();
         for ws_node in closure {
             if let Some(rows) = cross_calls_by_from.get(ws_node) {
                 for row in rows {
-                    if max_precision.is_some_and(|max| row.precision > max) {
-                        continue;
-                    }
                     if lineage_funcs
                         .is_some_and(|funcs| !(funcs.contains(&row.caller) && funcs.contains(&row.callee)))
                     {
@@ -7286,7 +7054,6 @@ impl IdgQueryService {
         &self,
         unified: &Arc<UnifiedAddressSpace>,
         closure: &[WsNodeId],
-        max_precision: Option<Precision>,
         lineage_funcs: &AHashSet<FuncId>,
     ) -> Vec<CrossCallEdge> {
         if closure.is_empty() || lineage_funcs.is_empty() {
@@ -7297,9 +7064,7 @@ impl IdgQueryService {
         for node in closure {
             if let Some(node_rows) = rows.get(node) {
                 for row in node_rows {
-                    if max_precision.is_none_or(|max| row.precision <= max) {
-                        out.push(*row);
-                    }
+                    out.push(*row);
                 }
             }
         }
@@ -7312,7 +7077,6 @@ impl IdgQueryService {
                 row.call_span.end,
                 row.arg_idx,
                 row.param_idx,
-                row.precision.rank(),
                 row.relation,
             )
         });
@@ -7329,12 +7093,9 @@ impl IdgQueryService {
     /// uses this as its function-level reachability graph so it can
     /// avoid per-source full dataflow walks without dropping
     /// higher-order flows.
-    pub fn semantic_function_edges_with_max_precision(
-        &self,
-        max_precision: Option<Precision>,
-    ) -> Vec<(FuncId, FuncId)> {
+    pub fn semantic_function_edges(&self) -> Vec<(FuncId, FuncId)> {
         let mut out: Vec<(FuncId, FuncId)> = self
-            .semantic_cross_call_edges_with_max_precision(max_precision)
+            .semantic_cross_call_edges()
             .into_iter()
             .map(|row| (row.caller, row.callee))
             .collect();
@@ -7350,18 +7111,17 @@ impl IdgQueryService {
     /// state in their source-to-sink direction. Both worklists run to a finite
     /// least fixed point; there is no path-depth, iteration, or result cap.
     #[must_use]
-    pub fn semantic_function_corridor_with_max_precision(
+    pub fn semantic_function_corridor(
         &self,
         source_funcs: &[FuncId],
         target_funcs: &AHashSet<FuncId>,
-        max_precision: Option<Precision>,
     ) -> AHashSet<FuncId> {
         if source_funcs.is_empty() || target_funcs.is_empty() {
             return AHashSet::default();
         }
         let mut forward: AHashMap<FuncId, Vec<FuncId>> = AHashMap::default();
         let mut backward: AHashMap<FuncId, Vec<FuncId>> = AHashMap::default();
-        for (from, to) in self.semantic_function_edges_with_max_precision(max_precision) {
+        for (from, to) in self.semantic_function_edges() {
             forward.entry(from).or_default().push(to);
             backward.entry(to).or_default().push(from);
         }
@@ -7393,21 +7153,15 @@ impl IdgQueryService {
     /// Every semantic cross-call dataflow edge known to the IDG.
     ///
     /// This is the renderable counterpart to
-    /// [`Self::semantic_function_edges_with_max_precision`]: callers that
-    /// need call-site spans, precision, and edge kind can consume these rows
+    /// [`Self::semantic_function_edges`]: callers that
+    /// need call-site spans and edge kind can consume these rows
     /// directly instead of reducing the graph to `(caller, callee)` pairs.
-    pub fn semantic_cross_call_edges_with_max_precision(
-        &self,
-        max_precision: Option<Precision>,
-    ) -> Vec<CrossCallEdge> {
+    pub fn semantic_cross_call_edges(&self) -> Vec<CrossCallEdge> {
         let unified = self.ensure_unified();
         let cross_calls_by_from = self.ensure_cross_calls_by_from(&unified);
         let mut out = Vec::new();
         for rows in cross_calls_by_from.values() {
             for row in rows {
-                if max_precision.is_some_and(|precision| row.precision > precision) {
-                    continue;
-                }
                 out.push(*row);
             }
         }
@@ -7466,7 +7220,7 @@ impl IdgQueryService {
     }
 
     /// Compute a flat workspace-global address space. Reachability CSRs are
-    /// materialised lazily for the precision actually requested.
+    /// materialised lazily on first use.
     fn build_unified(&self) -> UnifiedAddressSpace {
         let mut node_funcs = Vec::new();
         let mut node_boundaries = Vec::new();
@@ -7587,8 +7341,7 @@ impl IdgQueryService {
                 indices: param_indices.into_boxed_slice(),
             },
             unfiltered_reach: RwLock::new(None),
-            precision_reach: RwLock::new(AHashMap::new()),
-            contextual_summaries: RwLock::new(AHashMap::new()),
+            contextual_summaries: RwLock::new(None),
             cross_calls_by_from: RwLock::new(None),
             symbolic_runtime: OnceLock::new(),
         }
@@ -7675,30 +7428,22 @@ impl IdgQueryService {
         unified: &Arc<UnifiedAddressSpace>,
         seeds: &[NodeId],
         allowed: &NodeBitSet,
-        max_precision: Option<Precision>,
     ) -> Vec<NodeId> {
-        if let Some(precision) = max_precision {
-            self.ensure_precision_reach(unified, precision)
-                .forward_closure_nodes_within(seeds, allowed)
-        } else {
-            self.ensure_unfiltered_reach(unified)
-                .forward_closure_nodes_within(seeds, allowed)
-        }
+        self.ensure_unfiltered_reach(unified)
+            .forward_closure_nodes_within(seeds, allowed)
     }
 
     fn build_contextual_summary_runtime(
         &self,
         summary_edges: &[crate::function_summary::ContextualSummaryEdge],
-        max_precision: Option<Precision>,
         allowed_funcs: Option<&AHashSet<FuncId>>,
     ) -> ContextualSummaryRuntime {
-        self.build_contextual_summary_runtime_with_reverse(summary_edges, max_precision, true, allowed_funcs)
+        self.build_contextual_summary_runtime_with_reverse(summary_edges, true, allowed_funcs)
     }
 
     fn build_contextual_summary_runtime_with_reverse(
         &self,
         summary_edges: &[crate::function_summary::ContextualSummaryEdge],
-        max_precision: Option<Precision>,
         include_reverse: bool,
         allowed_funcs: Option<&AHashSet<FuncId>>,
     ) -> ContextualSummaryRuntime {
@@ -7753,9 +7498,6 @@ impl IdgQueryService {
                 &crate::segment::IdgSegment,
                 &crate::segment::IdgSegment,
             )>| {
-                if max_precision.is_some_and(|max| edge.meta.precision > max) {
-                    return;
-                }
                 let Some(from) = Self::ws_node_for(&unified, from_segment, edge.from) else {
                     return;
                 };
@@ -7826,7 +7568,6 @@ impl IdgQueryService {
                                 call_span: edge.meta.via_span,
                                 arg_idx,
                                 param_idx,
-                                precision: edge.meta.precision,
                                 call_kind: edge.meta.call_kind,
                                 relation: CrossCallRelation::Argument,
                             })
@@ -7840,7 +7581,6 @@ impl IdgQueryService {
                                 call_span: edge.meta.via_span,
                                 arg_idx: u32::MAX,
                                 param_idx: u32::MAX,
-                                precision: edge.meta.precision,
                                 call_kind: edge.meta.call_kind,
                                 relation: CrossCallRelation::Return,
                             })
@@ -7854,7 +7594,6 @@ impl IdgQueryService {
                                 call_span: edge.meta.via_span,
                                 arg_idx: u32::MAX,
                                 param_idx: u32::MAX,
-                                precision: edge.meta.precision,
                                 call_kind: edge.meta.call_kind,
                                 relation: CrossCallRelation::SharedStateCall,
                             })
@@ -7953,9 +7692,6 @@ impl IdgQueryService {
         if !structural_boundary_demand.is_empty() {
             let mut record_structural_boundary =
                 |from_segment: SegmentId, to_segment: SegmentId, edge: &IdgEdge| {
-                    if max_precision.is_some_and(|max| edge.meta.precision > max) {
-                        return;
-                    }
                     let Some(from) = Self::ws_node_for(&unified, from_segment, edge.from) else {
                         return;
                     };
@@ -7997,9 +7733,6 @@ impl IdgQueryService {
         let mut return_rows = ContextBoundaryRows::new(external_boundaries);
         {
             let mut record_boundary = |from_segment: SegmentId, to_segment: SegmentId, edge: &IdgEdge| {
-                if max_precision.is_some_and(|max| edge.meta.precision > max) {
-                    return;
-                }
                 let Some(from) = Self::ws_node_for(&unified, from_segment, edge.from) else {
                     return;
                 };
@@ -8063,7 +7796,6 @@ impl IdgQueryService {
                                 call_span: key.span,
                                 arg_idx,
                                 param_idx,
-                                precision: edge.meta.precision,
                                 call_kind: edge.meta.call_kind,
                                 relation,
                             })
@@ -8076,7 +7808,6 @@ impl IdgQueryService {
                             call_span: key.span,
                             arg_idx: u32::MAX,
                             param_idx: u32::MAX,
-                            precision: edge.meta.precision,
                             call_kind: edge.meta.call_kind,
                             relation: CrossCallRelation::Return,
                         }),
@@ -8171,7 +7902,7 @@ impl IdgQueryService {
                 };
                 for edge in &segment.edges {
                     if let Some((from, to)) =
-                        Self::contextual_ordinary_pair(&unified, segment_id, segment_id, edge, max_precision)
+                        Self::contextual_ordinary_pair(&unified, segment_id, segment_id, edge)
                     {
                         if node_pair_is_allowed(WsNodeId(from), WsNodeId(to)) {
                             visit(from, to);
@@ -8187,7 +7918,6 @@ impl IdgQueryService {
                             edge.from_segment,
                             edge.to_segment,
                             &edge.edge,
-                            max_precision,
                         ) {
                             if node_pair_is_allowed(WsNodeId(from), WsNodeId(to)) {
                                 visit(from, to);
@@ -8244,12 +7974,8 @@ impl IdgQueryService {
         from_segment: SegmentId,
         to_segment: SegmentId,
         edge: &IdgEdge,
-        max_precision: Option<Precision>,
     ) -> Option<(u32, u32)> {
-        if edge.meta.kind.is_inter()
-            || edge.meta.kind == IdgEdgeKind::IntraAggregateConsume
-            || max_precision.is_some_and(|max| edge.meta.precision > max)
-        {
+        if edge.meta.kind.is_inter() || edge.meta.kind == IdgEdgeKind::IntraAggregateConsume {
             return None;
         }
         let from = Self::ws_node_for(unified, from_segment, edge.from)?;
@@ -8320,7 +8046,6 @@ impl IdgQueryService {
         mut cross_calls: Option<&mut AHashSet<CrossCallEdge>>,
     ) -> Vec<NodeId> {
         let SymbolicClosurePolicy {
-            max_precision,
             allowed_funcs,
             target_relevance,
             summary_callees,
@@ -8347,7 +8072,7 @@ impl IdgQueryService {
             return Vec::new();
         }
         let runtime = self.ensure_symbolic_runtime(unified, allowed_funcs);
-        let field_demand = Self::ensure_symbolic_field_demand(&runtime, max_precision);
+        let field_demand = Self::ensure_symbolic_field_demand(&runtime);
         let node_count = Self::unified_node_count(unified);
         let mut worklist = SymbolicClosureWorklist::new(
             node_count,
@@ -8385,7 +8110,6 @@ impl IdgQueryService {
                     unified,
                     &runtime,
                     symbolic,
-                    max_precision,
                     summary_callees,
                     contextual.is_some(),
                     activate_seed_callers,
@@ -8704,7 +8428,6 @@ impl IdgQueryService {
         unified: &UnifiedAddressSpace,
         runtime: &SymbolicRuntimeIndex,
         symbolic: &crate::symbolic::SymbolicFieldGraph,
-        max_precision: Option<Precision>,
         summary_callees: Option<&AHashMap<FuncId, Vec<FuncId>>>,
         contextual: bool,
         activate_seed_callers: bool,
@@ -8727,20 +8450,18 @@ impl IdgQueryService {
             debug_assert!(
                 transform.allow_out_of_order_source || runtime.retains_local_provenance(transform.source)
             );
-            if max_precision.is_some_and(|max| transform.precision > max)
-                || (!transform.allow_out_of_order_source
-                    && !fact.is_interprocedural()
-                    && fact
-                        .span_id()
-                        .and_then(|span| runtime.span(span))
-                        .is_some_and(|span| {
-                            let is_exact_argument_value = transform.kind
-                                == SymbolicFieldTransformKind::Argument
-                                && span.into_span() == transform.write_span;
-                            !is_exact_argument_value
-                                && span.file == transform.call_span.file
-                                && span.start > transform.call_span.start
-                        }))
+            if !transform.allow_out_of_order_source
+                && !fact.is_interprocedural()
+                && fact
+                    .span_id()
+                    .and_then(|span| runtime.span(span))
+                    .is_some_and(|span| {
+                        let is_exact_argument_value = transform.kind == SymbolicFieldTransformKind::Argument
+                            && span.into_span() == transform.write_span;
+                        !is_exact_argument_value
+                            && span.file == transform.call_span.file
+                            && span.start > transform.call_span.start
+                    })
             {
                 continue;
             }
@@ -9223,28 +8944,8 @@ impl IdgQueryService {
         if let Some(reach) = write.as_ref() {
             return Arc::clone(reach);
         }
-        let reach = Arc::new(self.build_reach(unified, None));
+        let reach = Arc::new(self.build_reach(unified));
         *write = Some(Arc::clone(&reach));
-        reach
-    }
-
-    fn ensure_precision_reach(
-        &self,
-        unified: &Arc<UnifiedAddressSpace>,
-        max_precision: Precision,
-    ) -> Arc<ReachabilityIndex> {
-        {
-            let read = unified.precision_reach.read();
-            if let Some(reach) = read.get(&max_precision) {
-                return Arc::clone(reach);
-            }
-        }
-        let mut write = unified.precision_reach.write();
-        if let Some(reach) = write.get(&max_precision) {
-            return Arc::clone(reach);
-        }
-        let reach = Arc::new(self.build_reach(unified, Some(max_precision)));
-        write.insert(max_precision, Arc::clone(&reach));
         reach
     }
 
@@ -9301,27 +9002,11 @@ impl IdgQueryService {
     /// This is a semantic relation, not a budget: every inverse transform and
     /// access-path rebase is followed until convergence.  The spill-backed
     /// set starts empty and promotes storage only with actual relation density.
-    fn ensure_symbolic_field_demand(
-        runtime: &Arc<SymbolicRuntimeIndex>,
-        max_precision: Option<Precision>,
-    ) -> Arc<SymbolicFieldDemand> {
-        let slot = match max_precision {
-            None => 0,
-            Some(Precision::Exact) => 1,
-            Some(Precision::Narrowed) => 2,
-            Some(Precision::OverApproximate) => 3,
-            Some(Precision::Unknown) => 4,
-        };
-        Arc::clone(
-            runtime.field_demands[slot]
-                .get_or_init(|| Self::compile_symbolic_field_demand(runtime, max_precision)),
-        )
+    fn ensure_symbolic_field_demand(runtime: &Arc<SymbolicRuntimeIndex>) -> Arc<SymbolicFieldDemand> {
+        Arc::clone(runtime.field_demands[0].get_or_init(|| Self::compile_symbolic_field_demand(runtime)))
     }
 
-    fn compile_symbolic_field_demand(
-        runtime: &SymbolicRuntimeIndex,
-        max_precision: Option<Precision>,
-    ) -> Arc<SymbolicFieldDemand> {
+    fn compile_symbolic_field_demand(runtime: &SymbolicRuntimeIndex) -> Arc<SymbolicFieldDemand> {
         // A whole value passed to an unresolved/external consumer demands
         // every concrete suffix that can reach that compiler base. Keep this
         // as a sparse wildcard relation instead of materializing
@@ -9346,9 +9031,7 @@ impl IdgQueryService {
                 enqueue(rebase.target);
             }
             runtime.reverse_transforms.visit_incoming(base, |row| {
-                if max_precision.is_none_or(|max| row.precision <= max) {
-                    enqueue(row.source);
-                }
+                enqueue(row.source);
             });
         }
 
@@ -9376,9 +9059,7 @@ impl IdgQueryService {
                 }
             }
             runtime.reverse_transforms.visit_incoming(base, |row| {
-                if max_precision.is_none_or(|max| row.precision <= max) {
-                    enqueue(row.source, field);
-                }
+                enqueue(row.source, field);
             });
         }
         let demand = Arc::new(SymbolicFieldDemand {
@@ -9387,11 +9068,10 @@ impl IdgQueryService {
         });
         bonsai_diagnostics::debug_log!(
             "idg-query",
-            "symbolic field demand ready syntax_facts={} demanded_facts={} wildcard_bases={} precision={:?}",
+            "symbolic field demand ready syntax_facts={} demanded_facts={} wildcard_bases={}",
             runtime.projected_fact_keys.len(),
             demand.facts.len(),
             demand.wildcard_bases.len(),
-            max_precision
         );
         demand
     }
@@ -9457,7 +9137,6 @@ impl IdgQueryService {
     fn ensure_contextual_summary_runtime(
         &self,
         unified: &Arc<UnifiedAddressSpace>,
-        max_precision: Option<Precision>,
         allowed_funcs: Option<&AHashSet<FuncId>>,
     ) -> Arc<ContextualSummaryRuntime> {
         // Reuse a global runtime only if this process has already opened it.
@@ -9465,15 +9144,12 @@ impl IdgQueryService {
         // for a narrow query to make the whole workspace resident.
         if allowed_funcs.is_some() {
             let read = unified.contextual_summaries.read();
-            if let Some(runtime) = read.get(&max_precision) {
+            if let Some(runtime) = read.as_ref() {
                 return Arc::clone(runtime);
             }
         }
-        if allowed_funcs.is_some()
-            && max_precision == Some(SEMANTIC_MAX_PRECISION)
-            && self.persisted_query_accelerator.is_some()
-        {
-            return self.ensure_contextual_summary_runtime(unified, max_precision, None);
+        if allowed_funcs.is_some() && self.persisted_query_accelerator.is_some() {
+            return self.ensure_contextual_summary_runtime(unified, None);
         }
         if let Some(allowed_funcs) = allowed_funcs {
             let mut funcs: Vec<FuncId> = allowed_funcs.iter().copied().collect();
@@ -9481,7 +9157,7 @@ impl IdgQueryService {
             funcs.dedup();
             let mut scoped = self.scoped_contextual_summary.lock();
             if let Some(cache) = scoped.as_ref() {
-                if cache.max_precision == max_precision && cache.funcs.as_ref() == funcs.as_slice() {
+                if cache.funcs.as_ref() == funcs.as_slice() {
                     return Arc::clone(&cache.runtime);
                 }
             }
@@ -9489,15 +9165,10 @@ impl IdgQueryService {
                 &self.workspace,
                 &funcs,
                 Some(allowed_funcs),
-                max_precision,
             ));
-            let runtime = Arc::new(self.build_contextual_summary_runtime(
-                &batch.contextual_edges,
-                max_precision,
-                Some(allowed_funcs),
-            ));
+            let runtime =
+                Arc::new(self.build_contextual_summary_runtime(&batch.contextual_edges, Some(allowed_funcs)));
             *scoped = Some(ScopedContextualSummaryCache {
-                max_precision,
                 funcs: funcs.into_boxed_slice(),
                 runtime: Arc::clone(&runtime),
                 batch,
@@ -9506,12 +9177,12 @@ impl IdgQueryService {
         }
         {
             let read = unified.contextual_summaries.read();
-            if let Some(runtime) = read.get(&max_precision) {
+            if let Some(runtime) = read.as_ref() {
                 return Arc::clone(runtime);
             }
         }
         let mut write = unified.contextual_summaries.write();
-        if let Some(runtime) = write.get(&max_precision) {
+        if let Some(runtime) = write.as_ref() {
             return Arc::clone(runtime);
         }
         // An empty requested-function set still compiles every function's
@@ -9519,35 +9190,26 @@ impl IdgQueryService {
         // any parameter-result rows. This is the canonical compiler graph for
         // arbitrary forward closures.
         let runtime = Arc::new(
-            self.load_persisted_contextual_runtime(unified, max_precision)
+            self.load_persisted_contextual_runtime(unified)
                 .unwrap_or_else(|error| {
                     bonsai_diagnostics::debug_log!(
                         "idg-query",
                         "persisted contextual accelerator unavailable; rebuilding exact runtime: {error}"
                     );
-                    let summary_edges = crate::function_summary::return_taint_param_indices(
-                        &self.workspace,
-                        &[],
-                        max_precision,
-                    )
-                    .contextual_edges;
-                    self.build_contextual_summary_runtime(&summary_edges, max_precision, None)
+                    let summary_edges =
+                        crate::function_summary::return_taint_param_indices(&self.workspace, &[])
+                            .contextual_edges;
+                    self.build_contextual_summary_runtime(&summary_edges, None)
                 }),
         );
-        write.insert(max_precision, Arc::clone(&runtime));
+        *write = Some(Arc::clone(&runtime));
         runtime
     }
 
     fn load_persisted_contextual_runtime(
         &self,
         unified: &UnifiedAddressSpace,
-        max_precision: Option<Precision>,
     ) -> crate::IdgResult<ContextualSummaryRuntime> {
-        if max_precision != Some(SEMANTIC_MAX_PRECISION) {
-            return Err(invalid_query_accelerator(
-                "persisted contextual precision does not match the requested query",
-            ));
-        }
         let parts = self
             .persisted_query_accelerator
             .as_ref()
@@ -9578,17 +9240,11 @@ impl IdgQueryService {
         )
     }
 
-    fn build_reach(
-        &self,
-        unified: &UnifiedAddressSpace,
-        max_precision: Option<Precision>,
-    ) -> ReachabilityIndex {
+    fn build_reach(&self, unified: &UnifiedAddressSpace) -> ReachabilityIndex {
         ReachabilityIndex::from_pair_visitor(Self::unified_node_count(unified), |visit| {
             for (seg_id, segment) in self.workspace.segment_views() {
                 for edge in &segment.edges {
-                    if max_precision.is_some_and(|max| edge.meta.precision > max)
-                        || edge.meta.kind == IdgEdgeKind::IntraAggregateConsume
-                    {
+                    if edge.meta.kind == IdgEdgeKind::IntraAggregateConsume {
                         continue;
                     }
                     let Some(from) = Self::ws_node_for(unified, seg_id, edge.from) else {
@@ -9603,9 +9259,6 @@ impl IdgQueryService {
             self.workspace
                 .visit_cross_file_edges(|edges| {
                     for cfe in edges {
-                        if max_precision.is_some_and(|max| cfe.edge.meta.precision > max) {
-                            continue;
-                        }
                         let Some(from) = Self::ws_node_for(unified, cfe.from_segment, cfe.edge.from) else {
                             continue;
                         };
@@ -9722,7 +9375,6 @@ impl IdgQueryService {
                     call_span: link.via_span,
                     arg_idx: u32::MAX,
                     param_idx: u32::MAX,
-                    precision: link.precision,
                     call_kind: bonsai_callgraph::EdgeKind::Indirect,
                     relation: CrossCallRelation::SharedStateCall,
                 });
@@ -9795,7 +9447,6 @@ impl IdgQueryService {
                     row.call_span,
                     row.arg_idx,
                     row.param_idx,
-                    row.precision,
                     row.relation,
                 )
             });
@@ -9993,7 +9644,6 @@ fn lift_cross_call_edge_from_unified(
                 call_span,
                 arg_idx,
                 param_idx,
-                precision: edge.meta.precision,
                 call_kind: edge.meta.call_kind,
                 relation: CrossCallRelation::Argument,
             }));
@@ -10006,7 +9656,6 @@ fn lift_cross_call_edge_from_unified(
                     call_span: edge.meta.via_span,
                     arg_idx: u32::MAX,
                     param_idx,
-                    precision: edge.meta.precision,
                     call_kind: edge.meta.call_kind,
                     relation: CrossCallRelation::Callback,
                 }));
@@ -10025,7 +9674,6 @@ fn lift_cross_call_edge_from_unified(
             call_span: edge.meta.via_span,
             arg_idx: u32::MAX,
             param_idx,
-            precision: edge.meta.precision,
             call_kind: edge.meta.call_kind,
             relation: CrossCallRelation::Callback,
         }));
@@ -10044,7 +9692,6 @@ fn lift_cross_call_edge_from_unified(
             call_span: edge.meta.via_span,
             arg_idx: u32::MAX,
             param_idx: u32::MAX,
-            precision: edge.meta.precision,
             call_kind: edge.meta.call_kind,
             relation: CrossCallRelation::SharedStateCall,
         }));
@@ -10060,7 +9707,6 @@ fn lift_cross_call_edge_from_unified(
             call_span: edge.meta.via_span,
             arg_idx: u32::MAX,
             param_idx: u32::MAX,
-            precision: edge.meta.precision,
             call_kind: edge.meta.call_kind,
             relation: CrossCallRelation::Return,
         }));
@@ -10090,7 +9736,6 @@ fn lift_call_arg_edge(
                     call_span: site.0,
                     arg_idx: *idx,
                     param_idx: *param_idx,
-                    precision: edge.meta.precision,
                     call_kind: edge.meta.call_kind,
                     relation: CrossCallRelation::Argument,
                 });
@@ -10112,7 +9757,6 @@ fn lift_call_arg_edge(
                     call_span: edge.meta.via_span,
                     arg_idx: u32::MAX,
                     param_idx: *param_idx,
-                    precision: edge.meta.precision,
                     call_kind: edge.meta.call_kind,
                     relation: CrossCallRelation::Callback,
                 });
@@ -10149,7 +9793,6 @@ fn lift_call_arg_edge(
             call_span: edge.meta.via_span,
             arg_idx,
             param_idx,
-            precision: edge.meta.precision,
             call_kind: edge.meta.call_kind,
             // InterFieldCallArg is still anchored to a resolved AST call
             // boundary; only its carried value is projected. It is therefore
@@ -10169,7 +9812,6 @@ fn lift_call_arg_edge(
             call_span: edge.meta.via_span,
             arg_idx: u32::MAX,
             param_idx: u32::MAX,
-            precision: edge.meta.precision,
             call_kind: edge.meta.call_kind,
             relation: CrossCallRelation::SharedStateCall,
         });
@@ -10209,7 +9851,6 @@ fn lift_call_arg_edge(
             call_span: edge.meta.via_span,
             arg_idx: u32::MAX,
             param_idx: u32::MAX,
-            precision: edge.meta.precision,
             call_kind: edge.meta.call_kind,
             relation: CrossCallRelation::Return,
         });

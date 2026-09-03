@@ -16,7 +16,6 @@ fn compact_callgraph_wire_rebuilds_adjacency_and_provenance() {
         to: callee,
         span: Span::new(FileId::new(3), 10, 14),
         kind: EdgeKind::Direct,
-        precision: Precision::Narrowed,
         provenance: EdgeProvenance::receiver_dispatch(),
     });
 
@@ -751,7 +750,6 @@ fn callgraph_dedupes_exact_duplicate_edges() {
         to,
         span,
         kind: EdgeKind::Direct,
-        precision: Precision::Narrowed,
         provenance: EdgeProvenance::direct_symbol(),
     };
 
@@ -762,7 +760,6 @@ fn callgraph_dedupes_exact_duplicate_edges() {
         to,
         span: Span::new(file, 10, 25),
         kind: EdgeKind::Direct,
-        precision: Precision::Narrowed,
         provenance: EdgeProvenance::direct_symbol(),
     });
     graph.add_edge(CallEdge {
@@ -770,7 +767,6 @@ fn callgraph_dedupes_exact_duplicate_edges() {
         to,
         span: Span::new(file, 30, 40),
         kind: EdgeKind::Direct,
-        precision: Precision::Narrowed,
         provenance: EdgeProvenance::direct_symbol(),
     });
 
@@ -792,7 +788,6 @@ fn resolved_path_enumeration_ranks_shortest_semantic_paths() {
         to: mid,
         span: Span::new(file, 10, 11),
         kind: EdgeKind::Direct,
-        precision: Precision::Narrowed,
         provenance: EdgeProvenance::direct_symbol(),
     });
     graph.add_edge(CallEdge {
@@ -800,7 +795,6 @@ fn resolved_path_enumeration_ranks_shortest_semantic_paths() {
         to: sink,
         span: Span::new(file, 20, 21),
         kind: EdgeKind::Direct,
-        precision: Precision::Narrowed,
         provenance: EdgeProvenance::direct_symbol(),
     });
     graph.add_edge(CallEdge {
@@ -808,7 +802,6 @@ fn resolved_path_enumeration_ranks_shortest_semantic_paths() {
         to: alt,
         span: Span::new(file, 30, 31),
         kind: EdgeKind::Direct,
-        precision: Precision::Exact,
         provenance: EdgeProvenance::direct_symbol(),
     });
     graph.add_edge(CallEdge {
@@ -816,7 +809,6 @@ fn resolved_path_enumeration_ranks_shortest_semantic_paths() {
         to: sink,
         span: Span::new(file, 40, 41),
         kind: EdgeKind::Direct,
-        precision: Precision::Exact,
         provenance: EdgeProvenance::direct_symbol(),
     });
     graph.add_edge(CallEdge {
@@ -824,7 +816,6 @@ fn resolved_path_enumeration_ranks_shortest_semantic_paths() {
         to: sink,
         span: Span::new(file, 50, 51),
         kind: EdgeKind::Direct,
-        precision: Precision::Narrowed,
         provenance: EdgeProvenance::direct_symbol(),
     });
 
@@ -834,32 +825,14 @@ fn resolved_path_enumeration_ranks_shortest_semantic_paths() {
     assert_eq!(truncation, PathTruncation::None);
     assert_eq!(paths.len(), 3);
     assert_eq!(paths[0].funcs, vec![entry, sink]);
-    assert_eq!(paths[1].funcs, vec![entry, alt, sink]);
-    assert_eq!(paths[1].precision, Precision::Exact);
-    assert_eq!(paths[2].funcs, vec![entry, mid, sink]);
-    assert_eq!(paths[2].precision, Precision::Narrowed);
-}
-
-#[test]
-fn resolved_path_enumeration_ignores_nonsemantic_edges() {
-    let file = FileId::new(1);
-    let entry = FuncId::new(1);
-    let sink = FuncId::new(2);
-    let mut graph = CallGraph::new();
-    graph.add_edge(CallEdge {
-        from: entry,
-        to: sink,
-        span: Span::new(file, 10, 11),
-        kind: EdgeKind::Unknown,
-        precision: Precision::OverApproximate,
-        provenance: EdgeProvenance::default(),
-    });
-
-    let resolved = ResolvedCallGraph::from_call_graph(graph);
-    let (paths, truncation) = enumerate_paths_resolved(&resolved, entry, sink, 8, 8, 64);
-
-    assert!(paths.is_empty());
-    assert_eq!(truncation, PathTruncation::None);
+    let mut longer: Vec<Vec<FuncId>> = paths[1..].iter().map(|path| path.funcs.clone()).collect();
+    longer.sort();
+    let mut expected = vec![vec![entry, alt, sink], vec![entry, mid, sink]];
+    expected.sort();
+    assert_eq!(
+        longer, expected,
+        "both three-hop paths must follow the direct path"
+    );
 }
 
 #[test]
@@ -883,12 +856,11 @@ fn resolved_graph_between_keeps_all_target_paths_and_drops_sibling_branches() {
             to,
             span: Span::new(file, offset, offset + 1),
             kind: EdgeKind::Direct,
-            precision: Precision::Exact,
             provenance: EdgeProvenance::direct_symbol(),
         });
     }
 
-    let corridor = ResolvedCallGraph::from_call_graph(graph).between(&[source], &[target], None);
+    let corridor = ResolvedCallGraph::from_call_graph(graph).between(&[source], &[target]);
     let edges = corridor
         .inner()
         .edges
@@ -914,7 +886,6 @@ fn resolved_path_enumeration_exact_path_cap_is_not_truncated() {
         to: sink,
         span: Span::new(file, 10, 11),
         kind: EdgeKind::Direct,
-        precision: Precision::Exact,
         provenance: EdgeProvenance::direct_symbol(),
     });
 
@@ -938,7 +909,6 @@ fn resolved_path_enumeration_prunes_branches_that_cannot_reach_target() {
             to: FuncId::new(raw),
             span: Span::new(file, u64::from(raw), u64::from(raw) + 1),
             kind: EdgeKind::Direct,
-            precision: Precision::Exact,
             provenance: EdgeProvenance::direct_symbol(),
         });
     }
@@ -947,7 +917,6 @@ fn resolved_path_enumeration_prunes_branches_that_cannot_reach_target() {
         to: sink,
         span: Span::new(file, 20_000, 20_001),
         kind: EdgeKind::Direct,
-        precision: Precision::Exact,
         provenance: EdgeProvenance::direct_symbol(),
     });
 
@@ -970,7 +939,6 @@ fn resolved_path_zero_depth_and_probe_limits_mean_uncapped() {
             to: pair[1],
             span: Span::new(file, u64::from(pair[0].raw()), u64::from(pair[0].raw()) + 1),
             kind: EdgeKind::Direct,
-            precision: Precision::Exact,
             provenance: EdgeProvenance::direct_symbol(),
         });
     }
@@ -996,7 +964,6 @@ fn resolved_path_enumeration_reports_max_paths_only_when_extra_path_exists() {
         to: sink,
         span: Span::new(file, 10, 11),
         kind: EdgeKind::Direct,
-        precision: Precision::Exact,
         provenance: EdgeProvenance::direct_symbol(),
     });
     graph.add_edge(CallEdge {
@@ -1004,7 +971,6 @@ fn resolved_path_enumeration_reports_max_paths_only_when_extra_path_exists() {
         to: mid,
         span: Span::new(file, 20, 21),
         kind: EdgeKind::Direct,
-        precision: Precision::Exact,
         provenance: EdgeProvenance::direct_symbol(),
     });
     graph.add_edge(CallEdge {
@@ -1012,7 +978,6 @@ fn resolved_path_enumeration_reports_max_paths_only_when_extra_path_exists() {
         to: sink,
         span: Span::new(file, 30, 31),
         kind: EdgeKind::Direct,
-        precision: Precision::Exact,
         provenance: EdgeProvenance::direct_symbol(),
     });
 
@@ -1036,7 +1001,6 @@ fn resolved_path_enumeration_reports_depth_truncation() {
         to: mid,
         span: Span::new(file, 10, 11),
         kind: EdgeKind::Direct,
-        precision: Precision::Narrowed,
         provenance: EdgeProvenance::direct_symbol(),
     });
     graph.add_edge(CallEdge {
@@ -1044,7 +1008,6 @@ fn resolved_path_enumeration_reports_depth_truncation() {
         to: sink,
         span: Span::new(file, 20, 21),
         kind: EdgeKind::Direct,
-        precision: Precision::Narrowed,
         provenance: EdgeProvenance::direct_symbol(),
     });
 
@@ -1378,7 +1341,6 @@ fn elixir_function_clauses_emit_narrowed_virtual_edges() {
 
     assert_eq!(edges.len(), 2);
     assert!(edges.iter().all(|edge| edge.kind == EdgeKind::Virtual));
-    assert!(edges.iter().all(|edge| edge.precision == Precision::Narrowed));
     assert_eq!(
         edges.iter().map(|edge| edge.to).collect::<AHashSet<_>>(),
         helper_ids
@@ -1665,7 +1627,6 @@ fn c_callgraph_uses_makefile_build_targets_to_avoid_cross_binary_fanout() {
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].to, debug_assert);
     assert_eq!(edges[0].kind, EdgeKind::Direct);
-    assert_eq!(edges[0].precision, Precision::Narrowed);
 }
 
 #[test]
@@ -1710,7 +1671,6 @@ fn cpp_unqualified_cross_file_call_resolves_unique_linked_candidate() {
 
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].to, get_user);
-    assert_eq!(edges[0].precision, Precision::Narrowed);
 }
 
 #[test]
@@ -1786,7 +1746,6 @@ fn overloaded_call_uses_adapter_type_aliases_to_avoid_fanout() {
     let edges = cg.callees_of(entry).collect::<Vec<_>>();
     assert_eq!(edges.len(), 1, "typed overload should not fan out: {edges:?}");
     assert_eq!(edges[0].to, http);
-    assert_eq!(edges[0].precision, Precision::Narrowed);
 }
 
 #[test]
@@ -2020,7 +1979,6 @@ fn bare_call_prefers_nested_lexical_callable_in_caller_body() {
         "lexical local callable should win over same-name siblings: {edges:?}"
     );
     assert_eq!(edges[0].to, nested);
-    assert_eq!(edges[0].precision, Precision::Narrowed);
 }
 
 #[test]
@@ -2472,7 +2430,6 @@ fn bare_method_call_without_adapter_implicit_receiver_does_not_fan_out() {
 
     let edges = cg.callees_of(entry).collect::<Vec<_>>();
     assert_eq!(edges.len(), 1, "bare method call must stay semantically narrowed");
-    assert_eq!(edges[0].precision, Precision::Narrowed);
     let target = global
         .decl_of(SymbolId::new(edges[0].to.raw()))
         .expect("callee decl exists");
@@ -3941,7 +3898,6 @@ fn rust_conditional_same_signature_declarations_form_one_semantic_family() {
 
     assert_eq!(edges.len(), 2);
     assert!(edges.iter().all(|edge| edge.kind == EdgeKind::Virtual));
-    assert!(edges.iter().all(|edge| edge.precision == Precision::Narrowed));
 }
 
 #[test]

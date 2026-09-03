@@ -9,7 +9,7 @@
 //! spelling suggestions.
 
 use anyhow::Result;
-use bonsai_sdk::{summarize_incomplete_reasons, summarize_precision, CrossModuleOptions, Workspace};
+use bonsai_sdk::{summarize_incomplete_reasons, CrossModuleOptions, Workspace};
 use bonsai_sdk::{PathSummary, TraceResult, TraceStep, TraceStepKind};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -98,52 +98,50 @@ pub(crate) fn cmd_trace(
         }
         computed
     };
+    // `--contains` / `--not-contains` select the complete trace: a match on
+    // any path, step, edge, or state keeps every step of the trace, and a
+    // miss keeps none. The per-step page rows below are presentation slices
+    // of that one result and are never filtered individually.
+    let secondary = crate::filter::active();
+    let trace_selected = !secondary.is_active() || secondary.matches_value(&trace);
     match format {
         OutputFormat::Json => {
-            // Programmatic trace is token-budgeted by default. Keep
-            // the native TraceResult shape when the full result fits
-            // the first page; otherwise emit a page wrapper.
-            if paging_cfg.json_wrapped() {
-                let force_wrapper = paging_cfg.context.is_some()
-                    || !matches!(paging_cfg.page, paging::PageArg::First)
-                    || crate::filter::active().is_active();
-                let page_rows = trace_page_rows(&trace);
-                page_cache::emit_paged_text(
-                    root,
-                    &page_rows,
-                    &paging_cfg,
-                    "trace",
-                    filters_hash,
-                    |row| row.cost,
-                    |slice, info, _cfg| {
-                        if !force_wrapper && info.page_number == 1 && info.is_last {
-                            cli_println!("{}", project.trace().to_json(&trace)?);
-                            return Ok(());
-                        }
-                        let mut analysis_incomplete_reasons =
-                            trace.summary.analysis_incomplete_reasons.clone();
-                        analysis_incomplete_reasons.extend(trace.summary.truncation_reasons.iter().cloned());
-                        if !trace.summary.analysis_complete && analysis_incomplete_reasons.is_empty() {
-                            analysis_incomplete_reasons
-                                .push("trace analysis incomplete: unknown reason".to_string());
-                        }
-                        analysis_incomplete_reasons.extend(paged_json_incomplete_reasons("trace", info));
-                        analysis_incomplete_reasons.sort();
-                        analysis_incomplete_reasons.dedup();
-                        let path_ids = slice.iter().map(|row| row.path.path_id).collect::<BTreeSet<_>>();
-                        let step_ids = slice.iter().map(|row| row.step.id).collect::<BTreeSet<_>>();
-                        let state_ids = slice
-                            .iter()
-                            .flat_map(|row| [row.step.state_before, row.step.state_after])
-                            .flatten()
-                            .collect::<BTreeSet<_>>();
-                        let mut seen_paths = BTreeSet::new();
-                        let paths = slice
-                            .iter()
-                            .filter_map(|row| seen_paths.insert(row.path.path_id).then_some(row.path))
-                            .collect::<Vec<_>>();
-                        let steps = slice.iter().map(|row| row.step).collect::<Vec<_>>();
-                        let edges = trace
+            let page_rows = if trace_selected {
+                trace_page_rows(&trace)
+            } else {
+                Vec::new()
+            };
+            page_cache::emit_paged_text_prefiltered(
+                root,
+                &page_rows,
+                &paging_cfg,
+                "trace",
+                filters_hash,
+                |row| row.cost,
+                |slice, info, _cfg| {
+                    let mut analysis_incomplete_reasons = trace.summary.analysis_incomplete_reasons.clone();
+                    analysis_incomplete_reasons.extend(trace.summary.truncation_reasons.iter().cloned());
+                    if !trace.summary.analysis_complete && analysis_incomplete_reasons.is_empty() {
+                        analysis_incomplete_reasons
+                            .push("trace analysis incomplete: unknown reason".to_string());
+                    }
+                    analysis_incomplete_reasons.sort();
+                    analysis_incomplete_reasons.dedup();
+                    let result_incomplete_reasons = paged_json_incomplete_reasons("trace", info);
+                    let path_ids = slice.iter().map(|row| row.path.path_id).collect::<BTreeSet<_>>();
+                    let step_ids = slice.iter().map(|row| row.step.id).collect::<BTreeSet<_>>();
+                    let state_ids = slice
+                        .iter()
+                        .flat_map(|row| [row.step.state_before, row.step.state_after])
+                        .flatten()
+                        .collect::<BTreeSet<_>>();
+                    let mut seen_paths = BTreeSet::new();
+                    let paths = slice
+                        .iter()
+                        .filter_map(|row| seen_paths.insert(row.path.path_id).then_some(row.path))
+                        .collect::<Vec<_>>();
+                    let steps = slice.iter().map(|row| row.step).collect::<Vec<_>>();
+                    let edges = trace
                             .edges
                             .iter()
                             // Assign each edge to the page containing its
@@ -152,55 +150,62 @@ pub(crate) fn cmd_trace(
                             // emitted once while pages are traversed.
                             .filter(|edge| step_ids.contains(&edge.to_step))
                             .collect::<Vec<_>>();
-                        let states = trace
-                            .states
-                            .iter()
-                            .filter(|state| state_ids.contains(&state.id))
-                            .collect::<Vec<_>>();
-                        let mut rendered_info = info.clone();
-                        let wrapped = serde_json::json!({
-                            "analysis_complete": analysis_incomplete_reasons.is_empty(),
-                            "analysis_incomplete_reasons": analysis_incomplete_reasons,
-                            "trace_id": &trace.trace_id,
-                            "query": &trace.query,
-                            "summary": &trace.summary,
-                            "paths": paths,
-                            "steps": steps,
-                            "edges": edges,
-                            "states": states,
-                            "diagnostics": &trace.diagnostics,
-                            "metadata": &trace.metadata,
-                            "included_path_ids": path_ids,
-                            "page": page_info_to_json(&rendered_info),
-                        });
-                        let first_render = serde_json::to_string_pretty(&wrapped)?;
-                        rendered_info.tokens_used = paging::bytes_to_tokens(first_render.len() as u64 + 1);
-                        let wrapped = serde_json::json!({
-                            "analysis_complete": analysis_incomplete_reasons.is_empty(),
-                            "analysis_incomplete_reasons": analysis_incomplete_reasons,
-                            "trace_id": &trace.trace_id,
-                            "query": &trace.query,
-                            "summary": &trace.summary,
-                            "paths": paths,
-                            "steps": steps,
-                            "edges": edges,
-                            "states": states,
-                            "diagnostics": &trace.diagnostics,
-                            "metadata": &trace.metadata,
-                            "included_path_ids": path_ids,
-                            "page": page_info_to_json(&rendered_info),
-                        });
-                        cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
-                        Ok(())
-                    },
-                )?;
-            } else {
-                cli_println!("{}", project.trace().to_json(&trace)?);
-            }
+                    let states = trace
+                        .states
+                        .iter()
+                        .filter(|state| state_ids.contains(&state.id))
+                        .collect::<Vec<_>>();
+                    let mut rendered_info = info.clone();
+                    let wrapped = serde_json::json!({
+                        "analysis_complete": trace.summary.analysis_complete,
+                        "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                        "result_complete": result_incomplete_reasons.is_empty(),
+                        "result_incomplete_reasons": result_incomplete_reasons,
+                        "trace_id": &trace.trace_id,
+                        "query": &trace.query,
+                        "summary": &trace.summary,
+                        "paths": paths,
+                        "steps": steps,
+                        "edges": edges,
+                        "states": states,
+                        "diagnostics": &trace.diagnostics,
+                        "metadata": &trace.metadata,
+                        "included_path_ids": path_ids,
+                        "filter_matched": trace_selected,
+                        "page": page_info_to_json(&rendered_info),
+                    });
+                    let first_render = serde_json::to_string_pretty(&wrapped)?;
+                    rendered_info.tokens_used = paging::bytes_to_tokens(first_render.len() as u64 + 1);
+                    let wrapped = serde_json::json!({
+                        "analysis_complete": trace.summary.analysis_complete,
+                        "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                        "result_complete": result_incomplete_reasons.is_empty(),
+                        "result_incomplete_reasons": result_incomplete_reasons,
+                        "trace_id": &trace.trace_id,
+                        "query": &trace.query,
+                        "summary": &trace.summary,
+                        "paths": paths,
+                        "steps": steps,
+                        "edges": edges,
+                        "states": states,
+                        "diagnostics": &trace.diagnostics,
+                        "metadata": &trace.metadata,
+                        "included_path_ids": path_ids,
+                        "filter_matched": trace_selected,
+                        "page": page_info_to_json(&rendered_info),
+                    });
+                    crate::output::emit_json_document(&wrapped)?;
+                    Ok(())
+                },
+            )?;
         }
         OutputFormat::Text => {
-            let rows = trace_page_rows(&trace);
-            page_cache::emit_paged_text(
+            let rows = if trace_selected {
+                trace_page_rows(&trace)
+            } else {
+                Vec::new()
+            };
+            page_cache::emit_paged_text_prefiltered(
                 root,
                 &rows,
                 &paging_cfg,
@@ -208,7 +213,7 @@ pub(crate) fn cmd_trace(
                 filters_hash,
                 |row| row.cost,
                 |paged, info, _cfg| {
-                    render_trace_text_page(&trace, root, paged);
+                    render_trace_text_page(&trace, root, paged, trace_selected);
                     render_paging_footer(info, "bonsai-ninja trace <workspace> <symbol>");
                     Ok(())
                 },
@@ -255,13 +260,17 @@ fn trace_page_rows(trace: &TraceResult) -> Vec<TracePageRow<'_>> {
 /// CLI-themed text rendering for `trace`. Indents by call depth so the
 /// reader sees the call tree shape, prints workspace-relative paths, and
 /// uses the same `▸ flow` / `[module]` / source-snippet conventions as
-/// `inspect`. Closes with a semantic precision summary.
+/// `inspect`. Closes with a step tally.
 ///
 /// `to_text` (in `bonsai_sdk::trace_render`) is still available for SDK
 /// consumers that want a plain transcript without ANSI; this CLI path
 /// is the one users hit by default.
-fn render_trace_text_page(trace: &TraceResult, workspace_root: &std::path::Path, rows: &[TracePageRow<'_>]) {
-    use TraceStepKind as K;
+fn render_trace_text_page(
+    trace: &TraceResult,
+    workspace_root: &std::path::Path,
+    rows: &[TracePageRow<'_>],
+    filter_matched: bool,
+) {
     let ui = ui();
     let entry_label = trace
         .query
@@ -279,15 +288,13 @@ fn render_trace_text_page(trace: &TraceResult, workspace_root: &std::path::Path,
     cli_println!("{}", ui.heading(&header));
     cli_println!();
     cli_println!(
-        "  {} {}    {} {}    {} {}    {} {}",
+        "  {} {}    {} {}    {} {}",
         ui.label("language"),
         ui.name(&trace.summary.language),
         ui.label("paths"),
         ui.name(&trace.summary.explored_paths.to_string()),
         ui.label("steps"),
         ui.name(&trace.summary.total_steps.to_string()),
-        ui.label("precision"),
-        ui.name(&format!("{:?}", trace.summary.precision)),
     );
     if trace.summary.truncated_paths > 0 {
         cli_println!(
@@ -310,6 +317,22 @@ fn render_trace_text_page(trace: &TraceResult, workspace_root: &std::path::Path,
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
 
+    if !filter_matched {
+        cli_println!();
+        cli_println!(
+            "{}",
+            ui.dim(
+                "(the trace does not match the active output filter; --contains selects the complete trace)"
+            )
+        );
+        return;
+    }
+    if rows.is_empty() {
+        cli_println!();
+        cli_println!("{}", ui.dim("(no trace steps)"));
+        return;
+    }
+
     let mut current_path = None;
     for row in rows {
         if current_path != Some(row.path.path_id) {
@@ -321,22 +344,16 @@ fn render_trace_text_page(trace: &TraceResult, workspace_root: &std::path::Path,
                 ui.label("PATH"),
                 ui.name(&path.path_id.to_string()),
                 ui.dim(&format!(
-                    "[steps {}-{}, terminated by {:?}, precision {:?}]",
-                    path.first_step, path.last_step, path.terminated_by, path.precision
+                    "[steps {}-{}, terminated by {:?}]",
+                    path.first_step, path.last_step, path.terminated_by
                 )),
             );
             cli_println!("{}", ui.ruler('─', 70));
         }
         let step = row.step;
         let indent = "  ".repeat(row.depth + 1);
-        let (kind, label) = if step.precision.is_semantic() {
-            (step.kind, step_label(step))
-        } else {
-            (
-                K::Diagnostic,
-                "Suppressed diagnostic-precision trace step".to_string(),
-            )
-        };
+        let kind = step.kind;
+        let label = step_label(step);
         let kind_tag = format!("[{}]", short_step_kind(kind));
         cli_println!(
             "{}{} {}  {}",
@@ -352,22 +369,14 @@ fn render_trace_text_page(trace: &TraceResult, workspace_root: &std::path::Path,
         );
     }
 
-    let summary = summarize_precision(trace);
+    // One compiler graph: every step is semantic. JSON keeps the per-step
+    // provenance fields.
     cli_println!();
-    let non_semantic = summary.over_approximate.saturating_add(summary.unknown);
-    let mut tally = format!(
-        "{}  exact={}  narrowed={}",
-        ui.label("precision tally"),
-        ui.name(&summary.exact.to_string()),
-        ui.name(&summary.narrowed.to_string()),
+    cli_println!(
+        "{}  {}",
+        ui.label("steps"),
+        ui.name(&format!("{} semantic", trace.steps.len())),
     );
-    if non_semantic > 0 {
-        tally.push_str(&format!(
-            "  diagnostic-precision-suppressed={}",
-            ui.warn(&non_semantic.to_string())
-        ));
-    }
-    cli_println!("{tally}");
     cli_println!();
 }
 

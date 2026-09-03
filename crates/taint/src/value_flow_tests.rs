@@ -106,13 +106,11 @@ fn forward_closure_reaches_descendants() {
     g.add_edge(ValueFlowEdge {
         from: a.clone(),
         to: b.clone(),
-        precision: Precision::Exact,
         via_span: span(FileId::new(0), 0, 1),
     });
     g.add_edge(ValueFlowEdge {
         from: b.clone(),
         to: c.clone(),
-        precision: Precision::Exact,
         via_span: span(FileId::new(0), 4, 5),
     });
     let reach = g.forward_closure(&a);
@@ -129,58 +127,10 @@ fn backward_closure_reaches_ancestors() {
     g.add_edge(ValueFlowEdge {
         from: a.clone(),
         to: b.clone(),
-        precision: Precision::Exact,
         via_span: span(FileId::new(0), 0, 1),
     });
     assert!(g.backward_closure(&b).contains(&a));
     assert!(g.forward_closure(&a).contains(&b));
-}
-
-#[test]
-fn add_edge_meets_precision_to_worst() {
-    let mut g = ValueFlowGraph::new();
-    let a = node(1, 0, "a", ValueFlowNodeKind::Param);
-    let b = node(1, 4, "b", ValueFlowNodeKind::AssignTarget);
-    g.add_edge(ValueFlowEdge {
-        from: a.clone(),
-        to: b.clone(),
-        precision: Precision::OverApproximate,
-        via_span: span(FileId::new(0), 0, 1),
-    });
-    assert_eq!(g.precision, Precision::OverApproximate);
-}
-
-#[test]
-fn closures_do_not_traverse_diagnostic_precision_edges() {
-    let mut g = ValueFlowGraph::new();
-    let a = node(1, 0, "a", ValueFlowNodeKind::Param);
-    let b = node(1, 4, "b", ValueFlowNodeKind::AssignTarget);
-    let c = node(1, 8, "c", ValueFlowNodeKind::CallArg);
-    g.add_edge(ValueFlowEdge {
-        from: a.clone(),
-        to: b.clone(),
-        precision: Precision::Narrowed,
-        via_span: span(FileId::new(0), 0, 1),
-    });
-    g.add_edge(ValueFlowEdge {
-        from: b.clone(),
-        to: c.clone(),
-        precision: Precision::OverApproximate,
-        via_span: span(FileId::new(0), 4, 5),
-    });
-
-    let forward = g.forward_closure(&a);
-    assert!(forward.contains(&b));
-    assert!(
-        !forward.contains(&c),
-        "default value-flow closure must not traverse over-approximate evidence",
-    );
-
-    let backward = g.backward_closure(&c);
-    assert!(
-        backward.is_empty(),
-        "backward closure must also stop at diagnostic precision edges",
-    );
 }
 
 #[test]

@@ -36,11 +36,6 @@ fn empty_entry_roundtrips() {
     assert!(decoded.graph.forward.is_empty());
     assert!(decoded.graph.backward.is_empty());
     assert!(decoded.returning_seeds.is_empty());
-    // `ValueFlowEntry::default()` constructs a default `ValueFlowGraph`,
-    // whose `Precision::default()` is `Unknown` (the conservative
-    // sentinel) — distinct from `ValueFlowGraph::new()` which uses
-    // `Exact` as its starting precision.
-    assert_eq!(decoded.graph.precision, Precision::Unknown);
 }
 
 #[test]
@@ -51,7 +46,6 @@ fn single_edge_graph_roundtrips() {
     graph.add_edge(ValueFlowEdge {
         from: a.clone(),
         to: b.clone(),
-        precision: Precision::Exact,
         via_span: span(0, 8, 14),
     });
     let mut returning = AHashSet::default();
@@ -69,7 +63,6 @@ fn single_edge_graph_roundtrips() {
     assert_eq!(decoded.graph.forward, entry.graph.forward);
     assert_eq!(decoded.graph.backward, entry.graph.backward);
     assert_eq!(decoded.returning_seeds, entry.returning_seeds);
-    assert_eq!(decoded.graph.precision, Precision::Exact);
 }
 
 #[test]
@@ -81,13 +74,11 @@ fn multi_edge_graph_roundtrips_with_dedup() {
     graph.add_edge(ValueFlowEdge {
         from: a.clone(),
         to: b.clone(),
-        precision: Precision::Exact,
         via_span: span(0, 1, 2),
     });
     graph.add_edge(ValueFlowEdge {
         from: b.clone(),
         to: c.clone(),
-        precision: Precision::OverApproximate,
         via_span: span(0, 3, 4),
     });
     let entry = ValueFlowEntry {
@@ -99,10 +90,7 @@ fn multi_edge_graph_roundtrips_with_dedup() {
     let (pool_bytes, pool_offsets, count) = build_pool_view(&pool);
     let view = StringPoolView::new(&pool_bytes, &pool_offsets, count).expect("pool");
     let decoded = decode(&bytes, &view).expect("decode");
-    // Forward / backward should match exactly. The edge with
-    // OverApproximate precision must round-trip with the same
-    // discriminant.
-    assert_eq!(decoded.graph.precision, entry.graph.precision);
+    // Forward / backward should match exactly.
     assert_eq!(decoded.graph.forward, entry.graph.forward);
     assert_eq!(decoded.graph.backward, entry.graph.backward);
     // Pool must contain exactly the unique strings.
@@ -150,7 +138,6 @@ fn unknown_string_id_is_typed_error() {
         edges: Vec::new(),
         forward: Vec::new(),
         backward: Vec::new(),
-        precision: Precision::Exact,
         returning_seeds: Vec::new(),
     };
     let bytes = bonsai_common::wire::encode(&on_disk).unwrap();
@@ -188,11 +175,9 @@ fn unknown_node_idx_is_typed_error() {
             via_span_file: 0,
             via_span_start: 0,
             via_span_end: 0,
-            precision: Precision::Exact,
         }],
         forward: Vec::new(),
         backward: Vec::new(),
-        precision: Precision::Exact,
         returning_seeds: Vec::new(),
     };
     let bytes = bonsai_common::wire::encode(&on_disk).unwrap();

@@ -188,20 +188,6 @@ impl FactKindFilter {
     }
 }
 
-/// Semantic precision classes accepted by `dump-edges`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum PrecisionFilter {
-    /// `Precision::Exact` — structural facts; no approximation.
-    Exact,
-    /// `Precision::Narrowed` — single-candidate resolved call.
-    Narrowed,
-}
-
-// `PrecisionFilter::matches` lived here previously. Filter logic
-// against `bonsai_common::Precision` is now in
-// `bonsai_sdk::PrecisionClass::matches` — the CLI converts at
-// the cmd_dump_edges call site.
-
 #[derive(Parser, Debug)]
 #[command(
     name = "bonsai-ninja",
@@ -248,9 +234,11 @@ pub(crate) struct Cli {
     #[arg(long, global = true, help_heading = "GLOBAL OPTIONS")]
     pub(crate) no_progress: bool,
 
-    /// Write human-readable output as themed HTML without enabling extra
-    /// analysis. This is only a presentation sink; it does not enable
-    /// security, semantic, or indexing work the command did not request.
+    /// Render the command's canonical result (the same document
+    /// `--format json` prints) as a self-contained HTML report at PATH
+    /// without enabling extra analysis. This is only a presentation sink;
+    /// it does not enable security, semantic, or indexing work the command
+    /// did not request.
     #[arg(
         long = "html-output",
         global = true,
@@ -336,8 +324,9 @@ pub(crate) enum Cmd {
     #[command(
         display_order = 10,
         long_about = themed_subcommand_long_about("Ingest every supported source file under <WORKSPACE> and print \
-                      a JSON summary of the compiler-object cache and workspace \
-                      file count. Semantic mode additionally reports cache \
+                      a compiler-object cache and workspace summary. The default \
+                      view is themed text; use `--format json` for the complete \
+                      canonical object. Semantic mode additionally reports cache \
                       readiness, freshness, and the sidecars it made reusable.\n\
                       \n\
                       By default this is syntax/construct index-up-front behavior: \
@@ -406,18 +395,24 @@ pub(crate) enum Cmd {
         /// Poll interval for `--watch`, in milliseconds.
         #[arg(long = "interval-ms", default_value_t = 750)]
         interval_ms: u64,
+        /// Output shape — themed text for humans or the complete canonical JSON object.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Print normalized workspace semantic context.
     #[command(
         display_order = 11,
         long_about = themed_subcommand_long_about("Open <WORKSPACE> and emit the shared, language-neutral project \
-                      context as JSON: indexed module roots, dependency roots, \
+                      context: indexed module roots, dependency roots, \
                       generated / excluded roots, toolchain manifests, configured \
                       source hints, source-transformation evidence, and a compact \
                       summary. This is the same structure exposed by \
                       `bonsai_sdk::Project::semantic_context()` so CLI and SDK \
-                      consumers reason over identical workspace-shape facts."),
+                      consumers reason over identical workspace-shape facts. The \
+                      themed text and JSON views render the same canonical object."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Explain the workspace shape used by analysis\n  \
                       $ bonsai-ninja context ./src\n  \
@@ -440,6 +435,9 @@ pub(crate) enum Cmd {
         /// Emit the complete canonical SDK context object without paging.
         #[arg(long, default_value_t = false)]
         all: bool,
+        /// Output shape — themed text for humans or the complete canonical JSON object.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
         #[command(flatten)]
         output: OutputPathArg,
     },
@@ -705,9 +703,9 @@ pub(crate) enum Cmd {
                       declarations. Flags adapter-level extraction issues \
                       (unsupported construct per language, tree-sitter parse \
                       errors, unresolved imports) and capability gaps before \
-                      they silently degrade inspect / taint output. The report \
-                      is always JSON, matching the other compiler-only dumps; \
-                      there is no redundant --format switch. Exits 0 \
+                      they silently degrade inspect / taint output. The default \
+                      view is a themed capability/diagnostic report; use \
+                      `--format json` for the complete canonical object. Exits 0 \
                       even when warnings are present — CI pipelines can still \
                       gate on specific fields."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
@@ -715,11 +713,16 @@ pub(crate) enum Cmd {
                       $ bonsai-ninja diagnostics ./src\n  \
                       \n  \
                       # Query the JSON report in automation\n  \
-                      $ bonsai-ninja diagnostics ./src --no-progress | jq '.diagnostics'")
+                      $ bonsai-ninja diagnostics ./src --format json --no-progress | jq '.diagnostics'")
     )]
     Diagnostics {
         /// Workspace root to analyze.
         workspace: PathBuf,
+        /// Output shape — themed text for humans or the complete canonical JSON object.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Dump the HIR of a single function.
@@ -727,7 +730,7 @@ pub(crate) enum Cmd {
         display_order = 30,
         override_usage = "bonsai-ninja dump-hir [OPTIONS] <WORKSPACE> [SYMBOL]",
         long_about = themed_subcommand_long_about("Emit the HIR (flow-event tree — Call / Branch / Loop / Return \
-                      / Throw / Try / …) for one function as JSON. The \
+                      / Throw / Try / …) for one function. The \
                       layer directly above the tree-sitter AST; what \
                       `inspect`, `trace`, and the IDG compiler consume.\n\
                       \n\
@@ -741,11 +744,9 @@ pub(crate) enum Cmd {
                       one callable. When \
                       multiple files define the same name, pass \
                       `path:name` or `path:line:name` from the ambiguity \
-                      candidate list.\n\
-                      \n\
-                      Output is JSON-only — the HIR shape is structural, \
-                      not tabular, so a rendered text view wouldn't add \
-                      information. Pipe through `jq` to drill down."),
+                      candidate list. The themed view groups typed values and \
+                      complete compiler events; `--format json` emits the same \
+                      facts as the canonical object for automation."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Explicit symbol selector\n  \
                       $ bonsai-ninja dump-hir ./src --symbol run_admin_command\n  \
@@ -757,7 +758,7 @@ pub(crate) enum Cmd {
                       $ bonsai-ninja dump-hir ./src auth/gateway.py:42:handle_request\n  \
                       \n  \
                       # Just the call events inside a function\n  \
-                      $ bonsai-ninja dump-hir ./src handle_request | jq '.flow_events[] | select(.Call)'"),
+                      $ bonsai-ninja dump-hir ./src handle_request --format json | jq '.flow_events[] | select(.Call)'"),
         group(
             ArgGroup::new("hir_symbol")
                 .args(["symbol_pos", "symbol"])
@@ -776,6 +777,11 @@ pub(crate) enum Cmd {
         /// Pass either this flag or the positional form, not both.
         #[arg(long)]
         symbol: Option<String>,
+        /// Output shape — themed text for humans or the complete canonical JSON object.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Dump the CFG of a single function.
@@ -783,7 +789,7 @@ pub(crate) enum Cmd {
         display_order = 31,
         override_usage = "bonsai-ninja dump-cfg [OPTIONS] <WORKSPACE> [SYMBOL]",
         long_about = themed_subcommand_long_about("Emit the CFG (basic blocks + edges) derived from a function's \
-                      HIR as JSON. The intraprocedural view taint analysis \
+                      HIR. The intraprocedural view taint analysis \
                       walks — every branch, loop, and join point is \
                       materialised as explicit nodes.\n\
                       \n\
@@ -797,11 +803,9 @@ pub(crate) enum Cmd {
                       one callable. When \
                       multiple files define the same name, pass \
                       `path:name` or `path:line:name` from the ambiguity \
-                      candidate list.\n\
-                      \n\
-                      Output is JSON-only — the CFG shape is structural, \
-                      not tabular. Pipe through `jq` to inspect specific \
-                      blocks / terminators."),
+                      candidate list. The themed view groups blocks and their \
+                      complete compiler events; `--format json` emits the same \
+                      canonical object for automation."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Explicit symbol selector\n  \
                       $ bonsai-ninja dump-cfg ./src --symbol run_admin_command\n  \
@@ -813,7 +817,7 @@ pub(crate) enum Cmd {
                       $ bonsai-ninja dump-cfg ./src auth/gateway.py:42:handle_request\n  \
                       \n  \
                       # Just block terminators\n  \
-                      $ bonsai-ninja dump-cfg ./src handle_request | jq '.blocks[] | {id, terminator}'"),
+                      $ bonsai-ninja dump-cfg ./src handle_request --format json | jq '.blocks[] | {id, terminator}'"),
         group(
             ArgGroup::new("cfg_symbol")
                 .args(["symbol_pos", "symbol"])
@@ -832,6 +836,11 @@ pub(crate) enum Cmd {
         /// Pass either this flag or the positional form, not both.
         #[arg(long)]
         symbol: Option<String>,
+        /// Output shape — themed text for humans or the complete canonical JSON object.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Dump the callgraph (functions + reachable counts).
@@ -875,12 +884,11 @@ pub(crate) enum Cmd {
         output: OutputPathArg,
     },
 
-    /// Dump semantic resolved call edges with kind, precision, and provenance.
+    /// Dump resolved call edges with kind and resolver provenance.
     #[command(
         display_order = 33,
         long_about = themed_subcommand_long_about("One record per resolved call edge: caller, callee, call-site \
-                      location, `EdgeKind` (Direct / Virtual), semantic \
-                      `Precision` (Exact / Narrowed), and resolver provenance \
+                      location, `EdgeKind` (Direct / Virtual), and resolver provenance \
                       (`resolver_stage`, `evidence`, `confidence`). Broad \
                       resolver diagnostics are kept out of analysis output.\n\
                       \n\
@@ -892,9 +900,6 @@ pub(crate) enum Cmd {
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Semantic edges, full detail\n  \
                       $ bonsai-ninja dump-edges ./src\n  \
-                      \n  \
-                      # Only narrowed semantic edges\n  \
-                      $ bonsai-ninja dump-edges ./src --precision narrowed\n  \
                       \n  \
                       # Edges into a specific callee (every caller of os.system)\n  \
                       $ bonsai-ninja dump-edges ./src --to os.system\n  \
@@ -916,11 +921,8 @@ pub(crate) enum Cmd {
         /// Analogous to `inspect --to`.
         #[arg(long)]
         to: Option<String>,
-        /// Only keep edges at the given precision class.
-        #[arg(long, value_enum)]
-        precision: Option<PrecisionFilter>,
         /// Drop per-edge detail lines and emit one compact line per
-        /// edge (`E:id  kind  precision  caller → callee  (file:line)`).
+        /// edge (`E:id  kind  evidence  caller → callee  (file:line)`).
         /// Same data, shorter render — mirrors `inspect --compact`.
         #[arg(long, default_value_t = false)]
         compact: bool,
@@ -2180,24 +2182,23 @@ pub(crate) enum Cmd {
         #[command(flatten)]
         output: OutputPathArg,
     },
-    /// Inspect matching syntax facts with optional bounded compiler evidence.
+    /// Inspect matching syntax facts with their bounded compiler evidence.
     #[command(
         display_order = 1,
         long_about = themed_subcommand_long_about("Inspect a name / pattern across every fact: decls \
                       (functions, methods, classes, structs), calls, imports, \
                       vars (assignments), strings, args, refs, decorators.\n\
                       \n\
-                      By default inspect surfaces matching declarations, \
-                      occurrences, syntax/index facts, and source excerpts. It \
-                      does not load source / sink / sanitizer YAML or hydrate \
-                      a whole-workspace semantic graph. Pass `--graph-flow` \
-                      for one bounded source/evidence unit per matching callable, \
-                      or `--taint-flow` for rulepack-free raw taint \
-                      paths. These flags change output scope, not analysis \
-                      accuracy: emitted graph facts still use the same \
-                      compiler-proven static evidence contract.\n\
+                      Inspect surfaces matching declarations, occurrences, \
+                      syntax/index facts, and source excerpts, and attaches one \
+                      bounded compiler evidence unit (a stable `F:` flow with the \
+                      source body and resolved direct neighbors) to every \
+                      matching callable. It does not load source / sink / \
+                      sanitizer YAML. Pass `--taint-flow` for rulepack-free raw \
+                      taint paths; that flag changes output scope, not analysis \
+                      accuracy.\n\
                       \n\
-                      `--graph-flow` never recursively enumerates caller/callee paths. \
+                      Compiler flows never recursively enumerate caller/callee paths. \
                       Use `symbol-summary` for a standalone declaration packet and \
                       `path --from A --to B` for an exact compressed corridor. \
                       `security taint-analysis` \
@@ -2210,9 +2211,6 @@ pub(crate) enum Cmd {
                       \n  \
                       # Add rulepack-free raw taint paths explicitly\n  \
                       $ bonsai-ninja inspect ./src --query os.system --taint-flow\n  \
-                      \n  \
-                      # Add bounded structural source-body evidence\n  \
-                      $ bonsai-ninja inspect ./src --query os.system --graph-flow\n  \
                       \n  \
                       # Regex query — syntax hits for exec-like calls\n  \
                       $ bonsai-ninja inspect ./src --query '^(exec|system|popen)$' --regex\n  \
@@ -2295,8 +2293,8 @@ pub(crate) enum Cmd {
         #[arg(long, default_value_t = false)]
         all: bool,
         /// Render structural evidence without inlined source bodies. The
-        /// display line, `FLOW N` header (with `flow_id` + precision
-        /// tag), and a compact step list stay — the multi-line
+        /// display line, `FLOW N` header (with `flow_id`), and a
+        /// compact step list stay — the multi-line
         /// function blocks are dropped. Useful for surveying large
         /// result sets, piping to LLMs, and any case where you need
         /// the structural evidence but not the full transcript.
@@ -2323,11 +2321,6 @@ pub(crate) enum Cmd {
         /// pins a cluster of chains that share a tail.
         #[arg(long)]
         group: Option<String>,
-        /// Add one bounded compiler evidence unit with a source body for each
-        /// matching callable. This never recursively enumerates call paths;
-        /// use `path` for an exact compressed endpoint corridor.
-        #[arg(long = "graph-flow", default_value_t = false)]
-        graph_flow: bool,
         /// Add rulepack-free raw taint-engine paths. Off by default so
         /// a navigation query never silently performs whole-workspace
         /// dataflow analysis.
@@ -2965,10 +2958,9 @@ pub(crate) enum SecurityAction {
         output: OutputPathArg,
     },
 
-    /// Dependency inventory — every package the rulepack mentions whose
-    /// imports are actually used in the workspace, with the import-site
-    /// locations inlined. Same paginated table surface as `sources` /
-    /// `sinks` / `search`.
+    /// Dependency inventory — one table row per flagged package the
+    /// workspace actually depends on (import, manifest, or lockfile
+    /// evidence). Same paginated table surface as `sources` / `sinks`.
     #[command(
         long_about = themed_subcommand_long_about("Dependency inventory — every package the rulepack mentions \
                       whose imports are actually used in the workspace, with \
@@ -2986,8 +2978,11 @@ pub(crate) enum SecurityAction {
                       # Only packages whose highest-severity rule is critical\n  \
                       $ bonsai-ninja security ./src deps --severity critical\n  \
                       \n  \
-                      # A single package and its import sites\n  \
-                      $ bonsai-ninja security ./src deps --framework flask")
+                      # A single package\n  \
+                      $ bonsai-ninja security ./src deps --framework flask\n  \
+                      \n  \
+                      # Where a package is used: see `dependency-analysis`\n  \
+                      $ bonsai-ninja security ./src dependency-analysis --framework flask")
     )]
     Deps {
         /// Override the bundled `langs/<lang>/…` rulepack tree.
@@ -3026,6 +3021,77 @@ pub(crate) enum SecurityAction {
         #[arg(long, default_value_t = false)]
         all: bool,
         /// Output shape — `text` for the rendered table, `json` for machine-readable output.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
+    },
+
+    /// Dependency usage analysis — for every flagged package, the import
+    /// sites, the local names they bind, every call or reference that
+    /// reaches the package through those names, every rulepack source /
+    /// sink / sanitizer match on the package, and the enclosing callables
+    /// with their resolved direct callers. Triage dependency code without
+    /// running taint analysis.
+    #[command(
+        name = "dependency-analysis",
+        long_about = themed_subcommand_long_about("Dependency usage analysis. `deps` says which flagged packages \
+                      are present; this view says where each one is used: the \
+                      import statements, the local names they bind (aliases, \
+                      `require` bindings, imported symbols), every call or \
+                      reference that reaches the package through one of those \
+                      names, every rulepack source / sink / sanitizer match on \
+                      the package, and each enclosing callable with its resolved \
+                      direct callers from the compiler call graph.\n\
+                      \n\
+                      One pass over the exact per-file compiler objects plus one \
+                      call-graph lookup per callable; it never enumerates call \
+                      paths and never runs taint analysis. Use `security \
+                      taint-analysis` for source-to-sink findings."),
+        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
+                      # Every flagged package with its usage sites\n  \
+                      $ bonsai-ninja security ./src dependency-analysis\n  \
+                      \n  \
+                      # One package\n  \
+                      $ bonsai-ninja security ./src dependency-analysis --framework node-serialize\n  \
+                      \n  \
+                      # Only packages whose highest-severity rule is critical\n  \
+                      $ bonsai-ninja security ./src dependency-analysis --severity critical\n  \
+                      \n  \
+                      # JSON for tooling\n  \
+                      $ bonsai-ninja security ./src dependency-analysis --format json --all")
+    )]
+    DependencyAnalysis {
+        /// Override the bundled `langs/<lang>/…` rulepack tree.
+        /// Also reads `BONSAI_RULES_DIR`.
+        #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
+        rules_dir: Option<PathBuf>,
+        /// Filter to a single package / framework key.
+        #[arg(long)]
+        framework: Option<String>,
+        /// Severity-floor filter — keep packages whose highest-severity
+        /// rule is at least this level (`info`, `low`, `medium`, `high`,
+        /// `critical`).
+        #[arg(long)]
+        severity: Option<String>,
+        /// File-path include filter (repeatable). Match workspace-relative
+        /// paths; explicit absolute paths are also accepted.
+        #[arg(long = "file")]
+        files: Vec<String>,
+        /// File-path exclude filter (repeatable).
+        #[arg(long = "exclude-file")]
+        exclude_files: Vec<String>,
+        /// Token-budget ceiling for rendered output. One package block is
+        /// the paging unit.
+        #[arg(long)]
+        context: Option<String>,
+        /// Page to render — 1-based number, `P:xxxxxxxx` cursor, or `next`.
+        #[arg(long)]
+        page: Option<String>,
+        /// Render every result in one artifact instead of paging it.
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        /// Output shape — `text` for rendered blocks, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
         #[command(flatten)]
@@ -3443,6 +3509,15 @@ pub(crate) enum SecurityAction {
         /// typos can't silently widen the filter).
         #[arg(long)]
         severity: Option<String>,
+        /// Filter to one rule tag (`command-injection`, `http-input`, ...).
+        #[arg(long, value_name = "TAG")]
+        tag: Option<String>,
+        /// Rule id regex; matches the canonical id or any declared alias.
+        #[arg(long, value_name = "REGEX")]
+        rule: Option<String>,
+        /// Keep only `enabled` or `disabled` rules.
+        #[arg(long, value_name = "STATE", value_parser = ["enabled", "disabled"])]
+        state: Option<String>,
         /// Audit mode — print a per-lang / per-category coverage
         /// matrix and warn about thin or missing families.
         #[arg(long, default_value_t = false)]

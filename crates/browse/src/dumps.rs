@@ -214,22 +214,14 @@ pub fn callgraph_summary(ws: &Workspace, resolved: &ResolvedCallGraph) -> Vec<Ca
 }
 
 fn unique_semantic_callers(resolved: &ResolvedCallGraph, func: FuncId) -> Vec<FuncId> {
-    let mut callers: Vec<FuncId> = resolved
-        .callers_of(func)
-        .filter(|edge| edge.precision.is_semantic())
-        .map(|edge| edge.from)
-        .collect();
+    let mut callers: Vec<FuncId> = resolved.callers_of(func).map(|edge| edge.from).collect();
     callers.sort_by_key(|caller| caller.raw());
     callers.dedup();
     callers
 }
 
 fn unique_semantic_callees(resolved: &ResolvedCallGraph, func: FuncId) -> Vec<FuncId> {
-    let mut callees: Vec<FuncId> = resolved
-        .callees_of(func)
-        .filter(|edge| edge.precision.is_semantic())
-        .map(|edge| edge.to)
-        .collect();
+    let mut callees: Vec<FuncId> = resolved.callees_of(func).map(|edge| edge.to).collect();
     callees.sort_by_key(|callee| callee.raw());
     callees.dedup();
     callees

@@ -12,8 +12,6 @@ use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 
-const SEMANTIC_FLOW_MAX_PRECISION: bonsai_common::Precision = bonsai_common::Precision::Narrowed;
-
 /// Filter bundle for [`dump_taint`]. Mirrors the CLI flag surface.
 #[derive(Clone, Debug)]
 pub struct TaintFilters<'a> {
@@ -57,7 +55,6 @@ pub struct TaintReport {
     pub seeds: Vec<String>,
     pub analysis_complete: bool,
     pub analysis_incomplete_reasons: Vec<String>,
-    pub precision: String,
     pub pairs_analyzed: u32,
     pub records: Vec<TaintRecord>,
 }
@@ -81,7 +78,6 @@ pub struct TaintRecord {
     pub call_code: String,
     pub tainted_args: Vec<TaintedArgRecord>,
     pub edge_kind: String,
-    pub edge_precision: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -277,8 +273,7 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         };
     }
     let source_func = source_candidates[0].0;
-    let expanded_workspace =
-        ws.source_reachable_query_workspace(&[source_func], Some(SEMANTIC_FLOW_MAX_PRECISION));
+    let expanded_workspace = ws.source_reachable_query_workspace(&[source_func]);
     let ws = expanded_workspace.as_ref().unwrap_or(ws);
     let db = ws.db();
     let source_symbol = bonsai_common::SymbolId::new(source_func.raw());
@@ -305,7 +300,7 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     // skips open-time prewarm; the closure itself still runs to
     // completion for the requested source.
     let scoped_session = if db.idg_service().is_none() {
-        ws.source_flow_session(&[source_func], Some(SEMANTIC_FLOW_MAX_PRECISION))
+        ws.source_flow_session(&[source_func])
     } else {
         None
     };
@@ -339,12 +334,10 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         &f.output_arg_flows,
         global.as_ref(),
         idg,
-        Some(SEMANTIC_FLOW_MAX_PRECISION),
         None,
     );
 
-    let closure_evidence =
-        idg.forward_closure_evidence_with_max_precision(&seed_nodes, Some(SEMANTIC_FLOW_MAX_PRECISION));
+    let closure_evidence = idg.forward_closure_evidence(&seed_nodes);
     let closure_nodes = closure_evidence.nodes;
     let mut cross_calls = closure_evidence.cross_calls;
     cross_calls.sort_unstable_by_key(|edge| {
@@ -354,7 +347,6 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
             edge.call_span,
             edge.arg_idx,
             edge.param_idx,
-            edge.precision,
             edge.relation,
         )
     });
@@ -363,14 +355,13 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         for edge in &cross_calls {
             bonsai_diagnostics::debug_log!(
                 "idg-closure-detail",
-                "dump-taint cross-call caller={} callee={} span={:?} arg={} param={} relation={:?} precision={:?}",
+                "dump-taint cross-call caller={} callee={} span={:?} arg={} param={} relation={:?}",
                 edge.caller.raw(),
                 edge.callee.raw(),
                 edge.call_span,
                 edge.arg_idx,
                 edge.param_idx,
-                edge.relation,
-                edge.precision
+                edge.relation
             );
         }
     }
@@ -391,21 +382,10 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         }
     }
 
-    // Weakest precision first so review-worthy edges sit at the
-    // top — same ordering `dump-edges` uses.
-    fn precision_sort_key(p: &str) -> u8 {
-        match p {
-            "unknown" => 0,
-            "over-approximate" => 1,
-            "narrowed" => 2,
-            "exact" => 3,
-            _ => 4,
-        }
-    }
+    // Same ordering `dump-edges` uses.
     records.sort_by(|a, b| {
-        precision_sort_key(&a.edge_precision)
-            .cmp(&precision_sort_key(&b.edge_precision))
-            .then_with(|| a.caller_name.cmp(&b.caller_name))
+        a.caller_name
+            .cmp(&b.caller_name)
             .then_with(|| a.callee_name.cmp(&b.callee_name))
             .then_with(|| a.call_line.cmp(&b.call_line))
     });
@@ -416,10 +396,6 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     // serialised output, breaking Stable-IDs-From-Content.
     let mut seeds: Vec<String> = effective_seed.iter().cloned().collect();
     seeds.sort();
-    // Worst precision across recorded cross-call edges. The legacy
-    // engine returned a per-run aggregate; we compute the same shape
-    // here from the IDG cross-call edges' precision tags.
-    let aggregate_precision = aggregate_flow_precision(cross_calls.iter().map(|ce| ce.precision));
     // `pairs_analyzed` reports the count of distinct `(caller,
     // callee)` function pairs the IDG closure walked when seeding
     // from this source. Legacy engine semantics were "total
@@ -448,7 +424,6 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         seeds,
         analysis_complete: analysis_incomplete_reasons.is_empty(),
         analysis_incomplete_reasons,
-        precision: precision_display(aggregate_precision),
         pairs_analyzed: u32::try_from(pairs_analyzed).unwrap_or(u32::MAX),
         records,
     })
@@ -478,7 +453,6 @@ fn dedup_taint_records(records: &mut Vec<TaintRecord>) {
             call_line: record.call_line,
             call_column: record.call_column,
             edge_kind: record.edge_kind.clone(),
-            edge_precision: record.edge_precision.clone(),
             tainted_args,
         })
     });
@@ -497,7 +471,6 @@ struct TaintRecordDedupKey {
     call_line: u32,
     call_column: u32,
     edge_kind: String,
-    edge_precision: String,
     tainted_args: Vec<TaintRecordArgDedupKey>,
 }
 
@@ -545,8 +518,7 @@ fn workspace_call_site_has_semantic_resolution(
     call_name: &str,
 ) -> bool {
     ws.cached_resolved_call_graph().callees_of(caller).any(|edge| {
-        edge.precision.is_semantic()
-            && call_site_spans_match(edge.span, call_span)
+        call_site_spans_match(edge.span, call_span)
             && global
                 .decl_of(bonsai_common::SymbolId::new(edge.to.raw()))
                 .is_some_and(|decl| call_names_match(&decl.name, call_name))
@@ -671,7 +643,6 @@ pub(crate) fn build_taint_record_from_cross_call(
         call_code,
         tainted_args,
         edge_kind: edge_kind_display(ce.call_kind),
-        edge_precision: precision_display(ce.precision),
     })
 }
 
@@ -963,30 +934,6 @@ fn edge_kind_display(kind: bonsai_callgraph::EdgeKind) -> String {
         bonsai_callgraph::EdgeKind::Unknown => "unknown",
     }
     .to_string()
-}
-
-/// `bonsai_common::Precision` → public string form. Same wording the
-/// CLI surfaces in JSON output, so library consumers and CLI users
-/// see the same labels.
-#[must_use]
-pub fn precision_display(precision: bonsai_common::Precision) -> String {
-    match precision {
-        bonsai_common::Precision::Exact => "exact",
-        bonsai_common::Precision::Narrowed => "narrowed",
-        bonsai_common::Precision::OverApproximate => "over-approximate",
-        bonsai_common::Precision::Unknown => "unknown",
-    }
-    .to_string()
-}
-
-pub(crate) fn aggregate_flow_precision(
-    precisions: impl IntoIterator<Item = bonsai_common::Precision>,
-) -> bonsai_common::Precision {
-    precisions
-        .into_iter()
-        .fold(bonsai_common::Precision::Exact, |acc, precision| {
-            acc.meet(precision)
-        })
 }
 
 #[cfg(test)]

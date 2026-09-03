@@ -9,7 +9,6 @@ use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 
-const SNIPPET_MAX_LINES: usize = 4;
 const SNIPPET_MAX_CHARS: usize = 512;
 
 /// Filter bundle for [`refs`].
@@ -167,7 +166,7 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
                     line,
                     column,
                     kind,
-                    snippet: read_snippet(ws, &reference.span),
+                    snippet: read_anchor_line(ws, &reference.span),
                 });
             }
 
@@ -192,7 +191,7 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
                             line,
                             column,
                             kind: "read".to_string(),
-                            snippet: read_snippet(ws, &span),
+                            snippet: read_anchor_line(ws, &span),
                         });
                     });
                 }
@@ -588,49 +587,76 @@ fn walk_expression_flow_reads(flow: &bonsai_lang_api::ExpressionFlow, visit: &mu
     }
 }
 
-/// Read the source line(s) covering `span`, widened to line edges.
-/// Public so the CLI's renderer can re-use it when annotating
-/// hits without re-implementing the line-widening logic.
+/// The single source line that anchors `span`: the line containing the
+/// span's first byte, widened to line edges and trimmed. Browse rows show
+/// the fact's own line, never the surrounding region, so a multi-line call,
+/// string, or comment renders as one line in a table cell.
 #[must_use]
-pub fn read_snippet(ws: &Workspace, span: &bonsai_common::Span) -> String {
+pub fn read_anchor_line(ws: &Workspace, span: &bonsai_common::Span) -> String {
     let Ok(snapshot) = ws.vfs().snapshot(span.file) else {
         return String::new();
     };
     let bytes = snapshot.text.as_bytes();
-    let span_start = (span.start as usize).min(bytes.len());
-    let span_end = (span.end as usize).min(bytes.len()).max(span_start);
-    let start = bytes[..span_start]
-        .iter()
-        .rposition(|b| *b == b'\n')
-        .map_or(0, |i| i + 1);
-    let end = bytes[span_end..]
-        .iter()
-        .position(|b| *b == b'\n')
-        .map_or(bytes.len(), |i| span_end + i);
-    let raw = String::from_utf8_lossy(&bytes[start..end]);
-    bounded_snippet(&raw)
+    let anchor = (span.start as usize).min(bytes.len());
+    let (start, end) = line_bounds(bytes, anchor);
+    bounded_line(&String::from_utf8_lossy(&bytes[start..end]))
 }
 
-/// Cap a snippet at [`SNIPPET_MAX_LINES`] lines and
-/// [`SNIPPET_MAX_CHARS`] chars, appending an ellipsis when either
-/// limit fired.
-fn bounded_snippet(raw: &str) -> String {
-    let mut snippet: String = raw.lines().take(SNIPPET_MAX_LINES).collect::<Vec<_>>().join("\n");
-    let line_truncated = raw.lines().nth(SNIPPET_MAX_LINES).is_some();
-
-    let mut char_truncated = false;
-    if snippet.chars().count() > SNIPPET_MAX_CHARS {
-        snippet = snippet.chars().take(SNIPPET_MAX_CHARS).collect();
-        char_truncated = true;
-    }
-
-    if line_truncated || char_truncated {
-        if !snippet.ends_with('\n') && !snippet.is_empty() {
-            snippet.push('\n');
+/// The first source line inside `span` for which `matches` holds, with its
+/// 1-based line number and the 1-based column of that line's first
+/// non-blank byte. Used for facts whose span covers several lines (block
+/// comments, multi-line strings): the row anchors on the line that carries
+/// the match instead of the block start. `None` when no line matches.
+#[must_use]
+pub fn read_matched_line(
+    ws: &Workspace,
+    span: &bonsai_common::Span,
+    matches: &dyn Fn(&str) -> bool,
+) -> Option<(String, u32, u32)> {
+    let snapshot = ws.vfs().snapshot(span.file).ok()?;
+    let bytes = snapshot.text.as_bytes();
+    let span_start = (span.start as usize).min(bytes.len());
+    let span_end = (span.end as usize).min(bytes.len()).max(span_start);
+    let (mut cursor, _) = line_bounds(bytes, span_start);
+    let mut line_no = u32::try_from(bytes[..cursor].split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
+    while cursor < span_end.max(cursor + 1) && cursor < bytes.len() {
+        let (start, end) = line_bounds(bytes, cursor);
+        let raw = String::from_utf8_lossy(&bytes[start..end]);
+        if matches(&raw) {
+            let column = raw.len() - raw.trim_start().len() + 1;
+            return Some((bounded_line(&raw), line_no, column as u32));
         }
-        snippet.push('…');
+        if end >= bytes.len() {
+            break;
+        }
+        cursor = end + 1;
+        line_no += 1;
     }
-    snippet
+    None
+}
+
+/// `[start, end)` byte bounds of the line containing `at` (no newline).
+fn line_bounds(bytes: &[u8], at: usize) -> (usize, usize) {
+    let at = at.min(bytes.len());
+    let start = bytes[..at].iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let end = bytes[at..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map_or(bytes.len(), |i| at + i);
+    (start, end)
+}
+
+/// Cap a source line at [`SNIPPET_MAX_CHARS`] chars, appending an ellipsis
+/// when the cap fired. Leading indentation is kept so a `column` reported
+/// next to the line indexes into it exactly; renderers trim for display.
+fn bounded_line(raw: &str) -> String {
+    let line = raw.trim_end_matches('\r');
+    if line.chars().count() <= SNIPPET_MAX_CHARS {
+        return line.to_string();
+    }
+    let mut out: String = line.chars().take(SNIPPET_MAX_CHARS).collect();
+    out.push('…');
+    out
 }
 
 #[cfg(test)]

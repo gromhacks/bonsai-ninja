@@ -32,6 +32,7 @@ mod commands;
 mod filter;
 mod footer;
 mod help_theme;
+mod html;
 mod output;
 mod page_cache;
 mod paging;
@@ -40,7 +41,7 @@ mod syntax_highlight;
 mod theme;
 mod ui;
 
-use args::{BrowseFormat, CacheAction, Cli, Cmd, SecurityAction};
+use args::{CacheAction, Cli, Cmd, SecurityAction};
 use commands::{
     cmd_args, cmd_cache, cmd_calls, cmd_classes, cmd_comments, cmd_context, cmd_defs, cmd_diagnostics,
     cmd_dump_ast, cmd_dump_callgraph, cmd_dump_cfg, cmd_dump_edges, cmd_dump_hir, cmd_dump_resolution,
@@ -343,7 +344,7 @@ fn real_main() -> Result<()> {
         }
     }
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     // Set the explicit process budget before any compiler phase asks the
     // shared resource detector. The detector is cached after first use so SDK
     // and CLI scheduling observe one stable contract for the whole run.
@@ -401,9 +402,20 @@ fn real_main() -> Result<()> {
     if html_output.is_some() && command_output_path.is_some() {
         anyhow::bail!("--html-output and --output-path are mutually exclusive");
     }
+    // The HTML report is rendered from the command's canonical JSON
+    // document, so the command runs in its JSON mode and every structured
+    // emit becomes an HTML fragment (see `output::emit_json_document`).
+    if html_output.is_some() {
+        force_json_format(&mut cli.command)?;
+    }
     let output_path = html_output.as_ref().or(command_output_path.as_ref());
-    let html_theme = html_output.as_ref().map(|_| theme);
-    output::init(output_path.map(std::path::PathBuf::as_path), html_theme)?;
+    let html_context = html_output
+        .as_ref()
+        .map(|_| html::HtmlDocumentContext::from_argv());
+    output::init(
+        output_path.map(std::path::PathBuf::as_path),
+        html_context.as_ref(),
+    )?;
     if let Some(workspace) = command_workspace_for_page_cache(&cli.command) {
         if page_cache::replay_if_hit(workspace)? {
             output::finish()?;
@@ -419,6 +431,8 @@ fn real_main() -> Result<()> {
             semantic,
             semantic_worker,
             structural_only,
+            format,
+            output: _,
         } => cmd_index(
             &workspace,
             IndexCommandOptions {
@@ -428,6 +442,7 @@ fn real_main() -> Result<()> {
                 semantic,
                 semantic_worker,
                 structural_only,
+                format,
             },
         ),
         Cmd::Context {
@@ -435,10 +450,12 @@ fn real_main() -> Result<()> {
             context,
             page,
             all,
+            format,
             output: _,
         } => cmd_context(
             &workspace,
-            paging_from_cli(context.as_deref(), page.as_deref(), all, BrowseFormat::Json)?,
+            paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
+            format,
         ),
         Cmd::Trace {
             workspace,
@@ -529,22 +546,30 @@ fn real_main() -> Result<()> {
                 rules_dir: rules_dir.as_deref(),
             })
         }
-        Cmd::Diagnostics { workspace } => cmd_diagnostics(&workspace),
+        Cmd::Diagnostics {
+            workspace,
+            format,
+            output: _,
+        } => cmd_diagnostics(&workspace, format),
         Cmd::DumpHir {
             workspace,
             symbol_pos,
             symbol,
+            format,
+            output: _,
         } => {
             let sym = resolve_selector_arg(symbol_pos, symbol, "symbol")?;
-            cmd_dump_hir(&workspace, &sym)
+            cmd_dump_hir(&workspace, &sym, format)
         }
         Cmd::DumpCfg {
             workspace,
             symbol_pos,
             symbol,
+            format,
+            output: _,
         } => {
             let sym = resolve_selector_arg(symbol_pos, symbol, "symbol")?;
-            cmd_dump_cfg(&workspace, &sym)
+            cmd_dump_cfg(&workspace, &sym, format)
         }
         Cmd::DumpCallgraph {
             workspace,
@@ -564,7 +589,6 @@ fn real_main() -> Result<()> {
             workspace,
             from,
             to,
-            precision,
             compact,
             edge,
             limit,
@@ -577,7 +601,6 @@ fn real_main() -> Result<()> {
             &workspace,
             from.as_deref(),
             to.as_deref(),
-            precision,
             compact,
             edge.as_deref(),
             limit,
@@ -1071,7 +1094,6 @@ fn real_main() -> Result<()> {
             flow,
             view,
             group,
-            graph_flow,
             taint_flow,
             context,
             page,
@@ -1133,7 +1155,6 @@ fn real_main() -> Result<()> {
                     kind_filter: &kind,
                     filters,
                     render,
-                    graph_flow,
                     taint_flow,
                     paging_cfg: paging,
                     format,
@@ -1243,7 +1264,7 @@ fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
         | Cmd::Path { workspace, .. }
         | Cmd::Slice { workspace, .. }
         | Cmd::Show { workspace, .. }
-        | Cmd::Diagnostics { workspace }
+        | Cmd::Diagnostics { workspace, .. }
         | Cmd::DumpHir { workspace, .. }
         | Cmd::DumpCfg { workspace, .. }
         | Cmd::DumpCallgraph { workspace, .. }
@@ -1274,9 +1295,72 @@ fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
     }
 }
 
+/// `--html-output` renders the canonical JSON document, so every command
+/// runs in its JSON mode regardless of the `--format` it was given.
+fn force_json_format(cmd: &mut Cmd) -> Result<()> {
+    use args::{BrowseFormat, OutputFormat, SecurityFormat};
+    match cmd {
+        Cmd::Trace { format, .. } => *format = OutputFormat::Json,
+        Cmd::Index { format, .. }
+        | Cmd::Context { format, .. }
+        | Cmd::Path { format, .. }
+        | Cmd::Slice { format, .. }
+        | Cmd::Show { format, .. }
+        | Cmd::Diagnostics { format, .. }
+        | Cmd::DumpHir { format, .. }
+        | Cmd::DumpCfg { format, .. }
+        | Cmd::DumpCallgraph { format, .. }
+        | Cmd::DumpEdges { format, .. }
+        | Cmd::DumpResolution { format, .. }
+        | Cmd::DumpAst { format, .. }
+        | Cmd::DumpResolve { format, .. }
+        | Cmd::DumpTaint { format, .. }
+        | Cmd::Defs { format, .. }
+        | Cmd::EntryPoints { format, .. }
+        | Cmd::Calls { format, .. }
+        | Cmd::Imports { format, .. }
+        | Cmd::Vars { format, .. }
+        | Cmd::Strings { format, .. }
+        | Cmd::Comments { format, .. }
+        | Cmd::Args { format, .. }
+        | Cmd::Operations { format, .. }
+        | Cmd::Classes { format, .. }
+        | Cmd::Refs { format, .. }
+        | Cmd::Search { format, .. }
+        | Cmd::SymbolSummary { format, .. }
+        | Cmd::Inspect { format, .. }
+        | Cmd::Tree { format, .. }
+        | Cmd::ReadFile { format, .. } => *format = BrowseFormat::Json,
+        Cmd::Security { action, .. } => match action {
+            SecurityAction::TaintAnalysis { format, .. } => *format = SecurityFormat::Json,
+            SecurityAction::Sources { format, .. }
+            | SecurityAction::Sinks { format, .. }
+            | SecurityAction::Sanitizers { format, .. }
+            | SecurityAction::Deps { format, .. }
+            | SecurityAction::DependencyAnalysis { format, .. }
+            | SecurityAction::SourceAnalysis { format, .. }
+            | SecurityAction::SinkAnalysis { format, .. }
+            | SecurityAction::Pack { format, .. } => *format = BrowseFormat::Json,
+        },
+        Cmd::Cache {
+            action: CacheAction::Stats { format, .. },
+        } => *format = BrowseFormat::Json,
+        Cmd::Cache { .. } => {
+            anyhow::bail!(
+                "--html-output is not supported for `cache clear` / `cache rebuild`; they produce no report"
+            )
+        }
+        Cmd::Export { .. } => {
+            anyhow::bail!("--html-output is not supported for `export`; export streams a native graph artifact, use --format and --output-path")
+        }
+    }
+    Ok(())
+}
+
 fn command_output_path(cmd: &Cmd) -> Option<&std::path::Path> {
     match cmd {
-        Cmd::Trace { output, .. }
+        Cmd::Index { output, .. }
+        | Cmd::Trace { output, .. }
         | Cmd::Path { output, .. }
         | Cmd::Slice { output, .. }
         | Cmd::Show { output, .. }
@@ -1302,17 +1386,16 @@ fn command_output_path(cmd: &Cmd) -> Option<&std::path::Path> {
         | Cmd::Inspect { output, .. }
         | Cmd::Export { output, .. }
         | Cmd::Context { output, .. }
+        | Cmd::Diagnostics { output, .. }
+        | Cmd::DumpHir { output, .. }
+        | Cmd::DumpCfg { output, .. }
         | Cmd::Tree { output, .. }
         | Cmd::ReadFile { output, .. } => output.output_path.as_deref(),
         Cmd::Security { action, .. } => security_action_output_path(action),
         Cmd::Cache {
             action: CacheAction::Stats { output, .. },
         } => output.output_path.as_deref(),
-        Cmd::Index { .. }
-        | Cmd::Diagnostics { .. }
-        | Cmd::DumpHir { .. }
-        | Cmd::DumpCfg { .. }
-        | Cmd::Cache { .. } => None,
+        Cmd::Cache { .. } => None,
     }
 }
 
@@ -1322,6 +1405,7 @@ fn security_action_output_path(action: &SecurityAction) -> Option<&std::path::Pa
         | SecurityAction::Sinks { output, .. }
         | SecurityAction::Sanitizers { output, .. }
         | SecurityAction::Deps { output, .. }
+        | SecurityAction::DependencyAnalysis { output, .. }
         | SecurityAction::TaintAnalysis { output, .. }
         | SecurityAction::SourceAnalysis { output, .. }
         | SecurityAction::SinkAnalysis { output, .. }

@@ -300,7 +300,6 @@ fn inspect_retrieval_prefilter_uses_warmed_sidecar_candidate_files() {
         false,
         InspectFilters::default(),
         false,
-        false,
         1,
     )
     .expect("prefilter")
@@ -329,7 +328,6 @@ fn inspect_retrieval_prefilter_keeps_files_matched_only_by_named_arg_key() {
         false,
         InspectFilters::default(),
         false,
-        false,
         1,
     )
     .expect("prefilter")
@@ -353,7 +351,6 @@ fn inspect_retrieval_prefilter_uses_safe_empty_scope_for_no_candidates() {
         Some("missing_symbol"),
         false,
         InspectFilters::default(),
-        false,
         false,
         1,
     )
@@ -388,7 +385,6 @@ fn inspect_retrieval_prefilter_scopes_graph_flow_queries() {
         Some("inspect_unique_symbol"),
         false,
         InspectFilters::default(),
-        true,
         false,
         1,
     )
@@ -405,7 +401,6 @@ fn sample_taint_flow() -> InspectTaintFlow {
         entry_kind: Some(DeclKind::Function),
         terminal: "os.system".to_string(),
         terminal_kind: "call".to_string(),
-        precision: "narrowed".to_string(),
         func_ids: Vec::new(),
         chain_display: vec!["handle".to_string(), "sink".to_string()],
         steps: vec![InspectTaintStep {
@@ -415,7 +410,6 @@ fn sample_taint_flow() -> InspectTaintFlow {
             line: 4,
             column: 5,
             kind: "call".to_string(),
-            precision: "narrowed".to_string(),
             tainted_args: vec![InspectTaintedArg {
                 index: 0,
                 value_text: "cmd".to_string(),
@@ -443,12 +437,12 @@ fn raw_taint_page_cost_is_allocation_free_and_conservative() {
 
 fn sample_structural_flow(number: u32) -> InspectFlowRendered {
     InspectFlowRendered {
+        plan: None,
         flow_number: number,
         flow_label: number.to_string(),
         flow_id: format!("F:{number:016x}"),
         chain: vec!["entry".to_string(), "target".to_string()],
         chain_display: "entry -> target".to_string(),
-        precision: bonsai_common::Precision::Exact,
         functions: Vec::new(),
     }
 }
@@ -558,7 +552,6 @@ fn inspect_json_page_unit_serializes_one_flow_not_the_whole_declaration() {
         params: Vec::new(),
         direct_callers: Vec::new(),
         callees: Vec::new(),
-        graph_evidence_evaluated: true,
         flows: vec![sample_structural_flow(1), sample_structural_flow(2)],
         groups: Vec::new(),
         summary: InspectSummary {
@@ -666,7 +659,6 @@ fn taint_from_to_needles_ignore_constructor_prelude_labels() {
             line: 16,
             column: 9,
             kind: "propagation".to_string(),
-            precision: "narrowed".to_string(),
             tainted_args: Vec::new(),
         },
     );

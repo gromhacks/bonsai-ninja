@@ -6,20 +6,18 @@ use crate::external_relation::{
 use crate::symbolic::SymbolicFieldTransformKind;
 use crate::workspace::QueryAcceleratorBlobReader;
 use ahash::AHashMap;
-use bonsai_common::Precision;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::sync::Arc;
 
-const RECORD_BYTES: usize = 10;
+const RECORD_BYTES: usize = 9;
 const RUN_ROWS: usize = 131_072;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ReverseSymbolicRecord {
     target: u32,
     source: u32,
-    precision: u8,
     kind: u8,
 }
 
@@ -29,7 +27,6 @@ impl ExternalRecord for ReverseSymbolicRecord {
     fn encode(self, output: &mut Vec<u8>) {
         output.extend_from_slice(&self.target.to_le_bytes());
         output.extend_from_slice(&self.source.to_le_bytes());
-        output.push(self.precision);
         output.push(self.kind);
     }
 
@@ -37,8 +34,7 @@ impl ExternalRecord for ReverseSymbolicRecord {
         Self {
             target: u32::from_le_bytes(record[..4].try_into().expect("reverse target bytes")),
             source: u32::from_le_bytes(record[4..8].try_into().expect("reverse source bytes")),
-            precision: record[8],
-            kind: record[9],
+            kind: record[8],
         }
     }
 }
@@ -47,7 +43,6 @@ impl ExternalRecord for ReverseSymbolicRecord {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReverseSymbolicTransform {
     pub(crate) source: u32,
-    pub(crate) precision: Precision,
     pub(crate) kind: SymbolicFieldTransformKind,
 }
 
@@ -58,17 +53,10 @@ impl ReverseSymbolicTransformSpool {
         Self(ExternalSorter::new(RUN_ROWS))
     }
 
-    pub(crate) fn push(
-        &mut self,
-        target: u32,
-        source: u32,
-        precision: Precision,
-        kind: SymbolicFieldTransformKind,
-    ) {
+    pub(crate) fn push(&mut self, target: u32, source: u32, kind: SymbolicFieldTransformKind) {
         self.0.push(ReverseSymbolicRecord {
             target,
             source,
-            precision: precision.rank(),
             kind: kind as u8,
         });
     }
@@ -138,7 +126,6 @@ impl ReverseSymbolicTransformIndex {
         let start = self.relation.lower_bound(ReverseSymbolicRecord {
             target,
             source: 0,
-            precision: 0,
             kind: 0,
         });
         let max_entry_rows = self.cache.lock().max_entry_rows;
@@ -149,7 +136,6 @@ impl ReverseSymbolicTransformIndex {
             }
             let row = ReverseSymbolicTransform {
                 source: row.source,
-                precision: decode_precision(row.precision),
                 kind: decode_kind(row.kind),
             };
             visit(row);
@@ -205,16 +191,6 @@ impl ReversePageCache {
     }
 }
 
-fn decode_precision(value: u8) -> Precision {
-    match value {
-        0 => Precision::Exact,
-        1 => Precision::Narrowed,
-        2 => Precision::OverApproximate,
-        3 => Precision::Unknown,
-        _ => panic!("invalid compact reverse symbolic precision"),
-    }
-}
-
 fn decode_kind(value: u8) -> SymbolicFieldTransformKind {
     match value {
         0 => SymbolicFieldTransformKind::Argument,
@@ -231,27 +207,20 @@ fn decode_kind(value: u8) -> SymbolicFieldTransformKind {
 mod tests {
     use super::{ReverseSymbolicTransformSpool, RUN_ROWS};
     use crate::symbolic::SymbolicFieldTransformKind;
-    use bonsai_common::Precision;
 
     #[test]
     fn external_reverse_index_preserves_target_bucket_across_runs() {
         let mut spool = ReverseSymbolicTransformSpool::new();
         for source in (0..u32::try_from(RUN_ROWS + 10).expect("test row count")).rev() {
-            spool.push(4, source, Precision::Exact, SymbolicFieldTransformKind::Return);
-            spool.push(4, source, Precision::Exact, SymbolicFieldTransformKind::Return);
-            spool.push(
-                5,
-                source,
-                Precision::Narrowed,
-                SymbolicFieldTransformKind::Argument,
-            );
+            spool.push(4, source, SymbolicFieldTransformKind::Return);
+            spool.push(4, source, SymbolicFieldTransformKind::Return);
+            spool.push(5, source, SymbolicFieldTransformKind::Argument);
         }
         let index = spool.finish();
         let mut rows = Vec::new();
         index.visit_incoming(4, |row| rows.push(row));
         assert_eq!(rows.len(), RUN_ROWS + 10);
         assert!(rows.windows(2).all(|pair| pair[0].source < pair[1].source));
-        assert!(rows.iter().all(|row| row.precision == Precision::Exact));
         assert!(rows
             .iter()
             .all(|row| row.kind == SymbolicFieldTransformKind::Return));

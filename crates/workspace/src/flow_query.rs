@@ -265,15 +265,11 @@ impl Workspace {
     /// `None` means the current workspace is already complete or a validated
     /// partitioned source generation is unavailable.
     #[must_use]
-    pub fn source_reachable_query_workspace(
-        &self,
-        source_funcs: &[FuncId],
-        max_precision: Option<bonsai_common::Precision>,
-    ) -> Option<Workspace> {
+    pub fn source_reachable_query_workspace(&self, source_funcs: &[FuncId]) -> Option<Workspace> {
         if self.is_complete_workspace_index() || source_funcs.is_empty() {
             return None;
         }
-        let graph = match self.persisted_resolved_call_graph_reachable_from(source_funcs, max_precision)? {
+        let graph = match self.persisted_resolved_call_graph_reachable_from(source_funcs)? {
             Ok(graph) => graph,
             Err(error) => {
                 bonsai_diagnostics::debug_log!(
@@ -299,16 +295,11 @@ impl Workspace {
         &self,
         source_funcs: &[FuncId],
         target_funcs: &[FuncId],
-        max_precision: Option<bonsai_common::Precision>,
     ) -> Option<Workspace> {
         if self.is_complete_workspace_index() || source_funcs.is_empty() || target_funcs.is_empty() {
             return None;
         }
-        let graph = match self.persisted_resolved_call_graph_between_with_max_precision(
-            source_funcs,
-            target_funcs,
-            max_precision,
-        )? {
+        let graph = match self.persisted_resolved_call_graph_between(source_funcs, target_funcs)? {
             Ok(graph) => graph,
             Err(error) => {
                 bonsai_diagnostics::debug_log!(
@@ -331,16 +322,12 @@ impl Workspace {
     /// canonical complete-workspace fallback instead of treating cache
     /// absence as an empty graph.
     #[must_use]
-    pub fn target_inspect_query_workspace(
-        &self,
-        target_funcs: &[FuncId],
-        max_precision: Option<bonsai_common::Precision>,
-    ) -> Option<Workspace> {
+    pub fn target_inspect_query_workspace(&self, target_funcs: &[FuncId]) -> Option<Workspace> {
         if target_funcs.is_empty() {
             return None;
         }
         let service = self.callgraph_query_service()?;
-        let graph = match service.materialize_reaching_with_direct_callees(target_funcs, max_precision) {
+        let graph = match service.materialize_reaching_with_direct_callees(target_funcs) {
             Ok(graph) => graph,
             Err(error) => {
                 bonsai_diagnostics::debug_log!(
@@ -361,16 +348,12 @@ impl Workspace {
     /// a query scope, not a work limit: failure to open a fresh partition
     /// returns `None` so callers can fall back to the complete workspace.
     #[must_use]
-    pub fn target_inspect_lineage_funcs(
-        &self,
-        target_funcs: &[FuncId],
-        max_precision: Option<bonsai_common::Precision>,
-    ) -> Option<AHashSet<FuncId>> {
+    pub fn target_inspect_lineage_funcs(&self, target_funcs: &[FuncId]) -> Option<AHashSet<FuncId>> {
         if target_funcs.is_empty() {
             return None;
         }
         let service = self.callgraph_query_service()?;
-        let funcs = match service.reaching_functions_with_direct_callees(target_funcs, max_precision) {
+        let funcs = match service.reaching_functions_with_direct_callees(target_funcs) {
             Ok(funcs) => funcs,
             Err(error) => {
                 bonsai_diagnostics::debug_log!(
@@ -387,10 +370,9 @@ impl Workspace {
     fn persisted_source_flow_corridor(
         &self,
         source_funcs: &[FuncId],
-        max_precision: Option<bonsai_common::Precision>,
     ) -> Option<crate::SourceReachableCallGraph> {
         let started = std::time::Instant::now();
-        let graph = match self.persisted_resolved_call_graph_reachable_from(source_funcs, max_precision)? {
+        let graph = match self.persisted_resolved_call_graph_reachable_from(source_funcs)? {
             Ok(graph) => Arc::new(graph),
             Err(error) => {
                 bonsai_diagnostics::debug_log!(
@@ -544,17 +526,13 @@ impl Workspace {
     /// The resulting IDG is query-local and cannot contaminate whole-workspace
     /// security or export state.
     #[must_use]
-    pub fn source_flow_session(
-        &self,
-        source_funcs: &[FuncId],
-        max_precision: Option<bonsai_common::Precision>,
-    ) -> Option<SyntaxFlowSession> {
+    pub fn source_flow_session(&self, source_funcs: &[FuncId]) -> Option<SyntaxFlowSession> {
         if self.db().idg_service().is_some() || source_funcs.is_empty() {
             return None;
         }
         let corridor = self
-            .persisted_source_flow_corridor(source_funcs, max_precision)
-            .unwrap_or_else(|| self.source_reachable_query_call_graph(source_funcs, &[], max_precision));
+            .persisted_source_flow_corridor(source_funcs)
+            .unwrap_or_else(|| self.source_reachable_query_call_graph(source_funcs, &[]));
         self.compile_syntax_flow_session(corridor)
     }
 
@@ -577,9 +555,9 @@ impl Workspace {
         let mut targets: Vec<FuncId> = target_funcs.iter().copied().collect();
         targets.sort_unstable_by_key(|func| func.raw());
         let corridor = if source_funcs.iter().all(|func| target_funcs.contains(func)) {
-            self.target_emission_resolved_call_graph(source_funcs, &targets, None)
+            self.target_emission_resolved_call_graph(source_funcs, &targets)
         } else {
-            self.source_reachable_resolved_call_graph(source_funcs, &targets, None)
+            self.source_reachable_resolved_call_graph(source_funcs, &targets)
         };
         self.compile_syntax_flow_session(corridor)
     }
@@ -616,17 +594,11 @@ impl Workspace {
         let idg = global_idg
             .as_deref()
             .or_else(|| session.map(SyntaxFlowSession::idg))?;
-        let max_precision = Some(bonsai_common::Precision::Narrowed);
         Some(
             if let Some(lineage_funcs) = lineage_funcs.filter(|funcs| !funcs.is_empty()) {
-                idg.target_relevance_within_funcs_with_max_precision(
-                    target_nodes,
-                    Some(target_funcs),
-                    lineage_funcs,
-                    max_precision,
-                )
+                idg.target_relevance_within_funcs(target_nodes, Some(target_funcs), lineage_funcs)
             } else {
-                idg.target_relevance_with_max_precision(target_nodes, Some(target_funcs), max_precision)
+                idg.target_relevance(target_nodes, Some(target_funcs))
             },
         )
     }
@@ -650,12 +622,11 @@ impl Workspace {
         let idg = global_idg
             .as_deref()
             .or_else(|| session.map(SyntaxFlowSession::idg))?;
-        Some(idg.target_relevance_from_source_within_funcs_with_max_precision(
+        Some(idg.target_relevance_from_source_within_funcs(
             source,
             target_nodes,
             Some(target_funcs),
             lineage_funcs,
-            Some(bonsai_common::Precision::Narrowed),
         ))
     }
 

@@ -13,11 +13,8 @@
 //! * **cursor / page-number equivalence** — `--page P:xxxxxxxx`
 //!   and `--page N` resolve to the byte-identical row set when
 //!   the cursor came from page N's footer;
-//! * **JSON tokenizer safety** — default `--format json` returns a
-//!   bare array only when the whole result fits the budget; otherwise
-//!   it wraps in `{rows, page}`;
-//! * **JSON explicit wrap** — `--context` or `--page` on JSON wraps
-//!   in `{rows, page}`;
+//! * **JSON schema stability** — default and explicitly paged JSON use the
+//!   same completion envelope and canonical row representation;
 //! * **`--all` overrides** — enabled together with `--context`
 //!   still returns every row;
 //! * **context-budget cap** — `--context N` keeps the text
@@ -88,7 +85,10 @@ fn run(args: &[&str]) -> Option<String> {
 fn json_bare(args: &[&str]) -> Option<Vec<serde_json::Value>> {
     let out = run(args)?;
     let v: serde_json::Value = serde_json::from_str(&out).ok()?;
-    v.as_array().cloned()
+    v.get("rows")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| v.as_array())
+        .cloned()
 }
 
 fn json_wrapped(args: &[&str]) -> Option<(Vec<serde_json::Value>, serde_json::Value)> {
@@ -162,13 +162,14 @@ fn json_opts_into_wrap_with_context() {
     }
     assert_eq!(
         v.get("analysis_complete").and_then(|value| value.as_bool()),
-        Some(false),
-        "paged JSON must not claim complete analysis when more pages exist: {v:?}"
+        Some(true),
+        "paging must not downgrade complete compiler analysis: {v:?}"
     );
     let incomplete_reasons = v
-        .get("analysis_incomplete_reasons")
+        .get("result_incomplete_reasons")
         .and_then(|value| value.as_array())
-        .expect("analysis_incomplete_reasons array");
+        .expect("result_incomplete_reasons array");
+    assert_eq!(v["result_complete"].as_bool(), Some(false));
     assert!(
         incomplete_reasons.iter().any(|reason| {
             reason
@@ -198,7 +199,11 @@ fn paged_summary_json_keeps_structured_ids_on_the_requested_rows() {
         !rows.is_empty(),
         "summary page must retain the requested call row"
     );
-    assert!(rows.iter().all(|row| row["summary_ids"].is_array()), "{value}");
+    assert!(
+        rows.iter()
+            .all(|row| row["presentation"]["summary_ids"].is_array()),
+        "{value}"
+    );
     assert_eq!(value["page"]["number"].as_u64(), Some(1));
 }
 
@@ -230,17 +235,13 @@ fn dump_taint_paging_preserves_structured_semantic_and_presentation_coverage() {
         value.get("json_lines").is_none(),
         "paged dump-taint must not replace its report with JSON source lines: {value:?}"
     );
-    assert!(
-        value["semantic_analysis_complete"].is_boolean(),
-        "semantic completeness must remain available: {value:?}"
-    );
     assert_eq!(
-        value["analysis_complete"], false,
-        "the combined envelope must not claim complete coverage for one page: {value:?}"
+        value["analysis_complete"], true,
+        "paging must not downgrade complete semantic analysis: {value:?}"
     );
-    assert_eq!(value["presentation_complete"], false);
+    assert_eq!(value["result_complete"], false);
     assert!(
-        value["presentation_incomplete_reasons"]
+        value["result_incomplete_reasons"]
             .as_array()
             .is_some_and(|reasons| reasons.iter().any(|reason| reason
                 .as_str()
@@ -278,9 +279,8 @@ fn dump_taint_empty_page_is_explicitly_complete_when_analysis_and_presentation_a
     };
 
     assert_eq!(value["records"], serde_json::json!([]));
-    assert_eq!(value["semantic_analysis_complete"], true);
-    assert_eq!(value["presentation_complete"], true);
     assert_eq!(value["analysis_complete"], true);
+    assert_eq!(value["result_complete"], true);
     assert!(
         value["analysis_incomplete_reasons"]
             .as_array()
@@ -319,13 +319,14 @@ fn last_page_of_paged_json_is_still_incomplete() {
     assert_eq!(last["page"]["number"].as_u64(), Some(total_pages));
     assert_eq!(last["page"]["is_last"].as_bool(), Some(true));
     assert_eq!(
-        last["analysis_complete"].as_bool(),
+        last["result_complete"].as_bool(),
         Some(false),
         "the last page is still a partial response unless it is page 1 of 1: {last:?}"
     );
-    let reasons = last["analysis_incomplete_reasons"]
+    let reasons = last["result_incomplete_reasons"]
         .as_array()
-        .expect("analysis_incomplete_reasons array");
+        .expect("result_incomplete_reasons array");
+    assert_eq!(last["analysis_complete"].as_bool(), Some(true));
     assert!(
         reasons.iter().any(|reason| {
             reason
@@ -366,13 +367,14 @@ fn inspect_paged_json_exposes_top_level_completeness() {
     let v: serde_json::Value = serde_json::from_str(&out).expect("inspect JSON");
     assert_eq!(
         v.get("analysis_complete").and_then(|value| value.as_bool()),
-        Some(false),
-        "paged inspect JSON must expose top-level incomplete status: {v:?}"
+        Some(true),
+        "paging must not downgrade complete inspect analysis: {v:?}"
     );
     let reasons = v
-        .get("analysis_incomplete_reasons")
+        .get("result_incomplete_reasons")
         .and_then(|value| value.as_array())
-        .expect("analysis_incomplete_reasons array");
+        .expect("result_incomplete_reasons array");
+    assert_eq!(v["result_complete"].as_bool(), Some(false));
     assert!(
         reasons.iter().any(|reason| {
             reason
@@ -804,14 +806,11 @@ fn every_command_accepts_all_flag() {
 }
 
 #[test]
-fn every_command_json_default_is_bare_array() {
-    // Row-based browse + dump commands default to a bare JSON
-    // array. Structural commands (`inspect` / `trace`) default
-    // to their object shape (`InspectReport` / `TraceResult`) —
-    // pre-paging scripts already consume those. The test
-    // enforces that the DEFAULT run (no `--context`, no
-    // `--page`) never emits a top-level `page` wrapper. That's
-    // the back-compat contract.
+fn every_command_json_default_carries_completion_and_page_metadata() {
+    // Every programmatic command must keep one stable top-level document
+    // shape regardless of paging flags. This lets consumers distinguish
+    // semantic completeness from result-page completeness without branching
+    // on invocation details.
     let ws = ws();
     let ws_str = ws.to_str().unwrap();
     for (cmd, extra) in ALL_PAGED_COMMANDS {
@@ -820,10 +819,15 @@ fn every_command_json_default_is_bare_array() {
         let Some(out) = run(&args) else { return };
         let v: serde_json::Value =
             serde_json::from_str(&out).unwrap_or_else(|e| panic!("{cmd}: invalid JSON: {e}\n{out}"));
-        let has_page = matches!(&v, serde_json::Value::Object(o) if o.contains_key("page"));
         assert!(
-            !has_page,
-            "{cmd}: default JSON must NOT have a `page` wrapper; got {v:?}"
+            v.get("page").is_some()
+                && v.get("analysis_complete")
+                    .and_then(serde_json::Value::as_bool)
+                    .is_some()
+                && v.get("result_complete")
+                    .and_then(serde_json::Value::as_bool)
+                    .is_some(),
+            "{cmd}: default JSON must carry canonical completion/page metadata; got {v:?}"
         );
     }
 }
@@ -986,23 +990,23 @@ fn dump_ast_json_context_pages_large_single_file_by_lines() {
         .get("budget")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    let ceiling = budget + budget / 20;
     assert!(
-        used <= ceiling,
-        "dump-ast JSON tokens_used {used} exceeds budget {budget}: output head:\n{}",
+        used > budget && page.get("budget_exceeded").and_then(serde_json::Value::as_bool) == Some(true),
+        "one atomic AST object must report its unavoidable context overshoot: output head:\n{}",
         &out[..out.len().min(800)]
     );
     assert!(
-        v.get("json_lines")
+        v.get("rows")
             .and_then(serde_json::Value::as_array)
-            .is_some_and(|lines| !lines.is_empty()),
-        "large dump-ast JSON should page by JSON lines, got:\n{}",
+            .is_some_and(|rows| rows.len() == 1 && rows[0]["root"].is_object())
+            && v.get("json_lines").is_none(),
+        "large dump-ast JSON must retain its canonical AST row, never formatted JSON lines:\n{}",
         &out[..out.len().min(800)]
     );
     assert_eq!(
         v.get("analysis_complete").and_then(serde_json::Value::as_bool),
-        Some(false),
-        "large dump-ast JSON should report incomplete page without --all"
+        Some(true),
+        "an atomic oversized row is complete, not truncated"
     );
 }
 
@@ -2021,7 +2025,6 @@ fn inspect_occurrence_hits_table_renders_above_flow_blocks() {
         complex_ws().to_str().unwrap(),
         "--query",
         "request",
-        "--graph-flow",
         "--context",
         "8192",
     ]) else {

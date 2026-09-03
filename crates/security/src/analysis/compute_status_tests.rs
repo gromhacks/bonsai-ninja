@@ -970,22 +970,6 @@ fn taint_lineage_requires_recorded_parent_trace() {
     );
 }
 
-#[test]
-fn precision_filter_keeps_only_requested_confidence() {
-    assert!(finding_precision_within("exact", Precision::Narrowed));
-    assert!(finding_precision_within("narrowed", Precision::Narrowed));
-    assert!(!finding_precision_within("over-approximate", Precision::Narrowed));
-    assert!(!finding_precision_within("unknown", Precision::Narrowed));
-    assert!(
-        !finding_precision_within("over-approximate", Precision::Unknown),
-        "diagnostic-only precision must never become public finding evidence"
-    );
-    assert!(
-        !finding_precision_within("unknown", Precision::Unknown),
-        "unknown precision must remain diagnostic-only even under a broad caller cap"
-    );
-}
-
 fn tainted_edge(
     trace_id: u64,
     parent_trace_id: Option<u64>,
@@ -1000,7 +984,6 @@ fn tainted_edge(
         callee,
         call_span: Span::new(bonsai_common::FileId::new(1), start, start + 1),
         tainted_args: Vec::new(),
-        precision: Precision::Narrowed,
         edge_kind: bonsai_callgraph::EdgeKind::Direct,
     }
 }
@@ -1442,7 +1425,6 @@ fn finding_with_flow_for_grouping(
             hops: Vec::new(),
             tag: Some("command-injection".to_string()),
             severity: Some(Severity::Critical),
-            precision: "narrowed".to_string(),
             cwe: vec!["CWE-78".to_string()],
             owasp: Vec::new(),
             status: FindingStatus::Unsanitized,

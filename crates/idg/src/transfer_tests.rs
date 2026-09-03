@@ -115,7 +115,6 @@ fn parameter_seeding_creates_param_to_read_bridge() {
     assert_eq!(out.edges.len(), 2);
     for edge in &out.edges {
         assert_eq!(edge.meta.kind, IdgEdgeKind::IntraAssign);
-        assert_eq!(edge.meta.precision, Precision::Exact);
     }
 }
 
@@ -2292,7 +2291,6 @@ fn configured_call_result_passthrough_is_materialized_for_assign_rhs() {
     assert!(out.edges.iter().any(|edge| {
         matches!(place_for(edge.from), Place::CallArg { site, idx } if site.0 == call_span && *idx == 0)
             && matches!(place_for(edge.to), Place::CallRet { site } if site.0 == call_span)
-            && edge.meta.precision == Precision::Narrowed
     }));
 }
 
@@ -3027,7 +3025,6 @@ fn direct_call_argument_is_mediated_by_the_nested_call_return() {
                 Some(Place::CallRet { site }) if site.0 == inner_span
             )
             && edge.meta.kind == IdgEdgeKind::IntraAssign
-            && edge.meta.precision == Precision::Exact
     }));
     assert!(
         out.edges
@@ -4762,7 +4759,6 @@ fn syntax_operator_flows_operands_to_result() {
         out.edges.iter().any(|edge| {
             rendered_place_name(&out, edge.from) == format!("CallArg({operator_span:?},0)")
                 && rendered_place_name(&out, edge.to) == format!("CallRet({operator_span:?})")
-                && edge.meta.precision == Precision::Exact
         }),
         "an AST operator result must depend exactly on its operand: {:#?}",
         out.edges

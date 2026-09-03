@@ -43,8 +43,8 @@ fingerprint.
 sink-analysis`, `dump-taint`, inspect, and the public compatibility API use
 the IDG-backed graph builders in
 `crates/taint/src/reachable.rs`. Those builders resolve source seeds to IDG
-nodes, apply configured transfer summaries, compute a precision-filtered
-closure, and then cut/report only the relevant semantic target or lineage
+nodes, apply configured transfer summaries, compute the forward closure,
+and then cut/report only the relevant semantic target or lineage
 corridor. This is the deployed source-to-sink path; direct raw-AST taint and
 whole-workspace per-source/per-sink traversal are not production evidence
 paths.
@@ -96,7 +96,7 @@ fallback. A warm query reuses the validated IDG accelerator; a cold query
 builds only the complete compiler corridor required by its source and target
 spans and never publishes that partial graph as the workspace-wide IDG. All
 backends use the same adapter-lowered `FlowEvent`s, resolver-backed call
-edges, precision ceiling, and taint crate propagation semantics.
+edges, and taint crate propagation semantics.
 
 Default entry seeds are centralized in `reachable.rs`:
 
@@ -231,8 +231,8 @@ the security layer.
 ### 4. Call graph
 
 Function A → function B edges, resolved via
-`bonsai_resolve::resolve_callable_with_context`. Every edge carries a
-`Precision` and an `EdgeKind` (Direct / Virtual / Indirect / Unknown).
+`bonsai_resolve::resolve_callable_with_context`. Every edge carries an
+`EdgeKind` (Direct / Virtual / Indirect / Unknown) and resolver provenance.
 Callable values pass through `bonsai_common::callable_reference_variants`
 so the various forms (`&fn/1`, `fun fn/1`, `\&fn`, string callables, Ruby
 method symbols, qualified tails) collapse to the same bare callable.
@@ -483,7 +483,7 @@ All caches are `parking_lot::RwLock`-backed and safe to share
 across rayon worker threads. `Workspace::ingest_dir` clears or
 invalidates each one when a file edit lands.
 
-## Resolver semantics and precision
+## Resolver semantics
 
 `resolve_callable_with_context` (`crates/resolve/src/lib.rs`)
 is the single semantic entry point. It applies, in order:
@@ -508,18 +508,16 @@ The engine's `resolve_call_candidates_with_caller_at` builds the
 `ResolveContext` from each call site's `(caller_func, call_span)`,
 threads it into the resolver, and memoises the answer in
 `InterTaintCaches::resolved_calls_by_site`. When the answer is a
-single candidate, the edge is `EdgeKind::Direct` /
-`Precision::Narrowed`. Multiple candidates are emitted only when adapter
+single candidate, the edge is `EdgeKind::Direct`. Multiple candidates are
+emitted only when adapter
 facts semantically explain the set, such as typed virtual dispatch over a
 known receiver family or a same-scope overload family. Overload families are
 then narrowed by declared argument/parameter type facts when available, so a
 known `String` actual does not propagate into an `Int` overload. The remaining
-multi-candidate edges are `EdgeKind::Virtual` /
-`Precision::Narrowed`. Contextless or unexplained multi-candidate sets are
-not public evidence and must be surfaced as incompleteness/debug metadata,
-not widened into `Precision::OverApproximate` findings. There is no
-"used-tail-fallback widens single candidates to OverApproximate"
-exception — `ResolveContext` filtering already narrowed the result.
+multi-candidate edges are `EdgeKind::Virtual`. Contextless or unexplained
+multi-candidate sets are not edges at all: they are surfaced as
+incompleteness/debug metadata. There is no precision lattice to widen into;
+`ResolveContext` filtering already narrowed the result.
 
 Receiver-type-unknown calls produce no semantic call target. Debug-only
 helpers may explain why a name looked dynamic, but public review/security
@@ -611,11 +609,6 @@ interprocedural engine and not an alternate source-to-sink result.
   rulepack-declared receiver/method shapes that move argument taint into
   receiver state for later receiver-only sinks. The engine owns no global
   mutator-name list.
-- `max_edge_precision: Option<Precision>` — an internal accepted-evidence
-  boundary; production consumers admit compiler-proven edges (`Exact` or
-  `Narrowed` provenance) and reject guessed over-approximate edges. It is not a
-  public analysis mode or finding-set selector.
-
 Language syntax and ABI intrinsics remain in adapter/compiler lowering (for
 example C variadic builtins). Library/framework API behavior belongs only in
 rulepack/config transfer semantics. Package-gated rules require adapter import
@@ -636,7 +629,6 @@ typed calls against those targets and contains no constructor-name list.
 - `call_records: Vec<CallPropagation>` — every cross-function flow.
 - `tainted_calls: Vec<TaintedCall>` — every call/write/return whose
   operands carry tainted values.
-- `precision: Precision` — worst seen along any traversed edge.
 - `pairs_analyzed: u32` — number of graph pairs represented by the closure.
 
 The closure kernel is a sparse monotone stack over numeric CSR edges. It has

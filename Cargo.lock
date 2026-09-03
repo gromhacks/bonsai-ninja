@@ -185,6 +185,7 @@ dependencies = [
  "once_cell",
  "owo-colors",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

@@ -1,7 +1,7 @@
 use super::*;
 use crate::edge::{EdgeMeta, IdgEdgeKind};
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
-use bonsai_common::{FileId, Precision, Span};
+use bonsai_common::{FileId, Span};
 
 fn span() -> Span {
     Span::new(FileId::new(0), 0, 1)
@@ -9,7 +9,6 @@ fn span() -> Span {
 
 fn meta() -> EdgeMeta {
     EdgeMeta {
-        precision: Precision::Exact,
         kind: IdgEdgeKind::IntraAssign,
         call_kind: CallEdgeKind::Direct,
         via_span: span(),

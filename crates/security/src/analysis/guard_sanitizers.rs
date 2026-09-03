@@ -866,7 +866,7 @@ fn finite_literal_returning_helper_selection(
     for call_span in reaching_calls {
         let mut targets = call_graph
             .callees_of(caller_func)
-            .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, call_span))
+            .filter(|edge| spans_overlap(edge.span, call_span))
             .map(|edge| edge.to)
             .collect::<AHashSet<_>>()
             .into_iter()
@@ -1375,22 +1375,19 @@ pub(super) fn path_consumer_containment_guard_sanitizer(
         )
     })
     .or_else(|| {
-        let guarded = call_graph
-            .callers_of(sink_func)
-            .filter(|edge| edge.precision.is_semantic())
-            .find_map(|edge| {
-                let caller = ws.exact_decl(SymbolId::new(edge.from.raw()))?;
-                path_consumer_guard_span(
-                    ws,
-                    global,
-                    static_provenance_call_graph,
-                    &caller,
-                    edge.span,
-                    guard.sink_path_arg_index,
-                    guard,
-                    Some(&decl.name),
-                )
-            });
+        let guarded = call_graph.callers_of(sink_func).find_map(|edge| {
+            let caller = ws.exact_decl(SymbolId::new(edge.from.raw()))?;
+            path_consumer_guard_span(
+                ws,
+                global,
+                static_provenance_call_graph,
+                &caller,
+                edge.span,
+                guard.sink_path_arg_index,
+                guard,
+                Some(&decl.name),
+            )
+        });
         guarded
     })
     .or_else(|| {
@@ -1534,7 +1531,7 @@ fn path_consumer_helper_guard_span(
     }) {
         let targets = call_graph
             .callees_of(sink_func)
-            .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, helper_call.span))
+            .filter(|edge| spans_overlap(edge.span, helper_call.span))
             .map(|edge| edge.to)
             .collect::<AHashSet<_>>();
         let mut targets = targets.into_iter();
@@ -1612,7 +1609,7 @@ fn path_guarded_helper_return_span(
     let call = calls.iter().find(|call| spans_overlap(call.span, call_site))?;
     let targets = call_graph
         .callees_of(helper_func)
-        .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, call.span))
+        .filter(|edge| spans_overlap(edge.span, call.span))
         .map(|edge| edge.to)
         .collect::<AHashSet<_>>();
     let mut targets = targets.into_iter();
@@ -2367,7 +2364,7 @@ fn character_escape_resolved_flow_proof(
 
     let targets = call_graph
         .callees_of(caller_func)
-        .filter(|edge| edge.precision.is_semantic() && edge.span == *call_span)
+        .filter(|edge| edge.span == *call_span)
         .map(|edge| edge.to)
         .collect::<AHashSet<_>>();
     bonsai_diagnostics::debug_log!(
@@ -2670,7 +2667,7 @@ pub(super) fn character_constraint_sanitizer(context: &CompilerGuardContext<'_>)
                 };
                 let targets = graph
                     .callees_of(FuncId::new(call_owner.symbol.raw()))
-                    .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, call_span))
+                    .filter(|edge| spans_overlap(edge.span, call_span))
                     .map(|edge| edge.to)
                     .collect::<AHashSet<_>>();
                 let mut targets = targets.into_iter();
@@ -2924,7 +2921,7 @@ pub(super) fn same_origin_path_constraint_sanitizer(
                 let targets = context
                     .call_graph
                     .callees_of(caller_func)
-                    .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, helper_call_span))
+                    .filter(|edge| spans_overlap(edge.span, helper_call_span))
                     .map(|edge| edge.to)
                     .collect::<AHashSet<_>>();
                 let mut targets = targets.into_iter();
@@ -3781,7 +3778,7 @@ fn resolved_character_substitution_calls<'a>(
         .filter_map(|call| {
             let mut targets = call_graph
                 .callees_of(caller)
-                .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, call.span))
+                .filter(|edge| spans_overlap(edge.span, call.span))
                 .map(|edge| edge.to)
                 .collect::<AHashSet<_>>()
                 .into_iter();
@@ -4659,10 +4656,7 @@ fn function_parameter_has_only_static_callers(
     if !visited.insert((function, parameter_index)) {
         return false;
     }
-    let callers = call_graph
-        .callers_of(function)
-        .filter(|edge| edge.precision.is_semantic())
-        .collect::<Vec<_>>();
+    let callers = call_graph.callers_of(function).collect::<Vec<_>>();
     if callers.is_empty() {
         visited.remove(&(function, parameter_index));
         return false;
@@ -6816,7 +6810,7 @@ pub(super) fn configured_argument_factory_guard_sanitizer(
         clean_overwrite_target_key(parameter).as_deref() == Some(guarded_place.as_str())
     })?;
     let callers = call_graph.callers_of(sink_func).collect::<Vec<_>>();
-    if callers.is_empty() || callers.iter().any(|edge| !edge.precision.is_semantic()) {
+    if callers.is_empty() {
         return None;
     }
     let mut proof_span: Option<Span> = None;
@@ -7693,10 +7687,7 @@ fn url_reconstruction_target_for_sink(
 
     let helper_targets: AHashSet<FuncId> = call_graph
         .callees_of(sink_func)
-        .filter(|edge| {
-            edge.precision.is_semantic()
-                && (edge.span == helper_call.span || spans_overlap(edge.span, helper_call.span))
-        })
+        .filter(|edge| edge.span == helper_call.span || spans_overlap(edge.span, helper_call.span))
         .map(|edge| edge.to)
         .collect();
     let mut helper_targets = helper_targets.into_iter();

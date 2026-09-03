@@ -54,7 +54,7 @@ impl<'a> CallEdgeResolver<'a> {
         };
         if let Some(span) = graph
             .callees_of(caller_func)
-            .find(|edge| edge.to == target_func && edge.precision.is_semantic())
+            .find(|edge| edge.to == target_func)
             .map(|edge| edge.span)
         {
             self.edge_spans.insert((caller_func, target_func), Some(span));
@@ -103,7 +103,7 @@ pub fn find_call_span_to_func_uncached(
     workspace
         .cached_resolved_call_graph()
         .callees_of(caller_func)
-        .find(|edge| edge.to == target_func && edge.precision.is_semantic())
+        .find(|edge| edge.to == target_func)
         .map(|edge| edge.span)
 }
 

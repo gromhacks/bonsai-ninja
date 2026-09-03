@@ -9,8 +9,7 @@
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::{
-    cached_span_map_arc, path_filter_matches_with_root, wire, workspace_bonsai_dir, FileId, Precision, Span,
-    SymbolId,
+    cached_span_map_arc, path_filter_matches_with_root, wire, workspace_bonsai_dir, FileId, Span, SymbolId,
 };
 use bonsai_factstore::{FactStoreReader, FactStoreWriter, LookupHit};
 use bonsai_hash::{fnv1a_bytes64, fnv1a_str_slice64, Hasher as StableHasher};
@@ -73,7 +72,7 @@ use std::time::Instant;
 /// dictionary. These values are identities or file/kind projections and
 /// therefore cannot deduplicate; interning millions of semantic-edge ids made
 /// exact large-workspace builds serial without reducing the payload.
-pub const RETRIEVAL_SCHEMA_VERSION: u32 = 16;
+pub const RETRIEVAL_SCHEMA_VERSION: u32 = 17;
 
 /// Factstore table id for retrieval snapshots.
 pub const RETRIEVAL_TABLE_ID: u32 = 0x5254_5631;
@@ -115,7 +114,6 @@ pub struct FactDoc {
     pub enclosing_function: Option<String>,
     pub enclosing_class: Option<String>,
     pub stable_ids: Vec<String>,
-    pub resolver_precision: Option<String>,
     pub resolver_stage: Option<String>,
     pub provenance: Option<String>,
     pub confidence: Option<u8>,
@@ -154,7 +152,6 @@ struct CompactFactDoc {
     enclosing_function: Option<u32>,
     enclosing_class: Option<u32>,
     stable_ids: Vec<String>,
-    resolver_precision: Option<u32>,
     resolver_stage: Option<u32>,
     provenance: Option<u32>,
     confidence: Option<u8>,
@@ -601,7 +598,6 @@ pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
                     enclosing_function: enclosing_function.as_deref(),
                     enclosing_class: None,
                     stable_ids: Vec::new(),
-                    precision: None,
                     resolver_stage: None,
                     provenance: None,
                     confidence: None,
@@ -630,7 +626,6 @@ pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
                     enclosing_function: enclosing_function.as_deref(),
                     enclosing_class: None,
                     stable_ids: Vec::new(),
-                    precision: None,
                     resolver_stage: None,
                     provenance: Some(category.as_str()),
                     confidence: None,
@@ -659,7 +654,6 @@ pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
                     enclosing_function: enclosing_function.as_deref(),
                     enclosing_class: None,
                     stable_ids: Vec::new(),
-                    precision: None,
                     resolver_stage: None,
                     provenance: Some(category.as_str()),
                     confidence: None,
@@ -764,7 +758,6 @@ fn push_file_candidate_doc(
         enclosing_function: None,
         enclosing_class: None,
         stable_ids,
-        resolver_precision: None,
         resolver_stage: None,
         provenance: Some("file-candidate-index".to_string()),
         confidence: None,
@@ -779,10 +772,7 @@ fn push_file_candidate_doc(
 fn index_semantic_edges_by_file(call_graph: &ResolvedCallGraph) -> AHashMap<FileId, Vec<usize>> {
     let mut edge_indices = AHashMap::default();
     for (index, edge) in call_graph.inner().edges.iter().enumerate() {
-        if edge.precision.is_semantic()
-            && call_graph.node_name(edge.from).is_some()
-            && call_graph.node_name(edge.to).is_some()
-        {
+        if call_graph.node_name(edge.from).is_some() && call_graph.node_name(edge.to).is_some() {
             edge_indices
                 .entry(edge.span.file)
                 .or_insert_with(Vec::new)
@@ -1322,7 +1312,6 @@ impl CompactFactSnapshotBuilder {
             enclosing_function: self.strings.intern_option(doc.enclosing_function),
             enclosing_class: self.strings.intern_option(doc.enclosing_class),
             stable_ids: doc.stable_ids,
-            resolver_precision: self.strings.intern_option(doc.resolver_precision),
             resolver_stage: self.strings.intern_option(doc.resolver_stage),
             provenance: self.strings.intern_option(doc.provenance),
             confidence: doc.confidence,
@@ -1389,7 +1378,6 @@ impl CompactFactSnapshot {
                     enclosing_function: optional(&strings, doc.enclosing_function)?,
                     enclosing_class: optional(&strings, doc.enclosing_class)?,
                     stable_ids: doc.stable_ids,
-                    resolver_precision: optional(&strings, doc.resolver_precision)?,
                     resolver_stage: optional(&strings, doc.resolver_stage)?,
                     provenance: optional(&strings, doc.provenance)?,
                     confidence: doc.confidence,
@@ -1428,7 +1416,6 @@ impl CompactFactSnapshot {
                 doc.qualified_name,
                 doc.enclosing_function,
                 doc.enclosing_class,
-                doc.resolver_precision,
                 doc.resolver_stage,
                 doc.provenance,
             ]
@@ -1969,7 +1956,6 @@ fn push_import_doc(
         enclosing_function: None,
         enclosing_class: None,
         stable_ids: Vec::new(),
-        precision: None,
         resolver_stage: None,
         provenance: import.original_name.as_deref(),
         confidence: None,
@@ -2017,7 +2003,6 @@ fn push_decl_doc(
         enclosing_function: Some(decl.name.as_str()),
         enclosing_class: class.as_deref(),
         stable_ids: Vec::new(),
-        precision: None,
         resolver_stage: None,
         provenance: None,
         confidence: None,
@@ -2071,7 +2056,6 @@ fn push_file_doc(
         enclosing_function: None,
         enclosing_class: None,
         stable_ids: Vec::new(),
-        precision: None,
         resolver_stage: None,
         provenance: None,
         confidence: None,
@@ -2229,7 +2213,6 @@ fn push_assignment_doc(
         enclosing_function: Some(ctx.in_fn),
         enclosing_class: None,
         stable_ids: Vec::new(),
-        precision: None,
         resolver_stage: None,
         provenance: None,
         confidence: None,
@@ -2279,7 +2262,6 @@ fn push_call_arg_doc(
         enclosing_function: Some(ctx.in_fn),
         enclosing_class: None,
         stable_ids: Vec::new(),
-        precision: None,
         resolver_stage: None,
         provenance: arg.name.as_deref(),
         confidence: None,
@@ -2328,7 +2310,6 @@ fn push_operation_doc(ws: &Workspace, docs: &mut Vec<FactDoc>, op: &Operation, c
         enclosing_function: Some(ctx.in_fn),
         enclosing_class: None,
         stable_ids: Vec::new(),
-        precision: None,
         resolver_stage: None,
         provenance: op.detail.as_deref(),
         confidence: None,
@@ -2363,7 +2344,6 @@ fn push_simple_doc(
         enclosing_function: Some(ctx.in_fn),
         enclosing_class: None,
         stable_ids: Vec::new(),
-        precision: None,
         resolver_stage: None,
         provenance: None,
         confidence: None,
@@ -2378,9 +2358,6 @@ fn push_simple_doc(
 fn push_edge_docs(ws: &Workspace, docs: &mut Vec<FactDoc>, pipeline: u64) {
     let global = ws.db().global_index();
     for edge in &ws.cached_resolved_call_graph().inner().edges {
-        if !edge.precision.is_semantic() {
-            continue;
-        }
         let Some(caller) = global.decl_of(SymbolId::new(edge.from.raw())) else {
             continue;
         };
@@ -2408,7 +2385,6 @@ fn push_edge_docs(ws: &Workspace, docs: &mut Vec<FactDoc>, pipeline: u64) {
             enclosing_function: Some(caller.name.as_str()),
             enclosing_class: class_name_for_decl(ws, caller).as_deref(),
             stable_ids: vec![edge_id],
-            precision: Some(precision_label(edge.precision)),
             resolver_stage: Some(edge.provenance.resolver_stage()),
             provenance: Some(edge.provenance.evidence()),
             confidence: Some(edge.provenance.confidence()),
@@ -2436,7 +2412,6 @@ struct DocInput<'a> {
     enclosing_function: Option<&'a str>,
     enclosing_class: Option<&'a str>,
     stable_ids: Vec<String>,
-    precision: Option<&'a str>,
     resolver_stage: Option<&'a str>,
     provenance: Option<&'a str>,
     confidence: Option<u8>,
@@ -2467,7 +2442,6 @@ fn new_doc(input: DocInput<'_>) -> FactDoc {
         enclosing_function: input.enclosing_function.map(str::to_string),
         enclosing_class: input.enclosing_class.map(str::to_string),
         stable_ids: input.stable_ids,
-        resolver_precision: input.precision.map(str::to_string),
         resolver_stage: input.resolver_stage.map(str::to_string),
         provenance: input.provenance.map(str::to_string),
         confidence: input.confidence,
@@ -2535,15 +2509,6 @@ fn enclosing_function_in_decls(decls: &[Decl], span: Span) -> Option<String> {
         })
         .min_by_key(|decl| decl.span.end.saturating_sub(decl.span.start))
         .map(|decl| decl.name.clone())
-}
-
-fn precision_label(precision: Precision) -> &'static str {
-    match precision {
-        Precision::Exact => "exact",
-        Precision::Narrowed => "narrowed",
-        Precision::OverApproximate => "over-approximate",
-        Precision::Unknown => "unknown",
-    }
 }
 
 fn edge_id_for_parts(caller: &str, callee: &str, file: &str, line: u32, column: u32) -> String {
@@ -2686,7 +2651,6 @@ fn merge_fact_doc(existing: &mut FactDoc, doc: FactDoc) {
     fill_option(&mut existing.qualified_name, doc.qualified_name);
     fill_option(&mut existing.enclosing_function, doc.enclosing_function);
     fill_option(&mut existing.enclosing_class, doc.enclosing_class);
-    fill_option(&mut existing.resolver_precision, doc.resolver_precision);
     fill_option(&mut existing.resolver_stage, doc.resolver_stage);
     fill_option(&mut existing.provenance, doc.provenance);
     existing.confidence = match (existing.confidence, doc.confidence) {
@@ -2800,7 +2764,6 @@ mod tests {
             enclosing_function: Some("handler"),
             enclosing_class: None,
             stable_ids: Vec::new(),
-            precision: Some("exact"),
             resolver_stage: Some("exact-symbol"),
             provenance: Some("unit"),
             confidence: Some(100),

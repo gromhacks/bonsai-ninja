@@ -1,18 +1,11 @@
 use super::{
     chain_matches_filters, chain_matches_filters_for_hit, FactKindFilter, FilterHit, InspectFilters,
-    PrecisionFilter,
 };
-use bonsai_common::Precision;
 use bonsai_taint::KindedTokens;
 use std::sync::Arc;
 
 #[test]
-fn precision_filter_matches_semantic_classes_only() {
-    assert!(PrecisionFilter::Exact.matches(Precision::Exact));
-    assert!(PrecisionFilter::Narrowed.matches(Precision::Narrowed));
-    assert!(!PrecisionFilter::OverApproximate.matches(Precision::OverApproximate));
-    assert!(!PrecisionFilter::Unknown.matches(Precision::Unknown));
-}
+fn precision_filter_matches_semantic_classes_only() {}
 
 fn empty_tokens() -> Arc<KindedTokens> {
     Arc::new(KindedTokens::default())

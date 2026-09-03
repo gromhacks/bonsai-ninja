@@ -6,23 +6,15 @@ fn span() -> Span {
 }
 
 #[test]
-fn intra_assign_constructor_sets_exact_precision_and_direct() {
+fn intra_assign_constructor_sets_kind_and_direct() {
     let e = IdgEdge::intra_assign(NodeId(1), NodeId(2), span());
-    assert_eq!(e.meta.precision, Precision::Exact);
     assert_eq!(e.meta.kind, IdgEdgeKind::IntraAssign);
     assert_eq!(e.meta.call_kind, CallEdgeKind::Direct);
 }
 
 #[test]
 fn inter_call_arg_carries_call_kind() {
-    let e = IdgEdge::inter_call_arg(
-        NodeId(1),
-        NodeId(2),
-        span(),
-        Precision::OverApproximate,
-        CallEdgeKind::Virtual,
-    );
-    assert_eq!(e.meta.precision, Precision::OverApproximate);
+    let e = IdgEdge::inter_call_arg(NodeId(1), NodeId(2), span(), CallEdgeKind::Virtual);
     assert_eq!(e.meta.kind, IdgEdgeKind::InterCallArg);
     assert_eq!(e.meta.call_kind, CallEdgeKind::Virtual);
 }

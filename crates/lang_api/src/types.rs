@@ -4,7 +4,7 @@
 //! them minimal: every field costs every adapter.
 
 use ahash::AHashMap;
-use bonsai_common::{FileId, Precision, Span, SymbolId};
+use bonsai_common::{FileId, Span, SymbolId};
 use serde::{Deserialize, Serialize};
 
 /// Short lowercase language identifier (e.g. `"rust"`, `"python"`).
@@ -1712,7 +1712,7 @@ pub enum AssignValueKind {
     /// Resolved callees use their exact yield summaries. If a language
     /// adapter proves an inline-yield binding but the callee is external,
     /// the IDG may conservatively connect only the adapter-declared explicit
-    /// inputs to that binding at narrowed precision.
+    /// inputs to that binding as resolved evidence.
     YieldResult,
     /// A binding projected from an aggregate pattern. The bound value is
     /// reachable from both the aggregate and the exact selected field, so
@@ -4006,7 +4006,6 @@ impl CompilerBrowseHeader {
 pub struct UnsupportedConstruct {
     pub span: Span,
     pub note: String,
-    pub precision: Precision,
 }
 
 #[cfg(test)]

@@ -114,6 +114,14 @@ pub fn dump_ast(ws: &Workspace, f: &AstFilters<'_>) -> AstOutcome {
                 .vfs()
                 .path(file_id)
                 .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string());
+            // Presentation rows name files workspace-relative like every
+            // other browse row; the absolute path stays the filter and
+            // node-id key so stable `N:` ids do not change.
+            let output_path = if display_path == "<unknown>" {
+                display_path.clone()
+            } else {
+                crate::common::workspace_relative_path(ws, &display_path)
+            };
             if let Some(needle) = f.file {
                 if !file_path_matches_filter(ws, &display_path, needle) {
                     return None;
@@ -150,7 +158,7 @@ pub fn dump_ast(ws: &Workspace, f: &AstFilters<'_>) -> AstOutcome {
                             let node = find_node_covering_span(tree_root, decl.span.start, decl.span.end)?;
                             let start = node.start_position();
                             Some(AstFunctionCandidate {
-                                path: display_path.clone(),
+                                path: output_path.clone(),
                                 node_id: compute_node_id(
                                     &display_path,
                                     node.start_byte(),
@@ -181,7 +189,7 @@ pub fn dump_ast(ws: &Workspace, f: &AstFilters<'_>) -> AstOutcome {
 
             let root_ast = build_ast_node(scoped_node, source, &display_path, None, 0, depth_cap);
             Some(FileResult::Dump(AstFileDump {
-                path: display_path,
+                path: output_path,
                 root: root_ast,
             }))
         })

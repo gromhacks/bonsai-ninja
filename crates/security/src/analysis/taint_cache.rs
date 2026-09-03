@@ -1,6 +1,6 @@
 use crate::loader::Rulepack;
 use crate::rule::RuleKind;
-use bonsai_common::{FileId, FuncId, Precision};
+use bonsai_common::{FileId, FuncId};
 use bonsai_workspace::Workspace;
 use std::path::PathBuf;
 
@@ -12,11 +12,7 @@ use std::path::PathBuf;
 /// answer is no longer reusable.
 const TAINT_GRAPH_QUERY_ABI: u32 = 4;
 
-pub(super) fn config_fingerprint(
-    pack: &Rulepack,
-    mode: &'static str,
-    max_precision: Option<Precision>,
-) -> u64 {
+pub(super) fn config_fingerprint(pack: &Rulepack, mode: &'static str) -> u64 {
     let rule_content_fingerprint = *pack.taint_graph_rule_content_fingerprint.get_or_init(|| {
         let mut rule_tokens = Vec::new();
         let mut rules = pack.all_rules();
@@ -50,10 +46,6 @@ pub(super) fn config_fingerprint(
     let tokens = vec![
         format!("taint-graph-query-abi={TAINT_GRAPH_QUERY_ABI}"),
         format!("mode={mode}"),
-        format!(
-            "max_precision={}",
-            max_precision.map(precision_label).unwrap_or("all")
-        ),
         format!("rule_content={rule_content_fingerprint}"),
     ];
     bonsai_hash::fnv1a_names64(&tokens)
@@ -66,12 +58,11 @@ pub(super) fn config_fingerprint(
 pub(super) fn scoped_config_fingerprint(
     pack: &Rulepack,
     mode: &'static str,
-    max_precision: Option<Precision>,
     files: &[FileId],
     funcs: &[FuncId],
     transfer_fingerprint: u64,
 ) -> u64 {
-    let base = config_fingerprint(pack, mode, max_precision);
+    let base = config_fingerprint(pack, mode);
     semantic_scope_fingerprint(base, files, funcs, transfer_fingerprint)
 }
 
@@ -317,15 +308,6 @@ fn cache_disabled() -> bool {
     std::env::var("BONSAI_NO_CACHE")
         .ok()
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
-}
-
-fn precision_label(precision: Precision) -> &'static str {
-    match precision {
-        Precision::Exact => "exact",
-        Precision::Narrowed => "narrowed",
-        Precision::OverApproximate => "over-approximate",
-        Precision::Unknown => "unknown",
-    }
 }
 
 fn rule_kind_token(kind: RuleKind) -> &'static str {

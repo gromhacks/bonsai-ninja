@@ -54,7 +54,6 @@ fn combined() -> CombinedFindingWithChain {
             hops: Vec::new(),
             tag: Some("command-injection".to_string()),
             severity: Some(Severity::High),
-            precision: "exact".to_string(),
             cwe: Vec::new(),
             owasp: Vec::new(),
             status: FindingStatus::Unsanitized,
@@ -119,7 +118,6 @@ fn read_file_filters_match_alternate_flow_sources_and_chains() {
             tainted_args: Vec::new(),
         }],
         status: FindingStatus::Unsanitized,
-        precision: "exact".to_string(),
     });
 
     assert!(combined_finding_matches_filters(

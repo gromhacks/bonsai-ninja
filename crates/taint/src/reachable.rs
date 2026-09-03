@@ -28,7 +28,7 @@ use crate::idg_query::{
 };
 use crate::text::normalise_qualified_text;
 use ahash::AHashSet;
-use bonsai_common::{qualified_names_match, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
+use bonsai_common::{qualified_names_match, short_qualified_tail, FileId, FuncId, Span, SymbolId};
 use bonsai_db::AnalyzerDb;
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{collect_return_spans, FlowEvent};
@@ -227,13 +227,10 @@ pub struct KindedTokens {
 /// without replaying interprocedural taint.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EntryTaintGraph {
-    /// Caller→callee edges discovered during interprocedural propagation,
-    /// each tagged with the precision of the resolution.
+    /// Caller→callee edges discovered during interprocedural propagation.
     pub call_records: Vec<TaintedCallEdge>,
     /// Leaf call sites where one or more arguments arrived tainted.
     pub tainted_calls: Vec<crate::idg_api::TaintedCall>,
-    #[serde(default = "default_graph_precision")]
-    pub precision: Precision,
     /// Compatibility metric for the number of resolved cross-call relations
     /// represented by this graph. It never limits semantic work.
     #[serde(default)]
@@ -245,7 +242,6 @@ impl Default for EntryTaintGraph {
         Self {
             call_records: Vec::new(),
             tainted_calls: Vec::new(),
-            precision: Precision::Exact,
             pairs_analyzed: 0,
         }
     }
@@ -330,15 +326,7 @@ fn estimated_string_capacity_bytes(value: &String) -> u64 {
     u64::try_from(value.capacity()).unwrap_or(u64::MAX)
 }
 
-/// Serde default for [`EntryTaintGraph::precision`] / [`TaintedCallEdge::precision`]
-/// when older payloads (without the field) are deserialised — we
-/// stay maximally precise rather than guess `Approximate`.
-fn default_graph_precision() -> Precision {
-    Precision::Exact
-}
-
-/// One caller→callee edge in the per-entry semantic taint graph,
-/// tagged with the precision of the resolution that produced it.
+/// One caller→callee edge in the per-entry semantic taint graph.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaintedCallEdge {
     /// Stable edge trace ID from the interprocedural taint run.
@@ -353,8 +341,6 @@ pub struct TaintedCallEdge {
     pub call_span: Span,
     #[serde(default)]
     pub tainted_args: Vec<crate::idg_api::TaintedArg>,
-    #[serde(default = "default_graph_precision")]
-    pub precision: Precision,
     /// Resolver sub-kind retained from the IDG cross-call edge.
     #[serde(default = "default_call_edge_kind")]
     pub edge_kind: bonsai_callgraph::EdgeKind,
@@ -761,10 +747,7 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
         // semantic-fingerprint cache shares this compiler graph across entry
         // misses without changing `AnalyzerDb::idg_service()` lifecycle.
         caches.mark_used();
-        let config = crate::idg_api::InterTaintConfig {
-            max_edge_precision: Some(Precision::Narrowed),
-            ..Default::default()
-        };
+        let config = crate::idg_api::InterTaintConfig { ..Default::default() };
         let graph_result = crate::idg_api::idg_backed_interprocedural_taint_with_service(
             entry_func,
             &graph_seed,
@@ -782,12 +765,10 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
                 callee: record.callee,
                 call_span: record.call_span,
                 tainted_args: record.tainted_args.clone(),
-                precision: record.edge_precision,
                 edge_kind: record.edge_kind,
             })
             .collect();
         graph.tainted_calls.clone_from(&graph_result.tainted_calls);
-        graph.precision = graph_result.precision;
 
         // Avoid re-running the inter pass when the two seeds coincide;
         // a separate fact-only run is only needed if the wider graph_seed
@@ -1938,8 +1919,8 @@ fn output_arg_read_seed_nodes(
 
 /// Semantic-only source-return reachability over the IDG.
 ///
-/// Defaults to `Precision::Narrowed` so callers cannot accidentally
-/// promote diagnostic over-approximate edges into public evidence.
+/// Every materialized IDG edge is public evidence; there is no diagnostic
+/// edge class to filter.
 #[must_use]
 pub fn source_seed_reaches_return_from_idg(
     source_func: FuncId,
@@ -1967,7 +1948,6 @@ pub fn source_seed_reaches_return_from_idg_query(request: IdgReturnQuery<'_>) ->
     let IdgReturnQuery {
         source,
         receiver_state,
-        max_precision,
         db: _,
         global,
         idg,
@@ -2014,13 +1994,12 @@ pub fn source_seed_reaches_return_from_idg_query(request: IdgReturnQuery<'_>) ->
         return false;
     }
     if !receiver_state.is_empty() {
-        apply_receiver_state_fixpoint(&mut seed_nodes, receiver_state, global, idg, max_precision, None);
+        apply_receiver_state_fixpoint(&mut seed_nodes, receiver_state, global, idg, None);
     }
     let Some(return_node) = idg.return_node_of(source_func) else {
         return false;
     };
-    idg.forward_closure_with_max_precision(&seed_nodes, max_precision)
-        .contains(&return_node)
+    idg.forward_closure(&seed_nodes).contains(&return_node)
 }
 
 /// IDG-driven [`EntryTaintGraph`] builder. Closes the per-source
@@ -2224,7 +2203,6 @@ struct TaintClosureCompilationRequest<'a> {
     honor_node_targets: bool,
     global: &'a GlobalIndex,
     idg: &'a bonsai_idg::IdgQueryService,
-    max_precision: Option<Precision>,
     call_scope: IdgTaintCallScope,
     source_func: FuncId,
 }
@@ -2246,7 +2224,6 @@ fn compile_idg_taint_closure(request: TaintClosureCompilationRequest<'_>) -> Tai
         honor_node_targets,
         global,
         idg,
-        max_precision,
         call_scope,
         source_func,
     } = request;
@@ -2262,7 +2239,6 @@ fn compile_idg_taint_closure(request: TaintClosureCompilationRequest<'_>) -> Tai
         output_arg_flows,
         global,
         idg,
-        max_precision,
         targets.lineage_funcs,
     );
     let transfers_added_seeds = seed_nodes.len() != seed_count_before_transfers;
@@ -2287,12 +2263,7 @@ fn compile_idg_taint_closure(request: TaintClosureCompilationRequest<'_>) -> Tai
         && call_scope == IdgTaintCallScope::RootedAtSource
         && targets.funcs.is_none_or(|funcs| funcs.is_empty())
         && target_nodes.is_some_and(|targets| {
-            idg.rooted_scalar_target_precheck_with_max_precision(
-                &seed_nodes,
-                source_func,
-                targets,
-                max_precision,
-            ) == Some(false)
+            idg.rooted_scalar_target_precheck(&seed_nodes, source_func, targets) == Some(false)
         })
     {
         return TaintClosureCompilation {
@@ -2308,7 +2279,6 @@ fn compile_idg_taint_closure(request: TaintClosureCompilationRequest<'_>) -> Tai
         closure_evidence_with_targets(
             &seed_nodes,
             idg,
-            max_precision,
             ClosureTargetQuery {
                 nodes: target_nodes,
                 funcs: target_funcs,
@@ -2331,14 +2301,13 @@ fn compile_idg_taint_closure(request: TaintClosureCompilationRequest<'_>) -> Tai
         for edge in &evidence.cross_calls {
             bonsai_diagnostics::debug_log!(
                 "idg-closure-detail",
-                "cross-call caller={} callee={} span={:?} arg={} param={} relation={:?} precision={:?}",
+                "cross-call caller={} callee={} span={:?} arg={} param={} relation={:?}",
                 edge.caller.raw(),
                 edge.callee.raw(),
                 edge.call_span,
                 edge.arg_idx,
                 edge.param_idx,
                 edge.relation,
-                edge.precision
             );
         }
     }
@@ -2353,7 +2322,6 @@ fn renderable_cross_calls_from_closure(
     source_func: FuncId,
     closure_nodes: &[bonsai_idg::WsNodeId],
     cross_calls: Vec<bonsai_idg::CrossCallEdge>,
-    _max_precision: Option<Precision>,
     lineage_funcs: Option<&AHashSet<FuncId>>,
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<bonsai_idg::CrossCallEdge> {
@@ -2416,7 +2384,6 @@ fn renderable_cross_calls_from_closure(
             edge.call_span.start,
             edge.arg_idx,
             edge.param_idx,
-            edge.precision,
         )
     });
     edges.dedup();
@@ -2426,7 +2393,6 @@ fn renderable_cross_calls_from_closure(
 struct CallRecordCompilation<'a> {
     records: Vec<TaintedCallEdge>,
     first_inflow: ahash::AHashMap<FuncId, u64>,
-    precision: Precision,
     summary_cache: CallEventSummaryCache<'a>,
 }
 
@@ -2440,7 +2406,6 @@ fn materialize_call_records<'a>(
     let mut next_trace_id = 1u64;
     let mut first_inflow = ahash::AHashMap::new();
     let mut records = Vec::with_capacity(cross_calls.len());
-    let mut precision = Precision::Exact;
     let mut summary_cache = CallEventSummaryCache::for_query(
         caches.map(crate::idg_api::InterTaintCaches::attribution_caches),
         db,
@@ -2468,8 +2433,6 @@ fn materialize_call_records<'a>(
             edge.arg_idx,
             edge.param_idx,
         );
-        precision = precision.meet(edge.precision);
-
         let callee_decl = global.decl_of(bonsai_common::SymbolId::new(edge.callee.raw()));
         let call_summary = cached_call_event_summary(edge.caller, edge.call_span, global, &mut summary_cache);
         records.push(TaintedCallEdge {
@@ -2479,7 +2442,6 @@ fn materialize_call_records<'a>(
             callee: edge.callee,
             call_span: edge.call_span,
             tainted_args: tainted_args_for_cross_call_edge(edge, callee_decl, call_summary.as_deref()),
-            precision: edge.precision,
             edge_kind: edge.call_kind,
         });
     }
@@ -2487,7 +2449,6 @@ fn materialize_call_records<'a>(
     CallRecordCompilation {
         records,
         first_inflow,
-        precision,
         summary_cache,
     }
 }
@@ -2721,12 +2682,11 @@ fn log_entry_taint_graph(source_func: FuncId, graph: &EntryTaintGraph, global: &
         .unwrap_or_default();
     bonsai_diagnostics::debug_log!(
         "taint-graph",
-        "src={}({}) call_records={} tainted_calls={} precision={:?}",
+        "src={}({}) call_records={} tainted_calls={}",
         source_name,
         source_func.raw(),
         graph.call_records.len(),
         graph.tainted_calls.len(),
-        graph.precision
     );
     for call in &graph.tainted_calls {
         bonsai_diagnostics::debug_log!(
@@ -2780,7 +2740,6 @@ fn log_entry_taint_graph(source_func: FuncId, graph: &EntryTaintGraph, global: &
 }
 
 /// Computes call-record evidence for an explicitly scoped compiler query.
-/// Use `request.with_max_precision(None)` only for diagnostic reachability.
 #[must_use]
 pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTaintGraph {
     let IdgTaintQuery {
@@ -2788,7 +2747,6 @@ pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> En
         transfers,
         targets,
         call_scope,
-        max_precision,
         db,
         global,
         idg,
@@ -2841,22 +2799,14 @@ pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> En
         honor_node_targets: false,
         global,
         idg,
-        max_precision,
         call_scope,
         source_func,
     });
     cross_calls.extend(composed.callback_boundaries.iter().copied());
-    let cross_calls = renderable_cross_calls_from_closure(
-        source_func,
-        &closure_nodes,
-        cross_calls,
-        max_precision,
-        lineage_funcs,
-        idg,
-    );
+    let cross_calls =
+        renderable_cross_calls_from_closure(source_func, &closure_nodes, cross_calls, lineage_funcs, idg);
     let compiled = materialize_call_records(source_func, &cross_calls, global, db, caches);
     graph.call_records = compiled.records;
-    graph.precision = compiled.precision;
     graph.pairs_analyzed = u32::try_from(cross_calls.len()).unwrap_or(u32::MAX);
     graph
 }
@@ -2890,7 +2840,7 @@ pub fn entry_taint_graph_from_idg(
 }
 
 /// Computes the full taint evidence graph for an explicitly scoped compiler
-/// query. Use `request.with_max_precision(None)` only for diagnostics.
+/// query.
 #[must_use]
 pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTaintGraph {
     let IdgTaintQuery {
@@ -2898,7 +2848,6 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         transfers,
         targets,
         call_scope,
-        max_precision,
         db,
         global,
         idg,
@@ -2971,7 +2920,6 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         honor_node_targets: true,
         global,
         idg,
-        max_precision,
         call_scope,
         source_func,
     });
@@ -2996,18 +2944,11 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
     // must already be populated when a record with that caller is
     // processed, otherwise lineage chains reconstructed from
     // parent_trace_id come out reversed.
-    let cross_calls = renderable_cross_calls_from_closure(
-        source_func,
-        &closure_nodes,
-        cross_calls,
-        max_precision,
-        lineage_funcs,
-        idg,
-    );
+    let cross_calls =
+        renderable_cross_calls_from_closure(source_func, &closure_nodes, cross_calls, lineage_funcs, idg);
     let CallRecordCompilation {
         records: call_records,
         first_inflow,
-        precision: worst,
         summary_cache: mut call_summary_cache,
     } = materialize_call_records(source_func, &cross_calls, global, db, caches);
 
@@ -3032,7 +2973,6 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
     sort_tainted_calls(&mut tainted_calls);
     graph.call_records = call_records;
     graph.tainted_calls = tainted_calls;
-    graph.precision = worst;
     graph.pairs_analyzed = u32::try_from(cross_calls.len()).unwrap_or(u32::MAX);
     log_entry_taint_graph(source_func, &graph, global);
     if let Some(caches) = caches {
@@ -3072,7 +3012,7 @@ fn direct_assignment_call_span(
 /// output-argument transfers. Constructor field propagation is handled
 /// by the IDG itself; this layer must not promote one tainted
 /// constructor argument to the entire constructed object root.
-#[allow(clippy::too_many_arguments)] // Shared transfer surface carries seed, transfer tables, IDG, precision, and scope.
+#[allow(clippy::too_many_arguments)] // Shared transfer surface carries seed, transfer tables, IDG, and scope.
 pub fn apply_configured_transfer_fixpoint(
     seed_nodes: &mut Vec<bonsai_idg::WsNodeId>,
     receiver_state_propagations: &[crate::idg_api::ReceiverStatePropagation],
@@ -3080,7 +3020,6 @@ pub fn apply_configured_transfer_fixpoint(
     output_arg_flows: &[crate::idg_api::OutputArgFlow],
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
-    max_precision: Option<Precision>,
     func_filter: Option<&AHashSet<FuncId>>,
 ) {
     // All three fixpoints run inside ONE outer loop: receiver-state
@@ -3095,14 +3034,7 @@ pub fn apply_configured_transfer_fixpoint(
         let mut grew = false;
         if !receiver_state_propagations.is_empty() {
             let before = seed_nodes.len();
-            apply_receiver_state_fixpoint(
-                seed_nodes,
-                receiver_state_propagations,
-                global,
-                idg,
-                max_precision,
-                func_filter,
-            );
+            apply_receiver_state_fixpoint(seed_nodes, receiver_state_propagations, global, idg, func_filter);
             grew |= seed_nodes.len() != before;
         }
         if !call_result_passthroughs.is_empty() {
@@ -3111,19 +3043,11 @@ pub fn apply_configured_transfer_fixpoint(
                 call_result_passthroughs,
                 global,
                 idg,
-                max_precision,
                 func_filter,
             );
         }
         if !output_arg_flows.is_empty() {
-            grew |= apply_output_arg_flow_fixpoint(
-                seed_nodes,
-                output_arg_flows,
-                global,
-                idg,
-                max_precision,
-                func_filter,
-            );
+            grew |= apply_output_arg_flow_fixpoint(seed_nodes, output_arg_flows, global, idg, func_filter);
         }
         if !grew {
             break;
@@ -3234,13 +3158,12 @@ fn collect_write_event_summaries(events: &[bonsai_lang_api::FlowEvent], out: &mu
 fn closure_with_func_filter(
     seed_nodes: &[bonsai_idg::WsNodeId],
     idg: &bonsai_idg::IdgQueryService,
-    max_precision: Option<Precision>,
     func_filter: Option<&AHashSet<FuncId>>,
 ) -> Vec<bonsai_idg::WsNodeId> {
     if let Some(funcs) = func_filter.filter(|funcs| !funcs.is_empty()) {
-        idg.forward_closure_within_funcs_with_max_precision(seed_nodes, funcs, max_precision)
+        idg.forward_closure_within_funcs(seed_nodes, funcs)
     } else {
-        idg.forward_closure_with_max_precision(seed_nodes, max_precision)
+        idg.forward_closure(seed_nodes)
     }
 }
 
@@ -3259,36 +3182,24 @@ struct ClosureTargetQuery<'a> {
 fn closure_evidence_with_targets(
     seed_nodes: &[bonsai_idg::WsNodeId],
     idg: &bonsai_idg::IdgQueryService,
-    max_precision: Option<Precision>,
     targets: ClosureTargetQuery<'_>,
 ) -> bonsai_idg::IdgClosureEvidence {
     let func_filter = targets.corridor.filter(|funcs| !funcs.is_empty());
     let mut evidence = if let (Some(root), Some(funcs)) = (targets.source_root, func_filter) {
-        idg.forward_closure_evidence_rooted_at_func_within_funcs_and_relevance_with_max_precision(
+        idg.forward_closure_evidence_rooted_at_func_within_funcs_and_relevance(
             seed_nodes,
             root,
             funcs,
             targets.relevance,
-            max_precision,
         )
     } else if let Some(root) = targets.source_root {
-        idg.forward_closure_evidence_rooted_at_func_and_relevance_with_max_precision(
-            seed_nodes,
-            root,
-            targets.relevance,
-            max_precision,
-        )
+        idg.forward_closure_evidence_rooted_at_func_and_relevance(seed_nodes, root, targets.relevance)
     } else if let (Some(funcs), Some(relevance)) = (func_filter, targets.relevance) {
-        idg.forward_closure_evidence_within_funcs_and_relevance_with_max_precision(
-            seed_nodes,
-            funcs,
-            relevance,
-            max_precision,
-        )
+        idg.forward_closure_evidence_within_funcs_and_relevance(seed_nodes, funcs, relevance)
     } else if let Some(funcs) = func_filter {
-        idg.forward_closure_evidence_within_funcs_with_max_precision(seed_nodes, funcs, max_precision)
+        idg.forward_closure_evidence_within_funcs(seed_nodes, funcs)
     } else {
-        idg.forward_closure_evidence_with_max_precision(seed_nodes, max_precision)
+        idg.forward_closure_evidence(seed_nodes)
     };
     let target_nodes = targets.nodes.filter(|nodes| !nodes.is_empty());
     let target_funcs = targets.funcs.filter(|funcs| !funcs.is_empty());
@@ -3338,7 +3249,6 @@ fn apply_receiver_state_fixpoint(
     propagations: &[crate::idg_api::ReceiverStatePropagation],
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
-    max_precision: Option<Precision>,
     func_filter: Option<&AHashSet<FuncId>>,
 ) {
     let mut applied: ahash::AHashSet<(FuncId, bonsai_common::Span, String)> = ahash::AHashSet::default();
@@ -3350,7 +3260,7 @@ fn apply_receiver_state_fixpoint(
     let mut iter = 0usize;
     loop {
         iter += 1;
-        let closure = closure_with_func_filter(seed_nodes, idg, max_precision, func_filter);
+        let closure = closure_with_func_filter(seed_nodes, idg, func_filter);
         let tainted = idg.tainted_call_args_in_reachable_nodes_for_funcs(&closure, func_filter);
         let mut grew = false;
         // Per-caller, look up flow events once and walk them to find
@@ -3411,7 +3321,6 @@ fn apply_call_result_passthrough_fixpoint(
     passthroughs: &[crate::idg_api::CallResultPassthrough],
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
-    max_precision: Option<Precision>,
     func_filter: Option<&AHashSet<FuncId>>,
 ) -> bool {
     let passthroughs = compile_call_result_passthroughs(passthroughs);
@@ -3439,7 +3348,7 @@ fn apply_call_result_passthrough_fixpoint(
     let mut callee_name_cache = CalleeNameCache::default();
     let mut any_grew = false;
     loop {
-        let closure = closure_with_func_filter(seed_nodes, idg, max_precision, func_filter);
+        let closure = closure_with_func_filter(seed_nodes, idg, func_filter);
         let tainted_args = idg.tainted_call_args_in_reachable_nodes_for_funcs(&closure, func_filter);
         let descendant_inputs = DescendantClosureIndex::from_closure(&closure, idg, func_filter);
         let mut call_summary_cache = CallEventSummaryCache::default();
@@ -3744,7 +3653,6 @@ fn apply_output_arg_flow_fixpoint(
     flows: &[crate::idg_api::OutputArgFlow],
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
-    max_precision: Option<Precision>,
     func_filter: Option<&AHashSet<FuncId>>,
 ) -> bool {
     let flows: Vec<CompiledOutputArgFlow<'_>> = flows
@@ -3778,7 +3686,7 @@ fn apply_output_arg_flow_fixpoint(
     let mut any_grew = false;
     loop {
         iter += 1;
-        let closure = closure_with_func_filter(seed_nodes, idg, max_precision, func_filter);
+        let closure = closure_with_func_filter(seed_nodes, idg, func_filter);
         let tainted_args = idg.tainted_call_args_in_reachable_nodes_for_funcs(&closure, func_filter);
         let mut call_summary_cache = CallEventSummaryCache::default();
         let mut grew = false;

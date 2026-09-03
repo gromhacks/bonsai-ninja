@@ -15,7 +15,7 @@
 
 // Submodules: external surface is the re-exports below. `refs` and
 // `strings` stay `pub mod` because the SDK reaches into them
-// (`bonsai_browse::refs::read_snippet`, `bonsai_browse::strings::
+// (`bonsai_browse::refs::read_anchor_line`, `bonsai_browse::strings::
 // enclosing_fn_for_file_line`); everything else is internal.
 pub(crate) mod args;
 pub(crate) mod ast;
@@ -60,7 +60,7 @@ pub use dumps::{
     callgraph_summary, dump_callable_file_qualifier, dump_callgraph, dump_cfg, dump_hir, CallgraphRow,
     DumpCallableCandidate, DumpLookupError, HirDump,
 };
-pub use edges::{compute_edge_id, dump_edges, EdgeRecord, EdgesFilters, PrecisionClass};
+pub use edges::{compute_edge_id, dump_edges, EdgeRecord, EdgesFilters};
 pub use entrypoints::{entrypoints, EntryPointOut, EntryPointsFilters};
 pub use graph_export::{
     graph_projection, render_cypher, render_graph_export, render_graphml, render_networkx_json, GraphEdge,
@@ -90,7 +90,6 @@ pub use symbol_summary::{
     symbol_summaries, SymbolCallEdge, SymbolEvidenceKind, SymbolImport, SymbolSummary, UnresolvedCallEvidence,
 };
 pub use taint::{
-    compute_taint_id, dump_taint, precision_display, TaintFilters, TaintOutcome, TaintRecord, TaintReport,
-    TaintedArgRecord,
+    compute_taint_id, dump_taint, TaintFilters, TaintOutcome, TaintRecord, TaintReport, TaintedArgRecord,
 };
 pub use vars::{vars, VarOut, VarsFilters};

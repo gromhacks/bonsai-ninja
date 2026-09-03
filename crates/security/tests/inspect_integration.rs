@@ -298,13 +298,6 @@ fn sdk_sink_analysis_keeps_unreached_endpoints_and_exact_upstream_paths() {
             .any(|name| name == "run"),
         "upstream compiler lineage should preserve the resolved route"
     );
-    assert!(
-        matches!(
-            reached.upstream_flows[0].precision,
-            bonsai_common::Precision::Exact | bonsai_common::Precision::Narrowed
-        ),
-        "sink-analysis must not surface guessed upstream evidence"
-    );
     assert_eq!(
         reached.security_source_flows.len(),
         1,

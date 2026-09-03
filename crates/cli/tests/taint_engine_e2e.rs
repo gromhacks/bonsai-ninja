@@ -288,15 +288,7 @@ fn language_gauntlet_dump_taint_uses_rulepack_transfer_semantics() {
 fn language_gauntlet_inspect_and_symbol_summary_stay_bounded() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "language_gauntlet");
-    let Some((out, _, code)) = run(&[
-        "inspect",
-        &w,
-        "--query",
-        "execute",
-        "--graph-flow",
-        "--format",
-        "json",
-    ]) else {
+    let Some((out, _, code)) = run(&["inspect", &w, "--query", "execute", "--format", "json"]) else {
         return;
     };
     assert_eq!(code, 0, "language_gauntlet inspect ec={code}");
@@ -795,23 +787,14 @@ fn finding_chain_fits_compressed_path_corridor() {
     assert!(!findings.is_empty(), "complex flows empty");
 
     // Pick the first unsanitized finding whose chain has at least
-    // 2 hops AND a Direct/Narrowed precision class. Inspect filters
-    // out `OverApproximate` chains (they're guesses through Virtual
-    // edges where the resolver couldn't pin a unique callee), so a
-    // finding reported via a Virtual edge intentionally does not
-    // appear in inspect's flow enumeration. Pin the test to the
-    // shared invariant: chains the resolver could pin uniquely
-    // must be reachable from both surfaces.
+    // 2 hops. Chains the resolver pinned must be reachable from both
+    // surfaces.
     let rich = findings.iter().find(|f| {
         f.get("status").and_then(|s| s.as_str()) == Some("unsanitized")
             && f.get("chain_display")
                 .and_then(|c| c.as_array())
                 .map(|a| a.len() >= 2)
                 .unwrap_or(false)
-            && matches!(
-                f.get("precision").and_then(|p| p.as_str()),
-                Some("exact" | "narrowed")
-            )
     });
     let Some(finding) = rich else { return };
     let chain: Vec<String> = finding["chain_display"]
@@ -1034,7 +1017,7 @@ fn export_deterministic_across_runs() {
 }
 
 /// Every propagation in export must carry a taint_id-like stable
-/// shape — caller+callee+call_line+edge_kind+edge_precision all
+/// shape — caller+callee+call_line+edge_kind all
 /// non-empty / non-null.
 #[test]
 fn propagation_records_have_complete_shape() {
@@ -1052,7 +1035,7 @@ fn propagation_records_have_complete_shape() {
             .cloned()
             .unwrap_or_default()
         {
-            for field in ["caller", "callee", "edge_kind", "edge_precision"] {
+            for field in ["caller", "callee", "edge_kind"] {
                 let v = rec.get(field).and_then(|v| v.as_str()).unwrap_or("");
                 assert!(!v.is_empty(), "propagation record missing `{field}`: {rec}");
             }

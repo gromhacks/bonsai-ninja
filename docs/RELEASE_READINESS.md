@@ -203,17 +203,25 @@ For memory context, the prior instrumented
 August 20 empty-cache semantic run recorded 3,788,292,096 bytes maximum RSS
 and zero swaps; its fresh-process reopen used 99,287,040 bytes maximum RSS.
 
+Security selectors are views over one cached complete report: `taint-analysis`
+seeds every loaded source rule (the production profile's `trust: remote` is a
+view), and `sink-analysis` attaches security-source proofs for every loaded
+source rule to its selected sink set (`--sink` remains its one analysis-scope
+selector because lineage is compiled per sink). The taint rows below therefore
+measure the complete analysis, not a trust-scoped subset. Re-measured
+2026-09-02 on the pinned local host.
+
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
 | Fresh-cache structural index | 47.63 s | 100 s |
 | Warm structural index | 4.22 s | 12 s |
 | Cold semantic generation | 425.55 s | 600 s |
 | Fresh-process semantic reuse | 2.74 s | 18 s |
-| Default inspect | 0.89 s | 35 s |
-| Compiler-proven raw-taint inspect | 0.84 s | 35 s |
-| Fresh-cache production taint | 29.51 s | 50 s |
-| Warm production taint | 16.53 s | 35 s |
-| Sink-centric upstream analysis (5 matched endpoints) | 45.80 s | 70 s |
+| Default inspect (compiler flows attached) | 21.46 s | 45 s |
+| Compiler-proven raw-taint inspect | 35.13 s | 45 s |
+| Fresh-cache production taint (complete report, every source rule) | 132.87 s | 170 s |
+| Warm production taint (complete report, every source rule) | 97.66 s | 135 s |
+| Sink-centric upstream analysis (5 matched endpoints, proofs for every source rule) | 71.26 s | 90 s |
 | `tree --max-depth 1` | 0.11 s | 35 s |
 | Search | 1.07 s | 35 s |
 | Definitions | 1.05 s | 35 s |
@@ -386,7 +394,7 @@ The August 21 follow-up applied that same representation invariant to
 cross-file projected edges in the contextual accelerator. Those rows were
 still reopening both compiler-spooled segments once per edge. They are now
 grouped by exact source/target segment pair, and each pair is decoded once
-without changing edge admission, ordering, precision, or fixed-point scope.
+without changing edge admission, ordering, or fixed-point scope.
 On the same 627-file local release workload, contextual accelerator compilation
 fell from 57.42 to 2.70 seconds (21.3x); the complete accelerator fell from
 58.59 to 4.22 seconds. This local regression measurement supplements rather
@@ -439,9 +447,9 @@ The release workflow verifies:
 
 - native text and JSON output;
 - SARIF 2.1.0 parsing and code-flow metadata;
-- standalone HTML generation;
+- HTML report generation from the canonical JSON result;
 - native JSON and graph export formats;
-- native JSON schema v10 validation across every language fixture and
+- native JSON schema v11 validation across every language fixture and
   materialized propagation mode;
 - stable IDs and page/cursor reopening;
 - the locked parser manifest contains every adapter grammar and all six native
@@ -458,8 +466,8 @@ The release workflow verifies:
 - Linux, macOS, and Windows archives for x64 and arm64.
 
 `tree` is separately pinned as a filesystem-only command: it does not open the
-compiler, rulepack, callgraph, or IDG. `--html-output` wraps a command's text
-view and cannot enable additional analysis.
+compiler, rulepack, callgraph, or IDG. `--html-output` renders a command's
+canonical JSON result and cannot enable additional analysis.
 
 ## Publish gate
 

@@ -74,32 +74,6 @@ impl FactKindFilter {
     }
 }
 
-/// Stable, library-level mirror of `bonsai_common::Precision`. Frontends
-/// may still parse broad legacy labels, but public flow/call surfaces
-/// are semantic-only: only exact and narrowed classes can match.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum PrecisionFilter {
-    /// `Precision::Exact` — structural facts; no approximation.
-    Exact,
-    /// `Precision::Narrowed` — single-candidate resolved call.
-    Narrowed,
-    /// `Precision::OverApproximate` — diagnostic-only broad edges.
-    OverApproximate,
-    /// `Precision::Unknown` — diagnostic-only opaque edges.
-    Unknown,
-}
-
-impl PrecisionFilter {
-    #[must_use]
-    pub fn matches(self, precision: bonsai_common::Precision) -> bool {
-        use bonsai_common::Precision;
-        matches!(
-            (self, precision),
-            (Self::Exact, Precision::Exact) | (Self::Narrowed, Precision::Narrowed),
-        )
-    }
-}
-
 #[cfg(test)]
 #[path = "filter_tests.rs"]
 mod tests;

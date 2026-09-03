@@ -26,7 +26,6 @@ use crate::csr::EdgeCsr;
 use crate::edge::IdgEdge;
 use crate::node::NodeId;
 use bonsai_callgraph::PathTruncation;
-use bonsai_common::Precision;
 
 /// Cached bitvector adjacency for one IDG. Built once from the
 /// flat edge list; queries reuse it.
@@ -100,14 +99,12 @@ impl ReachabilityIndex {
             && self.backward.is_valid_for(expected_nodes)
     }
 
-    /// Construct the index from compact `(from, to, precision)` edge
-    /// records. Reachability ignores precision; precision-scoped
-    /// traversals keep their own side adjacency.
+    /// Construct the index from compact `(from, to)` edge records.
     #[must_use]
-    pub fn from_precision_edges(n_nodes: usize, edges: &[(u32, u32, Precision)]) -> Self {
+    pub fn from_pair_edges(n_nodes: usize, edges: &[(u32, u32)]) -> Self {
         Self {
-            forward: EdgeCsr::forward_precision(n_nodes, edges),
-            backward: EdgeCsr::backward_precision(n_nodes, edges),
+            forward: EdgeCsr::forward_pairs(n_nodes, edges),
+            backward: EdgeCsr::backward_pairs(n_nodes, edges),
             n_nodes,
         }
     }

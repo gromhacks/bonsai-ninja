@@ -329,12 +329,9 @@ fn read_file_with_taint_options(
             .map(|d| FuncId::new(d.symbol.raw()))
             .collect();
         drop(global);
-        let resolved = ws.resolved_call_graph_direct_neighborhood(&file_funcs, None);
+        let resolved = ws.resolved_call_graph_direct_neighborhood(&file_funcs);
         for func in &file_funcs {
-            for caller_edge in resolved
-                .callers_of(*func)
-                .filter(|edge| edge.precision.is_semantic())
-            {
+            for caller_edge in resolved.callers_of(*func) {
                 let caller_loc = func_to_locator(caller_edge.from, ws);
                 if caller_loc.file == raw_path {
                     continue;
@@ -349,10 +346,7 @@ fn read_file_with_taint_options(
                     callees_out: Vec::new(),
                 });
             }
-            for callee_edge in resolved
-                .callees_of(*func)
-                .filter(|edge| edge.precision.is_semantic())
-            {
+            for callee_edge in resolved.callees_of(*func) {
                 let callee_loc = func_to_locator(callee_edge.to, ws);
                 if callee_loc.file == raw_path {
                     continue;

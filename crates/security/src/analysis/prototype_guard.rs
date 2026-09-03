@@ -225,7 +225,7 @@ fn recursive_dynamic_key_filter_is_guarded(
 
     let targets: AHashSet<_> = call_graph
         .callees_of(tainted_call.caller)
-        .filter(|edge| edge.precision.is_semantic() && edge.span == helper_call_span)
+        .filter(|edge| edge.span == helper_call_span)
         .map(|edge| edge.to)
         .collect();
     let mut targets = targets.into_iter();

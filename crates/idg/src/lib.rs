@@ -2,9 +2,9 @@
 //!
 //! This crate is the canonical structural taint / dataflow graph.
 //! Public review, export, dump-taint, inspect, and security callers
-//! read it through precision-scoped queries and expose only
-//! semantic (`Exact` / `Narrowed`) reachability. Unscoped
-//! over-approximate reachability is diagnostic-only.
+//! read it through the one semantic closure. Every edge in the graph
+//! follows from syntax and resolved call flow; there is no diagnostic
+//! edge class and no precision knob.
 //!
 //! ## Design
 //!
@@ -42,9 +42,8 @@
 //! ## Evidence boundary
 //!
 //! The IDG forward closure models clean-overwrite kills and branch joins,
-//! and public queries accept evidence through `Precision::Narrowed` while
-//! excluding diagnostic-only edges. This is an evidence classification, not
-//! a traversal or result cap. Adapters provide syntax/capability facts and
+//! and every materialized edge is public evidence. Adapters provide
+//! syntax/capability facts and
 //! the rulepack provides security meaning; source/sink selection and
 //! framework policy remain layers above this API-neutral graph.
 //!
@@ -62,7 +61,7 @@
 //!
 //! - [`place`] — every position a value can occupy.
 //! - [`node`] — nodes (`(FuncId, PlaceId)`) and their u32 handles.
-//! - [`edge`] — directed edges with precision + kind metadata.
+//! - [`edge`] — directed edges with kind metadata.
 //! - [`error`] — error types surfaced by the layer.
 
 #![deny(missing_docs)]

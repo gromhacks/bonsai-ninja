@@ -1,5 +1,4 @@
 use super::trace_page_rows;
-use bonsai_common::Precision;
 use bonsai_sdk::{PathSummary, PathTermination, TraceResult, TraceStep, TraceStepKind};
 
 fn step(id: u64, path_id: u64, code: &str) -> TraceStep {
@@ -16,7 +15,6 @@ fn step(id: u64, path_id: u64, code: &str) -> TraceStep {
         code: code.to_string(),
         state_before: None,
         state_after: None,
-        precision: Precision::Exact,
         notes: Vec::new(),
     }
 }
@@ -31,7 +29,6 @@ fn programmatic_trace_pages_retain_the_steps_for_each_path() {
                 last_step: 1,
                 path_constraints: Vec::new(),
                 terminated_by: PathTermination::Return,
-                precision: Precision::Exact,
             },
             PathSummary {
                 path_id: 9,
@@ -39,7 +36,6 @@ fn programmatic_trace_pages_retain_the_steps_for_each_path() {
                 last_step: 2,
                 path_constraints: Vec::new(),
                 terminated_by: PathTermination::Throw,
-                precision: Precision::Exact,
             },
         ],
         steps: vec![

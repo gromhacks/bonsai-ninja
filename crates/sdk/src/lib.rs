@@ -76,7 +76,7 @@ pub use bonsai_browse::{
     CommentOut, CommentsFilters, DefOut, DefsFilters, EdgeRecord, EdgesFilters, EntryPointOut,
     EntryPointsFilters, GraphExportFormat, GraphProjection, HirDump, ImportOut, ImportsFilters, Locator,
     NativeExportPhase, NativeExportProgress, OperationOperandOut, OperationOut, OperationsFilters,
-    PathFilters, PathFunctionRow, PathOutcome, PathTerminalCallRow, PrecisionClass, RefOut, RefsFilters,
+    PathFilters, PathFunctionRow, PathOutcome, PathTerminalCallRow, RefOut, RefsFilters,
     ResolutionCoverageDeclRow, ResolutionCoverageFileRow, ResolutionCoverageFilters, ResolveFilters,
     ResolveOutcome, ResolveTrace, SearchFilters, SearchHit, SliceFilters, SliceOutcome, SliceRow, SliceStep,
     StringOut, StringsFilters, SummaryAnnotator, SymbolCallEdge, SymbolEvidenceKind, SymbolImport,
@@ -88,23 +88,24 @@ pub use bonsai_inspect::{
     compute_flow_labels_from, compute_group_id, compute_structural_group_id, compute_taint_flow_id,
     find_call_span_by_name, find_call_span_to_func_uncached, find_enclosing_func, func_display_name,
     matching_decls, matching_func_ids, name_token_match, CallEdgeResolver, ChainCache, FactKindFilter,
-    FilterHit, InspectFilters, Matcher, PrecisionFilter, TaintFlowIdentityStep,
+    FilterHit, InspectFilters, Matcher, TaintFlowIdentityStep,
 };
 pub use bonsai_retrieval::RetrievalBuildProgress;
 pub use bonsai_security::{
     build_flow_bodies, drain_runtime_disabled_rules, filter_rules_to_workspace_languages, load_rulepack,
     load_workspace_local_rules, parse_severity, rule_family, security_match_rows, select_rules,
     source_rule_matches_filters, tree_file_rel, workspace_languages, AnalysisProgress,
-    CombinedFindingWithChain, CombinedSourceAnalysisCandidate, DependencyInventory,
-    DependencyInventoryOptions, DependencyRow, Finding, FindingMatch, FindingStatus, FindingWithChain,
-    FlowBodyCache, FlowFunctionBody, FlowRole as SecurityFlowRole, FlowSourceLine, PackAuditCount,
-    PackAuditFamilyCount, PackAuditLanguage, PackAuditReport, PackInventoryOptions, PackRuleRow,
-    PackTreeFile, PackTreeLanguage, PackTreeReport, PackTreeRule, PackValidationIssue, PackValidationReport,
-    Rule, RuleKind, RuleMatch, Rulepack, RulepackMetadata, RuntimeDisabledRule, SecurityInventoryOptions,
-    SecurityMatchRow, SecurityReport, Severity, SinkAnalysisCandidate, SinkAnalysisFlow, SinkAnalysisOptions,
-    SinkAnalysisReport, SourceAnalysisCandidate, SourceAnalysisOptions, SourceAnalysisReport,
-    SourceLineageLimits, SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions,
-    TaintAnalysisReport, TaintPropagationArg, TaintPropagationStep, TrustClass,
+    CombinedFindingWithChain, CombinedSourceAnalysisCandidate, DependencyAnalysisCandidate,
+    DependencyAnalysisOptions, DependencyAnalysisReport, DependencyFunctionRow, DependencyInventory,
+    DependencyInventoryOptions, DependencyRow, DependencyUsageSite, Finding, FindingMatch, FindingStatus,
+    FindingWithChain, FlowBodyCache, FlowFunctionBody, FlowRole as SecurityFlowRole, FlowSourceLine,
+    PackAuditCount, PackAuditFamilyCount, PackAuditLanguage, PackAuditReport, PackInventoryOptions,
+    PackRuleRow, PackTreeFile, PackTreeLanguage, PackTreeReport, PackTreeRule, PackValidationIssue,
+    PackValidationReport, Rule, RuleKind, RuleMatch, Rulepack, RulepackMetadata, RuntimeDisabledRule,
+    SecurityInventoryOptions, SecurityMatchRow, SecurityReport, Severity, SinkAnalysisCandidate,
+    SinkAnalysisFlow, SinkAnalysisOptions, SinkAnalysisReport, SourceAnalysisCandidate,
+    SourceAnalysisOptions, SourceAnalysisReport, TaintAnalysisOptions, TaintAnalysisReport,
+    TaintPropagationArg, TaintPropagationStep, TrustClass,
 };
 pub use bonsai_trace::{
     summarize_incomplete_reasons, PathSummary, PathTermination, TraceResult, TraceStep, TraceStepKind,
@@ -119,10 +120,9 @@ pub use bonsai_workspace::{
         EntryTaintGraph, SyntaxFlowBackend, SyntaxFlowCacheStatus, SyntaxFlowGraph, SyntaxFlowPlan,
         SyntaxFlowQuery, SyntaxFlowSession, TaintedCall, TaintedCallEdge, TaintedCallKind,
     },
-    summarize_precision, CrossModuleOptions, Workspace, WorkspaceContextRoot, WorkspaceContextRootKind,
-    WorkspaceError, WorkspaceOpenOptions as OpenOptions, WorkspaceSemanticContext,
-    WorkspaceSemanticContextSummary, WorkspaceSourceTransformation, WorkspaceSourceVariant, WorkspaceStats,
-    WorkspaceToolchainManifest,
+    CrossModuleOptions, Workspace, WorkspaceContextRoot, WorkspaceContextRootKind, WorkspaceError,
+    WorkspaceOpenOptions as OpenOptions, WorkspaceSemanticContext, WorkspaceSemanticContextSummary,
+    WorkspaceSourceTransformation, WorkspaceSourceVariant, WorkspaceStats, WorkspaceToolchainManifest,
 };
 
 pub mod cache {
@@ -130,7 +130,7 @@ pub mod cache {
 }
 
 pub mod refs {
-    pub use bonsai_browse::refs::read_snippet;
+    pub use bonsai_browse::refs::{read_anchor_line, read_matched_line};
 }
 
 pub use bonsai_browse::decl_decorator_names;
@@ -5555,6 +5555,22 @@ impl Security<'_> {
         ))
     }
 
+    /// Where each flagged dependency is imported, bound, called, referenced,
+    /// and matched by rulepack rules, with enclosing callables and their
+    /// resolved direct callers. Never runs taint analysis.
+    pub fn dependency_analysis(
+        &self,
+        options: bonsai_security::DependencyAnalysisOptions,
+    ) -> Result<bonsai_security::DependencyAnalysisReport> {
+        self.project.refresh_from_disk_best_effort();
+        bonsai_security::dependency_analysis(
+            &self.project.workspace,
+            self.pack()?,
+            &self.project.root,
+            options,
+        )
+    }
+
     pub fn pack_inventory(&self, options: PackInventoryOptions) -> Result<Vec<bonsai_security::PackRuleRow>> {
         self.pack_facade()?.inventory(options)
     }
@@ -5713,7 +5729,6 @@ pub struct InspectChain {
     pub flow_id: String,
     pub funcs: Vec<u32>,
     pub names: Vec<String>,
-    pub precision: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -5722,7 +5737,6 @@ pub struct InspectChainGroup {
     pub member_flow_ids: Vec<String>,
     pub shared_suffix: Vec<String>,
     pub unique_prefixes: Vec<Vec<String>>,
-    pub precision: String,
     pub member_count: usize,
 }
 
@@ -5776,7 +5790,6 @@ fn structural_inspect_evidence(
             ),
             funcs: vec![target.raw()],
             names: bonsai_inspect::chain_to_names(&project.workspace, &funcs),
-            precision: "Exact".to_string(),
         }];
         let groups = group_inspect_chains_by_suffix(&chains);
         out.push(InspectTargetEvidence {
@@ -5829,12 +5842,10 @@ fn group_inspect_chains_by_suffix(chains: &[InspectChain]) -> Vec<InspectChainGr
         let shared_suffix = first_member_chain[first_member_chain.len() - suffix_len..].to_vec();
         let mut member_flow_ids = Vec::with_capacity(members.len());
         let mut unique_prefixes = Vec::with_capacity(members.len());
-        let mut precision = "Exact".to_string();
         for member in &members {
             member_flow_ids.push(member.flow_id.clone());
             let prefix_end = member.names.len() - suffix_len;
             unique_prefixes.push(member.names[..prefix_end].to_vec());
-            precision = worse_precision(&precision, &member.precision).to_string();
         }
 
         groups.push(InspectChainGroup {
@@ -5842,28 +5853,10 @@ fn group_inspect_chains_by_suffix(chains: &[InspectChain]) -> Vec<InspectChainGr
             member_flow_ids,
             shared_suffix,
             unique_prefixes,
-            precision,
             member_count: members.len(),
         });
     }
     groups
-}
-
-fn worse_precision<'a>(left: &'a str, right: &'a str) -> &'a str {
-    if precision_rank(right) > precision_rank(left) {
-        right
-    } else {
-        left
-    }
-}
-
-fn precision_rank(precision: &str) -> u8 {
-    match precision {
-        "Exact" => 0,
-        "Narrowed" => 1,
-        "OverApproximate" => 2,
-        _ => 3,
-    }
 }
 
 #[cfg(test)]

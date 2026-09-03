@@ -39,7 +39,7 @@ use crate::place::Place;
 pub const IDG_SEGMENT_TABLE_ID: u32 = 100;
 
 /// On-disk format version for IDG segments. Bump on layout change.
-pub const IDG_SEGMENT_VERSION: u32 = 4;
+pub const IDG_SEGMENT_VERSION: u32 = 5;
 
 /// One source file's portion of the workspace IDG.
 ///

@@ -4,11 +4,11 @@ use crate::external_relation::{
     ExternalRecord, ExternalSorter, PersistedExternalRelation, SortedExternalRelation,
 };
 use crate::workspace::QueryAcceleratorBlobReader;
-use bonsai_common::{FileId, Precision, Span};
+use bonsai_common::{FileId, Span};
 use std::fs::File;
 use std::sync::Arc;
 
-const RECORD_BYTES: usize = 33;
+const RECORD_BYTES: usize = 32;
 const RUN_ROWS: usize = 100_000;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -17,7 +17,6 @@ struct ReverseScalarRecord {
     write_span: Span,
     source: u32,
     exact_field: u32,
-    precision: u8,
 }
 
 impl ExternalRecord for ReverseScalarRecord {
@@ -30,7 +29,6 @@ impl ExternalRecord for ReverseScalarRecord {
         output.extend_from_slice(&self.write_span.end.to_le_bytes());
         output.extend_from_slice(&self.source.to_le_bytes());
         output.extend_from_slice(&self.exact_field.to_le_bytes());
-        output.push(self.precision);
     }
 
     fn decode(record: &[u8]) -> Self {
@@ -41,7 +39,6 @@ impl ExternalRecord for ReverseScalarRecord {
             write_span: Span::new(FileId::new(word(4)), wide(8), wide(16)),
             source: word(24),
             exact_field: word(28),
-            precision: record[32],
         }
     }
 }
@@ -51,7 +48,6 @@ impl ExternalRecord for ReverseScalarRecord {
 pub(crate) struct ReverseScalarTransform {
     pub(crate) source: u32,
     pub(crate) exact_field: u32,
-    pub(crate) precision: Precision,
 }
 
 pub(crate) struct ReverseScalarTransformSpool(ExternalSorter<ReverseScalarRecord>);
@@ -61,20 +57,12 @@ impl ReverseScalarTransformSpool {
         Self(ExternalSorter::new(RUN_ROWS))
     }
 
-    pub(crate) fn push(
-        &mut self,
-        target: u32,
-        write_span: Span,
-        source: u32,
-        exact_field: u32,
-        precision: Precision,
-    ) {
+    pub(crate) fn push(&mut self, target: u32, write_span: Span, source: u32, exact_field: u32) {
         self.0.push(ReverseScalarRecord {
             target,
             write_span,
             source,
             exact_field,
-            precision: precision.rank(),
         });
     }
 
@@ -116,7 +104,6 @@ impl ReverseScalarTransformIndex {
             write_span,
             source: 0,
             exact_field: 0,
-            precision: 0,
         });
         self.0.visit_while(start, |row| {
             if row.target != target || row.write_span != write_span {
@@ -125,27 +112,16 @@ impl ReverseScalarTransformIndex {
             visit(ReverseScalarTransform {
                 source: row.source,
                 exact_field: row.exact_field,
-                precision: decode_precision(row.precision),
             });
             true
         });
     }
 }
 
-fn decode_precision(value: u8) -> Precision {
-    match value {
-        0 => Precision::Exact,
-        1 => Precision::Narrowed,
-        2 => Precision::OverApproximate,
-        3 => Precision::Unknown,
-        _ => panic!("invalid compact reverse scalar precision"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{ReverseScalarTransformSpool, RUN_ROWS};
-    use bonsai_common::{FileId, Precision, Span};
+    use bonsai_common::{FileId, Span};
 
     #[test]
     fn external_scalar_index_preserves_one_key_across_runs() {
@@ -153,15 +129,14 @@ mod tests {
         let other_span = Span::new(FileId::new(7), 30, 40);
         let mut spool = ReverseScalarTransformSpool::new();
         for source in (0..u32::try_from(RUN_ROWS + 10).expect("test row count")).rev() {
-            spool.push(3, target_span, source, source % 5, Precision::Exact);
-            spool.push(3, target_span, source, source % 5, Precision::Exact);
-            spool.push(3, other_span, source, 0, Precision::Narrowed);
+            spool.push(3, target_span, source, source % 5);
+            spool.push(3, target_span, source, source % 5);
+            spool.push(3, other_span, source, 0);
         }
         let index = spool.finish();
         let mut rows = Vec::new();
         index.visit_incoming(3, target_span, |row| rows.push(row));
         assert_eq!(rows.len(), RUN_ROWS + 10);
         assert!(rows.windows(2).all(|pair| pair[0].source < pair[1].source));
-        assert!(rows.iter().all(|row| row.precision == Precision::Exact));
     }
 }

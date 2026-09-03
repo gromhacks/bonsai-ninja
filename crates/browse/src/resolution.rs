@@ -110,7 +110,7 @@ impl ResolutionIndex {
     }
 
     fn for_functions(ws: &Workspace, functions: &[FuncId]) -> Self {
-        Self::from_graph(ws, ws.resolved_call_graph_direct_neighborhood(functions, None))
+        Self::from_graph(ws, ws.resolved_call_graph_direct_neighborhood(functions))
     }
 
     fn from_graph(ws: &Workspace, resolved: std::sync::Arc<bonsai_callgraph::ResolvedCallGraph>) -> Self {
@@ -134,11 +134,7 @@ impl ResolutionIndex {
     fn resolved_sites_for_decl(&self, decl: &Decl) -> AHashMap<CallSiteKey, EdgeCounts> {
         let caller = bonsai_common::FuncId::new(decl.symbol.raw());
         let mut sites: AHashMap<CallSiteKey, EdgeCounts> = AHashMap::new();
-        for edge in self
-            .resolved
-            .callees_of(caller)
-            .filter(|edge| edge.precision.is_semantic())
-        {
+        for edge in self.resolved.callees_of(caller) {
             let counts = sites.entry(CallSiteKey::new(caller, edge.span)).or_default();
             match edge.kind {
                 EdgeKind::Direct => counts.direct += 1,
@@ -305,7 +301,7 @@ fn persisted_resolution_incomplete_reasons(ws: &Workspace) -> Option<Vec<String>
             // memory bounded by one compiler object while producing the same
             // classification as `resolution_coverage`.
             let mut resolved_sites: AHashMap<CallSiteKey, EdgeCounts> = AHashMap::new();
-            for edge in outgoing.iter().filter(|edge| edge.precision.is_semantic()) {
+            for edge in outgoing.iter() {
                 let counts = resolved_sites
                     .entry(CallSiteKey::new(edge.from, edge.span))
                     .or_default();

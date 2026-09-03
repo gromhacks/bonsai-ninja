@@ -11,7 +11,7 @@ use super::{
     source_seed_set, span_contains, spans_overlap, spans_share_enclosing_loop, symbolic_field_languages,
     taint_cache, AHashMap, AHashSet, AnalysisProgress, Arc, CleanOverwritePolicy, DeclKind, Duration, FileId,
     FindingWithChain, FlowEvent, FuncId, GlobalIndex, GuardProfile, IdgSeedRequest, InterTaintCaches,
-    InterTaintConfig, MatchKind, MatchOrigin, OnceLock, Precision, ResolutionCoverage, RuleMatch, Rulepack,
+    InterTaintConfig, MatchKind, MatchOrigin, OnceLock, ResolutionCoverage, RuleMatch, Rulepack,
     ScopedIdgSeedRequest, SourceMatchDedupeKey, SourceMatchDedupeValue, Span, SymbolId, TokenSet, Workspace,
 };
 
@@ -42,9 +42,8 @@ use super::{
 ///    apply sink-rule constraints with single-call `InterTaintView`.
 /// 7. **Chain assembly** — use propagation lineage IDs recorded by
 ///    the taint engine. If lineage evidence is missing, skip the
-///    finding rather than fabricating a call-graph-only path. Precision
-///    is met across the chosen edges, then `flow_id` / `group_id`
-///    include concrete call sites. Sanitizer attachment by chain hop
+///    finding rather than fabricating a call-graph-only path. `flow_id` /
+///    `group_id` include concrete call sites. Sanitizer attachment by chain hop
 ///    with data-flow gate
 ///    (`sanitizer_call_overlaps_tainted_call` or a sanitizer nested
 ///    directly inside a tainted sink argument).
@@ -67,7 +66,6 @@ pub(super) struct ChainAnalysisRequest<'a, F> {
     pub(super) sinks: &'a [RuleMatch],
     pub(super) sanitizers: &'a [RuleMatch],
     pub(super) pack: &'a Rulepack,
-    pub(super) max_precision: Option<Precision>,
     pub(super) taint_graph_resident_cache_entries: Option<usize>,
     pub(super) rulepack_typing: &'a Arc<crate::matcher::RulepackTyping>,
     pub(super) on_progress: &'a mut F,
@@ -259,7 +257,6 @@ struct SemanticScopeRequest<'a> {
     call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
     fallback_files: &'a [FileId],
     fallback_funcs: &'a [FuncId],
-    max_precision: Option<Precision>,
     prefilter_enabled: bool,
 }
 
@@ -278,7 +275,6 @@ struct SemanticGraphCompilationRequest<'a> {
     files: &'a [FileId],
     funcs: &'a [FuncId],
     call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
-    max_precision: Option<Precision>,
 }
 
 struct CompiledSemanticGraph {
@@ -309,7 +305,6 @@ where
     let taint_graph_fingerprint = taint_cache::scoped_config_fingerprint(
         request.pack,
         "taint-analysis",
-        request.max_precision,
         request.files,
         request.funcs,
         fingerprint_options.semantic_fingerprint(),
@@ -403,7 +398,6 @@ struct ReachableTaintScopeRequest<'a, 'source> {
     source_groups: &'a AHashMap<FuncId, Vec<usize>>,
     sink_by_func: &'a AHashMap<FuncId, Vec<&'source RuleMatch>>,
     config: &'a InterTaintConfig,
-    max_precision: Option<Precision>,
 }
 
 struct ReachableTaintScope {
@@ -470,7 +464,6 @@ where
         let (tick_tx, tick_rx) = mpsc::channel();
         std::thread::scope(|scope| {
             let ws = request.ws;
-            let max_precision = request.max_precision;
             let source_funcs = &graph_roots;
             let sink_func_list = &sink_func_list;
             let worker = std::thread::Builder::new()
@@ -480,7 +473,6 @@ where
                     ws.source_reachable_resolved_call_graph_with_progress(
                         source_funcs,
                         sink_func_list,
-                        max_precision,
                         || {
                             let _ = tick_tx.send(());
                         },
@@ -514,7 +506,6 @@ where
                     &AHashSet::from([host]),
                     request.global,
                     call_graph.graph.as_ref(),
-                    request.max_precision,
                 )
                 .is_some();
             if host_is_reachable {
@@ -580,7 +571,7 @@ where
     } else {
         request
             .ws
-            .resolved_call_graph_direct_neighborhood(&static_provenance_funcs, request.max_precision)
+            .resolved_call_graph_direct_neighborhood(&static_provenance_funcs)
     };
     bonsai_diagnostics::debug_log!(
         "security-phase",
@@ -642,7 +633,6 @@ struct SourceScheduleRequest<'a> {
     global: &'a Arc<GlobalIndex>,
     target_relevance: Option<&'a bonsai_idg::IdgTargetRelevance>,
     call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
-    max_precision: Option<Precision>,
     debug_taint_phase: bool,
 }
 
@@ -775,7 +765,6 @@ where
                     &shared_source_funcs,
                     request.global.as_ref(),
                     request.call_graph,
-                    request.max_precision,
                 )
             });
 
@@ -809,7 +798,6 @@ fn plan_semantic_scope(request: SemanticScopeRequest<'_>) -> SemanticScopePlan {
             request.sink_funcs,
             request.global,
             request.call_graph,
-            request.max_precision,
         ) {
             // Compute the exact union of per-source slices without retaining
             // hundreds of hash tables through IDG compilation and backward
@@ -820,7 +808,6 @@ fn plan_semantic_scope(request: SemanticScopeRequest<'_>) -> SemanticScopePlan {
                 request.source_funcs,
                 request.global,
                 request.call_graph,
-                request.max_precision,
                 |_, source_corridor| {
                     scope_funcs.extend(source_corridor.lineage_funcs);
                 },
@@ -833,7 +820,6 @@ fn plan_semantic_scope(request: SemanticScopeRequest<'_>) -> SemanticScopePlan {
             request.sink_funcs,
             request.global,
             request.call_graph,
-            request.max_precision,
         ));
     }
     let callback_corridors = callback_corridors
@@ -866,7 +852,6 @@ struct TransferPlanRequest<'a> {
     source_hits: &'a [RuleMatch],
     sinks: &'a [RuleMatch],
     sanitizers: &'a [RuleMatch],
-    max_precision: Option<Precision>,
     rulepack_typing: &'a Arc<crate::matcher::RulepackTyping>,
 }
 
@@ -918,7 +903,6 @@ where
         callback_invocations: compiled_transfers.callback_invocations,
         output_arg_flows: compiled_transfers.output_arg_flows,
         receiver_state_propagations: compiled_transfers.receiver_state_propagations,
-        max_edge_precision: request.max_precision,
     };
     TransferPlan { languages, config }
 }
@@ -1097,7 +1081,6 @@ where
         sinks,
         sanitizers,
         pack,
-        max_precision,
         taint_graph_resident_cache_entries,
         rulepack_typing,
         on_progress,
@@ -1107,7 +1090,7 @@ where
         // construct workspace linkage merely to rediscover that fact through
         // an empty function map; the empty endpoint sets are already exact
         // adapter/matcher results for this snapshot.
-        return finish_empty_chain_build(ws, pack, max_precision, on_progress);
+        return finish_empty_chain_build(ws, pack, on_progress);
     }
     // ---- Phase 1: resolve rule matches to enclosing FuncIds ----
     let global = ws.compiler_linkage_index();
@@ -1129,8 +1112,8 @@ where
     } = ResolvedMatchSites::resolve(ws, sanitizers, sinks);
     // Workspace-wide source-seeded graph index. The resident cache is
     // bounded and guarded by a rule/config fingerprint, so reuse
-    // cannot keep stale graphs alive across rulepack or precision
-    // changes and cannot grow without limit on large scans. Disk
+    // cannot keep stale graphs alive across rulepack changes and cannot
+    // grow without limit on large scans. Disk
     // persistence is best-effort and default-on so repeated CLI runs
     // can hydrate exact graphs from the sidecar instead of replaying
     // the same taint solve. Set `BONSAI_TAINT_GRAPH_PERSIST=0` to
@@ -1144,7 +1127,7 @@ where
         // No semantic IDG scope exists for this invocation. Still prepare and
         // immediately finish the empty namespace so SDK progress reports the
         // cache decision and no write-through temp file can dangle.
-        return finish_empty_chain_build(ws, pack, max_precision, on_progress);
+        return finish_empty_chain_build(ws, pack, on_progress);
     }
     let SourceWorkPlan {
         items: source_work,
@@ -1165,7 +1148,6 @@ where
             source_hits,
             sinks,
             sanitizers,
-            max_precision,
             rulepack_typing,
         },
         || on_progress(AnalysisProgress::PhaseTicked),
@@ -1203,7 +1185,6 @@ where
             source_groups: &source_groups,
             sink_by_func: &sink_by_func,
             config: &config,
-            max_precision: config.max_edge_precision,
         },
         on_progress,
     );
@@ -1228,7 +1209,6 @@ where
         call_graph: chain_call_graph.as_ref(),
         fallback_files: &reachable_call_graph.files,
         fallback_funcs: &reachable_call_graph.funcs,
-        max_precision: config.max_edge_precision,
         prefilter_enabled: source_sink_prefilter_enabled,
     });
     bonsai_diagnostics::debug_log!(
@@ -1270,7 +1250,6 @@ where
             files: &semantic_files,
             funcs: &semantic_funcs,
             call_graph: chain_call_graph.as_ref(),
-            max_precision,
         },
         on_progress,
     );
@@ -1280,10 +1259,7 @@ where
         label: "compiling function summaries",
         total: semantic_funcs.len() as u64,
     });
-    semantic_graph.prewarm_return_taint_param_indices_for_funcs_with_max_precision(
-        &semantic_funcs,
-        config.max_edge_precision,
-    );
+    semantic_graph.prewarm_return_taint_param_indices_for_funcs(&semantic_funcs);
     for _ in &semantic_funcs {
         on_progress(AnalysisProgress::PhaseTicked);
     }
@@ -1304,13 +1280,7 @@ where
     let target_relevance = sink_target_nodes
         .as_ref()
         .filter(|targets| !targets.nodes.is_empty() || !targets.unresolved_funcs.is_empty())
-        .map(|targets| {
-            semantic_graph.target_relevance_with_max_precision(
-                &targets.nodes,
-                Some(&targets.unresolved_funcs),
-                config.max_edge_precision,
-            )
-        });
+        .map(|targets| semantic_graph.target_relevance(&targets.nodes, Some(&targets.unresolved_funcs)));
     let sink_target_nodes_for_graph = sink_target_nodes
         .as_ref()
         .filter(|targets| !targets.nodes.is_empty())
@@ -1341,7 +1311,6 @@ where
             global: &global,
             target_relevance: target_relevance.as_ref(),
             call_graph: chain_call_graph.as_ref(),
-            max_precision: config.max_edge_precision,
             debug_taint_phase,
         },
         on_progress,
@@ -1402,16 +1371,11 @@ where
     ChainBuildResult { findings, resolution }
 }
 
-fn finish_empty_chain_build<F>(
-    ws: &Workspace,
-    pack: &Rulepack,
-    max_precision: Option<Precision>,
-    on_progress: &mut F,
-) -> ChainBuildResult
+fn finish_empty_chain_build<F>(ws: &Workspace, pack: &Rulepack, on_progress: &mut F) -> ChainBuildResult
 where
     F: FnMut(AnalysisProgress),
 {
-    let taint_graph_fingerprint = taint_cache::config_fingerprint(pack, "taint-analysis", max_precision);
+    let taint_graph_fingerprint = taint_cache::config_fingerprint(pack, "taint-analysis");
     let cache_report = taint_cache::prepare_workspace_cache(ws, "taint-analysis", taint_graph_fingerprint);
     on_progress(AnalysisProgress::Note {
         label: "taint-cache",
@@ -1562,7 +1526,6 @@ fn merge_configured_source_callback_corridors(
     sink_func_set: &AHashSet<FuncId>,
     global: &GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
-    max_precision: Option<Precision>,
 ) -> AHashSet<FuncId> {
     let mut added_scope = AHashSet::default();
     let mut sorted_sources: Vec<FuncId> = source_callback_targets.keys().copied().collect();
@@ -1575,13 +1538,9 @@ fn merge_configured_source_callback_corridors(
         sorted_targets.sort_by_key(|func| func.raw());
         let mut source_corridor = SourceSinkCorridor::default();
         for &callback_func in &sorted_targets {
-            if let Some(mut callback_corridor) = callgraph_source_sink_corridor(
-                callback_func,
-                sink_func_set,
-                global,
-                call_graph,
-                max_precision,
-            ) {
+            if let Some(mut callback_corridor) =
+                callgraph_source_sink_corridor(callback_func, sink_func_set, global, call_graph)
+            {
                 callback_corridor.lineage_funcs.insert(source_func);
                 callback_corridor.lineage_funcs.insert(callback_func);
                 source_corridor.extend(callback_corridor);
@@ -1595,7 +1554,7 @@ fn merge_configured_source_callback_corridors(
             // its exact compiler identity in that corridor so IDG transfer
             // can publish captured writes back to the host.
             if let Some(mut host_corridor) =
-                callgraph_source_sink_corridor(source_func, sink_func_set, global, call_graph, max_precision)
+                callgraph_source_sink_corridor(source_func, sink_func_set, global, call_graph)
             {
                 host_corridor.lineage_funcs.insert(callback_func);
                 source_corridor.extend(host_corridor);
@@ -1610,12 +1569,7 @@ fn merge_configured_source_callback_corridors(
         // to that callback. Retain both so the scoped IDG contains the
         // matcher-approved invocation span that creates the semantic edge.
         source_corridor.lineage_funcs.extend(sorted_targets);
-        extend_corridor_with_summary_dependency_support(
-            &mut source_corridor,
-            global,
-            call_graph,
-            max_precision,
-        );
+        extend_corridor_with_summary_dependency_support(&mut source_corridor, global, call_graph);
         added_scope.extend(source_corridor.lineage_funcs.iter().copied());
         coarse_corridors_by_func
             .entry(source_func)
@@ -1629,14 +1583,10 @@ fn extend_corridor_with_summary_dependency_support(
     corridor: &mut SourceSinkCorridor,
     global: &GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
-    max_precision: Option<Precision>,
 ) {
     let mut pending: Vec<FuncId> = corridor.lineage_funcs.iter().copied().collect();
     while let Some(func) = pending.pop() {
         for edge in call_graph.callees_of(func) {
-            if max_precision.is_some_and(|max| edge.precision > max) {
-                continue;
-            }
             if !summary_dependency_provider(global, edge.to) {
                 continue;
             }
@@ -1650,7 +1600,6 @@ fn extend_corridor_with_summary_dependency_support(
         &corridor.terminal_sinks,
         global,
         call_graph,
-        max_precision,
     );
 }
 
@@ -1658,7 +1607,6 @@ pub(super) fn source_analysis_lineage_func_scope(
     source_func: FuncId,
     global: &GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
-    max_precision: Option<Precision>,
 ) -> AHashSet<FuncId> {
     // Source-analysis has no sink set to cut against, so compute the complete
     // semantic callgraph fixed point from the source. Rendering may later keep
@@ -1676,18 +1624,9 @@ pub(super) fn source_analysis_lineage_func_scope(
     let mut stack = vec![source_func];
 
     while let Some(func) = stack.pop() {
-        let mut next: Vec<FuncId> = call_graph
-            .callees_of(func)
-            .filter(|edge| max_precision.is_none_or(|max| edge.precision <= max))
-            .map(|edge| edge.to)
-            .collect();
+        let mut next: Vec<FuncId> = call_graph.callees_of(func).map(|edge| edge.to).collect();
         if reverse_output_funcs.contains(&func) && processed_reverse_funcs.insert(func) {
-            next.extend(
-                call_graph
-                    .callers_of(func)
-                    .filter(|edge| max_precision.is_none_or(|max| edge.precision <= max))
-                    .map(|edge| edge.from),
-            );
+            next.extend(call_graph.callers_of(func).map(|edge| edge.from));
         }
 
         next.sort_by_key(|next_func| next_func.raw());
@@ -1709,7 +1648,6 @@ pub(super) fn source_analysis_lineage_func_scope(
         &callback_targets,
         global,
         call_graph,
-        max_precision,
     );
     scope
 }
@@ -1878,9 +1816,8 @@ fn callgraph_source_sink_corridor(
     sink_func_set: &AHashSet<FuncId>,
     global: &GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
-    max_precision: Option<Precision>,
 ) -> Option<SourceSinkCorridor> {
-    callgraph_sources_sink_corridor(&[source_func], sink_func_set, global, call_graph, max_precision)
+    callgraph_sources_sink_corridor(&[source_func], sink_func_set, global, call_graph)
 }
 
 /// Bind every reachable source to its exact callgraph corridor while sharing
@@ -1895,7 +1832,6 @@ fn shared_source_sink_corridor(
     source_funcs: &[FuncId],
     global: &GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
-    max_precision: Option<Precision>,
 ) -> SharedSourceSinkCorridors {
     if corridor.lineage_funcs.is_empty() {
         return SharedSourceSinkCorridors::default();
@@ -1908,7 +1844,6 @@ fn shared_source_sink_corridor(
         source_funcs,
         global,
         call_graph,
-        max_precision,
         |source, source_corridor| {
             let mut lineage_key: Vec<FuncId> = source_corridor.lineage_funcs.iter().copied().collect();
             lineage_key.sort_by_key(|func| func.raw());
@@ -1937,7 +1872,6 @@ fn visit_source_sink_corridors(
     source_funcs: &[FuncId],
     global: &GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
-    max_precision: Option<Precision>,
     mut visit: impl FnMut(FuncId, SourceSinkCorridor),
 ) {
     let mut sources: Vec<FuncId> = source_funcs
@@ -1948,21 +1882,12 @@ fn visit_source_sink_corridors(
     sources.sort_by_key(|func| func.raw());
     sources.dedup();
     for source in sources {
-        let Some(mut source_corridor) = callgraph_source_sink_corridor(
-            source,
-            &corridor.terminal_sinks,
-            global,
-            call_graph,
-            max_precision,
-        ) else {
+        let Some(mut source_corridor) =
+            callgraph_source_sink_corridor(source, &corridor.terminal_sinks, global, call_graph)
+        else {
             continue;
         };
-        extend_corridor_with_summary_dependency_support(
-            &mut source_corridor,
-            global,
-            call_graph,
-            max_precision,
-        );
+        extend_corridor_with_summary_dependency_support(&mut source_corridor, global, call_graph);
         visit(source, source_corridor);
     }
 }
@@ -1976,7 +1901,6 @@ fn callgraph_sources_sink_corridor(
     sink_func_set: &AHashSet<FuncId>,
     global: &GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
-    max_precision: Option<Precision>,
 ) -> Option<SourceSinkCorridor> {
     if sink_func_set.is_empty() || source_funcs.is_empty() {
         return None;
@@ -1996,17 +1920,9 @@ fn callgraph_sources_sink_corridor(
     stack.reverse();
     seen.extend(sources.iter().copied());
     while let Some(func) = stack.pop() {
-        let mut next: Vec<FuncId> = call_graph
-            .callees_of(func)
-            .filter(|edge| max_precision.is_none_or(|max| edge.precision <= max))
-            .map(|edge| edge.to)
-            .collect();
+        let mut next: Vec<FuncId> = call_graph.callees_of(func).map(|edge| edge.to).collect();
         if reverse_output_funcs.contains(&func) && processed_reverse_funcs.insert(func) {
-            let callers: Vec<FuncId> = call_graph
-                .callers_of(func)
-                .filter(|edge| max_precision.is_none_or(|max| edge.precision <= max))
-                .map(|edge| edge.from)
-                .collect();
+            let callers: Vec<FuncId> = call_graph.callers_of(func).map(|edge| edge.from).collect();
             for caller in callers {
                 if summary_dependency_provider(global, caller) && reverse_output_funcs.insert(caller) {
                     stack.push(caller);
@@ -2033,9 +1949,6 @@ fn callgraph_sources_sink_corridor(
     let mut return_sinks = AHashSet::default();
     for source_func in &sources {
         for edge in call_graph.callers_of(*source_func) {
-            if max_precision.is_some_and(|max| edge.precision > max) {
-                continue;
-            }
             if sink_func_set.contains(&edge.from) {
                 return_sinks.insert(edge.from);
             }
@@ -2332,7 +2245,6 @@ mod corridor_tests {
                 to: FuncId::new(to),
                 span: Span::new(FileId::new(0), index as u64, index as u64 + 1),
                 kind: EdgeKind::Direct,
-                precision: Precision::Exact,
                 provenance: EdgeProvenance::direct_symbol(),
             });
         }
@@ -2350,21 +2262,9 @@ mod corridor_tests {
         let graph = resolved_graph(&[(1, 2), (2, 3), (4, 5), (5, 6)]);
         let global = GlobalIndex::new();
         let sinks: AHashSet<FuncId> = [first_sink, second_sink].into_iter().collect();
-        let union = callgraph_sources_sink_corridor(
-            &[first_source, second_source],
-            &sinks,
-            &global,
-            &graph,
-            Some(Precision::Narrowed),
-        )
-        .expect("union corridor");
-        let shared = shared_source_sink_corridor(
-            &union,
-            &[first_source, second_source],
-            &global,
-            &graph,
-            Some(Precision::Narrowed),
-        );
+        let union = callgraph_sources_sink_corridor(&[first_source, second_source], &sinks, &global, &graph)
+            .expect("union corridor");
+        let shared = shared_source_sink_corridor(&union, &[first_source, second_source], &global, &graph);
 
         let first = shared.corridors_for_source(first_source);
         let second = shared.corridors_for_source(second_source);
@@ -2396,22 +2296,11 @@ mod corridor_tests {
         let graph = resolved_graph(&[(1, 2), (2, 3), (4, 5), (5, 6)]);
         let global = GlobalIndex::new();
         let sinks: AHashSet<FuncId> = [admitted_sink, rejected_sink].into_iter().collect();
-        let union = callgraph_sources_sink_corridor(
-            &[admitted_source, rejected_source],
-            &sinks,
-            &global,
-            &graph,
-            Some(Precision::Narrowed),
-        )
-        .expect("union corridor");
+        let union =
+            callgraph_sources_sink_corridor(&[admitted_source, rejected_source], &sinks, &global, &graph)
+                .expect("union corridor");
 
-        let shared = shared_source_sink_corridor(
-            &union,
-            &[admitted_source],
-            &global,
-            &graph,
-            Some(Precision::Narrowed),
-        );
+        let shared = shared_source_sink_corridor(&union, &[admitted_source], &global, &graph);
 
         assert_eq!(shared.corridors.len(), 1);
         assert!(shared.corridors_for_source(rejected_source).is_empty());

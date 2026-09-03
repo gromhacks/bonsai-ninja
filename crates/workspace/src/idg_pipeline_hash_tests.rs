@@ -517,7 +517,6 @@ fn resolved_graph_with_edges(edges: &[(u32, u32, u64)]) -> bonsai_callgraph::Res
             to: FuncId::new(to),
             span: bonsai_common::Span::new(FileId::new(1), start, start + 1),
             kind: bonsai_callgraph::EdgeKind::Direct,
-            precision: Precision::Exact,
             provenance: bonsai_callgraph::EdgeProvenance::direct_symbol(),
         });
     }

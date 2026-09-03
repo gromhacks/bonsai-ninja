@@ -145,16 +145,9 @@ pub(crate) fn function_summary_from_idg_in_scope(
         return FunctionSummary::default();
     };
     let mut summaries = if let Some(allowed_funcs) = allowed_funcs {
-        idg.return_taint_param_indices_for_funcs_within_funcs_with_max_precision(
-            &[func],
-            allowed_funcs,
-            Some(bonsai_common::Precision::Narrowed),
-        )
+        idg.return_taint_param_indices_for_funcs_within_funcs(&[func], allowed_funcs)
     } else {
-        idg.return_taint_param_indices_for_funcs_with_max_precision(
-            &[func],
-            Some(bonsai_common::Precision::Narrowed),
-        )
+        idg.return_taint_param_indices_for_funcs(&[func])
     };
     let returns_taint_of = summaries
         .remove(&func)

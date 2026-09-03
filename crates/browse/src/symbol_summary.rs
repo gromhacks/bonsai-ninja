@@ -9,7 +9,7 @@
 
 use crate::common::format_span;
 use crate::edges::edge_record_from_graph_nodes;
-use crate::refs::read_snippet;
+use crate::refs::read_anchor_line;
 use bonsai_callgraph::{call_invokes_parameter, CallEdge, ResolvedCallGraph};
 use bonsai_common::{FuncId, Span, SymbolId};
 use bonsai_lang_api::{for_each_flow_event, DeclKind, FlowEvent};
@@ -39,7 +39,6 @@ pub struct SymbolCallEdge {
     pub column: u32,
     pub call_text: String,
     pub dispatch: String,
-    pub precision: String,
     pub resolver_stage: String,
     pub resolver_evidence: String,
 }
@@ -106,7 +105,7 @@ pub fn symbol_summaries(
 ) -> Result<Vec<SymbolSummary>, regex::Error> {
     let matcher = bonsai_inspect::Matcher::build(pattern, regex)?;
     let targets = bonsai_inspect::matching_func_ids(ws, &matcher);
-    let graph = ws.resolved_call_graph_direct_neighborhood(&targets, None);
+    let graph = ws.resolved_call_graph_direct_neighborhood(&targets);
     let headers = ws.compiler_header_index();
     let mut summaries = targets
         .into_iter()
@@ -144,12 +143,10 @@ fn symbol_summary(
 
     let mut direct_callers = graph
         .callers_of(func)
-        .filter(|edge| edge.precision.is_semantic())
         .filter_map(|edge| summary_edge(ws, graph, edge))
         .collect::<Vec<_>>();
     let mut direct_callees = graph
         .callees_of(func)
-        .filter(|edge| edge.precision.is_semantic())
         .filter_map(|edge| summary_edge(ws, graph, edge))
         .collect::<Vec<_>>();
     sort_edges(&mut direct_callers);
@@ -160,11 +157,7 @@ fn symbol_summary(
         .filter(|(caller, _)| *caller == func)
         .map(|(_, span)| span)
         .collect::<Vec<_>>();
-    let semantic_outgoing_spans = graph
-        .callees_of(func)
-        .filter(|edge| edge.precision.is_semantic())
-        .map(|edge| edge.span)
-        .collect::<Vec<_>>();
+    let semantic_outgoing_spans = graph.callees_of(func).map(|edge| edge.span).collect::<Vec<_>>();
     let unresolved_parameter_spans = unresolved_parameter_dispatch_spans(
         &decl.flow_events,
         &decl.params,
@@ -182,7 +175,7 @@ fn symbol_summary(
                 file,
                 line,
                 column,
-                call_text: read_snippet(ws, &span),
+                call_text: read_anchor_line(ws, &span),
                 reason: "workspace candidates existed, but compiler evidence did not justify a target"
                     .to_string(),
             }
@@ -195,7 +188,7 @@ fn symbol_summary(
             file,
             line,
             column,
-            call_text: read_snippet(ws, span),
+            call_text: read_anchor_line(ws, span),
             reason: "parameter-dispatched call has no compiler-proven binding".to_string(),
         }
     }));
@@ -318,7 +311,6 @@ fn summary_edge(ws: &Workspace, graph: &ResolvedCallGraph, edge: &CallEdge) -> O
         column: row.call_column,
         call_text: row.call_text,
         dispatch: row.kind,
-        precision: row.precision,
         resolver_stage: row.resolver_stage,
         resolver_evidence: row.evidence,
     })

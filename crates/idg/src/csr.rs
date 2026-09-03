@@ -21,7 +21,6 @@
 
 use crate::edge::IdgEdge;
 use crate::node::NodeId;
-use bonsai_common::Precision;
 
 /// Compressed-sparse-row adjacency. Built from a list of edges; one
 /// CSR for forward (`from → targets`), one for backward (`to →
@@ -46,12 +45,6 @@ impl EdgeCsr {
     #[must_use]
     pub fn forward_pairs(n_nodes: usize, edges: &[(u32, u32)]) -> Self {
         Self::build_pairs(n_nodes, edges, |(from, to)| (*from, *to))
-    }
-
-    /// Build a forward CSR from compact `(from, to, precision)` edge records.
-    #[must_use]
-    pub fn forward_precision(n_nodes: usize, edges: &[(u32, u32, Precision)]) -> Self {
-        Self::build_precision(n_nodes, edges, |(from, to, _)| (*from, *to))
     }
 
     /// Build a backward CSR (transposed): each edge contributes one
@@ -187,12 +180,6 @@ impl EdgeCsr {
         }
     }
 
-    /// Build a backward CSR from compact `(from, to, precision)` edge records.
-    #[must_use]
-    pub fn backward_precision(n_nodes: usize, edges: &[(u32, u32, Precision)]) -> Self {
-        Self::build_precision(n_nodes, edges, |(from, to, _)| (*to, *from))
-    }
-
     /// Build a CSR. `extract` returns `(src, dst)` from each edge —
     /// the same function reused for forward and backward (with
     /// swapped from/to).
@@ -217,41 +204,6 @@ impl EdgeCsr {
         let total = *offsets.last().unwrap_or(&0) as usize;
         let mut targets = vec![0u32; total];
         // Second pass: fill targets, advancing per-source cursor.
-        let mut cursor = offsets.clone();
-        for edge in valid_edges {
-            let (s, d) = extract(edge);
-            let pos = cursor[s as usize] as usize;
-            targets[pos] = d;
-            cursor[s as usize] += 1;
-        }
-        Self {
-            offsets,
-            targets,
-            n_nodes,
-        }
-    }
-
-    /// Build a CSR from compact `(from, to, precision)` records. The
-    /// precision is ignored here; callers keep it in a side adjacency
-    /// when precision-scoped traversal needs it.
-    fn build_precision<F>(n_nodes: usize, edges: &[(u32, u32, Precision)], extract: F) -> Self
-    where
-        F: Fn(&(u32, u32, Precision)) -> (u32, u32),
-    {
-        let mut offsets = vec![0u32; n_nodes + 1];
-        let valid_edges = edges.iter().filter(|edge| {
-            let (s, d) = extract(edge);
-            (s as usize) < n_nodes && (d as usize) < n_nodes
-        });
-        for edge in valid_edges.clone() {
-            let (s, _) = extract(edge);
-            offsets[s as usize + 1] += 1;
-        }
-        for i in 1..offsets.len() {
-            offsets[i] += offsets[i - 1];
-        }
-        let total = *offsets.last().unwrap_or(&0) as usize;
-        let mut targets = vec![0u32; total];
         let mut cursor = offsets.clone();
         for edge in valid_edges {
             let (s, d) = extract(edge);

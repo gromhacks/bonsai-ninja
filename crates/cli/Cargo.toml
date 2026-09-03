@@ -41,6 +41,7 @@ dirs = { workspace = true }
 mimalloc = { workspace = true }
 owo-colors = { workspace = true }
 comfy-table = { workspace = true }
+regex = { workspace = true }
 
 # Tree-sitter is the CLI's only syntax layer: `dump-ast` walks the parse
 # tree directly and source rendering uses the adapters' grammars plus the

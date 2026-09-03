@@ -33,9 +33,7 @@ pub mod value_flow;
 pub mod value_flow_disk;
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{
-    normalize_path_for_filter, scoped_path_filter_matches, FileId, FuncId, Precision, SymbolId,
-};
+use bonsai_common::{normalize_path_for_filter, scoped_path_filter_matches, FileId, FuncId, SymbolId};
 use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
 use bonsai_hash::Hasher as StableHasher;
@@ -234,7 +232,7 @@ fn target_emission_requires_callee(
         .is_some_and(|decl| !decl.receiver_field_writes.is_empty())
 }
 
-type ScopedCallEdgeKey = (u32, u32, u32, u64, u64, u8, u8);
+type ScopedCallEdgeKey = (u32, u32, u32, u64, u64, u8);
 
 fn scoped_call_edge_key(edge: &bonsai_callgraph::CallEdge) -> ScopedCallEdgeKey {
     (
@@ -244,20 +242,16 @@ fn scoped_call_edge_key(edge: &bonsai_callgraph::CallEdge) -> ScopedCallEdgeKey 
         edge.span.start,
         edge.span.end,
         edge.kind as u8,
-        edge.precision.rank(),
     )
 }
 
 fn relation_callees(
     relation: &dyn bonsai_idg::workspace_adapter::CallGraphRelation,
     caller: FuncId,
-    max_precision: Option<Precision>,
 ) -> Vec<bonsai_callgraph::CallEdge> {
     let mut edges = Vec::new();
     relation.visit_callees(caller, &mut |edge| {
-        if max_precision.is_none_or(|max| edge.precision <= max) {
-            edges.push(edge.clone());
-        }
+        edges.push(edge.clone());
     });
     edges
 }
@@ -265,13 +259,10 @@ fn relation_callees(
 fn relation_callers(
     relation: &dyn bonsai_idg::workspace_adapter::CallGraphRelation,
     callee: FuncId,
-    max_precision: Option<Precision>,
 ) -> Vec<bonsai_callgraph::CallEdge> {
     let mut edges = Vec::new();
     relation.visit_callers(callee, &mut |edge| {
-        if max_precision.is_none_or(|max| edge.precision <= max) {
-            edges.push(edge.clone());
-        }
+        edges.push(edge.clone());
     });
     edges
 }
@@ -313,7 +304,6 @@ fn source_reachable_call_graph_from_relation(
     relation: &dyn bonsai_idg::workspace_adapter::CallGraphRelation,
     source_funcs: &[FuncId],
     target_funcs: &[FuncId],
-    max_precision: Option<Precision>,
     on_relation_unit: &dyn Fn(),
 ) -> SourceReachableCallGraph {
     let target_set: AHashSet<FuncId> = target_funcs.iter().copied().collect();
@@ -349,7 +339,7 @@ fn source_reachable_call_graph_from_relation(
             if !processed_reached.insert(caller) {
                 continue;
             }
-            let edges = relation_callees(relation, caller, max_precision);
+            let edges = relation_callees(relation, caller);
             on_relation_unit();
             for edge in edges {
                 if reached_funcs.insert(edge.to) {
@@ -362,7 +352,7 @@ fn source_reachable_call_graph_from_relation(
             if !processed_reverse_output.insert(callee) {
                 continue;
             }
-            let edges = relation_callers(relation, callee, max_precision);
+            let edges = relation_callers(relation, callee);
             on_relation_unit();
             for edge in edges {
                 if !has_summary_output(global.as_ref(), edge.from) {
@@ -384,7 +374,7 @@ fn source_reachable_call_graph_from_relation(
     // of declaration order, matching the cold compiler worklist.
     let mut target_callers_by_callee: AHashMap<FuncId, Vec<bonsai_callgraph::CallEdge>> = AHashMap::new();
     for &target in &target_set {
-        let edges = relation_callees(relation, target, max_precision);
+        let edges = relation_callees(relation, target);
         on_relation_unit();
         for edge in edges {
             target_callers_by_callee.entry(edge.to).or_default().push(edge);
@@ -454,7 +444,6 @@ fn source_reachable_call_graph_from_relation(
         &reached_target_set,
         global.as_ref(),
         &merged,
-        max_precision,
     );
 
     let mut filtered = bonsai_callgraph::CallGraph::new();
@@ -585,15 +574,10 @@ pub fn extend_func_set_with_semantic_callback_dispatchers(
     target_funcs: &AHashSet<FuncId>,
     global: &GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
-    max_precision: Option<Precision>,
 ) {
-    extend_func_set_with_semantic_callback_dispatchers_impl(
-        funcs,
-        target_funcs,
-        global,
-        max_precision,
-        |func| call_graph.callees_of(func).cloned().collect(),
-    );
+    extend_func_set_with_semantic_callback_dispatchers_impl(funcs, target_funcs, global, |func| {
+        call_graph.callees_of(func).cloned().collect()
+    });
 }
 
 fn extend_func_set_with_semantic_callback_dispatchers_in_call_graph(
@@ -601,22 +585,16 @@ fn extend_func_set_with_semantic_callback_dispatchers_in_call_graph(
     target_funcs: &AHashSet<FuncId>,
     global: &GlobalIndex,
     call_graph: &bonsai_callgraph::CallGraph,
-    max_precision: Option<Precision>,
 ) {
-    extend_func_set_with_semantic_callback_dispatchers_impl(
-        funcs,
-        target_funcs,
-        global,
-        max_precision,
-        |func| call_graph.callees(func).cloned().collect(),
-    );
+    extend_func_set_with_semantic_callback_dispatchers_impl(funcs, target_funcs, global, |func| {
+        call_graph.callees(func).cloned().collect()
+    });
 }
 
 fn extend_func_set_with_semantic_callback_dispatchers_impl<C>(
     funcs: &mut AHashSet<FuncId>,
     target_funcs: &AHashSet<FuncId>,
     global: &GlobalIndex,
-    max_precision: Option<Precision>,
     mut callees_of: C,
 ) where
     C: FnMut(FuncId) -> Vec<bonsai_callgraph::CallEdge>,
@@ -633,9 +611,7 @@ fn extend_func_set_with_semantic_callback_dispatchers_impl<C>(
             let callback_target_spans: Vec<bonsai_common::Span> = outgoing
                 .iter()
                 .filter(|edge| {
-                    edge.kind == bonsai_callgraph::EdgeKind::Indirect
-                        && target_funcs.contains(&edge.to)
-                        && max_precision.is_none_or(|max| edge.precision <= max)
+                    edge.kind == bonsai_callgraph::EdgeKind::Indirect && target_funcs.contains(&edge.to)
                 })
                 .map(|edge| edge.span)
                 .collect();
@@ -643,7 +619,7 @@ fn extend_func_set_with_semantic_callback_dispatchers_impl<C>(
                 continue;
             }
             for edge in outgoing {
-                if max_precision.is_some_and(|max| edge.precision > max) || funcs.contains(&edge.to) {
+                if funcs.contains(&edge.to) {
                     continue;
                 }
                 if !call_edge_passes_target_callback(global, edge.from, edge.span, &callback_target_spans) {
@@ -2562,11 +2538,7 @@ impl Workspace {
             return functions
                 .iter()
                 .copied()
-                .filter(|function| {
-                    graph
-                        .callers_of(*function)
-                        .any(|edge| edge.precision.is_semantic())
-                })
+                .filter(|function| graph.callers_of(*function).next().is_some())
                 .collect();
         }
         if let Some(service) = self.callgraph_query_service() {
@@ -2578,11 +2550,7 @@ impl Workspace {
         functions
             .iter()
             .copied()
-            .filter(|function| {
-                graph
-                    .callers_of(*function)
-                    .any(|edge| edge.precision.is_semantic())
-            })
+            .filter(|function| graph.callers_of(*function).next().is_some())
             .collect()
     }
 
@@ -2719,16 +2687,6 @@ impl Workspace {
         Some(service.materialize_between(starts, targets))
     }
 
-    pub fn persisted_resolved_call_graph_between_with_max_precision(
-        &self,
-        starts: &[FuncId],
-        targets: &[FuncId],
-        max_precision: Option<Precision>,
-    ) -> Option<std::io::Result<bonsai_callgraph::ResolvedCallGraph>> {
-        let service = self.callgraph_query_service()?;
-        Some(service.materialize_between_with_max_precision(starts, targets, max_precision))
-    }
-
     /// Return every exact persisted direct edge from `starts` to `targets`.
     pub fn persisted_direct_call_graph_between(
         &self,
@@ -2749,7 +2707,6 @@ impl Workspace {
     pub fn resolved_call_graph_direct_neighborhood(
         &self,
         functions: &[FuncId],
-        max_precision: Option<Precision>,
     ) -> Arc<bonsai_callgraph::ResolvedCallGraph> {
         if functions.is_empty() {
             return Arc::new(bonsai_callgraph::ResolvedCallGraph::default());
@@ -2758,7 +2715,7 @@ impl Workspace {
             return graph;
         }
         if let Some(service) = self.callgraph_query_service() {
-            if let Ok(graph) = service.materialize_direct_neighborhood(functions, max_precision) {
+            if let Ok(graph) = service.materialize_direct_neighborhood(functions) {
                 return Arc::new(graph);
             }
         }
@@ -2790,10 +2747,9 @@ impl Workspace {
     fn persisted_resolved_call_graph_reachable_from(
         &self,
         starts: &[FuncId],
-        max_precision: Option<Precision>,
     ) -> Option<std::io::Result<bonsai_callgraph::ResolvedCallGraph>> {
         let service = self.callgraph_query_service()?;
-        Some(service.materialize_reachable_with_max_precision(starts, max_precision))
+        Some(service.materialize_reachable(starts))
     }
 
     fn build_resolved_call_graph(&self) -> bonsai_callgraph::ResolvedCallGraph {
@@ -2813,16 +2769,8 @@ impl Workspace {
         &self,
         source_funcs: &[FuncId],
         target_funcs: &[FuncId],
-        max_precision: Option<Precision>,
     ) -> SourceReachableCallGraph {
-        self.source_reachable_resolved_call_graph_with_scope(
-            source_funcs,
-            target_funcs,
-            max_precision,
-            false,
-            false,
-            &|| {},
-        )
+        self.source_reachable_resolved_call_graph_with_scope(source_funcs, target_funcs, false, false, &|| {})
     }
 
     /// Progress-reporting variant of
@@ -2835,7 +2783,6 @@ impl Workspace {
         &self,
         source_funcs: &[FuncId],
         target_funcs: &[FuncId],
-        max_precision: Option<Precision>,
         on_compiled_file: F,
     ) -> SourceReachableCallGraph
     where
@@ -2844,7 +2791,6 @@ impl Workspace {
         self.source_reachable_resolved_call_graph_with_scope(
             source_funcs,
             target_funcs,
-            max_precision,
             false,
             false,
             &on_compiled_file,
@@ -2862,16 +2808,8 @@ impl Workspace {
         &self,
         source_funcs: &[FuncId],
         target_funcs: &[FuncId],
-        max_precision: Option<Precision>,
     ) -> SourceReachableCallGraph {
-        self.source_reachable_resolved_call_graph_with_scope(
-            source_funcs,
-            target_funcs,
-            max_precision,
-            false,
-            true,
-            &|| {},
-        )
+        self.source_reachable_resolved_call_graph_with_scope(source_funcs, target_funcs, false, true, &|| {})
     }
 
     /// Compile the exact callgraph region needed to emit flows inside
@@ -2889,23 +2827,14 @@ impl Workspace {
         &self,
         source_funcs: &[FuncId],
         target_funcs: &[FuncId],
-        max_precision: Option<Precision>,
     ) -> SourceReachableCallGraph {
-        self.source_reachable_resolved_call_graph_with_scope(
-            source_funcs,
-            target_funcs,
-            max_precision,
-            true,
-            true,
-            &|| {},
-        )
+        self.source_reachable_resolved_call_graph_with_scope(source_funcs, target_funcs, true, true, &|| {})
     }
 
     fn source_reachable_resolved_call_graph_with_scope(
         &self,
         source_funcs: &[FuncId],
         target_funcs: &[FuncId],
-        max_precision: Option<Precision>,
         target_emissions_only: bool,
         function_scoped: bool,
         on_compiler_unit: &(dyn Fn() + Sync),
@@ -2918,7 +2847,6 @@ impl Workspace {
                     service.as_ref(),
                     source_funcs,
                     target_funcs,
-                    max_precision,
                     on_compiler_unit,
                 );
                 let relation_status =
@@ -3160,9 +3088,6 @@ impl Workspace {
                 .iter()
                 .chain(cross_partition_callback_edges.iter())
             {
-                if max_precision.is_some_and(|max| edge.precision > max) {
-                    continue;
-                }
                 let edge_id = known_edges.len();
                 known_edges.push(edge.clone());
                 outgoing_edge_ids.entry(edge.from).or_default().push(edge_id);
@@ -3205,9 +3130,7 @@ impl Workspace {
                 if let Some(edge_ids) = outgoing_edge_ids.get(&target) {
                     for &edge_id in edge_ids {
                         let edge = &known_edges[edge_id];
-                        if max_precision.is_none_or(|max| edge.precision <= max) {
-                            target_callers_by_callee.entry(edge.to).or_default().push(edge_id);
-                        }
+                        target_callers_by_callee.entry(edge.to).or_default().push(edge_id);
                     }
                 }
             }
@@ -3219,7 +3142,6 @@ impl Workspace {
                         edge.span.file.raw(),
                         edge.span.start,
                         edge.span.end,
-                        edge.precision.rank(),
                     )
                 });
             }
@@ -3323,7 +3245,6 @@ impl Workspace {
             &reached_target_set,
             global.as_ref(),
             &merged,
-            max_precision,
         );
         let semantic_funcs = relevant_funcs;
 
@@ -5980,8 +5901,8 @@ impl Workspace {
                     }
                 });
             persisted.unwrap_or_else(|| {
-                let compiled = self.source_reachable_query_call_graph(&[source_func], &[target], None);
-                Arc::new(compiled.graph.between(&[source_func], &[target], None))
+                let compiled = self.source_reachable_query_call_graph(&[source_func], &[target]);
+                Arc::new(compiled.graph.between(&[source_func], &[target]))
             })
         } else {
             self.resolved_call_graph_reachable_from(&[source_func])
@@ -6733,7 +6654,6 @@ fn idg_call_graph_fingerprint(call_graph: &bonsai_callgraph::ResolvedCallGraph) 
                 edge.span.start,
                 edge.span.end,
                 kind,
-                edge.precision.rank(),
             )
         })
         .collect();
@@ -6747,17 +6667,17 @@ fn idg_call_graph_fingerprint(call_graph: &bonsai_callgraph::ResolvedCallGraph) 
     callable_arguments.sort_unstable();
 
     let mut hasher = StableHasher::new();
-    hasher.absorb(b"bonsai-idg-call-graph-v2");
+    hasher.absorb(b"bonsai-idg-call-graph-v3");
     hasher.absorb_separator();
     hasher.absorb(&(edges.len() as u64).to_le_bytes());
     hasher.absorb_separator();
-    for (from, to, file, start, end, kind, precision) in edges {
+    for (from, to, file, start, end, kind) in edges {
         hasher.absorb(&from.to_le_bytes());
         hasher.absorb(&to.to_le_bytes());
         hasher.absorb(&file.to_le_bytes());
         hasher.absorb(&start.to_le_bytes());
         hasher.absorb(&end.to_le_bytes());
-        hasher.absorb(&[kind, precision]);
+        hasher.absorb(&[kind]);
         hasher.absorb_separator();
     }
     hasher.absorb(&(bindings.len() as u64).to_le_bytes());
@@ -7446,32 +7366,6 @@ fn source_path_allowed(root: &Path, path: &Path, filter: PathFilterSpec<'_>) -> 
 
 fn text_contains_literal_query(text: &str, literal: &str, literal_lower: &str) -> bool {
     text.contains(literal) || text.to_lowercase().contains(literal_lower)
-}
-
-/// Precision-aware summary printed by the CLI `diagnostics` command.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct PrecisionReport {
-    pub exact: usize,
-    pub narrowed: usize,
-    pub over_approximate: usize,
-    pub unknown: usize,
-}
-
-/// Count steps in `trace` by [`Precision`] bucket. Wired by the
-/// `diagnostics` CLI command for an at-a-glance view of how
-/// approximate a trace is.
-#[must_use]
-pub fn summarize_precision(trace: &TraceResult) -> PrecisionReport {
-    let mut report = PrecisionReport::default();
-    for step in &trace.steps {
-        match step.precision {
-            Precision::Exact => report.exact += 1,
-            Precision::Narrowed => report.narrowed += 1,
-            Precision::OverApproximate => report.over_approximate += 1,
-            Precision::Unknown => report.unknown += 1,
-        }
-    }
-    report
 }
 
 #[cfg(test)]

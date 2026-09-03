@@ -68,7 +68,6 @@ pub(crate) fn cmd_show(args: ShowArgs<'_>) -> Result<()> {
             args.workspace,
             None,
             None,
-            None,
             args.compact,
             Some(id),
             0,
@@ -145,7 +144,6 @@ fn show_structural_flow(workspace: &Path, id: &str, options: StructuralShowOptio
                 structural_drilldown,
                 endpoint_drilldown: !structural_drilldown,
             },
-            graph_flow: true,
             taint_flow: false,
             paging_cfg: options.paging_cfg,
             format: options.format,
@@ -232,7 +230,6 @@ fn show_flow_group(workspace: &Path, id: &str, options: StructuralShowOptions<'_
                 structural_drilldown,
                 endpoint_drilldown: !structural_drilldown,
             },
-            graph_flow: true,
             taint_flow: false,
             paging_cfg: options.paging_cfg,
             format: options.format,
@@ -336,7 +333,7 @@ fn show_sdk_structural_group(workspace: &Path, id: &str, format: BrowseFormat) -
 fn emit_sdk_inspect_flow(flow: &bonsai_sdk::InspectFlowShow, format: BrowseFormat) -> Result<()> {
     match format {
         BrowseFormat::Json => {
-            cli_println!("{}", serde_json::to_string_pretty(flow)?);
+            crate::output::emit_json_document(&super::with_completeness(&serde_json::to_value(flow)?))?;
         }
         BrowseFormat::Text => {
             cli_println!("FLOW 1 {}", flow.flow_id);
@@ -356,7 +353,7 @@ fn emit_sdk_inspect_flow(flow: &bonsai_sdk::InspectFlowShow, format: BrowseForma
 fn emit_sdk_inspect_group(group: &bonsai_sdk::InspectFlowGroupShow, format: BrowseFormat) -> Result<()> {
     match format {
         BrowseFormat::Json => {
-            cli_println!("{}", serde_json::to_string_pretty(group)?);
+            crate::output::emit_json_document(&super::with_completeness(&serde_json::to_value(group)?))?;
         }
         BrowseFormat::Text => {
             cli_println!("GROUP {}  {} match(es)", group.group_id, group.matches.len());
@@ -396,7 +393,6 @@ fn show_raw_taint_flow(
                 structural_drilldown: true,
                 endpoint_drilldown: false,
             },
-            graph_flow: false,
             taint_flow: true,
             paging_cfg,
             format,

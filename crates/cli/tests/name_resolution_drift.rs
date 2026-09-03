@@ -108,7 +108,7 @@ fn defs_and_inspect_agree_on_function_locations() {
         let Some(defs_json) = run_json(&["defs", ws_str, "--format", "json"]) else {
             continue;
         };
-        let defs_rows = defs_json.as_array().cloned().unwrap_or_default();
+        let defs_rows = defs_json["rows"].as_array().cloned().unwrap_or_default();
         let Some((name, expected_file, expected_line)) = first_function(&defs_rows) else {
             // Adapter emits no plain functions in micro fixture
             // (rare for method-only fixtures) — skip.

@@ -15,7 +15,7 @@
 //! for name-shaped facts, extended to the other kinds.
 
 use crate::common::{file_path_matches_filter, format_span, source_files_small_first};
-use crate::refs::read_snippet;
+use crate::refs::{read_anchor_line, read_matched_line};
 use ahash::AHashSet;
 use bonsai_lang_api::{FlowEvent, RefKind};
 use bonsai_workspace::Workspace;
@@ -57,9 +57,10 @@ pub struct SearchHit {
     pub file: String,
     pub line: u32,
     pub column: u32,
-    /// Source line at `(file, line)`, widened to line edges — so
-    /// humans can see the actual code that produced the hit without
-    /// re-opening the file. Empty when the VFS can't read the file.
+    /// The single source line that carries the hit — the fact's anchor
+    /// line, or for multi-line strings and comments the line containing
+    /// the match. Never a whole region. Empty when the VFS can't read
+    /// the file.
     pub code: String,
 }
 
@@ -214,7 +215,7 @@ fn search_canonical(
                     } else {
                         format!("{}({})", decl.name, decl.params.join(", "))
                     };
-                    let code = read_snippet(ws, &decl.name_span);
+                    let code = read_anchor_line(ws, &decl.name_span);
                     push(
                         &mut per_file,
                         SearchHit {
@@ -270,7 +271,7 @@ fn search_canonical(
                             .as_ref()
                             .map(|o| format!("{} from {}", o, imp.module))
                     });
-                let code = read_snippet(ws, &imp.span);
+                let code = read_anchor_line(ws, &imp.span);
                 push(
                     &mut per_file,
                     SearchHit {
@@ -302,7 +303,7 @@ fn search_canonical(
                         _ => "ref",
                     }
                     .to_string();
-                    let code = read_snippet(ws, &r.span);
+                    let code = read_anchor_line(ws, &r.span);
                     push(
                         &mut per_file,
                         SearchHit {
@@ -326,7 +327,8 @@ fn search_canonical(
                         continue;
                     }
                     let (path, line, col) = format_span(&s.span, ws);
-                    let code = read_snippet(ws, &s.span);
+                    let (code, line, col) = read_matched_line(ws, &s.span, &matcher)
+                        .unwrap_or_else(|| (read_anchor_line(ws, &s.span), line, col));
                     push(
                         &mut per_file,
                         SearchHit {
@@ -350,7 +352,8 @@ fn search_canonical(
                         continue;
                     }
                     let (path, line, col) = format_span(&c.span, ws);
-                    let code = read_snippet(ws, &c.span);
+                    let (code, line, col) = read_matched_line(ws, &c.span, &matcher)
+                        .unwrap_or_else(|| (read_anchor_line(ws, &c.span), line, col));
                     push(
                         &mut per_file,
                         SearchHit {
@@ -453,7 +456,7 @@ fn walk_flow_events_inner<M>(
             FlowEvent::Call { name, args, span, .. } => {
                 if matcher(name) {
                     let (path, line, col) = format_span(span, ws);
-                    let code = read_snippet(ws, span);
+                    let code = read_anchor_line(ws, span);
                     push(SearchHit {
                         name: name.clone(),
                         kind: "call".to_string(),
@@ -468,7 +471,7 @@ fn walk_flow_events_inner<M>(
                 for arg in args {
                     if matcher(&arg.value_text) {
                         let (path, line, col) = format_span(&arg.span, ws);
-                        let code = read_snippet(ws, &arg.span);
+                        let code = read_anchor_line(ws, &arg.span);
                         push(SearchHit {
                             name: arg.value_text.clone(),
                             kind: "arg".to_string(),
@@ -493,7 +496,7 @@ fn walk_flow_events_inner<M>(
             } => {
                 if matcher(target) {
                     let (path, line, col) = format_span(span, ws);
-                    let code = read_snippet(ws, span);
+                    let code = read_anchor_line(ws, span);
                     let ctx = source_name
                         .as_deref()
                         .map(|s| format!("{target} = {s} in {in_fn}"))
@@ -514,7 +517,7 @@ fn walk_flow_events_inner<M>(
                         let (path, line, col) = format_span(span, ws);
                         let shadow_key = (name.clone(), path.clone(), line, in_fn.to_string());
                         if !explicit_shadows.calls.contains(&shadow_key) {
-                            let code = read_snippet(ws, span);
+                            let code = read_anchor_line(ws, span);
                             push(SearchHit {
                                 name: name.clone(),
                                 kind: "call".to_string(),
@@ -535,7 +538,7 @@ fn walk_flow_events_inner<M>(
                             if explicit_shadows.args.contains(&shadow_key) {
                                 continue;
                             }
-                            let code = read_snippet(ws, span);
+                            let code = read_anchor_line(ws, span);
                             push(SearchHit {
                                 name: arg.clone(),
                                 kind: "arg".to_string(),
@@ -552,7 +555,7 @@ fn walk_flow_events_inner<M>(
                 for source in source_names {
                     if matcher(source) {
                         let (path, line, col) = format_span(span, ws);
-                        let code = read_snippet(ws, span);
+                        let code = read_anchor_line(ws, span);
                         push(SearchHit {
                             name: source.clone(),
                             kind: "ref-read".to_string(),

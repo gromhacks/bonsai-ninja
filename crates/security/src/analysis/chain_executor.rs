@@ -165,12 +165,7 @@ impl SourceGroupExecutor<'_> {
         let target_nodes = nodes.as_deref().unwrap_or_default();
         let target_relevance =
             (!target_nodes.is_empty() || target_funcs.is_some_and(|funcs| !funcs.is_empty())).then(|| {
-                idg.target_relevance_within_funcs_with_max_precision(
-                    target_nodes,
-                    target_funcs,
-                    &group.corridor.lineage_funcs,
-                    self.config.max_edge_precision,
-                )
+                idg.target_relevance_within_funcs(target_nodes, target_funcs, &group.corridor.lineage_funcs)
             });
         GroupTaintTargets {
             nodes,
@@ -303,7 +298,6 @@ impl SourceGroupExecutor<'_> {
                         lineage_funcs,
                         relevance: targets.target_relevance.as_ref(),
                     })
-                    .with_max_precision(self.config.max_edge_precision)
                     .with_caches(self.taint_caches),
                 ));
                 let graph = self
@@ -746,7 +740,6 @@ impl SourceGroupExecutor<'_> {
                             tainted_call_spans: &tainted_call_spans,
                             sink_tainted_args: evidence.sink_tainted_args.clone(),
                             taint_path,
-                            precision: evidence.chain_precision,
                             analysis_incomplete_reasons: unresolved_call_index
                                 .get_or_insert_with(|| {
                                     GraphUnresolvedCallIndex::new(chain_call_graph, graph.as_ref())

@@ -104,7 +104,7 @@ fn function_scoped_graph_planning_accepts_a_warm_idg_header_owner() {
     drop(headers);
     ws.build_and_seed_idg_service();
 
-    let scoped = ws.target_emission_resolved_call_graph(&[root], &[leaf], None);
+    let scoped = ws.target_emission_resolved_call_graph(&[root], &[leaf]);
     assert!(scoped.funcs.contains(&root));
     assert!(scoped.funcs.contains(&leaf));
 }

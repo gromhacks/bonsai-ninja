@@ -218,16 +218,13 @@ end
         .expect("trailing block declaration");
     let graph = w.resolved_call_graph();
     assert!(
-        graph
-            .callees_of(with_root)
-            .any(|edge| edge.to == callback && edge.precision.is_semantic()),
+        graph.callees_of(with_root).any(|edge| edge.to == callback),
         "the formal yield invocation and exact trailing-block argument must join: {:#?}",
         graph.inner().edges
     );
     let show = w.lookup_function("show").expect("source entry");
     let read = w.lookup_function("read").expect("sink owner");
-    let reachable =
-        w.source_reachable_resolved_call_graph(&[show], &[read], Some(bonsai_common::Precision::Narrowed));
+    let reachable = w.source_reachable_resolved_call_graph(&[show], &[read]);
     assert!(
         reachable.funcs.contains(&callback) && reachable.funcs.contains(&read),
         "the exact callback edge must survive source-reachable graph staging: {:#?}",

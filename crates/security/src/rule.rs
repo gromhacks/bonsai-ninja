@@ -2383,8 +2383,8 @@ impl<'de> Deserialize<'de> for RuleMatchExample {
     }
 }
 
-/// Severity advisory. Tools may elevate this based on reachability or
-/// precision when rendering findings.
+/// Severity advisory. Tools may elevate this based on reachability when
+/// rendering findings.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {

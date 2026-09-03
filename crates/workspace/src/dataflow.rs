@@ -53,7 +53,7 @@ use std::{
 // method-receiver-base source exemption + container-input span
 // containment, service.rs return-position source-seeding fallback) and
 // adapter member synthesis alter propagated taint facts.
-pub const DATAFLOW_CACHE_VERSION: u32 = 37;
+pub const DATAFLOW_CACHE_VERSION: u32 = 38;
 
 type DataFlowMemoryEntry = (FuncId, Arc<KindedTokens>, Arc<EntryTaintGraph>, AHashSet<FileId>);
 

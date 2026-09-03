@@ -7,7 +7,7 @@
 //! from adapter-produced AST places; hot relations use numeric ids only.
 
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
-use bonsai_common::{FuncId, Precision, Span};
+use bonsai_common::{FuncId, Span};
 use hashbrown::HashTable;
 use serde::{Deserialize, Serialize};
 
@@ -132,8 +132,6 @@ pub struct SymbolicFieldTransform {
     /// Target write site, or the exact evaluated argument-expression span for
     /// an [`SymbolicFieldTransformKind::Argument`] transform.
     pub write_span: Span,
-    /// Resolver/evidence precision.
-    pub precision: Precision,
     /// Resolved call kind.
     pub call_kind: CallEdgeKind,
     /// Transform operation.

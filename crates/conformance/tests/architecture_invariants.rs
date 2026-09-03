@@ -2898,9 +2898,7 @@ fn method_dispatch_does_not_use_span_containment_as_parent_fallback() {
 }
 
 /// Public IDG-backed taint wrappers are evidence-producing APIs, so
-/// they must default to the semantic precision ceiling. Diagnostic
-/// callers can still opt into unscoped reachability through a typed
-/// query request with `with_max_precision(None)`.
+/// they must go through the one typed semantic query request.
 #[test]
 fn public_idg_taint_wrappers_are_semantic_by_default() {
     let root = repo_root();
@@ -2922,8 +2920,9 @@ fn public_idg_taint_wrappers_are_semantic_by_default() {
         );
     }
     assert!(
-        function_body(&taint_query, "semantic").contains("max_precision: Some(Precision::Narrowed)"),
-        "typed IDG taint queries must default to the semantic precision ceiling"
+        function_body(&taint_query, "semantic").contains("targets: IdgTaintTargets::None")
+            || function_body(&taint_query, "semantic").contains("IdgTaintTargets"),
+        "typed IDG taint queries must start from the canonical untargeted semantic request"
     );
     for legacy_ladder in [
         "source_seed_reaches_return_from_idg_with_max_precision",
@@ -3024,29 +3023,63 @@ fn idg_taint_queries_reuse_canonical_linkage_without_global_body_materialization
     );
 }
 
-/// IDG query-service defaults are evidence-producing APIs. They must
-/// cap reachability at the semantic precision ceiling; unfiltered
-/// reachability is reserved for explicit diagnostic callers.
+/// The compiler has exactly one precision level: an edge, step, or flow
+/// either follows from syntax and resolved call flow or it does not exist.
+/// No crate may reintroduce a precision lattice, a max-precision knob, or a
+/// semantic/diagnostic split on the public or internal query surface.
 #[test]
-fn public_idg_query_defaults_are_semantic_by_default() {
+fn compiler_has_one_precision_level() {
     let root = repo_root();
-    let idg_service = read(&root.join("crates/idg/src/service.rs"));
-    for function in [
-        "forward_closure",
-        "tainted_call_args_in_closure",
-        "cross_call_edges_in_closure",
-        "cross_call_edges_in_reachable_nodes",
-    ] {
-        let body = function_body(&idg_service, function);
-        assert!(
-            body.contains("Some(SEMANTIC_MAX_PRECISION)"),
-            "{function} must cap default IDG reachability at the semantic precision ceiling"
-        );
-        assert!(
-            !body.contains(", None)") && !body.contains("(closure, None"),
-            "{function} must not delegate to unscoped diagnostic reachability by default"
-        );
+    let forbidden = [
+        "bonsai_common::Precision",
+        "Precision::Exact",
+        "Precision::Narrowed",
+        "Precision::OverApproximate",
+        "Precision::Unknown",
+        "max_precision",
+        "with_max_precision",
+        "PrecisionClass",
+        "PrecisionFilter",
+        "SEMANTIC_MAX_PRECISION",
+        "SEMANTIC_FLOW_MAX_PRECISION",
+        "precision.is_semantic()",
+        "edge_precision",
+        "semantic_max_precision",
+    ];
+    let mut offenders = Vec::new();
+    let mut files = Vec::new();
+    collect_rs_files(&root.join("crates"), &mut files);
+    for path in &files {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        // Test code may assert the tokens' absence on the wire; production
+        // code may not carry them at all.
+        if rel.contains("/tests/") || rel.ends_with("_tests.rs") {
+            continue;
+        }
+        let body = read(path);
+        for token in forbidden {
+            if body.contains(token) {
+                offenders.push(format!(
+                    "{}: {token}",
+                    path.strip_prefix(&root).unwrap_or(path).display()
+                ));
+            }
+        }
     }
+    assert!(
+        offenders.is_empty(),
+        "the compiler must keep one precision level; remove these reintroductions:\n{}",
+        offenders.join("\n")
+    );
+    let schema = read(&root.join("schemas/bonsai-native-export-v11.schema.json"));
+    assert!(
+        !schema.contains("precision"),
+        "the native export schema must not carry per-edge precision labels"
+    );
 }
 
 /// Source-analysis and dump-taint are user-visible evidence surfaces.
@@ -3058,7 +3091,6 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
 
     let security_analysis = security_analysis_source(&root);
     let browse_taint = read(&root.join("crates/browse/src/taint.rs"));
-    let taint_idg_api = read(&root.join("crates/taint/src/idg_api.rs"));
     let taint_value_flow = read(&root.join("crates/taint/src/value_flow.rs"));
     let workspace_trace = read(&root.join("crates/workspace/src/cross_module.rs"));
     let trace_schema = read(&root.join("crates/trace/src/lib.rs"));
@@ -3069,21 +3101,6 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     let inspect_call_edges = read(&root.join("crates/inspect/src/call_edges.rs"));
     let native_export = read(&root.join("crates/browse/src/native_export.rs"));
 
-    assert!(
-        taint_idg_api.contains("max_edge_precision: Some(Precision::Narrowed)"),
-        "InterTaintConfig::default must cap flow evidence at the semantic precision ceiling"
-    );
-
-    let value_forward_body = function_body(&taint_value_flow, "forward_closure");
-    assert!(
-        value_forward_body.contains("SEMANTIC_FLOW_MAX_PRECISION"),
-        "ValueFlowGraph::forward_closure must use the semantic precision ceiling by default"
-    );
-    let value_backward_body = function_body(&taint_value_flow, "backward_closure");
-    assert!(
-        value_backward_body.contains("SEMANTIC_FLOW_MAX_PRECISION"),
-        "ValueFlowGraph::backward_closure must use the semantic precision ceiling by default"
-    );
     let value_intra_body = function_body(&taint_value_flow, "build_intra_entry_graph");
     assert!(
         value_intra_body.contains("type FlowEnv")
@@ -3111,10 +3128,6 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     let source_scope_compilation_body = function_body(&security_analysis, "compile_source_lineage_scope");
     let source_group_body = function_body(&security_analysis, "build_source_group_candidates");
     assert!(
-        source_body.contains("max_edge_precision: Some(Precision::Narrowed)"),
-        "security source-analysis must build source-seeded graphs with a semantic precision ceiling"
-    );
-    assert!(
         source_body.contains("compile_source_lineage_scope")
             && source_body.contains("enumerate_source_candidates")
             && source_scope_compilation_body.contains("source_analysis_lineage_func_scope")
@@ -3124,10 +3137,6 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
             && source_scope_compilation_body.contains("group.lineage_funcs = Some")
             && source_group_body.contains("group.lineage_funcs.as_ref()"),
         "security source-analysis must scope default source path graphs through a semantic source-lineage corridor, not an unbounded source-only closure"
-    );
-    assert!(
-        source_group_body.contains("if !precision.is_semantic()"),
-        "security source-analysis must drop diagnostic precision classes before emitting candidates"
     );
     assert!(
         source_group_body.contains("entry_taint_call_records_from_idg_query")
@@ -3175,29 +3184,10 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
             && trace_call_body.contains("max-branch-fanout"),
         "trace must mark unresolved calls incomplete, expand every semantic alternative by default, and expose explicit fanout truncation"
     );
-    assert!(
-        !trace_call_body.contains("Precision::Unknown"),
-        "trace must not emit unresolved calls as unknown-precision call evidence"
-    );
     let trace_finalize_body = function_body(&trace_schema, "finalize");
     assert!(
-        trace_finalize_body.contains("public_semantic_step"),
-        "trace finalization must normalize raw steps through the semantic public boundary"
-    );
-    let trace_public_step_body = function_body(&trace_schema, "public_semantic_step");
-    assert!(
-        trace_public_step_body.contains("!raw_step.precision.is_semantic()")
-            && trace_public_step_body.contains("TraceStepKind::Diagnostic")
-            && trace_public_step_body.contains("diagnostic-precision-step:")
-            && trace_public_step_body.contains("precision: Precision::Exact"),
-        "trace must suppress diagnostic precision as incomplete metadata, not public flow evidence"
-    );
-
-    let inspect_render_body = function_body(&cli_inspect, "render_flow_with_cached_call_spans");
-    assert!(
-        inspect_render_body.contains("if !precision.is_semantic()")
-            && inspect_render_body.contains("return None;"),
-        "inspect must drop diagnostic-precision chains before rendering public flow evidence"
+        trace_finalize_body.contains("public_step"),
+        "trace finalization must project raw steps through the one public step boundary"
     );
     assert!(
         cli_inspect.contains("analysis_complete: bool")
@@ -3210,8 +3200,8 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     );
     let inspect_call_span_body = function_body(&inspect_call_edges, "find_call_span_to_func");
     assert!(
-        inspect_call_span_body.contains("edge.to == target_func && edge.precision.is_semantic()"),
-        "inspect call-site rendering must use semantic callgraph edge spans only"
+        inspect_call_span_body.contains("edge.to == target_func"),
+        "inspect call-site rendering must use resolved callgraph edge spans only"
     );
     assert!(
         !inspect_call_span_body.contains("find_call_span_resolved")
@@ -3221,56 +3211,24 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     let inspect_uncached_call_span_body =
         function_body(&inspect_call_edges, "find_call_span_to_func_uncached");
     assert!(
-        inspect_uncached_call_span_body.contains("edge.to == target_func && edge.precision.is_semantic()")
+        inspect_uncached_call_span_body.contains("edge.to == target_func")
             && !inspect_uncached_call_span_body.contains("find_call_span_resolved")
             && !inspect_uncached_call_span_body.contains("collect_local_callable_bindings"),
         "uncached inspect call-site rendering must use semantic callgraph edge spans only"
     );
     let dump_edges_body = function_body(&cli_dump, "cmd_dump_edges");
-    let precision_filter_start = cli_args
-        .find("pub(crate) enum PrecisionFilter")
-        .expect("missing CLI PrecisionFilter");
-    let precision_filter_tail = &cli_args[precision_filter_start..];
-    let precision_filter_end = precision_filter_tail
-        .find("\n}")
-        .map(|offset| offset + 2)
-        .expect("unterminated CLI PrecisionFilter");
-    let precision_filter_body = &precision_filter_tail[..precision_filter_end];
     assert!(
-        precision_filter_body.contains("Exact")
-            && precision_filter_body.contains("Narrowed")
-            && !precision_filter_body.contains("OverApproximate")
-            && !precision_filter_body.contains("Unknown")
-            && !dump_edges_body.contains("OverApproximate")
-            && !dump_edges_body.contains("Unknown"),
-        "dump-edges must make diagnostic precision filters unrepresentable so clap rejects them before command dispatch"
+        !cli_args.contains("--precision") && !dump_edges_body.contains("precision"),
+        "dump-edges must not expose a precision mode switch"
     );
     let security_taint_body = function_body(&cli_security, "cmd_flows");
     assert!(
-        security_analysis.contains(
-            "pub(crate) const PUBLIC_SEMANTIC_MAX_PRECISION: Precision = Precision::Narrowed",
-        )
-            && security_analysis
-                .contains("max_precision: Some(PUBLIC_SEMANTIC_MAX_PRECISION)")
-            && !security_taint_body.contains("max_precision")
-            && !security_taint_body.contains("Precision::")
-            && !security_taint_body.contains("SemanticPrecisionFilter")
-            && !security_taint_body.contains("OverApproximate")
-            && !security_taint_body.contains("Unknown"),
+        !security_taint_body.contains("precision"),
         "security taint-analysis must use one internal semantic evidence contract without exposing a precision mode or override"
     );
-    let export_callgraph_body = function_body(&native_export, "export_structural_callgraph_count");
     assert!(
-        export_callgraph_body.contains("edge.precision.is_semantic()"),
-        "native export structural callgraph must emit semantic call edges only"
-    );
-    assert!(
-        native_export.contains("struct ExportTaintCallEdgesStreaming")
-            && native_export
-                .matches("filter(|edge| edge.precision.is_semantic())")
-                .count()
-                >= 4,
-        "native export taint call_edges must emit semantic call edges only"
+        native_export.contains("struct ExportTaintCallEdgesStreaming"),
+        "native export taint call_edges must stream the resolved call graph"
     );
 
     let dump_taint_context_body = function_body(&browse_taint, "workspace_has_callable_named_in_context");
@@ -3293,19 +3251,13 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
         "dump-taint must stream the selected Tree-sitter body into default-seed derivation and canonical IDG seed composition"
     );
     assert!(
-        dump_taint_body.contains("forward_closure_evidence_with_max_precision")
-            && dump_taint_body.contains("closure_evidence.cross_calls")
-            && dump_taint_body.contains("Some(SEMANTIC_FLOW_MAX_PRECISION)"),
-        "dump-taint must compute its seed closure and traversed call provenance inside the semantic precision scope"
+        dump_taint_body.contains("forward_closure_evidence")
+            && dump_taint_body.contains("closure_evidence.cross_calls"),
+        "dump-taint must compute its seed closure and traversed call provenance from the one compiler closure"
     );
     assert!(
-        !dump_taint_body.contains("cross_call_edges_in_reachable_nodes_with_max_precision"),
+        !dump_taint_body.contains("cross_call_edges_in_reachable_nodes"),
         "dump-taint must consume provenance captured by the closure instead of rescanning the workspace IDG"
-    );
-    assert!(
-        !dump_taint_body.contains("with_max_precision(&seed_nodes, None")
-            && !dump_taint_body.contains("with_max_precision(\n            &seed_nodes,\n            None"),
-        "dump-taint must not request unscoped diagnostic reachability"
     );
     let dump_taint_record_body = function_body(&browse_taint, "build_taint_record_from_cross_call");
     assert!(
@@ -3433,10 +3385,10 @@ fn public_security_and_dump_taint_renderers_preserve_completeness_metadata() {
     let dump_json_body = function_body(&cli_dump, "render_taint_report_json_paged");
     assert!(
         dump_json_body.contains("\"records\": records")
-            && dump_json_body.contains("semantic_analysis_complete")
-            && dump_json_body.contains("semantic_analysis_incomplete_reasons")
-            && dump_json_body.contains("presentation_complete")
-            && dump_json_body.contains("presentation_incomplete_reasons")
+            && dump_json_body.contains("\"analysis_complete\": report.analysis_complete")
+            && dump_json_body.contains("\"analysis_incomplete_reasons\": analysis_incomplete_reasons")
+            && dump_json_body.contains("\"result_complete\": result_complete")
+            && dump_json_body.contains("\"result_incomplete_reasons\": result_incomplete_reasons")
             && dump_json_body.contains("paged_json_incomplete_reasons(\"dump-taint\"")
             && !dump_json_body.contains("json_lines"),
         "paged dump-taint JSON must retain structured records and separate semantic coverage from presentation truncation"
@@ -3472,11 +3424,11 @@ fn production_taint_command_paths_use_filtered_semantic_idg_apis() {
     ];
     let forbidden_calls = [
         "entry_taint_call_records_from_idg(",
-        "entry_taint_call_records_from_idg_with_max_precision(",
+        "entry_taint_call_records_from_idg(",
         "entry_taint_graph_from_idg(",
-        "entry_taint_graph_from_idg_with_max_precision(",
-        "forward_closure_with_max_precision(&seed_nodes, None",
-        "forward_closure_with_max_precision(\n        &seed_nodes,\n        None",
+        "entry_taint_graph_from_idg(",
+        "forward_closure(&seed_nodes, None",
+        "forward_closure(\n        &seed_nodes,\n        None",
     ];
     let allowlist = [
         "crates/security/src/analysis/mod.rs: exact_source_seed_graph",
@@ -3533,7 +3485,8 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
     let occurrence_scan = function_body(&inspect, "scan_occurrence_facts");
     let occurrence_file_scan = function_body(&inspect, "scan_occurrence_file");
     let decl_scan = function_body(&inspect, "collect_decl_hits");
-    let render_flow = function_body(&inspect, "render_flow_with_cached_call_spans");
+    let render_flow = function_body(&inspect, "plan_flow_with_cached_call_spans");
+    let hydrate_flow = function_body(&inspect, "hydrate_flow");
     let render_function = function_body(&inspect, "render_function_source");
     let render_report = function_body(&inspect, "render_inspect_report_text");
     assert!(
@@ -3564,6 +3517,8 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
             && !occurrence_file_scan.contains("global_index()")
             && render_flow.contains("ws.exact_decl(symbol)")
             && !render_flow.contains("global_index()")
+            && hydrate_flow.contains("ws.exact_decl(symbol)")
+            && !hydrate_flow.contains("global_index()")
             && render_function.contains("ws.exact_decl_index_shared(file)")
             && !render_function.contains("global_index()")
             && function_body(&workspace, "exact_decl_index_shared")
@@ -3667,19 +3622,23 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
 fn browse_summaries_remain_lightweight_and_machine_readable() {
     let root = repo_root();
     let browse = read(&root.join("crates/cli/src/commands/browse.rs"));
-    let json_emitter = function_body(&browse, "emit_summary_json_paged_cached");
+    // Browse JSON is one canonical envelope: rows are projected through the
+    // same presentation projection text uses, and that projection (which
+    // opens the summary annotator) runs only for the requested page slice —
+    // whole-result projection happens only when a secondary filter must
+    // inspect every row.
+    let json_emitter = function_body(&browse, "emit_canonical_browse_json");
+    let whole_result_filter = function_body(&browse, "filter_browse_rows_by_canonical_value");
     assert!(
         browse.contains("summary_ids: Vec<String>")
-            && json_emitter.contains("SummaryAnnotator::new(ws)")
-            && json_emitter.contains("if cfg.json_wrapped() && !crate::filter::active().is_active()")
-            && json_emitter
-                .find("page_cache::emit_paged_text")
-                .zip(json_emitter.find("let annotator = bonsai_sdk::SummaryAnnotator::new(ws)"))
-                .is_some_and(|(paginate, annotate)| paginate < annotate)
-            && json_emitter.contains("emit_json_paged_cached")
+            && json_emitter.contains("page_cache::emit_paged_text_prefiltered")
+            && json_emitter.contains("slice.iter().map(&project)")
+            && !json_emitter.contains("SummaryAnnotator::new")
+            && whole_result_filter.contains("secondary.is_active()")
+            && browse.contains("SummaryAnnotator::new(ws)")
             && !browse.contains("flows && !partial_workspace")
             && !browse.contains("CallEdgeResolver"),
-        "browse --summaries must expose compiler summary identities in JSON, annotate only the requested page when possible, and preserve scoped workspaces without silently disabling the flag"
+        "browse JSON must project only the requested page through the shared presentation row, run whole-result projection only for secondary filters, expose compiler summary identities, and preserve scoped workspaces without silently disabling the flag"
     );
 }
 
@@ -3872,7 +3831,9 @@ fn cli_paging_formats_only_the_requested_page() {
     let trace = read(&root.join("crates/cli/src/commands/trace.rs"));
     let tree = read(&root.join("crates/cli/src/commands/tree.rs"));
     let window = function_body(&page_cache, "requested_page_window");
-    let emit = function_body(&page_cache, "emit_paged_text");
+    // `emit_paged_text` / `emit_paged_text_prefiltered` are thin wrappers
+    // over one funnel that plans, renders, and caches only the requested page.
+    let emit = function_body(&page_cache, "emit_paged_text_inner");
     let replay = function_body(&page_cache, "replay_if_hit");
     assert!(
         window.contains("pages.insert(current_page.clamp(1, total_pages))")
@@ -4547,7 +4508,7 @@ fn first_class_path_and_slice_use_syntax_derived_indexes_only() {
     assert!(
         path_graph_body.contains("ws.cached_resolved_call_graph()")
             && path_graph_body.contains("persisted_resolved_call_graph_between")
-            && path_graph_body.contains("idg.semantic_cross_call_edges_with_max_precision(")
+            && path_graph_body.contains("idg.semantic_cross_call_edges(")
             && path_graph_body.contains("call_edge_from_idg_cross_call("),
         "path semantic graph must prefer exact partitioned relations, fall back to the cached resolved graph, and augment with warmed IDG cross-call edges"
     );
@@ -4576,7 +4537,7 @@ fn first_class_path_and_slice_use_syntax_derived_indexes_only() {
     }
     let idg_service = read(&root.join("crates/idg/src/service.rs"));
     assert!(
-        idg_service.contains("semantic_cross_call_edges_with_max_precision")
+        idg_service.contains("semantic_cross_call_edges")
             && idg_service.contains("Every semantic cross-call dataflow edge known to the IDG"),
         "IDG must expose renderable semantic cross-call edges for path/security/export consumers"
     );
@@ -5340,9 +5301,9 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
     let taint = read(&repo_root().join("crates/taint/src/reachable.rs"));
     let closure = function_body(&taint, "closure_evidence_with_targets");
     assert!(
-        closure.contains("forward_closure_evidence_within_funcs_with_max_precision")
+        closure.contains("forward_closure_evidence_within_funcs")
             && closure.contains(
-                "forward_closure_evidence_within_funcs_and_relevance_with_max_precision"
+                "forward_closure_evidence_within_funcs_and_relevance"
             ),
         "taint closures must enforce both the compiler-proven function scope and reusable target demand during fixed-point propagation"
     );
@@ -5425,7 +5386,7 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
         "external sort mergers must share one positioned spool descriptor and one bounded page budget instead of scaling descriptors or buffers per run"
     );
     assert!(
-        !execution.contains("may_forward_target_nodes_cut_within_funcs_with_max_precision"),
+        !execution.contains("may_forward_target_nodes_cut_within_funcs"),
         "security scheduling must compile target demand once rather than rebuilding a forward closure per source"
     );
     let semantic_compile = function_body(&execution, "compile_taint_semantic_graph");
@@ -6393,7 +6354,6 @@ fn unified_taint_closure_is_uncapped_compiler_dataflow() {
     let idg_query = read(&root.join("crates/idg/src/query.rs"));
     let idg_service = read(&root.join("crates/idg/src/service.rs"));
     let idg_spill = read(&root.join("crates/idg/src/spill_set.rs"));
-    let taint_idg_api = read(&root.join("crates/taint/src/idg_api.rs"));
 
     for function in [
         "bitvector_closure",
@@ -6568,6 +6528,7 @@ fn unified_taint_closure_is_uncapped_compiler_dataflow() {
             && !root.join("crates/taint/src/inter/tests.rs").exists(),
         "the canonical IDG API must not be confused with the retired interprocedural worklist"
     );
+    let taint_idg_api = read(&root.join("crates/taint/src/idg_api.rs"));
     let entry = function_body(&taint_idg_api, "interprocedural_taint");
     assert!(
         entry.contains("idg_backed_interprocedural_taint")

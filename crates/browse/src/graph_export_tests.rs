@@ -14,7 +14,6 @@ fn renders_networkx_graphml_and_cypher_from_sdk_projection() {
     assert!(networkx.contains("\"links\""));
     assert!(networkx.contains("\"analysis_complete\":false"));
     assert!(networkx.contains("\"analysis_incomplete_reasons\""));
-    assert!(networkx.contains("\"semantic_max_precision\":\"narrowed\""));
     assert!(networkx.contains("\"taint_propagations_complete\":false"));
     assert!(networkx.contains("\"taint_propagations_incomplete_reason\""));
 

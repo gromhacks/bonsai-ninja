@@ -6,7 +6,7 @@ use crate::symbolic::{
     SymbolicFieldGraph, SymbolicFieldTransform, SymbolicFieldTransformKind, NO_SYMBOLIC_STRING,
 };
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
-use bonsai_common::{FileId, Precision, Span};
+use bonsai_common::{FileId, Span};
 
 fn span() -> Span {
     Span::new(FileId::new(0), 0, 1)
@@ -80,13 +80,7 @@ fn cross_file_edge_indexed_both_directions() {
     let mut cfe = CrossFileEdges::new();
     let from_seg = SegmentId(1);
     let to_seg = SegmentId(2);
-    let edge = IdgEdge::inter_call_arg(
-        NodeId(0),
-        NodeId(1),
-        span(),
-        Precision::Exact,
-        CallEdgeKind::Direct,
-    );
+    let edge = IdgEdge::inter_call_arg(NodeId(0), NodeId(1), span(), CallEdgeKind::Direct);
     cfe.push(CrossFileEdge {
         from_segment: from_seg,
         to_segment: to_seg,
@@ -101,13 +95,7 @@ fn cross_file_edge_indexed_both_directions() {
 #[test]
 fn cross_file_invalidate_from_segment_drops_only_those_edges() {
     let mut cfe = CrossFileEdges::new();
-    let edge = IdgEdge::inter_call_arg(
-        NodeId(0),
-        NodeId(1),
-        span(),
-        Precision::Exact,
-        CallEdgeKind::Direct,
-    );
+    let edge = IdgEdge::inter_call_arg(NodeId(0), NodeId(1), span(), CallEdgeKind::Direct);
     for from_raw in [1u32, 1, 2, 1, 3] {
         cfe.push(CrossFileEdge {
             from_segment: SegmentId(from_raw),
@@ -133,13 +121,7 @@ fn cross_file_invalidate_returns_zero_for_unknown_segment() {
     cfe.push(CrossFileEdge {
         from_segment: SegmentId(1),
         to_segment: SegmentId(0),
-        edge: IdgEdge::inter_call_arg(
-            NodeId(0),
-            NodeId(0),
-            span(),
-            Precision::Exact,
-            CallEdgeKind::Direct,
-        ),
+        edge: IdgEdge::inter_call_arg(NodeId(0), NodeId(0), span(), CallEdgeKind::Direct),
     });
     assert_eq!(cfe.invalidate_from_segment(SegmentId(99)), 0);
     assert_eq!(cfe.len(), 1);
@@ -151,13 +133,7 @@ fn cross_file_rebuild_indexes_after_serde() {
     cfe.push(CrossFileEdge {
         from_segment: SegmentId(1),
         to_segment: SegmentId(2),
-        edge: IdgEdge::inter_call_arg(
-            NodeId(0),
-            NodeId(1),
-            span(),
-            Precision::Exact,
-            CallEdgeKind::Direct,
-        ),
+        edge: IdgEdge::inter_call_arg(NodeId(0), NodeId(1), span(), CallEdgeKind::Direct),
     });
     let bytes = bonsai_common::wire::encode(&cfe).unwrap();
     let mut restored: CrossFileEdges = bonsai_common::wire::decode(&bytes).unwrap();
@@ -178,13 +154,7 @@ fn sidecar_build_defers_cross_file_indexes_without_dropping_edges() {
     workspace.cross_file_mut().push(CrossFileEdge {
         from_segment: SegmentId(1),
         to_segment: SegmentId(2),
-        edge: IdgEdge::inter_call_arg(
-            NodeId(0),
-            NodeId(1),
-            span(),
-            Precision::Exact,
-            CallEdgeKind::Direct,
-        ),
+        edge: IdgEdge::inter_call_arg(NodeId(0), NodeId(1), span(), CallEdgeKind::Direct),
     });
 
     assert_eq!(workspace.cross_file().len(), 1);
@@ -223,7 +193,6 @@ fn workspace_total_counts_intra_plus_cross_file() {
             NodeId(0),
             NodeId(0),
             crate::edge::EdgeMeta {
-                precision: Precision::Exact,
                 kind: IdgEdgeKind::InterCallArg,
                 call_kind: CallEdgeKind::Direct,
                 via_span: span(),
@@ -263,13 +232,7 @@ fn save_load_round_trip_preserves_segments_and_indexes() {
     w.cross_file_mut().push(CrossFileEdge {
         from_segment: id_a,
         to_segment: id_b,
-        edge: IdgEdge::inter_call_arg(
-            NodeId(0),
-            NodeId(0),
-            span(),
-            Precision::Exact,
-            CallEdgeKind::Direct,
-        ),
+        edge: IdgEdge::inter_call_arg(NodeId(0), NodeId(0), span(), CallEdgeKind::Direct),
     });
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("idg.factstore");
@@ -311,13 +274,7 @@ fn paged_query_sidecar_preserves_exact_segments_edges_and_transforms() {
     workspace.cross_file_mut().push(CrossFileEdge {
         from_segment: source_segment,
         to_segment: target_segment,
-        edge: IdgEdge::inter_call_arg(
-            NodeId(0),
-            NodeId(0),
-            span(),
-            Precision::Exact,
-            CallEdgeKind::Direct,
-        ),
+        edge: IdgEdge::inter_call_arg(NodeId(0), NodeId(0), span(), CallEdgeKind::Direct),
     });
     let mut symbolic = SymbolicFieldGraph::new();
     let source = symbolic.intern_base(source_segment, FuncId::new(11), "payload");
@@ -328,7 +285,6 @@ fn paged_query_sidecar_preserves_exact_segments_edges_and_transforms() {
         exact_field: NO_SYMBOLIC_STRING,
         call_span: span(),
         write_span: span(),
-        precision: Precision::Exact,
         call_kind: CallEdgeKind::Direct,
         kind: SymbolicFieldTransformKind::Argument,
         arg_idx: 0,
@@ -433,7 +389,6 @@ fn save_load_round_trip_preserves_chunked_cross_file_and_field_flow() {
                 NodeId(idx),
                 NodeId(idx),
                 Span::new(FileId::new(0), idx as u64, idx as u64 + 1),
-                Precision::Exact,
                 CallEdgeKind::Direct,
             ),
         });
@@ -443,7 +398,6 @@ fn save_load_round_trip_preserves_chunked_cross_file_and_field_flow() {
             writer_ws_node: idx,
             reader_ws_node: idx + 10,
             via_span: Span::new(FileId::new(0), idx as u64, idx as u64 + 1),
-            precision: Precision::Exact,
         });
     }
     let mut symbolic = SymbolicFieldGraph::new();
@@ -456,7 +410,6 @@ fn save_load_round_trip_preserves_chunked_cross_file_and_field_flow() {
             exact_field: NO_SYMBOLIC_STRING,
             call_span: Span::new(FileId::new(0), offset, offset + 1),
             write_span: Span::new(FileId::new(0), offset, offset + 1),
-            precision: Precision::Exact,
             call_kind: CallEdgeKind::Direct,
             kind: SymbolicFieldTransformKind::Argument,
             arg_idx: 0,

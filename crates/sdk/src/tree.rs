@@ -17,7 +17,7 @@ use bonsai_browse::{
     file_path_excluded_by_filters, file_path_matches_filter, workspace_relative_path, Locator,
 };
 use bonsai_callgraph::EdgeKind;
-use bonsai_common::{FuncId, Precision, SymbolId};
+use bonsai_common::{FuncId, SymbolId};
 use bonsai_security::rule::Severity;
 use bonsai_security::{run_taint_analysis, Finding, FindingMatch, Rulepack, TaintAnalysisOptions};
 use bonsai_workspace::Workspace;
@@ -177,7 +177,6 @@ pub struct CrossEdge {
     pub flow_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finding_id: Option<String>,
-    pub precision: Precision,
     pub edge_kind: EdgeKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external: Option<ExternalKind>,
@@ -508,12 +507,7 @@ fn build_cross_edges(graph: &bonsai_callgraph::ResolvedCallGraph, ws: &Workspace
     // bodies. Keep this phase on the compact compiler linkage product so an
     // SDK tree never materializes the whole-workspace body index.
     let global = ws.compiler_header_index();
-    for edge in graph
-        .inner()
-        .edges
-        .iter()
-        .filter(|edge| edge.precision.is_semantic())
-    {
+    for edge in graph.inner().edges.iter() {
         let caller_file = global
             .declaring_file(SymbolId::new(edge.from.raw()))
             .and_then(|fid| ws.vfs().path(fid).ok().map(|p| p.display().to_string()))
@@ -543,7 +537,6 @@ fn build_cross_edges(graph: &bonsai_callgraph::ResolvedCallGraph, ws: &Workspace
             edge_id: None,
             flow_id: None,
             finding_id: None,
-            precision: edge.precision,
             edge_kind: edge.kind,
             external: None,
         };
@@ -554,24 +547,7 @@ fn build_cross_edges(graph: &bonsai_callgraph::ResolvedCallGraph, ws: &Workspace
             .push(cross.clone());
         index.out_callees.entry(caller_path).or_default().push(cross);
     }
-    for v in index.into_callers.values_mut() {
-        let v: &mut Vec<CrossEdge> = v;
-        v.sort_by_key(|edge| std::cmp::Reverse(precision_rank(edge.precision)));
-    }
-    for v in index.out_callees.values_mut() {
-        let v: &mut Vec<CrossEdge> = v;
-        v.sort_by_key(|edge| std::cmp::Reverse(precision_rank(edge.precision)));
-    }
     index
-}
-
-fn precision_rank(p: Precision) -> u8 {
-    match p {
-        Precision::Exact => 4,
-        Precision::Narrowed => 3,
-        Precision::OverApproximate => 2,
-        Precision::Unknown => 1,
-    }
 }
 
 fn func_to_locator(func: FuncId, ws: &Workspace) -> Locator {

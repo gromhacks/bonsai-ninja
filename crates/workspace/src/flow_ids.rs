@@ -48,7 +48,7 @@ const FLOW_IDS_TABLE_ID: u32 = 3;
 // v7 (2026-07-16): MessagePack replaces the retired binary codec.
 // v6 (2026-05-27): downstream of IDG/adapter semantic changes,
 // enumerated chains can differ, so reject older sidecars.
-pub const FLOW_IDS_CACHE_VERSION: u32 = 14;
+pub const FLOW_IDS_CACHE_VERSION: u32 = 15;
 
 /// Pipeline-hash field in the factstore header. Folds the matcher
 /// policy fingerprint into 64 bits and mixes in the current workspace

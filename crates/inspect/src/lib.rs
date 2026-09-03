@@ -24,7 +24,7 @@ pub use call_edges::{find_call_span_by_name, find_call_span_to_func_uncached, Ca
 pub use chain_cache::{find_enclosing_func, ChainCache};
 pub use filter::{
     chain_matches_filters, chain_matches_filters_for_hit, name_token_match, FactKindFilter, FilterHit,
-    InspectFilters, PrecisionFilter,
+    InspectFilters,
 };
 pub use flow_id::{
     compute_flow_id, compute_flow_labels_from, compute_group_id, compute_structural_group_id,

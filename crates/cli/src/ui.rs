@@ -115,12 +115,6 @@ impl Ui {
         )
     }
 
-    pub(crate) fn wrapped_bullet_lines(&self, bullet: &str, text: &str) -> Vec<String> {
-        let first_prefix = format!("    {bullet} ");
-        let next_prefix = " ".repeat(first_prefix.len());
-        self.wrapped_dim_prefixed_lines(&first_prefix, &self.dim(&first_prefix), &next_prefix, text)
-    }
-
     pub(crate) fn wrapped_dim_prefixed_lines(
         &self,
         raw_first_prefix: &str,
@@ -209,6 +203,29 @@ impl Ui {
             constraints[flow_col] = ColumnConstraint::Absolute(Width::Fixed(8));
             t.set_constraints(constraints);
         }
+        t
+    }
+
+    /// A [`Self::table`] whose `pinned` columns always render at their
+    /// content width. Identifier columns (rule ids, stable ids) must never
+    /// be wrapped or truncated to fit a narrow terminal: a cut id cannot be
+    /// copied back into `--rule` / `show`, so prose columns absorb the
+    /// width pressure instead.
+    pub(crate) fn table_pinned(&self, headers: &[&str], pinned: &[&str]) -> Table {
+        let mut t = self.table(headers);
+        let constraints: Vec<ColumnConstraint> = headers
+            .iter()
+            .map(|header| {
+                if pinned.contains(header) {
+                    ColumnConstraint::ContentWidth
+                } else if *header == "flows" {
+                    ColumnConstraint::Absolute(Width::Fixed(8))
+                } else {
+                    ColumnConstraint::LowerBoundary(Width::Fixed(1))
+                }
+            })
+            .collect();
+        t.set_constraints(constraints);
         t
     }
 

@@ -23,6 +23,173 @@ use super::{
 };
 
 const BROWSE_LITERAL_PREFILTER_FILE_LIMIT: usize = 5_000;
+
+/// Canonical presentation fields shared by text and JSON browse views. The
+/// compiler fact remains flattened at the row root; these derived fields are
+/// kept together so automation can consume every value the table renderer
+/// shows without parsing terminal text.
+#[derive(Clone, Debug, serde::Serialize)]
+struct BrowsePresentation {
+    location: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enclosing_function: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    import_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    summary_ids: Vec<String>,
+}
+
+fn canonical_browse_row<T: serde::Serialize>(
+    ws: &Workspace,
+    annotator: &bonsai_sdk::SummaryAnnotator<'_>,
+    row: &T,
+    include_summaries: bool,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(row)?;
+    let fields = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("browse row did not serialize as an object"))?;
+    let file = fields
+        .get("file")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let line = fields
+        .get("line")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|line| u32::try_from(line).ok())
+        .unwrap_or(0);
+    let column = fields
+        .get("column")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|column| u32::try_from(column).ok())
+        .unwrap_or(0);
+    let location = if column == 0 {
+        format!("{}:{line}", short_file(file))
+    } else {
+        format!("{}:{line}:{column}", short_file(file))
+    };
+    let code = fields
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| fields.get("snippet").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .or_else(|| (line != 0).then(|| read_line(ws, file, line)));
+    let enclosing_function = (line != 0)
+        .then(|| annotator.enclosing_function_name(file, line))
+        .flatten();
+    let signature = fields
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .zip(fields.get("params").and_then(serde_json::Value::as_array))
+        .map(|(name, params)| {
+            let params = params
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let params = dedup_sigil_params(&params);
+            format!("{name}({})", params.join(", "))
+        });
+    let import_kind = fields
+        .get("is_wildcard")
+        .and_then(serde_json::Value::as_bool)
+        .map(|wildcard| {
+            import_kind_label(
+                wildcard,
+                fields.get("original_name").and_then(serde_json::Value::as_str),
+            )
+            .to_string()
+        });
+    let summary_ids = if include_summaries && line != 0 {
+        annotator
+            .labels_for(file, line)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    fields.insert(
+        "presentation".to_string(),
+        serde_json::to_value(BrowsePresentation {
+            location,
+            code,
+            enclosing_function,
+            signature,
+            import_kind,
+            summary_ids,
+        })?,
+    );
+    Ok(value)
+}
+
+fn filter_browse_rows_by_canonical_value<T, P>(rows: &[T], project: &P) -> Result<Option<Vec<T>>>
+where
+    T: Clone,
+    P: Fn(&T) -> Result<serde_json::Value>,
+{
+    let secondary = crate::filter::active();
+    if !secondary.is_active() {
+        return Ok(None);
+    }
+    rows.iter()
+        .filter_map(|row| match project(row) {
+            Ok(value) if secondary.matches_value(&value) => Some(Ok(row.clone())),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
+fn emit_canonical_browse_json<T, C, P>(
+    workspace: &std::path::Path,
+    rows: &[T],
+    cfg: &paging::PagingConfig,
+    command: &str,
+    filters_hash: u64,
+    row_cost_bytes: C,
+    project: P,
+    analysis_incomplete_reasons: &[String],
+) -> Result<()>
+where
+    T: Clone + serde::Serialize,
+    C: Fn(&T) -> u64,
+    P: Fn(&T) -> Result<serde_json::Value>,
+{
+    page_cache::emit_paged_text_prefiltered(
+        workspace,
+        rows,
+        cfg,
+        command,
+        filters_hash,
+        row_cost_bytes,
+        |slice, info, _cfg| {
+            let rendered = slice.iter().map(&project).collect::<Result<Vec<_>>>()?;
+            let result_complete = page_covers_entire_result(info);
+            let wrapped = serde_json::json!({
+                "analysis_complete": analysis_incomplete_reasons.is_empty(),
+                "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                "result_complete": result_complete,
+                "result_incomplete_reasons": if result_complete {
+                    Vec::<String>::new()
+                } else {
+                    paged_json_incomplete_reasons(command, info)
+                },
+                "rows": rendered,
+                "page": page_info_to_json(info),
+            });
+            crate::output::emit_json_document(&wrapped)?;
+            Ok(())
+        },
+    )
+}
 fn browse_literal_prefilter_enabled(root: &std::path::Path, literal: Option<&str>, regex: bool) -> bool {
     literal
         .and_then(|literal| {
@@ -235,27 +402,41 @@ pub(crate) fn cmd_defs(
         (d.name.len() + d.file.len() + 24 + d.params.iter().map(|p| p.len() + 2).sum::<usize>()) as u64
             + paging::TABLE_ROW_CHROME_BYTES
     };
+    let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
+    let project_row = |definition: &bonsai_sdk::DefOut| {
+        let mut value = canonical_browse_row(ws, &canonical_ann, definition, flows)?;
+        let callees = def_callee_summaries(ws, std::slice::from_ref(definition), usize::MAX)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        if let Some(presentation) = value
+            .get_mut("presentation")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            presentation.insert("callees".to_string(), serde_json::json!(callees));
+        }
+        Ok(value)
+    };
+    let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
+    let rows = filtered_rows.as_deref().unwrap_or(&out);
+    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
     match format {
         BrowseFormat::Json => {
-            if flows {
-                emit_summary_json_paged_cached(
-                    root,
-                    ws,
-                    &out,
-                    &paging_cfg,
-                    "defs",
-                    filters_hash,
-                    cost,
-                    |ann, row| ann.labels_for(&row.file, row.line),
-                )?;
-            } else {
-                emit_json_paged_cached(root, &out, &paging_cfg, "defs", filters_hash, cost)?;
-            }
+            emit_canonical_browse_json(
+                root,
+                rows,
+                &paging_cfg,
+                "defs",
+                filters_hash,
+                cost,
+                project_row,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 root,
-                &out,
+                rows,
                 &paging_cfg,
                 "defs",
                 filters_hash,
@@ -308,6 +489,7 @@ pub(crate) fn cmd_defs(
                     cli_println!("{}", u.dim(&format!("({} definitions)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja defs <workspace>");
                     Ok(())
                 },
@@ -355,14 +537,30 @@ pub(crate) fn cmd_entrypoints(
             e.reason.len(),
         ])
     };
+    let canonical_ann = bonsai_sdk::SummaryAnnotator::new(project.workspace());
+    let project_row = |entrypoint: &bonsai_sdk::EntryPointOut| {
+        canonical_browse_row(project.workspace(), &canonical_ann, entrypoint, false)
+    };
+    let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
+    let rows = filtered_rows.as_deref().unwrap_or(&out);
+    let analysis_reasons = super::touched_parser_incomplete_reasons(project.workspace());
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &out, &paging_cfg, "entrypoints", filters_hash, cost)?;
+            emit_canonical_browse_json(
+                root,
+                rows,
+                &paging_cfg,
+                "entrypoints",
+                filters_hash,
+                cost,
+                project_row,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 root,
-                &out,
+                rows,
                 &paging_cfg,
                 "entrypoints",
                 filters_hash,
@@ -399,6 +597,7 @@ pub(crate) fn cmd_entrypoints(
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} entry points)", info.total_rows)));
                     render_truncation_notice(rows.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja entrypoints <workspace>");
                     Ok(())
                 },
@@ -467,15 +666,35 @@ pub(crate) fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-pub(crate) fn short_file(p: &str) -> String {
-    // Keep last 3 path components for table compactness.
-    let parts: Vec<&str> = p.rsplitn(4, '/').collect();
-    if parts.len() <= 3 {
-        return p.to_string();
+/// One-line preview of a fact's text for table cells: whitespace runs
+/// (including newlines inside a multi-line argument or string) collapse to a
+/// single space before the width cap. The canonical row keeps the full text.
+pub(crate) fn one_line_preview(text: &str, max: usize) -> String {
+    let mut collapsed = String::with_capacity(text.len().min(max + 4));
+    let mut pending_space = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            pending_space = !collapsed.is_empty();
+            continue;
+        }
+        if pending_space {
+            collapsed.push(' ');
+            pending_space = false;
+        }
+        collapsed.push(ch);
+        if collapsed.chars().count() > max + 1 {
+            break;
+        }
     }
-    let mut keep: Vec<&str> = parts[..3].to_vec();
-    keep.reverse();
-    keep.join("/")
+    truncate(&collapsed, max)
+}
+
+/// Display form of a row's file: the exact workspace-relative path JSON
+/// carries. Locations printed by the text view must be the same fact a
+/// script reads, and must paste back into `read-file`, `--file`, and
+/// `--in-file` unchanged, so no component is ever dropped.
+pub(crate) fn short_file(p: &str) -> String {
+    p.to_string()
 }
 
 /// Apply the text-mode row cap to `rows`. When truncation happens,
@@ -830,96 +1049,6 @@ fn class_summary_labels(ann: &bonsai_sdk::SummaryAnnotator<'_>, class: &bonsai_s
     union.into_iter().collect::<Vec<_>>().join(" ")
 }
 
-#[derive(serde::Serialize)]
-struct SummaryJsonRow<'row, T> {
-    #[serde(flatten)]
-    row: &'row T,
-    summary_ids: Vec<String>,
-}
-
-impl<T> Clone for SummaryJsonRow<'_, T> {
-    fn clone(&self) -> Self {
-        Self {
-            row: self.row,
-            summary_ids: self.summary_ids.clone(),
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)] // mirrors the existing paged JSON emitter contract
-fn emit_summary_json_paged_cached<T, F, L>(
-    workspace: &std::path::Path,
-    ws: &Workspace,
-    rows: &[T],
-    cfg: &paging::PagingConfig,
-    command: &str,
-    filters_hash: u64,
-    row_cost_bytes: F,
-    labels_for: L,
-) -> Result<()>
-where
-    T: serde::Serialize,
-    F: Fn(&T) -> u64,
-    L: Fn(&bonsai_sdk::SummaryAnnotator<'_>, &T) -> String,
-{
-    // Bare exhaustive JSON and secondary filtering genuinely consume every
-    // rendered summary label. A normal paged request does not: select its
-    // exact rows first, then open the semantic annotator only inside the one
-    // requested-page renderer.
-    if cfg.json_wrapped() && !crate::filter::active().is_active() {
-        let rows_by_ref = rows.iter().collect::<Vec<_>>();
-        let force_wrapper = cfg.context.is_some() || !matches!(cfg.page, paging::PageArg::First);
-        return page_cache::emit_paged_text(
-            workspace,
-            &rows_by_ref,
-            cfg,
-            command,
-            filters_hash,
-            |row| row_cost_bytes(*row).saturating_add(192),
-            |slice, info, _cfg| {
-                let annotator = bonsai_sdk::SummaryAnnotator::new(ws);
-                let annotated = slice
-                    .iter()
-                    .map(|row| SummaryJsonRow {
-                        row: *row,
-                        summary_ids: labels_for(&annotator, *row)
-                            .split_whitespace()
-                            .map(str::to_string)
-                            .collect(),
-                    })
-                    .collect::<Vec<_>>();
-                if !force_wrapper && page_covers_entire_result(info) {
-                    cli_println!("{}", serde_json::to_string_pretty(&annotated)?);
-                    return Ok(());
-                }
-                let wrapped = serde_json::json!({
-                    "analysis_complete": page_covers_entire_result(info),
-                    "analysis_incomplete_reasons": paged_json_incomplete_reasons(command, info),
-                    "rows": annotated,
-                    "page": page_info_to_json(info),
-                });
-                cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
-                Ok(())
-            },
-        );
-    }
-
-    let annotator = bonsai_sdk::SummaryAnnotator::new(ws);
-    let annotated: Vec<SummaryJsonRow<'_, T>> = rows
-        .iter()
-        .map(|row| SummaryJsonRow {
-            row,
-            summary_ids: labels_for(&annotator, row)
-                .split_whitespace()
-                .map(str::to_string)
-                .collect(),
-        })
-        .collect();
-    emit_json_paged_cached(workspace, &annotated, cfg, command, filters_hash, |row| {
-        row_cost_bytes(row.row) + row.summary_ids.iter().map(|id| id.len() as u64 + 4).sum::<u64>() + 20
-    })
-}
-
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
 pub(crate) fn cmd_calls(
     root: &std::path::Path,
@@ -969,22 +1098,23 @@ pub(crate) fn cmd_calls(
                 c.line,
             ))
     };
+    let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
+    let project_row = |call: &bonsai_sdk::CallOut| canonical_browse_row(ws, &canonical_ann, call, flows);
+    let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
+    let rows = filtered_rows.as_deref().unwrap_or(&out);
+    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
     match format {
         BrowseFormat::Json => {
-            if flows {
-                emit_summary_json_paged_cached(
-                    root,
-                    ws,
-                    &out,
-                    &paging_cfg,
-                    "calls",
-                    filters_hash,
-                    cost_bytes,
-                    |ann, row| ann.labels_for(&row.file, row.line),
-                )?;
-            } else {
-                emit_json_paged_cached(root, &out, &paging_cfg, "calls", filters_hash, cost_bytes)?;
-            }
+            emit_canonical_browse_json(
+                root,
+                rows,
+                &paging_cfg,
+                "calls",
+                filters_hash,
+                cost_bytes,
+                project_row,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
             // `--context` / `--page` / `--all` drive the slice.
@@ -992,9 +1122,9 @@ pub(crate) fn cmd_calls(
             // suspenders truncation a user can set when their
             // context budget happens to fit more rows than they
             // want visually (rare). Paging is the primary knob.
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 root,
-                &out,
+                rows,
                 &paging_cfg,
                 "calls",
                 filters_hash,
@@ -1035,6 +1165,7 @@ pub(crate) fn cmd_calls(
                     cli_println!("{}", u.dim(&format!("({} call sites)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja calls <workspace>");
                     Ok(())
                 },
@@ -1044,6 +1175,7 @@ pub(crate) fn cmd_calls(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_json_paged_cached<T, F>(
     workspace: &std::path::Path,
     rows: &[T],
@@ -1051,49 +1183,37 @@ pub(crate) fn emit_json_paged_cached<T, F>(
     command: &str,
     filters_hash: u64,
     row_cost_bytes: F,
+    analysis_incomplete_reasons: &[String],
 ) -> Result<()>
 where
     T: serde::Serialize + Clone,
     F: Fn(&T) -> u64,
 {
-    if cfg.json_wrapped() {
-        let force_wrapper = cfg.context.is_some() || !matches!(cfg.page, paging::PageArg::First);
-        page_cache::emit_paged_text(
-            workspace,
-            rows,
-            cfg,
-            command,
-            filters_hash,
-            row_cost_bytes,
-            |slice, info, _cfg| {
-                if !force_wrapper && page_covers_entire_result(info) {
-                    cli_println!("{}", serde_json::to_string_pretty(slice)?);
-                    return Ok(());
-                }
-                let analysis_incomplete_reasons = paged_json_incomplete_reasons(command, info);
-                let wrapped = serde_json::json!({
-                    "analysis_complete": page_covers_entire_result(info),
-                    "analysis_incomplete_reasons": analysis_incomplete_reasons,
-                    "rows": slice,
-                    "page": page_info_to_json(info),
-                });
-                cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
-                Ok(())
-            },
-        )?;
-    } else {
-        // Bare-array path (no pagination wrapper) renders directly and
-        // so doesn't pass through `emit_paged_text`'s shared filter —
-        // apply the secondary `--contains` / `--not-contains` filter
-        // here so json `--all` matches the text path's filtered set.
-        let secondary = crate::filter::active();
-        if secondary.is_active() {
-            let kept: Vec<&T> = rows.iter().filter(|row| secondary.matches_value(row)).collect();
-            cli_println!("{}", serde_json::to_string_pretty(&kept)?);
-        } else {
-            cli_println!("{}", serde_json::to_string_pretty(&rows)?);
-        }
-    }
+    // Row-oriented JSON has one stable document shape regardless of paging:
+    // command completeness plus the exact canonical rows rendered by text.
+    // Returning a bare array for `--all` made consumers branch on flags and
+    // discarded the distinction between analysis and result completeness.
+    page_cache::emit_paged_text(
+        workspace,
+        rows,
+        cfg,
+        command,
+        filters_hash,
+        row_cost_bytes,
+        |slice, info, _cfg| {
+            let result_incomplete_reasons = paged_json_incomplete_reasons(command, info);
+            let wrapped = serde_json::json!({
+                "analysis_complete": analysis_incomplete_reasons.is_empty(),
+                "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                "result_complete": result_incomplete_reasons.is_empty(),
+                "result_incomplete_reasons": result_incomplete_reasons,
+                "rows": slice,
+                "page": page_info_to_json(info),
+            });
+            crate::output::emit_json_document(&wrapped)?;
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
@@ -1107,56 +1227,98 @@ pub(crate) fn emit_json_value_paged_cached<T>(
 where
     T: serde::Serialize,
 {
-    let rendered = serde_json::to_string_pretty(value)?;
-    if !cfg.json_wrapped() {
-        cli_println!("{rendered}");
+    emit_json_value_paged_cached_inner(workspace, value, cfg, command, filters_hash, true)
+}
+
+pub(crate) fn emit_json_value_paged_cached_prefiltered<T>(
+    workspace: &std::path::Path,
+    value: &T,
+    cfg: &paging::PagingConfig,
+    command: &str,
+    filters_hash: u64,
+) -> Result<()>
+where
+    T: serde::Serialize,
+{
+    emit_json_value_paged_cached_inner(workspace, value, cfg, command, filters_hash, false)
+}
+
+fn emit_json_value_paged_cached_inner<T>(
+    workspace: &std::path::Path,
+    value: &T,
+    cfg: &paging::PagingConfig,
+    command: &str,
+    filters_hash: u64,
+    apply_secondary_filter: bool,
+) -> Result<()>
+where
+    T: serde::Serialize,
+{
+    let canonical = serde_json::to_value(value)?;
+    let secondary = crate::filter::active();
+    if apply_secondary_filter && secondary.is_active() && !secondary.matches_value(&canonical) {
+        crate::output::emit_json_document(&serde_json::json!({
+            "analysis_complete": true,
+            "analysis_incomplete_reasons": [],
+            "result_complete": true,
+            "result_incomplete_reasons": [],
+            "matched": false,
+            "value": null,
+        }))?;
         return Ok(());
     }
 
-    let force_wrapper = cfg.context.is_some()
-        || !matches!(cfg.page, paging::PageArg::First)
-        || crate::filter::active().is_active();
-    let lines: Vec<String> = rendered.lines().map(str::to_string).collect();
-    page_cache::emit_paged_text(
+    // A structured object is one semantic result, not a bag of formatted JSON
+    // source lines. Keep it atomic even when it exceeds a requested context
+    // budget; `page.oversized_rows` makes that explicit without corrupting the
+    // command schema or omitting child facts.
+    page_cache::emit_paged_text_prefiltered(
         workspace,
-        &lines,
+        std::slice::from_ref(&canonical),
         cfg,
         command,
         filters_hash,
-        |line| line.len() as u64 + 8,
+        |row| {
+            serde_json::to_vec(row)
+                .map(|bytes| bytes.len() as u64 + paging::TABLE_ROW_CHROME_BYTES)
+                .unwrap_or(paging::TABLE_ROW_CHROME_BYTES)
+        },
         |slice, info, _cfg| {
-            // Preserve the command's native JSON schema whenever the whole
-            // value fits. With an explicit paging request, add `page` beside
-            // the native object fields instead of turning the object into an
-            // array of JSON source lines.
-            if page_covers_entire_result(info) && !crate::filter::active().is_active() {
-                if !force_wrapper {
-                    cli_println!("{}", slice.join("\n"));
-                    return Ok(());
+            let mut native = slice.first().cloned().unwrap_or(serde_json::Value::Null);
+            match &mut native {
+                serde_json::Value::Object(fields) => {
+                    fields
+                        .entry("analysis_complete".to_string())
+                        .or_insert(serde_json::Value::Bool(true));
+                    fields
+                        .entry("analysis_incomplete_reasons".to_string())
+                        .or_insert_with(|| serde_json::json!([]));
+                    fields.insert("result_complete".to_string(), serde_json::Value::Bool(true));
+                    fields.insert("result_incomplete_reasons".to_string(), serde_json::json!([]));
+                    fields.insert("page".to_string(), page_info_to_json(info));
                 }
-                let mut native = serde_json::to_value(value)?;
-                match &mut native {
-                    serde_json::Value::Object(fields) => {
-                        fields.insert("page".to_string(), page_info_to_json(info));
-                    }
-                    _ => {
-                        native = serde_json::json!({
-                            "value": native,
-                            "page": page_info_to_json(info),
-                        });
-                    }
+                serde_json::Value::Array(rows) => {
+                    native = serde_json::json!({
+                        "analysis_complete": true,
+                        "analysis_incomplete_reasons": [],
+                        "result_complete": true,
+                        "result_incomplete_reasons": [],
+                        "rows": rows,
+                        "page": page_info_to_json(info),
+                    });
                 }
-                cli_println!("{}", serde_json::to_string_pretty(&native)?);
-                return Ok(());
+                _ => {
+                    native = serde_json::json!({
+                        "analysis_complete": true,
+                        "analysis_incomplete_reasons": [],
+                        "result_complete": true,
+                        "result_incomplete_reasons": [],
+                        "value": native,
+                        "page": page_info_to_json(info),
+                    });
+                }
             }
-            let analysis_incomplete_reasons = paged_json_incomplete_reasons(command, info);
-            let wrapped = serde_json::json!({
-                "analysis_complete": page_covers_entire_result(info),
-                "analysis_incomplete_reasons": analysis_incomplete_reasons,
-                "json_lines": slice,
-                "page": page_info_to_json(info),
-            });
-            cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
+            crate::output::emit_json_document(&native)?;
             Ok(())
         },
     )
@@ -1214,11 +1376,7 @@ fn dedup_sigil_params(params: &[String]) -> Vec<String> {
     out
 }
 
-/// Convert a [`paging::PageInfo`] into the JSON `page` object
-/// shape: numeric counters, cursors, and `is_last`. Used only
-/// when the caller opted into paged JSON via `--context` or
-/// `--page` — the default JSON shape is a bare array for
-/// back-compat.
+/// Convert a [`paging::PageInfo`] into the canonical JSON `page` object.
 pub(crate) fn page_info_to_json(info: &paging::PageInfo) -> serde_json::Value {
     serde_json::json!({
         "number": info.page_number,
@@ -1232,6 +1390,7 @@ pub(crate) fn page_info_to_json(info: &paging::PageInfo) -> serde_json::Value {
         "cursor": info.cursor,
         "next_cursor": info.next_cursor,
         "is_last": info.is_last,
+        "budget_exceeded": info.budget.is_some_and(|budget| info.tokens_used > budget),
     })
 }
 
@@ -1310,27 +1469,44 @@ pub(crate) fn cmd_imports(
         ])
         .saturating_add(source_line_estimated_cell_cost())
     };
-    match format {
-        BrowseFormat::Json => {
-            if flows {
-                emit_summary_json_paged_cached(
-                    root,
-                    ws,
-                    &out,
-                    &paging_cfg,
-                    "imports",
-                    filters_hash,
-                    cost,
-                    import_flow_labels,
-                )?;
-            } else {
-                emit_json_paged_cached(root, &out, &paging_cfg, "imports", filters_hash, cost)?;
+    let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
+    let project_row = |import: &bonsai_sdk::ImportOut| {
+        let mut value = canonical_browse_row(ws, &canonical_ann, import, flows)?;
+        if flows {
+            if let Some(presentation) = value
+                .get_mut("presentation")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                presentation.insert(
+                    "summary_ids".to_string(),
+                    serde_json::json!(import_flow_labels(&canonical_ann, import)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()),
+                );
             }
         }
-        BrowseFormat::Text => {
-            page_cache::emit_paged_text(
+        Ok(value)
+    };
+    let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
+    let rows = filtered_rows.as_deref().unwrap_or(&out);
+    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
+    match format {
+        BrowseFormat::Json => {
+            emit_canonical_browse_json(
                 root,
-                &out,
+                rows,
+                &paging_cfg,
+                "imports",
+                filters_hash,
+                cost,
+                project_row,
+                &analysis_reasons,
+            )?;
+        }
+        BrowseFormat::Text => {
+            page_cache::emit_paged_text_prefiltered(
+                root,
+                rows,
                 &paging_cfg,
                 "imports",
                 filters_hash,
@@ -1382,6 +1558,7 @@ pub(crate) fn cmd_imports(
                     cli_println!("{}", u.dim(&format!("({} imports)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja imports <workspace>");
                     Ok(())
                 },
@@ -1454,27 +1631,29 @@ pub(crate) fn cmd_vars(
                 v.line,
             ))
     };
+    let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
+    let project_row =
+        |variable: &bonsai_sdk::VarOut| canonical_browse_row(ws, &canonical_ann, variable, flows);
+    let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
+    let rows = filtered_rows.as_deref().unwrap_or(&out);
+    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
     match format {
         BrowseFormat::Json => {
-            if flows {
-                emit_summary_json_paged_cached(
-                    root,
-                    ws,
-                    &out,
-                    &paging_cfg,
-                    "vars",
-                    filters_hash,
-                    cost,
-                    |ann, row| ann.labels_for(&row.file, row.line),
-                )?;
-            } else {
-                emit_json_paged_cached(root, &out, &paging_cfg, "vars", filters_hash, cost)?;
-            }
+            emit_canonical_browse_json(
+                root,
+                rows,
+                &paging_cfg,
+                "vars",
+                filters_hash,
+                cost,
+                project_row,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 root,
-                &out,
+                rows,
                 &paging_cfg,
                 "vars",
                 filters_hash,
@@ -1515,6 +1694,7 @@ pub(crate) fn cmd_vars(
                     cli_println!("{}", u.dim(&format!("({} writes)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja vars <workspace>");
                     Ok(())
                 },
@@ -1581,27 +1761,29 @@ pub(crate) fn cmd_strings(
             s.line,
         ))
     };
+    let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
+    let project_row =
+        |string: &bonsai_sdk::StringOut| canonical_browse_row(ws, &canonical_ann, string, flows);
+    let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
+    let rows = filtered_rows.as_deref().unwrap_or(&out);
+    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
     match format {
         BrowseFormat::Json => {
-            if flows {
-                emit_summary_json_paged_cached(
-                    root,
-                    ws,
-                    &out,
-                    &paging_cfg,
-                    "strings",
-                    filters_hash,
-                    cost,
-                    |ann, row| ann.labels_for(&row.file, row.line),
-                )?;
-            } else {
-                emit_json_paged_cached(root, &out, &paging_cfg, "strings", filters_hash, cost)?;
-            }
+            emit_canonical_browse_json(
+                root,
+                rows,
+                &paging_cfg,
+                "strings",
+                filters_hash,
+                cost,
+                project_row,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 root,
-                &out,
+                rows,
                 &paging_cfg,
                 "strings",
                 filters_hash,
@@ -1647,6 +1829,7 @@ pub(crate) fn cmd_strings(
                     cli_println!("{}", u.dim(&format!("({} strings)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja strings <workspace>");
                     Ok(())
                 },
@@ -1687,14 +1870,29 @@ pub(crate) fn cmd_comments(
     let cost = |c: &bonsai_sdk::CommentOut| {
         (c.kind.len() + c.text.len().min(200) + c.file.len() + 16) as u64 + paging::TABLE_ROW_CHROME_BYTES
     };
+    let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
+    let project_row =
+        |comment: &bonsai_sdk::CommentOut| canonical_browse_row(ws, &canonical_ann, comment, false);
+    let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
+    let rows = filtered_rows.as_deref().unwrap_or(&out);
+    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &out, &paging_cfg, "comments", filters_hash, cost)?;
+            emit_canonical_browse_json(
+                root,
+                rows,
+                &paging_cfg,
+                "comments",
+                filters_hash,
+                cost,
+                project_row,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 root,
-                &out,
+                rows,
                 &paging_cfg,
                 "comments",
                 filters_hash,
@@ -1722,6 +1920,7 @@ pub(crate) fn cmd_comments(
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} comments)", info.total_rows)));
                     render_truncation_notice(rows.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja comments <workspace>");
                     Ok(())
                 },
@@ -1798,27 +1997,29 @@ pub(crate) fn cmd_args(
             a.line,
         ))
     };
+    let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
+    let project_row =
+        |argument: &bonsai_sdk::ArgOut| canonical_browse_row(ws, &canonical_ann, argument, flows);
+    let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
+    let rows = filtered_rows.as_deref().unwrap_or(&out);
+    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
     match format {
         BrowseFormat::Json => {
-            if flows {
-                emit_summary_json_paged_cached(
-                    root,
-                    ws,
-                    &out,
-                    &paging_cfg,
-                    "args",
-                    filters_hash,
-                    cost,
-                    |ann, row| ann.labels_for(&row.file, row.line),
-                )?;
-            } else {
-                emit_json_paged_cached(root, &out, &paging_cfg, "args", filters_hash, cost)?;
-            }
+            emit_canonical_browse_json(
+                root,
+                rows,
+                &paging_cfg,
+                "args",
+                filters_hash,
+                cost,
+                project_row,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 root,
-                &out,
+                rows,
                 &paging_cfg,
                 "args",
                 filters_hash,
@@ -1872,6 +2073,7 @@ pub(crate) fn cmd_args(
                     cli_println!("{}", u.dim(&format!("({} arguments)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja args <workspace>");
                     Ok(())
                 },
@@ -1944,27 +2146,29 @@ pub(crate) fn cmd_operations(
             op.line,
         ))
     };
+    let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
+    let project_row =
+        |operation: &bonsai_sdk::OperationOut| canonical_browse_row(ws, &canonical_ann, operation, flows);
+    let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
+    let rows = filtered_rows.as_deref().unwrap_or(&out);
+    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
     match format {
         BrowseFormat::Json => {
-            if flows {
-                emit_summary_json_paged_cached(
-                    root,
-                    ws,
-                    &out,
-                    &paging_cfg,
-                    "operations",
-                    filters_hash,
-                    cost,
-                    |ann, row| ann.labels_for(&row.file, row.line),
-                )?;
-            } else {
-                emit_json_paged_cached(root, &out, &paging_cfg, "operations", filters_hash, cost)?;
-            }
+            emit_canonical_browse_json(
+                root,
+                rows,
+                &paging_cfg,
+                "operations",
+                filters_hash,
+                cost,
+                project_row,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 root,
-                &out,
+                rows,
                 &paging_cfg,
                 "operations",
                 filters_hash,
@@ -2020,6 +2224,7 @@ pub(crate) fn cmd_operations(
                     cli_println!("{}", u.dim(&format!("({} operations)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja operations <workspace>");
                     Ok(())
                 },
@@ -2074,27 +2279,44 @@ pub(crate) fn cmd_classes(
             + c.methods.iter().take(8).map(|m| m.len() + 2).sum::<usize>()) as u64
             + paging::TABLE_ROW_CHROME_BYTES
     };
-    match format {
-        BrowseFormat::Json => {
-            if flows {
-                emit_summary_json_paged_cached(
-                    root,
-                    ws,
-                    &out,
-                    &paging_cfg,
-                    "classes",
-                    filters_hash,
-                    cost,
-                    class_summary_labels,
-                )?;
-            } else {
-                emit_json_paged_cached(root, &out, &paging_cfg, "classes", filters_hash, cost)?;
+    let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
+    let project_row = |class: &bonsai_sdk::ClassOut| {
+        let mut value = canonical_browse_row(ws, &canonical_ann, class, flows)?;
+        if flows {
+            if let Some(presentation) = value
+                .get_mut("presentation")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                presentation.insert(
+                    "summary_ids".to_string(),
+                    serde_json::json!(class_summary_labels(&canonical_ann, class)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()),
+                );
             }
         }
-        BrowseFormat::Text => {
-            page_cache::emit_paged_text(
+        Ok(value)
+    };
+    let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
+    let rows = filtered_rows.as_deref().unwrap_or(&out);
+    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
+    match format {
+        BrowseFormat::Json => {
+            emit_canonical_browse_json(
                 root,
-                &out,
+                rows,
+                &paging_cfg,
+                "classes",
+                filters_hash,
+                cost,
+                project_row,
+                &analysis_reasons,
+            )?;
+        }
+        BrowseFormat::Text => {
+            page_cache::emit_paged_text_prefiltered(
+                root,
+                rows,
                 &paging_cfg,
                 "classes",
                 filters_hash,
@@ -2142,6 +2364,7 @@ pub(crate) fn cmd_classes(
                     cli_println!("{}", u.dim(&format!("({} types)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja classes <workspace>");
                     Ok(())
                 },
@@ -2182,27 +2405,29 @@ pub(crate) fn cmd_refs(
         (r.symbol.len() + r.kind.len() + r.file.len() + 16 + r.snippet.len().min(100)) as u64
             + paging::TABLE_ROW_CHROME_BYTES
     };
+    let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
+    let project_row =
+        |reference: &bonsai_sdk::RefOut| canonical_browse_row(ws, &canonical_ann, reference, flows);
+    let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
+    let rows = filtered_rows.as_deref().unwrap_or(&out);
+    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
     match format {
         BrowseFormat::Json => {
-            if flows {
-                emit_summary_json_paged_cached(
-                    root,
-                    ws,
-                    &out,
-                    &paging_cfg,
-                    "refs",
-                    filters_hash,
-                    cost,
-                    |ann, row| ann.labels_for(&row.file, row.line),
-                )?;
-            } else {
-                emit_json_paged_cached(root, &out, &paging_cfg, "refs", filters_hash, cost)?;
-            }
+            emit_canonical_browse_json(
+                root,
+                rows,
+                &paging_cfg,
+                "refs",
+                filters_hash,
+                cost,
+                project_row,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 root,
-                &out,
+                rows,
                 &paging_cfg,
                 "refs",
                 filters_hash,
@@ -2246,6 +2471,7 @@ pub(crate) fn cmd_refs(
                     cli_println!("{}", u.dim(&format!("({} references)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja refs <workspace> <symbol>");
                     Ok(())
                 },
@@ -2302,27 +2528,28 @@ pub(crate) fn cmd_search(
             + 16) as u64
             + paging::TABLE_ROW_CHROME_BYTES
     };
+    let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
+    let project_row = |hit: &bonsai_sdk::SearchHit| canonical_browse_row(ws, &canonical_ann, hit, flows);
+    let filtered_rows = filter_browse_rows_by_canonical_value(&hits, &project_row)?;
+    let rows = filtered_rows.as_deref().unwrap_or(&hits);
+    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
     match format {
         BrowseFormat::Json => {
-            if flows {
-                emit_summary_json_paged_cached(
-                    root,
-                    ws,
-                    &hits,
-                    &paging_cfg,
-                    "search",
-                    filters_hash,
-                    cost,
-                    |ann, row| ann.labels_for(&row.file, row.line),
-                )?;
-            } else {
-                emit_json_paged_cached(root, &hits, &paging_cfg, "search", filters_hash, cost)?;
-            }
+            emit_canonical_browse_json(
+                root,
+                rows,
+                &paging_cfg,
+                "search",
+                filters_hash,
+                cost,
+                project_row,
+                &analysis_reasons,
+            )?;
         }
         BrowseFormat::Text => {
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 root,
-                &hits,
+                rows,
                 &paging_cfg,
                 "search",
                 filters_hash,
@@ -2349,7 +2576,7 @@ pub(crate) fn cmd_search(
                         let code = h.code.trim();
                         let code_cell = Cell::new(u.snippet(code, ext));
                         let mut cells = vec![
-                            Cell::new(u.name(&h.name)),
+                            Cell::new(u.name(&one_line_preview(&h.name, 80))),
                             Cell::new(u.kind(&h.kind)),
                             Cell::new(u.dim(&qualified)),
                             Cell::new(u.dim(&context)),
@@ -2372,6 +2599,7 @@ pub(crate) fn cmd_search(
                     cli_println!("{}", u.dim(&format!("({} matches)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
+                    super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_paging_footer(info, "bonsai-ninja search <workspace> <query>");
                     Ok(())
                 },
@@ -2406,7 +2634,33 @@ pub(crate) fn cmd_symbol_summary(
     };
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &rows, &paging_cfg, "symbol-summary", filters_hash, cost)?;
+            page_cache::emit_paged_text(
+                root,
+                &rows,
+                &paging_cfg,
+                "symbol-summary",
+                filters_hash,
+                cost,
+                |paged, info, _cfg| {
+                    let analysis_incomplete_reasons = paged
+                        .iter()
+                        .flat_map(|row| row.analysis_incomplete_reasons.iter().cloned())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    let result_incomplete_reasons = paged_json_incomplete_reasons("symbol-summary", info);
+                    let payload = serde_json::json!({
+                        "analysis_complete": analysis_incomplete_reasons.is_empty(),
+                        "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                        "result_complete": result_incomplete_reasons.is_empty(),
+                        "result_incomplete_reasons": result_incomplete_reasons,
+                        "rows": paged,
+                        "page": page_info_to_json(info),
+                    });
+                    crate::output::emit_json_document(&payload)?;
+                    Ok(())
+                },
+            )?;
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
@@ -2459,11 +2713,25 @@ pub(crate) fn cmd_symbol_summary(
                             cli_println!();
                             cli_println!("{}", u.label("IMPORTS"));
                             for import in &row.imports {
+                                // Same facts as the JSON `imports` entry:
+                                // module, imported name, local alias, and
+                                // wildcard form.
+                                let mut detail = import.module.clone();
+                                if import.wildcard {
+                                    detail.push_str(" *");
+                                }
+                                if let Some(original) = import.original_name.as_deref() {
+                                    detail.push_str(&format!(" → {original}"));
+                                }
+                                if let Some(alias) = import.alias.as_deref() {
+                                    detail.push_str(&format!(" as {alias}"));
+                                }
                                 cli_println!(
-                                    "  {}:{}  {}",
+                                    "  {}:{}  {}  {}",
                                     short_file(&row.file),
                                     import.line,
-                                    import.module
+                                    u.name(&detail),
+                                    u.dim(&format!("{:?}", import.evidence_kind).to_lowercase())
                                 );
                             }
                         }
@@ -2485,15 +2753,14 @@ fn render_summary_edges(u: &Ui, title: &str, edges: &[bonsai_sdk::SymbolCallEdge
     cli_println!("{}", u.label(title));
     for edge in edges {
         cli_println!(
-            "  {} {} → {}  {}:{}:{}  {} / {}",
+            "  {} {} → {}  {}:{}:{}  {}",
             edge.edge_id,
             edge.caller,
             edge.callee,
             short_file(&edge.file),
             edge.line,
             edge.column,
-            edge.precision,
-            edge.resolver_stage
+            u.dim(&edge.resolver_stage)
         );
         if !edge.call_text.trim().is_empty() {
             cli_println!(

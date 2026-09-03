@@ -84,12 +84,7 @@ fn inspect_uses_match_not_sink() {
         return;
     }
     let ws = ws_path();
-    let out = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "run_admin_command",
-        "--graph-flow",
-    ]);
+    let out = run(&["inspect", ws.to_str().unwrap(), "run_admin_command"]);
     assert!(!out.contains("SINK"), "output still contains SINK: {out}");
     assert!(out.contains("MATCH"), "output missing MATCH annotation: {out}");
 }
@@ -113,7 +108,7 @@ fn inspect_request_keeps_graph_evidence_bounded_to_the_matching_callable() {
         return;
     }
     let ws = ws_path();
-    let out = run(&["inspect", ws.to_str().unwrap(), "request", "--graph-flow"]);
+    let out = run(&["inspect", ws.to_str().unwrap(), "request"]);
     // The request match lives in handle_request. Graph-flow owns one bounded
     // callable unit and exposes direct calls without recursively expanding
     // their descendants.
@@ -123,7 +118,7 @@ fn inspect_request_keeps_graph_evidence_bounded_to_the_matching_callable() {
     );
     assert!(
         !out.contains("handle_request →") && !out.contains("handle_request ->"),
-        "graph-flow must not materialize a transitive path: {out}"
+        "compiler flows must not materialize a transitive path: {out}"
     );
 }
 
@@ -133,7 +128,7 @@ fn inspect_qualified_call_name_preserved() {
         return;
     }
     let ws = ws_path();
-    let out = run(&["inspect", ws.to_str().unwrap(), "os.system", "--graph-flow"]);
+    let out = run(&["inspect", ws.to_str().unwrap(), "os.system"]);
     assert!(out.contains("os.system"), "qualified call name missing: {out}");
     // Should have a flow from root -> update_user -> run_admin_command.
     assert!(
@@ -204,7 +199,6 @@ fn exact_file_graph_flow_builds_complete_cold_workspace_linkage() {
         "target",
         "--file",
         "target.py",
-        "--graph-flow",
         "--format",
         "json",
         "--no-progress",
@@ -281,7 +275,6 @@ def load_from_pickle(data):
         td.to_str().unwrap(),
         "--to",
         "pickle",
-        "--graph-flow",
         "--taint-flow",
         "--all",
         "--format",
@@ -350,7 +343,6 @@ def load_from_pickle(data):
         td.to_str().unwrap(),
         "--to",
         "pickle",
-        "--graph-flow",
         "--all",
         "--no-progress",
     ]);
@@ -430,7 +422,7 @@ def load_from_pickle(data):
 }
 
 #[test]
-fn inspect_syntax_fast_path_respects_endpoint_kind_filters() {
+fn inspect_endpoint_kind_filters_use_typed_compiler_facts() {
     if require_binary_built().is_none() {
         return;
     }
@@ -461,13 +453,24 @@ def load(data):
     ]);
     let v: serde_json::Value = serde_json::from_str(&out).expect("valid inspect JSON");
     let hits = v["hits"].as_array().expect("hits array");
-    assert!(!hits.is_empty(), "expected direct pickle call hit:\n{out}");
     assert!(
-        hits.iter().all(|hit| {
+        hits.iter().any(|hit| {
             hit["kind"].as_str() == Some("call")
                 && hit["text"].as_str().is_some_and(|text| text.contains("pickle"))
         }),
-        "syntax fast path must use typed endpoint evidence, not assignment text:\n{out}"
+        "expected the direct pickle call hit:\n{out}"
+    );
+    // `--to-kind call` is a typed compiler predicate over each hit's flow:
+    // only facts whose enclosing callable reaches a *call* fact matching the
+    // needle survive. The module-level `import pickle` has no callable flow
+    // and must not be kept on the strength of its text alone.
+    assert!(
+        hits.iter().all(|hit| {
+            hit["in_function"].as_str() == Some("load")
+                && hit["flows"].as_array().is_some_and(|flows| !flows.is_empty())
+                && hit["kind"].as_str() != Some("import")
+        }),
+        "endpoint kind filters must keep only hits whose compiler flow reaches a typed call fact:\n{out}"
     );
 
     let _ = std::fs::remove_dir_all(td);
@@ -500,7 +503,6 @@ def predict(data):
         ws.to_str().unwrap(),
         "--to",
         "pickle",
-        "--graph-flow",
         "--all",
         "--no-progress",
     ]);
@@ -668,10 +670,13 @@ fn inspect_secondary_contains_filters_taint_rows() {
         Some(1),
         "--contains must keep the taint row whose argument value contains the needle: {v:#}"
     );
-    assert_eq!(
-        v["hits"].as_array().map(Vec::len),
-        Some(0),
-        "--contains must not retain an independent syntax row merely because another taint row matches: {v:#}"
+    // Secondary filters match the complete canonical row. A syntax hit
+    // carries its compiler flow (the enclosing callable's source body), so
+    // it survives only when that whole object contains the needle.
+    let hits = v["hits"].as_array().expect("hits array");
+    assert!(
+        hits.iter().all(|hit| hit.to_string().contains("notify-admin")),
+        "--contains must keep only syntax rows whose complete object (hit + compiler flow) contains the needle: {v:#}"
     );
 }
 
@@ -701,11 +706,12 @@ fn inspect_secondary_not_contains_drops_only_matching_taint_rows() {
             .and_then(|section| section.as_array())
             .is_some_and(Vec::is_empty)
     };
+    let hits = v["hits"].as_array().expect("hits array");
     assert!(
         section_empty("decl_hits")
-            && !section_empty("hits")
-            && section_empty("taint_flows"),
-        "--not-contains must remove the matching taint row without dropping the independent syntax call: {v:#}"
+            && section_empty("taint_flows")
+            && hits.iter().all(|hit| !hit.to_string().contains("notify-admin")),
+        "--not-contains must remove every row whose complete object contains the needle and keep the rest: {v:#}"
     );
 }
 
@@ -846,7 +852,7 @@ fn inspect_call_hit_owns_one_bounded_containing_callable_unit() {
         p.canonicalize().expect("repo root")
     };
     let ws = repo_root.join("test-fixtures/languages/kotlin/micro");
-    let out = run(&["inspect", ws.to_str().unwrap(), "--query", "exec", "--graph-flow"]);
+    let out = run(&["inspect", ws.to_str().unwrap(), "--query", "exec"]);
     assert!(
         out.contains("FLOW 2") && out.contains("runAdminCommand"),
         "expected source-backed containing callable evidence for exec hit:\n{out}"
@@ -882,7 +888,6 @@ def helper(value):
         "external.helper",
         "--kind",
         "call",
-        "--graph-flow",
         "--format",
         "json",
         "--no-progress",
@@ -927,14 +932,7 @@ fn inspect_flow_bodies_show_class_owner_context() {
 }\n";
     std::fs::write(td.join("Gateway.java"), src).unwrap();
     let out = Command::new(bin)
-        .args([
-            "inspect",
-            td.to_str().unwrap(),
-            "--query",
-            "exec",
-            "--graph-flow",
-            "--no-color",
-        ])
+        .args(["inspect", td.to_str().unwrap(), "--query", "exec", "--no-color"])
         .output()
         .expect("run bonsai-ninja");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -967,13 +965,7 @@ def right(cmd):\n    sink(cmd)\n\
 def handle_request(cmd, path):\n    if path == '/l':\n        left(cmd)\n    else:\n        right(cmd)\n";
     std::fs::write(td.join("a.py"), src).unwrap();
     let out = Command::new(bin)
-        .args([
-            "inspect",
-            td.to_str().unwrap(),
-            "sink",
-            "--graph-flow",
-            "--no-color",
-        ])
+        .args(["inspect", td.to_str().unwrap(), "sink", "--no-color"])
         .output()
         .expect("run bonsai-ninja");
     let stdout = String::from_utf8_lossy(&out.stdout);

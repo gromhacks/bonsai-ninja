@@ -147,7 +147,6 @@ impl CalleeResolver for MockResolver {
             .map(|f| ResolvedCallee {
                 func: *f,
                 edge_kind: CallEdgeKind::Direct,
-                precision: Precision::Exact,
             })
             .collect()
     }
@@ -164,7 +163,6 @@ impl CalleeResolver for MockResolver {
             .map(|func| ResolvedCallee {
                 func: *func,
                 edge_kind: CallEdgeKind::Indirect,
-                precision: Precision::Narrowed,
             })
             .collect()
     }
@@ -189,7 +187,6 @@ impl CalleeResolver for MockResolver {
             .map(|func| ResolvedCallee {
                 func: *func,
                 edge_kind: CallEdgeKind::Indirect,
-                precision: Precision::Narrowed,
             })
             .collect()
     }
@@ -202,7 +199,6 @@ impl CalleeResolver for MockResolver {
             .map(|func| ResolvedCallee {
                 func: *func,
                 edge_kind: CallEdgeKind::Indirect,
-                precision: Precision::Narrowed,
             })
             .collect()
     }
@@ -331,10 +327,9 @@ fn exact_inline_callback_capture_write_reaches_later_call_argument_and_clean_ove
     };
     let reaches_sink = |ws: IdgWorkspace| {
         let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
-        let evidence = service.forward_closure_evidence_within_funcs_with_max_precision(
+        let evidence = service.forward_closure_evidence_within_funcs(
             &service.param_nodes_of(host_func),
             &AHashSet::from([host_func, callback_func]),
-            Some(Precision::Narrowed),
         );
         let tainted = service
             .tainted_call_args_in_reachable_nodes(&evidence.nodes)
@@ -1103,11 +1098,8 @@ fn rule_compiled_callback_return_reaches_only_the_declared_tuple_result() {
 
     let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
     let seed = service.param_nodes_of(callback_func);
-    let evidence = service.forward_closure_evidence_within_funcs_with_max_precision(
-        &seed,
-        &AHashSet::from([host_func, callback_func]),
-        Some(Precision::Narrowed),
-    );
+    let evidence =
+        service.forward_closure_evidence_within_funcs(&seed, &AHashSet::from([host_func, callback_func]));
     assert!(
         service
             .tainted_call_args_in_reachable_nodes(&evidence.nodes)
@@ -1223,11 +1215,8 @@ fn rule_compiled_direct_callback_return_preserves_aggregate_fields() {
     );
     let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
     let seed = service.param_nodes_of(callback_func);
-    let evidence = service.forward_closure_evidence_within_funcs_with_max_precision(
-        &seed,
-        &AHashSet::from([host_func, callback_func]),
-        Some(Precision::Narrowed),
-    );
+    let evidence =
+        service.forward_closure_evidence_within_funcs(&seed, &AHashSet::from([host_func, callback_func]));
     assert!(
         service
             .tainted_call_args_in_reachable_nodes(&evidence.nodes)
@@ -1459,7 +1448,6 @@ fn compatibility_mode_stitches_unresolved_assignment_args_to_result() {
             node_place(segment, edge.from),
             Some(Place::CallArg { idx: 0, .. })
         ) && matches!(node_place(segment, edge.to), Some(Place::CallRet { .. }))
-            && edge.meta.precision == Precision::Narrowed
     }));
 }
 
@@ -1541,10 +1529,7 @@ fn tainted_method_receiver_does_not_taint_literal_explicit_argument() {
         &StaticF2S(AHashMap::from([(FuncId::new(1), SegmentId(0))])),
     );
     let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
-    let closure = service.forward_closure_with_max_precision(
-        &service.param_nodes_of(FuncId::new(1)),
-        Some(Precision::Narrowed),
-    );
+    let closure = service.forward_closure(&service.param_nodes_of(FuncId::new(1)));
     let tainted_call_inputs = service.tainted_call_args_in_reachable_nodes(&closure);
 
     assert!(
@@ -2402,22 +2387,13 @@ fn imported_module_field_state_uses_exact_target_identity_across_resolved_call()
             .forward_closure(&seeds)
             .iter()
             .any(|node| service.call_arg_identity(*node) == Some((FuncId::new(2), sink_span, 0)));
-        let evidence = service.forward_closure_evidence_with_max_precision(&seeds, Some(Precision::Narrowed));
+        let evidence = service.forward_closure_evidence(&seeds);
         let target_nodes = service.nodes_at_span(FuncId::new(2), sink_span);
         let allowed_funcs = AHashSet::from([FuncId::new(1), FuncId::new(2)]);
-        let relevance = service.target_relevance_within_funcs_with_max_precision(
-            &target_nodes,
-            None,
-            &allowed_funcs,
-            Some(Precision::Narrowed),
-        );
+        let relevance = service.target_relevance_within_funcs(&target_nodes, None, &allowed_funcs);
         let seeds_are_relevant = relevance.admits_any(&seeds);
-        let relevant = service.forward_closure_evidence_within_funcs_and_relevance_with_max_precision(
-            &seeds,
-            &allowed_funcs,
-            &relevance,
-            Some(Precision::Narrowed),
-        );
+        let relevant =
+            service.forward_closure_evidence_within_funcs_and_relevance(&seeds, &allowed_funcs, &relevance);
         let relevant_reaches_sink = relevant
             .nodes
             .iter()
@@ -2613,7 +2589,7 @@ fn imported_shared_field_state_rejects_siblings_post_call_writes_and_ambiguous_c
     let closure_result = |ws: IdgWorkspace| {
         let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
         let seeds = service.read_or_write_nodes_for_names(FuncId::new(1), &["payload".to_string()]);
-        let evidence = service.forward_closure_evidence_with_max_precision(&seeds, Some(Precision::Narrowed));
+        let evidence = service.forward_closure_evidence(&seeds);
         let reaches_sink = evidence
             .nodes
             .iter()
@@ -2861,7 +2837,7 @@ fn spooled_higher_order_environment_uses_compact_projected_places() {
             .forward_closure(&seeds)
             .iter()
             .any(|node| service.call_arg_identity(*node) == Some((FuncId::new(3), sink_span, 0)));
-        let evidence = service.forward_closure_evidence_with_max_precision(&seeds, Some(Precision::Narrowed));
+        let evidence = service.forward_closure_evidence(&seeds);
         (reaches_sink, evidence.cross_calls)
     };
     let (positive_reaches_sink, positive_cross_calls) = closure_result(build("thunk", 0xC411_BA6E));
@@ -3387,7 +3363,6 @@ fn syntactic_field_universe_composes_resolved_receiver_selector_demand() {
             param_name: "self".to_string(),
             call_span: span(30, 45),
             argument_value_span: None,
-            precision: Precision::Exact,
             call_kind: bonsai_callgraph::EdgeKind::Direct,
             arg_idx: u32::MAX,
             param_idx: u32::MAX,
@@ -3457,7 +3432,6 @@ fn syntactic_field_universe_composes_nested_aggregate_return_call_paths_once() {
             target_base: format!("{}.Repository", crate::transfer::RETURN_FIELD_BASE),
             call_span: span(60, 70),
             write_span: span(55, 75),
-            precision: Precision::Exact,
             call_kind: bonsai_callgraph::EdgeKind::Direct,
         })],
     );

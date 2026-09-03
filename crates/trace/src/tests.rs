@@ -12,7 +12,7 @@ fn source_span() -> SourceSpan {
     }
 }
 
-fn step(id: u64, kind: TraceStepKind, precision: Precision) -> TraceStep {
+fn step(id: u64, kind: TraceStepKind) -> TraceStep {
     TraceStep {
         id,
         path_id: 1,
@@ -26,7 +26,6 @@ fn step(id: u64, kind: TraceStepKind, precision: Precision) -> TraceStep {
         code: String::new(),
         state_before: None,
         state_after: None,
-        precision,
         notes: Vec::new(),
     }
 }
@@ -54,7 +53,6 @@ fn truncate_after_step_rebuilds_derived_trace_sections() {
             total_steps: 4,
             total_paths: 1,
             explored_paths: 1,
-            precision: Precision::Narrowed,
             ..TraceSummary::default()
         },
         paths: vec![PathSummary {
@@ -63,13 +61,12 @@ fn truncate_after_step_rebuilds_derived_trace_sections() {
             last_step: 3,
             path_constraints: Vec::new(),
             terminated_by: PathTermination::Return,
-            precision: Precision::Narrowed,
         }],
         steps: vec![
-            step(0, TraceStepKind::EnterFunction, Precision::Exact),
-            step(1, TraceStepKind::Call, Precision::Narrowed),
-            step(2, TraceStepKind::EvalExpr, Precision::Exact),
-            step(3, TraceStepKind::Return, Precision::Exact),
+            step(0, TraceStepKind::EnterFunction),
+            step(1, TraceStepKind::Call),
+            step(2, TraceStepKind::EvalExpr),
+            step(3, TraceStepKind::Return),
         ],
         edges: vec![
             TraceEdge {
@@ -102,18 +99,16 @@ fn truncate_after_step_rebuilds_derived_trace_sections() {
     assert_eq!(trace.summary.total_steps, 2);
     assert_eq!(trace.summary.total_paths, 1);
     assert_eq!(trace.summary.explored_paths, 1);
-    assert_eq!(trace.summary.precision, Precision::Narrowed);
     assert_eq!(trace.paths.len(), 1);
     assert_eq!(trace.paths[0].last_step, 1);
-    assert_eq!(trace.paths[0].precision, Precision::Narrowed);
 }
 
 #[test]
 fn selected_sink_marks_the_retained_path_as_an_intentional_stop() {
     let mut trace = TraceResult {
         steps: vec![
-            step(0, TraceStepKind::EnterFunction, Precision::Exact),
-            step(1, TraceStepKind::EnterFunction, Precision::Exact),
+            step(0, TraceStepKind::EnterFunction),
+            step(1, TraceStepKind::EnterFunction),
         ],
         paths: vec![PathSummary {
             path_id: 1,
@@ -121,7 +116,6 @@ fn selected_sink_marks_the_retained_path_as_an_intentional_stop() {
             last_step: 1,
             path_constraints: Vec::new(),
             terminated_by: PathTermination::Unknown,
-            precision: Precision::Exact,
         }],
         ..TraceResult::default()
     };
@@ -133,43 +127,17 @@ fn selected_sink_marks_the_retained_path_as_an_intentional_stop() {
 
 #[test]
 fn path_summary_marks_unresolved_call_diagnostic_termination() {
-    let mut unresolved = step(1, TraceStepKind::Diagnostic, Precision::Exact);
+    let mut unresolved = step(1, TraceStepKind::Diagnostic);
     unresolved.message = "Unresolved call dynamic_target".to_string();
     let paths = path_summaries(
         &[
-            step(0, TraceStepKind::EnterFunction, Precision::Exact),
+            step(0, TraceStepKind::EnterFunction),
             unresolved,
-            step(2, TraceStepKind::Return, Precision::Exact),
+            step(2, TraceStepKind::Return),
         ],
         false,
     );
 
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0].terminated_by, PathTermination::UnknownCall);
-    assert_eq!(paths[0].precision, Precision::Exact);
-}
-
-#[test]
-fn public_semantic_step_suppresses_diagnostic_precision() {
-    let raw = RawStep {
-        id: bonsai_common::TraceStepId::new(0),
-        path_id: 0,
-        kind: StepKind::Call,
-        span: bonsai_common::Span::new(bonsai_common::FileId::new(0), 0, 1),
-        func: bonsai_common::FuncId::new(1),
-        precision: Precision::Unknown,
-        message: "Call dynamic_target".to_string(),
-    };
-    let mut reasons = Vec::new();
-
-    let public = public_semantic_step(&raw, &mut reasons);
-
-    assert_eq!(public.kind, TraceStepKind::Diagnostic);
-    assert_eq!(public.precision, Precision::Exact);
-    assert!(
-        public.message.contains("Suppressed diagnostic-precision Call"),
-        "diagnostic precision should be metadata, not call evidence: {}",
-        public.message
-    );
-    assert_eq!(reasons, vec!["diagnostic-precision-step:Call"]);
 }

@@ -4,7 +4,7 @@
 //! without selecting a second engine mode or changing propagation semantics.
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{FuncId, Precision, Span};
+use bonsai_common::{FuncId, Span};
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::DeclKind;
 use serde::{Deserialize, Serialize};
@@ -14,8 +14,6 @@ use crate::idg_api::{
 };
 use crate::reachable::collect_assign_targets;
 use crate::TokenSet;
-
-const SEMANTIC_FLOW_MAX_PRECISION: Precision = Precision::Narrowed;
 
 /// One provenance marker: identifies a value at the point it became
 /// "interesting" (a self-marked variable in the entry, a return
@@ -82,10 +80,6 @@ pub enum ValueFlowNodeKind {
 pub struct ValueFlowEdge {
     pub from: ValueFlowNode,
     pub to: ValueFlowNode,
-    /// Engine precision for this edge. Edges produced by virtual /
-    /// over-approximate dispatch get the worst-case precision the
-    /// engine could prove.
-    pub precision: Precision,
     /// Origin span of the propagation step (call site, assignment
     /// target span, throw site). Lets consumers anchor lineage in
     /// the source.
@@ -104,31 +98,23 @@ pub struct ValueFlowGraph {
     pub forward: AHashMap<ValueFlowNode, AHashSet<ValueFlowEdge>>,
     /// Incoming adjacency — supports backward closure.
     pub backward: AHashMap<ValueFlowNode, AHashSet<ValueFlowEdge>>,
-    /// Worst precision observed across all edges in the graph.
-    /// Defaults to `Exact` for an empty graph.
-    pub precision: Precision,
 }
 
 impl ValueFlowGraph {
-    /// Construct an empty graph; precision starts at `Exact` and is
-    /// monotonically widened as edges are added.
+    /// Construct an empty graph.
     #[must_use]
     pub fn new() -> Self {
         Self {
             nodes: AHashSet::default(),
             forward: AHashMap::default(),
             backward: AHashMap::default(),
-            precision: Precision::Exact,
         }
     }
 
-    /// Insert one edge into the graph; updates both adjacency
-    /// indexes and the worst-precision tag.
+    /// Insert one edge into the graph; updates both adjacency indexes.
     pub fn add_edge(&mut self, edge: ValueFlowEdge) {
         self.nodes.insert(edge.from.clone());
         self.nodes.insert(edge.to.clone());
-        // Worst-edge precision dominates: meet with the running tag.
-        self.precision = self.precision.meet(edge.precision);
         self.forward
             .entry(edge.from.clone())
             .or_default()
@@ -136,19 +122,10 @@ impl ValueFlowGraph {
         self.backward.entry(edge.to.clone()).or_default().insert(edge);
     }
 
-    /// Semantic forward transitive closure from `node`. Visits every
-    /// node reachable via exact/narrowed outgoing edges; weaker
-    /// diagnostic edges are not evidence and are not traversed.
+    /// Forward transitive closure from `node` over every compiler-proven
+    /// outgoing edge.
     #[must_use]
     pub fn forward_closure(&self, node: &ValueFlowNode) -> AHashSet<ValueFlowNode> {
-        self.forward_closure_with_max_precision(node, SEMANTIC_FLOW_MAX_PRECISION)
-    }
-
-    fn forward_closure_with_max_precision(
-        &self,
-        node: &ValueFlowNode,
-        max_precision: Precision,
-    ) -> AHashSet<ValueFlowNode> {
         let mut reached = AHashSet::default();
         let mut stack = vec![node.clone()];
         while let Some(current) = stack.pop() {
@@ -158,9 +135,6 @@ impl ValueFlowGraph {
             }
             if let Some(edges) = self.forward.get(&current) {
                 for edge in edges {
-                    if edge.precision > max_precision || !edge.precision.is_semantic() {
-                        continue;
-                    }
                     stack.push(edge.to.clone());
                 }
             }
@@ -170,18 +144,10 @@ impl ValueFlowGraph {
         reached
     }
 
-    /// Semantic backward transitive closure from `node`. Mirror of
+    /// Backward transitive closure from `node`. Mirror of
     /// [`Self::forward_closure`].
     #[must_use]
     pub fn backward_closure(&self, node: &ValueFlowNode) -> AHashSet<ValueFlowNode> {
-        self.backward_closure_with_max_precision(node, SEMANTIC_FLOW_MAX_PRECISION)
-    }
-
-    fn backward_closure_with_max_precision(
-        &self,
-        node: &ValueFlowNode,
-        max_precision: Precision,
-    ) -> AHashSet<ValueFlowNode> {
         let mut reached = AHashSet::default();
         let mut stack = vec![node.clone()];
         while let Some(current) = stack.pop() {
@@ -190,9 +156,6 @@ impl ValueFlowGraph {
             }
             if let Some(edges) = self.backward.get(&current) {
                 for edge in edges {
-                    if edge.precision > max_precision || !edge.precision.is_semantic() {
-                        continue;
-                    }
                     stack.push(edge.from.clone());
                 }
             }
@@ -284,14 +247,13 @@ pub fn value_flow_for_function_with_caches(
 /// Lift one engine result into a graph: register origin nodes for
 /// each entry param, materialise intra-function assign edges, and
 /// translate every recorded call propagation into one
-/// `ValueFlowEdge`. Precision carries over from the engine result.
+/// `ValueFlowEdge`.
 fn build_graph_from_result(
     entry_func: FuncId,
     entry_decl: &bonsai_lang_api::Decl,
     result: &InterTaintResult,
 ) -> ValueFlowGraph {
     let (mut graph, mut node_index) = build_intra_entry_graph(entry_func, entry_decl);
-    graph.precision = result.precision;
 
     // Walk every recorded propagation. Each `CallPropagation` says:
     // "in the caller, value X (at call_span) flowed into the callee's
@@ -331,7 +293,6 @@ fn build_graph_from_result(
             graph.add_edge(ValueFlowEdge {
                 from: from_node,
                 to: to_node,
-                precision: propagation.edge_precision,
                 via_span: propagation.call_span,
             });
         }
@@ -531,7 +492,6 @@ fn build_intra_entry_graph(
                             graph.add_edge(ValueFlowEdge {
                                 from: source_node,
                                 to: target_node.clone(),
-                                precision: Precision::Exact,
                                 via_span: *span,
                             });
                         }
@@ -579,7 +539,6 @@ fn build_intra_entry_graph(
                                 graph.add_edge(ValueFlowEdge {
                                     from: source_node,
                                     to: arg_node.clone(),
-                                    precision: Precision::Exact,
                                     via_span: *span,
                                 });
                             }
@@ -614,7 +573,6 @@ fn build_intra_entry_graph(
                             graph.add_edge(ValueFlowEdge {
                                 from: from_node,
                                 to: return_node.clone(),
-                                precision: Precision::Exact,
                                 via_span: *span,
                             });
                         }
@@ -690,7 +648,6 @@ fn build_intra_entry_graph(
                                         graph.add_edge(ValueFlowEdge {
                                             from: from_node,
                                             to: catch_node.clone(),
-                                            precision: Precision::Exact,
                                             via_span: *span,
                                         });
                                     }
@@ -735,7 +692,6 @@ fn build_intra_entry_graph(
                                 graph.add_edge(ValueFlowEdge {
                                     from: from_node,
                                     to: yield_node.clone(),
-                                    precision: Precision::Exact,
                                     via_span: *span,
                                 });
                             }

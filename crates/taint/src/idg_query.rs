@@ -2,12 +2,12 @@
 //!
 //! These types describe compiler queries without performing traversal or
 //! allocating graph state. Execution remains in `reachable`, while callers
-//! select source semantics, declarative transfers, target scope, precision,
-//! and cache reuse through named fields instead of positional API ladders.
+//! select source semantics, declarative transfers, target scope, and cache
+//! reuse through named fields instead of positional API ladders.
 
 use crate::reachable::TokenSet;
 use ahash::AHashSet;
-use bonsai_common::{FuncId, Precision};
+use bonsai_common::FuncId;
 use bonsai_db::AnalyzerDb;
 use bonsai_index::GlobalIndex;
 
@@ -200,7 +200,6 @@ pub struct IdgTaintQuery<'a> {
     pub transfers: IdgTaintTransfers<'a>,
     pub targets: IdgTaintTargets<'a>,
     pub call_scope: IdgTaintCallScope,
-    pub max_precision: Option<Precision>,
     pub db: &'a AnalyzerDb,
     /// Compiler linkage/body facts supplied by a workspace-scale caller.
     /// When absent, standalone compatibility APIs lower the exact global
@@ -223,7 +222,6 @@ impl<'a> IdgTaintQuery<'a> {
             transfers: IdgTaintTransfers::none(),
             targets: IdgTaintTargets::all_reachable(),
             call_scope: IdgTaintCallScope::AnyResolvedCaller,
-            max_precision: Some(Precision::Narrowed),
             db,
             global: None,
             idg,
@@ -253,12 +251,6 @@ impl<'a> IdgTaintQuery<'a> {
     }
 
     #[must_use]
-    pub const fn with_max_precision(mut self, max_precision: Option<Precision>) -> Self {
-        self.max_precision = max_precision;
-        self
-    }
-
-    #[must_use]
     pub const fn with_caches(mut self, caches: &'a crate::idg_api::InterTaintCaches) -> Self {
         self.caches = Some(caches);
         self
@@ -275,7 +267,6 @@ impl<'a> IdgTaintQuery<'a> {
 pub struct IdgReturnQuery<'a> {
     pub source: IdgTaintSource<'a>,
     pub receiver_state: &'a [crate::idg_api::ReceiverStatePropagation],
-    pub max_precision: Option<Precision>,
     pub db: &'a AnalyzerDb,
     pub global: Option<&'a GlobalIndex>,
     pub idg: &'a bonsai_idg::IdgQueryService,
@@ -292,17 +283,10 @@ impl<'a> IdgReturnQuery<'a> {
         Self {
             source,
             receiver_state,
-            max_precision: Some(Precision::Narrowed),
             db,
             global: None,
             idg,
         }
-    }
-
-    #[must_use]
-    pub const fn with_max_precision(mut self, max_precision: Option<Precision>) -> Self {
-        self.max_precision = max_precision;
-        self
     }
 
     #[must_use]

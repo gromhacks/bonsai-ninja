@@ -20,9 +20,11 @@ behavioural contract; cross-cutting details live in
 2. Produce a step-by-step trace that crosses files and modules.
 3. Make the primary output machine-consumable JSON with a stable schema;
    render text / DOT / SARIF on top.
-4. Degrade explicitly — every step carries `Precision::{Exact, Narrowed,
-   OverApproximate, Unknown}`. Semantic call edges also carry resolver
-   stage, evidence, and confidence. Never silently invent precision.
+4. Degrade explicitly — the compiler has one precision level. A step or
+   edge exists only when it follows from syntax and resolved call flow;
+   semantic call edges carry resolver stage, evidence, and confidence, and
+   anything unproven is reported as an incompleteness reason. Never
+   silently invent evidence.
 5. Scale incrementally after edits — immutable per-file compiler objects are
    keyed by relative path, adapter, frontend ABI, and SHA-256 source content;
    dependent sidecars add their exact pipeline fingerprints.
@@ -76,7 +78,7 @@ non-budget gaps such as unresolved call expansion live in
 `summary.analysis_incomplete_reasons`.
 
 `TraceStep` is `{ id, path_id, order, kind, message, function, module, file,
-span, code, state_before, state_after, precision, notes }` with
+span, code, state_before, state_after }` with
 `TraceStepKind` covering EnterFunction, EvalExpr, Assign, BranchSplit, Return,
 Throw, and the other typed interpreter steps.
 
@@ -87,7 +89,7 @@ Throw, and the other typed interpreter steps.
 ```
 Finding {
   finding_id, representative_flow_id, group_id,
-  language, severity, precision, status,
+  language, severity, status,
   tag, cwe, owasp,
   source: FindingMatch,
   sink: FindingMatch,
@@ -103,7 +105,7 @@ Finding {
 ```
 
 One concrete semantic sink is one finding. `alternate_flows` retains the
-other complete source/path/sink-argument/sanitizer/status/precision tuples
+other complete source/path/sink-argument/sanitizer/status tuples
 without duplicating the finding row. Finding IDs are FNV-1a-64 over the
 combined source identities, sink identities, representative group, and
 language, formatted as `S:xxxxxxxxxxxxxxxx` and stable across runs.
@@ -162,20 +164,17 @@ documented above and the cache-aware form have the same completeness contract.
 
 ## 5. Precision contract
 
-Every fact crossing a layer boundary carries a `Precision`:
+The compiler has exactly one precision level. A call edge, taint step, or
+flow is materialized only when it follows from syntax and resolved call flow,
+the way a compiler's own call graph and data-flow facts do. There is no
+precision lattice, no `meet`, and no diagnostic edge class that public
+commands have to filter out.
 
-- `Exact` — derived without approximation from facts admitted by the modeled
-  static semantics; this does not claim that absent runtime/build evidence was
-  recovered.
-- `Narrowed` — precise within documented static-evidence constraints.
-- `OverApproximate` — may include spurious paths.
-- `Unknown` — gave up.
-
-`meet(a, b)` returns the worse of the two. Chains take the worst seen.
-Public review/security/debug commands render only Exact / Narrowed evidence.
-If a requested path would require OverApproximate / Unknown evidence, the
-command must omit the broad edge/path and mark the result incomplete with a
-reason instead of presenting spurious evidence as complete.
+Every semantic call edge carries resolver provenance (`resolver_stage`,
+`evidence`, `confidence`) so a reader can reproduce how the target was proven.
+If a requested path would need an unresolved or unexplained call, the command
+omits that edge/path and marks the result incomplete with a reason instead of
+presenting spurious evidence as complete.
 
 ## 6. Determinism
 

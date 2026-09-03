@@ -23,7 +23,7 @@ def process(value):
     let exported = native_export_json(&ws, dir.path(), false).expect("native export");
 
     assert_eq!(exported["schema"], "bonsai-native-export");
-    assert_eq!(exported["schema_version"], 10);
+    assert_eq!(exported["schema_version"], 11);
     let file = exported["files"]
         .as_array()
         .and_then(|files| {

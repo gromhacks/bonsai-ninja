@@ -13,59 +13,18 @@ use bonsai_lang_api::{CallArg, Decl, FlowEvent};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 
-/// Stable, library-level mirror of `bonsai_common::Precision`.
-/// Filtering across the FFI boundary uses this enum so frontends
-/// don't need to depend on `bonsai_common` directly.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum PrecisionClass {
-    Exact,
-    Narrowed,
-    OverApproximate,
-    Unknown,
-}
-
-impl PrecisionClass {
-    /// Parse the public string form (`"exact"` / `"narrowed"` /
-    /// `"over-approximate"` / `"unknown"`) back to the enum.
-    /// Unknown spellings map to [`Self::Unknown`] so a caller can
-    /// stay open-ended without unwrapping.
-    #[must_use]
-    pub fn from_label(s: &str) -> Self {
-        match s {
-            "exact" => Self::Exact,
-            "narrowed" => Self::Narrowed,
-            "over-approximate" => Self::OverApproximate,
-            _ => Self::Unknown,
-        }
-    }
-    /// Compare an external [`PrecisionClass`] filter against the
-    /// internal [`bonsai_common::Precision`] tag carried on every
-    /// resolved edge. Public analysis surfaces are semantic-only, so
-    /// diagnostic broad classes never match.
-    pub fn matches(self, precision: bonsai_common::Precision) -> bool {
-        use bonsai_common::Precision;
-        matches!(
-            (self, precision),
-            (Self::Exact, Precision::Exact) | (Self::Narrowed, Precision::Narrowed)
-        )
-    }
-}
-
 /// Filter bundle for [`dump_edges`]. Match-anywhere semantics on
 /// `from`/`to`; an `edge_id` filter narrows to a single edge.
 #[derive(Copy, Clone, Default, Debug)]
 pub struct EdgesFilters<'a> {
     pub from: Option<&'a str>,
     pub to: Option<&'a str>,
-    pub precision: Option<PrecisionClass>,
     pub edge_id: Option<&'a str>,
 }
 
 /// One resolved call edge. `call_*` fields point at the resolved
 /// call-site span; `caller_*` / `callee_*` point at the
-/// decl name spans. `kind` is `direct` / `virtual`; `precision` is
-/// `exact` / `narrowed` on public surfaces. Diagnostic-only internal
-/// classes are not emitted by default analysis/export commands.
+/// decl name spans. `kind` is `direct` / `virtual` / `indirect`.
 /// `resolver_stage` / `evidence` / `confidence` are forwarded from the
 /// shared resolver provenance on the call edge; the dump layer does not
 /// infer or rewrite them.
@@ -83,7 +42,6 @@ pub struct EdgeRecord {
     pub call_column: u32,
     pub call_text: String,
     pub kind: String,
-    pub precision: String,
     pub resolver_stage: String,
     pub evidence: String,
     pub confidence: u8,
@@ -132,12 +90,6 @@ pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
         .edges
         .iter()
         .filter_map(|edge| {
-            if !edge.precision.is_semantic()
-                || f.precision
-                    .is_some_and(|precision| !precision.matches(edge.precision))
-            {
-                return None;
-            }
             let caller_decl = global.decl_of(SymbolId::new(edge.from.raw()))?;
             let callee_decl = global.decl_of(SymbolId::new(edge.to.raw()))?;
             if !edge_names_match_filters(&caller_decl.name, &callee_decl.name, f) {
@@ -153,9 +105,8 @@ pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
         })
         .collect();
     records.sort_by(|a, b| {
-        precision_sort_key(&a.precision)
-            .cmp(&precision_sort_key(&b.precision))
-            .then_with(|| a.caller_name.cmp(&b.caller_name))
+        a.caller_name
+            .cmp(&b.caller_name)
             .then_with(|| a.callee_name.cmp(&b.callee_name))
             .then_with(|| a.call_line.cmp(&b.call_line))
     });
@@ -180,12 +131,7 @@ fn dump_persisted_edge_id(
     let matches = matches.ok()?;
     let mut records = Vec::with_capacity(matches.len());
     for (caller, callee, edge) in matches {
-        if !edge.precision.is_semantic()
-            || filters
-                .precision
-                .is_some_and(|precision| !precision.matches(edge.precision))
-            || !edge_names_match_filters(caller.name.as_ref(), callee.name.as_ref(), filters)
-        {
+        if !edge_names_match_filters(caller.name.as_ref(), callee.name.as_ref(), filters) {
             continue;
         }
         let record = edge_record_from_nodes(ws, &caller, &callee, &edge);
@@ -207,13 +153,6 @@ fn dump_persisted_filtered_edges(ws: &Workspace, filters: &EdgesFilters<'_>) -> 
         }
         let edges = if scan_outgoing { outgoing } else { incoming };
         for edge in edges {
-            if !edge.precision.is_semantic()
-                || filters
-                    .precision
-                    .is_some_and(|precision| !precision.matches(edge.precision))
-            {
-                continue;
-            }
             let local_function = if scan_outgoing { edge.from } else { edge.to };
             let Some(local_node) = nodes
                 .binary_search_by_key(&local_function.raw(), |node| node.func.raw())
@@ -323,7 +262,6 @@ fn edge_record_from_nodes(
         call_column,
         call_text,
         kind: edge_kind_display(edge.kind).to_string(),
-        precision: precision_display(edge.precision).to_string(),
         resolver_stage: edge.provenance.resolver_stage().to_string(),
         evidence: edge.provenance.evidence().to_string(),
         confidence: edge.provenance.confidence(),
@@ -346,9 +284,8 @@ fn edge_names_match_filters(caller_name: &str, callee_name: &str, filters: &Edge
 
 fn sort_edge_records(records: &mut [EdgeRecord]) {
     records.sort_by(|a, b| {
-        precision_sort_key(&a.precision)
-            .cmp(&precision_sort_key(&b.precision))
-            .then_with(|| a.caller_name.cmp(&b.caller_name))
+        a.caller_name
+            .cmp(&b.caller_name)
             .then_with(|| a.callee_name.cmp(&b.callee_name))
             .then_with(|| a.call_line.cmp(&b.call_line))
     });
@@ -382,7 +319,6 @@ fn edge_record_from_decls(
         call_column,
         call_text: call_text_for_edge(ws, caller_decl, edge).unwrap_or_else(|| callee_decl.name.clone()),
         kind: edge_kind_display(edge.kind).to_string(),
-        precision: precision_display(edge.precision).to_string(),
         resolver_stage: edge.provenance.resolver_stage().to_string(),
         evidence: edge.provenance.evidence().to_string(),
         confidence: edge.provenance.confidence(),
@@ -395,15 +331,6 @@ fn edge_kind_display(kind: EdgeKind) -> &'static str {
         EdgeKind::Virtual => "virtual",
         EdgeKind::Indirect => "indirect",
         EdgeKind::Unknown => "unknown",
-    }
-}
-
-fn precision_display(precision: bonsai_common::Precision) -> &'static str {
-    match precision {
-        bonsai_common::Precision::Exact => "exact",
-        bonsai_common::Precision::Narrowed => "narrowed",
-        bonsai_common::Precision::OverApproximate => "over-approximate",
-        bonsai_common::Precision::Unknown => "unknown",
     }
 }
 
@@ -510,19 +437,6 @@ fn call_text_for_span(ws: &Workspace, span: Span) -> Option<String> {
         return None;
     }
     Some(truncate_call_text(rendered))
-}
-
-/// Lower number = weaker precision; semantic edges still sort
-/// deterministically, and broad classes stay listed for stable
-/// ordering if older sidecars surface them internally.
-fn precision_sort_key(precision: &str) -> u8 {
-    match precision {
-        "unknown" => 0,
-        "over-approximate" => 1,
-        "narrowed" => 2,
-        "exact" => 3,
-        _ => 4,
-    }
 }
 
 #[cfg(test)]

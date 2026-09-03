@@ -149,12 +149,26 @@ fn normalize_help(output: &str) -> String {
     output.replace("\r\n", "\n").trim_end().to_string()
 }
 
+/// Browse commands share one JSON document contract: command-level completion
+/// metadata plus the exact rows rendered by the text view. Keep accepting a
+/// bare array here only for older/raw graph commands that intentionally retain
+/// their established wire shape.
+fn parse_rows(output: &str) -> Vec<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(output).expect("valid command JSON");
+    if let Some(rows) = value.as_array() {
+        return rows.clone();
+    }
+    value["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("JSON document missing `rows`: {value}"))
+        .clone()
+}
+
 fn run_inspect_graph(ws: &Path, args_after_ws: &[&str]) -> Option<String> {
     let ws_str = ws.to_str().unwrap().to_string();
     let mut args: Vec<&str> = Vec::with_capacity(args_after_ws.len() + 3);
     args.push("inspect");
     args.push(ws_str.as_str());
-    args.push("--graph-flow");
     args.extend_from_slice(args_after_ws);
     run(&args)
 }
@@ -251,8 +265,7 @@ fn defs_json_format_parses_and_has_expected_fields() {
     let Some(out) = run(&["defs", ws.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
-    let v: serde_json::Value = serde_json::from_str(&out).expect("defs --format json: valid JSON");
-    let arr = v.as_array().expect("top-level array");
+    let arr = parse_rows(&out);
     assert!(!arr.is_empty(), "expected at least one def in JSON");
     let first = &arr[0];
     for field in &["name", "kind", "file", "line", "column", "params"] {
@@ -293,8 +306,7 @@ fn entrypoints_json_format_parses_and_has_expected_fields() {
     let Some(out) = run(&["entrypoints", ws.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
-    let v: serde_json::Value = serde_json::from_str(&out).expect("entrypoints --format json: valid JSON");
-    let arr = v.as_array().expect("top-level array");
+    let arr = parse_rows(&out);
     assert!(!arr.is_empty(), "expected at least one entrypoint in JSON");
     let first = &arr[0];
     for field in &[
@@ -347,8 +359,8 @@ fn calls_json_shape() {
     let Some(out) = run(&["calls", ws.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
-    let v: serde_json::Value = serde_json::from_str(&out).expect("calls --format json: valid JSON");
-    let first = &v.as_array().expect("array")[0];
+    let rows = parse_rows(&out);
+    let first = &rows[0];
     for f in &["resolution_scope", "callee", "file", "line", "column", "caller"] {
         assert!(first.get(f).is_some(), "calls JSON missing `{f}`: {first}");
     }
@@ -384,8 +396,8 @@ fn imports_json_shape() {
     let Some(out) = run(&["imports", ws.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
-    let v: serde_json::Value = serde_json::from_str(&out).expect("imports JSON parses");
-    let first = &v.as_array().unwrap()[0];
+    let rows = parse_rows(&out);
+    let first = &rows[0];
     for f in &["file", "module", "alias", "is_wildcard", "line"] {
         assert!(first.get(f).is_some(), "imports JSON missing `{f}`: {first}");
     }
@@ -484,8 +496,8 @@ fn args_json_declares_syntactic_scope() {
     let Some(out) = run(&["args", ws.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
-    let v: serde_json::Value = serde_json::from_str(&out).expect("args --format json: valid JSON");
-    let first = &v.as_array().expect("array")[0];
+    let rows = parse_rows(&out);
+    let first = &rows[0];
     assert_eq!(first["resolution_scope"], "syntactic-call-site-argument");
 }
 
@@ -523,8 +535,7 @@ fn operations_json_filters_by_kind_and_name() {
     ]) else {
         return;
     };
-    let v: serde_json::Value = serde_json::from_str(&out).expect("operations --format json: valid JSON");
-    let rows = v.as_array().expect("operations JSON array");
+    let rows = parse_rows(&out);
     assert_eq!(
         rows.first().and_then(|row| row["name"].as_str()),
         Some("action"),
@@ -560,8 +571,7 @@ fn operations_does_not_report_literal_returns_as_reads() {
     ]) else {
         return;
     };
-    let rows: Vec<serde_json::Value> =
-        serde_json::from_str(&out).expect("operations literal-read JSON parses");
+    let rows = parse_rows(&out);
     assert!(
         rows.is_empty(),
         "`return None` is a literal return, not a read of a symbol: {out}"
@@ -583,8 +593,7 @@ fn operations_does_not_report_literal_returns_as_reads() {
         ) else {
             return;
         };
-        let rows: Vec<serde_json::Value> =
-            serde_json::from_str(&out).expect("operations literal-read JSON parses");
+        let rows = parse_rows(&out);
         assert!(
             rows.is_empty(),
             "{lang}: literal `{literal}` is not a read of a symbol: {out}"
@@ -656,8 +665,7 @@ fn search_json_shape() {
     let Some(out) = run(&["search", ws.to_str().unwrap(), "verify", "--format", "json"]) else {
         return;
     };
-    let v: serde_json::Value = serde_json::from_str(&out).expect("search JSON parses");
-    assert!(!v.as_array().unwrap().is_empty(), "search JSON empty");
+    assert!(!parse_rows(&out).is_empty(), "search JSON empty");
 }
 
 #[test]
@@ -674,7 +682,7 @@ fn search_file_kind_hydrates_canonical_file_rows() {
     ]) else {
         return;
     };
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("search file JSON parses");
+    let rows = parse_rows(&out);
     assert_eq!(rows.len(), 1, "expected exactly one file row: {out}");
     let row = &rows[0];
     assert_eq!(row["kind"], "file");
@@ -832,14 +840,14 @@ fn index_default_stays_structural_and_does_not_write_semantic_sidecars() {
     let tmp = tempdir_for_test("bonsai_index_default_structural");
     write_tiny_python_workspace(&tmp);
 
-    let Some(out) = run(&["index", tmp.to_str().unwrap()]) else {
+    let Some(out) = run(&["index", tmp.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
     assert!(out.contains("files"), "index summary missing: {out}");
     let first: serde_json::Value = serde_json::from_str(&out).expect("first index summary JSON");
     assert_eq!(first["compiler_cache"], "rebuilt", "{out}");
     assert_eq!(first["parsed_files"], first["files"], "{out}");
-    let Some(warm_out) = run(&["index", tmp.to_str().unwrap()]) else {
+    let Some(warm_out) = run(&["index", tmp.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
     let warm: serde_json::Value = serde_json::from_str(&warm_out).expect("warm index summary JSON");
@@ -884,7 +892,7 @@ fn index_semantic_flag_writes_shared_semantic_sidecars() {
     let tmp = tempdir_for_test("bonsai_index_semantic");
     write_tiny_python_workspace(&tmp);
 
-    let Some(out) = run(&["index", tmp.to_str().unwrap(), "--semantic"]) else {
+    let Some(out) = run(&["index", tmp.to_str().unwrap(), "--semantic", "--format", "json"]) else {
         return;
     };
     let semantic: serde_json::Value = serde_json::from_str(&out).expect("semantic index summary JSON");
@@ -893,7 +901,7 @@ fn index_semantic_flag_writes_shared_semantic_sidecars() {
     assert_eq!(semantic["semantic_cache"], "rebuilt", "{out}");
     assert_eq!(semantic["semantic_ready"], true, "{out}");
     assert_eq!(semantic["manifest_status"], "fresh", "{out}");
-    let Some(warm_out) = run(&["index", tmp.to_str().unwrap(), "--semantic"]) else {
+    let Some(warm_out) = run(&["index", tmp.to_str().unwrap(), "--semantic", "--format", "json"]) else {
         return;
     };
     let warm: serde_json::Value = serde_json::from_str(&warm_out).expect("warm semantic index summary JSON");
@@ -1024,6 +1032,28 @@ fn path_and_slice_text_summaries_are_polished() {
 }
 
 #[test]
+fn slice_accepts_the_one_based_declaration_line_printed_by_defs() {
+    let ws = repo_root().join("examples/python/language_gauntlet");
+    let Some(out) = run(&[
+        "slice",
+        ws.to_str().unwrap(),
+        "--symbol",
+        "execute",
+        "--file",
+        "infrastructure/executor.py",
+        "--line",
+        "25",
+        "--all",
+    ]) else {
+        return;
+    };
+    assert!(
+        out.contains("in execute") && !out.contains("no callable contains line 25"),
+        "slice must accept the exact one-based declaration line shown by defs: {out}"
+    );
+}
+
+#[test]
 fn trace_from_entry_produces_flow() {
     let ws = ws_path();
     let Some(out) = run(&["trace", ws.to_str().unwrap(), "handle_request"]) else {
@@ -1082,8 +1112,12 @@ fn trace_default_is_themed_text() {
         "summary line missing: {out}"
     );
     assert!(
-        out.contains("precision tally"),
-        "precision tally summary missing: {out}"
+        out.contains("steps") && out.contains("semantic"),
+        "step summary missing: {out}"
+    );
+    assert!(
+        !out.contains("precision") && !out.contains("narrowed"),
+        "trace text must describe one compiler graph without precision modes: {out}"
     );
     assert!(
         !out.contains("/Users/")
@@ -1398,9 +1432,8 @@ def entry(value):
         v["steps"].as_array().expect("steps array").iter().any(|step| {
             step["kind"].as_str() == Some("Diagnostic")
                 && step["message"].as_str() == Some("Unresolved call missing_call")
-                && step["precision"].as_str() == Some("exact")
         }),
-        "unresolved call should be exact diagnostic metadata, not unknown call evidence:\n{out}"
+        "unresolved call should be diagnostic metadata, not call evidence:\n{out}"
     );
     assert!(
         v["steps"].as_array().expect("steps array").iter().all(|step| {
@@ -1466,8 +1499,15 @@ fn html_output_is_standalone_themed_and_escapes_source() {
     assert!(output.stdout.is_empty(), "HTML payload must go only to its file");
     let html = std::fs::read_to_string(&report).expect("read HTML report");
     assert!(html.starts_with("<!doctype html>"));
-    assert!(html.contains("bonsai-ninja") && html.contains("Moss theme"));
+    assert!(
+        html.contains("<title>bonsai-ninja read-file</title>"),
+        "HTML report must name the command it renders"
+    );
     assert!(html.contains("&lt;unsafe&gt;&amp;value"));
+    assert!(
+        !html.contains("</pre></main>"),
+        "HTML report must be rendered from the canonical result, not an escaped transcript"
+    );
     assert!(
         !html.contains(&workspace.display().to_string()),
         "HTML code locations must be portable and workspace-relative"
@@ -1514,9 +1554,9 @@ fn export_produces_valid_json() {
         return;
     };
     let value: serde_json::Value = serde_json::from_str(&out).expect("export should be valid JSON");
-    assert_eq!(
-        value["analysis_scope"]["semantic_max_precision"], "narrowed",
-        "native export should declare semantic-only call/flow precision"
+    assert!(
+        value["analysis_scope"].get("semantic_max_precision").is_none(),
+        "native export must not declare a precision mode"
     );
     assert_eq!(
         value["analysis_scope"]["full_propagations"], false,
@@ -2077,7 +2117,7 @@ fn symbol_summary_reports_direct_edges_without_transitive_markers() {
     ]) else {
         return;
     };
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
+    let rows = parse_rows(&out);
     let row = rows.first().expect("update_user summary");
     assert!(row["direct_callers"]
         .as_array()
@@ -2102,7 +2142,7 @@ fn symbol_summary_includes_source_and_parameters() {
     ]) else {
         return;
     };
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
+    let rows = parse_rows(&out);
     let row = rows.first().expect("update_user summary");
     assert!(row["source"]
         .as_str()
@@ -2157,7 +2197,7 @@ def wrapper(
     ]) else {
         return;
     };
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
+    let rows = parse_rows(&out);
     let row = rows.first().expect("wrapper summary");
     assert_eq!(row["graph_scope"], "direct_resolved_neighbors");
     assert_eq!(row["analysis_complete"], false);
@@ -2240,7 +2280,7 @@ fn symbol_summary_reports_or_resolves_parameter_dispatch_for_every_language() {
         ]) else {
             return;
         };
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
+        let rows = parse_rows(&out);
         let row = rows
             .first()
             .unwrap_or_else(|| panic!("{language}: missing `{symbol}` summary"));
@@ -2307,7 +2347,7 @@ class App {
     ]) else {
         return;
     };
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
+    let rows = parse_rows(&out);
     let row = rows.first().expect("wrapper summary");
     assert_eq!(row["analysis_complete"], true, "{out}");
     assert_eq!(row["unresolved_calls"].as_array().map(Vec::len), Some(0), "{out}");
@@ -2960,36 +3000,6 @@ fn every_help_menu_renders_and_documents_core_surface() {
         assert!(
             !out.contains("Paging unit is one PATH"),
             "{args:?}: help should not contain stale trace paging wording:\n{out}"
-        );
-    }
-}
-
-#[test]
-fn dump_edges_precision_only_accepts_semantic_classes() {
-    let Some(bin) = bin_path() else {
-        return;
-    };
-    let ws = ws_path();
-    for unsupported in ["over-approximate", "unknown"] {
-        let out = Command::new(&bin)
-            .args([
-                "dump-edges",
-                ws.to_str().unwrap(),
-                "--precision",
-                unsupported,
-                "--no-color",
-                "--no-progress",
-            ])
-            .output()
-            .expect("failed to run bonsai-ninja");
-        assert!(
-            !out.status.success(),
-            "unsupported precision `{unsupported}` must be absent from the parser"
-        );
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("invalid value") && stderr.contains("exact") && stderr.contains("narrowed"),
-            "clap should list dump-edges' complete precision surface:\n{stderr}"
         );
     }
 }
@@ -3741,7 +3751,13 @@ fn read_file_compact_text_marks_incomplete_when_body_context_truncated() {
 #[test]
 fn dump_hir_emits_flow_event_tree() {
     let ws = ws_path();
-    let Some(out) = run(&["dump-hir", ws.to_str().unwrap(), "handle_request"]) else {
+    let Some(out) = run(&[
+        "dump-hir",
+        ws.to_str().unwrap(),
+        "handle_request",
+        "--format",
+        "json",
+    ]) else {
         return;
     };
     let v: serde_json::Value = serde_json::from_str(&out).expect("dump-hir should be valid JSON");
@@ -3796,7 +3812,14 @@ fn dump_hir_rejects_ambiguous_bare_symbol_and_accepts_file_context() {
 
     let disambiguator = format!("{}:1:dup", a.display());
     let qualified = Command::new(&bin)
-        .args(["dump-hir", root.to_str().unwrap(), &disambiguator, "--no-color"])
+        .args([
+            "dump-hir",
+            root.to_str().unwrap(),
+            &disambiguator,
+            "--format",
+            "json",
+            "--no-color",
+        ])
         .output()
         .expect("run qualified dump-hir");
     assert!(
@@ -3836,7 +3859,13 @@ fn dump_cfg_rejects_ambiguous_bare_symbol() {
 #[test]
 fn dump_cfg_emits_entry_and_exit_blocks() {
     let ws = ws_path();
-    let Some(out) = run(&["dump-cfg", ws.to_str().unwrap(), "update_user"]) else {
+    let Some(out) = run(&[
+        "dump-cfg",
+        ws.to_str().unwrap(),
+        "update_user",
+        "--format",
+        "json",
+    ]) else {
         return;
     };
     let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
@@ -3907,8 +3936,7 @@ fn dump_callgraph_counts_semantic_workspace_edges_only() {
     let Some(out) = run(&["dump-callgraph", ws.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
-    let rows: serde_json::Value = serde_json::from_str(&out).expect("dump-callgraph JSON");
-    let rows = rows.as_array().expect("dump-callgraph rows");
+    let rows = parse_rows(&out);
     assert!(
         rows.iter().all(|row| {
             row["file"]
@@ -3945,8 +3973,7 @@ fn dump_edges_uses_semantic_resolved_callgraph_edges_only() {
     let Some(out) = run(&["dump-edges", ws.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
-    let rows: serde_json::Value = serde_json::from_str(&out).expect("dump-edges JSON");
-    let rows = rows.as_array().expect("dump-edges rows");
+    let rows = parse_rows(&out);
 
     let pairs: std::collections::BTreeSet<(String, String)> = rows
         .iter()
@@ -3969,9 +3996,8 @@ fn dump_edges_uses_semantic_resolved_callgraph_edges_only() {
         "dump-edges must be a view over resolved workspace callgraph edges only:\n{out}"
     );
     assert!(
-        rows.iter()
-            .all(|row| matches!(row["precision"].as_str(), Some("exact" | "narrowed"))),
-        "dump-edges must not expose broad precision classes:\n{out}"
+        rows.iter().all(|row| row.get("precision").is_none()),
+        "dump-edges rows must not carry a precision label:\n{out}"
     );
     assert!(
         rows.iter().all(|row| {
@@ -4011,8 +4037,7 @@ function entry(cmd) {
     let Some(out) = run(&["dump-edges", root.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
-    let rows: serde_json::Value = serde_json::from_str(&out).expect("dump-edges JSON");
-    let rows = rows.as_array().expect("dump-edges rows");
+    let rows = parse_rows(&out);
     let pairs: std::collections::BTreeSet<(String, String)> = rows
         .iter()
         .filter_map(|row| {
@@ -4053,7 +4078,7 @@ fn diagnostics_points_at_specific_error_node() {
         p.canonicalize().expect("repo root")
     };
     let ws = repo_root.join("test-fixtures/languages/cpp/micro");
-    let Some(out) = run(&["diagnostics", ws.to_str().unwrap()]) else {
+    let Some(out) = run(&["diagnostics", ws.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
     let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
@@ -4759,7 +4784,7 @@ fn cli_dump_callgraph_content_correct_for_every_lang() {
 fn cli_dump_hir_content_correct_for_every_lang() {
     for e in lang_expectations() {
         let selector = executable_entry_selector(&e);
-        let Some(out) = run_on(e.lang, &["dump-hir", selector.as_str()]) else {
+        let Some(out) = run_on(e.lang, &["dump-hir", selector.as_str(), "--format", "json"]) else {
             return;
         };
         let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("dump-hir output is JSON");
@@ -4777,7 +4802,7 @@ fn cli_dump_hir_content_correct_for_every_lang() {
 fn cli_dump_cfg_content_correct_for_every_lang() {
     for e in lang_expectations() {
         let selector = executable_entry_selector(&e);
-        let Some(out) = run_on(e.lang, &["dump-cfg", selector.as_str()]) else {
+        let Some(out) = run_on(e.lang, &["dump-cfg", selector.as_str(), "--format", "json"]) else {
             return;
         };
         let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("dump-cfg output is JSON");
@@ -4886,8 +4911,7 @@ fn cli_imports_hide_resolver_only_bindings() {
     let Some(lua_out) = run_on("lua", &["imports", "--format", "json", "--all"]) else {
         return;
     };
-    let lua_rows: serde_json::Value = serde_json::from_str(lua_out.trim()).expect("lua imports JSON");
-    let lua_rows = lua_rows.as_array().expect("lua imports array");
+    let lua_rows = parse_rows(&lua_out);
     assert!(
         !lua_rows
             .iter()
@@ -4911,8 +4935,7 @@ fn cli_imports_hide_resolver_only_bindings() {
     let Some(ruby_out) = run_on("ruby", &["imports", "--format", "json", "--all"]) else {
         return;
     };
-    let ruby_rows: serde_json::Value = serde_json::from_str(ruby_out.trim()).expect("ruby imports JSON");
-    let ruby_rows = ruby_rows.as_array().expect("ruby imports array");
+    let ruby_rows = parse_rows(&ruby_out);
     assert!(
         ruby_rows
             .iter()
@@ -5383,15 +5406,12 @@ fn secondary_filter_updates_browse_totals() {
         "defs",
         ws.to_str().unwrap(),
         "--contains",
-        "verify_token",
+        "get_user(token)",
         "--all",
     ]) else {
         return;
     };
-    assert!(
-        out.contains("verify_token"),
-        "filtered definition missing:\n{out}"
-    );
+    assert!(out.contains("get_user"), "filtered definition missing:\n{out}");
     assert!(
         out.contains("(1 definitions)"),
         "browse totals must describe the post-filter rows, not the hidden pre-filter set:\n{out}"
@@ -5803,7 +5823,7 @@ fn from_needle_matches_parameter_name() {
     ]) else {
         return;
     };
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
+    let rows = parse_rows(&out);
     assert!(
         rows[0]["source"]
             .as_str()
@@ -5873,7 +5893,7 @@ fn from_needle_matches_ref_name() {
     ]) else {
         return;
     };
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
+    let rows = parse_rows(&out);
     assert!(
         rows[0]["direct_callees"]
             .as_array()
@@ -6440,7 +6460,6 @@ fn inspect_flow_unknown_id_errors() {
         .args([
             "inspect",
             ws.to_str().unwrap(),
-            "--graph-flow",
             "--query",
             "run_admin_command",
             "--flow",
@@ -6605,7 +6624,6 @@ fn inspect_group_unknown_id_errors() {
         .args([
             "inspect",
             ws.to_str().unwrap(),
-            "--graph-flow",
             "--query",
             "run_admin_command",
             "--group",
@@ -6905,7 +6923,7 @@ fn every_lang_micro_compact_preserves_symbol_identity() {
 // must produce at least one resolved edge (the `entry → mid`
 // connection at minimum), every edge must carry an `E:xxxxxxxx` id,
 // `--compact` must emit a table with the same ids, `--edge <E:id>`
-// must round-trip, and the precision filter must split the edge set.
+// must round-trip.
 // =============================================================================
 
 /// Pull every `E:xxxxxxxx` id token out of a rendered `dump-edges`
@@ -7446,23 +7464,21 @@ fn compiler_qualified_identity_round_trips_from_defs_to_hir_and_cfg() {
     ]) else {
         return;
     };
-    let rows: serde_json::Value = serde_json::from_str(defs.trim()).expect("defs JSON");
+    let rows = parse_rows(&defs);
     let qualified = rows
-        .as_array()
-        .expect("defs array")
         .iter()
         .find(|row| row["file"] == "a.rs")
         .and_then(|row| row["qualified_name"].as_str())
         .expect("qualified identity printed by defs")
         .to_string();
 
-    let Some(hir) = run(&["dump-hir", root.to_str().unwrap(), &qualified]) else {
+    let Some(hir) = run(&["dump-hir", root.to_str().unwrap(), &qualified, "--format", "json"]) else {
         return;
     };
     let hir: serde_json::Value = serde_json::from_str(hir.trim()).expect("HIR JSON");
     assert_eq!(hir["qualified_name"], qualified, "defs identity must reopen HIR");
 
-    let Some(cfg) = run(&["dump-cfg", root.to_str().unwrap(), &qualified]) else {
+    let Some(cfg) = run(&["dump-cfg", root.to_str().unwrap(), &qualified, "--format", "json"]) else {
         return;
     };
     let cfg: serde_json::Value = serde_json::from_str(cfg.trim()).expect("CFG JSON");
@@ -7751,7 +7767,6 @@ fn every_lang_micro_dump_taint_json_shape() {
             "seeds",
             "analysis_complete",
             "analysis_incomplete_reasons",
-            "precision",
             "records",
         ] {
             assert!(
@@ -7788,17 +7803,13 @@ fn every_lang_micro_dump_taint_json_shape() {
             c.lang,
         );
         assert!(
-            matches!(parsed["precision"].as_str(), Some("exact" | "narrowed")),
-            "{}: dump-taint report precision must be semantic-only; got:\n{out}",
-            c.lang,
-        );
-        assert!(
-            parsed["records"]
-                .as_array()
-                .expect("records array")
-                .iter()
-                .all(|record| matches!(record["edge_precision"].as_str(), Some("exact" | "narrowed"))),
-            "{}: dump-taint records must be semantic-only; got:\n{out}",
+            parsed.get("precision").is_none()
+                && parsed["records"]
+                    .as_array()
+                    .expect("records array")
+                    .iter()
+                    .all(|record| record.get("edge_precision").is_none()),
+            "{}: dump-taint output must not carry precision labels; got:\n{out}",
             c.lang,
         );
     }

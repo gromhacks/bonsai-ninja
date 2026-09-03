@@ -478,7 +478,65 @@ pub(crate) fn emit_paged_text<T, C, R>(
     command: &str,
     filters_hash: u64,
     row_cost_bytes: C,
+    render_page: R,
+) -> anyhow::Result<()>
+where
+    T: Clone + serde::Serialize,
+    C: Fn(&T) -> u64,
+    R: FnMut(&[T], &paging::PageInfo, &paging::PagingConfig) -> anyhow::Result<()>,
+{
+    emit_paged_text_inner(
+        workspace,
+        rows,
+        cfg,
+        command,
+        filters_hash,
+        row_cost_bytes,
+        render_page,
+        true,
+    )
+}
+
+/// Paginate rows whose caller has already applied the global secondary
+/// filter to its complete canonical render object. This prevents the shared
+/// pager from filtering a thinner compiler row a second time and dropping a
+/// result whose match lives in derived code/signature/flow evidence.
+pub(crate) fn emit_paged_text_prefiltered<T, C, R>(
+    workspace: &Path,
+    rows: &[T],
+    cfg: &paging::PagingConfig,
+    command: &str,
+    filters_hash: u64,
+    row_cost_bytes: C,
+    render_page: R,
+) -> anyhow::Result<()>
+where
+    T: Clone + serde::Serialize,
+    C: Fn(&T) -> u64,
+    R: FnMut(&[T], &paging::PageInfo, &paging::PagingConfig) -> anyhow::Result<()>,
+{
+    emit_paged_text_inner(
+        workspace,
+        rows,
+        cfg,
+        command,
+        filters_hash,
+        row_cost_bytes,
+        render_page,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_paged_text_inner<T, C, R>(
+    workspace: &Path,
+    rows: &[T],
+    cfg: &paging::PagingConfig,
+    command: &str,
+    filters_hash: u64,
+    row_cost_bytes: C,
     mut render_page: R,
+    apply_secondary_filter: bool,
 ) -> anyhow::Result<()>
 where
     T: Clone + serde::Serialize,
@@ -492,7 +550,7 @@ where
     // budgets, and cursors all reflect the filtered set. The filter is
     // part of the normalized argv, so the saved pages key correctly.
     let secondary = crate::filter::active();
-    let filtered_storage: Option<Vec<T>> = secondary.is_active().then(|| {
+    let filtered_storage: Option<Vec<T>> = (apply_secondary_filter && secondary.is_active()).then(|| {
         let mut kept = rows.to_vec();
         secondary.retain(&mut kept);
         kept

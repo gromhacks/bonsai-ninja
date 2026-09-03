@@ -64,10 +64,12 @@ For scripts, normally add:
 --format json --no-color --no-progress
 ```
 
-`index`, `diagnostics`, `dump-hir`, and `dump-cfg` are JSON-only and do not
-accept `--format`. Use `--output-path <file>` for large artifacts when the
-command supports it. Use `--html-output <file>` only for a standalone human
-report; it wraps the selected text view and never enables more analysis.
+`index`, `diagnostics`, `dump-hir`, and `dump-cfg` print readable text by
+default and one structured object with `--format json`; pass `--format json`
+explicitly before piping to `jq`. Use `--output-path <file>` for large
+artifacts when the command supports it. Use `--html-output <file>` for a human
+report rendered from the command's canonical JSON result; it never enables
+more analysis.
 Full `diagnostics` performs one exact streaming compiler-object pass. Stable
 `show E:<id>` drilldown uses the persisted exact edge directory; neither
 command requires a duplicate whole-workspace lowering or edge scan.
@@ -149,15 +151,15 @@ entry point -> validation -> business logic -> storage/external call -> response
 
 ## Trace behavior and dataflow
 
-`inspect` is rulepack-free by default. Add `--graph-flow` for one bounded
-source/evidence unit per matching callable or `--taint-flow` for raw taint
-paths.
+`inspect` is rulepack-free and attaches one bounded compiler evidence unit
+(a stable `F:` flow) to every matching callable by default. Add `--taint-flow`
+for raw taint paths.
 
 For lookup, start with plain `inspect`, `refs`, or `calls`. Use
 `symbol-summary` when one callable needs a self-contained packet with source,
 signature, imports, direct resolved callers/callees, and explicit unresolved
-calls. `--graph-flow` adds the same bounded callable evidence to matching
-inspect rows; it never enumerates transitive caller/callee paths. When both
+calls. Inspect rows carry the same bounded callable evidence; it never
+enumerates transitive caller/callee paths. When both
 endpoints are known, use `path --from ... --to ...` for the exact compressed
 compiler corridor or `trace --from ... --to ...` to interpret it.
 
@@ -222,8 +224,13 @@ unfiltered. Explicit security flags override profile values.
 
 Inspect the security model when a finding or gap needs explanation:
 
-Use `source-analysis` for “where can this input go?” and `sink-analysis` for
-“what compiler-proven value lineage feeds each dangerous endpoint?”
+Use `source-analysis` for “where can this input go?”, `sink-analysis` for
+“what compiler-proven value lineage feeds each dangerous endpoint?”, and
+`dependency-analysis` for “where is this flagged package imported, bound to a
+local name, called, or matched by a rule?” (`deps` is the one-row-per-package
+inventory behind it). Every selector on these commands filters the cached
+complete report; only file scope, `--exclude-tests`, `--inferred-sources`, and
+(for `sink-analysis`) the `--sink` rule set change the analysis itself.
 Sink-analysis does not require a security source: `upstream_flows` is
 source-independent, while `security_source_flows` separately answers which
 selected security sources reach the endpoint.

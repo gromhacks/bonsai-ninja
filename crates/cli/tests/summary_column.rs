@@ -486,15 +486,7 @@ fn browse_summary_ids_match_inspect_flow_ids() {
 
     // Query every callable so inspect emits the same bounded compiler
     // evidence identities.
-    let Some(inspect_out) = run(&[
-        "inspect",
-        ws_str,
-        "--query",
-        ".*",
-        "--regex",
-        "--all",
-        "--graph-flow",
-    ]) else {
+    let Some(inspect_out) = run(&["inspect", ws_str, "--query", ".*", "--regex", "--all"]) else {
         return;
     };
     let inspect_ids: std::collections::HashSet<String> =
@@ -564,7 +556,7 @@ fn inspect_flow_standalone_resolves() {
 fn inspect_folds_occurrence_hits_sharing_a_flow() {
     let Some(ws) = ws_for("python") else { return };
     let ws_str = ws.to_str().unwrap();
-    let Some(system_out) = run(&["inspect", ws_str, "--query", "os.system", "--graph-flow"]) else {
+    let Some(system_out) = run(&["inspect", ws_str, "--query", "os.system"]) else {
         return;
     };
     let Some(flow_id) = extract_summary_ids(&system_out).into_iter().next() else {

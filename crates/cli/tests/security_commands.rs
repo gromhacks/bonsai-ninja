@@ -1097,7 +1097,6 @@ def handle():
     assert!(
         !out.stderr.contains("files=")
             && !out.stderr.contains("source_rules=")
-            && !out.stderr.contains("max_precision")
             && !out.stderr.contains("disk_entries=")
             && !out.stderr.contains("resident_before=")
             && !out.stderr.contains("entries=0")
@@ -2010,10 +2009,6 @@ fn source_analysis_maps_python_entrypoint_paths() {
         "source-analysis rows must expose machine-readable incomplete reasons:\n{out}"
     );
     assert!(
-        rows.iter().all(|row| row["lineage"].is_object()),
-        "source-analysis rows must include lineage status:\n{out}"
-    );
-    assert!(
         rows.iter()
             .all(|row| row["analysis_complete"].as_bool() == Some(true)),
         "source-analysis --all must request uncapped lineage evidence for this fixture:\n{out}"
@@ -2026,22 +2021,59 @@ fn source_analysis_maps_python_entrypoint_paths() {
         }),
         "complete source-analysis --all rows must not carry incomplete reasons:\n{out}"
     );
-    let multi_hop_precisions: Vec<_> = rows
+    let multi_hop_rows = rows
         .iter()
         .filter(|row| {
             row["flow"]["chain"]
                 .as_array()
                 .is_some_and(|chain| chain.len() > 1)
         })
-        .filter_map(|row| row["flow"]["precision"].as_str())
-        .collect();
+        .count();
     assert!(
-        !multi_hop_precisions.is_empty(),
+        multi_hop_rows > 0,
         "fixture should expose source flows crossing call edges:\n{out}"
     );
     assert!(
-        multi_hop_precisions.iter().all(|precision| *precision == "narrowed"),
-        "source-analysis flow precision must reflect lineage call-edge precision, got {multi_hop_precisions:?}:\n{out}"
+        rows.iter().all(|row| row["flow"].get("precision").is_none()),
+        "source-analysis flows must not carry a precision label:\n{out}"
+    );
+}
+
+#[test]
+fn source_analysis_contains_matches_the_complete_hydrated_flow() {
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "source-analysis",
+        "--contains",
+        "os.system(\"notify-admin \" + cmd)",
+        "--source",
+        "^python\\.flask\\.",
+        "--trust",
+        "remote",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("source-analysis JSON");
+    let rows = json_rows(&parsed);
+    assert!(
+        !rows.is_empty()
+            && rows.iter().all(|row| row["flow"]["functions"]
+                .as_array()
+                .is_some_and(|functions| functions.iter().any(|function| function["lines"]
+                    .as_array()
+                    .is_some_and(|lines| lines.iter().any(|line| line["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("os.system"))))))),
+        "--contains must select the complete parent flow by hydrated source code: {out}"
     );
 }
 
@@ -2089,7 +2121,7 @@ fn sink_analysis_maps_python_endpoints_and_exact_upstream_paths() {
     );
     assert!(
         upstream.iter().all(|flow| {
-            matches!(flow["precision"].as_str(), Some("exact" | "narrowed"))
+            flow.get("precision").is_none()
                 && flow["origin_function"]
                     .as_str()
                     .is_some_and(|name| !name.is_empty())
@@ -2583,12 +2615,13 @@ fn source_analysis_paged_json_exposes_top_level_completeness() {
     );
     assert_eq!(
         parsed["analysis_complete"].as_bool(),
-        Some(false),
-        "paged source-analysis JSON must not claim complete row coverage:\n{out}"
+        Some(true),
+        "paging must not downgrade complete compiler analysis:\n{out}"
     );
-    let reasons = parsed["analysis_incomplete_reasons"]
+    assert_eq!(parsed["result_complete"].as_bool(), Some(false));
+    let reasons = parsed["result_incomplete_reasons"]
         .as_array()
-        .expect("analysis_incomplete_reasons array");
+        .expect("result_incomplete_reasons array");
     assert!(
         reasons.iter().any(|reason| {
             reason
@@ -2624,9 +2657,10 @@ fn sink_analysis_paged_json_exposes_top_level_completeness() {
         parsed["rows"].as_array().is_some(),
         "paged JSON must use rows wrapper:\n{out}"
     );
-    assert_eq!(parsed["analysis_complete"].as_bool(), Some(false));
+    assert_eq!(parsed["analysis_complete"].as_bool(), Some(true));
+    assert_eq!(parsed["result_complete"].as_bool(), Some(false));
     assert!(
-        parsed["analysis_incomplete_reasons"]
+        parsed["result_incomplete_reasons"]
             .as_array()
             .is_some_and(
                 |reasons| reasons.iter().any(|reason| reason.as_str().is_some_and(|reason| {
@@ -2660,6 +2694,7 @@ fn taint_analysis_json_exposes_completion_metadata() {
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&out).expect("taint-analysis JSON");
     assert_eq!(parsed["analysis_complete"].as_bool(), Some(true));
+    assert_eq!(parsed["result_complete"].as_bool(), Some(true));
     assert!(parsed["analysis_incomplete_reasons"]
         .as_array()
         .is_some_and(Vec::is_empty));
@@ -2718,7 +2753,7 @@ fn taint_analysis_summary_json_exposes_triage_counts() {
 }
 
 #[test]
-fn taint_analysis_summary_text_exposes_precision_counts() {
+fn taint_analysis_summary_text_describes_one_compiler_graph() {
     let ws = micro_path("python");
     if !ws.exists() {
         return;
@@ -2740,9 +2775,16 @@ fn taint_analysis_summary_text_exposes_precision_counts() {
         out.contains("analysis: complete") || out.contains("analysis incomplete"),
         "summary text must state whether semantic coverage is complete:\n{out}"
     );
+    // The summary is one compiler graph: tags, severities, and statuses are
+    // rendered; per-edge proof provenance stays in JSON (`precision_counts`)
+    // and is never presented as an exact/narrowed mode split in text.
     assert!(
-        out.contains("precision") && (out.contains("exact") || out.contains("narrowed")),
-        "summary text must expose semantic precision counts:\n{out}"
+        out.contains("tags") && out.contains("severities") && out.contains("statuses"),
+        "summary text must render tag, severity, and status tables:\n{out}"
+    );
+    assert!(
+        !out.contains("precision") && !out.contains("narrowed"),
+        "summary text must not present precision modes:\n{out}"
     );
     assert!(
         !out.contains("TAINT FLOW"),
@@ -3094,17 +3136,41 @@ def handle():
         "json",
         "--all",
     ];
+    // `--format` is a presentation selector: switching the compact text
+    // render to JSON `--all` reuses the cached canonical report and hydrates
+    // flow bodies lazily for the rendered rows instead of rebuilding the
+    // semantic graph scope.
     let first_json_all = run_command(&json_all_args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
     assert!(
-        first_json_all.stderr.contains("semantic graph scope"),
-        "JSON --all must not reuse compact text cache without bulk flow evidence:\n{}",
+        first_json_all.stderr.contains("rendering cached taint report"),
+        "JSON --all must reuse the cached canonical taint report:\n{}",
+        first_json_all.stderr
+    );
+    assert!(
+        !first_json_all.stderr.contains("semantic graph scope"),
+        "a --format switch must not rebuild semantic graph scope:\n{}",
         first_json_all.stderr
     );
     let rows: serde_json::Value =
         serde_json::from_str(&first_json_all.stdout).expect("first JSON --all output");
+    let rows = json_rows(&rows);
     assert!(
-        !json_rows(&rows).is_empty(),
+        !rows.is_empty(),
         "JSON --all should emit findings:\n{}",
+        first_json_all.stdout
+    );
+    assert!(
+        rows.iter().all(|row| {
+            row["hops"].as_array().is_some_and(|hops| !hops.is_empty())
+                && row["flow"]["functions"].as_array().is_some_and(|functions| {
+                    functions.iter().any(|function| {
+                        function["lines"]
+                            .as_array()
+                            .is_some_and(|lines| !lines.is_empty())
+                    })
+                })
+        }),
+        "cached-report JSON must still carry complete flow evidence:\n{}",
         first_json_all.stdout
     );
 
@@ -3118,6 +3184,32 @@ def handle():
         !second_json_all.stderr.contains("semantic graph scope"),
         "second JSON --all should not rebuild semantic graph scope once bulk flow evidence is cached:\n{}",
         second_json_all.stderr
+    );
+
+    // `--html-output` is another presentation sink over the same canonical
+    // report: it renders the cached document and never reruns analysis.
+    let html_path = ws.join("report.html");
+    let html_args = [
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--all",
+        "--html-output",
+        html_path.to_str().unwrap(),
+    ];
+    let html_run = run_command(&html_args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    assert!(
+        html_run.stderr.contains("rendering cached taint report")
+            && !html_run.stderr.contains("semantic graph scope"),
+        "--html-output must render the cached canonical report without new analysis:\n{}",
+        html_run.stderr
+    );
+    let html = std::fs::read_to_string(&html_path).expect("read HTML report");
+    assert!(
+        html.contains("<title>bonsai-ninja security taint-analysis</title>") && html.contains("os.system"),
+        "HTML report must be rendered from the taint result:\n{html}"
     );
 }
 
@@ -3768,14 +3860,14 @@ fn pack_inventory_text_keeps_long_rule_ids_readable() {
     ])
     .unwrap();
     assert!(
-        out.lines().any(|line| {
-            line.starts_with("[RULE ") && line.ends_with("  python.deser.django_signed_cookie_loads")
-        }),
-        "pack inventory should render long rule ids as intact block headings:\n{out}"
+        out.lines().any(|line| line
+            .split_whitespace()
+            .any(|token| token == "python.deser.django_signed_cookie_loads")),
+        "pack inventory should render long rule ids intact on one line:\n{out}"
     );
     assert!(
-        !out.contains("django_signed_cookie_l\n"),
-        "pack inventory must not table-wrap rule ids across lines:\n{out}"
+        !out.contains("django_signed_cookie_l\n") && !out.contains("django_signed_cooki "),
+        "pack inventory must not wrap or truncate rule ids:\n{out}"
     );
 }
 

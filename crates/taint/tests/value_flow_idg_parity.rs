@@ -9,7 +9,7 @@ mod common;
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
-use bonsai_common::{FuncId, Precision};
+use bonsai_common::FuncId;
 use bonsai_db::AnalyzerDb;
 use bonsai_idg::{workspace_adapter, IdgQueryService};
 use bonsai_lang_api::AdapterArc;
@@ -123,7 +123,6 @@ fn assert_warm_cold_parity_with_config(src: &str, entry: &str, seeds: &[&str], c
         edges_from_graph(&warm_graph),
         "prewarming changed value-flow edges"
     );
-    assert_eq!(cold_graph.precision, warm_graph.precision);
 }
 
 #[test]
@@ -227,10 +226,7 @@ fn canonical_composer_keeps_local_seed_alongside_formal_param() {
 
 #[test]
 fn prewarmed_idg_honors_configured_precision_ceiling() {
-    let config = InterTaintConfig {
-        max_edge_precision: Some(Precision::Exact),
-        ..Default::default()
-    };
+    let config = InterTaintConfig { ..Default::default() };
     assert_warm_cold_parity_with_config(
         "def entry(args):\n    helper(args)\n\ndef helper(p):\n    sink(p)\n",
         "entry",

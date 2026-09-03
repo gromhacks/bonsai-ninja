@@ -35,7 +35,7 @@
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
-use bonsai_common::{FuncId, Precision, Span};
+use bonsai_common::{FuncId, Span};
 use bonsai_factstore::{StrId, StringPoolBuilder};
 use bonsai_lang_api::{CallKind, CallReceiverRole};
 use serde::{Deserialize, Serialize};
@@ -644,7 +644,6 @@ struct FieldArgStitch {
     /// even when the language's canonical call span names only the callee
     /// token and therefore precedes the argument text.
     argument_value_span: Option<Span>,
-    precision: Precision,
     call_kind: CallEdgeKind,
     arg_idx: u32,
     param_idx: u32,
@@ -951,7 +950,6 @@ struct ConstructorReturnStitch {
     receiver_param_name: String,
     call_span: Span,
     write_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
 }
 
@@ -965,7 +963,6 @@ struct ReturnFieldStitch {
     target_base: String,
     call_span: Span,
     write_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
 }
 
@@ -980,7 +977,6 @@ struct ScalarReturnStitch {
     target_base: String,
     call_span: Span,
     write_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
 }
 
@@ -993,7 +989,6 @@ struct ReceiverMutationStitch {
     target_base: String,
     callee_receiver_param_name: String,
     call_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
 }
 
@@ -1199,10 +1194,6 @@ pub struct ResolvedCallee {
     /// Resolver-determined edge sub-kind (Direct / Virtual /
     /// Indirect / Unknown).
     pub edge_kind: CallEdgeKind,
-    /// Precision floor for this resolution. Semantic resolver paths
-    /// return `Exact`/`Narrowed`; ambiguous broad dispatch should
-    /// return no candidate instead of a guessed fan-out.
-    pub precision: Precision,
 }
 
 /// Exact lexical environment origin for a callable value passed through a
@@ -1228,8 +1219,8 @@ pub struct CallbackBindingOrigin {
 pub trait CalleeResolver {
     /// Resolve `(caller, site_span, callee_name)` to semantically
     /// proven candidate callees. Ambiguous broad matches should be
-    /// omitted; the implementation is responsible for inheriting
-    /// precision onto each [`ResolvedCallee`].
+    /// omitted; the implementation is responsible for attaching the
+    /// resolved call kind to each [`ResolvedCallee`].
     fn resolve(
         &self,
         caller: FuncId,
@@ -1640,7 +1631,6 @@ impl WorkspaceStitchState {
                 target_base: copy.target_base.clone(),
                 write_span: copy.span,
                 via_span: copy.span,
-                precision: Precision::Exact,
                 call_kind: CallEdgeKind::Direct,
             }));
         let mut yield_cursor = 0usize;
@@ -3064,7 +3054,6 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
                         from: input,
                         to: caller_call_ret,
                         meta: crate::edge::EdgeMeta {
-                            precision: bonsai_common::Precision::Narrowed,
                             kind: crate::edge::IdgEdgeKind::IntraAssign,
                             call_kind: bonsai_callgraph::EdgeKind::Indirect,
                             via_span: site.site.0,
@@ -3112,7 +3101,6 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
                         from: input,
                         to: target,
                         meta: crate::edge::EdgeMeta {
-                            precision: bonsai_common::Precision::Narrowed,
                             kind: crate::edge::IdgEdgeKind::IntraYield,
                             call_kind: bonsai_callgraph::EdgeKind::Indirect,
                             via_span: site.site.0,
@@ -3256,7 +3244,6 @@ fn schedule_rule_compiled_receiver_field_passthrough(
         edge.from == receiver_node
             && edge.to == call_ret
             && edge.meta.kind == crate::edge::IdgEdgeKind::IntraAssign
-            && edge.meta.precision == Precision::Narrowed
             && edge.meta.via_span == site.site.0
     }) else {
         return;
@@ -3274,7 +3261,6 @@ fn schedule_rule_compiled_receiver_field_passthrough(
             target_base,
             write_span,
             via_span: site.site.0,
-            precision: summary_edge.meta.precision,
             call_kind: summary_edge.meta.call_kind,
         });
     }
@@ -3318,7 +3304,6 @@ fn stitch_higher_order_callable_environments(
                 origin_endpoints,
                 endpoints,
                 origin.call_site,
-                Precision::Narrowed,
                 CallEdgeKind::Indirect,
                 ws,
             ));
@@ -3344,7 +3329,6 @@ fn stitch_higher_order_callable_environments(
                             from: source,
                             to: param_node,
                             meta: crate::edge::EdgeMeta {
-                                precision: Precision::Narrowed,
                                 kind: crate::edge::IdgEdgeKind::InterCallArg,
                                 call_kind: CallEdgeKind::Indirect,
                                 via_span: invocation.site.0,
@@ -3529,7 +3513,6 @@ fn stitch_candidate_shared_binding_state(
                     from: source,
                     to: target_node,
                     meta: crate::edge::EdgeMeta {
-                        precision: Precision::Narrowed,
                         kind: crate::edge::IdgEdgeKind::InterSharedFieldState,
                         call_kind: cand.edge_kind,
                         via_span: site.site.0,
@@ -3615,7 +3598,6 @@ fn stitch_candidate_receiver_inputs(
                                 caller_call_arg,
                                 callee_param_node,
                                 site.site.0,
-                                cand.precision,
                                 cand.edge_kind,
                             );
                             place_inter_edge(caller_seg, endpoints.segment, edge, ws);
@@ -3650,7 +3632,6 @@ fn stitch_candidate_receiver_inputs(
                         &actual_receiver,
                         param_name,
                         site.site.0,
-                        cand.precision,
                         cand.edge_kind,
                         None,
                     );
@@ -3665,7 +3646,6 @@ fn stitch_candidate_receiver_inputs(
                     param_name,
                     endpoints,
                     site.site.0,
-                    cand.precision,
                     cand.edge_kind,
                 );
                 if !receiver_is_projection {
@@ -3679,7 +3659,6 @@ fn stitch_candidate_receiver_inputs(
                             &actual_receiver,
                             param_name,
                             site.site.0,
-                            cand.precision,
                             cand.edge_kind,
                             Some(receiver_type.as_str()),
                         );
@@ -3702,7 +3681,6 @@ fn stitch_candidate_receiver_inputs(
                             caller_call_arg,
                             callee_receiver_consumer,
                             site.site.0,
-                            cand.precision,
                             cand.edge_kind,
                         );
                         place_inter_edge(caller_seg, endpoints.segment, edge, ws);
@@ -3770,7 +3748,6 @@ fn stitch_candidate_receiver_inputs(
                                     &actual_receiver,
                                     receiver_root,
                                     site.site.0,
-                                    cand.precision,
                                     cand.edge_kind,
                                     None,
                                 );
@@ -3785,7 +3762,6 @@ fn stitch_candidate_receiver_inputs(
                                 receiver_root,
                                 endpoints,
                                 site.site.0,
-                                cand.precision,
                                 cand.edge_kind,
                             );
                         }
@@ -3804,7 +3780,6 @@ fn stitch_candidate_receiver_inputs(
                         &actual_base,
                         param_name,
                         site.site.0,
-                        cand.precision,
                         cand.edge_kind,
                         None,
                     );
@@ -3828,7 +3803,6 @@ fn stitch_candidate_receiver_inputs(
             caller_implicit_receiver_bases,
             caller_receiver_names,
             site.site.0,
-            cand.precision,
             cand.edge_kind,
         );
     }
@@ -3875,13 +3849,7 @@ fn stitch_candidate_explicit_arguments(
         if caller_call_arg.is_sentinel() {
             continue;
         }
-        let edge = IdgEdge::inter_call_arg(
-            caller_call_arg,
-            callee_param_node,
-            site.site.0,
-            cand.precision,
-            cand.edge_kind,
-        );
+        let edge = IdgEdge::inter_call_arg(caller_call_arg, callee_param_node, site.site.0, cand.edge_kind);
         place_inter_edge(caller_seg, endpoints.segment, edge, ws);
         if let (Some(actual_arg), Some(param_name)) = (
             site.call_arg_places.get(i).map(String::as_str),
@@ -3897,7 +3865,6 @@ fn stitch_candidate_explicit_arguments(
                     param_name: param_name.trim().to_string(),
                     call_span: site.site.0,
                     argument_value_span: site.call_arg_spans.get(i).copied(),
-                    precision: cand.precision,
                     call_kind: cand.edge_kind,
                     arg_idx: u32::try_from(i).expect("call argument index exceeds u32"),
                     param_idx: u32::try_from(callee_param_idx).expect("callee parameter index exceeds u32"),
@@ -3914,7 +3881,6 @@ fn stitch_candidate_explicit_arguments(
                 endpoints.param_write_nodes(callee_param_idx),
                 target_base,
                 site.site.0,
-                cand.precision,
                 cand.edge_kind,
                 ws,
             );
@@ -3949,7 +3915,6 @@ fn stitch_candidate_capture_inputs(
             endpoints.segment,
             endpoints,
             site.site.0,
-            cand.precision,
             cand.edge_kind,
             ws,
         );
@@ -3990,7 +3955,7 @@ fn stitch_candidate_return_outputs(
             place_inter_edge(
                 endpoints.segment,
                 caller_seg,
-                IdgEdge::inter_yield(callee_yield, target, site.site.0, cand.precision, cand.edge_kind),
+                IdgEdge::inter_yield(callee_yield, target, site.site.0, cand.edge_kind),
                 ws,
             );
             return_field_sites.push(ReturnFieldStitch {
@@ -4002,7 +3967,6 @@ fn stitch_candidate_return_outputs(
                 target_base: binding.target_base.clone(),
                 call_span: site.site.0,
                 write_span: binding.write_span,
-                precision: cand.precision,
                 call_kind: cand.edge_kind,
             });
             if let Some(stats) = stats.as_deref_mut() {
@@ -4014,13 +3978,7 @@ fn stitch_candidate_return_outputs(
     let caller_call_ret = caller_remap.get(site.call_ret_node);
     if let Some(callee_return) = endpoints.return_node() {
         if !caller_call_ret.is_sentinel() {
-            let edge = IdgEdge::inter_return(
-                callee_return,
-                caller_call_ret,
-                site.site.0,
-                cand.precision,
-                cand.edge_kind,
-            );
+            let edge = IdgEdge::inter_return(callee_return, caller_call_ret, site.site.0, cand.edge_kind);
             place_inter_edge(endpoints.segment, caller_seg, edge, ws);
             if let Some(stats) = stats.as_deref_mut() {
                 stats.inter_edges = stats.inter_edges.saturating_add(1);
@@ -4060,7 +4018,6 @@ fn stitch_candidate_return_outputs(
                         target_base: target_base.clone(),
                         write_span: *write_span,
                         via_span: site.site.0,
-                        precision: cand.precision,
                         call_kind: cand.edge_kind,
                     });
                 }
@@ -4082,7 +4039,6 @@ fn stitch_candidate_return_outputs(
                         target_base: target_base.clone(),
                         call_span: site.site.0,
                         write_span: *write_span,
-                        precision: cand.precision,
                         call_kind: cand.edge_kind,
                     });
                 }
@@ -4099,7 +4055,6 @@ fn stitch_candidate_return_outputs(
                         target_base: target_base.clone(),
                         call_span: site.site.0,
                         write_span: *write_span,
-                        precision: cand.precision,
                         call_kind: cand.edge_kind,
                     });
                     continue;
@@ -4115,7 +4070,6 @@ fn stitch_candidate_return_outputs(
                         target_base: target_base.clone(),
                         call_span: site.site.0,
                         write_span: *write_span,
-                        precision: cand.precision,
                         call_kind: cand.edge_kind,
                     });
                 }
@@ -4195,7 +4149,6 @@ fn stitch_candidate_receiver_effects(
                     target_base: projected_target_base,
                     callee_receiver_param_name,
                     call_span: site.site.0,
-                    precision: cand.precision,
                     call_kind: cand.edge_kind,
                 }));
             }
@@ -4239,7 +4192,6 @@ fn stitch_candidate_constructor_result(
                             receiver_param_name: receiver_param_name.clone(),
                             call_span: site.site.0,
                             write_span,
-                            precision: cand.precision,
                             call_kind: cand.edge_kind,
                         });
                     }
@@ -4260,7 +4212,6 @@ fn stitch_lexical_capture_reads(
     callee_seg: SegmentId,
     endpoints: CalleeEndpointView<'_>,
     call_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
     ws: &mut IdgWorkspace,
 ) -> usize {
@@ -4275,7 +4226,6 @@ fn stitch_lexical_capture_reads(
                     from: source,
                     to: capture_read,
                     meta: crate::edge::EdgeMeta {
-                        precision,
                         kind: crate::edge::IdgEdgeKind::InterCallArg,
                         call_kind,
                         via_span: call_span,
@@ -4296,7 +4246,6 @@ fn stitch_lexical_capture_reads_from_endpoint(
     caller_endpoints: CalleeEndpointView<'_>,
     callee_endpoints: CalleeEndpointView<'_>,
     call_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
     ws: &mut IdgWorkspace,
 ) -> usize {
@@ -4310,7 +4259,6 @@ fn stitch_lexical_capture_reads_from_endpoint(
                     from: source,
                     to: capture_read,
                     meta: crate::edge::EdgeMeta {
-                        precision,
                         kind: crate::edge::IdgEdgeKind::InterCallArg,
                         call_kind,
                         via_span: call_span,
@@ -4360,7 +4308,6 @@ pub(crate) fn stitch_inline_lexical_capture_environment(
                     from: source,
                     to: capture_read,
                     meta: crate::edge::EdgeMeta {
-                        precision: Precision::Narrowed,
                         kind: crate::edge::IdgEdgeKind::InterCallArg,
                         call_kind: CallEdgeKind::Indirect,
                         via_span: definition_span,
@@ -4385,7 +4332,6 @@ fn stitch_lexical_capture_writes(
     caller_seg: SegmentId,
     callback_endpoints: CalleeEndpointView<'_>,
     call_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
     ws: &mut IdgWorkspace,
 ) -> usize {
@@ -4421,7 +4367,6 @@ fn stitch_lexical_capture_writes(
                 from: callback_write,
                 to: host_write,
                 meta: crate::edge::EdgeMeta {
-                    precision,
                     kind: crate::edge::IdgEdgeKind::InterReturn,
                     call_kind,
                     via_span: call_span,
@@ -4579,7 +4524,6 @@ fn stitch_out_parameter_write_back(
     callee_param_writes: &[NodeId],
     target_base: &str,
     call_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
     ws: &mut IdgWorkspace,
 ) -> usize {
@@ -4603,7 +4547,6 @@ fn stitch_out_parameter_write_back(
                 from: source_write,
                 to: target_write,
                 meta: crate::edge::EdgeMeta {
-                    precision,
                     kind: crate::edge::IdgEdgeKind::InterReturn,
                     call_kind,
                     via_span: call_span,
@@ -4758,7 +4701,6 @@ fn stitch_source_callback_args(
                     caller_call_ret,
                     callee_param_node,
                     site.site.0,
-                    cand.precision,
                     cand.edge_kind,
                 );
                 place_inter_edge(caller_seg, endpoints.segment, edge, ws);
@@ -4779,7 +4721,6 @@ fn stitch_source_callback_args(
                             caller_call_ret,
                             projected_read,
                             site.site.0,
-                            cand.precision,
                             cand.edge_kind,
                         );
                         place_inter_edge(caller_seg, endpoints.segment, edge, ws);
@@ -4852,7 +4793,6 @@ fn stitch_callback_invocations(
                 .filter_map(|(span, target)| {
                     (*span == site.site.0).then_some(ResolvedCallee {
                         func: *target,
-                        precision: Precision::Narrowed,
                         edge_kind: CallEdgeKind::Indirect,
                     })
                 }),
@@ -4913,7 +4853,6 @@ fn stitch_callback_invocations(
                                 caller_receiver,
                                 callee_param,
                                 site.site.0,
-                                candidate.precision,
                                 candidate.edge_kind,
                             ),
                             ws,
@@ -4939,13 +4878,7 @@ fn stitch_callback_invocations(
                 place_inter_edge(
                     caller_seg,
                     endpoints.segment,
-                    IdgEdge::inter_call_arg(
-                        caller_arg,
-                        callee_param,
-                        site.site.0,
-                        candidate.precision,
-                        candidate.edge_kind,
-                    ),
+                    IdgEdge::inter_call_arg(caller_arg, callee_param, site.site.0, candidate.edge_kind),
                     ws,
                 );
                 emitted = emitted.saturating_add(1);
@@ -4960,7 +4893,6 @@ fn stitch_callback_invocations(
                 endpoints.segment,
                 endpoints,
                 site.site.0,
-                candidate.precision,
                 candidate.edge_kind,
                 ws,
             ));
@@ -4969,7 +4901,6 @@ fn stitch_callback_invocations(
                 caller_seg,
                 endpoints,
                 site.site.0,
-                candidate.precision,
                 candidate.edge_kind,
                 ws,
             ));
@@ -4996,13 +4927,7 @@ fn stitch_callback_invocations(
             place_inter_edge(
                 endpoints.segment,
                 caller_seg,
-                IdgEdge::inter_return(
-                    callback_return,
-                    target_write,
-                    site.site.0,
-                    candidate.precision,
-                    candidate.edge_kind,
-                ),
+                IdgEdge::inter_return(callback_return, target_write, site.site.0, candidate.edge_kind),
                 ws,
             );
             emitted = emitted.saturating_add(1);
@@ -5015,7 +4940,6 @@ fn stitch_callback_invocations(
                 target_base: target_base.clone(),
                 call_span: site.site.0,
                 write_span: *write_span,
-                precision: candidate.precision,
                 call_kind: candidate.edge_kind,
             });
         }
@@ -5090,13 +5014,7 @@ fn stitch_callback_map_invocation(
             place_inter_edge(
                 caller_seg,
                 endpoints.segment,
-                IdgEdge::inter_call_arg(
-                    producer,
-                    param_node,
-                    site.site.0,
-                    Precision::Narrowed,
-                    CallEdgeKind::Indirect,
-                ),
+                IdgEdge::inter_call_arg(producer, param_node, site.site.0, CallEdgeKind::Indirect),
                 ws,
             );
             emitted = emitted.saturating_add(1);
@@ -5316,7 +5234,6 @@ fn push_receiver_field_arg_site(
     receiver: &str,
     param_name: &str,
     call_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
     receiver_type: Option<&str>,
 ) {
@@ -5339,7 +5256,6 @@ fn push_receiver_field_arg_site(
         param_name: param_name.trim().to_string(),
         call_span,
         argument_value_span: None,
-        precision,
         call_kind,
         arg_idx: u32::MAX,
         param_idx: u32::MAX,
@@ -5358,7 +5274,6 @@ fn push_nested_receiver_field_arg_sites(
     receiver_param_name: &str,
     endpoints: CalleeEndpointView<'_>,
     call_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
 ) {
     let projection_bases = return_projection_bases(endpoints);
@@ -5388,7 +5303,6 @@ fn push_nested_receiver_field_arg_sites(
             param_name: nested_param_base.to_string(),
             call_span,
             argument_value_span: None,
-            precision,
             call_kind,
             arg_idx: u32::MAX,
             param_idx: u32::MAX,
@@ -5408,7 +5322,6 @@ fn push_bare_implicit_member_field_arg_sites(
     caller_implicit_receiver_bases: &[String],
     caller_receiver_names: &[String],
     call_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
 ) {
     let roots = implicit_member_actual_roots(caller_implicit_receiver_bases, caller_receiver_names);
@@ -5443,7 +5356,6 @@ fn push_bare_implicit_member_field_arg_sites(
                 param_name: nested_param_base.to_string(),
                 call_span,
                 argument_value_span: None,
-                precision,
                 call_kind,
                 arg_idx: u32::MAX,
                 param_idx: u32::MAX,
@@ -5606,7 +5518,6 @@ fn flush_symbolic_site_queues(
             exact_field: NO_SYMBOLIC_STRING,
             call_span: site.call_span,
             write_span: site.argument_value_span.unwrap_or(site.call_span),
-            precision: site.precision,
             call_kind: site.call_kind,
             kind: SymbolicFieldTransformKind::Argument,
             arg_idx: site.arg_idx,
@@ -5628,7 +5539,6 @@ fn flush_symbolic_site_queues(
             exact_field: NO_SYMBOLIC_STRING,
             call_span: site.call_span,
             write_span: site.write_span,
-            precision: site.precision,
             call_kind: site.call_kind,
             kind: SymbolicFieldTransformKind::Return,
             arg_idx: u32::MAX,
@@ -5651,7 +5561,6 @@ fn flush_symbolic_site_queues(
             exact_field,
             call_span: site.call_span,
             write_span: site.write_span,
-            precision: site.precision,
             call_kind: site.call_kind,
             kind: SymbolicFieldTransformKind::ScalarReturn,
             arg_idx: u32::MAX,
@@ -5673,7 +5582,6 @@ fn flush_symbolic_site_queues(
             exact_field: NO_SYMBOLIC_STRING,
             call_span: site.call_span,
             write_span: site.write_span,
-            precision: site.precision,
             call_kind: site.call_kind,
             kind: SymbolicFieldTransformKind::ConstructorReturn,
             arg_idx: u32::MAX,
@@ -5715,7 +5623,6 @@ struct OutboundFieldWrite<'a> {
     target_base: &'a str,
     write_span: Span,
     via_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
     edge_kind: crate::edge::IdgEdgeKind,
     skip_self_edge: bool,
@@ -6034,7 +5941,6 @@ struct FieldCopySite {
     target_base: String,
     write_span: Span,
     via_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
 }
 
@@ -6098,7 +6004,6 @@ fn push_symbolic_field_copy(graph: &mut SymbolicFieldCompilerStorage, site: &Fie
         exact_field: NO_SYMBOLIC_STRING,
         call_span: site.via_span,
         write_span: site.write_span,
-        precision: site.precision,
         call_kind: site.call_kind,
         kind: SymbolicFieldTransformKind::Copy,
         arg_idx: u32::MAX,
@@ -6116,7 +6021,6 @@ fn push_symbolic_receiver_mutation(graph: &mut SymbolicFieldCompilerStorage, sit
         exact_field: NO_SYMBOLIC_STRING,
         call_span: site.call_span,
         write_span: site.call_span,
-        precision: site.precision,
         call_kind: site.call_kind,
         kind: SymbolicFieldTransformKind::ReceiverMutation,
         arg_idx: u32::MAX,
@@ -6347,7 +6251,6 @@ fn apply_field_argument_write(
             from: source.node,
             to: param_field_write,
             meta: crate::edge::EdgeMeta {
-                precision: site.precision,
                 kind: crate::edge::IdgEdgeKind::InterFieldCallArg,
                 call_kind: site.call_kind,
                 via_span: site.call_span,
@@ -6371,7 +6274,6 @@ fn apply_field_argument_write(
         &source.field,
         param_field_write,
         site.call_span,
-        site.precision,
         site.call_kind,
         state.ws,
         state.known_edges,
@@ -6394,7 +6296,6 @@ fn apply_return_field_write(
             target_base: &site.target_base,
             write_span: site.write_span,
             via_span: site.call_span,
-            precision: site.precision,
             call_kind: site.call_kind,
             edge_kind: crate::edge::IdgEdgeKind::InterFieldReturn,
             skip_self_edge: false,
@@ -6429,7 +6330,6 @@ fn apply_scalar_return_field_write(
             from: source.node,
             to: target_write,
             meta: crate::edge::EdgeMeta {
-                precision: site.precision,
                 kind: crate::edge::IdgEdgeKind::InterFieldReturn,
                 call_kind: site.call_kind,
                 via_span: site.call_span,
@@ -6454,7 +6354,6 @@ fn apply_constructor_return_field_write(
             target_base: &site.target_base,
             write_span: site.write_span,
             via_span: site.call_span,
-            precision: site.precision,
             call_kind: site.call_kind,
             edge_kind: crate::edge::IdgEdgeKind::InterFieldReturn,
             skip_self_edge: false,
@@ -6479,7 +6378,6 @@ fn apply_receiver_mutation_field_write(
             target_base: &site.target_base,
             write_span: site.call_span,
             via_span: site.call_span,
-            precision: site.precision,
             call_kind: site.call_kind,
             edge_kind: crate::edge::IdgEdgeKind::InterFieldReturn,
             skip_self_edge: false,
@@ -6525,7 +6423,6 @@ fn apply_intra_field_copy_write(
             target_base: &site.target_base,
             write_span: site.write_span,
             via_span: site.via_span,
-            precision: site.precision,
             call_kind: site.call_kind,
             edge_kind: crate::edge::IdgEdgeKind::IntraAssign,
             skip_self_edge: true,
@@ -6605,7 +6502,6 @@ fn apply_outbound_field_write(
                 from: source.node,
                 to: target_field_write,
                 meta: crate::edge::EdgeMeta {
-                    precision: target.precision,
                     kind: target.edge_kind,
                     call_kind: target.call_kind,
                     via_span: target.via_span,
@@ -6635,7 +6531,6 @@ fn apply_outbound_field_write(
         &source.field,
         target_field_write,
         target_field_span,
-        target.precision,
         target.call_kind,
         state.ws,
         state.known_edges,
@@ -6678,7 +6573,6 @@ fn stitch_field_argument_fallbacks(
             &site.actual_arg,
             &site.param_name,
             site.call_span,
-            site.precision,
             site.call_kind,
             state,
         );
@@ -6702,7 +6596,6 @@ fn stitch_field_argument_fallbacks_spooled(
             &site.actual_arg,
             &site.param_name,
             site.call_span,
-            site.precision,
             site.call_kind,
             state,
         );
@@ -6739,7 +6632,6 @@ fn stitch_one_field_argument_fallback(
     actual_arg: &str,
     param_name: &str,
     call_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
     state: &mut FieldPropagationState<'_>,
 ) -> usize {
@@ -6776,7 +6668,6 @@ fn stitch_one_field_argument_fallback(
                 from: actual_field_read,
                 to: reader,
                 meta: crate::edge::EdgeMeta {
-                    precision,
                     kind: crate::edge::IdgEdgeKind::InterFieldCallArg,
                     call_kind,
                     via_span: call_span,
@@ -6997,7 +6888,6 @@ fn collect_field_copy_sites_from_segment(
             target_base,
             write_span,
             via_span: edge.meta.via_span,
-            precision: edge.meta.precision,
             call_kind: edge.meta.call_kind,
         });
     }
@@ -7084,7 +6974,6 @@ fn connect_field_write_to_reads(
     field: &str,
     writer: NodeId,
     via_span: Span,
-    precision: Precision,
     call_kind: CallEdgeKind,
     ws: &mut IdgWorkspace,
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
@@ -7110,7 +6999,6 @@ fn connect_field_write_to_reads(
                 from: writer,
                 to: reader.node,
                 meta: crate::edge::EdgeMeta {
-                    precision,
                     kind: crate::edge::IdgEdgeKind::IntraFieldRead,
                     call_kind,
                     via_span,

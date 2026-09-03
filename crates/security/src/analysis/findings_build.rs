@@ -88,7 +88,6 @@ fn make_pattern_finding(
         hops: Vec::new(),
         tag: sink_rule.tag.clone(),
         severity: sink_rule.severity,
-        precision: precision_label(Precision::Exact).to_string(),
         cwe: sink_rule.cwe.clone(),
         owasp: sink_rule.owasp.clone(),
         status: FindingStatus::Unsanitized,
@@ -174,7 +173,6 @@ pub(super) struct FindingBuildContext<'a> {
     pub(super) tainted_call_spans: &'a AHashSet<Span>,
     pub(super) sink_tainted_args: Vec<TaintedArgInfo>,
     pub(super) taint_path: Vec<TaintPropagationStep>,
-    pub(super) precision: Precision,
     pub(super) analysis_incomplete_reasons: Vec<String>,
 }
 
@@ -676,7 +674,6 @@ pub(super) fn make_finding(
         hops: Vec::new(),
         tag: skr.tag.clone(),
         severity,
-        precision: precision_label(context.precision).to_string(),
         cwe: skr.cwe.clone(),
         owasp: skr.owasp.clone(),
         status,
