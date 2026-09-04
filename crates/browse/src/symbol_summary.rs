@@ -14,10 +14,10 @@ use bonsai_callgraph::{call_invokes_parameter, CallEdge, ResolvedCallGraph};
 use bonsai_common::{FuncId, Span, SymbolId};
 use bonsai_lang_api::{for_each_flow_event, DeclKind, FlowEvent};
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Whether a row is exact source evidence or a semantic resolver proof.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolEvidenceKind {
     Source,
@@ -26,7 +26,7 @@ pub enum SymbolEvidenceKind {
 }
 
 /// One direct compiler-resolved call edge adjacent to the selected symbol.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolCallEdge {
     pub evidence_kind: SymbolEvidenceKind,
     pub edge_id: String,
@@ -44,7 +44,7 @@ pub struct SymbolCallEdge {
 }
 
 /// One import declared in the selected symbol's source file.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SymbolImport {
     pub evidence_kind: SymbolEvidenceKind,
     pub module: String,
@@ -57,7 +57,7 @@ pub struct SymbolImport {
 /// A call expression for which the resolver could not prove a runtime target.
 /// This includes ambiguous workspace candidates and parameter-dispatched
 /// calls without a compiler-proven binding.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UnresolvedCallEvidence {
     pub evidence_kind: SymbolEvidenceKind,
     pub file: String,
@@ -120,7 +120,11 @@ pub fn symbol_summaries(
     Ok(summaries)
 }
 
-fn symbol_summary(
+/// The bounded compiler packet for one callable over a caller-supplied
+/// resolved graph: direct callers and callees with edge ids and resolver
+/// provenance, unresolved call sites, and the file's imports. `inspect-graph`
+/// attaches this to every matched declaration.
+pub fn symbol_summary(
     ws: &Workspace,
     headers: &bonsai_index::GlobalIndex,
     graph: &ResolvedCallGraph,

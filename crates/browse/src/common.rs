@@ -47,7 +47,8 @@ impl Deref for AdmittedDeclIndex<'_> {
 /// changes scheduling only.
 pub(crate) fn source_files_small_first(ws: &Workspace) -> Vec<bonsai_common::FileId> {
     let mut files = ws.vfs().all_files();
-    files.sort_by_cached_key(|file| ws.vfs().snapshot(*file).map_or(0, |snapshot| snapshot.text.len()));
+    // Byte length is metadata: a lazily interned source is not read for it.
+    files.sort_by_cached_key(|file| ws.vfs().text_len(*file).unwrap_or(0));
     files
 }
 
@@ -340,40 +341,33 @@ impl Locator {
             .adapter_for(span.file)
             .map(|a| a.language_id().as_str().to_string());
         let global = ws.compiler_header_index();
-        let decls_in_file: &[bonsai_lang_api::Decl] = global.decls_in(span.file);
-        let decls_ref: Vec<&bonsai_lang_api::Decl> = decls_in_file.iter().collect();
-        if let Some((_func_id, decl_name)) = bonsai_inspect::find_enclosing_func(&decls_ref, span) {
-            loc.decl = Some(decl_name);
-            // Walk decls again to find the matching record so we
-            // can fill in decl_kind, qualified_name, and class
-            // (when the parent decl is a class-shape).
-            for decl in decls_in_file {
-                if loc.decl.as_deref() == Some(decl.name.as_str())
-                    && decl.span.file == span.file
-                    && decl.span.start <= span.start
-                    && span.end <= decl.span.end
-                {
-                    loc.decl_kind = Some(decl.kind);
-                    loc.qualified_name.clone_from(&decl.qualified_name);
-                    // Only methods / constructors carry a class;
-                    // bare functions live at module scope.
-                    if matches!(decl.kind, DeclKind::Method | DeclKind::Constructor) {
-                        if let Some(parent_sym) = decl.parent {
-                            if let Some(parent_decl) = global.decl_of(parent_sym) {
-                                if matches!(
-                                    parent_decl.kind,
-                                    DeclKind::Class
-                                        | DeclKind::Struct
-                                        | DeclKind::Trait
-                                        | DeclKind::Interface
-                                        | DeclKind::Enum
-                                ) {
-                                    loc.class = Some(parent_decl.name.clone());
-                                }
-                            }
+        // The workspace enclosing-span index answers in O(log decls) and
+        // returns the callable's SymbolId, so the declaration record is one
+        // slot read: no second pass and no name-string re-match.
+        if let Some(entry) = ws
+            .enclosing_index()
+            .enclosing_for(global.as_ref(), span.file, span.start)
+            .filter(|entry| entry.end >= span.end)
+        {
+            if let Some(decl) = global.decl_of(entry.symbol) {
+                loc.decl = Some(decl.name.clone());
+                loc.decl_kind = Some(decl.kind);
+                loc.qualified_name.clone_from(&decl.qualified_name);
+                // Only methods / constructors carry a class; bare functions
+                // live at module scope.
+                if matches!(decl.kind, DeclKind::Method | DeclKind::Constructor) {
+                    if let Some(parent_decl) = decl.parent.and_then(|parent| global.decl_of(parent)) {
+                        if matches!(
+                            parent_decl.kind,
+                            DeclKind::Class
+                                | DeclKind::Struct
+                                | DeclKind::Trait
+                                | DeclKind::Interface
+                                | DeclKind::Enum
+                        ) {
+                            loc.class = Some(parent_decl.name.clone());
                         }
                     }
-                    break;
                 }
             }
         }
@@ -426,15 +420,13 @@ pub fn format_span(span: &Span, ws: &Workspace) -> (String, u32, u32) {
     } else {
         workspace_relative_path(ws, &path)
     };
-    let snapshot = ws.vfs().snapshot(span.file).ok();
-    let (line, column) = if let Some(snap) = snapshot {
-        // Share the line index across calls for the same immutable snapshot.
-        let map = bonsai_common::cached_span_map_arc(span.file, snap.version, &snap.text);
+    // The line index comes from the loaded text or, for a lazily interned
+    // source, from the line table its compiler object recorded: rendering a
+    // location never reads the file.
+    let (line, column) = ws.db().span_map(span.file).map_or((0, 0), |map| {
         let line_col = map.line_col(span.start);
         (line_col.line, line_col.column)
-    } else {
-        (0, 0)
-    };
+    });
     (path, line, column)
 }
 

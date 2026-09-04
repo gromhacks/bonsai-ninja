@@ -286,6 +286,9 @@ pub struct GlobalIndex {
     /// worker bind streamed compiler-object bodies to the same stable symbols
     /// without reparsing every file merely to reconstruct linkage headers.
     linkage_by_symbol: AHashMap<SymbolId, FunctionLinkageFacts>,
+    /// `by_file` keys in ascending order, maintained on insert/remove so
+    /// `all_files()` is an allocation-free iterator.
+    sorted_files: Vec<FileId>,
 }
 
 impl GlobalIndex {
@@ -361,6 +364,8 @@ impl GlobalIndex {
             out.slots_by_file.insert(file, slots);
             out.by_file.insert(file, index);
         }
+        out.sorted_files = out.by_file.keys().copied().collect();
+        out.sorted_files.sort_unstable();
         for symbols in out.by_name.values_mut() {
             symbols.sort_unstable_by_key(|symbol| symbol.raw());
             symbols.dedup();
@@ -511,6 +516,39 @@ impl GlobalIndex {
     /// so they expose exactly the adapter-lowered body regardless of whether
     /// the caller opened a full or retrieval-scoped workspace.
     #[must_use]
+    /// Remap one declaration decoded from a per-declaration frame to this
+    /// index's header symbol table. `local_symbols` are the file's local
+    /// symbols in deduplicated index order (the frame directory); they must
+    /// line up one-to-one with the header declarations of `file`. Applies
+    /// the same receiver-ancestry enrichment as the whole-file remap.
+    pub fn remap_single_decl_to_existing_symbols(
+        &self,
+        file: FileId,
+        local_symbols: &[SymbolId],
+        decl: &mut Decl,
+    ) -> bool {
+        let Some(headers) = self.by_file.get(&file) else {
+            return false;
+        };
+        if headers.defs.len() != local_symbols.len() {
+            return false;
+        }
+        let local_to_global: AHashMap<SymbolId, SymbolId> = local_symbols
+            .iter()
+            .copied()
+            .zip(headers.defs.iter().map(|header| header.symbol))
+            .collect();
+        let Some(global) = local_to_global.get(&decl.symbol).copied() else {
+            return false;
+        };
+        decl.symbol = global;
+        if let Some(parent) = decl.parent {
+            decl.parent = local_to_global.get(&parent).copied();
+        }
+        enrich_receiver_types_in_events(&mut decl.flow_events, &self.finalized_bases_by_type);
+        true
+    }
+
     pub fn remap_file_to_existing_symbols_frontend_only(&self, index: DeclIndex) -> DeclIndex {
         let mut index = self.remap_file_symbols_only(index);
         index.compact_storage();
@@ -600,6 +638,7 @@ impl GlobalIndex {
             }
         }
         self.by_file.insert(file, index);
+        self.note_file_present(file);
     }
 
     /// Finish workspace-wide semantic facts that need all files.
@@ -636,6 +675,7 @@ impl GlobalIndex {
         self.refs_by_symbol.clear();
         let mut files: Vec<FileId> = self.by_file.keys().copied().collect();
         files.sort_unstable_by_key(|file| file.raw());
+        self.sorted_files.clone_from(&files);
         for file in files {
             let index = &self.by_file[&file];
             for decl in &index.defs {
@@ -686,6 +726,7 @@ impl GlobalIndex {
             return;
         }
         self.advance_identity();
+        self.note_file_removed(file);
         if let Some(prev) = self.by_file.remove(&file) {
             for decl in &prev.defs {
                 self.linkage_by_symbol.remove(&decl.symbol);
@@ -878,9 +919,34 @@ impl GlobalIndex {
     /// callers iterate `by_file`'s AHashMap keys directly and their
     /// downstream ordering (hits, flow numbers) varies run-to-run.
     pub fn all_files(&self) -> impl Iterator<Item = FileId> + '_ {
-        let mut ids: Vec<FileId> = self.by_file.keys().copied().collect();
-        ids.sort();
-        ids.into_iter()
+        self.sorted_files.iter().copied()
+    }
+
+    /// Number of indexed files.
+    #[must_use]
+    pub fn file_count(&self) -> usize {
+        self.sorted_files.len()
+    }
+
+    /// Position of `symbol`'s declaration inside its file's `defs` vector.
+    /// O(1): the global slot table already records `(file, local index)`.
+    #[must_use]
+    pub fn local_index_of(&self, symbol: SymbolId) -> Option<usize> {
+        self.entries
+            .get(symbol.raw() as usize)
+            .and_then(|slot| slot.map(|(_, local_index)| local_index))
+    }
+
+    fn note_file_present(&mut self, file: FileId) {
+        if let Err(position) = self.sorted_files.binary_search(&file) {
+            self.sorted_files.insert(position, file);
+        }
+    }
+
+    fn note_file_removed(&mut self, file: FileId) {
+        if let Ok(position) = self.sorted_files.binary_search(&file) {
+            self.sorted_files.remove(position);
+        }
     }
 
     /// Every decl that lives in `file`, in adapter-emitted order.
@@ -1010,6 +1076,7 @@ impl GlobalIndex {
             by_name: self.by_name.clone(),
             refs_by_symbol: self.refs_by_symbol.clone(),
             slots_by_file: self.slots_by_file.clone(),
+            sorted_files: self.sorted_files.clone(),
             finalized_bases_by_type: self.finalized_bases_by_type.clone(),
             linkage_by_symbol: AHashMap::new(),
         }
@@ -1077,13 +1144,16 @@ impl<'de> Deserialize<'de> for GlobalIndex {
             slots_by_file: AHashMap::new(),
             finalized_bases_by_type: AHashMap::new(),
             linkage_by_symbol: wire.linkage_by_symbol.into_iter().collect(),
+            sorted_files: Vec::new(),
         };
         index.rebuild_persisted_indexes();
         Ok(index)
     }
 }
 
-fn dedup_decl_index_defs(index: &mut DeclIndex) {
+/// Merge duplicate declarations exactly as header construction does, so
+/// per-declaration artifacts stay aligned with the header symbol table.
+pub fn dedup_decl_index_defs(index: &mut DeclIndex) {
     let mut seen: AHashMap<DeclDedupKey, usize> = AHashMap::new();
     let mut local_aliases: AHashMap<SymbolId, SymbolId> = AHashMap::new();
     let mut deduped: Vec<Decl> = Vec::with_capacity(index.defs.len());

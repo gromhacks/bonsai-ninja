@@ -182,10 +182,12 @@ Static-analysis limits are explicit:
   because the call site remains `ns.member(...)`, not a bare imported symbol.
 
 The workspace exposes the canonical `InterTaintCaches` singleton via
-`Workspace::inter_taint_caches()`. Production and diagnostic drivers borrow
-that one instance so resolver answers per `(caller_func, call_span)`, file
-alias maps, function summaries, and local bindings accumulate across runs in a
-single CLI process. `Workspace::ingest_dir` calls `InterTaintCaches::clear()`
+`Workspace::inter_taint_caches()`. It is now a source-compatible handle over
+the IDG: it records whether the graph has been warmed and holds the
+IDG attribution caches (`IdgAttributionCaches`) that rendered evidence reuses,
+so repeated security/inspect runs in one CLI process do not re-lower
+attribution bodies. Call-site resolution itself is memoised in the resolved
+callgraph, not here. `Workspace::ingest_dir` calls `InterTaintCaches::clear()`
 when a file edit lands.
 
 Security source sites and source-returning helpers are resolved to concrete
@@ -351,10 +353,12 @@ Branches don't dilute clean paths. `Branch` handling clones state per arm,
 walks both, and unions post-states. Clean reassignment in both branches
 clears prior taint at the merge.
 
-The adapter contract requires both arms to be present. The kit's
-`branch_repair` recovers the partition for grammars that lump both arms
-together. That repair runs before taint analysis, so inspect, trace,
-export, and security all see the same branch shape.
+The adapter contract requires both arms to be present. The kit's structured
+control lowering (`crates/lang_api/src/kit/walker/control.rs`) recovers the
+then/else partition from adapter-declared fields, and
+`split_match_arms_in_branch_events` peels flat multi-arm forms. That happens
+at compiler-object lowering, before any analysis, so inspect, export, and
+security all see the same branch shape.
 
 Branch proofs consume adapter-lowered `ConditionExpressionFact` trees and
 typed `ConditionOperandFact` scalar values. The owning adapter maps its
@@ -410,8 +414,11 @@ summary capability and must not be guessed from call text.
 - `taints_params_from`: parameter-to-parameter side effects (e.g.
   `join(dst, ..., src)` writes `src` into `dst`).
 
-Caller's `apply_return_taint` consults the summary when processing
-`var = callee(args)`. Adapters set `Decl.has_implicit_returns` only for
+Return summaries are compiled by the IDG (`crates/idg/src/function_summary.rs`,
+`return_taint_param_indices`) from exact call boundaries and composed at every
+`var = callee(args)` stitch; the `FunctionSummary` in
+`crates/taint/src/idg_api/summary.rs` is the compatibility projection of that
+result. Adapters set `Decl.has_implicit_returns` only for
 language or body forms where a final expression really returns a value
 (Rust/Ruby tail expressions, expression-bodied lambdas/functions). The
 summary pass only uses terminal-tail evidence when that adapter fact is
@@ -470,7 +477,7 @@ lookup instead of a fresh propagation pass.
   see scope, memory/disk hit or miss, config invalidation, and
   write-through status.
 - **`Workspace::cached_resolved_call_graph()`** — singleton
-  `Arc<ResolvedCallGraph>` shared across `inspect`, `security`,
+  `Arc<ResolvedCallGraph>` shared across `inspect-graph`, `security`,
   `dump-callgraph`, the `DataFlowCache`, and the `FlowIdCache`. The
   data caches receive it via `seed_call_graph(arc)` when a query or
   explicit prewarm path has built it so they don't rebuild identical
@@ -504,11 +511,11 @@ The caller must also provide the workspace file-path lookup in
 languages leave the capability false and must import or alias the symbol, so
 the resolver fails closed instead of fabricating a cross-file edge.
 
-The engine's `resolve_call_candidates_with_caller_at` builds the
-`ResolveContext` from each call site's `(caller_func, call_span)`,
-threads it into the resolver, and memoises the answer in
-`InterTaintCaches::resolved_calls_by_site`. When the answer is a
-single candidate, the edge is `EdgeKind::Direct`. Multiple candidates are
+The resolved callgraph (`crates/callgraph`) builds a `ResolveContext` for
+each call site from its `(caller_func, call_span)`, threads it into the
+resolver, and records the answer once with its provenance; IDG stitching and
+every taint surface consume that persisted relation instead of resolving
+again. When the answer is a single candidate, the edge is `EdgeKind::Direct`. Multiple candidates are
 emitted only when adapter
 facts semantically explain the set, such as typed virtual dispatch over a
 known receiver family or a same-scope overload family. Overload families are

@@ -7,7 +7,7 @@ use crate::common::{
 use bonsai_common::short_qualified_tail;
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const SNIPPET_MAX_CHARS: usize = 512;
 
@@ -28,7 +28,7 @@ pub struct RefsFilters<'a> {
 }
 
 /// One row of `refs` output.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RefOut {
     pub symbol: String,
     pub file: String,
@@ -141,6 +141,11 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
                 .filter(|reference| reference.kind == bonsai_lang_api::RefKind::Read)
                 .map(|reference| (reference.span.start, reference.span.end))
                 .collect();
+            // `--in-fn` needs the enclosing callable per reference: one
+            // O(log n) span index per file instead of a scan per reference.
+            let enclosing_index = f.in_fn.is_some().then(|| {
+                bonsai_workspace::enclosing_index::EnclosingSpanIndex::from_callable_decls(&index.defs)
+            });
             for reference in &index.refs {
                 let syntax_qualified_call = reference.kind == bonsai_lang_api::RefKind::Call
                     && qualified_call_spans.contains(&(reference.span.start, reference.span.end));
@@ -153,8 +158,12 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
                 let kind = format!("{:?}", reference.kind).to_lowercase();
                 if f.kind.is_some_and(|wanted| !kind.eq_ignore_ascii_case(wanted))
                     || f.in_fn.is_some_and(|needle| {
-                        !enclosing_function_for_span(&index, reference.span)
-                            .is_some_and(|name| name.contains(needle))
+                        !enclosing_index
+                            .as_ref()
+                            .and_then(|enclosing| enclosing.enclosing(reference.span.start))
+                            .is_some_and(|entry| {
+                                entry.end >= reference.span.end && entry.name.contains(needle)
+                            })
                     })
                 {
                     continue;
@@ -409,31 +418,6 @@ fn qualified_owner_matches(query_owner: &str, candidate: &str) -> bool {
         || candidate
             .strip_suffix(query_owner)
             .is_some_and(bonsai_common::ends_at_qualified_name_boundary)
-}
-
-fn enclosing_function_for_span(
-    index: &bonsai_lang_api::DeclIndex,
-    span: bonsai_common::Span,
-) -> Option<&str> {
-    use bonsai_lang_api::DeclKind;
-    index
-        .defs
-        .iter()
-        .filter(|decl| {
-            matches!(
-                decl.kind,
-                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-            )
-        })
-        .filter(|decl| {
-            let body = decl.body_span.unwrap_or(decl.span);
-            body.file == span.file && body.start <= span.start && span.end <= body.end
-        })
-        .min_by_key(|decl| {
-            let body = decl.body_span.unwrap_or(decl.span);
-            body.end.saturating_sub(body.start)
-        })
-        .map(|decl| decl.name.as_str())
 }
 
 fn refine_span_to_name(ws: &Workspace, span: bonsai_common::Span, name: &str) -> bonsai_common::Span {

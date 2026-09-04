@@ -77,20 +77,39 @@ impl EnclosingSpanIndex {
                         DeclKind::Function | DeclKind::Method | DeclKind::Constructor
                     )
                 })
-                .map(|decl| {
-                    let body = decl.body_span.unwrap_or(decl.span);
-                    EnclosingEntry {
-                        start: body.start,
-                        end: body.end,
-                        name: decl.name.clone(),
-                        symbol: decl.symbol,
-                    }
+                .map(|decl| EnclosingEntry {
+                    start: decl.span.start,
+                    end: decl.span.end,
+                    name: decl.name.clone(),
+                    symbol: decl.symbol,
                 })
                 .collect(),
         )
     }
 
     /// Return the innermost indexed declaration covering `pos`.
+    /// Same as [`Self::from_callable_decls`] over borrowed declarations.
+    #[must_use]
+    pub fn from_callable_decl_refs(decls: &[&Decl]) -> Self {
+        Self::new(
+            decls
+                .iter()
+                .filter(|decl| {
+                    matches!(
+                        decl.kind,
+                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                    )
+                })
+                .map(|decl| EnclosingEntry {
+                    start: decl.span.start,
+                    end: decl.span.end,
+                    name: decl.name.clone(),
+                    symbol: decl.symbol,
+                })
+                .collect(),
+        )
+    }
+
     #[must_use]
     pub fn enclosing(&self, pos: u64) -> Option<EnclosingEntry> {
         let upper = self.entries.partition_point(|entry| entry.start <= pos);
@@ -204,14 +223,13 @@ fn build_entries(headers: &GlobalIndex, file: FileId) -> Vec<EnclosingEntry> {
     let entries: Vec<EnclosingEntry> = headers
         .decls_in(file)
         .iter()
-        .map(|d| {
-            let body = d.body_span.unwrap_or(d.span);
-            EnclosingEntry {
-                start: body.start,
-                end: body.end,
-                name: d.name.clone(),
-                symbol: d.symbol,
-            }
+        // The complete declaration span (signature and body): a position in
+        // a parameter list or on the name belongs to that callable too.
+        .map(|d| EnclosingEntry {
+            start: d.span.start,
+            end: d.span.end,
+            name: d.name.clone(),
+            symbol: d.symbol,
         })
         .collect();
     entries

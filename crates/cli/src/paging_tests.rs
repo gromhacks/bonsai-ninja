@@ -311,8 +311,6 @@ fn effective_budget_respects_format_class() {
     assert_eq!(cfg_text.effective_budget(), Some(DEFAULT_CONTEXT_TEXT));
     let cfg_json = PagingConfig::new(None, PageArg::First, None, false, FormatClass::Programmatic);
     assert_eq!(cfg_json.effective_budget(), Some(DEFAULT_CONTEXT_TEXT));
-    let cfg_dot = PagingConfig::new(None, PageArg::First, None, false, FormatClass::RenderOnly);
-    assert_eq!(cfg_dot.effective_budget(), None);
     let cfg_json_all = PagingConfig::new(None, PageArg::First, None, true, FormatClass::Programmatic);
     assert_eq!(cfg_json_all.effective_budget(), None);
 }

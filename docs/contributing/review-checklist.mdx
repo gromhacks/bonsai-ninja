@@ -24,9 +24,9 @@ class and verify each box.
       over_taint_matrix` is green for all 20 languages.
 - [ ] **Determinism holds.** `finding_ids_deterministic_across_runs`
       passes.
-- [ ] **Quoted-literal short-circuit unchanged.** `arg_text_is_tainted` /
-      `rhs_operand_is_tainted` do not propagate identifier tokens from
-      inside string literals.
+- [ ] **Quoted-literal short-circuit unchanged.** `text_is_tainted` /
+      `strict_operand_is_tainted` (`crates/taint/src/intra.rs`) do not
+      propagate identifier tokens from inside string literals.
 - [ ] **Matcher policy fingerprint bumped.** If the change alters
       propagation semantics, `MATCHER_POLICY_FINGERPRINT` is incremented.
 - [ ] **`CONTEXTLESS_LOOKUP_JUSTIFICATION` markers preserved.** New
@@ -79,8 +79,9 @@ class and verify each box.
 - [ ] **Fresh/object parity holds.** The adapter's typed output is fully
       serializable in `CompiledFileObject`; a warm decode cannot omit a fact or
       diagnostic that fresh Tree-sitter lowering emits.
-- [ ] **Documentation updated.** `docs/contributing/architecture.mdx` per-language
-      summary reflects new GrammarHandler config.
+- [ ] **Documentation updated.** `docs/contributing/adapter-capabilities.mdx`
+      and `docs/language-support.mdx` reflect the new capability declarations
+      and GrammarHandler config.
 
 ## Rule pack change (`security-patterns/`)
 
@@ -140,10 +141,10 @@ class and verify each box.
       sdk_cli_parity`.
 - [ ] **Pagination still works** for the affected command.
 - [ ] **Inspect mode contract holds.** Every matching callable carries one
-      bounded compiler evidence unit (a stable `F:` flow); `--taint-flow`
-      adds raw taint paths. Structural inspect and browse summaries never
-      enumerate recursive call paths; `path` returns an exact compressed
-      endpoint corridor. There is one compiler-proven static-evidence
+      bounded compiler evidence unit (a stable `F:` flow) and expands the raw
+      taint flows through it into full call stacks. Structural inspect and browse summaries never
+      enumerate recursive call paths; `inspect-graph --from/--to` and the SDK
+      `paths` API return an exact compressed endpoint corridor. There is one compiler-proven static-evidence
       contract and no precision label or accuracy mode on any surface.
 - [ ] **Stable ID routing holds.** `show F:`, `show G:`, `show T:`,
       `show E:`, `show N:`, `show S:`, and resolver-scoped `show R:`
@@ -285,8 +286,8 @@ class and verify each box.
       validated frame directory per admitted file and range-decodes only its
       requested function frames; it does not reopen the directory per row or
       decompress unrequested sibling functions.
-- [ ] **Inspect syntax and IDG residency are sequential.** `inspect
-      --taint-flow` records exact AST target spans, releases syntax bodies and
+- [ ] **Inspect syntax and IDG residency are sequential.** `inspect-graph`
+      records exact AST target spans, releases syntax bodies and
       graph caches, and only then opens the persisted IDG. Broad target sets
       use one sparse backward demand proof plus exact forward closures; they
       do not run an unrestricted whole-IDG closure once per lexical hit.

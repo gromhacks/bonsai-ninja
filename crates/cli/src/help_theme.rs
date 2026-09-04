@@ -21,9 +21,9 @@ use crate::theme;
 use crate::{resolve_theme_early, Cli};
 
 pub(crate) const CLI_LONG_ABOUT: &str = "\
-bonsai-ninja indexes a source tree and lets you browse symbols, trace
-cross-file execution, inspect source-backed flows, and run rulepack-driven
-security taint analysis across 20 languages.";
+bonsai-ninja indexes a source tree and lets you map module connections,
+browse symbols, walk exact compiler corridors and taint call stacks, and run
+rulepack-driven security taint analysis across 20 languages.";
 
 const MAX_HELP_DESCRIPTION_LINES: usize = 8;
 const MAX_SUBCOMMAND_EXAMPLE_COMMANDS: usize = 3;
@@ -43,22 +43,10 @@ pub(crate) fn themed_cli_long_about() -> String {
 /// help menu without coupling them to the per-command `about` text.
 pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
     (
-        "Flow",
-        &[
-            ("inspect", "Find hits and source-backed flows"),
-            ("symbol-summary", "Bounded compiler packet for one callable"),
-            ("trace", "Expand one entry point's call tree"),
-            ("path", "Exact compressed callgraph corridor"),
-            ("slice", "Backward symbol slice"),
-            ("show", "Open an F:/G:/T:/E:/N:/S:/R: id"),
-        ],
-    ),
-    (
         "Workspace",
         &[
-            ("index", "Parse a workspace and print stats"),
-            ("context", "Workspace semantic context"),
-            ("export", "Export the graph as JSON"),
+            ("index", "Parse a workspace; report stats and context"),
+            ("export", "Export the compiler graph as JSON"),
         ],
     ),
     (
@@ -67,6 +55,13 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("cache stats", "Show cache config and sidecar size"),
             ("cache clear", "Delete external workspace sidecars"),
             ("cache rebuild", "Rebuild semantic structural sidecars"),
+        ],
+    ),
+    (
+        "Navigation",
+        &[
+            ("tree", "Module map: files, defs, imports, cross-file calls"),
+            ("read-file", "Source view with imports and cross-file links"),
         ],
     ),
     (
@@ -87,10 +82,13 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
-        "Navigation",
+        "Flow",
         &[
-            ("tree", "Direct filesystem tree"),
-            ("read-file", "Annotated source view"),
+            (
+                "inspect-graph",
+                "Hits, compiler flows, corridors, and taint call stacks",
+            ),
+            ("show", "Open an F:/G:/T:/E:/N:/S:/R: id"),
         ],
     ),
     (
@@ -100,10 +98,11 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("security sinks", "Rulepack sink matches"),
             ("security sanitizers", "Sanitizer matches"),
             ("security deps", "Rulepack dependency hits"),
+            ("security dependency-analysis", "Dependency usage and taint flows"),
             ("security taint-analysis", "Source-to-sink findings"),
             ("security source-analysis", "Downstream source flows"),
             ("security sink-analysis", "Upstream sink flows"),
-            ("security pack", "Rulepack audit"),
+            ("security pack", "Rulepack YAML, audit, validate"),
         ],
     ),
     (
@@ -126,12 +125,19 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
 /// fragments so the builder can paint commands / flags separately.
 pub(crate) const HELP_EXAMPLES: &[(&str, &[&str])] = &[
     (
-        "Inspect a sink and its raw taint flows:",
-        &["bonsai-ninja inspect ./src --query os.system --taint-flow"],
+        "Inspect a sink, its compiler flow, and the taint call stacks through it:",
+        &["bonsai-ninja inspect-graph ./src --query os.system"],
     ),
     (
-        "Trace behavior from an entry point:",
-        &["bonsai-ninja trace ./src --symbol handle_request"],
+        "Walk the exact corridor between two callables:",
+        &["bonsai-ninja inspect-graph ./src --from handle_request --to os.system"],
+    ),
+    (
+        "See how a module is wired:",
+        &[
+            "bonsai-ninja tree ./src",
+            "bonsai-ninja read-file ./src --file gateway.py",
+        ],
     ),
     (
         "Browse before drilling in:",
@@ -231,7 +237,10 @@ pub(crate) fn themed_after_help() -> String {
     ));
     out.push_str("\n  ");
     out.push_str(&paint_help_text("Common starting points: ", &palette.dim, colors));
-    for (i, cmd) in ["inspect", "trace", "defs", "calls", "refs"].iter().enumerate() {
+    for (i, cmd) in ["inspect-graph", "show", "defs", "calls", "refs"]
+        .iter()
+        .enumerate()
+    {
         if i > 0 {
             out.push_str(&paint_help_text(", ", &palette.dim, colors));
         }
@@ -481,6 +490,197 @@ pub(crate) fn themed_help_template() -> String {
 /// like flag descriptions (indented >= 10 spaces, no existing ANSI
 /// escape) get wrapped in the palette's `dim` slot so they read as
 /// muted body text consistent with the rest of the themed output.
+/// Global flags that may precede a command name on the command line.
+const GLOBAL_FLAGS_WITHOUT_VALUE: &[&str] = &["--no-color", "--no-cache", "--no-progress"];
+const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
+    "--theme",
+    "--html-output",
+    "--contains",
+    "--not-contains",
+    "--parse-timeout",
+    "--memory-budget",
+    "--debug",
+];
+
+/// Resolve the command a command line addresses: walk `args` past global
+/// flags and through nested subcommand names. Returns the deepest matched
+/// command, its name path, and the first root-level word that named no
+/// command (if any).
+fn resolve_command_path(args: &[String]) -> (clap::Command, Vec<String>, Option<String>) {
+    use clap::CommandFactory;
+    let mut command = Cli::command();
+    command.build();
+    let mut path: Vec<String> = Vec::new();
+    let mut unknown = None;
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--help" || arg == "-h" || arg == "--" {
+            break;
+        }
+        if GLOBAL_FLAGS_WITHOUT_VALUE.contains(&arg.as_str()) {
+            continue;
+        }
+        if GLOBAL_FLAGS_WITH_VALUE.contains(&arg.as_str()) {
+            iter.next();
+            continue;
+        }
+        if GLOBAL_FLAGS_WITH_VALUE
+            .iter()
+            .any(|flag| arg.starts_with(&format!("{flag}=")))
+        {
+            continue;
+        }
+        if arg.starts_with('-') {
+            if command.get_subcommands().next().is_none() {
+                break;
+            }
+            continue;
+        }
+        match command.find_subcommand(arg.as_str()) {
+            Some(next) => {
+                path.push(next.get_name().to_string());
+                command = next.clone();
+            }
+            None => {
+                if command.get_subcommands().next().is_some() {
+                    // A positional (workspace path) before a nested action,
+                    // or an unknown command name at the root.
+                    if path.is_empty() && unknown.is_none() {
+                        unknown = Some(arg.clone());
+                    }
+                    continue;
+                }
+                break;
+            }
+        }
+    }
+    (command, path, unknown)
+}
+
+/// Render the themed help of one command (the root menu for the root).
+pub(crate) fn render_command_help(command: &clap::Command, long: bool) -> String {
+    let mut command = command.clone();
+    let styled = if long {
+        command.render_long_help()
+    } else {
+        command.render_help()
+    };
+    let rendered_help = if help_colors_enabled() {
+        styled.ansi().to_string()
+    } else {
+        styled.to_string()
+    };
+    let rendered_help = rendered_help
+        .replace("Print help (see more with '--help')", "Print help")
+        .replace("Print help (see a summary with '-h')", "Print help");
+    let rendered_help = normalize_help_section_casing(&rendered_help);
+    let rendered_help = add_inherited_workspace_argument(&rendered_help);
+    colorize_help_body(&rendered_help)
+}
+
+/// One themed error line in the palette every help menu uses.
+fn themed_error_line(message: &str) -> String {
+    let theme = resolve_theme_early();
+    let palette = theme.palette();
+    let colors = help_colors_enabled();
+    format!(
+        "{} {}",
+        paint_help_text("error:", &palette.warn, colors),
+        paint_help_text(message, &palette.name, colors)
+    )
+}
+
+fn themed_hint_line(message: &str) -> String {
+    let theme = resolve_theme_early();
+    let palette = theme.palette();
+    let colors = help_colors_enabled();
+    paint_help_text(message, &palette.dim, colors)
+}
+
+fn unknown_word_present(path: &[String], resolved: &[String]) -> bool {
+    path.iter()
+        .any(|word| !word.starts_with('-') && !resolved.iter().any(|name| name == word))
+}
+
+/// `bonsai-ninja help [COMMAND]...`: the root menu, or one command's full
+/// reference. An unknown command name prints a themed error plus the menu
+/// and exits 2.
+pub(crate) fn run_help_command(path: &[String]) -> i32 {
+    use std::io::Write;
+    let (command, resolved, unknown) = resolve_command_path(path);
+    let unknown = unknown.or_else(|| {
+        path.iter()
+            .find(|word| !word.starts_with('-') && !resolved.iter().any(|name| name == *word))
+            .cloned()
+    });
+    let stdout_handle = std::io::stdout();
+    let mut out = stdout_handle.lock();
+    if let Some(word) = unknown {
+        let _ = writeln!(out, "{}", themed_error_line(&format!("unknown command `{word}`")));
+        let _ = writeln!(out);
+    }
+    let _ = out.write_all(render_command_help(&command, true).as_bytes());
+    let _ = out.flush();
+    if unknown_word_present(path, &resolved) {
+        2
+    } else {
+        0
+    }
+}
+
+/// A parse error rendered the way the help menus are: the themed error
+/// line, the help of the command the input addressed (the root menu for an
+/// unknown command), and the `help` hint. Returns the process exit code.
+pub(crate) fn render_themed_clap_error(err: &clap::Error) -> i32 {
+    use std::io::Write;
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let (command, path, _) = resolve_command_path(&argv);
+    let rendered = err.render().to_string();
+    let mut paragraphs = rendered.split("\n\n");
+    let mut message = paragraphs
+        .next()
+        .unwrap_or("invalid input")
+        .trim_start_matches("error: ")
+        .trim()
+        .to_string();
+    // One wording for every unknown command, whichever path reported it.
+    if err.kind() == clap::error::ErrorKind::InvalidSubcommand {
+        if let Some(name) = message
+            .strip_prefix("unrecognized subcommand '")
+            .and_then(|rest| rest.strip_suffix('\''))
+        {
+            message = format!("unknown command `{name}`");
+        }
+    }
+    let tip = paragraphs
+        .flat_map(|paragraph| paragraph.lines())
+        .map(str::trim)
+        .find(|line| line.starts_with("tip:"))
+        .map(str::to_string);
+    let stderr_handle = std::io::stderr();
+    let mut out = stderr_handle.lock();
+    let _ = writeln!(out, "{}", themed_error_line(&message));
+    if let Some(tip) = tip {
+        let _ = writeln!(out, "{}", themed_hint_line(&tip));
+    }
+    let _ = writeln!(out);
+    // The same long reference `--help` renders, so an argument error and the
+    // help menu never differ in content, wrapping, or colour.
+    let _ = out.write_all(render_command_help(&command, true).as_bytes());
+    let hint = if path.is_empty() {
+        "Run `bonsai-ninja help <command>` for a command's full reference.".to_string()
+    } else {
+        format!(
+            "Run `bonsai-ninja help {}` for the full reference.",
+            path.join(" ")
+        )
+    };
+    let _ = writeln!(out);
+    let _ = writeln!(out, "{}", themed_hint_line(&hint));
+    let _ = out.flush();
+    2
+}
+
 pub(crate) fn try_themed_help() -> Option<i32> {
     use clap::CommandFactory;
     use std::io::Write;
@@ -492,6 +692,31 @@ pub(crate) fn try_themed_help() -> Option<i32> {
     let no_arguments = argv.len() == 1;
     let mut help_requested = no_arguments;
     let mut long_help_requested = no_arguments;
+    // `bonsai-ninja help [COMMAND]...` is the same themed path as `--help`.
+    let mut words = argv.iter().skip(1).peekable();
+    while let Some(arg) = words.peek() {
+        if GLOBAL_FLAGS_WITHOUT_VALUE.contains(&arg.as_str()) {
+            words.next();
+            continue;
+        }
+        if GLOBAL_FLAGS_WITH_VALUE.contains(&arg.as_str()) {
+            words.next();
+            words.next();
+            continue;
+        }
+        if GLOBAL_FLAGS_WITH_VALUE
+            .iter()
+            .any(|flag| arg.starts_with(&format!("{flag}=")))
+        {
+            words.next();
+            continue;
+        }
+        break;
+    }
+    if words.peek().is_some_and(|arg| arg.as_str() == "help") {
+        let rest: Vec<String> = words.skip(1).cloned().collect();
+        return Some(run_help_command(&rest));
+    }
     // Otherwise find either `--help` or `-h` anywhere after the program name.
     // Anything after a `--` marker is ignored (positional argument scope).
     for arg in argv.iter().skip(1) {
@@ -1024,27 +1249,32 @@ mod tests {
     use crate::Cli;
 
     #[test]
-    fn flow_group_lists_symbol_summary_exactly_once() {
+    fn flow_group_lists_inspect_graph_exactly_once() {
         let flow = HELP_GROUPS
             .iter()
             .find_map(|(group, entries)| (*group == "Flow").then_some(*entries))
             .expect("Flow help group");
         let matches: Vec<_> = flow
             .iter()
-            .filter(|(command, _)| *command == "symbol-summary")
+            .filter(|(command, _)| *command == "inspect-graph")
             .collect();
 
-        assert_eq!(matches.len(), 1, "Flow must list symbol-summary once");
+        assert_eq!(matches.len(), 1, "Flow must list inspect-graph once");
         assert_eq!(
-            matches[0].1, "Bounded compiler packet for one callable",
-            "symbol-summary should retain its concise menu description"
+            matches[0].1, "Hits, compiler flows, corridors, and taint call stacks",
+            "inspect-graph should retain its concise menu description"
         );
     }
 
     #[test]
     fn curated_menu_covers_every_public_top_level_command() {
         let clap = Cli::command();
-        let public_commands: BTreeSet<_> = clap.get_subcommands().map(|command| command.get_name()).collect();
+        // `help` renders the menu itself and is not a menu entry.
+        let public_commands: BTreeSet<_> = clap
+            .get_subcommands()
+            .map(|command| command.get_name())
+            .filter(|name| *name != "help")
+            .collect();
         let curated_commands: BTreeSet<_> = HELP_GROUPS
             .iter()
             .flat_map(|(_, entries)| entries.iter())

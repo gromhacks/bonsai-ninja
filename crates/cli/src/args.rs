@@ -38,13 +38,6 @@ pub(crate) enum SemanticWorkerPhase {
 pub(crate) const BROWSE_TEXT_LIMIT_DEFAULT: usize = 0;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum OutputFormat {
-    Json,
-    Text,
-    Dot,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum BrowseFormat {
     Json,
     Text,
@@ -98,7 +91,7 @@ pub(crate) struct OutputPathArg {
     pub(crate) output_path: Option<PathBuf>,
 }
 
-/// How `inspect` shapes its flow output. `trace` is the historical
+/// How `inspect-graph` shapes its flow output. `trace` is the historical
 /// per-flow render (one FLOW N section per chain). `grouped` clusters
 /// flows that share a call-edge tail and renders the shared tail
 /// once. `auto` picks based on flow count — small result sets stay
@@ -129,7 +122,7 @@ pub(crate) const GROUPED_VIEW_AUTO_THRESHOLD: usize = 10;
 /// Mirrors the taint fact kind vocabulary with clap-friendly value
 /// spellings — callers type `--from-kind read`, `--from-kind call`,
 /// etc. to narrow match space to one browse-fact surface.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, serde::Serialize, serde::Deserialize)]
 pub(crate) enum FactKindFilter {
     Decl,
     Call,
@@ -304,8 +297,8 @@ pub(crate) struct Cli {
     pub(crate) minified_js: bool,
 
     /// Enable comma-separated debug categories on stderr, or `*` for all.
-    /// Equivalent to `BONSAI_DEBUG`; common categories are `idg-closure`,
-    /// `idg-resolve`, `recv-state`, `find-group`, `taint-graph`, and `xcall`.
+    /// Equivalent to `BONSAI_DEBUG`; common categories: `workspace-open`,
+    /// `compiler-cache`, `security-phase`, `idg-query`, `idg-closure`, `taint-graph`.
     #[arg(
         long = "debug",
         global = true,
@@ -320,6 +313,19 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
+    /// Show the command menu, or the full reference for one command
+    /// (`help inspect-graph`, `help security taint-analysis`).
+    #[command(
+        display_order = 0,
+        name = "help",
+        override_usage = "bonsai-ninja help [COMMAND]..."
+    )]
+    Help {
+        /// Command path to explain; empty prints the menu.
+        #[arg(value_name = "COMMAND")]
+        command: Vec<String>,
+    },
+
     /// Ingest a workspace and print stats.
     #[command(
         display_order = 10,
@@ -403,203 +409,6 @@ pub(crate) enum Cmd {
     },
 
     /// Print normalized workspace semantic context.
-    #[command(
-        display_order = 11,
-        long_about = themed_subcommand_long_about("Open <WORKSPACE> and emit the shared, language-neutral project \
-                      context: indexed module roots, dependency roots, \
-                      generated / excluded roots, toolchain manifests, configured \
-                      source hints, source-transformation evidence, and a compact \
-                      summary. This is the same structure exposed by \
-                      `bonsai_sdk::Project::semantic_context()` so CLI and SDK \
-                      consumers reason over identical workspace-shape facts. The \
-                      themed text and JSON views render the same canonical object."),
-        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Explain the workspace shape used by analysis\n  \
-                      $ bonsai-ninja context ./src\n  \
-                      \n  \
-                      # Machine-readable output only\n  \
-                      $ bonsai-ninja context ./src --no-color --no-progress")
-    )]
-    Context {
-        /// Workspace root to analyze.
-        workspace: PathBuf,
-        /// Token-budget ceiling for the typed context rows. Shorthand:
-        /// `4k`, `32k`, `128k`, `1m`; `0` / `all` / `uncapped`
-        /// disables paging.
-        #[arg(long)]
-        context: Option<String>,
-        /// Page to render — 1-based number, `P:xxxxxxxx` cursor, or
-        /// `next`.
-        #[arg(long)]
-        page: Option<String>,
-        /// Emit the complete canonical SDK context object without paging.
-        #[arg(long, default_value_t = false)]
-        all: bool,
-        /// Output shape — themed text for humans or the complete canonical JSON object.
-        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
-        format: BrowseFormat,
-        #[command(flatten)]
-        output: OutputPathArg,
-    },
-
-    /// Cross-module execution trace from a function (headline feature).
-    #[command(
-        display_order = 2,
-        override_usage = "bonsai-ninja trace [OPTIONS] <WORKSPACE> [TARGET]",
-        long_about = themed_subcommand_long_about("Expand a function's call tree across the whole workspace and \
-                      emit a structured trace of every step (Call / Branch / Loop / \
-                      Return / Throw / Try / ...). Follows qualified calls through \
-                      classes, modules, and imports, backed by the same indexed \
-                      dataflow sidecar that inspect and security query.\n\
-                      \n\
-                      Use `--from X --to Y` to restrict to flows that go from X to Y."),
-        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Trace every flow that starts at handle_request\n  \
-                      $ bonsai-ninja trace ./src --symbol handle_request\n  \
-                      \n  \
-                      # Disambiguate a same-named method by compiler owner\n  \
-                      $ bonsai-ninja trace ./src --symbol Flask.__call__\n  \
-                      \n  \
-                      # Only flows that reach os.system starting from handle_request\n  \
-                      $ bonsai-ninja trace ./src --from handle_request --to os.system\n  \
-                      \n  \
-                      # Graphviz output\n  \
-                      $ bonsai-ninja trace ./src --symbol handle_request --format dot | dot -Tpng > flow.png"),
-        group(
-            ArgGroup::new("trace_selector")
-                .args(["target", "function", "from"])
-                .required(true)
-                .multiple(false)
-        )
-    )]
-    Trace {
-        /// Workspace root to analyze.
-        workspace: PathBuf,
-        /// Positional symbol selector to trace. Accepts qualified
-        /// `Owner.member`, `path:name`, and `path:line:name` forms.
-        target: Option<String>,
-        /// Function/symbol selector to trace. Accepts the same qualified/file
-        /// selectors as the positional form; `--function` remains a
-        /// compatibility alias. Pass exactly one selector form.
-        #[arg(long = "symbol", visible_alias = "function")]
-        function: Option<String>,
-        /// Restrict to flows from this symbol selector. Qualified owner and
-        /// exact file selectors are accepted. Pairs with `--to` to bracket a
-        /// specific entry → sink window.
-        #[arg(long, requires = "to")]
-        from: Option<String>,
-        /// Restrict to flows that reach this symbol selector. Qualified owner
-        /// and exact file selectors are accepted. Requires `--from`.
-        #[arg(long, requires = "from")]
-        to: Option<String>,
-        /// Token-budget ceiling for rendered output. Long traces page at
-        /// rendered-line boundaries so large paths stay within budget.
-        /// Shorthand `4k` / `32k`. `0` / `all` / `uncapped`
-        /// disables. Default 32k.
-        #[arg(long)]
-        context: Option<String>,
-        /// Page to render — 1-based (`--page 2`), cursor
-        /// (`--page P:xxxxxxxx`), or `next`.
-        #[arg(long)]
-        page: Option<String>,
-        /// Emit the full trace with no context cap.
-        #[arg(long, default_value_t = false)]
-        all: bool,
-        /// Output shape — `text` for the rendered trace, `json` for machine-readable output.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
-        #[command(flatten)]
-        output: OutputPathArg,
-    },
-
-    /// Exact compressed semantic corridor between two callables.
-    #[command(
-        display_order = 3,
-        long_about = themed_subcommand_long_about("Project the exact semantic callgraph corridor from one callable to another. The result is a compressed node/edge relation, so branches, diamonds, and cycles stay linear in graph size instead of multiplying into concrete paths. Every edge is syntax-derived and resolver-backed; unresolved evidence is reported explicitly."),
-        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Exact semantic corridor from entry to sink\n  \
-                      $ bonsai-ninja path ./src --from handle_request --to os.system\n  \
-                      \n  \
-                      # Machine-readable output for tooling\n  \
-                      $ bonsai-ninja path ./src --from handle_request --to run_admin_command --format json")
-    )]
-    Path {
-        /// Workspace root to analyze.
-        workspace: PathBuf,
-        /// Source callable name or pattern.
-        #[arg(long)]
-        from: String,
-        /// Target callable name or pattern.
-        #[arg(long)]
-        to: String,
-        /// Interpret `--from` and `--to` as regexes instead of substring matches.
-        #[arg(long, default_value_t = false)]
-        regex: bool,
-        /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
-        #[arg(long)]
-        context: Option<String>,
-        /// Page to render — 1-based (`--page 2`), cursor (`P:xxxxxxxx`), or `next`.
-        #[arg(long)]
-        page: Option<String>,
-        /// Emit every row, no paging or context cap.
-        #[arg(long, default_value_t = false)]
-        all: bool,
-        /// Output shape — `text` for a rendered corridor, `json` for machine-readable output.
-        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
-        format: BrowseFormat,
-        #[command(flatten)]
-        output: OutputPathArg,
-    },
-
-    /// Backward slice for a symbol, optionally narrowed to a source line.
-    #[command(
-        display_order = 4,
-        long_about = themed_subcommand_long_about("Build an exact backwards slice for one normalized symbol \
-                      at one source line using adapter-emitted syntax-flow facts. \
-                      The command follows local assignments, call arguments, returns, \
-                      and lifecycle/use-site facts. It does not search raw text or \
-                      invent interprocedural summaries; parameter and opaque-call \
-                      boundaries are reported as incomplete analysis reasons."),
-        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # What influences result at line 15?\n  \
-                      $ bonsai-ninja slice ./src --symbol result\n  \
-                      \n  \
-                      # Disambiguate same-line callables by file\n  \
-                      $ bonsai-ninja slice ./src --symbol action --line 15 --file gateway.py\n  \
-                      \n  \
-                      # Machine-readable output for tooling\n  \
-                      $ bonsai-ninja slice ./src --symbol result --line 15 --format json")
-    )]
-    Slice {
-        /// Workspace root to analyze.
-        workspace: PathBuf,
-        /// Variable / place / normalized symbol to slice backwards from.
-        #[arg(long)]
-        symbol: String,
-        /// Optional one-based source line where `--symbol` is inspected.
-        /// Omit it when the symbol has one unambiguous syntax-flow site.
-        #[arg(long)]
-        line: Option<u32>,
-        /// Optional workspace-relative file path filter used to narrow candidates.
-        /// Explicit absolute paths are also accepted.
-        #[arg(long)]
-        file: Option<String>,
-        /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
-        #[arg(long)]
-        context: Option<String>,
-        /// Page to render — 1-based (`--page 2`), cursor (`P:xxxxxxxx`), or `next`.
-        #[arg(long)]
-        page: Option<String>,
-        /// Emit every row, no paging or context cap.
-        #[arg(long, default_value_t = false)]
-        all: bool,
-        /// Output shape — `text` for rendered slices, `json` for machine-readable output.
-        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
-        format: BrowseFormat,
-        #[command(flatten)]
-        output: OutputPathArg,
-    },
-
     /// Resolve a stable bonsai id and open its owning drilldown view.
     #[command(
         display_order = 5,
@@ -616,9 +425,9 @@ pub(crate) enum Cmd {
              and the original dump-taint filters to reopen that view.\n\
              \n\
              This is a navigation shortcut over existing commands: \
-             structural `F:` / `G:` use `inspect`, security taint `F:` / `G:` \
-             fall back to `security taint-analysis --flow` / `--group`, raw inspect \
-             `T:` uses `inspect`, \
+             structural `F:` / `G:` use `inspect-graph`, security taint `F:` / `G:` \
+             fall back to `security taint-analysis --flow` / `--group`, raw inspect-graph \
+             `T:` uses `inspect-graph`, \
              structured dump-taint `T:` uses `dump-taint --taint`, `E:` \
              uses `dump-edges`, `N:` uses `dump-ast`, `R:` uses \
              `dump-resolve`, and `S:` uses `security taint-analysis --finding`."
@@ -732,7 +541,7 @@ pub(crate) enum Cmd {
         long_about = themed_subcommand_long_about("Emit the HIR (flow-event tree — Call / Branch / Loop / Return \
                       / Throw / Try / …) for one function. The \
                       layer directly above the tree-sitter AST; what \
-                      `inspect`, `trace`, and the IDG compiler consume.\n\
+                      `inspect-graph` and the IDG compiler consume.\n\
                       \n\
                       Use to verify an adapter actually extracts a construct \
                       before chasing a missing chain further down the \
@@ -914,20 +723,20 @@ pub(crate) enum Cmd {
         /// Workspace root to analyze.
         workspace: PathBuf,
         /// Only keep edges whose caller name contains this substring.
-        /// Analogous to `inspect --from`.
+        /// Analogous to `inspect-graph --from`.
         #[arg(long)]
         from: Option<String>,
         /// Only keep edges whose callee name contains this substring.
-        /// Analogous to `inspect --to`.
+        /// Analogous to `inspect-graph --to`.
         #[arg(long)]
         to: Option<String>,
         /// Drop per-edge detail lines and emit one compact line per
         /// edge (`E:id  kind  evidence  caller → callee  (file:line)`).
-        /// Same data, shorter render — mirrors `inspect --compact`.
+        /// Same data, shorter render — mirrors `inspect-graph --compact`.
         #[arg(long, default_value_t = false)]
         compact: bool,
         /// Re-render only the edge whose stable content-hash id
-        /// matches (`E:` + 8 hex). Complementary to `inspect --flow`
+        /// matches (`E:` + 8 hex). Complementary to `inspect-graph --flow`
         /// — one level down: pins a single call edge, not a chain.
         #[arg(long)]
         edge: Option<String>,
@@ -965,7 +774,7 @@ pub(crate) enum Cmd {
                       external/library calls are counted separately and do not \
                       reduce workspace-resolution coverage.\n\
                       \n\
-                      Use this when `inspect`, `trace`, or taint output looks sparse: \
+                      Use this when `inspect-graph` or taint output looks sparse: \
                       files with unresolved calls, dynamic calls, macro call \
                       sites, or missing receiver-type facts identify where \
                       downstream code-intelligence modes will be incomplete."),
@@ -1015,7 +824,7 @@ pub(crate) enum Cmd {
         long_about = themed_subcommand_long_about("Emit the tree-sitter parse tree for the workspace, one file \
                       at a time (or one function with `--function`). The ground-truth \
                       view of what the grammar actually extracted — the first place \
-                      to look when `dump-hir` / `inspect` don't surface a function \
+                      to look when `dump-hir` / `inspect-graph` don't surface a function \
                       you expected, or when a language adapter silently misses a \
                       construct (DSL callbacks, lambdas hidden in a closure, etc.).\n\
                       \n\
@@ -1159,7 +968,7 @@ pub(crate) enum Cmd {
         line: Option<u32>,
         /// Drop per-stage detail and emit one line per candidate
         /// (`R:id  name  location`). Same data, shorter render —
-        /// mirrors `inspect --compact`.
+        /// mirrors `inspect-graph --compact`.
         #[arg(long, default_value_t = false)]
         compact: bool,
         /// Re-render only the candidate whose stable content-hash id
@@ -1319,7 +1128,7 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include stable symbol-summary IDs derived from compiler identity
+        /// Include stable symbol IDs derived from compiler identity
         /// facts. This is off by default so the command remains a light syntax
         /// inventory.
         #[arg(long = "summaries", default_value_t = false)]
@@ -1417,7 +1226,7 @@ pub(crate) enum Cmd {
                       location, and a syntax-highlighted source-line \
                       snippet. Pass `--summaries` to add the stable \
                       `F:<16-hex>` id for the call's enclosing function; \
-                      `symbol-summary` opens the complete bounded packet. \
+                      `inspect-graph --query <name>` opens the declaration packet. \
                       `--callee` accepts a substring or regex \
                       (`--regex`) and is the fastest way to find every \
                       invocation of a sensitive function."),
@@ -1468,7 +1277,7 @@ pub(crate) enum Cmd {
         /// `--context 0`.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Include stable symbol-summary IDs derived from compiler identity
+        /// Include stable symbol IDs derived from compiler identity
         /// facts. This is off by default so the command remains a light syntax
         /// inventory.
         #[arg(long = "summaries", default_value_t = false)]
@@ -1546,7 +1355,7 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include stable symbol-summary IDs derived from compiler identity
+        /// Include stable symbol IDs derived from compiler identity
         /// facts. This is off by default so the command remains a light syntax
         /// inventory.
         #[arg(long = "summaries", default_value_t = false)]
@@ -1616,7 +1425,7 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include stable symbol-summary IDs derived from compiler identity
+        /// Include stable symbol IDs derived from compiler identity
         /// facts. This is off by default so the command remains a light syntax
         /// inventory.
         #[arg(long = "summaries", default_value_t = false)]
@@ -1679,7 +1488,7 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include stable symbol-summary IDs derived from compiler identity
+        /// Include stable symbol IDs derived from compiler identity
         /// facts. This is off by default so the command remains a light syntax
         /// inventory.
         #[arg(long = "summaries", default_value_t = false)]
@@ -1826,7 +1635,7 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include stable symbol-summary IDs derived from compiler identity
+        /// Include stable symbol IDs derived from compiler identity
         /// facts. This is off by default so the command remains a light syntax
         /// inventory.
         #[arg(long = "summaries", default_value_t = false)]
@@ -1892,7 +1701,7 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include stable symbol-summary IDs derived from compiler identity
+        /// Include stable symbol IDs derived from compiler identity
         /// facts. This is off by default so the command remains a light syntax
         /// inventory.
         #[arg(long = "summaries", default_value_t = false)]
@@ -1959,7 +1768,7 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include stable symbol-summary IDs derived from compiler identity
+        /// Include stable symbol IDs derived from compiler identity
         /// facts. This is off by default so the command remains a light syntax
         /// inventory.
         #[arg(long = "summaries", default_value_t = false)]
@@ -2040,7 +1849,7 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include stable symbol-summary IDs derived from compiler identity
+        /// Include stable symbol IDs derived from compiler identity
         /// facts. This is off by default so the command remains a light syntax
         /// inventory.
         #[arg(long = "summaries", default_value_t = false)]
@@ -2121,7 +1930,7 @@ pub(crate) enum Cmd {
         /// combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = 0)]
         limit: usize,
-        /// Include stable symbol-summary IDs derived from compiler identity
+        /// Include stable symbol IDs derived from compiler identity
         /// facts. This is off by default.
         #[arg(long = "summaries", default_value_t = false)]
         flows: bool,
@@ -2140,98 +1949,55 @@ pub(crate) enum Cmd {
         #[command(flatten)]
         output: OutputPathArg,
     },
-    /// Emit one bounded compiler evidence packet per matching callable.
+    /// Inspect matching syntax facts with their compiler evidence and expanded taint call stacks.
     #[command(
-        display_order = 2,
-        override_usage = "bonsai-ninja symbol-summary [OPTIONS] <WORKSPACE> [SYMBOL]",
-        long_about = themed_subcommand_long_about("Summarize one callable from exact compiler evidence: its declaration and source body, signature and parameters, direct resolved callers and callees, file imports, and explicitly unresolved workspace calls. This command never recursively enumerates call paths; use `path` for an exact compressed source-to-target graph."),
-        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      $ bonsai-ninja symbol-summary . --symbol handle_request\n  \
-                      $ bonsai-ninja symbol-summary . 'Service\\.run' --regex --format json"),
-        group(
-            ArgGroup::new("summary_symbol")
-                .args(["symbol_pos", "symbol"])
-                .required(true)
-                .multiple(false)
-        )
-    )]
-    SymbolSummary {
-        /// Workspace root to analyze.
-        workspace: PathBuf,
-        /// Positional symbol selector (alternative to `--symbol`).
-        #[arg(value_name = "SYMBOL")]
-        symbol_pos: Option<String>,
-        /// Callable name or qualified name.
-        #[arg(short = 's', long)]
-        symbol: Option<String>,
-        /// Interpret the selector as a regular expression.
-        #[arg(long, default_value_t = false)]
-        regex: bool,
-        /// Token-budget ceiling for rendered output.
-        #[arg(long)]
-        context: Option<String>,
-        /// Page to render (1-based number, `P:xxxxxxxx`, or `next`).
-        #[arg(long)]
-        page: Option<String>,
-        /// Emit every matching summary without paging.
-        #[arg(long, default_value_t = false)]
-        all: bool,
-        /// Output shape — `text` or `json`.
-        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
-        format: BrowseFormat,
-        #[command(flatten)]
-        output: OutputPathArg,
-    },
-    /// Inspect matching syntax facts with their bounded compiler evidence.
-    #[command(
+        name = "inspect-graph",
         display_order = 1,
         long_about = themed_subcommand_long_about("Inspect a name / pattern across every fact: decls \
                       (functions, methods, classes, structs), calls, imports, \
                       vars (assignments), strings, args, refs, decorators.\n\
                       \n\
                       Inspect surfaces matching declarations, occurrences, \
-                      syntax/index facts, and source excerpts, and attaches one \
+                      syntax/index facts, and source excerpts, attaches one \
                       bounded compiler evidence unit (a stable `F:` flow with the \
                       source body and resolved direct neighbors) to every \
-                      matching callable. It does not load source / sink / \
-                      sanitizer YAML. Pass `--taint-flow` for rulepack-free raw \
-                      taint paths; that flag changes output scope, not analysis \
-                      accuracy.\n\
+                      matching callable, and expands every rulepack-free taint \
+                      flow that passes through a matched callable into its full \
+                      call stack: one `TAINT FLOW` block per flow with each hop's \
+                      source body and the propagated values annotated. It does \
+                      not load source / sink / sanitizer YAML.\n\
                       \n\
                       Compiler flows never recursively enumerate caller/callee paths. \
-                      Use `symbol-summary` for a standalone declaration packet and \
-                      `path --from A --to B` for an exact compressed corridor. \
+                      Every declaration hit carries its signature, direct callers and \
+                      callees as `E:` edges, external calls, and imports; \
+                      `--from A --to B` gives the exact compiler-resolved corridor. \
                       `security taint-analysis` \
                       applies rulepack source / sink / sanitizer matches with \
-                      exact source seeds. `--taint-flow` requests exact raw \
-                      taint paths explicitly."),
+                      exact source seeds."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Syntax hits and code evidence\n  \
-                      $ bonsai-ninja inspect ./src --query os.system\n  \
-                      \n  \
-                      # Add rulepack-free raw taint paths explicitly\n  \
-                      $ bonsai-ninja inspect ./src --query os.system --taint-flow\n  \
+                      # Syntax hits, compiler flows, and expanded taint call stacks\n  \
+                      $ bonsai-ninja inspect-graph ./src --query os.system\n  \
                       \n  \
                       # Regex query — syntax hits for exec-like calls\n  \
-                      $ bonsai-ninja inspect ./src --query '^(exec|system|popen)$' --regex\n  \
+                      $ bonsai-ninja inspect-graph ./src --query '^(exec|system|popen)$' --regex\n  \
                       \n  \
                       # Inspect a specific decl syntax hit\n  \
-                      $ bonsai-ninja inspect ./src handle_request\n  \
+                      $ bonsai-ninja inspect-graph ./src handle_request\n  \
                       \n  \
                       # Restrict to call-kind hits only\n  \
-                      $ bonsai-ninja inspect ./src --query exec --kind call\n  \
+                      $ bonsai-ninja inspect-graph ./src --query exec --kind call\n  \
                       \n  \
                       # Reopen one bounded structural evidence unit\n  \
-                      $ bonsai-ninja inspect ./src --query handle_request --flow F:0123456789abcdef\n  \
+                      $ bonsai-ninja inspect-graph ./src --query handle_request --flow F:0123456789abcdef\n  \
                       \n  \
                       # --from/--to syntax window\n  \
-                      $ bonsai-ninja inspect ./src --from handle_request --to os.system\n  \
+                      $ bonsai-ninja inspect-graph ./src --from handle_request --to os.system\n  \
                       \n  \
                       # Grouped view for structural flow output\n  \
-                      $ bonsai-ninja inspect ./src --query exec --view grouped\n  \
+                      $ bonsai-ninja inspect-graph ./src --query exec --view grouped\n  \
                       \n  \
                       # JSON output for CI / tooling\n  \
-                      $ bonsai-ninja inspect ./src --query os.system --format json"),
+                      $ bonsai-ninja inspect-graph ./src --query os.system --format json"),
         group(
             ArgGroup::new("inspect_query")
                 .args(["symbol_pos", "query"])
@@ -2321,11 +2087,6 @@ pub(crate) enum Cmd {
         /// pins a cluster of chains that share a tail.
         #[arg(long)]
         group: Option<String>,
-        /// Add rulepack-free raw taint-engine paths. Off by default so
-        /// a navigation query never silently performs whole-workspace
-        /// dataflow analysis.
-        #[arg(long = "taint-flow", default_value_t = false)]
-        taint_flow: bool,
         /// Token-budget ceiling for rendered output. Taint rows, syntax hits,
         /// declarations, and structural FLOW blocks are lossless page units;
         /// a structural flow is never split mid-flow. Shorthand `4k`, `32k`,
@@ -2354,7 +2115,7 @@ pub(crate) enum Cmd {
                       section that materializes the analyzer's \
                       engine state end-to-end.\n\
                       \n\
-                      The `taint_graph` is the raw view both `inspect` and \
+                      The `taint_graph` is the raw view both `inspect-graph` and \
                       `security` query: per-function return-taint summaries, \
                       per-file alias maps, class field-taint (G3), \
                       reachability facts kinded by (decl / call / read / \
@@ -2525,10 +2286,12 @@ pub(crate) enum Cmd {
         display_order = 23,
         long_about = themed_subcommand_long_about(
             "Fast hierarchical filesystem view for workspace navigation. \
-             It walks directory entries directly and never opens the compiler, \
-             builds semantic graphs, loads a rulepack, or runs security \
-             analysis. Use `security <workspace> taint-analysis` when you need \
-             findings."
+             It walks directory entries directly and, unless `--files-only` \
+             is set, attaches definition counts, imports, and cross-file call \
+             edges for the rendered files from the persisted structural \
+             index. It never builds semantic graphs, loads a rulepack, or \
+             runs security analysis. Use `security <workspace> taint-analysis` \
+             when you need findings."
         ),
         after_help = themed_subcommand_after_help(
             "EXAMPLES\n\n  \
@@ -2571,6 +2334,10 @@ pub(crate) enum Cmd {
         /// Output shape — `text` or `json`.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        /// Plain filesystem listing: skip declarations, resolved imports,
+        /// and cross-file call edges.
+        #[arg(long = "files-only", default_value_t = false)]
+        files_only: bool,
         #[command(flatten)]
         output: OutputPathArg,
     },
@@ -2586,7 +2353,7 @@ pub(crate) enum Cmd {
              to open the defining file for a symbol. By default this \
              opens and indexes only the resolved file, so it is \
              suitable for large workspaces after `search`, `defs`, \
-             or syntax `inspect` finds an anchor. Semantic overlays are explicit: \
+             or `inspect-graph` finds an anchor. Semantic overlays are explicit: \
              `--rules-dir`, `--from`, `--to`, or `--max-inlined-bodies` \
              use the workspace-analysis path for finding \
              marks, flow entry/exit pairs, and cross-file caller / \
@@ -3099,7 +2866,7 @@ pub(crate) enum SecurityAction {
     },
 
     /// Run automatic source→sink taint analysis using every loaded
-    /// rule and emit a paginated security report. Mirrors `inspect`
+    /// rule and emit a paginated security report. Mirrors `inspect-graph`
     /// pagination — paging unit is one finding block; the report shows
     /// the source line, the sink line, the chain, and stable ids
     /// (`S:`, `F:`, `G:`).
@@ -3113,12 +2880,12 @@ pub(crate) enum SecurityAction {
                       the way.\n\
                       \n\
                       Architecturally this consumes the same semantic \
-                      graph as inspect, trace, source-analysis, export, \
+                      graph as inspect-graph, source-analysis, export, \
                       and the debug dumps. Patterns identify sources, \
                       sinks, and sanitizers; propagation comes from the \
                       indexed dataflow graph, not from rule-side flow wiring.\n\
                       \n\
-                      Mirrors `inspect` pagination — the paging unit is one \
+                      Mirrors `inspect-graph` pagination — the paging unit is one \
                       finding block; each finding shows the source line, the \
                       sink line, the chain between them, and stable ids \
                       (`S:` for the finding, `F:` for the security flow, \
@@ -3617,18 +3384,37 @@ pub(crate) enum CacheAction {
                       $ bonsai-ninja cache clear ./src\n  \
                       \n  \
                       # Keep other sidecars, only drop the dataflow cache\n  \
-                      $ bonsai-ninja cache clear ./src --dataflow-only")
+                      $ bonsai-ninja cache clear ./src --dataflow-only\n  \
+                      \n  \
+                      # Remove cache entries whose workspace root no longer exists\n  \
+                      $ bonsai-ninja cache clear --orphans\n  \
+                      \n  \
+                      # Remove a legacy in-tree .bonsai directory\n  \
+                      $ bonsai-ninja cache clear --legacy ~/src/project")
     )]
     Clear {
         /// Workspace root whose external cache directory should be removed.
         /// Defaults to the current directory.
         workspace: Option<PathBuf>,
+        /// Instead of one workspace, sweep the shared OS cache root and
+        /// remove every entry whose recorded workspace root no longer exists
+        /// (deleted clones, throwaway fixtures). Entries whose root still
+        /// exists are never touched. The engine runs the same sweep at most
+        /// once per day when a new workspace is first cached.
+        #[arg(long, default_value_t = false, conflicts_with = "dataflow_only")]
+        orphans: bool,
         /// Only clear dataflow sidecars (`dataflow.v3.factstore`
         /// and compatibility `dataflow.v2.bin`), leaving the other
         /// external workspace sidecars intact. Useful when you want to force
         /// a dataflow recompute without touching unrelated sidecars.
         #[arg(long)]
         dataflow_only: bool,
+        /// Remove the legacy in-tree `<WORKSPACE>/.bonsai` directory left by
+        /// releases that cached inside the workspace. Acts only when that
+        /// directory is not the active cache directory; the external cache
+        /// is untouched. `cache stats` reports such a directory.
+        #[arg(long, default_value_t = false, conflicts_with_all = ["orphans", "dataflow_only"])]
+        legacy: bool,
     },
     /// Remove persisted analysis sidecars and rebuild reusable
     /// structural artifacts from scratch. Refreshes callgraph and

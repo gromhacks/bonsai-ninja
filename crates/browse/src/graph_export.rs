@@ -253,11 +253,21 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
         let Some(target) = func_ids.get(&edge.to.raw()) else {
             continue;
         };
+        // One graph edge per call site: the call-site coordinates are part
+        // of the edge identity, so a caller that invokes the same callee
+        // from several sites exports several distinct edges instead of
+        // duplicate ids that GraphML rejects and Cypher `MERGE` collapses.
+        let (call_file, call_line, call_column) = crate::common::format_span(&edge.span, ws);
         graph.edge(
             source.clone(),
             target.clone(),
             "CALLS",
-            [("kind", Value::String(format!("{:?}", edge.kind).to_lowercase()))],
+            [
+                ("kind", Value::String(format!("{:?}", edge.kind).to_lowercase())),
+                ("call_file", Value::String(call_file)),
+                ("call_line", number(call_line)),
+                ("call_column", number(call_column)),
+            ],
         );
     }
 

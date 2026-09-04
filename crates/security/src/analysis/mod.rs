@@ -59,6 +59,7 @@ mod execution;
 mod findings_build;
 mod guard_sanitizers;
 mod prototype_guard;
+mod sink_lineage;
 mod source_seeds;
 mod taint_cache;
 mod validation;
@@ -306,6 +307,12 @@ pub struct PackRuleRow {
     pub packages: Vec<String>,
     pub frameworks: Vec<String>,
     pub description: String,
+    /// Rule file, relative to the pack root.
+    pub source_path: String,
+    /// The rule exactly as written in that file: its `- id:` list item up to
+    /// the next item, including comments. Empty when the file could not be
+    /// read or the item was not found.
+    pub yaml: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1606,21 +1613,30 @@ fn endpoint_only_sink_flow(
 }
 
 fn prune_redundant_sink_flow_suffixes(flows: &mut Vec<SinkAnalysisFlow>) {
-    let redundant: AHashSet<usize> = flows
-        .iter()
-        .enumerate()
-        .filter_map(|(index, candidate)| {
-            (!candidate.endpoint_only
-                && !candidate.chain_funcs.is_empty()
-                && flows.iter().enumerate().any(|(other_index, other)| {
-                    other_index != index
-                        && !other.endpoint_only
-                        && other.chain_funcs.len() > candidate.chain_funcs.len()
-                        && other.chain_funcs.ends_with(&candidate.chain_funcs)
-                }))
-            .then_some(index)
-        })
-        .collect();
+    // A chain that is a proper suffix of a longer chain to the same sink is
+    // that longer chain's tail, not a distinct route. Longer chains are
+    // visited first and publish their proper suffixes, so each flow is
+    // classified with one hash lookup instead of a scan over every other flow.
+    if flows.len() < 2 {
+        return;
+    }
+    let mut order: Vec<usize> = (0..flows.len()).collect();
+    order.sort_by_key(|&index| std::cmp::Reverse(flows[index].chain_funcs.len()));
+    let mut published: AHashSet<Vec<FuncId>> = AHashSet::new();
+    let mut redundant: AHashSet<usize> = AHashSet::new();
+    for index in order {
+        let flow = &flows[index];
+        if flow.endpoint_only || flow.chain_funcs.is_empty() {
+            continue;
+        }
+        if published.contains(&flow.chain_funcs) {
+            redundant.insert(index);
+            continue;
+        }
+        for start in 1..flow.chain_funcs.len() {
+            published.insert(flow.chain_funcs[start..].to_vec());
+        }
+    }
     if redundant.is_empty() {
         return;
     }
@@ -1851,12 +1867,6 @@ fn compile_sink_upstream_flows(
     let relevance =
         idg.target_relevance_within_funcs(&target_nodes, Some(&unresolved_target_funcs), &lineage_scope);
     let origin_funcs = idg.funcs_admitted_by_target_relevance(&scoped_funcs, &relevance);
-    let targets = IdgTaintTargets {
-        nodes: Some(&target_nodes),
-        funcs: Some(&unresolved_target_funcs),
-        lineage_funcs: Some(&lineage_scope),
-        relevance: Some(&relevance),
-    };
     let transfers = IdgTaintTransfers {
         receiver_state: &graph_config.receiver_state_propagations,
         call_result_passthroughs: &graph_config.call_result_passthroughs,
@@ -1868,74 +1878,62 @@ fn compile_sink_upstream_flows(
         sink_indices_by_func.entry(*func).or_default().push(*index);
     }
     let caches = ws.inter_taint_caches();
+    // Lineage is composed from function-local summaries: every admitted
+    // function is analysed once per entering value, entry points once over
+    // all their places, and routes are paths through the resulting graph.
+    // See `sink_lineage` for the contract.
+    let lineage_context = sink_lineage::SinkLineageContext {
+        ws,
+        global: global.as_ref(),
+        idg: idg.as_ref(),
+        call_graph: call_graph.as_ref(),
+        transfers,
+        relevance: &relevance,
+        caches,
+        sink_matches,
+        sink_indices_by_func: &sink_indices_by_func,
+    };
+    let routes = sink_lineage::compile_sink_routes(&lineage_context, &origin_funcs, on_progress);
+    let origin_context = SinkOriginEnumerationContext {
+        ws,
+        global: global.as_ref(),
+        idg: idg.as_ref(),
+        transfers: &transfers,
+        caches,
+        sink_matches,
+    };
+    let mut seen_flow_ids: AHashMap<SinkEndpointKey, AHashSet<String>> = AHashMap::new();
+    for (key, flow) in routes {
+        if seen_flow_ids
+            .entry(key.clone())
+            .or_default()
+            .insert(flow.flow_id.clone())
+        {
+            flows.entry(key).or_default().push(flow);
+        }
+    }
+    // A sink no entry point feeds still shows the route inside its own
+    // function: the sink function's parameters and reads are the only
+    // values that can reach it.
+    let unfed: Vec<usize> = (0..sink_matches.len())
+        .filter(|index| {
+            flows
+                .get(&sink_rule_match_key(&sink_matches[*index]))
+                .is_none_or(Vec::is_empty)
+        })
+        .collect();
     on_progress(AnalysisProgress::PhaseStarted {
-        label: "enumerating upstream sink paths",
-        total: origin_funcs.len() as u64,
+        label: "tracing sink-local routes",
+        total: unfed.len() as u64,
     });
-    for origin in origin_funcs {
-        let mut tokens: TokenSet = idg.read_or_write_names_of_func(origin).into_iter().collect();
-        if let Some(decl) = global.decl_of(SymbolId::new(origin.raw())) {
-            tokens.extend(decl.params.iter().filter(|param| !param.is_empty()).cloned());
+    for (key, flow) in sink_local_routes(&origin_context, &attributed, &unfed, &relevance, on_progress) {
+        if seen_flow_ids
+            .entry(key.clone())
+            .or_default()
+            .insert(flow.flow_id.clone())
+        {
+            flows.entry(key).or_default().push(flow);
         }
-        let seed_nodes = compose_idg_seed_nodes(
-            IdgSeedRequest::rule_match(origin, &tokens, None, &[]),
-            global.as_ref(),
-            idg.as_ref(),
-        );
-        if seed_nodes.is_empty() {
-            on_progress(AnalysisProgress::PhaseTicked);
-            continue;
-        }
-        let graph = bonsai_taint::entry_taint_graph_from_idg_query(
-            IdgTaintQuery::semantic(
-                IdgTaintSource::precomposed(origin, &tokens, &seed_nodes),
-                ws.db(),
-                idg.as_ref(),
-            )
-            .with_global_index(global.as_ref())
-            .with_transfers(transfers)
-            .with_targets(targets)
-            .with_caches(caches),
-        );
-        let trace_index = trace_record_index(&graph.call_records);
-        for terminal_call in &graph.tainted_calls {
-            let Some(sink_indices) = sink_indices_by_func.get(&terminal_call.caller) else {
-                continue;
-            };
-            let records = lineage_records_for_call_indexed(&trace_index, terminal_call).unwrap_or_default();
-            let Some(chain_funcs) = chain_funcs_for_lineage(&records, origin, terminal_call.caller) else {
-                continue;
-            };
-            let Some(chain_names) = chain_names_for_path(ws, global.as_ref(), &chain_funcs) else {
-                continue;
-            };
-            let taint_path = taint_path_for_lineage(ws, global.as_ref(), &records, Some(terminal_call));
-            let (origin_function, origin_file, origin_line) = sink_flow_origin(ws, global.as_ref(), origin);
-            let flow = SinkAnalysisFlow {
-                flow_id: flow_id_for_taint_path(&chain_names, &taint_path),
-                origin_function,
-                origin_file,
-                origin_line,
-                chain_names,
-                chain_funcs,
-                taint_path,
-                endpoint_only: false,
-            };
-            for &sink_index in sink_indices {
-                let sink = &sink_matches[sink_index];
-                if !tainted_call_matches_sink(terminal_call, sink) {
-                    continue;
-                }
-                let candidate_flows = flows.entry(sink_rule_match_key(sink)).or_default();
-                if !candidate_flows
-                    .iter()
-                    .any(|existing| existing.flow_id == flow.flow_id)
-                {
-                    candidate_flows.push(flow.clone());
-                }
-            }
-        }
-        on_progress(AnalysisProgress::PhaseTicked);
     }
     on_progress(AnalysisProgress::PhaseFinished);
 
@@ -1964,6 +1962,142 @@ fn compile_sink_upstream_flows(
     debug_resolution_gaps(ws, global.as_ref(), &resolution);
     let incomplete_reasons = workspace_analysis_incomplete_reasons(ws, &scan_files, Some(&resolution));
     (flows, incomplete_reasons)
+}
+
+/// Upstream flows keyed by the sink endpoint each one reaches.
+type SinkOriginFlows = Vec<(SinkEndpointKey, SinkAnalysisFlow)>;
+
+struct SinkOriginEnumerationContext<'a> {
+    ws: &'a Workspace,
+    global: &'a GlobalIndex,
+    idg: &'a bonsai_idg::IdgQueryService,
+    transfers: &'a IdgTaintTransfers<'a>,
+    caches: &'a InterTaintCaches,
+    sink_matches: &'a [RuleMatch],
+}
+
+/// Routes that start inside a sink's own function, for sinks no entry point
+/// feeds: the function's parameters and reads are traced only to that
+/// function's own sink nodes, so each query is a function-local closure.
+fn sink_local_routes<F>(
+    context: &SinkOriginEnumerationContext<'_>,
+    attributed: &[(usize, FuncId, Span)],
+    unfed: &[usize],
+    relevance: &bonsai_idg::IdgTargetRelevance,
+    on_progress: &mut F,
+) -> SinkOriginFlows
+where
+    F: FnMut(AnalysisProgress),
+{
+    use rayon::prelude::*;
+    let started = Instant::now();
+    let unfed_set: AHashSet<usize> = unfed.iter().copied().collect();
+    let mut spans_by_func: BTreeMap<FuncId, Vec<(usize, Span)>> = BTreeMap::new();
+    for (index, func, span) in attributed {
+        if unfed_set.contains(index) {
+            spans_by_func.entry(*func).or_default().push((*index, *span));
+        }
+    }
+    let groups: Vec<(FuncId, Vec<(usize, Span)>)> = spans_by_func.into_iter().collect();
+    let trace = |(func, sinks): &(FuncId, Vec<(usize, Span)>)| -> SinkOriginFlows {
+        let ws = context.ws;
+        let global = context.global;
+        let idg = context.idg;
+        let func = *func;
+        let mut tokens: TokenSet = idg.read_or_write_names_of_func(func).into_iter().collect();
+        if let Some(decl) = global.decl_of(SymbolId::new(func.raw())) {
+            tokens.extend(decl.params.iter().filter(|param| !param.is_empty()).cloned());
+        }
+        let seed_nodes =
+            compose_idg_seed_nodes(IdgSeedRequest::rule_match(func, &tokens, None, &[]), global, idg);
+        if seed_nodes.is_empty() {
+            return Vec::new();
+        }
+        let target_spans: Vec<(FuncId, Span)> = sinks.iter().map(|(_, span)| (func, *span)).collect();
+        let (target_nodes, unresolved_target_funcs) = idg.nodes_and_unresolved_funcs_at_spans(&target_spans);
+        let lineage_funcs: AHashSet<FuncId> = AHashSet::from([func]);
+        let targets = IdgTaintTargets {
+            nodes: Some(&target_nodes),
+            funcs: Some(&unresolved_target_funcs),
+            lineage_funcs: Some(&lineage_funcs),
+            relevance: Some(relevance),
+        };
+        let graph = bonsai_taint::entry_taint_graph_from_idg_query(
+            IdgTaintQuery::semantic(
+                IdgTaintSource::precomposed(func, &tokens, &seed_nodes),
+                ws.db(),
+                idg,
+            )
+            .with_global_index(global)
+            .with_transfers(*context.transfers)
+            .with_targets(targets)
+            .with_caches(context.caches),
+        );
+        let trace_index = trace_record_index(&graph.call_records);
+        let mut origin_site: Option<(String, String, u32)> = None;
+        let mut emitted = Vec::new();
+        for terminal_call in &graph.tainted_calls {
+            if terminal_call.caller != func {
+                continue;
+            }
+            let records = lineage_records_for_call_indexed(&trace_index, terminal_call).unwrap_or_default();
+            let Some(chain_funcs) = chain_funcs_for_lineage(&records, func, terminal_call.caller) else {
+                continue;
+            };
+            let Some(chain_names) = chain_names_for_path(ws, global, &chain_funcs) else {
+                continue;
+            };
+            let taint_path = taint_path_for_lineage(ws, global, &records, Some(terminal_call));
+            let (origin_function, origin_file, origin_line) = origin_site
+                .get_or_insert_with(|| sink_flow_origin(ws, global, func))
+                .clone();
+            let flow = SinkAnalysisFlow {
+                flow_id: flow_id_for_taint_path(&chain_names, &taint_path),
+                origin_function,
+                origin_file,
+                origin_line,
+                chain_names,
+                chain_funcs,
+                taint_path,
+                endpoint_only: false,
+            };
+            for (index, _) in sinks {
+                let sink = &context.sink_matches[*index];
+                if tainted_call_matches_sink(terminal_call, sink) {
+                    emitted.push((sink_rule_match_key(sink), flow.clone()));
+                }
+            }
+        }
+        emitted
+    };
+    let worker_count = source_analysis_worker_count();
+    let results: Vec<SinkOriginFlows> = if worker_count > 1 && groups.len() > 1 {
+        match rayon::ThreadPoolBuilder::new()
+            .num_threads(worker_count)
+            .thread_name(|index| format!("bonsai-sink-local-{index}"))
+            .stack_size(bonsai_common::compiler_worker_stack_bytes())
+            .build()
+        {
+            Ok(pool) => pool.install(|| groups.par_iter().map(trace).collect()),
+            Err(_) => groups.iter().map(trace).collect(),
+        }
+    } else {
+        groups.iter().map(trace).collect()
+    };
+    let mut flows = Vec::new();
+    for group in results {
+        on_progress(AnalysisProgress::PhaseTicked);
+        flows.extend(group);
+    }
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "sink-local routes: sink_funcs={} unfed_sinks={} flows={} elapsed={:.3}s",
+        groups.len(),
+        unfed.len(),
+        flows.len(),
+        started.elapsed().as_secs_f64()
+    );
+    flows
 }
 
 fn build_sink_analysis_report(
@@ -2607,6 +2741,11 @@ where
     });
     use rayon::prelude::*;
     let worker_count = source_analysis_worker_count();
+    // Shared by every rooted query: build the symbolic runtime once here
+    // instead of under the first worker while the rest of the pool waits.
+    if let Some(idg) = context.ws.db().idg_service() {
+        idg.warm_symbolic_query_runtime();
+    }
     let mut grouped_candidates: Vec<(usize, Vec<SourceAnalysisCandidate>)> =
         if worker_count > 1 && source_groups.len() > 1 {
             match rayon::ThreadPoolBuilder::new()
@@ -3034,6 +3173,71 @@ pub fn workspace_languages(ws: &Workspace) -> AHashSet<String> {
     languages
 }
 
+/// The rule ids an inventory request selects, by kind. This is the exact
+/// selection each inventory scan applies before matching, exposed so a
+/// cached complete inventory (every enabled rule of the kind) can be
+/// narrowed to the same set as a view: `matches.retain(|m| ids.contains(&m.rule_id))`.
+pub fn inventory_rule_ids(
+    pack: &Rulepack,
+    kind: RuleKind,
+    options: &SecurityInventoryOptions,
+) -> Result<ahash::AHashSet<String>> {
+    let selected = match kind {
+        RuleKind::Source => select_rules(
+            pack,
+            RuleKind::Source,
+            options.rule.as_deref(),
+            options.rule_regex.as_deref(),
+            |rule| {
+                source_rule_matches_filters(
+                    rule,
+                    options.trust.as_deref(),
+                    options.category.as_deref(),
+                    options.tag.as_deref(),
+                ) && options
+                    .severity
+                    .is_none_or(|min| rule.severity.is_some_and(|severity| severity >= min))
+            },
+        )?,
+        RuleKind::Sink => select_rules(
+            pack,
+            RuleKind::Sink,
+            options.rule.as_deref(),
+            options.rule_regex.as_deref(),
+            |rule| {
+                options
+                    .severity
+                    .is_none_or(|min| rule.severity.is_some_and(|severity| severity >= min))
+                    && options
+                        .tag
+                        .as_deref()
+                        .is_none_or(|tag| rule.tag.as_deref() == Some(tag))
+                    && options
+                        .category
+                        .as_deref()
+                        .is_none_or(|category| rule_matches_category(pack, rule, category))
+            },
+        )?,
+        RuleKind::Sanitizer => select_rules(
+            pack,
+            RuleKind::Sanitizer,
+            options.rule.as_deref(),
+            options.rule_regex.as_deref(),
+            |rule| {
+                rule.tag
+                    .as_deref()
+                    .is_none_or(|tag| !sanitizer_tag_is_recognized_non_crediting(&pack.metadata, tag))
+                    && options
+                        .tag
+                        .as_deref()
+                        .is_none_or(|tag| rule.tag.as_deref() == Some(tag))
+            },
+        )?,
+        RuleKind::Typing => Vec::new(),
+    };
+    Ok(selected.into_iter().map(|rule| rule.id.clone()).collect())
+}
+
 pub fn source_inventory(
     ws: &Workspace,
     pack: &Rulepack,
@@ -3315,21 +3519,65 @@ pub fn security_match_rows(pack: &Rulepack, matches: &[RuleMatch]) -> Vec<Securi
 }
 
 pub fn pack_inventory(pack: &Rulepack, options: PackInventoryOptions) -> Vec<PackRuleRow> {
+    let mut sources: AHashMap<String, Option<Arc<String>>> = AHashMap::new();
+    let root_prefix = format!("{}{}", pack.root.display(), std::path::MAIN_SEPARATOR);
     select_pack_rules(pack, &options)
         .into_iter()
-        .map(|rule| PackRuleRow {
-            rule_id: rule.id.clone(),
-            language: rule.language.clone(),
-            kind: rule_kind_str(rule.kind).to_string(),
-            family: pack.normalized_sink_family(rule_family(&rule.id)).to_string(),
-            tag: rule.tag.clone(),
-            severity: rule.severity.map(|severity| severity.as_str().to_string()),
-            enabled: rule.enabled,
-            packages: rule.packages.clone(),
-            frameworks: rule.frameworks.clone(),
-            description: rule.description.clone(),
+        .map(|rule| {
+            let text = sources
+                .entry(rule.source_path.clone())
+                .or_insert_with(|| std::fs::read_to_string(&rule.source_path).ok().map(Arc::new))
+                .clone();
+            let yaml = text
+                .as_deref()
+                .and_then(|text| rule_yaml_block(text, &rule.id))
+                .unwrap_or_default();
+            PackRuleRow {
+                rule_id: rule.id.clone(),
+                language: rule.language.clone(),
+                kind: rule_kind_str(rule.kind).to_string(),
+                family: pack.normalized_sink_family(rule_family(&rule.id)).to_string(),
+                tag: rule.tag.clone(),
+                severity: rule.severity.map(|severity| severity.as_str().to_string()),
+                enabled: rule.enabled,
+                packages: rule.packages.clone(),
+                frameworks: rule.frameworks.clone(),
+                description: rule.description.clone(),
+                source_path: rule
+                    .source_path
+                    .strip_prefix(&root_prefix)
+                    .unwrap_or(&rule.source_path)
+                    .replace('\\', "/"),
+                yaml,
+            }
         })
         .collect()
+}
+
+/// The `- id: <rule_id>` list item of a rule file, verbatim, from its `- id`
+/// line up to (not including) the next top-level list item. Trailing blank
+/// lines are dropped; comments and key order are preserved.
+pub fn rule_yaml_block(text: &str, rule_id: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let is_item_start = |line: &str| line.starts_with("- ");
+    let id_matches = |line: &str| {
+        let Some(rest) = line.strip_prefix("- id:") else {
+            return false;
+        };
+        let value = rest.split('#').next().unwrap_or("").trim();
+        let value = value.trim_matches(|c| c == '"' || c == '\'');
+        value == rule_id
+    };
+    let start = lines.iter().position(|line| id_matches(line))?;
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| is_item_start(line))
+        .map_or(lines.len(), |offset| start + 1 + offset);
+    let mut block = lines[start..end].to_vec();
+    while block.last().is_some_and(|line| line.trim().is_empty()) {
+        block.pop();
+    }
+    Some(block.join("\n"))
 }
 
 pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport {

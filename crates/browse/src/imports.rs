@@ -9,7 +9,7 @@ use crate::common::{
     textual_relevance_key,
 };
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Filter bundle for [`imports`].
 #[derive(Copy, Clone, Default, Debug)]
@@ -34,7 +34,7 @@ pub struct ImportsFilters<'a> {
 }
 
 /// One row of `imports` output.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ImportOut {
     pub file: String,
     /// Imported module name as written in source.

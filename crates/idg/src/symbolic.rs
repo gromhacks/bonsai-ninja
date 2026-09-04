@@ -45,10 +45,6 @@ impl CompactCanonicalIndex {
             )
         });
     }
-
-    fn clear(&mut self) {
-        self.table.clear();
-    }
 }
 
 /// Canonical adapter-normalized storage components for one IDG read/write.
@@ -152,12 +148,35 @@ pub struct SymbolicFieldGraph {
     strings: Vec<String>,
     bases: Vec<SymbolicFieldBase>,
     transforms: Vec<SymbolicFieldTransform>,
+    /// Name → id dictionaries, built on first lookup: a graph loaded from
+    /// disk is queried by numeric ids far more often than by spelling, and
+    /// hashing every dictionary entry up front cost seconds per command.
     #[serde(skip)]
-    string_ids: CompactCanonicalIndex,
+    string_ids: std::sync::OnceLock<CompactCanonicalIndex>,
     #[serde(skip)]
-    base_ids: CompactCanonicalIndex,
+    base_ids: std::sync::OnceLock<CompactCanonicalIndex>,
     #[serde(skip)]
     outgoing_by_source: Vec<Vec<u32>>,
+}
+
+fn build_string_index(strings: &[String]) -> CompactCanonicalIndex {
+    let mut index = CompactCanonicalIndex::default();
+    for (position, value) in strings.iter().enumerate() {
+        let id = u32::try_from(position).expect("symbolic field string count exceeds u32");
+        let hash = index.hash(value);
+        index.insert(hash, id, strings);
+    }
+    index
+}
+
+fn build_base_index(bases: &[SymbolicFieldBase]) -> CompactCanonicalIndex {
+    let mut index = CompactCanonicalIndex::default();
+    for (position, base) in bases.iter().copied().enumerate() {
+        let id = u32::try_from(position).expect("symbolic field base count exceeds u32");
+        let hash = index.hash(&base);
+        index.insert(hash, id, bases);
+    }
+    index
 }
 
 impl SymbolicFieldGraph {
@@ -167,10 +186,18 @@ impl SymbolicFieldGraph {
         Self::default()
     }
 
+    fn string_index(&self) -> &CompactCanonicalIndex {
+        self.string_ids.get_or_init(|| build_string_index(&self.strings))
+    }
+
+    fn base_index(&self) -> &CompactCanonicalIndex {
+        self.base_ids.get_or_init(|| build_base_index(&self.bases))
+    }
+
     /// Intern one adapter-normalized AST place/string.
     pub fn intern_string(&mut self, value: &str) -> u32 {
-        let hash = self.string_ids.hash(value);
-        if let Some(id) = self.string_ids.find(hash, |id| {
+        let hash = self.string_index().hash(value);
+        if let Some(id) = self.string_index().find(hash, |id| {
             self.strings
                 .get(id as usize)
                 .is_some_and(|stored| stored == value)
@@ -179,7 +206,11 @@ impl SymbolicFieldGraph {
         }
         let id = u32::try_from(self.strings.len()).expect("symbolic field string count exceeds u32");
         self.strings.push(value.to_string());
-        self.string_ids.insert(hash, id, &self.strings);
+        let strings = &self.strings;
+        self.string_ids
+            .get_mut()
+            .expect("string index initialized before insertion")
+            .insert(hash, id, strings);
         id
     }
 
@@ -191,16 +222,20 @@ impl SymbolicFieldGraph {
             func,
             storage,
         };
-        let hash = self.base_ids.hash(&base);
+        let hash = self.base_index().hash(&base);
         if let Some(id) = self
-            .base_ids
+            .base_index()
             .find(hash, |id| self.bases.get(id as usize) == Some(&base))
         {
             return id;
         }
         let id = u32::try_from(self.bases.len()).expect("symbolic field base count exceeds u32");
         self.bases.push(base);
-        self.base_ids.insert(hash, id, &self.bases);
+        let bases = &self.bases;
+        self.base_ids
+            .get_mut()
+            .expect("base index initialized before insertion")
+            .insert(hash, id, bases);
         id
     }
 
@@ -242,8 +277,8 @@ impl SymbolicFieldGraph {
     /// Look up an already-interned string without mutating the relation.
     #[must_use]
     pub fn string_id(&self, value: &str) -> Option<u32> {
-        let hash = self.string_ids.hash(value);
-        self.string_ids.find(hash, |id| {
+        let hash = self.string_index().hash(value);
+        self.string_index().find(hash, |id| {
             self.strings
                 .get(id as usize)
                 .is_some_and(|stored| stored == value)
@@ -259,8 +294,8 @@ impl SymbolicFieldGraph {
             func,
             storage,
         };
-        let hash = self.base_ids.hash(&base);
-        self.base_ids
+        let hash = self.base_index().hash(&base);
+        self.base_index()
             .find(hash, |id| self.bases.get(id as usize) == Some(&base))
     }
 
@@ -285,23 +320,15 @@ impl SymbolicFieldGraph {
     }
 
     fn rebuild_dictionary_indexes(&mut self) {
-        self.string_ids.clear();
-        self.base_ids.clear();
-        for (index, value) in self.strings.iter().enumerate() {
-            let id = u32::try_from(index).expect("symbolic field string count exceeds u32");
-            let hash = self.string_ids.hash(value);
-            self.string_ids.insert(hash, id, &self.strings);
-        }
-        for (index, base) in self.bases.iter().copied().enumerate() {
-            let id = u32::try_from(index).expect("symbolic field base count exceeds u32");
-            let hash = self.base_ids.hash(&base);
-            self.base_ids.insert(hash, id, &self.bases);
-        }
+        // Drop the indexes; they are rebuilt from the dictionaries on the
+        // first spelling lookup, which many loaded graphs never perform.
+        self.string_ids = std::sync::OnceLock::new();
+        self.base_ids = std::sync::OnceLock::new();
     }
 
     pub(crate) fn release_indexes(&mut self) {
-        self.string_ids = CompactCanonicalIndex::default();
-        self.base_ids = CompactCanonicalIndex::default();
+        self.string_ids = std::sync::OnceLock::new();
+        self.base_ids = std::sync::OnceLock::new();
         self.outgoing_by_source = Vec::new();
     }
 
@@ -325,8 +352,8 @@ impl SymbolicFieldGraph {
             strings,
             bases,
             transforms,
-            string_ids: CompactCanonicalIndex::default(),
-            base_ids: CompactCanonicalIndex::default(),
+            string_ids: std::sync::OnceLock::new(),
+            base_ids: std::sync::OnceLock::new(),
             outgoing_by_source: Vec::new(),
         };
         graph.rebuild_indexes();
@@ -342,8 +369,8 @@ impl SymbolicFieldGraph {
             strings,
             bases,
             transforms: Vec::new(),
-            string_ids: CompactCanonicalIndex::default(),
-            base_ids: CompactCanonicalIndex::default(),
+            string_ids: std::sync::OnceLock::new(),
+            base_ids: std::sync::OnceLock::new(),
             outgoing_by_source: Vec::new(),
         };
         graph.rebuild_dictionary_indexes();

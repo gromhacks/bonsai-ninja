@@ -101,9 +101,9 @@ Identifier tokens used in taint state come from adapter-emitted
 
 The adapter kit walks tree-sitter expression children and emits only
 value-bearing identifier/place nodes. It does not recover taint operands by
-tokenizing rendered expressions. The engine's `arg_text_is_tainted` and
-`rhs_operand_is_tainted` also short-circuit `false` on `is_quoted_literal`
-before any other check.
+tokenizing rendered expressions. The compatibility helpers in
+`crates/taint/src/intra.rs` (`text_is_tainted`, `strict_operand_is_tainted`)
+also short-circuit `false` on `is_quoted_literal` before any other check.
 
 This matters because a string literal like `'.category == "electronics"'`
 must never produce identifier tokens that pollute state. An earlier version
@@ -153,9 +153,9 @@ caches use `(FuncId, file_version)`; cross-process caches use file content
 hash plus `MATCHER_POLICY_FINGERPRINT`.
 
 Bumping the policy fingerprint is required when you change resolver
-narrowing, engine semantics (the various `_is_tainted` paths,
-`apply_unresolved_call_side_effects`, `try_body_throws_tainted`), adapter
-fact shape, or matcher policy.
+narrowing, engine semantics (IDG transfer lowering in
+`crates/idg/src/transfer.rs`, return summaries, or the compatibility
+`_is_tainted` helpers), adapter fact shape, or matcher policy.
 
 ## 6. Monotonic invalidation
 
@@ -189,14 +189,14 @@ a tightly-scoped contract:
 - **Write side** (`insert_target_taint`): a qualified write `obj.value =
   tainted` writes only `obj.value` into state. The bare carrier `obj` is
   not promoted.
-- **Read side** (`arg_text_is_tainted`): a qualified read `obj.safe`
+- **Read side** (`text_is_tainted`): a qualified read `obj.safe`
   matches only an explicit qualified seed. A bare tainted carrier doesn't
   poison every field.
 - **Carrier argument passing**: `process(obj)` matches any qualified seed
   sharing the same base via `state_qualified_token_matches_text`. This
   preserves whole-object propagation when a tainted field is passed
   through its carrier.
-- **Strict RHS** (`rhs_operand_is_tainted`): assignment RHS uses a
+- **Strict RHS** (`strict_operand_is_tainted`): assignment RHS uses a
   stricter check that doesn't promote bare-name reads to qualified-seed
   matches. `out = data['other']` doesn't inherit `data.value`'s taint.
 
@@ -207,9 +207,11 @@ taint when a tainted argument flows into a resolved type-like constructor.
 
 ## 9. Path-sensitive branch merge via per-arm cloning
 
-`walk_events_for_propagation` clones state for each branch arm, walks both
-arms independently, and unions post-states at the merge. The clone-walk-
-union pattern keeps the engine path-sensitive without enumerating paths.
+IDG transfer lowering (`walk_events` in `crates/idg/src/transfer.rs`) lowers
+each branch arm from the same incoming writer state, walks both arms
+independently, and joins the arm states at the merge node. The
+clone-walk-join pattern keeps the engine path-sensitive without enumerating
+paths.
 
 Match/switch arms get the same treatment. Adapters whose grammar emits a
 flat `Branch` with every arm concatenated into `then_events` collect arm
@@ -407,11 +409,11 @@ enforces this.
 The justification typically takes one of three shapes:
 
 - **Resolver primitive itself** — `resolve_callable_with_context`
-  and `resolve_class_with_context` are the canonical narrow
+  and `resolve_class` are the canonical narrow
   resolvers; their `find_by_name` calls feed the immediate
   `visibility_allows` + receiver-type filter.
 - **Display-only compatibility paths** — `bonsai_resolve::resolve_callable`
-  is `#[doc(hidden)]` and consumed by browse output / CLI
+  is `#[doc(hidden)]` and consumed by browse output / SDK
   trace-source resolution where cross-context candidate
   enumeration is acceptable.
 

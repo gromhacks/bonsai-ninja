@@ -12,7 +12,7 @@ use bonsai_common::FuncId;
 use bonsai_lang_api::{DeclKind, MODULE_DECL_NAME};
 use bonsai_workspace::Workspace;
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Filter bundle for [`entrypoints`].
 #[derive(Copy, Clone, Default, Debug)]
@@ -29,7 +29,7 @@ pub struct EntryPointsFilters<'a> {
 }
 
 /// One row of `entrypoints` output.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EntryPointOut {
     pub name: String,
     pub qualified_name: Option<String>,
@@ -115,10 +115,7 @@ pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<Ent
     let mut out = root_files
         .par_iter()
         .flat_map_iter(|(file, decls)| {
-            let source_bytes = ws
-                .vfs()
-                .snapshot(*file)
-                .map_or(0, |snapshot| snapshot.text.len() as u64);
+            let source_bytes = ws.vfs().text_len(*file).unwrap_or(0);
             let _memory_permit = memory_permits.acquire(source_bytes);
             // Open one validated adapter-attribution directory per file and
             // read only its root-function frames. This avoids both repeated

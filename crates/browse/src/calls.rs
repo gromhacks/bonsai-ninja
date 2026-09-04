@@ -14,7 +14,7 @@ use crate::common::{
 };
 use bonsai_lang_api::{FlowEvent, RefKind};
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub(crate) const CALLSITE_RESOLUTION_SCOPE: &str = "syntactic-call-site";
 
@@ -42,11 +42,11 @@ pub struct CallsFilters<'a> {
 
 /// One row of `calls` output. Field names match the JSON schema
 /// the CLI emits.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CallOut {
     /// Explicitly declares that this row is a call-site inventory fact,
     /// not a resolved semantic caller→callee edge.
-    pub resolution_scope: &'static str,
+    pub resolution_scope: String,
     /// Callee text as written at the call site (`os.system`,
     /// `self.execute`).
     pub callee: String,
@@ -148,7 +148,7 @@ pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex
                         }
                         let (path, line, column) = format_span(&reference.span, ws);
                         acc.push(CallOut {
-                            resolution_scope: CALLSITE_RESOLUTION_SCOPE,
+                            resolution_scope: CALLSITE_RESOLUTION_SCOPE.to_string(),
                             callee,
                             file: path,
                             line,
@@ -343,7 +343,7 @@ fn walk_calls(
                 }
                 let (path, line, column) = format_span(span, ws);
                 out.push(CallOut {
-                    resolution_scope: CALLSITE_RESOLUTION_SCOPE,
+                    resolution_scope: CALLSITE_RESOLUTION_SCOPE.to_string(),
                     callee,
                     file: path,
                     line,
@@ -370,7 +370,7 @@ fn walk_calls(
                 // call site.
                 let (path, line, column) = format_span(span, ws);
                 out.push(CallOut {
-                    resolution_scope: CALLSITE_RESOLUTION_SCOPE,
+                    resolution_scope: CALLSITE_RESOLUTION_SCOPE.to_string(),
                     callee,
                     file: path,
                     line,

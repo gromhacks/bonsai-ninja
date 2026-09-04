@@ -113,7 +113,7 @@ fn export_test_cache_dir(workspace: &Path) -> PathBuf {
 fn export_schema() -> &'static jsonschema::Validator {
     static VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
     VALIDATOR.get_or_init(|| {
-        let path = repo_root().join("schemas/bonsai-native-export-v11.schema.json");
+        let path = repo_root().join("schemas/bonsai-native-export-v12.schema.json");
         let schema: Value = serde_json::from_slice(&std::fs::read(&path).expect("read export schema"))
             .expect("export schema is JSON");
         jsonschema::validator_for(&schema).expect("export schema compiles")
@@ -129,7 +129,7 @@ fn assert_matches_export_schema(label: &str, export: &Value) {
         .collect::<Vec<_>>();
     assert!(
         errors.is_empty(),
-        "[{label}] native export does not match schemas/bonsai-native-export-v11.schema.json:\n{}",
+        "[{label}] native export does not match schemas/bonsai-native-export-v12.schema.json:\n{}",
         errors.join("\n")
     );
 }
@@ -422,12 +422,12 @@ fn every_lang_micro_export_funcid_refs_resolve() {
 }
 
 #[test]
-fn committed_schema_is_strict_v11_and_accepts_materialized_propagations() {
-    let schema_path = repo_root().join("schemas/bonsai-native-export-v11.schema.json");
+fn committed_schema_is_strict_v12_and_accepts_materialized_propagations() {
+    let schema_path = repo_root().join("schemas/bonsai-native-export-v12.schema.json");
     let schema: Value = serde_json::from_slice(&std::fs::read(schema_path).expect("read export schema"))
         .expect("export schema is JSON");
     assert_eq!(schema["$schema"], "https://json-schema.org/draft/2020-12/schema");
-    assert_eq!(schema["properties"]["schema_version"]["const"], 11);
+    assert_eq!(schema["properties"]["schema_version"]["const"], 12);
     assert_eq!(schema["additionalProperties"], false);
 
     let export =

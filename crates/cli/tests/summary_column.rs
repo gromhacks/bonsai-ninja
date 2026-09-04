@@ -486,7 +486,7 @@ fn browse_summary_ids_match_inspect_flow_ids() {
 
     // Query every callable so inspect emits the same bounded compiler
     // evidence identities.
-    let Some(inspect_out) = run(&["inspect", ws_str, "--query", ".*", "--regex", "--all"]) else {
+    let Some(inspect_out) = run(&["inspect-graph", ws_str, "--query", ".*", "--regex", "--all"]) else {
         return;
     };
     let inspect_ids: std::collections::HashSet<String> =
@@ -531,7 +531,7 @@ fn inspect_flow_standalone_resolves() {
 
     let Some(bin) = bin_path() else { return };
     let out = Command::new(&bin)
-        .args(["inspect", ws_str, "--flow", &target_id, "--no-color"])
+        .args(["inspect-graph", ws_str, "--flow", &target_id, "--no-color"])
         .env("COLUMNS", "200")
         .output()
         .expect("failed to run bonsai-ninja");
@@ -556,13 +556,13 @@ fn inspect_flow_standalone_resolves() {
 fn inspect_folds_occurrence_hits_sharing_a_flow() {
     let Some(ws) = ws_for("python") else { return };
     let ws_str = ws.to_str().unwrap();
-    let Some(system_out) = run(&["inspect", ws_str, "--query", "os.system"]) else {
+    let Some(system_out) = run(&["inspect-graph", ws_str, "--query", "os.system"]) else {
         return;
     };
     let Some(flow_id) = extract_summary_ids(&system_out).into_iter().next() else {
         panic!("inspect --query os.system emitted no structural id:\n{system_out}");
     };
-    let Some(out) = run(&["inspect", ws_str, "--flow", &flow_id]) else {
+    let Some(out) = run(&["inspect-graph", ws_str, "--flow", &flow_id]) else {
         return;
     };
 

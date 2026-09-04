@@ -496,6 +496,20 @@ impl CallgraphQueryService {
     /// consumers such as native export can therefore process the complete
     /// compiler graph without materializing its multi-million-edge adjacency
     /// relation in memory.
+    /// One file's persisted relation: its callable nodes, the edges leaving
+    /// it, and the edges entering it. One partition decode.
+    pub(crate) fn file_partition_edges(
+        &self,
+        file: FileId,
+    ) -> std::io::Result<(Vec<CallGraphNode>, Vec<CallEdge>, Vec<CallEdge>)> {
+        let partition = self.cached_partition(file)?;
+        Ok((
+            partition.nodes.clone(),
+            partition.outgoing.clone(),
+            partition.incoming.clone(),
+        ))
+    }
+
     pub(crate) fn visit_partitions(
         &self,
         mut visit: impl FnMut(FileId, &[CallGraphNode], &[CallEdge], &[CallEdge], &[UnresolvedWorkspaceCallSite]),
@@ -905,6 +919,117 @@ impl CallgraphQueryService {
         targets: &[FuncId],
     ) -> std::io::Result<AHashSet<FuncId>> {
         self.visit_reaching_with_direct_callees(targets, |_| {})
+    }
+
+    /// One caller chain per target: the shallowest entry point (a callable
+    /// with no persisted caller) that reaches the target, followed by the
+    /// callees it was discovered through, ending just before the target.
+    /// One breadth-first reverse walk with parent pointers over persisted
+    /// partitions: O(lineage), no path enumeration. Targets that are entry
+    /// points themselves (or sit in a caller cycle with no entry) map to an
+    /// empty chain.
+    pub(crate) fn lineage_chains(
+        &self,
+        targets: &[FuncId],
+    ) -> std::io::Result<AHashMap<FuncId, Vec<Vec<FuncId>>>> {
+        struct Reach {
+            from: FuncId,
+            origin: FuncId,
+        }
+        let mut reached: AHashMap<FuncId, Reach> = AHashMap::new();
+        let mut has_caller: AHashSet<FuncId> = AHashSet::new();
+        let mut order: Vec<FuncId> = Vec::new();
+        // Reverse BFS batched per file: every partition's incoming edges are
+        // scanned once per batch of functions that live in it, not once per
+        // function, so a wide lineage costs O(edges), never O(funcs × edges).
+        let mut pending: BTreeMap<u32, Vec<FuncId>> = BTreeMap::new();
+        for &target in targets {
+            if reached
+                .insert(
+                    target,
+                    Reach {
+                        from: target,
+                        origin: target,
+                    },
+                )
+                .is_none()
+            {
+                if let Some(file) = self.node_file(target) {
+                    pending.entry(file.raw()).or_default().push(target);
+                }
+            }
+        }
+        while let Some((file, functions)) = pending.pop_first() {
+            let requested: AHashSet<FuncId> = functions.into_iter().collect();
+            let partition = self.cached_partition(FileId::new(file))?;
+            for edge in partition.incoming.iter() {
+                if !requested.contains(&edge.to) {
+                    continue;
+                }
+                has_caller.insert(edge.to);
+                if reached.contains_key(&edge.from) {
+                    continue;
+                }
+                let origin = reached[&edge.to].origin;
+                reached.insert(
+                    edge.from,
+                    Reach {
+                        from: edge.to,
+                        origin,
+                    },
+                );
+                order.push(edge.from);
+                if let Some(caller_file) = self.node_file(edge.from) {
+                    pending.entry(caller_file.raw()).or_default().push(edge.from);
+                }
+            }
+        }
+        // Every entry point that reaches a target yields one chain along the
+        // breadth-first parent pointers. Roots were discovered shallowest
+        // first, so reversing the discovery order lists the deepest chain
+        // (the most upstream context) first for each target.
+        let mut chains: AHashMap<FuncId, Vec<Vec<FuncId>>> = AHashMap::new();
+        for root in order.into_iter().rev() {
+            if has_caller.contains(&root) {
+                continue;
+            }
+            let origin = reached[&root].origin;
+            let mut chain = vec![root];
+            let mut cursor = root;
+            while let Some(reach) = reached.get(&cursor) {
+                if reach.from == cursor {
+                    break;
+                }
+                cursor = reach.from;
+                if cursor == origin {
+                    break;
+                }
+                chain.push(cursor);
+            }
+            chains.entry(origin).or_default().push(chain);
+        }
+        Ok(chains)
+    }
+
+    /// The entry points of `targets`' caller lineage: every callable that
+    /// reaches a target (or is a target) and has no persisted caller itself.
+    /// One reverse fixed point over file partitions; no path enumeration.
+    pub(crate) fn lineage_roots(&self, targets: &[FuncId]) -> std::io::Result<Vec<FuncId>> {
+        let mut has_caller: AHashSet<FuncId> = AHashSet::new();
+        let mut callers: AHashSet<FuncId> = AHashSet::new();
+        self.visit_reaching_with_direct_callees(targets, |edge| {
+            has_caller.insert(edge.to);
+            callers.insert(edge.from);
+        })?;
+        let mut roots: Vec<FuncId> = targets
+            .iter()
+            .copied()
+            .chain(callers)
+            .filter(|func| !has_caller.contains(func))
+            .collect();
+        roots.sort_unstable_by_key(|func| func.raw());
+        roots.dedup();
+        Ok(roots)
     }
 
     fn visit_reaching_with_direct_callees(
@@ -1349,13 +1474,13 @@ fn build_edge_id_index(
                 if let Some((path, span_map)) = source_locations.get(&edge.span.file) {
                     let location = span_map.line_col(edge.span.start);
                     (path.as_str(), location.line, location.column)
-                } else if let Ok(snapshot) = db.vfs().snapshot(edge.span.file) {
+                } else if let (Ok(file_path), Some(span_map)) =
+                    (db.vfs().path(edge.span.file), db.span_map(edge.span.file))
+                {
                     let path = bonsai_common::workspace_relative_filter_path(
                         workspace_root.as_deref(),
-                        &snapshot.path.to_string_lossy(),
+                        &file_path.to_string_lossy(),
                     );
-                    let span_map =
-                        bonsai_common::cached_span_map_arc(edge.span.file, snapshot.version, &snapshot.text);
                     let location = span_map.line_col(edge.span.start);
                     source_locations.insert(edge.span.file, (path, span_map));
                     let (path, _) = source_locations
@@ -2132,16 +2257,13 @@ fn sort_partition(partition: &mut CallgraphFilePartition) {
 fn current_source_fingerprints(db: &AnalyzerDb) -> Vec<(String, u64)> {
     let mut files = Vec::new();
     for file in db.vfs().all_files() {
-        let Ok(snapshot) = db.vfs().snapshot(file) else {
-            continue;
-        };
         let Ok(path) = db.vfs().path(file) else {
             continue;
         };
-        files.push((
-            path.to_string_lossy().into_owned(),
-            fnv1a_bytes64(snapshot.text.as_bytes()),
-        ));
+        let Some(hash) = crate::source_content_hash(db.vfs(), file) else {
+            continue;
+        };
+        files.push((path.to_string_lossy().into_owned(), hash));
     }
     files.sort();
     files

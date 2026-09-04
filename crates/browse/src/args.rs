@@ -14,7 +14,7 @@ use crate::common::{
 use bonsai_common::Span;
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub(crate) const ARG_RESOLUTION_SCOPE: &str = "syntactic-call-site-argument";
 
@@ -45,11 +45,11 @@ pub struct ArgsFilters<'a> {
 
 /// One row of `args` output. Every field maps directly to a
 /// column in the CLI's table render and a key in its JSON output.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ArgOut {
     /// Explicitly declares that this row is call-site argument
     /// inventory, not a resolved semantic caller→callee edge.
-    pub resolution_scope: &'static str,
+    pub resolution_scope: String,
     /// Callee name as it appears at the call site (qualified form
     /// like `os.system` or `cursor.execute`).
     pub callee: String,
@@ -226,7 +226,7 @@ fn walk_args(
                     let (path, line, column) = format_span(&arg.span, ws);
                     out.push(ArgFact {
                         out: ArgOut {
-                            resolution_scope: ARG_RESOLUTION_SCOPE,
+                            resolution_scope: ARG_RESOLUTION_SCOPE.to_string(),
                             callee: name.clone(),
                             position,
                             keyword: arg.name.clone(),
@@ -261,7 +261,7 @@ fn walk_args(
                     }
                     out.push(ArgFact {
                         out: ArgOut {
-                            resolution_scope: ARG_RESOLUTION_SCOPE,
+                            resolution_scope: ARG_RESOLUTION_SCOPE.to_string(),
                             callee: name.clone(),
                             position,
                             keyword: None,

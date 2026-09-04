@@ -5,7 +5,7 @@ use crate::common::{
     source_files_small_first, textual_relevance_key,
 };
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Filter bundle for [`strings`].
 #[derive(Copy, Clone, Default, Debug)]
@@ -27,7 +27,7 @@ pub struct StringsFilters<'a> {
     pub regex: bool,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StringOut {
     pub text: String,
     pub category: String,

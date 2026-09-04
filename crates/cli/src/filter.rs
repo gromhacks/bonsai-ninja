@@ -101,12 +101,36 @@ impl SecondaryFilter {
         if !self.is_active() {
             return true;
         }
-        let Ok(value) = serde_json::to_value(row) else {
+        let mut scratch = FilterScratch::default();
+        self.matches_row(row, &mut scratch, None)
+    }
+
+    /// Match a serialized row without building a `serde_json::Value`: the
+    /// JSON text is scanned for string values (object keys are skipped, the
+    /// same leaf set `matches_value` sees) into a reusable buffer. `extra`
+    /// adds one synthesized leaf (for example the rendered location) that
+    /// is not a field of the row itself.
+    pub(crate) fn matches_row<T: serde::Serialize>(
+        &self,
+        row: &T,
+        scratch: &mut FilterScratch,
+        extra: Option<&str>,
+    ) -> bool {
+        if !self.is_active() {
             return true;
-        };
-        let mut text = String::new();
-        collect_string_leaves(&value, &mut text);
-        self.matches_text(&text)
+        }
+        scratch.json.clear();
+        scratch.leaves.clear();
+        if serde_json::to_writer(&mut scratch.json, row).is_err() {
+            // Never silently drop a row on an encode error.
+            return true;
+        }
+        collect_json_string_values(&scratch.json, &mut scratch.leaves);
+        if let Some(extra) = extra {
+            scratch.leaves.push_str(extra);
+            scratch.leaves.push('\n');
+        }
+        self.matches_text(&scratch.leaves)
     }
 
     /// Drop the rows whose serialized string-values fail the filter.
@@ -115,12 +139,122 @@ impl SecondaryFilter {
         if !self.is_active() {
             return;
         }
-        rows.retain(|row| self.matches_value(row));
+        let mut scratch = FilterScratch::default();
+        rows.retain(|row| self.matches_row(row, &mut scratch, None));
+    }
+}
+
+/// Reusable buffers for [`SecondaryFilter::matches_row`] so filtering a
+/// large row set allocates once, not per row.
+#[derive(Default)]
+pub(crate) struct FilterScratch {
+    json: Vec<u8>,
+    leaves: String,
+}
+
+/// Append every JSON string *value* in `json` to `out` (one per line),
+/// decoding escapes; object keys are skipped so `--contains name` filters on
+/// values, not on the `"name"` key. Mirrors `collect_string_leaves` over a
+/// `Value` tree without materializing the tree.
+fn collect_json_string_values(json: &[u8], out: &mut String) {
+    let mut index = 0usize;
+    let len = json.len();
+    while index < len {
+        if json[index] != b'"' {
+            index += 1;
+            continue;
+        }
+        // Decode the string literal starting at `index`.
+        let mut cursor = index + 1;
+        let mut decoded = String::new();
+        let mut closed = false;
+        while cursor < len {
+            match json[cursor] {
+                b'"' => {
+                    closed = true;
+                    cursor += 1;
+                    break;
+                }
+                b'\\' => {
+                    cursor += 1;
+                    let Some(&escaped) = json.get(cursor) else {
+                        break;
+                    };
+                    match escaped {
+                        b'"' => decoded.push('"'),
+                        b'\\' => decoded.push('\\'),
+                        b'/' => decoded.push('/'),
+                        b'b' => decoded.push('\u{8}'),
+                        b'f' => decoded.push('\u{c}'),
+                        b'n' => decoded.push('\n'),
+                        b'r' => decoded.push('\r'),
+                        b't' => decoded.push('\t'),
+                        b'u' => {
+                            let hex = json.get(cursor + 1..cursor + 5);
+                            let unit = hex
+                                .and_then(|hex| std::str::from_utf8(hex).ok())
+                                .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+                            if let Some(unit) = unit {
+                                cursor += 4;
+                                // Surrogate pairs arrive as two escapes; join them.
+                                if (0xD800..0xDC00).contains(&unit)
+                                    && json.get(cursor + 1..cursor + 3) == Some(b"\\u")
+                                {
+                                    let low = json
+                                        .get(cursor + 3..cursor + 7)
+                                        .and_then(|hex| std::str::from_utf8(hex).ok())
+                                        .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+                                    if let Some(low) = low.filter(|low| (0xDC00..0xE000).contains(low)) {
+                                        let combined = 0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00);
+                                        if let Some(ch) = char::from_u32(combined) {
+                                            decoded.push(ch);
+                                        }
+                                        cursor += 6;
+                                        cursor += 1;
+                                        continue;
+                                    }
+                                }
+                                if let Some(ch) = char::from_u32(unit) {
+                                    decoded.push(ch);
+                                }
+                            }
+                        }
+                        other => decoded.push(other as char),
+                    }
+                    cursor += 1;
+                }
+                _ => {
+                    // Copy a maximal run of plain bytes at once.
+                    let start = cursor;
+                    while cursor < len && json[cursor] != b'"' && json[cursor] != b'\\' {
+                        cursor += 1;
+                    }
+                    decoded.push_str(&String::from_utf8_lossy(&json[start..cursor]));
+                }
+            }
+        }
+        if !closed {
+            break;
+        }
+        // A string followed by ':' is an object key: skip it.
+        let mut peek = cursor;
+        while peek < len && json[peek].is_ascii_whitespace() {
+            peek += 1;
+        }
+        let is_key = json.get(peek) == Some(&b':');
+        if !is_key {
+            out.push_str(&decoded);
+            out.push('\n');
+        }
+        index = cursor;
     }
 }
 
 /// Append every string leaf of `value` to `out`, separated by `\n` so
 /// substrings can't bridge two unrelated leaves.
+/// Reference leaf walk over a `Value` tree; the streaming scanner above is
+/// checked against it in tests.
+#[cfg(test)]
 fn collect_string_leaves(value: &serde_json::Value, out: &mut String) {
     match value {
         serde_json::Value::String(s) => {

@@ -9,8 +9,9 @@
 //! source/rulepack/dependency freshness fingerprints.
 
 use crate::{out_count, output, paging, progress};
-use anyhow::Context;
-use bonsai_common::{dependency_metadata::collect_dependency_metadata_fingerprints, write_atomic_bytes};
+use bonsai_common::{
+    dependency_metadata::collect_dependency_metadata_fingerprints, wire, write_atomic_bytes,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,7 +42,7 @@ thread_local! {
 // Version 13 stores only the page the caller requested. Earlier versions
 // eagerly formatted neighboring pages, multiplying render cost for commands
 // whose exact analysis had already completed.
-const RENDER_CACHE_VERSION: u32 = 13;
+const RENDER_CACHE_VERSION: u32 = 14;
 
 /// Stable structural ids are hashes of rendered chains, so the id alone
 /// cannot be inverted into the target declaration that made the query
@@ -65,9 +66,55 @@ pub(crate) struct StructuralIdHint {
     pub(crate) in_fn: Option<String>,
 }
 
+/// Upper bound on remembered structural ids. One `inspect-graph` run on a
+/// large workspace emits thousands of ids; without a bound the registry grew
+/// past 40MB and every id-emitting command re-read and rewrote all of it.
+/// Eviction is by insertion order (oldest first), so the ids a user can
+/// still see in a recent terminal always resolve.
+const STRUCTURAL_ID_HINTS_MAX_ENTRIES: usize = 50_000;
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct StructuralIdHints {
     by_id: std::collections::BTreeMap<String, StructuralIdHint>,
+    /// Insertion sequence per id (monotonic); absent for entries written by
+    /// older binaries, which then evict first.
+    #[serde(default)]
+    sequence: std::collections::BTreeMap<String, u64>,
+    #[serde(default)]
+    next_sequence: u64,
+}
+
+impl StructuralIdHints {
+    fn remember(&mut self, id: &str, hint: &StructuralIdHint) -> bool {
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        let existing = self.by_id.get(id);
+        if existing == Some(hint) {
+            // Refresh recency so a re-emitted id outlives stale ones.
+            self.sequence.insert(id.to_string(), sequence);
+            return false;
+        }
+        self.by_id.insert(id.to_string(), hint.clone());
+        self.sequence.insert(id.to_string(), sequence);
+        true
+    }
+
+    fn evict_to_bound(&mut self) {
+        if self.by_id.len() <= STRUCTURAL_ID_HINTS_MAX_ENTRIES {
+            return;
+        }
+        let mut order: Vec<(u64, String)> = self
+            .by_id
+            .keys()
+            .map(|id| (self.sequence.get(id).copied().unwrap_or(0), id.clone()))
+            .collect();
+        order.sort_unstable();
+        let excess = self.by_id.len() - STRUCTURAL_ID_HINTS_MAX_ENTRIES;
+        for (_, id) in order.into_iter().take(excess) {
+            self.by_id.remove(&id);
+            self.sequence.remove(&id);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -215,6 +262,13 @@ pub(crate) fn replay_if_hit(workspace: &Path) -> anyhow::Result<bool> {
         return Ok(false);
     };
     stage.finish();
+    bonsai_diagnostics::debug_log!(
+        "page-cache",
+        "replaying rendered {} page {}/{}",
+        cache.command,
+        page.number,
+        page.total_pages
+    );
     paging::write_last_cursor(&cache.command, cache.filters_hash, &page.cursor);
     emit_cached_text(&page.text)?;
     Ok(true)
@@ -246,12 +300,246 @@ struct KeyedPayloadFile {
     rulepack_fingerprint: Option<u64>,
     semantic_key: u64,
     kind: String,
-    /// Pre-serialized payload JSON (a string, never a `Value` tree).
-    value: String,
+    /// Length and digest of the sibling `.bin` blob holding the value.
+    blob_len: u64,
+    blob_digest: u64,
 }
 
 fn keyed_payload_path(workspace: &Path, semantic_key: u64) -> PathBuf {
     cache_dir(workspace).join(format!("payload.{semantic_key:016x}.json"))
+}
+
+/// The binary blob that accompanies a JSON envelope (`*.json` → `*.bin`).
+fn blob_path_for(envelope: &Path) -> PathBuf {
+    envelope.with_extension("bin")
+}
+
+/// Read a bounded binary blob and verify its recorded length and digest.
+fn read_blob(path: &Path, expected_len: u64, expected_digest: u64, max_bytes: usize) -> Option<Vec<u8>> {
+    if expected_len > max_bytes as u64 {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if metadata.len() != expected_len {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(expected_len).ok()?);
+    file.take(expected_len.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 != expected_len || bonsai_hash::fnv1a_bytes64(&bytes) != expected_digest {
+        return None;
+    }
+    Some(bytes)
+}
+
+/// Encode `value` for a payload blob, honouring the byte bound.
+fn encode_blob_bounded<T: Serialize>(value: &T, max_bytes: usize) -> anyhow::Result<Option<Vec<u8>>> {
+    // Map encoding: fields are named, so values with optional/skipped
+    // fields decode regardless of which fields were present.
+    let bytes = with_cache_fields(|| wire::encode_struct_map(value))?;
+    Ok((bytes.len() <= max_bytes).then_some(bytes))
+}
+
+/// Complete row sets are larger than rendered pages (a large workspace lists
+/// hundreds of thousands of definitions), so they get their own bound and a
+/// per-workspace retention of the most recently used sets.
+const MAX_ROWS_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
+const ROWS_PAYLOAD_RETENTION: usize = 24;
+
+/// One command's complete semantic row set for one set of semantic filters.
+/// Rows are stored as native JSON (no string wrapping) so a large set is
+/// parsed once.
+#[derive(Serialize, Deserialize)]
+struct RowsPayloadFile {
+    version: u32,
+    binary_version: String,
+    matcher_policy_fingerprint: u128,
+    workspace_fingerprint: bonsai_sdk::WorkspaceContentFingerprint,
+    dependency_metadata_fingerprint: u64,
+    command: String,
+    filters_hash: u64,
+    /// Analysis-completeness reasons observed while collecting (for example
+    /// files with syntax errors). A replay must report them exactly like the
+    /// run that collected the rows.
+    #[serde(default)]
+    analysis_incomplete_reasons: Vec<String>,
+    /// Length and digest of the sibling `.bin` blob holding the rows.
+    blob_len: u64,
+    blob_digest: u64,
+}
+
+/// A replayed complete row set with the completeness facts it was collected
+/// under.
+pub(crate) struct RowsPayload<T> {
+    pub(crate) rows: Vec<T>,
+    pub(crate) analysis_incomplete_reasons: Vec<String>,
+}
+
+fn rows_payload_key(command: &str, filters_hash: u64) -> u64 {
+    let mut hasher = bonsai_hash::Hasher::new();
+    hasher.absorb(b"rows-payload");
+    hasher.absorb(command.as_bytes());
+    hasher.absorb(&filters_hash.to_le_bytes());
+    hasher.finish()
+}
+
+fn rows_payload_path(workspace: &Path, command: &str, filters_hash: u64) -> PathBuf {
+    cache_dir(workspace).join(format!(
+        "rows.{:016x}.json",
+        rows_payload_key(command, filters_hash)
+    ))
+}
+
+/// The complete row set a browse command computed for `filters_hash`, when
+/// it is still fresh for the current sources and binary. Views (page turns,
+/// formats, text filters) start from these rows instead of re-collecting.
+pub(crate) fn read_rows_payload<T: DeserializeOwned>(
+    workspace: &Path,
+    command: &str,
+    filters_hash: u64,
+) -> anyhow::Result<Option<RowsPayload<T>>> {
+    if cache_disabled() {
+        return Ok(None);
+    }
+    let path = rows_payload_path(workspace, command, filters_hash);
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return Ok(None);
+    };
+    if current_exe_is_newer_than_cache(&metadata) {
+        return Ok(None);
+    }
+    let started = std::time::Instant::now();
+    let Some(file) = read_json_cache_file::<RowsPayloadFile>(&path) else {
+        return Ok(None);
+    };
+    if file.version != RENDER_CACHE_VERSION
+        || file.binary_version != binary_cache_fingerprint()
+        || file.matcher_policy_fingerprint != bonsai_common::MATCHER_POLICY_FINGERPRINT
+        || file.command != command
+        || file.filters_hash != filters_hash
+    {
+        return Ok(None);
+    }
+    let fresh = file.workspace_fingerprint == workspace_fingerprint(workspace)?
+        && file.dependency_metadata_fingerprint == dependency_metadata_fingerprint(workspace)?;
+    if !fresh {
+        return Ok(None);
+    }
+    let Some(blob) = read_blob(
+        &blob_path_for(&path),
+        file.blob_len,
+        file.blob_digest,
+        MAX_ROWS_PAYLOAD_BYTES,
+    ) else {
+        return Ok(None);
+    };
+    let rows: Vec<T> = match wire::decode(&blob) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::debug!("{command} rows payload blob decode failed: {error}");
+            return Ok(None);
+        }
+    };
+    // Touch so retention keeps recently used sets.
+    let _ = std::fs::File::open(&path).and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    bonsai_diagnostics::debug_log!(
+        "page-cache",
+        "{command} rows payload hit: {:.3}s rows={} bytes={}",
+        started.elapsed().as_secs_f64(),
+        rows.len(),
+        blob.len()
+    );
+    Ok(Some(RowsPayload {
+        rows,
+        analysis_incomplete_reasons: file.analysis_incomplete_reasons,
+    }))
+}
+
+/// Persist a command's complete row set. Failures are logged, never fatal:
+/// the rendered result does not depend on the cache.
+pub(crate) fn save_rows_payload<T: Serialize>(
+    workspace: &Path,
+    command: &str,
+    filters_hash: u64,
+    rows: &[T],
+    analysis_incomplete_reasons: &[String],
+) {
+    if cache_disabled() {
+        return;
+    }
+    let result: anyhow::Result<()> = (|| {
+        let dir = cache_dir(workspace);
+        std::fs::create_dir_all(&dir)?;
+        let workspace_fingerprint = match remembered_workspace_fingerprint(workspace) {
+            Some(fingerprint) => fingerprint,
+            None => workspace_fingerprint(workspace)?,
+        };
+        let started = std::time::Instant::now();
+        let Some(blob) = encode_blob_bounded(&rows, MAX_ROWS_PAYLOAD_BYTES)? else {
+            bonsai_diagnostics::debug_log!(
+                "page-cache",
+                "skipping {command} rows payload: exceeds {MAX_ROWS_PAYLOAD_BYTES} bytes"
+            );
+            return Ok(());
+        };
+        let envelope_path = rows_payload_path(workspace, command, filters_hash);
+        write_atomic_bytes(&blob_path_for(&envelope_path), &blob)?;
+        let file = RowsPayloadFile {
+            version: RENDER_CACHE_VERSION,
+            binary_version: binary_cache_fingerprint().to_string(),
+            matcher_policy_fingerprint: bonsai_common::MATCHER_POLICY_FINGERPRINT,
+            workspace_fingerprint,
+            dependency_metadata_fingerprint: dependency_metadata_fingerprint(workspace)?,
+            command: command.to_string(),
+            filters_hash,
+            analysis_incomplete_reasons: analysis_incomplete_reasons.to_vec(),
+            blob_len: blob.len() as u64,
+            blob_digest: bonsai_hash::fnv1a_bytes64(&blob),
+        };
+        atomic_write_json(&envelope_path, &file)?;
+        bonsai_diagnostics::debug_log!(
+            "page-cache",
+            "{command} rows payload saved: {:.3}s rows={} bytes={}",
+            started.elapsed().as_secs_f64(),
+            rows.len(),
+            blob.len()
+        );
+        prune_rows_payloads(&dir);
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::debug!("{command} rows payload save failed: {error}");
+    }
+}
+
+/// Keep the most recently used row sets; the rest are rebuilt on demand.
+fn prune_rows_payloads(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !(name.starts_with("rows.") && name.ends_with(".json")) {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect();
+    if files.len() <= ROWS_PAYLOAD_RETENTION {
+        return;
+    }
+    files.sort();
+    let excess = files.len() - ROWS_PAYLOAD_RETENTION;
+    for (_, path) in files.into_iter().take(excess) {
+        let _ = std::fs::remove_file(blob_path_for(&path));
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Persist `payload` under `semantic_key`. No-op when caching is
@@ -263,18 +551,46 @@ pub(crate) fn save_keyed_payload<T: Serialize>(
     kind: &str,
     payload: &T,
 ) -> anyhow::Result<()> {
+    save_keyed_payload_with_bound(workspace, semantic_key, kind, payload, MAX_PAYLOAD_BYTES)
+}
+
+/// Complete query reports (an inspect-graph report over a hub name carries
+/// hundreds of thousands of flows) are worth far more than the default bound;
+/// retention keeps the payload directory bounded instead.
+pub(crate) const MAX_REPORT_PAYLOAD_BYTES: usize = 1024 * 1024 * 1024;
+const KEYED_PAYLOAD_RETENTION: usize = 48;
+/// Total bytes of keyed payload blobs kept per workspace; the oldest are
+/// dropped first once the budget is exceeded.
+const KEYED_PAYLOAD_BUDGET_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+
+pub(crate) fn save_keyed_payload_with_bound<T: Serialize>(
+    workspace: &Path,
+    semantic_key: u64,
+    kind: &str,
+    payload: &T,
+    max_bytes: usize,
+) -> anyhow::Result<()> {
     if cache_disabled() {
         return Ok(());
     }
-    let Some(value) = serialize_json_bounded(payload, MAX_PAYLOAD_BYTES)? else {
-        tracing::debug!(
-            "skipping {kind} keyed payload: serialized value exceeds {MAX_PAYLOAD_BYTES} cache bound"
+    let started = std::time::Instant::now();
+    let Some(blob) = encode_blob_bounded(payload, max_bytes)? else {
+        bonsai_diagnostics::debug_log!(
+            "page-cache",
+            "skipping {kind} keyed payload: encoded value exceeds {max_bytes} byte bound"
         );
         return Ok(());
     };
-    let value = String::from_utf8(value).context("serialized page-cache JSON was not UTF-8")?;
+    bonsai_diagnostics::debug_log!(
+        "page-cache",
+        "{kind} keyed payload encoded: {:.3}s bytes={}",
+        started.elapsed().as_secs_f64(),
+        blob.len()
+    );
     let dir = cache_dir(workspace);
     std::fs::create_dir_all(&dir)?;
+    let envelope_path = keyed_payload_path(workspace, semantic_key);
+    write_atomic_bytes(&blob_path_for(&envelope_path), &blob)?;
     let file = KeyedPayloadFile {
         version: RENDER_CACHE_VERSION,
         binary_version: binary_cache_fingerprint().to_string(),
@@ -287,9 +603,52 @@ pub(crate) fn save_keyed_payload<T: Serialize>(
         rulepack_fingerprint: rulepack_fingerprint_for_command(workspace)?,
         semantic_key,
         kind: kind.to_string(),
-        value,
+        blob_len: blob.len() as u64,
+        blob_digest: bonsai_hash::fnv1a_bytes64(&blob),
     };
-    atomic_write_json(&keyed_payload_path(workspace, semantic_key), &file)
+    atomic_write_json(&envelope_path, &file)?;
+    prune_keyed_payloads(&dir);
+    Ok(())
+}
+
+/// Keep the most recently written keyed payloads; older complete objects are
+/// rebuilt on demand.
+fn prune_keyed_payloads(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !(name.starts_with("payload.") && name.ends_with(".json")) {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            let blob_len = std::fs::metadata(blob_path_for(&entry.path()))
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            Some((modified, entry.path(), blob_len))
+        })
+        .collect();
+    let total: u64 = files.iter().map(|(_, _, len)| *len).sum();
+    if files.len() <= KEYED_PAYLOAD_RETENTION && total <= KEYED_PAYLOAD_BUDGET_BYTES {
+        return;
+    }
+    // Oldest first; drop until both the count and the byte budget hold.
+    files.sort();
+    let mut remaining = files.len();
+    let mut total = total;
+    for (_, path, len) in files {
+        if remaining <= KEYED_PAYLOAD_RETENTION && total <= KEYED_PAYLOAD_BUDGET_BYTES {
+            break;
+        }
+        let _ = std::fs::remove_file(blob_path_for(&path));
+        let _ = std::fs::remove_file(path);
+        remaining -= 1;
+        total = total.saturating_sub(len);
+    }
 }
 
 /// Read the payload stored under `semantic_key`/`kind` when it is fresh
@@ -326,7 +685,29 @@ pub(crate) fn read_keyed_payload<T: DeserializeOwned>(
     if !fresh {
         return Ok(None);
     }
-    Ok(Some(serde_json::from_str(&file.value)?))
+    let started = std::time::Instant::now();
+    let Some(blob) = read_blob(
+        &blob_path_for(&path),
+        file.blob_len,
+        file.blob_digest,
+        MAX_REPORT_PAYLOAD_BYTES,
+    ) else {
+        return Ok(None);
+    };
+    let decoded: T = match wire::decode(&blob) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::debug!("{kind} keyed payload blob decode failed: {error}");
+            return Ok(None);
+        }
+    };
+    bonsai_diagnostics::debug_log!(
+        "page-cache",
+        "{kind} keyed payload hit: {:.3}s bytes={}",
+        started.elapsed().as_secs_f64(),
+        blob.len()
+    );
+    Ok(Some(decoded))
 }
 
 /// Persist query provenance for structural ids emitted by one exact inspect
@@ -355,15 +736,13 @@ pub(crate) fn remember_structural_id_hints<'a>(
     };
     let mut changed = false;
     for id in ids {
-        if !matches!(id.split_once(':'), Some(("F" | "G", body)) if !body.is_empty()) {
+        if !matches!(id.split_once(':'), Some(("F" | "G" | "T", body)) if !body.is_empty()) {
             continue;
         }
-        if registry.by_id.get(id) != Some(&hint) {
-            registry.by_id.insert(id.to_string(), hint.clone());
-            changed = true;
-        }
+        changed |= registry.remember(id, &hint);
     }
     if changed {
+        registry.evict_to_bound();
         if let Err(error) = save_keyed_payload(
             workspace,
             STRUCTURAL_ID_HINTS_KEY,
@@ -387,13 +766,37 @@ pub(crate) fn structural_id_hint(workspace: &Path, id: &str) -> anyhow::Result<O
     )
 }
 
+thread_local! {
+    static CACHE_FIELDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `skip_serializing_if` predicate for fields that exist only to replay a
+/// cached report (hydration plans, function ids, cost estimates): hidden
+/// from every user-facing JSON document, emitted only while a payload is
+/// being written.
+pub(crate) fn hide_cache_only<T>(_: &T) -> bool {
+    !CACHE_FIELDS.with(std::cell::Cell::get)
+}
+
+fn with_cache_fields<R>(f: impl FnOnce() -> R) -> R {
+    let previous = CACHE_FIELDS.with(|flag| flag.replace(true));
+    let result = f();
+    CACHE_FIELDS.with(|flag| flag.set(previous));
+    result
+}
+
 /// Atomically write `value` as JSON to `path` via a temp file + rename,
 /// fsync'd so a crash can't leave a torn cache file. Shared by the page
 /// cache and the keyed-payload store.
 fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
-    let Some(bytes) = serialize_json_bounded(value, MAX_PAYLOAD_BYTES)? else {
-        tracing::debug!(
-            "skipping rendered cache file: serialized value exceeds {MAX_PAYLOAD_BYTES} cache bound"
+    // The keyed-payload value is bounded by its own writer; the envelope
+    // itself is bounded by the largest bound any writer may use.
+    let Some(bytes) =
+        serialize_json_bounded(value, MAX_REPORT_PAYLOAD_BYTES.saturating_add(MAX_PAYLOAD_BYTES))?
+    else {
+        bonsai_diagnostics::debug_log!(
+            "page-cache",
+            "skipping rendered cache file: serialized value exceeds the cache bound"
         );
         return Ok(());
     };
@@ -416,9 +819,12 @@ fn save_pages_value(
     pages: Vec<CachedPage>,
 ) -> anyhow::Result<()> {
     // The rendered-page cache exists to make repeated requests and page
-    // turns cheap. Persist one requested page from a multi-page report, but
-    // avoid freshness walks and disk I/O for terminal single-page commands.
-    if cache_disabled() || pages.is_empty() || pages.iter().all(|page| page.total_pages <= 1) {
+    // turns cheap. Every report is cached even when it fits one page: a
+    // corridor that fits one page still costs the whole query to recompute,
+    // and a security inventory that fits one page still costs a workspace
+    // open before its keyed payload can be read. Replaying the rendered
+    // page skips both.
+    if cache_disabled() || pages.is_empty() {
         return Ok(());
     }
     let dir = cache_dir(workspace);
@@ -468,6 +874,31 @@ pub(crate) fn requested_page_window(current_page: u64, total_pages: u64) -> BTre
         return pages;
     }
     pages.insert(current_page.clamp(1, total_pages));
+    pages
+}
+
+/// Query reports up to this many pages are rendered and cached in full on
+/// the first request, so every later page is a replay.
+const FULL_RENDER_PAGE_LIMIT: u64 = 12;
+
+/// The pages a query report (browse, inspect-graph) renders now: the
+/// requested page, the page after it (so `--page next` replays), and every
+/// page of a short report. A page render costs milliseconds next to the
+/// query that produced the rows; long reports still render on demand.
+pub(crate) fn query_report_page_window(current_page: u64, total_pages: u64) -> BTreeSet<u64> {
+    let mut pages = BTreeSet::new();
+    if total_pages == 0 {
+        return pages;
+    }
+    let current = current_page.clamp(1, total_pages);
+    if total_pages <= FULL_RENDER_PAGE_LIMIT {
+        pages.extend(1..=total_pages);
+        return pages;
+    }
+    pages.insert(current);
+    if current < total_pages {
+        pages.insert(current + 1);
+    }
     pages
 }
 
@@ -568,7 +999,7 @@ where
     let mut cached_pages = Vec::new();
     let render_label = format!("rendering {command} page");
     let render_stage = progress::ScopedSpinner::new(&render_label);
-    for page_number in requested_page_window(current_page, current_info.total_pages) {
+    for page_number in query_report_page_window(current_page, current_info.total_pages) {
         let mut page_cfg = cfg.clone();
         if page_number != current_page {
             page_cfg.page = paging::PageArg::Number(page_number);
@@ -739,22 +1170,35 @@ fn normalized_argv_hash() -> u64 {
     h.finish()
 }
 
+/// Flags that cannot change the rendered bytes: page selection, output
+/// destination (every spelling), and stderr-only / scheduling switches. They
+/// are dropped from the rendered-page key so toggling them replays the same
+/// page instead of recomputing it.
+const KEY_NEUTRAL_FLAGS_WITH_VALUE: &[&str] = &[
+    "--page",
+    "--output-path",
+    "--output",
+    "-o",
+    "--debug",
+    "--memory-budget",
+];
+const KEY_NEUTRAL_FLAGS: &[&str] = &["--no-progress"];
+
 fn normalized_argv_without_page() -> Vec<String> {
     let mut out = Vec::new();
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
-        if arg == "--page" {
+        if KEY_NEUTRAL_FLAGS_WITH_VALUE.contains(&arg.as_str()) {
             let _ = args.next();
             continue;
         }
-        if arg.starts_with("--page=") {
+        if KEY_NEUTRAL_FLAGS_WITH_VALUE
+            .iter()
+            .any(|flag| flag.starts_with("--") && arg.starts_with(&format!("{flag}=")))
+        {
             continue;
         }
-        if arg == "--output-path" {
-            let _ = args.next();
-            continue;
-        }
-        if arg.starts_with("--output-path=") {
+        if KEY_NEUTRAL_FLAGS.contains(&arg.as_str()) {
             continue;
         }
         out.push(arg);

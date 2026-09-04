@@ -21,8 +21,10 @@ Keep the workspace positional and prefer explicit selector flags
 agent calls. Positional selectors remain supported for interactive use, but
 the CLI rejects supplying both forms. Output files accept `-o`, `--output`,
 and `--output-path`.
-Use `--html-output <file>` for a standalone themed human report; it wraps the
-selected command's text view and must never enable additional analysis.
+Use `--html-output <file>` for a standalone themed human report rendered from
+the command's canonical JSON result (the same document `--format json`
+prints); it must never enable additional analysis and is mutually exclusive
+with `--output-path`.
 For save-time workflows, keep `index <workspace> --watch --no-progress`
 running; command and SDK facades refresh saved file changes before they
 render.
@@ -33,8 +35,8 @@ intentionally want structural semantic sidecars and
 the external workspace-cache `manifest.json` built up front; commands still validate sidecar
 headers/payloads before reuse and compute requested exact facts on demand.
 Retrieval is candidate lookup only: search and literal-filtered browse can
-reuse a fresh sidecar before candidate lookup, and large-workspace inspect can
-use a warmed sidecar only before opening a scoped workspace. Rendered facts
+reuse a fresh sidecar before candidate lookup, and large-workspace
+`inspect-graph` can use a warmed sidecar only before opening a scoped workspace. Rendered facts
 still hydrate through canonical APIs, and scoped query workspaces do not
 publish partial retrieval sidecars under the full workspace cache.
 
@@ -245,7 +247,8 @@ Start with shape, then follow one concrete behavior.
 ./target/release/bonsai-ninja index <workspace> --structural-only --no-progress
 # Optional during active editing:
 ./target/release/bonsai-ninja index <workspace> --watch --no-progress
-./target/release/bonsai-ninja context <workspace> --no-color --no-progress
+# Workspace roots, language coverage, and the `context` object as JSON:
+./target/release/bonsai-ninja index <workspace> --format json --no-color --no-progress
 ./target/release/bonsai-ninja tree <workspace> --max-depth 3 --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja imports <workspace> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja defs <workspace> --kind function --context 16k --no-color --no-progress
@@ -265,48 +268,45 @@ Find anchors with `search`, then pivot to structured facts:
 Understand behavior:
 
 ```shell
-./target/release/bonsai-ninja inspect <workspace> --query <target> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja inspect <workspace> --query <target> --taint-flow --context 16k --no-color --no-progress
-./target/release/bonsai-ninja symbol-summary <workspace> --symbol <target> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja inspect <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja path <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
+./target/release/bonsai-ninja inspect-graph <workspace> --query <target> --context 16k --no-color --no-progress
+./target/release/bonsai-ninja inspect-graph <workspace> --query <target> --kind decl --compact --context 16k --no-color --no-progress
+./target/release/bonsai-ninja inspect-graph <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja show <workspace> --id F:<id> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja trace <workspace> --symbol <entry-function> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja slice <workspace> --symbol <symbol> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja read-file <workspace> --file <path> --lines A:B --context 16k --no-color --no-progress
 ```
 
-Use qualified `Owner.member` trace selectors when short method names collide;
-`path:name` and `path:line:name` provide exact file disambiguation. When both
-endpoints are known, prefer `trace --from <entry> --to <target>`: declared
-endpoints are projected to the complete compiler-resolved graph corridor
-before symbolic interpretation, without interpreting sibling branches first.
+Use qualified `Owner.member` selectors when short method names collide. When
+both endpoints are known, prefer `inspect-graph --from <entry> --to <target>`:
+the endpoints are projected to the exact compressed compiler-resolved corridor
+(the forward-reachable ∩ backward-reachable cut of the callgraph, rendered as a
+`CORRIDOR` section plus one `CORRIDOR FLOW` body walk) with no path
+enumeration.
 
-For `slice`, omit `--line` when the symbol has one compiler syntax-flow site.
-If the result reports ambiguity, add the printed `--line` and optionally
-`--file`; the command never falls back to raw-text matching.
+There is no CLI backward slice. For "what influences this symbol?", combine
+`inspect-graph --query <symbol>` with `refs` / `vars` for its read and write
+sites; the SDK `slices` API remains available for programmatic slices.
 
-`inspect` is rulepack-free by default and renders indexed syntax facts. Use
-`--graph-flow` to add structural source-body evidence and `--taint-flow` to
-explicitly add rulepack-free raw taint paths. These flags change output scope,
-not analysis accuracy: emitted graph facts still use the single compiler-proven
-static-evidence contract. `Exact` and `Narrowed` are per-edge proof-provenance
-labels, never alternate modes. Inspect raw taint paths go through the workspace syntax-flow
-facade. Syntax discovery records exact matching Tree-sitter spans and releases
-body/callgraph caches before a persisted IDG opens. A warm query batch resolves
-those spans to typed target nodes and reuses one sparse backward demand proof;
-a sidecar miss builds an exact query-scoped source/target IDG, with the
-canonical cached dataflow graph retained only as the compatibility fallback.
-Broad raw-flow reports compute every exact path before pagination, reuse
-worker-precomputed row costs, and format/cache only the requested page. Follow
-the printed page or cursor for more; page 1 never eagerly renders later pages.
-Use plain `inspect`, `refs`, or `calls` for symbol lookup. `--graph-flow`
-adds one bounded source/evidence unit per matching callable; it never
-recursively materializes caller/callee path combinations. Use
-`symbol-summary` for the callable's declaration, source, imports, direct
-resolved neighbors, and unresolved-call evidence. When both endpoints are
-known, use `path --from ... --to ...` for the exact compressed graph corridor,
-or `trace --from ... --to ...` to interpret that corridor.
+`inspect-graph` is rulepack-free. It renders indexed syntax hits, attaches one
+bounded compiler evidence unit (a stable `F:` flow with the source body, direct
+resolved callers/callees, and the match point) to every matching callable, and
+expands every rulepack-free raw taint flow through a match into its full
+`TAINT CALL STACK`. Emitted graph facts use the single compiler-proven
+static-evidence contract: `Exact` and `Narrowed` are per-edge proof-provenance
+labels, never alternate modes. Raw taint paths go through the workspace
+syntax-flow facade. Syntax discovery records exact matching Tree-sitter spans
+and releases body/callgraph caches before a persisted IDG opens. A warm query
+batch resolves those spans to typed target nodes and reuses one sparse backward
+demand proof; a sidecar miss builds an exact query-scoped source/target IDG,
+with the canonical cached dataflow graph retained only as the compatibility
+fallback. Broad raw-flow reports compute every exact path before pagination,
+reuse worker-precomputed row costs, and format/cache only the requested page.
+Follow the printed page or cursor for more; page 1 never eagerly renders later
+pages. Use plain `inspect-graph --query`, `refs`, or `calls` for symbol lookup.
+Each `decl` hit carries the callable's signature, imports, direct resolved
+neighbors (stable `E:` edge ids), and external-call evidence; it never
+recursively materializes caller/callee path combinations. `--compact` drops
+the inlined bodies; `--kind`, `--file`, and `--in-fn` narrow the hits;
+`--flow F:<id>` / `--group G:<id>` re-render one structural unit.
 
 Record understanding as:
 
@@ -326,8 +326,7 @@ Use the tool to narrow the bug before editing.
 ./target/release/bonsai-ninja search <workspace> --query <symptom> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja refs <workspace> --symbol <symbol> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja calls <workspace> --callee <callee> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja inspect <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja trace <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
+./target/release/bonsai-ninja inspect-graph <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
 ```
 
 If high-level output disagrees with source, use the debug ladder:
@@ -419,7 +418,7 @@ line, sanitizer status, and the exact page/cursor coverage reviewed.
 Security `F:` ids are taint-path flow ids and security `G:` ids are
 taint-path group ids; reopen them with `show F:<id>` / `show G:<id>` or
 `security taint-analysis --flow F:<id>` / `--group G:<id>`. Use
-`inspect --flow` / `inspect --group` for structural ids printed by
+`inspect-graph --flow` / `inspect-graph --group` for structural ids printed by
 code-navigation commands.
 
 ## Rulepack Work

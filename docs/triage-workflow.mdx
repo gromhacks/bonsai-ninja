@@ -62,14 +62,21 @@ not copy this overlay-only suppression pattern into the bundled pack.
 | ID | Meaning | Use |
 |---|---|---|
 | `S:` | Stable finding ID | Cross-run dedupe and triage tracking. |
-| `F:` | Stable flow ID | Re-render a security taint path with `show F:...` or `security taint-analysis --flow`; use `inspect --flow` only for structural inspect flow IDs. |
-| `G:` | Stable group ID | Re-render a structural group with `show G:...` / `inspect --group`, or a security taint group with `show G:...` / `security taint-analysis --group`. |
-| `T:` | Taint propagation record ID | Debug propagation with `dump-taint`. |
+| `F:` | Stable flow ID | Re-render a security taint path with `show F:...` or `security taint-analysis --flow`; use `inspect-graph --flow` only for structural `inspect-graph` flow IDs. |
+| `G:` | Stable group ID | Re-render a structural group with `show G:...` / `inspect-graph --group`, or a security taint group with `show G:...` / `security taint-analysis --group`. |
+| `T:` | Taint propagation record ID | Raw `inspect-graph` taint flow or `dump-taint` propagation; reopen with `show T:...` (add `--taint-source` and the original seeds for `dump-taint` ids). |
 
 ## Re-Run
 
 ```bash
 bonsai-ninja security ./src taint-analysis --format json --all > after.json
+bonsai-ninja security ./src taint-analysis --baseline before.json
 bonsai-ninja security ./src taint-analysis --flow F:0123456789abcdef
 bonsai-ninja show ./src --id F:0123456789abcdef
 ```
+
+`--baseline <PREV_JSON>` compares the current report with an earlier
+`--format json --all` file and labels each finding `new`, `unchanged`, or
+`fixed` (text appends a `baseline diff` line; JSON adds `baseline_status` per
+row and a top-level `baseline` object). It is render-only and reuses the
+current analysis.

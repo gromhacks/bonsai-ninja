@@ -1,4 +1,4 @@
-//! `bonsai-ninja inspect` — find compiler syntax facts and optionally hydrate
+//! `bonsai-ninja inspect-graph` — find compiler syntax facts and hydrate
 //! bounded, source-inlined evidence for each selected symbol. Transitive call
 //! structure remains an exact compressed graph rather than an enumeration of
 //! concrete call paths. JSON output is structurally the same, keyed by
@@ -26,8 +26,6 @@ use crate::ui::Ui;
 use crate::{cli_println, progress, ui, NO_CACHE};
 
 use crate::args::FactKindFilter;
-use bonsai_sdk::refs::read_anchor_line;
-use bonsai_sdk::RefOut;
 
 use super::{
     format_span, nearest_names, open_project_index_matching_literal, open_project_index_matching_path,
@@ -43,7 +41,7 @@ use super::{
 const INSPECT_GRAPH_FLOW_FILE_LIMIT: usize = 5_000;
 const FLOW_LABEL_PLACEHOLDER: &str = "__BONSAI_FLOW_LABEL__";
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct InspectOut {
     symbol: String,
     kind: String,
@@ -51,8 +49,20 @@ struct InspectOut {
     line: u32,
     column: u32,
     params: Vec<String>,
-    direct_callers: Vec<RefOut>,
-    callees: Vec<String>,
+    signature: String,
+    /// Resolved direct callers with stable `E:` edge ids and resolver
+    /// provenance.
+    direct_callers: Vec<bonsai_sdk::SymbolCallEdge>,
+    /// Resolved direct callees with stable `E:` edge ids and resolver
+    /// provenance.
+    direct_callees: Vec<bonsai_sdk::SymbolCallEdge>,
+    /// Call sites inside the callable with candidates but no compiler-proven
+    /// target (external APIs, parameter-dispatched calls).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    external_calls: Vec<bonsai_sdk::UnresolvedCallEvidence>,
+    /// The callable's file imports: the names the body can reach.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    imports: Vec<bonsai_sdk::SymbolImport>,
     flows: Vec<InspectFlowRendered>,
     /// Longest-shared-suffix grouping of `flows`. Always populated
     /// alongside `flows` so JSON consumers can pick either view.
@@ -62,7 +72,7 @@ struct InspectOut {
     summary: InspectSummary,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct InspectSummary {
     evidence_units: u32,
     max_functions_per_unit: u32,
@@ -88,7 +98,7 @@ pub(crate) struct InspectFlowRendered {
     /// Deferred source-body hydration. `Some` from enumeration until the
     /// page renderer hydrates this unit; the wire never carries it. Flow
     /// identity (`flow_id`, chain, function metadata) is complete without it.
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "crate::page_cache::hide_cache_only")]
     pub(crate) plan: Option<FlowHydrationPlan>,
 }
 
@@ -104,14 +114,14 @@ pub(crate) struct InspectFunctionRendered {
     pub(crate) lines: Vec<InspectLine>,
     /// Body byte size from the compiler span; the paging cost until `lines`
     /// are hydrated.
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "crate::page_cache::hide_cache_only")]
     pub(crate) body_bytes: u64,
 }
 
 /// Everything needed to hydrate one flow's source bodies later: the exact
 /// chain, cached call-site spans, the match override, and the endpoint
 /// filters whose markers are painted onto the rendered lines.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct FlowHydrationPlan {
     chain: Vec<bonsai_common::FuncId>,
     call_spans: Vec<Option<bonsai_common::Span>>,
@@ -121,7 +131,7 @@ pub(crate) struct FlowHydrationPlan {
     full_source_for_large_bodies: bool,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct OwnedInspectFilters {
     from: Option<String>,
     from_kind: Option<FactKindFilter>,
@@ -175,7 +185,7 @@ pub(crate) struct InspectLine {
     pub(crate) annotation: Option<String>,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 struct InspectReport {
     query: String,
     regex: bool,
@@ -191,12 +201,191 @@ struct InspectReport {
     /// Non-decl occurrences (calls, strings, vars, imports, args, refs,
     /// decorators) with the enclosing function and a chain preview.
     hits: Vec<HitOut>,
-    /// Raw taint-engine paths matching the inspect query / filters.
-    /// Populated only by explicit `--taint-flow`/`T:` requests; no rulepack
-    /// source/sink/sanitizer semantics are involved.
+    /// Raw taint-engine paths through the matched callables, each expanded
+    /// into its call stack; no rulepack source/sink/sanitizer semantics are
+    /// involved.
     #[serde(default)]
     taint_flows: Vec<InspectTaintFlow>,
+    /// Exact compiler corridor between `--from` and `--to` (explicit
+    /// endpoint queries only).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    corridor: Option<InspectCorridor>,
     summary: InspectReportSummary,
+}
+
+/// The exact compressed compiler corridor between two endpoints: every
+/// resolved callable on some call path from `from` to `to`, the resolved
+/// edges between them, and — when `to` names an external API rather than a
+/// workspace callable — the terminal call sites the corridor ends at. `stack`
+/// expands the corridor's callables into source bodies, in call order from
+/// the source, so the whole call stack is readable in one place.
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct InspectCorridor {
+    from: String,
+    to: String,
+    representation: String,
+    analysis_complete: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    analysis_incomplete_reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    backends: Vec<String>,
+    /// Whether a warmed IDG augmented the resolved callgraph with semantic
+    /// cross-call edges while projecting this corridor.
+    idg_available: bool,
+    /// Number of warmed-IDG semantic cross-call edges consulted.
+    idg_semantic_edges: usize,
+    node_count: usize,
+    edge_count: usize,
+    nodes: Vec<bonsai_sdk::PathFunctionRow>,
+    edges: Vec<bonsai_sdk::EdgeRecord>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    terminal_calls: Vec<bonsai_sdk::PathTerminalCallRow>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    stack: Option<InspectFlowRendered>,
+    /// Raw `FuncId`s of the matched source callables: raw taint flows are
+    /// seeded from these so multi-hop taint paths through the corridor are
+    /// reported alongside the structural stack.
+    #[serde(default, skip_serializing_if = "crate::page_cache::hide_cache_only")]
+    source_funcs: Vec<u32>,
+}
+
+impl InspectCorridor {
+    fn stack_len(&self) -> usize {
+        self.stack.as_ref().map_or(0, |stack| stack.functions.len())
+    }
+}
+
+/// Project the exact compiler corridor for an explicit `--from A --to B`
+/// query and plan its expanded call stack. The corridor is the
+/// forward-reachable ∩ backward-reachable cut of the resolved callgraph
+/// (no path enumeration). The stack is one linearization of that cut in
+/// call order from the source: a chain corridor renders exactly; a
+/// branching corridor renders every callable once, with the edge table
+/// naming every resolved hop.
+fn build_inspect_corridor(
+    ws: &Workspace,
+    from: &str,
+    to: &str,
+    is_regex: bool,
+    full_source_for_large_bodies: bool,
+) -> Result<Option<InspectCorridor>> {
+    let stage = progress::ScopedSpinner::new("projecting compiler corridor");
+    let outcome = bonsai_sdk::compiler_corridor(
+        ws,
+        &bonsai_sdk::PathFilters {
+            from,
+            to,
+            regex: is_regex,
+        },
+    )
+    .with_context(|| format!("invalid endpoint regex: {from} / {to}"))?;
+    stage.finish();
+    // A corridor exists only when at least one callable lies on a path
+    // between the endpoints; terminal call sites alone are not a corridor.
+    if outcome.nodes.is_empty() {
+        return Ok(None);
+    }
+    // Call-order linearization: depth-first from every source callable over
+    // corridor edges, each callable once. Targets that are unreachable
+    // through edges (a source that is itself the target) still appear.
+    let mut adjacency: ahash::AHashMap<u32, Vec<u32>> = ahash::AHashMap::new();
+    for (caller, callee) in &outcome.corridor_edges {
+        adjacency.entry(*caller).or_default().push(*callee);
+    }
+    for callees in adjacency.values_mut() {
+        callees.sort_unstable();
+        callees.dedup();
+    }
+    let corridor_nodes: ahash::AHashSet<u32> = outcome.nodes.iter().map(|node| node.func).collect();
+    let mut order: Vec<u32> = Vec::with_capacity(outcome.nodes.len());
+    let mut seen: ahash::AHashSet<u32> = ahash::AHashSet::new();
+    let mut stack: Vec<u32> = Vec::new();
+    let mut roots: Vec<u32> = outcome
+        .source_funcs
+        .iter()
+        .copied()
+        .filter(|func| corridor_nodes.contains(func))
+        .collect();
+    roots.sort_unstable();
+    for root in roots {
+        stack.push(root);
+        while let Some(func) = stack.pop() {
+            if !seen.insert(func) {
+                continue;
+            }
+            order.push(func);
+            if let Some(callees) = adjacency.get(&func) {
+                for callee in callees.iter().rev() {
+                    if corridor_nodes.contains(callee) && !seen.contains(callee) {
+                        stack.push(*callee);
+                    }
+                }
+            }
+        }
+    }
+    for node in &outcome.nodes {
+        if seen.insert(node.func) {
+            order.push(node.func);
+        }
+    }
+    // The node table reads in the same call order as the expanded stack.
+    let mut nodes = outcome.nodes;
+    let position: ahash::AHashMap<u32, usize> = order.iter().enumerate().map(|(i, f)| (*f, i)).collect();
+    nodes.sort_by_key(|node| position.get(&node.func).copied().unwrap_or(usize::MAX));
+    let chain: Vec<bonsai_common::FuncId> = order.into_iter().map(bonsai_common::FuncId::new).collect();
+    // When the target is an external call site, mark it inside the last
+    // callable of the stack so the reader sees exactly where the corridor
+    // ends.
+    let match_at = chain.last().and_then(|last| {
+        outcome
+            .terminal_calls
+            .iter()
+            .find(|call| call.func == last.raw())
+            .and_then(|call| {
+                call.span.map(|span| {
+                    (
+                        chain.len() - 1,
+                        MatchOverride {
+                            span,
+                            label: format!("TO: {}", call.name),
+                            marker_subjects: vec![call.name.clone()],
+                        },
+                    )
+                })
+            })
+    });
+    let stack = if chain.is_empty() {
+        None
+    } else {
+        plan_flow_with_cached_call_spans(
+            ws,
+            &chain,
+            &vec![None; chain.len().saturating_sub(1)],
+            1,
+            "1",
+            match_at,
+            InspectFilters::default(),
+            true,
+            full_source_for_large_bodies,
+        )
+    };
+    Ok(Some(InspectCorridor {
+        from: outcome.from,
+        to: outcome.to,
+        representation: outcome.representation.to_string(),
+        analysis_complete: outcome.analysis_complete,
+        analysis_incomplete_reasons: outcome.analysis_incomplete_reasons,
+        backends: outcome.backends,
+        idg_available: outcome.idg_available,
+        idg_semantic_edges: outcome.idg_semantic_edges,
+        node_count: outcome.node_count,
+        edge_count: outcome.edge_count,
+        nodes,
+        edges: outcome.edges,
+        terminal_calls: outcome.terminal_calls,
+        stack,
+        source_funcs: outcome.source_funcs,
+    }))
 }
 
 #[derive(Clone)]
@@ -212,6 +401,11 @@ enum InspectJsonPageUnit<'a> {
         flow: Option<&'a InspectFlowRendered>,
     },
     Taint(&'a InspectTaintFlow),
+    /// One callable of the corridor call stack.
+    Corridor {
+        index: usize,
+        function: &'a InspectFunctionRendered,
+    },
 }
 
 impl Serialize for InspectJsonPageUnit<'_> {
@@ -226,6 +420,10 @@ impl Serialize for InspectJsonPageUnit<'_> {
                 state.serialize_field("section", "decl_hits")?;
                 state.serialize_field("value", &paged_decl_hit(hit, *flow))?;
             }
+            Self::Corridor { function, .. } => {
+                state.serialize_field("section", "corridor")?;
+                state.serialize_field("value", function)?;
+            }
             Self::Hit { hit, flow, .. } => {
                 state.serialize_field("section", "hits")?;
                 state.serialize_field("value", &paged_occurrence_hit(hit, *flow))?;
@@ -239,7 +437,7 @@ impl Serialize for InspectJsonPageUnit<'_> {
     }
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 struct InspectReportSummary {
     total_decl_hits: usize,
     total_hits: usize,
@@ -280,15 +478,15 @@ struct InspectReportSummary {
     graph_flow_incomplete_reasons: Vec<String>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct InspectTaintFlow {
     taint_id: String,
     entry: String,
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "crate::page_cache::hide_cache_only")]
     entry_kind: Option<DeclKind>,
     terminal: String,
     terminal_kind: String,
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "crate::page_cache::hide_cache_only")]
     func_ids: Vec<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     chain_display: Vec<String>,
@@ -297,11 +495,66 @@ struct InspectTaintFlow {
     /// Conservative serialized-size estimate computed while the owning
     /// closure worker already has this row hot. Paging reads it in O(1)
     /// instead of walking every step in the complete result set again.
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "crate::page_cache::hide_cache_only")]
     json_size_upper_bound: u64,
+    /// The expanded call stack (one rendered function per hop). Hydrated for
+    /// the rows on the rendered page; text and JSON carry the same bodies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flow: Option<InspectFlowRendered>,
+    /// Structural caller stack above the entry: the shallowest entry point
+    /// that reaches it and the callees in between (root first). Attached
+    /// from one reverse callgraph walk; empty when the entry is itself an
+    /// entry point or no persisted callgraph is available.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lineage: Vec<String>,
+    #[serde(default, skip_serializing_if = "crate::page_cache::hide_cache_only")]
+    lineage_func_ids: Vec<u32>,
+    /// Every other entry-point chain that reaches the entry, in the same
+    /// root-first shape as `lineage`; each renders as its own call stack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    alternate_lineages: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "crate::page_cache::hide_cache_only")]
+    alternate_lineage_func_ids: Vec<Vec<u32>>,
 }
 
-#[derive(Serialize, Clone)]
+/// Attach the structural caller stack to every raw taint flow: one
+/// breadth-first reverse walk over the persisted callgraph from the distinct
+/// entry callables, then a pointer walk per entry. O(lineage), no closure.
+fn attach_taint_lineage(ws: &Workspace, flows: &mut [InspectTaintFlow]) {
+    let mut entries: Vec<bonsai_common::FuncId> = flows
+        .iter()
+        .filter_map(|flow| flow.func_ids.first().copied())
+        .map(bonsai_common::FuncId::new)
+        .collect();
+    entries.sort_unstable_by_key(|func| func.raw());
+    entries.dedup();
+    let Some(chains) = ws.target_inspect_lineage_chains(&entries) else {
+        return;
+    };
+    for flow in flows.iter_mut() {
+        let Some(entry) = flow.func_ids.first().copied() else {
+            continue;
+        };
+        let Some(entry_chains) = chains.get(&bonsai_common::FuncId::new(entry)) else {
+            continue;
+        };
+        let mut entry_chains = entry_chains.iter();
+        let Some(chain) = entry_chains.next() else {
+            continue;
+        };
+        flow.lineage_func_ids = chain.iter().map(|func| func.raw()).collect();
+        flow.lineage = chain.iter().map(|func| func_display_name(ws, *func)).collect();
+        flow.alternate_lineage_func_ids = entry_chains
+            .clone()
+            .map(|chain| chain.iter().map(|func| func.raw()).collect())
+            .collect();
+        flow.alternate_lineages = entry_chains
+            .map(|chain| chain.iter().map(|func| func_display_name(ws, *func)).collect())
+            .collect();
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 struct InspectTaintStep {
     caller: String,
     callee: String,
@@ -313,7 +566,7 @@ struct InspectTaintStep {
     tainted_args: Vec<InspectTaintedArg>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct InspectTaintedArg {
     index: usize,
     value_text: String,
@@ -349,7 +602,7 @@ impl TaintFlowIdentityStep for InspectTaintStep {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct HitOut {
     kind: String,
     text: String,
@@ -382,7 +635,7 @@ struct HitOut {
 /// where it lives in the workspace. Rendered as `name (file:line:col)`
 /// in the occurrence-hits table so the row summarises the full flow
 /// without the user having to dig into the rendered body below.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct FilterMatch {
     /// The matched symbol / text (e.g. `handleRequest`, `Process`).
     name: String,
@@ -624,15 +877,20 @@ fn collect_decl_hits(
     // for graph evidence. Exact bodies are hydrated only for the selected
     // chains below; retaining every workspace body here made a narrow inspect
     // pay whole-program memory before it knew its targets.
-    let global = ws.compiler_header_index();
-    let mut matched_decls = Vec::new();
-    for file in options.files_in_path_order.iter().copied() {
-        for decl in global.decls_in(file) {
-            if options.matcher.is_declaration_match(decl) {
-                matched_decls.push(decl.clone());
-            }
-        }
-    }
+    // The precomputed declaration-name index answers the matcher without
+    // walking every workspace declaration or lowercasing names per query.
+    let file_order: ahash::AHashMap<bonsai_common::FileId, usize> = options
+        .files_in_path_order
+        .iter()
+        .enumerate()
+        .map(|(position, file)| (*file, position))
+        .collect();
+    let mut matched_decls: Vec<bonsai_lang_api::Decl> = bonsai_sdk::matching_decls(ws, options.matcher)
+        .into_iter()
+        .filter(|decl| file_order.contains_key(&decl.name_span.file))
+        .collect();
+    // Path order, then adapter emission order (symbol ids follow it).
+    matched_decls.sort_by_key(|decl| (file_order[&decl.name_span.file], decl.symbol.raw()));
     // Prefer callables first so the most interesting flows land on top.
     matched_decls.sort_by_key(|decl| match decl.kind {
         DeclKind::Function | DeclKind::Method | DeclKind::Constructor => 0,
@@ -734,8 +992,32 @@ fn collect_decl_hits(
         .into_iter()
         .collect();
         dedup_structural_flows(&mut flows);
-        let direct_callers = semantic_direct_callers(ws, chain_cache.resolved_graph(), target_func);
-        let callees = semantic_callees(ws, chain_cache.resolved_graph(), target_func);
+        let packet = bonsai_sdk::symbol_summary(
+            ws,
+            ws.compiler_header_index().as_ref(),
+            chain_cache.resolved_graph(),
+            target_func,
+        );
+        let (signature, direct_callers, direct_callees, external_calls, imports) = packet.map_or_else(
+            || {
+                (
+                    build_signature(decl),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            },
+            |packet| {
+                (
+                    packet.signature,
+                    packet.direct_callers,
+                    packet.direct_callees,
+                    packet.unresolved_calls,
+                    packet.imports,
+                )
+            },
+        );
         let unique_entries: ahash::AHashSet<&String> =
             flows.iter().filter_map(|flow| flow.chain.first()).collect();
         let summary = InspectSummary {
@@ -755,8 +1037,11 @@ fn collect_decl_hits(
             line,
             column: col,
             params: decl.params.clone(),
+            signature,
             direct_callers,
-            callees,
+            direct_callees,
+            external_calls,
+            imports,
             flows,
             groups,
             summary,
@@ -776,6 +1061,10 @@ struct OccurrenceHitPass<'a> {
     taint_flow: bool,
     occurrence_scan_skipped_for_id_lookup: bool,
     partial_workspace: bool,
+    /// Callables of the exact compiler corridor when `--from`/`--to` are
+    /// both set. Occurrence hits (and therefore taint closures) outside them
+    /// are not part of the corridor result.
+    corridor_funcs: Option<&'a ahash::AHashSet<bonsai_common::FuncId>>,
 }
 
 struct OccurrenceGraphFilterResult {
@@ -1135,21 +1424,27 @@ fn collect_occurrence_hits<'workspace>(
         taint_flow,
         occurrence_scan_skipped_for_id_lookup,
         partial_workspace,
+        corridor_funcs,
     } = options;
     // ----- 2. Non-decl hits: calls, assignments, strings, imports, args, decorators, refs.
     let mut hits: Vec<HitOut> = Vec::new();
     // Every occurrence hit renders its compiler flow, so warm the cached
     // resolved graph once up front instead of on the first hit.
     let _ = chain_cache.resolved_graph();
-    let endpoint_corridor_funcs =
-        (partial_workspace && filters.from.is_some() && filters.to.is_some()).then(|| {
+    // Corridor mode: hits belong to the corridor's callables. The projected
+    // corridor is exact for complete and partial opens alike; the
+    // endpoint-scoped graph is the fallback when no corridor was projected.
+    let endpoint_corridor_funcs = match corridor_funcs {
+        Some(funcs) if filters.from.is_some() && filters.to.is_some() => Some(funcs.clone()),
+        _ => (partial_workspace && filters.from.is_some() && filters.to.is_some()).then(|| {
             chain_cache
                 .resolved_graph()
                 .nodes()
                 .iter()
                 .map(|node| node.func)
                 .collect::<ahash::AHashSet<_>>()
-        });
+        }),
+    };
     type OccurrenceHitKey = (String, String, String, u32, u32, Option<String>);
     let mut seen_hits = ahash::AHashSet::<OccurrenceHitKey>::default();
     let mut push_hit = |kind: &str,
@@ -1300,7 +1595,13 @@ fn collect_occurrence_hits<'workspace>(
 struct InspectFinish<'a> {
     pattern: Option<&'a str>,
     is_regex: bool,
+    /// Kinds the user asked for: a view over the complete report.
     kind_filter: &'a [String],
+    /// Kinds the scan itself narrows to: empty for every non-lexical
+    /// request (the complete report is computed and cached), the requested
+    /// kinds when a lexical kind (`decorator`, `ref`) is asked for, because
+    /// those are excluded from the complete report by design.
+    scan_kind_filter: &'a [String],
     filters: InspectFilters<'a>,
     provenance_filters: InspectFilters<'a>,
     render: InspectRenderOptions,
@@ -1308,6 +1609,87 @@ struct InspectFinish<'a> {
     format: BrowseFormat,
     taint_flow: bool,
     graph_flow_incomplete_reason: Option<&'a str>,
+    corridor: Option<InspectCorridor>,
+}
+
+/// Lexical hit kinds are excluded from the complete report unless asked for.
+fn kind_filter_is_lexical(kind_filter: &[String]) -> bool {
+    kind_filter
+        .iter()
+        .any(|kind| matches!(kind.to_lowercase().as_str(), "decorator" | "ref"))
+}
+
+/// The kinds a scan narrows to for `kind_filter` (see `InspectFinish`).
+fn scan_kind_filter_for<'a>(kind_filter: &'a [String]) -> &'a [String] {
+    if kind_filter_is_lexical(kind_filter) {
+        kind_filter
+    } else {
+        &[]
+    }
+}
+
+/// Apply the `--kind` view to a complete report: keep the hits of the
+/// requested kinds, declaration hits only when `decl` is among them, and the
+/// raw taint flows that carry one of the kinds. Summary counts follow.
+fn apply_kind_view(report: &mut InspectReport, kind_filter: &[String]) {
+    if kind_filter.is_empty() || kind_filter == report.kind_filter.as_slice() {
+        return;
+    }
+    let requested: ahash::AHashSet<String> = kind_filter.iter().map(|kind| kind.to_lowercase()).collect();
+    let selection = InspectKindSelection {
+        requested,
+        endpoint_kind: None,
+        exclude_lexical_by_default: false,
+    };
+    report.hits.retain(|hit| selection.wants(&hit.kind));
+    if !selection.wants("decl") {
+        report.decl_hits.clear();
+    }
+    let kinds: Vec<String> = kind_filter.iter().map(|kind| kind.to_lowercase()).collect();
+    report
+        .taint_flows
+        .retain(|flow| taint_flow_matches_kind_filter(flow, &kinds));
+    report.summary.total_decl_hits = report.decl_hits.len();
+    report.summary.total_hits = report.hits.len();
+    report.summary.hit_counts_by_kind = sorted_hit_counts_json(&report.hits);
+    report.summary.total_taint_flows = report.taint_flows.len();
+    report.kind_filter = kinds;
+}
+
+const INSPECT_REPORT_CACHE_KIND: &str = "inspect-graph/report/v1";
+
+/// Semantic identity of an inspect-graph report: everything that changes
+/// which hits, flows, and corridor are computed. Paging, format, view,
+/// flow/group selectors, and text filters are views over the cached report.
+fn inspect_report_key(
+    pattern: Option<&str>,
+    is_regex: bool,
+    kind_filter: &[String],
+    filters: &InspectFilters<'_>,
+    taint_flow: bool,
+) -> u64 {
+    let kinds = kind_filter.join(",");
+    let from_kind = filters
+        .from_kind
+        .map(|kind| format!("{kind:?}"))
+        .unwrap_or_default();
+    let to_kind = filters
+        .to_kind
+        .map(|kind| format!("{kind:?}"))
+        .unwrap_or_default();
+    paging::hash_filters(&[
+        ("kind", "inspect-graph-report"),
+        ("query", pattern.unwrap_or("")),
+        ("regex", if is_regex { "1" } else { "0" }),
+        ("kinds", &kinds),
+        ("from", filters.from.unwrap_or("")),
+        ("from_kind", &from_kind),
+        ("to", filters.to.unwrap_or("")),
+        ("to_kind", &to_kind),
+        ("file", filters.file.unwrap_or("")),
+        ("in_fn", filters.in_fn.unwrap_or("")),
+        ("taint_flow", if taint_flow { "1" } else { "0" }),
+    ])
 }
 
 fn finish_inspect(
@@ -1318,10 +1700,12 @@ fn finish_inspect(
     occurrence_hits: OccurrenceHitResult,
     taint_candidates: TaintCandidates,
 ) -> Result<()> {
+    let assembly_started = std::time::Instant::now();
     let InspectFinish {
         pattern,
         is_regex,
         kind_filter,
+        scan_kind_filter,
         filters,
         provenance_filters,
         render,
@@ -1329,6 +1713,7 @@ fn finish_inspect(
         format,
         taint_flow,
         graph_flow_incomplete_reason,
+        corridor,
     } = options;
     let mut hits = occurrence_hits.hits;
     // Determinism: `global.all_files()` iterates an AHashMap, so discovery
@@ -1373,12 +1758,13 @@ fn finish_inspect(
     let mut report = InspectReport {
         query: pattern.unwrap_or("").to_string(),
         regex: is_regex,
-        kind_filter: kind_filter.iter().map(String::from).collect(),
+        kind_filter: scan_kind_filter.iter().map(|kind| kind.to_lowercase()).collect(),
         analysis_complete: false,
         analysis_incomplete_reasons: Vec::new(),
         decl_hits,
         hits,
         taint_flows: Vec::new(),
+        corridor,
         summary,
     };
     if taint_flow {
@@ -1389,16 +1775,108 @@ fn finish_inspect(
                 pattern,
                 is_regex,
                 filters,
-                kind_filter,
+                kind_filter: scan_kind_filter,
                 prefer_warmed_idg: true,
                 flow_id_filter: render.flow_id_filter.as_deref(),
             },
         )?;
         report.taint_flows = taint_flows;
+        attach_taint_lineage(ws, &mut report.taint_flows);
         report.summary.total_taint_flows = report.taint_flows.len();
         apply_semantic_flow_stats(&mut report.summary, semantic_flow_stats);
     }
     refresh_inspect_completeness(&mut report);
+    // The complete report is the cached object every later view starts
+    // from: page turns, formats, kind/flow/group selectors, text filters.
+    let report_key = inspect_report_key(
+        pattern,
+        is_regex,
+        scan_kind_filter,
+        &provenance_filters,
+        taint_flow,
+    );
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect report assembly: decl_hits={} hits={} taint_flows={} elapsed={:.3}s",
+        report.decl_hits.len(),
+        report.hits.len(),
+        report.taint_flows.len(),
+        assembly_started.elapsed().as_secs_f64()
+    );
+    let save_started = std::time::Instant::now();
+    if let Err(error) = crate::page_cache::save_keyed_payload_with_bound(
+        root,
+        report_key,
+        INSPECT_REPORT_CACHE_KIND,
+        &report,
+        crate::page_cache::MAX_REPORT_PAYLOAD_BYTES,
+    ) {
+        tracing::debug!("inspect report payload save failed: {error}");
+    }
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect report save: elapsed={:.3}s",
+        save_started.elapsed().as_secs_f64()
+    );
+    let render_started = std::time::Instant::now();
+    let rendered = finish_inspect_from_report(
+        root,
+        ws,
+        InspectFinish {
+            pattern,
+            is_regex,
+            kind_filter,
+            scan_kind_filter,
+            filters,
+            provenance_filters,
+            render,
+            paging_cfg,
+            format,
+            taint_flow,
+            graph_flow_incomplete_reason: None,
+            corridor: None,
+        },
+        report,
+    );
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect render: elapsed={:.3}s",
+        render_started.elapsed().as_secs_f64()
+    );
+    rendered
+}
+
+/// Render an inspect-graph report (fresh or replayed from the cache):
+/// structural-id hints, view selectors, text filters, then the requested
+/// page in the requested format.
+fn finish_inspect_from_report(
+    root: &std::path::Path,
+    ws: &Workspace,
+    options: InspectFinish<'_>,
+    mut report: InspectReport,
+) -> Result<()> {
+    let InspectFinish {
+        pattern,
+        is_regex,
+        kind_filter,
+        scan_kind_filter: _,
+        filters,
+        provenance_filters,
+        render,
+        paging_cfg,
+        format,
+        taint_flow: _,
+        graph_flow_incomplete_reason: _,
+        corridor: _,
+    } = options;
+    let view_started = std::time::Instant::now();
+    apply_kind_view(&mut report, kind_filter);
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect render kind view: elapsed={:.3}s",
+        view_started.elapsed().as_secs_f64()
+    );
+    let hints_started = std::time::Instant::now();
 
     // A structural F:/G: hash is intentionally content-stable but not
     // invertible. Preserve the exact query that produced each id so `show`
@@ -1420,6 +1898,16 @@ fn finish_inspect(
                     .map(|flow| flow.flow_id.as_str())
                     .chain(hit.groups.iter().map(|group| group.group_id.as_str()))
             }))
+            .chain(
+                report
+                    .corridor
+                    .as_ref()
+                    .and_then(|corridor| corridor.stack.as_ref())
+                    .map(|stack| stack.flow_id.as_str()),
+            )
+            // Raw taint ids are query-scoped too: a lineage-rooted stack only
+            // exists under the target cut of the query that produced it.
+            .chain(report.taint_flows.iter().map(|flow| flow.taint_id.as_str()))
             .collect::<Vec<_>>();
         crate::page_cache::remember_structural_id_hints(
             root,
@@ -1448,6 +1936,12 @@ fn finish_inspect(
     // occurrence records whose text (name, file, code, flow bodies)
     // matches. A render-time narrow like `--flow` below — the analysis
     // already ran; this just shapes what surfaces.
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect render hints: elapsed={:.3}s",
+        hints_started.elapsed().as_secs_f64()
+    );
+    let filters_started = std::time::Instant::now();
     let secondary = crate::filter::active();
     if secondary.is_active() {
         // Secondary text filters match the complete canonical row, so every
@@ -1460,6 +1954,20 @@ fn finish_inspect(
             .chain(report.hits.iter_mut().flat_map(|hit| hit.flows.iter_mut()))
         {
             hydrate_flow(ws, flow);
+        }
+        if let Some(stack) = report
+            .corridor
+            .as_mut()
+            .and_then(|corridor| corridor.stack.as_mut())
+        {
+            hydrate_flow(ws, stack);
+        }
+        if report
+            .corridor
+            .as_ref()
+            .is_some_and(|corridor| !secondary.matches_value(corridor))
+        {
+            report.corridor = None;
         }
         report.decl_hits.retain(|hit| secondary.matches_value(hit));
         report.hits.retain(|hit| secondary.matches_value(hit));
@@ -1475,7 +1983,11 @@ fn finish_inspect(
     // truncation banner will still surface in that case).
     if let Some(target_id) = render.flow_id_filter.as_deref() {
         apply_flow_id_filter(&mut report, target_id);
-        if report.decl_hits.is_empty() && report.hits.is_empty() && report.taint_flows.is_empty() {
+        if report.decl_hits.is_empty()
+            && report.hits.is_empty()
+            && report.taint_flows.is_empty()
+            && report.corridor.is_none()
+        {
             anyhow::bail!(
                 "no flow matching `{target_id}` in this workspace + query \
                  combination. Flow ids are printed next to every `FLOW N` \
@@ -1522,6 +2034,7 @@ fn finish_inspect(
     if report.decl_hits.is_empty()
         && report.hits.is_empty()
         && report.taint_flows.is_empty()
+        && report.corridor.is_none()
         && matches!(format, BrowseFormat::Text)
     {
         let kind_label = if kind_filter.is_empty() {
@@ -1571,6 +2084,11 @@ fn finish_inspect(
         return Ok(());
     }
 
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect render filters: elapsed={:.3}s",
+        filters_started.elapsed().as_secs_f64()
+    );
     match format {
         BrowseFormat::Json => {
             // Keep one document shape for the complete and paged views.
@@ -1584,17 +2102,19 @@ fn finish_inspect(
                 root,
                 &units,
                 &paging_cfg,
-                "inspect",
+                "inspect-graph",
                 filters_hash,
                 inspect_json_unit_cost,
                 |slice, info, _cfg| {
                     let analysis_incomplete_reasons = report.analysis_incomplete_reasons.clone();
-                    let result_incomplete_reasons = paged_json_incomplete_reasons("inspect", info);
+                    let result_incomplete_reasons = paged_json_incomplete_reasons("inspect-graph", info);
                     let mut decl_hits = BTreeMap::<usize, InspectOut>::new();
                     let mut hits = BTreeMap::<usize, HitOut>::new();
-                    let mut taint_flows: Vec<&InspectTaintFlow> = Vec::new();
+                    let mut taint_flows: Vec<InspectTaintFlow> = Vec::new();
+                    let mut corridor_functions: Vec<usize> = Vec::new();
                     for unit in slice {
                         match unit {
+                            InspectJsonPageUnit::Corridor { index, .. } => corridor_functions.push(*index),
                             InspectJsonPageUnit::Decl { index, hit, flow } => {
                                 let entry = decl_hits
                                     .entry(*index)
@@ -1615,7 +2135,12 @@ fn finish_inspect(
                                     entry.flows.push(flow);
                                 }
                             }
-                            InspectJsonPageUnit::Taint(flow) => taint_flows.push(*flow),
+                            InspectJsonPageUnit::Taint(flow) => {
+                                let mut owned = (*flow).clone();
+                                owned.flow =
+                                    rendered_flow_from_raw_taint(ws, flow, (taint_flows.len() + 1) as u32);
+                                taint_flows.push(owned);
+                            }
                         }
                     }
                     for hit in decl_hits.values_mut() {
@@ -1626,7 +2151,26 @@ fn finish_inspect(
                     }
                     let decl_hits = decl_hits.into_values().collect::<Vec<_>>();
                     let hits = hits.into_values().collect::<Vec<_>>();
-                    let wrapped = serde_json::json!({
+                    // The corridor tables travel with every page; the call
+                    // stack carries only the callables paged here, hydrated
+                    // once for this page.
+                    let corridor = report.corridor.as_ref().map(|corridor| {
+                        let mut page = corridor.clone();
+                        page.stack = corridor.stack.as_ref().map(|stack| {
+                            let mut ready = stack.clone();
+                            if !corridor_functions.is_empty() {
+                                hydrate_flow(ws, &mut ready);
+                            }
+                            let functions = corridor_functions
+                                .iter()
+                                .filter_map(|index| ready.functions.get(*index).cloned())
+                                .collect::<Vec<_>>();
+                            ready.functions = functions;
+                            ready
+                        });
+                        page
+                    });
+                    let mut wrapped = serde_json::json!({
                         "analysis_complete": report.analysis_complete,
                         "analysis_incomplete_reasons": analysis_incomplete_reasons,
                         "result_complete": result_incomplete_reasons.is_empty(),
@@ -1640,6 +2184,9 @@ fn finish_inspect(
                         "summary": &report.summary,
                         "page": page_info_to_json(info),
                     });
+                    if let Some(corridor) = corridor {
+                        wrapped["corridor"] = serde_json::to_value(corridor)?;
+                    }
                     crate::output::emit_json_document(&wrapped)?;
                     Ok(())
                 },
@@ -1692,10 +2239,10 @@ fn finish_inspect(
                     });
                 }
             }
-            if let Err(e) = page_cache::save_pages(root, "inspect", filters_hash, cached_pages) {
+            if let Err(e) = page_cache::save_pages(root, "inspect-graph", filters_hash, cached_pages) {
                 tracing::debug!("page cache save failed: {e}");
             }
-            paging::write_last_cursor("inspect", filters_hash, &current_info.cursor);
+            paging::write_last_cursor("inspect-graph", filters_hash, &current_info.cursor);
             page_cache::emit_cached_text(&output_text)?;
         }
     }
@@ -1706,7 +2253,7 @@ fn finish_inspect(
 /// complete before this presentation step; formatting neighboring pages
 /// would add unrelated latency without improving the current answer.
 fn inspect_requested_window(current_page: u64, total_pages: u64) -> BTreeSet<u64> {
-    page_cache::requested_page_window(current_page, total_pages)
+    page_cache::query_report_page_window(current_page, total_pages)
 }
 
 /// Pick a source-literal candidate for a semantic inspect name.
@@ -1782,6 +2329,9 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         paging_cfg,
         format,
     } = options;
+    // `--kind` is a view over the complete report unless a lexical kind is
+    // requested; the scan narrows only in that case.
+    let scan_kind_filter = scan_kind_filter_for(kind_filter);
     // Taint-aware default for `--query X` combined with standalone
     // `--from Y` or `--to Y`: synthesize the OPPOSITE endpoint from
     // the pattern so the filter enters the dual-mode matcher
@@ -2006,9 +2556,10 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         endpoint_funcs.is_some(),
         endpoint_workspace.is_some()
     );
-    let exact_endpoint_absent = endpoint_funcs
-        .as_ref()
-        .is_some_and(|(from, to)| from.is_empty() || to.is_empty());
+    // Only an absent source proves an empty corridor. An absent target may
+    // still be an external call site (`--to os.system`): the exact corridor
+    // projection resolves terminal call sites on the complete workspace.
+    let exact_endpoint_absent = endpoint_funcs.as_ref().is_some_and(|(from, _)| from.is_empty());
     let endpoint_fallback_project = if explicit_endpoint_graph_flow
         && endpoint_workspace.is_none()
         && endpoint_retrieval_used
@@ -2112,9 +2663,62 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         filters.from = filters.from.map(bonsai_lang_api::kit::short_name_of);
         filters.to = filters.to.map(bonsai_lang_api::kit::short_name_of);
     }
+    // A cached complete report for this semantic query renders directly:
+    // no corridor projection, occurrence scan, or taint closure re-runs for
+    // a page turn, a format, or a view selector.
+    let report_key = inspect_report_key(
+        pattern,
+        is_regex,
+        scan_kind_filter,
+        &provenance_filters,
+        taint_flow,
+    );
+    if let Some(cached) =
+        crate::page_cache::read_keyed_payload::<InspectReport>(root, report_key, INSPECT_REPORT_CACHE_KIND)?
+    {
+        bonsai_diagnostics::debug_log!(
+            "page-cache",
+            "inspect-graph report payload hit: decl_hits={} hits={} taint_flows={}",
+            cached.decl_hits.len(),
+            cached.hits.len(),
+            cached.taint_flows.len()
+        );
+        return finish_inspect_from_report(
+            root,
+            ws,
+            InspectFinish {
+                pattern,
+                is_regex,
+                kind_filter,
+                scan_kind_filter,
+                filters,
+                provenance_filters,
+                render,
+                paging_cfg,
+                format,
+                taint_flow,
+                graph_flow_incomplete_reason: None,
+                corridor: None,
+            },
+            cached,
+        );
+    }
     let global = ws.compiler_header_index();
     let full_source_for_large_bodies =
         paging_cfg.all || render.flow_id_filter.is_some() || render.group_id_filter.is_some();
+    // `--from A --to B` is a corridor question first: project the exact
+    // compiler corridor between the two endpoints once, over the same
+    // workspace the hit/flow scan uses, and plan its expanded call stack.
+    let corridor = if explicit_endpoint_graph_flow {
+        match (provenance_filters.from, provenance_filters.to) {
+            (Some(from), Some(to)) => {
+                build_inspect_corridor(ws, from, to, is_regex, full_source_for_large_bodies)?
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
     // One cache per `inspect` run. `inspect --query system` in Redis
     // resolves 50+ hits to the same handful of enclosing functions, so
     // per-target memoization here turns an N × call-graph walk into
@@ -2151,7 +2755,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         None
     };
     prepare_stage.finish();
-    let kinds: ahash::AHashSet<String> = kind_filter.iter().map(|s| s.to_lowercase()).collect();
+    let kinds: ahash::AHashSet<String> = scan_kind_filter.iter().map(|s| s.to_lowercase()).collect();
     // When a `--query` is active but `--kind` is left unset, exclude
     // purely lexical hit kinds (`decorator`, `ref`) from the default
     // set. Decorators and bare refs aren't part of the taint-analysis
@@ -2202,17 +2806,84 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         .filter(|literal| !is_regex && literal.len() >= 3);
     let files_in_path_order: Vec<bonsai_common::FileId> = {
         let all_files = global.all_files().collect::<Vec<_>>();
+        // Corridor mode: occurrence hits belong to the corridor's callables,
+        // so only their files are scanned; hydrating the whole tree for two
+        // endpoint names is never part of the corridor result.
+        let corridor_files: Option<ahash::AHashSet<bonsai_common::FileId>> =
+            corridor.as_ref().map(|corridor| {
+                corridor
+                    .nodes
+                    .iter()
+                    .filter_map(|node| bonsai_sdk::workspace_file_id(ws, &node.file))
+                    .collect()
+            });
+        let all_files = match corridor_files {
+            Some(files) => all_files
+                .into_iter()
+                .filter(|file| files.contains(file))
+                .collect::<Vec<_>>(),
+            None => all_files,
+        };
         let selected_files = if let Some(literal) = taint_source_literal {
             use rayon::prelude::*;
-            all_files
-                .par_iter()
-                .copied()
-                .filter(|file| {
-                    ws.vfs()
-                        .snapshot(*file)
-                        .is_ok_and(|snapshot| source_contains_inspect_literal(&snapshot.text, literal))
-                })
-                .collect::<Vec<_>>()
+            // The raw-source anchor is an accelerator for occurrence facts,
+            // which always have a spelling in their file. Declarations can
+            // carry synthesized names (`__module__`, lambdas), so every file
+            // whose header index matches the query is admitted regardless
+            // of its raw text.
+            let header_files: ahash::AHashSet<bonsai_common::FileId> =
+                bonsai_sdk::matching_decls(ws, &matcher)
+                    .into_iter()
+                    .map(|decl| decl.name_span.file)
+                    .collect();
+            // The persisted retrieval index keeps trigram Bloom pages over
+            // the same compiler facts this scan matches, so it yields a
+            // candidate superset without reading a single file. Without a
+            // current index, the exact text scan decides.
+            let retrieval_candidates: Option<ahash::AHashSet<bonsai_common::FileId>> =
+                crate::commands::bonsai_for_cli()
+                    .retrieval_candidate_file_filters(
+                        root,
+                        literal,
+                        bonsai_sdk::SearchFilters {
+                            kind: None,
+                            file: None,
+                            regex: false,
+                        },
+                    )
+                    .ok()
+                    .flatten()
+                    .map(|include| {
+                        include
+                            .iter()
+                            .filter_map(|path| bonsai_sdk::workspace_file_id(ws, path))
+                            .collect()
+                    });
+            match retrieval_candidates {
+                Some(candidates) => {
+                    bonsai_diagnostics::debug_log!(
+                        "compiler-cache",
+                        "inspect literal prefilter: retrieval candidates {} · header files {} · of {}",
+                        candidates.len(),
+                        header_files.len(),
+                        all_files.len()
+                    );
+                    all_files
+                        .into_iter()
+                        .filter(|file| header_files.contains(file) || candidates.contains(file))
+                        .collect::<Vec<_>>()
+                }
+                None => all_files
+                    .par_iter()
+                    .copied()
+                    .filter(|file| {
+                        header_files.contains(file)
+                            || ws.vfs().snapshot(*file).is_ok_and(|snapshot| {
+                                source_contains_inspect_literal(&snapshot.text, literal)
+                            })
+                    })
+                    .collect::<Vec<_>>(),
+            }
         } else {
             all_files
         };
@@ -2286,6 +2957,18 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // text/JSON renderers page the owned rows afterward. `--all` therefore
     // changes presentation only and can never change taint results.
     let mut taint_candidates = TaintCandidates::new(initial_taint_candidates);
+    if let Some(corridor) = corridor.as_ref() {
+        // Raw taint flows for `--from A --to B` start at A: seed the taint
+        // graph from the corridor's source callables so multi-hop paths
+        // that reach B are reported, not only the flows of B's callers.
+        taint_candidates.entries.extend(
+            corridor
+                .source_funcs
+                .iter()
+                .copied()
+                .map(bonsai_common::FuncId::new),
+        );
+    }
     let syntax_inspect_started = std::time::Instant::now();
     let decl_hits = collect_decl_hits(
         ws,
@@ -2300,6 +2983,13 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         },
         &mut taint_candidates,
     );
+    let corridor_funcs: Option<ahash::AHashSet<bonsai_common::FuncId>> = corridor.as_ref().map(|corridor| {
+        corridor
+            .nodes
+            .iter()
+            .map(|node| bonsai_common::FuncId::new(node.func))
+            .collect()
+    });
     let occurrence_hits = collect_occurrence_hits(
         ws,
         &chain_cache,
@@ -2313,6 +3003,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             taint_flow,
             occurrence_scan_skipped_for_id_lookup,
             partial_workspace,
+            corridor_funcs: corridor_funcs.as_ref(),
         },
         &mut taint_candidates,
     );
@@ -2362,6 +3053,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             pattern,
             is_regex,
             kind_filter,
+            scan_kind_filter,
             filters,
             provenance_filters,
             render,
@@ -2371,6 +3063,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             graph_flow_incomplete_reason: target_graph_index_unavailable.then_some(
                 "the complete reverse-call index is not warmed; run `bonsai-ninja index <workspace> --semantic`",
             ),
+            corridor,
         },
         decl_hits,
         occurrence_hits,
@@ -2602,6 +3295,10 @@ fn inspect_taint_flows(
     } else {
         None
     };
+    // Taint closures run per matched callable (the query's exact entries);
+    // the caller stack above each entry is structural context attached after
+    // the closure from one reverse callgraph walk (`attach_taint_lineage`),
+    // never a forward closure from every entry point of the lineage.
     let lineage_funcs = if prefer_warmed_idg {
         lineage_targets.as_ref().and_then(|targets| {
             if targets.is_empty() {
@@ -2773,16 +3470,18 @@ fn inspect_taint_flows(
     let entry_bar = progress::progress_bar("tracing taint entries", entries.len() as u64);
     let analyze_entry = |entry: bonsai_common::FuncId| {
         entry_bar.inc(1);
-        let entry_target_nodes = if source_rooted_targets {
-            target_nodes_by_source
-                .get(&entry)
-                .map(Vec::as_slice)
-                .unwrap_or_default()
-        } else {
-            target_nodes.as_slice()
-        };
-        let entry_target_funcs = if source_rooted_targets {
-            let needs_fallback = entry_target_nodes.is_empty() || unresolved_target_funcs.contains(&entry);
+        // A target owner closes over its own exact target nodes. A lineage
+        // root (an entry seeded from the caller lineage) owns none; it closes
+        // over the union of target nodes, which its forward fixed point can
+        // only reach through the lineage anyway.
+        let owned_target_nodes = source_rooted_targets
+            .then(|| target_nodes_by_source.get(&entry).map(Vec::as_slice))
+            .flatten()
+            .filter(|nodes| !nodes.is_empty());
+        let owns_target = owned_target_nodes.is_some() || unresolved_target_funcs.contains(&entry);
+        let entry_target_nodes = owned_target_nodes.unwrap_or(target_nodes.as_slice());
+        let entry_target_funcs = if source_rooted_targets && owns_target {
+            let needs_fallback = owned_target_nodes.is_none() || unresolved_target_funcs.contains(&entry);
             needs_fallback.then(|| ahash::AHashSet::from([entry]))
         } else {
             None
@@ -2808,6 +3507,18 @@ fn inspect_taint_flows(
         (entry_flows, graph.plan)
     };
     let workers = bonsai_common::rooted_semantic_query_worker_count(rayon::current_num_threads());
+    // The symbolic runtime and its field demand are shared by every entry:
+    // build them once here rather than under the first worker that needs
+    // them while the rest of the pool waits.
+    if let Some(idg) = ws.db().idg_service() {
+        let warm_started = std::time::Instant::now();
+        idg.warm_symbolic_query_runtime();
+        bonsai_diagnostics::debug_log!(
+            "compiler-cache",
+            "inspect symbolic runtime warm: elapsed={:.3}s",
+            warm_started.elapsed().as_secs_f64()
+        );
+    }
     bonsai_diagnostics::debug_log!("compiler-cache", "inspect rooted taint workers: {}", workers);
     let closures_started = std::time::Instant::now();
     let results = if workers == 1 {
@@ -2830,8 +3541,9 @@ fn inspect_taint_flows(
     };
     bonsai_diagnostics::debug_log!(
         "compiler-cache",
-        "inspect taint closures: entries={} elapsed={:.3}s",
+        "inspect taint closures: entries={} workers={} elapsed={:.3}s",
         results.len(),
+        workers,
         closures_started.elapsed().as_secs_f64()
     );
     for (mut entry_flows, plan) in results {
@@ -3058,6 +3770,11 @@ fn build_inspect_taint_flow(
         chain_display,
         steps,
         json_size_upper_bound: 0,
+        flow: None,
+        lineage: Vec::new(),
+        lineage_func_ids: Vec::new(),
+        alternate_lineages: Vec::new(),
+        alternate_lineage_func_ids: Vec::new(),
     };
     flow.json_size_upper_bound = calculate_inspect_taint_flow_json_upper_bound(&flow);
     Some(flow)
@@ -3422,63 +4139,6 @@ fn is_zero_usize(n: &usize) -> bool {
     usize::eq(n, &0)
 }
 
-fn semantic_direct_callers(
-    ws: &Workspace,
-    graph: &bonsai_callgraph::ResolvedCallGraph,
-    target: bonsai_common::FuncId,
-) -> Vec<RefOut> {
-    let mut callers: Vec<RefOut> = graph
-        .callers_of(target)
-        .map(|edge| {
-            let span = edge.span;
-            let (file, line, column) = format_span(&span, ws);
-            RefOut {
-                symbol: func_display_name(ws, edge.from),
-                file,
-                line,
-                column,
-                kind: edge_kind_label(edge.kind).to_string(),
-                snippet: read_anchor_line(ws, &span),
-            }
-        })
-        .collect();
-    callers.sort_by(|a, b| {
-        a.file
-            .cmp(&b.file)
-            .then_with(|| a.line.cmp(&b.line))
-            .then_with(|| a.column.cmp(&b.column))
-            .then_with(|| a.symbol.cmp(&b.symbol))
-    });
-    callers.dedup_by(|a, b| {
-        a.symbol == b.symbol && a.file == b.file && a.line == b.line && a.column == b.column
-    });
-    callers
-}
-
-fn semantic_callees(
-    ws: &Workspace,
-    graph: &bonsai_callgraph::ResolvedCallGraph,
-    source: bonsai_common::FuncId,
-) -> Vec<String> {
-    let mut callees: Vec<String> = graph
-        .callees_of(source)
-        .map(|edge| func_display_name(ws, edge.to))
-        .filter(|name| !name.is_empty())
-        .collect();
-    callees.sort();
-    callees.dedup();
-    callees
-}
-
-fn edge_kind_label(kind: bonsai_callgraph::EdgeKind) -> &'static str {
-    match kind {
-        bonsai_callgraph::EdgeKind::Direct => "call",
-        bonsai_callgraph::EdgeKind::Virtual => "virtual-call",
-        bonsai_callgraph::EdgeKind::Indirect => "indirect-call",
-        bonsai_callgraph::EdgeKind::Unknown => "unknown-call",
-    }
-}
-
 fn sorted_hit_counts_json(hits: &[HitOut]) -> serde_json::Value {
     let mut by_kind: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
     for h in hits {
@@ -3506,6 +4166,19 @@ fn inspect_json_page_units(report: &InspectReport) -> Vec<InspectJsonPageUnit<'_
             .map(|hit| hit.flows.len().max(1))
             .sum::<usize>();
     let mut units = Vec::with_capacity(flow_units + report.taint_flows.len());
+    if let Some(stack) = report
+        .corridor
+        .as_ref()
+        .and_then(|corridor| corridor.stack.as_ref())
+    {
+        units.extend(
+            stack
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(index, function)| InspectJsonPageUnit::Corridor { index, function }),
+        );
+    }
     for (index, hit) in report.decl_hits.iter().enumerate() {
         if hit.flows.is_empty() {
             units.push(InspectJsonPageUnit::Decl {
@@ -3548,8 +4221,11 @@ fn paged_decl_hit(hit: &InspectOut, flow: Option<&InspectFlowRendered>) -> Inspe
         line: hit.line,
         column: hit.column,
         params: hit.params.clone(),
+        signature: hit.signature.clone(),
         direct_callers: hit.direct_callers.clone(),
-        callees: hit.callees.clone(),
+        direct_callees: hit.direct_callees.clone(),
+        external_calls: hit.external_calls.clone(),
+        imports: hit.imports.clone(),
         flows: flow.into_iter().cloned().collect(),
         groups: Vec::new(),
         summary: hit.summary.clone(),
@@ -3576,17 +4252,73 @@ fn paged_occurrence_hit(hit: &HitOut, flow: Option<&InspectFlowRendered>) -> Hit
     page
 }
 
+/// JSON page cost of one unit: a computed upper bound of its serialized
+/// size plus the bytes its lazily hydrated bodies may add. Computed from
+/// field lengths, never by serializing the unit — a hub query carries
+/// hundreds of thousands of units and pagination must stay linear.
 fn inspect_json_unit_cost(unit: &InspectJsonPageUnit<'_>) -> u64 {
-    let pending = match unit {
-        InspectJsonPageUnit::Decl { flow, .. } | InspectJsonPageUnit::Hit { flow, .. } => {
-            unhydrated_body_bytes(*flow)
+    fn escaped(value: &str) -> u64 {
+        (value.len() as u64).saturating_mul(6).saturating_add(2)
+    }
+    fn rendered_function_bytes(function: &InspectFunctionRendered) -> u64 {
+        let body: u64 = if function.lines.is_empty() {
+            function.body_bytes.saturating_add(function.body_bytes / 4)
+        } else {
+            function
+                .lines
+                .iter()
+                .map(|line| escaped(&line.text).saturating_add(48))
+                .sum()
+        };
+        escaped(&function.module_path)
+            .saturating_add(escaped(&function.name))
+            .saturating_add(escaped(&function.signature))
+            .saturating_add(function.owners.len() as u64 * 96)
+            .saturating_add(body)
+            .saturating_add(128)
+    }
+    fn rendered_flow_bytes(flow: &InspectFlowRendered) -> u64 {
+        escaped(&flow.flow_label)
+            .saturating_add(escaped(&flow.flow_id))
+            .saturating_add(escaped(&flow.chain_display))
+            .saturating_add(flow.chain.iter().map(|name| escaped(name) + 2).sum::<u64>())
+            .saturating_add(flow.functions.iter().map(rendered_function_bytes).sum::<u64>())
+            .saturating_add(128)
+    }
+    match unit {
+        InspectJsonPageUnit::Decl { hit, flow, .. } => {
+            let header = escaped(&hit.symbol)
+                .saturating_add(escaped(&hit.kind))
+                .saturating_add(escaped(&hit.file))
+                .saturating_add(escaped(&hit.signature))
+                .saturating_add(hit.params.iter().map(|p| escaped(p) + 2).sum::<u64>())
+                .saturating_add((hit.direct_callers.len() + hit.direct_callees.len()) as u64 * 160)
+                .saturating_add((hit.external_calls.len() + hit.imports.len()) as u64 * 128)
+                .saturating_add(256);
+            header
+                .saturating_add(flow.map_or(0, rendered_flow_bytes))
+                .saturating_add(unhydrated_body_bytes(*flow))
         }
-        InspectJsonPageUnit::Taint(_) => 0,
-    };
-    serde_json::to_string(unit)
-        .map(|s| s.len() as u64 + 64)
-        .unwrap_or(512)
-        .saturating_add(pending)
+        InspectJsonPageUnit::Hit { hit, flow, .. } => {
+            let header = escaped(&hit.kind)
+                .saturating_add(escaped(&hit.text))
+                .saturating_add(escaped(&hit.file))
+                .saturating_add(hit.in_function.as_deref().map_or(0, escaped))
+                .saturating_add(hit.chains_preview.iter().map(|c| escaped(c) + 2).sum::<u64>())
+                .saturating_add(192);
+            header
+                .saturating_add(flow.map_or(0, rendered_flow_bytes))
+                .saturating_add(unhydrated_body_bytes(*flow))
+        }
+        InspectJsonPageUnit::Taint(flow) => flow
+            .json_size_upper_bound
+            .max(calculate_inspect_taint_flow_json_upper_bound(flow))
+            .saturating_add(flow.func_ids.len() as u64 * 4_096)
+            .saturating_add(64),
+        InspectJsonPageUnit::Corridor { function, .. } => {
+            rendered_function_bytes(function).saturating_add(64)
+        }
+    }
 }
 
 /// Filter-signature hash for `inspect`. Shared between the JSON
@@ -3619,6 +4351,14 @@ fn apply_flow_id_filter(report: &mut InspectReport, target_flow_id: &str) {
         .hits
         .retain(|occurrence_hit| !occurrence_hit.flows.is_empty());
     report.taint_flows.retain(|flow| flow.taint_id == target_flow_id);
+    if report
+        .corridor
+        .as_ref()
+        .and_then(|corridor| corridor.stack.as_ref())
+        .is_none_or(|stack| stack.flow_id != target_flow_id)
+    {
+        report.corridor = None;
+    }
     rebuild_report_summary(report);
 }
 
@@ -3860,7 +4600,7 @@ fn format_kind_filter(kinds: &[String]) -> String {
 fn render_inspect_header(u: &Ui, report: &InspectReport, view: ResolvedView) {
     cli_println!(
         "{} {} {} {} {}{}{}",
-        u.label("inspect"),
+        u.label("inspect-graph"),
         display_query_colored(&report.query, report.regex),
         u.dim("—"),
         u.name(&report.summary.total_decl_hits.to_string()),
@@ -3880,6 +4620,16 @@ fn render_inspect_header(u: &Ui, report: &InspectReport, view: ResolvedView) {
             String::new()
         },
     );
+    if let Some(corridor) = report.corridor.as_ref() {
+        cli_println!(
+            "  {} {} {} {} {}",
+            u.dim("corridor:"),
+            u.name(&corridor.node_count.to_string()),
+            u.dim("function(s),"),
+            u.name(&corridor.edge_count.to_string()),
+            u.dim("edge(s)")
+        );
+    }
     if view == ResolvedView::Grouped {
         // Make the view mode visible at the top of the output so
         // the reader knows group ids + shared-suffix blocks are
@@ -3948,7 +4698,8 @@ struct InspectPageContext<'a> {
     view: ResolvedView,
     flowless_hits: &'a [&'a HitOut],
     folded_order: &'a [&'a InspectFlowRendered],
-    taint_units: usize,
+    corridor_units: usize,
+    taint_base: usize,
     structural_base: usize,
     total_decls: usize,
     total_units: usize,
@@ -3975,7 +4726,8 @@ fn render_inspect_page(
         view,
         flowless_hits,
         folded_order,
-        taint_units,
+        corridor_units,
+        taint_base,
         structural_base,
         total_decls,
         total_units,
@@ -4005,29 +4757,34 @@ fn render_inspect_page(
             .unwrap_or(total_units);
         next_start
     };
-    let taint_start = start_offset.min(taint_units);
-    let taint_end = page_end_unit.min(taint_units);
-    let page_taint_flows = &report.taint_flows[taint_start..taint_end];
-    if !page_taint_flows.is_empty() {
-        render_taint_flows_table(u, page_taint_flows);
-        if should_render_raw_taint_bodies(render, total_units.saturating_sub(structural_base)) {
-            // Raw T: drilldowns can contain very large source bodies. Under
-            // a token budget render the exact chain/step evidence compactly;
-            // `--all` retains the full source-body transcript.
-            render_raw_taint_flow_bodies(
-                ws,
-                u,
-                page_taint_flows,
-                taint_start,
-                render.compact || budget_bytes.is_some(),
+    let corridor_start = start_offset.min(corridor_units);
+    let corridor_end = page_end_unit.min(corridor_units);
+    if let Some(corridor) = report.corridor.as_ref() {
+        if start_offset == 0 {
+            render_corridor_tables(u, corridor);
+        } else if corridor_start < corridor_end {
+            cli_println!();
+            cli_println!(
+                "{} {}",
+                u.heading("══ CORRIDOR"),
+                u.dim(&format!(
+                    "{} → {} (call stack continued)",
+                    corridor.from, corridor.to
+                ))
             );
+        }
+        if corridor_start < corridor_end {
+            if let Some(stack) = corridor.stack.as_ref() {
+                let ready = hydrated.get(&stack.flow_id).unwrap_or(stack);
+                render_corridor_stack(u, render, ready, corridor_start, corridor_end);
+            }
         }
     }
 
     let page_flow_ids: ahash::AHashSet<String> = {
         let mut ids = ahash::AHashSet::new();
         for unit_index in start_offset..page_end_unit {
-            if unit_index < structural_base {
+            if unit_index < structural_base || unit_index >= taint_base {
                 continue;
             }
             let structural_index = unit_index - structural_base;
@@ -4044,10 +4801,11 @@ fn render_inspect_page(
     // Flow-less syntax facts are first-class pageable units. Flow-associated
     // hits are a compact index for structural blocks on this page; their full
     // match-point details are also rendered with those blocks.
-    let flowless_page_start = start_offset.max(taint_units).min(structural_base);
-    let flowless_page_end = page_end_unit.max(taint_units).min(structural_base);
+    let flowless_base = corridor_units;
+    let flowless_page_start = start_offset.max(flowless_base).min(structural_base);
+    let flowless_page_end = page_end_unit.max(flowless_base).min(structural_base);
     let mut page_hits: Vec<(&HitOut, bool)> = flowless_hits
-        [flowless_page_start - taint_units..flowless_page_end - taint_units]
+        [flowless_page_start - flowless_base..flowless_page_end - flowless_base]
         .iter()
         .map(|hit| (*hit, true))
         .collect();
@@ -4188,7 +4946,10 @@ fn render_inspect_page(
     let strict_remaining =
         || -> Option<u64> { strict_budget_bytes.map(|b| b.saturating_sub(strict_emitted())) };
     let first_unit = unit_cursor;
-    for unit_index in first_unit..page_end_unit {
+    // Structural units end at `taint_base`; the raw taint rows on this page
+    // render after the structural walk below.
+    let structural_page_end = page_end_unit.min(taint_base);
+    for unit_index in first_unit..structural_page_end {
         let is_first_on_page = rendered_units == 0;
         // Budget-exhaustion breaks only apply after the first unit.
         // A page must always advance the cursor by at least one unit
@@ -4308,6 +5069,21 @@ fn render_inspect_page(
         rendered_units += 1;
         unit_cursor = unit_index + 1;
     }
+    // Raw taint rows: the planner budgeted each flow's body bytes, so every
+    // taint unit assigned to this page renders here, after the structural
+    // answer, unless the structural walk stopped early on budget.
+    if unit_cursor >= taint_base && page_end_unit > taint_base {
+        let taint_start = unit_cursor.max(taint_base) - taint_base;
+        let taint_end = page_end_unit - taint_base;
+        let page_taint_flows = &report.taint_flows[taint_start..taint_end];
+        if !page_taint_flows.is_empty() {
+            render_taint_flows_table(u, page_taint_flows);
+            if should_render_raw_taint_bodies(render) {
+                render_raw_taint_flow_bodies(ws, u, page_taint_flows, taint_start, render.compact);
+            }
+            unit_cursor = page_end_unit;
+        }
+    }
     if compact_fallback_used {
         cli_println!();
         cli_println!(
@@ -4343,7 +5119,11 @@ fn render_inspect_page(
         if paging_info.total_pages <= paging_info.page_number {
             paging_info.total_pages = paging_info.page_number + 1;
         }
-        paging_info.next_cursor = Some(paging::cursor_id("inspect", filters_hash, unit_cursor as u64));
+        paging_info.next_cursor = Some(paging::cursor_id(
+            "inspect-graph",
+            filters_hash,
+            unit_cursor as u64,
+        ));
     } else {
         paging_info.is_last = true;
         paging_info.next_cursor = None;
@@ -4354,7 +5134,7 @@ fn render_inspect_page(
         (out_count::bytes() as u64).saturating_sub(bytes_before_payload as u64)
     };
     paging_info.tokens_used = paging::bytes_to_tokens(payload_bytes);
-    render_paging_footer(&paging_info, "bonsai-ninja inspect <workspace>");
+    render_paging_footer(&paging_info, "bonsai-ninja inspect-graph <workspace>");
     paging_info
 }
 
@@ -4380,10 +5160,15 @@ fn render_inspect_report_text(
         .filter(|hit| hit.flows.is_empty())
         .collect::<Vec<_>>();
     let folded_order: Vec<&InspectFlowRendered> = collect_folded_flow_order(&report.hits);
-    let taint_units = report.taint_flows.len();
-    let structural_base = taint_units + flowless_hits.len();
+    // Unit order: corridor call-stack callables, flow-less syntax hits,
+    // declaration blocks, unique folded occurrence flows, then raw taint
+    // rows (supporting context, after the query's own answer).
+    let corridor_units = report.corridor.as_ref().map_or(0, InspectCorridor::stack_len);
+    let structural_base = corridor_units + flowless_hits.len();
     let total_decls = report.decl_hits.len();
-    let total_units = structural_base + total_decls + folded_order.len();
+    let taint_base = structural_base + total_decls + folded_order.len();
+    let taint_units = report.taint_flows.len();
+    let total_units = taint_base + taint_units;
 
     // Safety factor on full-body byte estimates. The raw estimate
     // already matches actual output to within ~20 %. A 1.2× cushion
@@ -4408,11 +5193,42 @@ fn render_inspect_report_text(
     // allocation-free cost per flow and reuse it for full/compact simulation,
     // page totals, and the live renderer. This changes presentation cost only;
     // every flow remains in the canonical pageable unit stream.
-    let taint_unit_costs = report
-        .taint_flows
-        .iter()
-        .map(|flow| scale(inspect_taint_flow_json_upper_bound(flow)))
-        .collect::<Vec<_>>();
+    // Body sizes come from the declaration headers (spans), memoised per
+    // function: a hub query carries hundreds of thousands of flows and
+    // sizing them must not decode a declaration frame per lineage hop.
+    let cost_headers = ws.compiler_header_index();
+    let mut body_bytes_memo: ahash::AHashMap<u32, u64> = ahash::AHashMap::new();
+    let taint_unit_costs: Vec<u64> = {
+        let mut costs = Vec::with_capacity(report.taint_flows.len());
+        for flow in &report.taint_flows {
+            let body_bytes: u64 = flow
+                .lineage_func_ids
+                .iter()
+                .chain(flow.func_ids.iter())
+                .map(|func| {
+                    *body_bytes_memo.entry(*func).or_insert_with(|| {
+                        let symbol = bonsai_common::SymbolId::new(*func);
+                        cost_headers
+                            .declaring_file(symbol)
+                            .and_then(|file| {
+                                cost_headers
+                                    .decls_in(file)
+                                    .iter()
+                                    .find(|decl| decl.symbol == symbol)
+                            })
+                            .map_or(0, |decl| {
+                                let span = decl.body_span.unwrap_or(decl.span);
+                                span.end.saturating_sub(span.start).saturating_add(96)
+                            })
+                    })
+                })
+                .sum();
+            costs.push(scale(
+                inspect_taint_flow_json_upper_bound(flow).saturating_add(body_bytes),
+            ));
+        }
+        costs
+    };
     fn func_full_cost(f: &InspectFunctionRendered) -> u64 {
         // Module path + def line + every body line. Mirrors what
         // `render_full_source_bodies` actually emits. Unhydrated bodies use
@@ -4434,12 +5250,25 @@ fn render_inspect_report_text(
         let header = (decl.symbol.len() as u64) + (decl.file.len() as u64) + 32;
         header + decl.flows.iter().map(&flow_full_cost).sum::<u64>()
     };
+    let corridor_unit_cost = |idx: usize| -> u64 {
+        report
+            .corridor
+            .as_ref()
+            .and_then(|corridor| corridor.stack.as_ref())
+            .and_then(|stack| stack.functions.get(idx))
+            .map_or(UNIT_RENDER_FLOOR_BYTES, |function| {
+                scale(func_full_cost(function))
+            })
+    };
     let unit_full_cost = |idx: usize| -> u64 {
-        if idx < taint_units {
-            return taint_unit_costs[idx];
+        if idx < corridor_units {
+            return corridor_unit_cost(idx);
+        }
+        if idx >= taint_base {
+            return taint_unit_costs[idx - taint_base];
         }
         let raw = if idx < structural_base {
-            let hit = flowless_hits[idx - taint_units];
+            let hit = flowless_hits[idx - corridor_units];
             (hit.text.len() + hit.file.len() + hit.kind.len() + 256) as u64
         } else {
             let structural_index = idx - structural_base;
@@ -4452,11 +5281,14 @@ fn render_inspect_report_text(
         scale(raw)
     };
     let unit_compact_cost = |idx: usize| -> u64 {
-        if idx < taint_units {
-            return taint_unit_costs[idx];
+        if idx < corridor_units {
+            return corridor_unit_cost(idx);
+        }
+        if idx >= taint_base {
+            return taint_unit_costs[idx - taint_base];
         }
         let raw = if idx < structural_base {
-            let hit = flowless_hits[idx - taint_units];
+            let hit = flowless_hits[idx - corridor_units];
             (hit.text.len() + hit.file.len() + hit.kind.len() + 256) as u64
         } else {
             let structural_index = idx - structural_base;
@@ -4503,7 +5335,7 @@ fn render_inspect_report_text(
     let requested_start_offset: usize = match &paging_cfg.page {
         paging::PageArg::First => page_starts.first().copied().unwrap_or(0),
         paging::PageArg::Number(n) => {
-            paging::validate_page_number(*n, total_pages as u64, "inspect")?;
+            paging::validate_page_number(*n, total_pages as u64, "inspect-graph")?;
             let idx = (*n as usize).saturating_sub(1);
             page_starts.get(idx).copied().unwrap_or(0)
         }
@@ -4514,7 +5346,7 @@ fn render_inspect_report_text(
         // silently replayed page 1 whenever the two disagreed.
         paging::PageArg::Cursor(c) => paging::resolve_cursor_offset(
             c,
-            "inspect",
+            "inspect-graph",
             filters_hash,
             (0..=total_units).map(|offset| offset as u64),
         )? as usize,
@@ -4524,10 +5356,10 @@ fn render_inspect_report_text(
             // The recorded cursor can sit mid-page (see Cursor arm), so
             // resolve it over unit offsets and advance to the first
             // simulated page start after it.
-            paging::last_cursor("inspect", filters_hash)
+            paging::last_cursor("inspect-graph", filters_hash)
                 .and_then(|cur| {
                     (0..=total_units)
-                        .find(|off| paging::cursor_id("inspect", filters_hash, *off as u64) == cur)
+                        .find(|off| paging::cursor_id("inspect-graph", filters_hash, *off as u64) == cur)
                         .map(|off| {
                             page_starts
                                 .iter()
@@ -4552,9 +5384,9 @@ fn render_inspect_report_text(
     // Persist this page's cursor so a subsequent `--page next` advances
     // from here, matching `paging::paginate`'s behavior.
     paging::write_last_cursor(
-        "inspect",
+        "inspect-graph",
         filters_hash,
-        &paging::cursor_id("inspect", filters_hash, start_offset as u64),
+        &paging::cursor_id("inspect-graph", filters_hash, start_offset as u64),
     );
     // Estimate uncapped render size: sum every unit's full-cost
     // estimate (chain bodies + headers). Gives the user an honest
@@ -4571,8 +5403,19 @@ fn render_inspect_report_text(
         .find(|&s| s > start_offset)
         .unwrap_or(total_units);
     let mut hydrated: ahash::AHashMap<String, InspectFlowRendered> = ahash::AHashMap::new();
+    if start_offset < corridor_units.min(page_end_unit) {
+        if let Some(stack) = report
+            .corridor
+            .as_ref()
+            .and_then(|corridor| corridor.stack.as_ref())
+        {
+            let mut ready = stack.clone();
+            hydrate_flow(ws, &mut ready);
+            hydrated.insert(stack.flow_id.clone(), ready);
+        }
+    }
     for unit_index in start_offset..page_end_unit {
-        if unit_index < structural_base {
+        if unit_index < structural_base || unit_index >= taint_base {
             continue;
         }
         let structural_index = unit_index - structural_base;
@@ -4598,7 +5441,7 @@ fn render_inspect_report_text(
         total_rows: total_units as u64,
         budget: paging_cfg.effective_budget(),
         tokens_used: 0,
-        cursor: paging::cursor_id("inspect", filters_hash, start_offset as u64),
+        cursor: paging::cursor_id("inspect-graph", filters_hash, start_offset as u64),
         next_cursor: None,
         is_last: true,
         start_offset: start_offset as u64,
@@ -4613,7 +5456,8 @@ fn render_inspect_report_text(
             view,
             flowless_hits: &flowless_hits,
             folded_order: &folded_order,
-            taint_units,
+            corridor_units,
+            taint_base,
             structural_base,
             total_decls,
             total_units,
@@ -4824,16 +5668,135 @@ fn render_taint_flows_table(u: &Ui, flows: &[InspectTaintFlow]) {
     cli_println!("{table}");
 }
 
-fn should_render_raw_taint_bodies(render: &InspectRenderOptions, structural_units: usize) -> bool {
-    !render.compact
-        && render.group_id_filter.is_none()
-        && (structural_units == 0
-            || render
-                .flow_id_filter
-                .as_deref()
-                .is_some_and(|id| id.starts_with("T:")))
+/// Raw taint flows always expand into their full call stack (one source
+/// body per hop). Only `--compact` and a group drilldown collapse them to
+/// the step table.
+fn should_render_raw_taint_bodies(render: &InspectRenderOptions) -> bool {
+    !render.compact && render.group_id_filter.is_none()
 }
 
+/// Source-body bytes a raw taint flow will render: the compiler span size of
+/// every function on its chain. Paging costs use this before any body is
+/// read.
+/// The corridor's compiler facts: callables, resolved edges (`E:` ids), and
+/// terminal call sites when the target is an external API.
+fn render_corridor_tables(u: &Ui, corridor: &InspectCorridor) {
+    cli_println!();
+    cli_println!(
+        "{} {} {} {}",
+        u.heading("══ CORRIDOR"),
+        u.name(&corridor.from),
+        u.dim("→"),
+        u.name(&corridor.to),
+    );
+    let mut meta = vec![
+        "exact compressed compiler corridor".to_string(),
+        format!("{} function(s)", corridor.node_count),
+        format!("{} edge(s)", corridor.edge_count),
+    ];
+    if !corridor.terminal_calls.is_empty() {
+        meta.push(format!("{} terminal call(s)", corridor.terminal_calls.len()));
+    }
+    if !corridor.backends.is_empty() {
+        meta.push(format!("backends {}", corridor.backends.join(", ")));
+    }
+    cli_println!("  {}", u.dim(&meta.join(" · ")));
+    if !corridor.nodes.is_empty() {
+        let mut table = u.table(&["function", "location"]);
+        for node in &corridor.nodes {
+            table.add_row(vec![
+                Cell::new(u.name(&node.name)),
+                Cell::new(format!(
+                    "{}:{}",
+                    u.path(&short_file(&node.file)),
+                    u.loc(&node.line.to_string())
+                )),
+            ]);
+        }
+        cli_println!("{table}");
+    }
+    if !corridor.edges.is_empty() {
+        cli_println!("  {}", u.dim("edges:"));
+        for edge in &corridor.edges {
+            cli_println!(
+                "    {} {} {} {}  {}:{}:{}  {}  {}",
+                u.dim(&edge.edge_id),
+                u.name(&edge.caller_name),
+                u.dim("→"),
+                u.name(&edge.callee_name),
+                u.path(&short_file(&edge.call_file)),
+                u.loc(&edge.call_line.to_string()),
+                u.loc(&edge.call_column.to_string()),
+                edge.call_text.trim(),
+                u.dim(&format!("{} · {}", edge.kind, edge.resolver_stage)),
+            );
+        }
+    }
+    if !corridor.terminal_calls.is_empty() {
+        cli_println!("  {}", u.dim("terminal calls:"));
+        for call in &corridor.terminal_calls {
+            cli_println!(
+                "    {}  {}:{}:{}  {} {}",
+                u.name(&call.name),
+                u.path(&short_file(&call.file)),
+                u.loc(&call.line.to_string()),
+                u.loc(&call.column.to_string()),
+                u.dim("in"),
+                u.name(&call.enclosing_function),
+            );
+        }
+    }
+    for reason in &corridor.analysis_incomplete_reasons {
+        cli_println!("  {}", u.warn(&format!("incomplete: {reason}")));
+    }
+}
+
+/// The corridor call stack: every callable on the corridor, in call order
+/// from the source, as full source bodies (or compact steps). Only the
+/// callables at `[start, end)` render on this page.
+fn render_corridor_stack(
+    u: &Ui,
+    render: &InspectRenderOptions,
+    stack: &InspectFlowRendered,
+    start: usize,
+    end: usize,
+) {
+    cli_println!();
+    cli_println!("{}", u.ruler('═', 70));
+    cli_println!(
+        "{} {}  {}",
+        u.annotation(&format!("CORRIDOR FLOW {}", stack.flow_label)),
+        u.dim(&stack.flow_id),
+        u.dim(&format!(
+            "{} of {} callable(s)",
+            end.saturating_sub(start),
+            stack.functions.len()
+        )),
+    );
+    let chain_line = stack
+        .chain
+        .iter()
+        .map(|hop| u.name(hop))
+        .collect::<Vec<_>>()
+        .join(&u.dim(" → "));
+    cli_println!("{chain_line}");
+    cli_println!("{}", u.ruler('═', 70));
+    let page = InspectFlowRendered {
+        functions: stack.functions[start..end.min(stack.functions.len())].to_vec(),
+        ..stack.clone()
+    };
+    let mut seen = BodySet::default();
+    if render.compact {
+        render_compact_step_list(u, &page);
+    } else {
+        render_full_source_bodies(u, &page, &mut seen);
+    }
+}
+
+/// Expand the page's raw taint flows into call stacks. Flows that share the
+/// same function chain share one expanded stack: the block names every
+/// `T:` id it covers, then prints each function body once. Single-function
+/// flows therefore render their body once per page, not once per flow.
 fn render_raw_taint_flow_bodies(
     ws: &Workspace,
     u: &Ui,
@@ -4845,25 +5808,92 @@ fn render_raw_taint_flow_bodies(
         compact,
         ..InspectRenderOptions::default()
     };
-    for (idx, flow) in flows.iter().enumerate() {
-        let Some(rendered) = rendered_flow_from_raw_taint(ws, flow, (first_flow_number + idx + 1) as u32)
-        else {
+    struct Stack<'a> {
+        key: Vec<u32>,
+        lineage_func_ids: Vec<u32>,
+        members: Vec<&'a InspectTaintFlow>,
+    }
+    let mut stacks: Vec<Stack<'_>> = Vec::new();
+    for flow in flows {
+        if flow.func_ids.is_empty() {
+            continue;
+        }
+        // One stack per entry-point chain: the primary lineage first, then
+        // every alternate chain that also reaches the entry.
+        let lineages = std::iter::once(&flow.lineage_func_ids).chain(flow.alternate_lineage_func_ids.iter());
+        for lineage in lineages {
+            let key: Vec<u32> = lineage.iter().chain(flow.func_ids.iter()).copied().collect();
+            match stacks.iter_mut().find(|stack| stack.key == key) {
+                Some(stack) => stack.members.push(flow),
+                None => stacks.push(Stack {
+                    key,
+                    lineage_func_ids: lineage.clone(),
+                    members: vec![flow],
+                }),
+            }
+        }
+    }
+    for (idx, stack) in stacks.iter().enumerate() {
+        let stack_number = (first_flow_number + idx + 1) as u32;
+        let members = &stack.members;
+        // Render the stack along its own chain; a flow reached through
+        // several entry points keeps its primary lineage in the flow record.
+        let representative = if members[0].lineage_func_ids == stack.lineage_func_ids {
+            members[0].clone()
+        } else {
+            let mut representative = members[0].clone();
+            representative
+                .lineage_func_ids
+                .clone_from(&stack.lineage_func_ids);
+            representative.lineage = stack
+                .lineage_func_ids
+                .iter()
+                .map(|func| func_display_name(ws, bonsai_common::FuncId::new(*func)))
+                .collect();
+            representative
+        };
+        let Some(rendered) = rendered_flow_from_raw_taint(ws, &representative, stack_number) else {
             continue;
         };
-        let header_name = if flow.terminal.is_empty() {
-            flow.entry.as_str()
-        } else {
-            flow.terminal.as_str()
-        };
-        let mut local_seen = BodySet::default();
-        render_flow_block_with_heading(
-            u,
-            &render_opts,
-            &rendered,
-            header_name,
-            &mut local_seen,
-            "TAINT FLOW",
+        cli_println!();
+        cli_println!("{}", u.ruler('═', 70));
+        cli_println!(
+            "{}  {}",
+            u.annotation(&format!("TAINT CALL STACK {stack_number}")),
+            u.dim(&format!("{} flow(s)", members.len())),
         );
+        let chain_line = rendered
+            .chain_display
+            .split(" -> ")
+            .map(|hop| u.name(hop))
+            .collect::<Vec<_>>()
+            .join(&u.dim(" → "));
+        cli_println!("{chain_line}");
+        for member in members {
+            let args = format_taint_args(member);
+            let terminal = if member.terminal.is_empty() {
+                member.entry.as_str()
+            } else {
+                member.terminal.as_str()
+            };
+            if args.is_empty() {
+                cli_println!("  {}  {}", u.dim(&member.taint_id), u.name(terminal));
+            } else {
+                cli_println!(
+                    "  {}  {}  {}",
+                    u.dim(&member.taint_id),
+                    u.name(terminal),
+                    u.dim(&args)
+                );
+            }
+        }
+        cli_println!("{}", u.ruler('═', 70));
+        let mut local_seen = BodySet::default();
+        if render_opts.compact {
+            render_compact_step_list(u, &rendered);
+        } else {
+            render_full_source_bodies(u, &rendered, &mut local_seen);
+        }
     }
 }
 
@@ -4872,9 +5902,12 @@ fn rendered_flow_from_raw_taint(
     flow: &InspectTaintFlow,
     flow_number: u32,
 ) -> Option<InspectFlowRendered> {
+    // The rendered stack is the structural caller lineage (root first)
+    // followed by the taint flow's own chain.
     let funcs: Vec<bonsai_common::FuncId> = flow
-        .func_ids
+        .lineage_func_ids
         .iter()
+        .chain(flow.func_ids.iter())
         .copied()
         .map(bonsai_common::FuncId::new)
         .collect();
@@ -4896,8 +5929,10 @@ fn rendered_flow_from_raw_taint(
     )?;
     rendered.flow_id.clone_from(&flow.taint_id);
     if !flow.chain_display.is_empty() {
-        rendered.chain.clone_from(&flow.chain_display);
-        rendered.chain_display = flow.chain_display.join(" -> ");
+        let mut chain = flow.lineage.clone();
+        chain.extend(flow.chain_display.iter().cloned());
+        rendered.chain_display = chain.join(" -> ");
+        rendered.chain = chain;
     }
     Some(rendered)
 }
@@ -5982,6 +7017,28 @@ fn walk_flow_hits_inner<F>(
     }
 }
 
+/// One line per resolved direct edge: stable `E:` id, the edge's other
+/// endpoint, the call site, and how the resolver proved it.
+fn render_decl_edges(u: &Ui, label: &str, edges: &[bonsai_sdk::SymbolCallEdge], callers: bool) {
+    if edges.is_empty() {
+        return;
+    }
+    cli_println!("   {} {}:", u.dim(label), u.loc(&format!("({})", edges.len())));
+    for edge in edges {
+        let other = if callers { &edge.caller } else { &edge.callee };
+        cli_println!(
+            "     {} {}  {}:{}:{}  {}  {}",
+            u.dim(&edge.edge_id),
+            u.name(other),
+            u.path(&short_file(&edge.file)),
+            u.loc(&edge.line.to_string()),
+            u.loc(&edge.column.to_string()),
+            edge.call_text.trim(),
+            u.dim(&format!("{} · {}", edge.dispatch, edge.resolver_stage)),
+        );
+    }
+}
+
 fn render_inspect_text(out: &InspectOut, render: &InspectRenderOptions, view: ResolvedView) {
     let u = ui();
     cli_println!(
@@ -5996,33 +7053,49 @@ fn render_inspect_text(out: &InspectOut, render: &InspectRenderOptions, view: Re
         u.loc(&out.line.to_string()),
         u.loc(&out.column.to_string()),
     );
-    if !out.params.is_empty() {
+    if !out.signature.is_empty() {
+        cli_println!("   {} {}", u.dim("signature:"), u.name(&out.signature));
+    } else if !out.params.is_empty() {
         cli_println!("   {} {}", u.dim("params:"), out.params.join(", "));
     }
-    if !out.direct_callers.is_empty() {
+    render_decl_edges(u, "direct callers", &out.direct_callers, true);
+    render_decl_edges(u, "direct callees", &out.direct_callees, false);
+    if !out.external_calls.is_empty() {
         cli_println!(
             "   {} {}:",
-            u.dim("direct callers"),
-            u.loc(&format!("({})", out.direct_callers.len())),
+            u.dim("external calls"),
+            u.loc(&format!("({})", out.external_calls.len())),
         );
-        for c in out.direct_callers.iter().take(10) {
+        for call in &out.external_calls {
             cli_println!(
-                "     {}:{}:{}  {}",
-                u.path(&short_file(&c.file)),
-                u.loc(&c.line.to_string()),
-                u.loc(&c.column.to_string()),
-                c.snippet.trim(),
-            );
-        }
-        if out.direct_callers.len() > 10 {
-            cli_println!(
-                "     {}",
-                u.dim(&format!("... ({} more)", out.direct_callers.len() - 10))
+                "     {}:{}:{}  {}  {}",
+                u.path(&short_file(&call.file)),
+                u.loc(&call.line.to_string()),
+                u.loc(&call.column.to_string()),
+                call.call_text.trim(),
+                u.dim(&call.reason),
             );
         }
     }
-    if !out.callees.is_empty() {
-        cli_println!("   {} {}", u.dim("outgoing calls:"), out.callees.join(", "));
+    if !out.imports.is_empty() {
+        let rendered: Vec<String> = out
+            .imports
+            .iter()
+            .map(|import| {
+                let mut text = import.module.clone();
+                if let Some(original) = import.original_name.as_deref() {
+                    text = format!("{original} from {}", import.module);
+                }
+                if let Some(alias) = import.alias.as_deref() {
+                    text.push_str(&format!(" as {alias}"));
+                }
+                if import.wildcard {
+                    text.push_str(" (*)");
+                }
+                text
+            })
+            .collect();
+        cli_println!("   {} {}", u.dim("imports:"), rendered.join(", "));
     }
     if out.flows.is_empty() {
         cli_println!(
@@ -6150,7 +7223,7 @@ fn build_filter_match(
 /// human label like `"call os.system"`. `marker_subjects` are the
 /// structured fact strings allowed to satisfy FROM/TO markers on this
 /// rendered line; callers must not pass raw source lines.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct MatchOverride {
     pub(crate) span: bonsai_common::Span,
     pub(crate) label: String,
@@ -6423,7 +7496,7 @@ fn owner_qualified_decl_name(ws: &Workspace, decl: &bonsai_lang_api::Decl) -> Op
 /// `\0`). Hashed via fixed-seed FNV-1a-64 (low 32 bits, hex) so the
 /// id stays identical across runs / cache modes / themes.
 /// `group_id` is a pure function of the shared suffix.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct InspectFlowGroup {
     /// Stable content-hash id (`G:` + 16 hex).
     group_id: String,
@@ -6602,8 +7675,11 @@ fn render_function_source(
     let from_anchor = if is_root { fact_anchor(filters.from) } else { None };
     let to_anchor = if is_target { fact_anchor(filters.to) } else { None };
 
+    // A module body is the whole file: only the marked lines and their
+    // context are evidence, so it is always rendered as windows.
+    let module_body = decl.kind == DeclKind::Module || decl.name == bonsai_lang_api::MODULE_DECL_NAME;
     let large_body_elision = !full_source_for_large_bodies
-        && end_clamped.saturating_sub(first_line) as usize > LARGE_BODY_LINE_THRESHOLD;
+        && (module_body || end_clamped.saturating_sub(first_line) as usize > LARGE_BODY_LINE_THRESHOLD);
     let line_plan: Vec<Option<u32>> = if large_body_elision {
         let mut keep: ahash::AHashSet<u32> = ahash::AHashSet::new();
         let mut mark_window = |line: u32| {

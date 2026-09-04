@@ -1323,35 +1323,6 @@ fn cli_cache_command_uses_sdk_cache_facade_for_dataflow_sidecar() {
 }
 
 #[test]
-fn cli_trace_command_uses_sdk_trace_types() {
-    // docs/contributing/review-checklist.mdx B-7: trace renderers may format SDK trace values,
-    // but they should not import bonsai_trace directly.
-    let root = repo_root();
-    let trace_rs = root
-        .join("crates")
-        .join("cli")
-        .join("src")
-        .join("commands")
-        .join("trace.rs");
-    let text = read(&trace_rs);
-    let mut violations = Vec::new();
-    for (lineno, line) in text.lines().enumerate() {
-        let live = line.split("//").next().unwrap_or("").trim();
-        if live.is_empty() {
-            continue;
-        }
-        if live.contains("bonsai_trace") {
-            violations.push(format!("commands/trace.rs:{}: {live}", lineno + 1));
-        }
-    }
-    assert!(
-        violations.is_empty(),
-        "CLI trace command must consume trace result types through bonsai_sdk:\n  {}",
-        violations.join("\n  ")
-    );
-}
-
-#[test]
 fn cli_export_command_uses_sdk_export_cache_facade() {
     // docs/contributing/review-checklist.mdx B-8: export rendering and default-export cache
     // freshness/path logic belong behind the SDK export/cache
@@ -1473,18 +1444,26 @@ fn plain_read_file_reuses_one_exact_compiler_body_without_semantic_graphs() {
 }
 
 #[test]
-fn cli_tree_is_filesystem_only() {
+fn cli_tree_attaches_module_connections_without_security_or_graph_builds() {
     let root = repo_root();
     let path = root.join("crates/cli/src/commands/tree.rs");
     let text = read(&path);
+    // `tree` is the module map: one lazy index open plus the shared
+    // `file_connections` projection (persisted callgraph partitions). It must
+    // never load a rulepack, run taint analysis, or build the resident
+    // resolved graph itself.
+    assert!(
+        text.contains("bonsai_sdk::file_connections(") && text.contains("open_project_index_only("),
+        "tree must attach module connections through the shared projection"
+    );
     let forbidden = [
-        "open_project",
         "TreeFilters",
         "run_taint_analysis",
         "cached_resolved_call_graph",
-        "bonsai_sdk",
         "bonsai_security",
         "bonsai_workspace",
+        "Rulepack",
+        "rules_dir",
     ];
     let mut violations = Vec::new();
     for (lineno, line) in text.lines().enumerate() {
@@ -1500,7 +1479,7 @@ fn cli_tree_is_filesystem_only() {
     }
     assert!(
         violations.is_empty(),
-        "CLI tree must remain a direct filesystem view with no compiler or security path:\n  {}",
+        "CLI tree must stay a module map with no security or resident-graph work:\n  {}",
         violations.join("\n  ")
     );
 }
@@ -2958,10 +2937,17 @@ fn idg_taint_queries_reuse_canonical_linkage_without_global_body_materialization
     let idg_api = read(&root.join("crates/taint/src/idg_api.rs"));
     let summaries = read(&root.join("crates/taint/src/idg_api/summary.rs"));
 
+    // `entry_taint_graph_from_idg_query` delegates to the closure-returning
+    // implementation; the invariant holds on the implementation body.
+    let wrapper = function_body(&reachable, "entry_taint_graph_from_idg_query");
+    assert!(
+        wrapper.contains("entry_taint_graph_with_closure_from_idg_query(request)"),
+        "entry_taint_graph_from_idg_query must delegate to the closure-returning implementation"
+    );
     for function in [
         "source_seed_reaches_return_from_idg_query",
         "entry_taint_call_records_from_idg_query",
-        "entry_taint_graph_from_idg_query",
+        "entry_taint_graph_with_closure_from_idg_query",
     ] {
         let body = function_body(&reachable, function);
         assert!(
@@ -3075,7 +3061,7 @@ fn compiler_has_one_precision_level() {
         "the compiler must keep one precision level; remove these reintroductions:\n{}",
         offenders.join("\n")
     );
-    let schema = read(&root.join("schemas/bonsai-native-export-v11.schema.json"));
+    let schema = read(&root.join("schemas/bonsai-native-export-v12.schema.json"));
     assert!(
         !schema.contains("precision"),
         "the native export schema must not carry per-edge precision labels"
@@ -3545,8 +3531,8 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
     );
     assert!(
         inspect.contains("inspect_requested_window")
-            && function_body(&inspect, "inspect_requested_window").contains("requested_page_window"),
-        "inspect must render only the requested page instead of eagerly formatting unrelated future pages"
+            && function_body(&inspect, "inspect_requested_window").contains("query_report_page_window"),
+        "inspect must render the requested page window instead of eagerly formatting unrelated future pages"
     );
     for forbidden in [
         "dataflow().graph_for",
@@ -3574,13 +3560,14 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
             && compile_session.contains(
                 "build_for_persistence_streaming_with_file_semantics_and_options_for_files_and_funcs",
             )
-            && compile_session.contains("tempfile::Builder::new()")
+            && compile_session.contains("idg_transfer_sidecar_path(")
             && compile_session.contains("IdgQueryService::load_from_disk")
+            && compile_session.contains("temporary_syntax_flow_sidecar()")
             && !session.contains(".take(")
             && !session.contains(".truncate(")
             && !compile_session.contains(".take(")
             && !compile_session.contains(".truncate("),
-        "cold targeted inspect must stream one exact source-to-target IDG corridor through an unpublished paged session without semantic work caps"
+        "cold targeted inspect must stream one exact source-to-target IDG corridor through a content-keyed persisted session (temporary only without a cache dir) without semantic work caps"
     );
     assert!(
         function_body(&inspect_query, "matching_decls").contains("compiler_header_index()")
@@ -3660,15 +3647,6 @@ fn targeted_cli_queries_do_not_hydrate_unrelated_workspace_graphs() {
             && !function_body(&browse_slice, "semantic_function_name")
                 .contains("compiler_linkage_index()"),
         "slice must select exact bodies from compact compiler headers without opening whole-workspace linkage"
-    );
-    let cli_slice = read(&root.join("crates/cli/src/commands/slice.rs"));
-    let slice = function_body(&cli_slice, "cmd_slice");
-    assert!(
-        slice.contains("open_project_index_matching_literal")
-            && slice.contains("bonsai_callgraph::short_callee(symbol)")
-            && slice.contains("open_project_index_filtered_paths")
-            && !slice.contains("open_project(root)"),
-        "slice must scope workspace hydration by its required symbol/file selector"
     );
 
     let resolution = read(&root.join("crates/browse/src/resolution.rs"));
@@ -3828,7 +3806,6 @@ fn production_callgraph_consumers_share_the_workspace_graph() {
 fn cli_paging_formats_only_the_requested_page() {
     let root = repo_root();
     let page_cache = read(&root.join("crates/cli/src/page_cache.rs"));
-    let trace = read(&root.join("crates/cli/src/commands/trace.rs"));
     let tree = read(&root.join("crates/cli/src/commands/tree.rs"));
     let window = function_body(&page_cache, "requested_page_window");
     // `emit_paged_text` / `emit_paged_text_prefiltered` are thin wrappers
@@ -3838,20 +3815,11 @@ fn cli_paging_formats_only_the_requested_page() {
     assert!(
         window.contains("pages.insert(current_page.clamp(1, total_pages))")
             && !window.contains("for page")
-            && emit.contains("requested_page_window")
+            && emit.contains("query_report_page_window")
+            && function_body(&page_cache, "query_report_page_window").contains("FULL_RENDER_PAGE_LIMIT")
             && !page_cache.contains("EAGER_PAGE_LIMIT")
             && !replay.contains("requested_page_arg().is_none()"),
-        "CLI paging must format only the requested page while allowing a fresh repeated page to replay"
-    );
-    let trace_plan = function_body(&trace, "trace_page_rows");
-    let trace_render = function_body(&trace, "render_trace_text_page");
-    assert!(
-        trace_plan.contains("for step in &trace.steps")
-            && trace_plan.contains("depth_by_path")
-            && !trace_plan.contains("flat_map")
-            && trace_render.contains("for row in rows")
-            && !trace.contains("fn trace_text_lines"),
-        "trace paging must plan steps once and format only the requested page without a paths-times-steps rescan"
+        "CLI paging must format the requested page window (query reports add the successor page and render short reports in full; security reports stay single-page) while allowing a fresh repeated page to replay"
     );
     let tree_page = function_body(&tree, "render_text_paged");
     assert!(
@@ -4495,7 +4463,6 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
 fn first_class_path_and_slice_use_syntax_derived_indexes_only() {
     let root = repo_root();
     let paths_rs = read(&root.join("crates/browse/src/paths.rs"));
-    let cli_path = read(&root.join("crates/cli/src/commands/path.rs"));
     let path_body = live_code(function_body(&paths_rs, "paths"));
     let path_graph_body = live_code(function_body(&paths_rs, "semantic_path_graph"));
     let path_finalize_body = live_code(function_body(&paths_rs, "finalize_outcome"));
@@ -4511,11 +4478,6 @@ fn first_class_path_and_slice_use_syntax_derived_indexes_only() {
             && path_graph_body.contains("idg.semantic_cross_call_edges(")
             && path_graph_body.contains("call_edge_from_idg_cross_call("),
         "path semantic graph must prefer exact partitioned relations, fall back to the cached resolved graph, and augment with warmed IDG cross-call edges"
-    );
-    assert!(
-        cli_path.matches("open_project_path_query(root)?").count() >= 2
-            && !cli_path.contains("mark_endpoint_candidate_scope"),
-        "retrieval path candidates must fall back to the complete lazy compiler snapshot unless an exact partitioned graph answered the query"
     );
     assert!(
         path_finalize_body.contains("resolution_incomplete_reasons_for_funcs(")
@@ -4548,7 +4510,7 @@ fn first_class_path_and_slice_use_syntax_derived_indexes_only() {
         cli_reference.contains("idg_semantic_edges")
             && sdk_reference.contains("PathOutcome.backends")
             && architecture.contains("warmed IDG cross-call edges"),
-        "path docs must describe warmed-IDG backend metadata and semantic graph augmentation"
+        "corridor docs must describe warmed-IDG backend metadata and semantic graph augmentation"
     );
 
     let slice_rs = read(&root.join("crates/browse/src/slice.rs"));
@@ -4742,7 +4704,7 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
     assert!(
         callgraph_sidecar.contains("matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT")
             && callgraph_sidecar.contains("dependency_metadata_fingerprint_for_sidecar(path)")
-            && callgraph_sidecar.contains("fnv1a_bytes64(snapshot.text.as_bytes())")
+            && callgraph_sidecar.contains("crate::source_content_hash(db.vfs(), file)")
             && callgraph_load_body.contains("validate_metadata(path, &metadata)")
             && callgraph_validation_body
                 .contains("metadata.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT")
@@ -5797,18 +5759,21 @@ fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
 fn workspace_context_does_not_run_an_unneeded_compiler_pass() {
     let root = repo_root();
     let diagnostics = read(&root.join("crates/cli/src/commands/diagnostics.rs"));
-    let body = function_body(&diagnostics, "cmd_context");
+    // The workspace context rides in `index`. Its compiler-cache hit path
+    // answers from a metadata scan (`semantic_context_for_root`) before any
+    // parse-only open could ingest source contents.
+    let body = function_body(&diagnostics, "cmd_index");
+    let metadata_scan = body
+        .find("semantic_context_for_root(root)")
+        .expect("index cache-hit path collects the workspace context from metadata");
+    let parse_open = body.find("open_project_parse_only").expect("index parse path");
     assert!(
-        body.contains("Workspace::new")
-            && body.contains("semantic_context_for_root(root)")
-            && !body.contains("open_workspace_syntax_only"),
-        "context must derive metadata-only source paths without ingesting source contents"
+        body.contains("Workspace::new") && metadata_scan < parse_open && !body.contains("open_workspace_syntax_only"),
+        "index must answer a compiler-cache hit (with its workspace context) without ingesting source contents"
     );
     assert!(
-        !body.contains("open_project_parse_only")
-            && !body.contains("global_index")
-            && !body.contains(".ingest"),
-        "context must not trigger declaration lowering or global semantic indexing"
+        !body.contains("global_index") && !body.contains(".ingest"),
+        "index must not trigger global semantic indexing to report the workspace context"
     );
 }
 
@@ -6279,8 +6244,11 @@ fn default_security_review_profile_is_rulepack_policy() {
         "the rulepack must select its default review profile; shared CLI code must not hard-code a profile spelling"
     );
     assert!(
-        show.contains("cmd_security_unprofiled") && !show.contains("Some(\"all\".to_string())"),
-        "stable-id reopening must bypass review defaults generically instead of hard-coding a rulepack profile name"
+        show.contains("cmd_security_default_profile")
+            && show.contains("cmd_security_unprofiled")
+            && show.contains("MissingStableId")
+            && !show.contains("Some(\"all\".to_string())"),
+        "stable-id reopening must first reuse the cached default-profile report and widen to the unprofiled run generically instead of hard-coding a rulepack profile name"
     );
 }
 

@@ -51,9 +51,29 @@ pub struct ReadFileOut {
     pub callees_out: Vec<InlinedDecl>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings_in_view: Vec<FindingDigest>,
+    /// How this file is wired to the rest of the workspace: imports (with
+    /// the workspace files they resolve to) and resolved cross-file call
+    /// edges in both directions. Always present; a large cold workspace
+    /// without a persisted callgraph reports the gap in
+    /// `analysis_incomplete_reasons`.
+    #[serde(default)]
+    pub connections: ReadFileConnections,
     pub truncated: ReadFileTruncation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_cursor: Option<String>,
+}
+
+/// Cross-module wiring of one file.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ReadFileConnections {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<bonsai_browse::ModuleImport>,
+    /// Resolved calls from this file into other workspace files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls_out: Vec<bonsai_browse::ModuleEdgeGroup>,
+    /// Resolved calls from other workspace files into this file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callers_in: Vec<bonsai_browse::ModuleEdgeGroup>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -90,6 +110,8 @@ pub enum MarkKind {
     Through,
     CallOut,
     CallIn,
+    /// A line that uses a name bound by one of the file's imports.
+    ImportUse,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
@@ -434,6 +456,128 @@ fn read_file_with_taint_options(
         callers_dropped: raw_callers.saturating_sub(max_bodies),
         callees_dropped: raw_callees.saturating_sub(max_bodies),
     };
+    // Module connections: imports resolved to workspace files plus the
+    // resolved cross-file call edges, and a `CALL→` / `→CALL` line mark for
+    // every edge whose call site (or callee declaration) is in view.
+    let mut connections = ReadFileConnections::default();
+    if let Some(facts) = bonsai_browse::file_connections(ws, &[file_id]).into_iter().next() {
+        for group in &facts.calls_out {
+            for edge in &group.edges {
+                if edge.line < line_lo || edge.line > actual_hi {
+                    continue;
+                }
+                marks.push(LineMark {
+                    line: edge.line,
+                    kind: MarkKind::CallOut,
+                    at: Locator {
+                        file: raw_path.clone(),
+                        line: edge.line,
+                        column: edge.column,
+                        decl: Some(edge.caller.clone()),
+                        ..Locator::default()
+                    },
+                    target: Some(Locator {
+                        file: group.file.clone(),
+                        line: edge.callee_line,
+                        column: 1,
+                        decl: Some(edge.callee.clone()),
+                        ..Locator::default()
+                    }),
+                    finding_id: None,
+                    flow_id: None,
+                    edge_id: Some(edge.edge_id.clone()),
+                    taint_id: None,
+                    rule_id: None,
+                    tag: None,
+                    severity: None,
+                    status: None,
+                    taint_source_name: None,
+                    taint_history: Vec::new(),
+                    sanitizer_seen_at: None,
+                });
+            }
+        }
+        for group in &facts.callers_in {
+            for edge in &group.edges {
+                if edge.callee_line < line_lo || edge.callee_line > actual_hi {
+                    continue;
+                }
+                marks.push(LineMark {
+                    line: edge.callee_line,
+                    kind: MarkKind::CallIn,
+                    at: Locator {
+                        file: raw_path.clone(),
+                        line: edge.callee_line,
+                        column: 1,
+                        decl: Some(edge.callee.clone()),
+                        ..Locator::default()
+                    },
+                    target: Some(Locator {
+                        file: group.file.clone(),
+                        line: edge.line,
+                        column: edge.column,
+                        decl: Some(edge.caller.clone()),
+                        ..Locator::default()
+                    }),
+                    finding_id: None,
+                    flow_id: None,
+                    edge_id: Some(edge.edge_id.clone()),
+                    taint_id: None,
+                    rule_id: None,
+                    tag: None,
+                    severity: None,
+                    status: None,
+                    taint_source_name: None,
+                    taint_history: Vec::new(),
+                    sanitizer_seen_at: None,
+                });
+            }
+        }
+        for import in &facts.imports {
+            let target = import.resolved_files.first().map(|file| Locator {
+                file: file.clone(),
+                line: 1,
+                column: 1,
+                module: Some(import.module.clone()),
+                ..Locator::default()
+            });
+            for line in &import.use_lines {
+                if *line < line_lo || *line > actual_hi {
+                    continue;
+                }
+                marks.push(LineMark {
+                    line: *line,
+                    kind: MarkKind::ImportUse,
+                    at: Locator {
+                        file: raw_path.clone(),
+                        line: *line,
+                        column: 1,
+                        decl: Some(import.names.join(", ")),
+                        module: Some(import.module.clone()),
+                        ..Locator::default()
+                    },
+                    target: target.clone(),
+                    finding_id: None,
+                    flow_id: None,
+                    edge_id: None,
+                    taint_id: None,
+                    rule_id: None,
+                    tag: Some(import.module.clone()),
+                    severity: None,
+                    status: None,
+                    taint_source_name: None,
+                    taint_history: Vec::new(),
+                    sanitizer_seen_at: None,
+                });
+            }
+        }
+        marks.sort_by_key(|mark| mark.line);
+        connections = ReadFileConnections {
+            imports: facts.imports,
+            calls_out: facts.calls_out,
+            callers_in: facts.callers_in,
+        };
+    }
     let mut analysis_incomplete_reasons = read_file_analysis_incomplete_reasons(&truncated);
     analysis_incomplete_reasons.extend(finding_incomplete_reasons);
     analysis_incomplete_reasons.sort();
@@ -455,6 +599,7 @@ fn read_file_with_taint_options(
         callers_in,
         callees_out,
         findings_in_view,
+        connections,
         truncated,
         page_cursor: None,
     };

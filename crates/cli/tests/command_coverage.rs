@@ -603,159 +603,11 @@ fn search_request_finds_multiple_kinds() {
     assert_contains(&out, "flask", "search request");
 }
 
-// -------- trace --------
-
-#[test]
-fn trace_handle_request_shows_sink_path() {
-    let Some(out) = run(&["trace", ws().to_str().unwrap(), "handle_request"]) else {
-        return;
-    };
-    // The trace must walk through every function in the call tree.
-    for name in &[
-        "handle_request",
-        "get_user",
-        "verify_token",
-        "update_user",
-        "run_admin_command",
-    ] {
-        assert_contains(&out, name, "trace handle_request");
-    }
-    // And must hit both known sinks.
-    assert_contains(&out, "cursor.execute", "trace handle_request");
-    assert_contains(&out, "os.system", "trace handle_request");
-}
-
-// -------- path --------
-
-#[test]
-fn path_handle_request_to_admin_command_reports_compressed_semantic_corridor() {
-    let Some(out) = run(&[
-        "path",
-        ws().to_str().unwrap(),
-        "--from",
-        "handle_request",
-        "--to",
-        "run_admin_command",
-        "--format",
-        "json",
-    ]) else {
-        return;
-    };
-    let value: serde_json::Value = serde_json::from_str(&out).expect("path JSON");
-    assert_eq!(value["from"], "handle_request");
-    assert_eq!(value["to"], "run_admin_command");
-    for field in ["backends", "idg_available", "idg_semantic_edges"] {
-        assert!(value.get(field).is_some(), "path JSON missing `{field}`: {out}");
-    }
-    assert_eq!(value["representation"], "compressed_callgraph");
-    assert!(
-        value["node_count"].as_u64().unwrap_or(0) >= 3,
-        "path command should find the semantic corridor:\n{out}"
-    );
-    assert!(
-        value["edge_count"].as_u64().unwrap_or(0) >= 2,
-        "path command should retain resolved corridor edges:\n{out}"
-    );
-    for field in ["nodes", "edges", "analysis_complete"] {
-        assert!(
-            value.get(field).is_some(),
-            "path result missing `{field}`: {value}"
-        );
-    }
-    let names: Vec<&str> = value["nodes"]
-        .as_array()
-        .expect("corridor nodes")
-        .iter()
-        .filter_map(|func| func["name"].as_str())
-        .collect();
-    assert!(
-        names.contains(&"handle_request")
-            && names.contains(&"update_user")
-            && names.contains(&"run_admin_command"),
-        "corridor should include the semantic nodes through update_user: {names:?}\n{out}"
-    );
-}
-
-// -------- slice --------
-
-#[test]
-fn slice_result_at_update_user_call_reports_local_influences() {
-    let Some(out) = run(&[
-        "slice",
-        ws().to_str().unwrap(),
-        "--symbol",
-        "result",
-        "--line",
-        "15",
-        "--file",
-        "gateway.py",
-        "--format",
-        "json",
-    ]) else {
-        return;
-    };
-    let value: serde_json::Value = serde_json::from_str(&out).expect("slice JSON");
-    assert_eq!(value["symbol"], "result");
-    assert_eq!(value["line"], 15);
-    assert_eq!(value["candidate_count"], 1);
-    assert!(
-        value["slice_count"].as_u64().unwrap_or(0) >= 1,
-        "slice command should find handle_request result slice:\n{out}"
-    );
-    let first = value["slices"]
-        .as_array()
-        .and_then(|slices| slices.first())
-        .unwrap_or_else(|| panic!("slice JSON missing first slice:\n{out}"));
-    for field in [
-        "slice_id",
-        "file",
-        "function",
-        "target_line",
-        "target_symbol",
-        "influencing_symbols",
-        "steps",
-    ] {
-        assert!(first.get(field).is_some(), "slice row missing `{field}`: {first}");
-    }
-    let influences: Vec<&str> = first["influencing_symbols"]
-        .as_array()
-        .expect("slice influences")
-        .iter()
-        .filter_map(|symbol| symbol.as_str())
-        .collect();
-    assert!(
-        influences.contains(&"token") && influences.contains(&"action"),
-        "slice should report call-argument influences token/action: {influences:?}\n{out}"
-    );
-}
-
-#[test]
-fn slice_resolves_an_unambiguous_symbol_without_line() {
-    let Some(out) = run(&[
-        "slice",
-        ws().to_str().unwrap(),
-        "--symbol",
-        "result",
-        "--file",
-        "gateway.py",
-        "--format",
-        "json",
-    ]) else {
-        return;
-    };
-    let value: serde_json::Value = serde_json::from_str(&out).expect("slice JSON");
-    assert!(value["candidate_count"].as_u64().unwrap_or(0) >= 1, "{out}");
-    assert!(
-        value["slices"].as_array().is_some_and(|rows| !rows.is_empty()),
-        "{out}"
-    );
-}
-
 // -------- inspect --------
 
 #[test]
 fn inspect_verify_token_finds_decl_and_direct_evidence() {
-    let Some(out) = run(&["inspect", ws().to_str().unwrap(), "--query", "verify_token"]) else {
+    let Some(out) = run(&["inspect-graph", ws().to_str().unwrap(), "--query", "verify_token"]) else {
         return;
     };
     assert_contains(&out, "decl hit(s)", "inspect verify_token");
@@ -768,7 +620,7 @@ fn inspect_verify_token_finds_decl_and_direct_evidence() {
 #[test]
 fn inspect_reports_uncapped_total() {
     let Some(out) = run(&[
-        "inspect",
+        "inspect-graph",
         ws().to_str().unwrap(),
         "--query",
         "verify_token",
@@ -983,13 +835,7 @@ fn dump_taint_from_update_user_propagates_to_verify_token() {
 
 #[test]
 fn show_raw_taint_id_reopens_inspect_view() {
-    let Some(full) = run(&[
-        "inspect",
-        ws().to_str().unwrap(),
-        "--query",
-        "os.system",
-        "--taint-flow",
-    ]) else {
+    let Some(full) = run(&["inspect-graph", ws().to_str().unwrap(), "--query", "os.system"]) else {
         return;
     };
     let target = first_stable_id(&full, 'T', 8)

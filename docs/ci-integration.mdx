@@ -157,7 +157,10 @@ workspace input, or rulepack validation failures exit non-zero.
 
 Use the JSON or SARIF artifact to enforce policy after confirming the report is
 complete. For example, a wrapper can fail only on new unsanitized critical or
-high findings while allowing unchanged baseline findings.
+high findings while allowing unchanged baseline findings:
+`security . taint-analysis --baseline previous.json --format json --all`
+labels every current finding `new`, `unchanged`, or `fixed` against a prior
+`--format json --all` report without rerunning analysis.
 
 ## Repository release checks
 

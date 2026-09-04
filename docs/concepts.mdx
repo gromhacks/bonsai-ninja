@@ -31,7 +31,7 @@ The completed generation is replaced atomically; queries never observe half
 old and half new compiler state.
 
 Workspace-wide resolution retains compact declaration, type, module,
-inheritance, import, and stable-symbol headers. Security, inspect, export, and
+inheritance, import, and stable-symbol headers. Security, inspect-graph, export, and
 IDG construction stream exact bodies from the compiler-object generation and
 remap them to those symbols. This separates body lifetime from graph lifetime
 without introducing another parser or lowering path.
@@ -112,7 +112,7 @@ never separates lineage from the boundary it explains.
 
 | Label | Produced by | Meaning |
 |---|---|---|
-| `FLOW` | `inspect`, grouped inspect output, and navigation-oriented views | A stable structural evidence unit. For ordinary inspect this is one matched callable; endpoint queries use an exact compressed compiler corridor rather than enumerating every path combination. |
+| `FLOW` | `inspect-graph` (`FLOW N` blocks in the default `trace` view, `GROUP N` blocks with `--view grouped`, `CORRIDOR FLOW` for `--from`/`--to`) | A stable structural evidence unit. For an ordinary `inspect-graph` query this is one matched callable; `--from`/`--to` queries use an exact compressed compiler corridor rather than enumerating every path combination. |
 | `SOURCE n · DOWNSTREAM FLOW m` | `security source-analysis` | A path produced by running taint forward from numbered source `n`. It maps where boundary data can travel without requiring a sink. |
 | `SINK n · UPSTREAM FLOW m` | `security sink-analysis` | Exact source-independent compiler value lineage into numbered sink `n`, presented sink-first. Security-source reachability is separate evidence. |
 | `TAINT FLOW` | `security taint-analysis` | A source-to-sink finding path where the security engine proved tainted data reaches the sink operand. Steps include tainted argument indexes or receiver evidence where available. |

@@ -6,25 +6,24 @@
 //! `const serialize = require("node-serialize")`, `S` in `use X\Service as S`),
 //! every call or reference that reaches the dependency through one of those
 //! names, and every rulepack source / sink / sanitizer match whose rule claims
-//! the dependency. Each site carries its enclosing callable, and each callable
-//! carries its resolved direct callers from the cached compiler call graph, so
-//! a reviewer can triage dependency code without running taint analysis.
+//! the dependency. Each site carries its enclosing callable. The CLI joins
+//! these sites with the cached complete taint-analysis report to show the
+//! taint flows each dependency appears in.
 //!
-//! The analysis is a single pass over the exact per-file compiler objects plus
-//! one lookup per callable in the cached resolved call graph. It never
-//! enumerates call paths.
+//! The analysis is a single pass over the exact per-file compiler objects. It
+//! never enumerates call paths.
 
 use crate::analysis::{
     dependency_inventory, sanitizer_inventory, sink_inventory, source_inventory, DependencyInventoryOptions,
     SecurityInventoryOptions,
 };
-use crate::deps::{import_package_candidates, DependencyRow};
+use crate::deps::{import_package_candidates, DependencyInventory, DependencyRow};
 use crate::loader::Rulepack;
 use crate::matcher::RuleMatch;
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashMap;
 use anyhow::Result;
-use bonsai_common::{FileId, FuncId, Span, SymbolId};
-use bonsai_lang_api::{Decl, FlowEvent, RefKind};
+use bonsai_common::{FileId, FuncId, Span};
+use bonsai_lang_api::{FlowEvent, RefKind};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 use std::path::Path;
@@ -61,22 +60,6 @@ pub struct DependencyUsageSite {
     pub in_func: Option<FuncId>,
 }
 
-/// A callable that touches the dependency and its resolved direct callers.
-#[derive(Clone, Debug, Serialize)]
-pub struct DependencyFunctionRow {
-    pub function: String,
-    pub file: String,
-    pub line: u32,
-    /// Number of usage sites inside this callable.
-    pub site_count: usize,
-    /// Display names of resolved direct callers (`Owner.member` when the
-    /// workspace has same-named callables). Empty when nothing resolved
-    /// calls the function.
-    pub direct_callers: Vec<String>,
-    #[serde(skip)]
-    pub func: FuncId,
-}
-
 /// One dependency with every place it is used.
 #[derive(Clone, Debug, Serialize)]
 pub struct DependencyAnalysisCandidate {
@@ -84,7 +67,6 @@ pub struct DependencyAnalysisCandidate {
     /// Local names bound to the dependency by import statements, sorted.
     pub bound_names: Vec<String>,
     pub sites: Vec<DependencyUsageSite>,
-    pub functions: Vec<DependencyFunctionRow>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -115,13 +97,58 @@ pub fn dependency_analysis(
         exclude_files: options.inventory.exclude_files.clone(),
         ..SecurityInventoryOptions::default()
     };
+    let matches = DependencyInventoryMatches {
+        sources: source_inventory(ws, pack, inventory_options.clone())?,
+        sinks: sink_inventory(ws, pack, inventory_options.clone())?,
+        sanitizers: sanitizer_inventory(ws, pack, inventory_options)?,
+    };
+    dependency_analysis_with_inventory(ws, pack, inventory, matches)
+}
+
+/// Complete source/sink/sanitizer inventories for the analysis scope.
+/// Callers that already hold them (cached complete objects) pass them in so
+/// the analysis is a projection, never a rescan.
+#[derive(Clone, Debug, Default)]
+pub struct DependencyInventoryMatches {
+    pub sources: Vec<RuleMatch>,
+    pub sinks: Vec<RuleMatch>,
+    pub sanitizers: Vec<RuleMatch>,
+}
+
+/// [`dependency_analysis`] over precomputed inventories: same output, no
+/// inventory scan.
+pub fn dependency_analysis_with_matches(
+    ws: &Workspace,
+    pack: &Rulepack,
+    root: &Path,
+    options: DependencyAnalysisOptions,
+    matches: DependencyInventoryMatches,
+) -> Result<DependencyAnalysisReport> {
+    let inventory = dependency_inventory(ws, pack, root, options.inventory);
+    if inventory.rows.is_empty() {
+        let analysis_incomplete_reasons = Vec::new();
+        return Ok(DependencyAnalysisReport {
+            candidates: Vec::new(),
+            analysis_complete: analysis_incomplete_reasons.is_empty(),
+            analysis_incomplete_reasons,
+        });
+    }
+    dependency_analysis_with_inventory(ws, pack, inventory, matches)
+}
+
+fn dependency_analysis_with_inventory(
+    ws: &Workspace,
+    pack: &Rulepack,
+    inventory: DependencyInventory,
+    matches: DependencyInventoryMatches,
+) -> Result<DependencyAnalysisReport> {
     let mut matches_by_rule: AHashMap<String, Vec<(&'static str, RuleMatch)>> = AHashMap::new();
-    for (family, matches) in [
-        ("source", source_inventory(ws, pack, inventory_options.clone())?),
-        ("sink", sink_inventory(ws, pack, inventory_options.clone())?),
-        ("sanitizer", sanitizer_inventory(ws, pack, inventory_options)?),
+    for (family, family_matches) in [
+        ("source", matches.sources),
+        ("sink", matches.sinks),
+        ("sanitizer", matches.sanitizers),
     ] {
-        for matched in matches {
+        for matched in family_matches {
             matches_by_rule
                 .entry(matched.rule_id.clone())
                 .or_default()
@@ -129,11 +156,10 @@ pub fn dependency_analysis(
         }
     }
 
-    let global = ws.compiler_header_index();
-    let call_graph = ws.cached_resolved_call_graph();
     let mut incomplete_reasons = Vec::new();
+    let usages = collect_import_usage_for_rows(ws, pack, &inventory.rows, &mut incomplete_reasons);
     let mut candidates = Vec::with_capacity(inventory.rows.len());
-    for row in inventory.rows {
+    for (row, usage) in inventory.rows.into_iter().zip(usages) {
         let mut sites: Vec<DependencyUsageSite> = Vec::new();
         for rule_id in &row.rule_ids {
             for (family, matched) in matches_by_rule.get(rule_id).into_iter().flatten() {
@@ -150,51 +176,12 @@ pub fn dependency_analysis(
                 });
             }
         }
-        let usage = collect_import_usage(ws, pack, &row, &mut incomplete_reasons);
         sites.extend(usage.sites);
         sites.sort();
         sites.dedup_by(|a, b| {
             a.file == b.file && a.line == b.line && a.column == b.column && a.kind == b.kind
         });
 
-        let mut functions: Vec<DependencyFunctionRow> = Vec::new();
-        let mut seen_funcs: AHashSet<FuncId> = AHashSet::new();
-        for site in &sites {
-            let Some(func) = site.in_func else {
-                continue;
-            };
-            if !seen_funcs.insert(func) {
-                if let Some(existing) = functions.iter_mut().find(|row| row.func == func) {
-                    existing.site_count += 1;
-                }
-                continue;
-            }
-            let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
-                continue;
-            };
-            let (file, line, _) = crate::analysis::resolve_span_location(ws, decl.name_span);
-            let mut direct_callers: Vec<String> = call_graph
-                .callers_of(func)
-                .map(|edge| bonsai_inspect::func_display_name(ws, edge.from))
-                .collect();
-            direct_callers.sort();
-            direct_callers.dedup();
-            functions.push(DependencyFunctionRow {
-                function: bonsai_inspect::func_display_name(ws, func),
-                file: bonsai_common::workspace_relative_filter_path(Some(root), &file),
-                line,
-                site_count: 1,
-                direct_callers,
-                func,
-            });
-        }
-        functions.sort_by(|a, b| {
-            (a.file.as_str(), a.line, a.function.as_str()).cmp(&(
-                b.file.as_str(),
-                b.line,
-                b.function.as_str(),
-            ))
-        });
         let mut bound_names = usage.bound_names;
         bound_names.sort();
         bound_names.dedup();
@@ -202,7 +189,6 @@ pub fn dependency_analysis(
             dependency: row,
             bound_names,
             sites,
-            functions,
         });
     }
     incomplete_reasons.sort();
@@ -219,146 +205,236 @@ struct ImportUsage {
     sites: Vec<DependencyUsageSite>,
 }
 
-/// Import statements binding `row.key` plus every call/reference through the
-/// names they bind, over the exact per-file compiler objects of `row.language`.
-fn collect_import_usage(
+/// Import statements binding each package row plus every call/reference
+/// through the bound names, for every row at once: each file's compiler
+/// object is decoded once and its calls/refs walked once, then matched
+/// against every row of the file's language. Returns one usage per row,
+/// aligned with `rows`.
+fn collect_import_usage_for_rows(
     ws: &Workspace,
     pack: &Rulepack,
-    row: &DependencyRow,
+    rows: &[DependencyRow],
     incomplete_reasons: &mut Vec<String>,
-) -> ImportUsage {
+) -> Vec<ImportUsage> {
+    use rayon::prelude::*;
     let db = ws.db();
     let root = db.workspace_root();
-    let package_matching = pack
-        .metadata
-        .languages
-        .get(&row.language)
-        .map(|metadata| metadata.package_matching.clone())
-        .unwrap_or_default();
-    let mut bound_names = Vec::new();
-    let mut sites = Vec::new();
-    for file in ws.vfs().all_files() {
-        let Some(adapter) = db.adapter_for(file) else {
-            continue;
-        };
-        if adapter.language_id().as_str() != row.language {
-            continue;
-        }
-        let Some(object) = db.compiler_file_object_uncached(file) else {
-            let path = file_display_path(ws, file);
-            incomplete_reasons.push(format!(
-                "dependency-analysis: compiler object unavailable for {path}"
-            ));
-            continue;
-        };
-        let Some(imports) = object.imports.as_ref() else {
-            continue;
-        };
-        // Names this file binds to the dependency.
-        let mut file_names: Vec<String> = Vec::new();
-        for import in &imports.imports {
-            let matches_key = import_package_candidates(&import.module, &package_matching)
+    let mut usages: Vec<ImportUsage> = rows
+        .iter()
+        .map(|_| ImportUsage {
+            bound_names: Vec::new(),
+            sites: Vec::new(),
+        })
+        .collect();
+    let mut rows_by_language: AHashMap<&str, Vec<usize>> = AHashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        rows_by_language
+            .entry(row.language.as_str())
+            .or_default()
+            .push(index);
+    }
+    let package_matching_by_language: AHashMap<&str, _> = rows_by_language
+        .keys()
+        .map(|language| {
+            (
+                *language,
+                pack.metadata
+                    .languages
+                    .get(*language)
+                    .map(|metadata| metadata.package_matching.clone())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+
+    // Per-file result: usage sites and bound names per dependency row, plus
+    // an incompleteness reason when the compiler object is unavailable.
+    struct FileUsage {
+        sites: Vec<(usize, DependencyUsageSite)>,
+        bound_names: Vec<(usize, Vec<String>)>,
+        incomplete: Option<String>,
+    }
+
+    let files = ws.vfs().all_files();
+    let per_file: Vec<Option<FileUsage>> = files
+        .par_iter()
+        .map(|&file| {
+            let adapter = db.adapter_for(file)?;
+            let language = adapter.language_id().as_str();
+            let row_indexes = rows_by_language.get(language)?;
+            // The import header is a small, separately addressable part of
+            // the compiler object; the full object (declarations, bodies) is
+            // decoded only for files that import a flagged package.
+            let Some(imports) = db.compiler_import_index_uncached(file) else {
+                let path = file_display_path(ws, file);
+                return Some(FileUsage {
+                    sites: Vec::new(),
+                    bound_names: Vec::new(),
+                    incomplete: Some(format!(
+                        "dependency-analysis: compiler object unavailable for {path}"
+                    )),
+                });
+            };
+            let package_matching = &package_matching_by_language[language];
+            let import_candidates: Vec<Vec<String>> = imports
+                .imports
                 .iter()
-                .any(|candidate| candidate == &row.key);
-            if !matches_key {
-                continue;
-            }
-            let (path, line, column) = crate::analysis::resolve_span_location(ws, import.span);
-            let path = bonsai_common::workspace_relative_filter_path(root.as_deref(), &path);
-            let mut text = import.module.clone();
-            if let Some(original) = import.original_name.as_deref() {
-                text = format!("{original} from {}", import.module);
-            }
-            if let Some(alias) = import.alias.as_deref() {
-                text.push_str(&format!(" as {alias}"));
-            }
-            sites.push(DependencyUsageSite {
-                file: path,
-                line,
-                column,
-                kind: "import".to_string(),
-                text,
-                in_function: None,
-                via_alias: None,
-                rule_id: None,
-                in_func: None,
-            });
-            for name in [import.alias.as_deref(), import.original_name.as_deref()]
-                .into_iter()
-                .flatten()
-            {
-                if !name.is_empty() && !file_names.iter().any(|existing| existing == name) {
-                    file_names.push(name.to_string());
-                }
-            }
-            if import.alias.is_none() && import.original_name.is_none() {
-                // `import os` / `import x.y` bind the module's tail segment.
-                if let Some(tail) = module_tail(&import.module) {
-                    if !file_names.iter().any(|existing| existing == tail) {
-                        file_names.push(tail.to_string());
+                .map(|import| import_package_candidates(&import.module, package_matching))
+                .collect();
+            let mut out = FileUsage {
+                sites: Vec::new(),
+                bound_names: Vec::new(),
+                incomplete: None,
+            };
+            let mut file_names_by_row: Vec<(usize, Vec<String>)> = Vec::new();
+            for &row_index in row_indexes {
+                let row = &rows[row_index];
+                let mut file_names: Vec<String> = Vec::new();
+                for (import, candidates) in imports.imports.iter().zip(&import_candidates) {
+                    if !candidates.iter().any(|candidate| candidate == &row.key) {
+                        continue;
+                    }
+                    let (path, line, column) = crate::analysis::resolve_span_location(ws, import.span);
+                    let path = bonsai_common::workspace_relative_filter_path(root.as_deref(), &path);
+                    let mut text = import.module.clone();
+                    if let Some(original) = import.original_name.as_deref() {
+                        text = format!("{original} from {}", import.module);
+                    }
+                    if let Some(alias) = import.alias.as_deref() {
+                        text.push_str(&format!(" as {alias}"));
+                    }
+                    out.sites.push((
+                        row_index,
+                        DependencyUsageSite {
+                            file: path,
+                            line,
+                            column,
+                            kind: "import".to_string(),
+                            text,
+                            in_function: None,
+                            via_alias: None,
+                            rule_id: None,
+                            in_func: None,
+                        },
+                    ));
+                    for name in [import.alias.as_deref(), import.original_name.as_deref()]
+                        .into_iter()
+                        .flatten()
+                    {
+                        if !name.is_empty() && !file_names.iter().any(|existing| existing == name) {
+                            file_names.push(name.to_string());
+                        }
+                    }
+                    if import.alias.is_none() && import.original_name.is_none() {
+                        if let Some(tail) = module_tail(&import.module) {
+                            if !file_names.iter().any(|existing| existing == tail) {
+                                file_names.push(tail.to_string());
+                            }
+                        }
                     }
                 }
+                if !file_names.is_empty() {
+                    file_names_by_row.push((row_index, file_names));
+                }
             }
-        }
-        if file_names.is_empty() {
-            continue;
-        }
-        let Some(index) = object.declarations.as_ref() else {
-            continue;
-        };
-        let decls: Vec<&Decl> = index.defs.iter().collect();
-        let push_site =
-            |kind: &str, text: &str, span: Span, alias: &str, sites: &mut Vec<DependencyUsageSite>| {
+            if file_names_by_row.is_empty() {
+                return Some(out);
+            }
+            let Some(object) = db.compiler_file_object_uncached(file) else {
+                let path = file_display_path(ws, file);
+                out.incomplete = Some(format!(
+                    "dependency-analysis: compiler object unavailable for {path}"
+                ));
+                return Some(out);
+            };
+            let Some(index) = object.declarations.as_ref() else {
+                return Some(out);
+            };
+            let enclosing_index =
+                bonsai_workspace::enclosing_index::EnclosingSpanIndex::from_callable_decls(&index.defs);
+            let mut calls: Vec<(String, Option<String>, Span)> = Vec::new();
+            for decl in &index.defs {
+                walk_calls(&decl.flow_events, &mut |name, receiver, span| {
+                    calls.push((name.to_string(), receiver.map(str::to_string), span));
+                });
+            }
+            let site = |kind: &str, text: &str, span: Span, alias: &str| -> DependencyUsageSite {
                 let (path, line, column) = crate::analysis::resolve_span_location(ws, span);
-                let enclosing = bonsai_inspect::find_enclosing_func(&decls, span);
-                sites.push(DependencyUsageSite {
+                let enclosing = enclosing_index.enclosing(span.start);
+                DependencyUsageSite {
                     file: bonsai_common::workspace_relative_filter_path(root.as_deref(), &path),
                     line,
                     column,
                     kind: kind.to_string(),
                     text: text.to_string(),
-                    in_function: enclosing.as_ref().map(|(_, name)| name.clone()),
+                    in_function: enclosing.as_ref().map(|entry| entry.name.clone()),
                     via_alias: Some(alias.to_string()),
                     rule_id: None,
-                    in_func: enclosing.map(|(func, _)| func),
-                });
-            };
-        for decl in &decls {
-            walk_calls(&decl.flow_events, &mut |name, receiver, span| {
-                if let Some(alias) = bound_name_for(name, receiver, &file_names) {
-                    push_site("call", name, span, alias, &mut sites);
+                    in_func: enclosing.map(|entry| FuncId::new(entry.symbol.raw())),
                 }
-            });
-        }
-        for reference in &index.refs {
-            if !matches!(reference.kind, RefKind::Read | RefKind::Call | RefKind::Write) {
-                continue;
+            };
+            for (row_index, file_names) in file_names_by_row {
+                for (name, receiver, span) in &calls {
+                    if let Some(alias) = bound_name_for(name, receiver.as_deref(), &file_names) {
+                        out.sites.push((row_index, site("call", name, *span, alias)));
+                    }
+                }
+                for reference in &index.refs {
+                    if !matches!(reference.kind, RefKind::Read | RefKind::Call | RefKind::Write) {
+                        continue;
+                    }
+                    if let Some(alias) = bound_name_for(&reference.name, None, &file_names) {
+                        let kind = if reference.kind == RefKind::Call {
+                            "call"
+                        } else {
+                            "ref"
+                        };
+                        out.sites
+                            .push((row_index, site(kind, &reference.name, reference.span, alias)));
+                    }
+                }
+                out.bound_names.push((row_index, file_names));
             }
-            if let Some(alias) = bound_name_for(&reference.name, None, &file_names) {
-                let kind = if reference.kind == RefKind::Call {
-                    "call"
-                } else {
-                    "ref"
-                };
-                push_site(kind, &reference.name, reference.span, alias, &mut sites);
-            }
+            Some(out)
+        })
+        .collect();
+    // Ordered merge keeps the output identical to the sequential walk.
+    for usage in per_file.into_iter().flatten() {
+        if let Some(reason) = usage.incomplete {
+            incomplete_reasons.push(reason);
         }
-        bound_names.extend(file_names);
+        for (row_index, site) in usage.sites {
+            usages[row_index].sites.push(site);
+        }
+        for (row_index, names) in usage.bound_names {
+            usages[row_index].bound_names.extend(names);
+        }
     }
-    ImportUsage { bound_names, sites }
+    usages
 }
 
-/// The bound name (if any) through which `callee` reaches the dependency:
-/// the exact name, a `name.member` / `name::member` / `name->member` /
-/// `name:member` head, or an explicit receiver equal to the name.
 fn bound_name_for<'a>(callee: &str, receiver: Option<&str>, names: &'a [String]) -> Option<&'a str> {
-    names.iter().map(String::as_str).find(|name| {
-        callee == *name
-            || receiver == Some(*name)
-            || [".", "::", "->", ":"]
-                .iter()
-                .any(|sep| callee.starts_with(&format!("{name}{sep}")))
-    })
+    // The head of `name.member` / `name::member` / `name->member` /
+    // `name:member`, computed once without allocating.
+    let head = qualified_head(callee);
+    names
+        .iter()
+        .map(String::as_str)
+        .find(|name| callee == *name || receiver == Some(*name) || head.is_some_and(|head| head == *name))
+}
+
+/// `callee` up to its first member separator, or `None` when it has none.
+fn qualified_head(callee: &str) -> Option<&str> {
+    let bytes = callee.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'.' | b':' => return (index > 0).then(|| &callee[..index]),
+            b'-' if bytes.get(index + 1) == Some(&b'>') => return (index > 0).then(|| &callee[..index]),
+            _ => index += 1,
+        }
+    }
+    None
 }
 
 fn module_tail(module: &str) -> Option<&str> {
@@ -370,26 +446,54 @@ fn module_tail(module: &str) -> Option<&str> {
 
 /// Visit every call event (including calls nested in branches, loops,
 /// try/catch, defer/using bodies, and assignment sources).
+/// Visit every call site in a flow-event tree. An assignment whose value is
+/// a call (`x = pkg.f()`) is reported at the call expression, not at the
+/// assignment: one pre-order pass records every `Call` span by callee name,
+/// and an assign is emitted only when no recorded call of that name sits
+/// inside its span.
 fn walk_calls(events: &[FlowEvent], visit: &mut dyn FnMut(&str, Option<&str>, Span)) {
-    for event in events {
-        match event {
-            FlowEvent::Call {
-                name, receiver, span, ..
-            } => visit(name, receiver.as_deref(), *span),
-            FlowEvent::Assign {
-                span, source_call, ..
-            } => {
-                if let Some(name) = source_call.as_deref() {
-                    visit(name, None, *span);
-                }
+    let mut call_spans_by_name: ahash::AHashMap<&str, Vec<Span>> = ahash::AHashMap::new();
+    let mut pending_assigns: Vec<(&str, Span)> = Vec::new();
+    for_each_nested(events, &mut |event| match event {
+        FlowEvent::Call {
+            name, receiver, span, ..
+        } => {
+            call_spans_by_name.entry(name.as_str()).or_default().push(*span);
+            visit(name, receiver.as_deref(), *span);
+        }
+        FlowEvent::Assign {
+            span, source_call, ..
+        } => {
+            if let Some(name) = source_call.as_deref() {
+                pending_assigns.push((name, *span));
             }
+        }
+        _ => {}
+    });
+    for (name, span) in pending_assigns {
+        let already_recorded = call_spans_by_name.get(name).is_some_and(|spans| {
+            spans
+                .iter()
+                .any(|call| call.file == span.file && call.start >= span.start && call.end <= span.end)
+        });
+        if !already_recorded {
+            visit(name, None, span);
+        }
+    }
+}
+
+/// Pre-order walk over a flow-event tree and every nested block.
+fn for_each_nested<'a>(events: &'a [FlowEvent], visit: &mut dyn FnMut(&'a FlowEvent)) {
+    for event in events {
+        visit(event);
+        match event {
             FlowEvent::Branch {
                 then_events,
                 else_events,
                 ..
             } => {
-                walk_calls(then_events, visit);
-                walk_calls(else_events, visit);
+                for_each_nested(then_events, visit);
+                for_each_nested(else_events, visit);
             }
             FlowEvent::Loop {
                 condition_events,
@@ -397,9 +501,9 @@ fn walk_calls(events: &[FlowEvent], visit: &mut dyn FnMut(&str, Option<&str>, Sp
                 body,
                 ..
             } => {
-                walk_calls(condition_events, visit);
-                walk_calls(update_events, visit);
-                walk_calls(body, visit);
+                for_each_nested(condition_events, visit);
+                for_each_nested(update_events, visit);
+                for_each_nested(body, visit);
             }
             FlowEvent::Try {
                 body,
@@ -407,20 +511,21 @@ fn walk_calls(events: &[FlowEvent], visit: &mut dyn FnMut(&str, Option<&str>, Sp
                 finally_events,
                 ..
             } => {
-                walk_calls(body, visit);
-                walk_calls(catch_events, visit);
-                walk_calls(finally_events, visit);
+                for_each_nested(body, visit);
+                for_each_nested(catch_events, visit);
+                for_each_nested(finally_events, visit);
             }
-            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => walk_calls(body, visit),
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => for_each_nested(body, visit),
             _ => {}
         }
     }
 }
 
 fn enclosing_func_at(ws: &Workspace, span: Span) -> Option<FuncId> {
-    let index = ws.exact_decl_index_shared(span.file)?;
-    let decls: Vec<&Decl> = index.defs.iter().collect();
-    bonsai_inspect::find_enclosing_func(&decls, span).map(|(func, _)| func)
+    let headers = ws.compiler_header_index();
+    ws.enclosing_index()
+        .enclosing_for(headers.as_ref(), span.file, span.start)
+        .map(|entry| FuncId::new(entry.symbol.raw()))
 }
 
 fn file_display_path(ws: &Workspace, file: FileId) -> String {

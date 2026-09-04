@@ -353,7 +353,7 @@ fn security_flows_shares_taint_view_with_inspect() {
     let rules_s = rules.to_str().unwrap();
 
     let inspect = run(&[
-        "inspect",
+        "inspect-graph",
         ws_s,
         "--from",
         "request",

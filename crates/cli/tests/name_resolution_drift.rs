@@ -115,7 +115,8 @@ fn defs_and_inspect_agree_on_function_locations() {
             continue;
         };
 
-        let Some(inspect_json) = run_json(&["inspect", ws_str, "--query", &name, "--format", "json"]) else {
+        let Some(inspect_json) = run_json(&["inspect-graph", ws_str, "--query", &name, "--format", "json"])
+        else {
             panic!("[{lang}] inspect --query {name} returned non-zero exit / non-JSON output");
         };
         let decl_hits = inspect_json

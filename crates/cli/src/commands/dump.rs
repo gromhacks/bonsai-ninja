@@ -1018,20 +1018,62 @@ pub(crate) fn cmd_dump_taint(
     // completeness. Open the complete lazy compiler snapshot here: bodies
     // remain streamed, and `source_flow_session` narrows exact work to the
     // source-reachable fixed point without making all bodies resident.
-    let (project, _footer) = open_project_index_only_with_rulepack(root, None)?;
-    let filters = bonsai_sdk::TaintFilters {
-        source: source_name,
-        seeds: seeds.to_vec(),
-        sink: sink_filter,
-        taint_id: taint_id_filter,
-        ..Default::default()
+    // The complete propagation report for `{source, seeds}` is computed once
+    // and cached under that scope; `--sink` and `--taint T:` are views.
+    let seeds_key = seeds.join(",");
+    let analysis_hash = paging::hash_filters(&[
+        ("kind", "dump-taint"),
+        ("source", source_name),
+        ("seeds", &seeds_key),
+    ]);
+    const DUMP_TAINT_CACHE_KIND: &str = "dump-taint/report/v1";
+    let cached: Option<bonsai_sdk::TaintReport> =
+        page_cache::read_keyed_payload(root, analysis_hash, DUMP_TAINT_CACHE_KIND)?;
+    let outcome = if let Some(report) = cached {
+        bonsai_sdk::TaintOutcome::Report(report)
+    } else {
+        let (project, _footer) = open_project_index_only_with_rulepack(root, None)?;
+        let filters = bonsai_sdk::TaintFilters {
+            source: source_name,
+            seeds: seeds.to_vec(),
+            sink: None,
+            taint_id: None,
+            ..Default::default()
+        };
+        // The taint pipeline (cross-function propagation + sink reachability)
+        // can run for a while on large workspaces; spin so the user knows
+        // the CLI didn't hang.
+        let spin = progress::ScopedSpinner::new("propagating taint");
+        let outcome = project.dump().taint(filters);
+        spin.finish();
+        if let bonsai_sdk::TaintOutcome::Report(report) = &outcome {
+            page_cache::save_keyed_payload(root, analysis_hash, DUMP_TAINT_CACHE_KIND, report)?;
+        }
+        outcome
     };
-    // The taint pipeline (cross-function propagation + sink reachability)
-    // can run for a while on large workspaces; spin so the user knows
-    // the CLI didn't hang.
-    let spin = progress::ScopedSpinner::new("propagating taint");
-    let outcome = project.dump().taint(filters);
-    spin.finish();
+    // Views over the complete report: the same retention the engine applied
+    // when these selectors were analysis inputs.
+    let outcome = match outcome {
+        bonsai_sdk::TaintOutcome::Report(mut report) => {
+            if let Some(needle) = sink_filter {
+                report
+                    .records
+                    .retain(|record| record.callee_name.contains(needle));
+            }
+            if let Some(target_id) = taint_id_filter {
+                report.records.retain(|record| record.taint_id == target_id);
+                if report.records.is_empty() {
+                    anyhow::bail!(
+                        "no propagation matching `{target_id}` in this workspace + seed combination. \
+                         Taint ids are shown in the leftmost column of `dump-taint` text output and \
+                         in `taint_id` on each object in `--format json`."
+                    );
+                }
+            }
+            bonsai_sdk::TaintOutcome::Report(report)
+        }
+        other => other,
+    };
     let filters_hash = dump_taint_filters_hash(source_name, seeds, sink_filter, compact, taint_id_filter);
     match outcome {
         bonsai_sdk::TaintOutcome::SourceNotFound => anyhow::bail!(

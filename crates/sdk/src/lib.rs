@@ -50,7 +50,7 @@ const CACHE_MANIFEST_FILE: &str = "manifest.json";
 // v6 records an exact Git/HEAD/worktree source-state snapshot. Fresh CLI
 // processes can therefore reuse the manifest's complete compiler input table
 // without recursively stat-ing every source in an unchanged repository.
-const CACHE_MANIFEST_SCHEMA_VERSION: u32 = 7;
+const CACHE_MANIFEST_SCHEMA_VERSION: u32 = 8;
 const RETRIEVAL_NO_CANDIDATES_FILTER: &str = "/__bonsai_no_retrieval_candidates__/__none__";
 static EXPORT_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -62,26 +62,30 @@ use refresh::{disk_file_stamp, DiskFileStamp, GitChangeOracle};
 
 pub use read_file::{
     read_file as build_read_file, FindingDigest, FlowEntryExit, FlowRole, InlinedDecl, LineDeclSpan,
-    LineMark, MarkKind, ReadFileFilters, ReadFileOut, ReadFileTruncation, TaintHop,
+    LineMark, MarkKind, ReadFileConnections, ReadFileFilters, ReadFileOut, ReadFileTruncation, TaintHop,
 };
 pub use tree::{
     tree as build_tree, CrossEdge, ExternalKind, IndexedStatus, MostSevereFlowSummary, NodeKind,
     SeverityHistogram, TreeFilters, TreeNode, TreeOut, TreeSummary, TreeTruncation,
 };
 
+pub use bonsai_browse::paths as compiler_corridor;
 pub use bonsai_browse::{
     collect_callee_names, dump_callable_file_qualifier, file_path_excluded_by_filters,
-    file_path_matches_filter, format_span, workspace_file_id, ArgOut, ArgsFilters, AstFileDump, AstFilters,
-    AstFunctionCandidate, AstNode, AstOutcome, CallOut, CallgraphRow, CallsFilters, ClassOut, ClassesFilters,
-    CommentOut, CommentsFilters, DefOut, DefsFilters, EdgeRecord, EdgesFilters, EntryPointOut,
-    EntryPointsFilters, GraphExportFormat, GraphProjection, HirDump, ImportOut, ImportsFilters, Locator,
-    NativeExportPhase, NativeExportProgress, OperationOperandOut, OperationOut, OperationsFilters,
-    PathFilters, PathFunctionRow, PathOutcome, PathTerminalCallRow, RefOut, RefsFilters,
+    file_path_matches_filter, format_span, symbol_summary, workspace_file_id, ArgOut, ArgsFilters,
+    AstFileDump, AstFilters, AstFunctionCandidate, AstNode, AstOutcome, CallOut, CallgraphRow, CallsFilters,
+    ClassOut, ClassesFilters, CommentOut, CommentsFilters, DefOut, DefsFilters, EdgeRecord, EdgesFilters,
+    EntryPointOut, EntryPointsFilters, GraphExportFormat, GraphProjection, HirDump, ImportOut,
+    ImportsFilters, Locator, NativeExportPhase, NativeExportProgress, OperationOperandOut, OperationOut,
+    OperationsFilters, PathFilters, PathFunctionRow, PathOutcome, PathTerminalCallRow, RefOut, RefsFilters,
     ResolutionCoverageDeclRow, ResolutionCoverageFileRow, ResolutionCoverageFilters, ResolveFilters,
     ResolveOutcome, ResolveTrace, SearchFilters, SearchHit, SliceFilters, SliceOutcome, SliceRow, SliceStep,
     StringOut, StringsFilters, SummaryAnnotator, SymbolCallEdge, SymbolEvidenceKind, SymbolImport,
     SymbolSummary, TaintFilters, TaintOutcome, TaintRecord, TaintReport, UnresolvedCallEvidence, VarOut,
     VarsFilters,
+};
+pub use bonsai_browse::{
+    file_connections, FileConnections, ModuleDecl, ModuleEdge, ModuleEdgeGroup, ModuleImport,
 };
 pub use bonsai_inspect::{
     chain_matches_filters, chain_matches_filters_for_hit, chain_to_names, compute_flow_id,
@@ -91,12 +95,13 @@ pub use bonsai_inspect::{
     FilterHit, InspectFilters, Matcher, TaintFlowIdentityStep,
 };
 pub use bonsai_retrieval::RetrievalBuildProgress;
+pub use bonsai_security::inventory_rule_ids;
 pub use bonsai_security::{
     build_flow_bodies, drain_runtime_disabled_rules, filter_rules_to_workspace_languages, load_rulepack,
     load_workspace_local_rules, parse_severity, rule_family, security_match_rows, select_rules,
     source_rule_matches_filters, tree_file_rel, workspace_languages, AnalysisProgress,
     CombinedFindingWithChain, CombinedSourceAnalysisCandidate, DependencyAnalysisCandidate,
-    DependencyAnalysisOptions, DependencyAnalysisReport, DependencyFunctionRow, DependencyInventory,
+    DependencyAnalysisOptions, DependencyAnalysisReport, DependencyInventory, DependencyInventoryMatches,
     DependencyInventoryOptions, DependencyRow, DependencyUsageSite, Finding, FindingMatch, FindingStatus,
     FindingWithChain, FlowBodyCache, FlowFunctionBody, FlowRole as SecurityFlowRole, FlowSourceLine,
     PackAuditCount, PackAuditFamilyCount, PackAuditLanguage, PackAuditReport, PackInventoryOptions,
@@ -727,12 +732,17 @@ impl Bonsai {
     {
         let root = root.as_ref();
         let options = self.apply_workspace_options(WorkspaceOpenOptions::lazy_query());
-        let ws = Workspace::open_query_filtered_paths_with_options_and_events(
+        let lazy = self
+            .persistent_semantic_cache
+            .then(|| lazy_source_table(root, self.include_minified_sources))
+            .flatten();
+        let ws = Workspace::open_query_filtered_paths_with_options_lazy_sources_and_events(
             root,
             self.registry.clone(),
             include_filters,
             exclude_filters,
             options,
+            lazy.as_ref(),
             &on_event,
         )?;
         Ok(self.one_shot_project(root, ws, options))
@@ -1066,8 +1076,20 @@ impl Bonsai {
         // cache landed there but not here — the OWASP single-core
         // cliff was reintroduced multiple times before being
         // collapsed onto this delegation.
-        Workspace::open_with_options_and_events(root, self.registry.clone(), options, on_event)
-            .with_context(|| format!("opening workspace at {}", root.display()))
+        // Sources the manifest already identified are interned by identity
+        // and read on first use; the ingest re-validates each stamp.
+        let lazy = self
+            .persistent_semantic_cache
+            .then(|| lazy_source_table(root, self.include_minified_sources))
+            .flatten();
+        Workspace::open_with_options_lazy_sources_and_events(
+            root,
+            self.registry.clone(),
+            options,
+            lazy.as_ref(),
+            on_event,
+        )
+        .with_context(|| format!("opening workspace at {}", root.display()))
     }
 }
 
@@ -1766,6 +1788,12 @@ pub struct CacheStats {
     pub export_sidecar_exists: bool,
     pub export_sidecar_bytes: u64,
     pub validation: CacheValidationReport,
+    /// Legacy in-tree `<root>/.bonsai` directory left by releases that cached
+    /// inside the workspace, when present and not the active cache directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_in_tree_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub legacy_in_tree_bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1831,6 +1859,189 @@ impl CacheFreshnessStatus {
     }
 }
 
+/// Outcome of one orphaned-workspace-cache sweep.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OrphanedCachePrune {
+    /// Shared root that was scanned (`None` when caches are pinned by
+    /// `BONSAI_WORKSPACE_DIR`, in which case nothing is scanned).
+    pub root: Option<PathBuf>,
+    /// Entries examined.
+    pub scanned: usize,
+    /// Entries removed because their recorded workspace root no longer
+    /// exists, or because they never published a manifest and are older
+    /// than one day.
+    pub removed: usize,
+    /// Bytes reclaimed by the removed entries.
+    pub freed_bytes: u64,
+    /// Entries kept because their manifest could not be read as one of ours
+    /// (not touched: the engine never deletes what it cannot attribute).
+    pub unattributed: usize,
+}
+
+const ORPHAN_PRUNE_STAMP: &str = ".orphan-prune-stamp";
+const ORPHAN_PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+const MANIFESTLESS_ENTRY_GRACE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Remove workspace cache entries under the shared cache root whose
+/// recorded workspace root no longer exists on disk. Entries that never
+/// published a manifest are removed once they are older than one day
+/// (an ingest that was interrupted before publication). Entries whose
+/// manifest cannot be attributed are left alone. Entries whose root exists
+/// are never touched, whatever their age.
+pub fn prune_orphaned_workspace_caches() -> std::io::Result<OrphanedCachePrune> {
+    let mut report = OrphanedCachePrune::default();
+    let Some(root) = bonsai_common::names::default_workspaces_cache_root() else {
+        return Ok(report);
+    };
+    report.root = Some(root.clone());
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(report),
+        Err(error) => return Err(error),
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        report.scanned = report.scanned.saturating_add(1);
+        let manifest_path = path.join(CACHE_MANIFEST_FILE);
+        let orphaned = match manifest_workspace_root_head(&manifest_path) {
+            Ok(Some(workspace_root)) => !workspace_root.exists(),
+            Ok(None) => {
+                report.unattributed = report.unattributed.saturating_add(1);
+                false
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age >= MANIFESTLESS_ENTRY_GRACE),
+            Err(_) => {
+                report.unattributed = report.unattributed.saturating_add(1);
+                false
+            }
+        };
+        if !orphaned {
+            continue;
+        }
+        let bytes = directory_bytes(&path);
+        match fs::remove_dir_all(&path) {
+            Ok(()) => {
+                report.removed = report.removed.saturating_add(1);
+                report.freed_bytes = report.freed_bytes.saturating_add(bytes);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "cache",
+                    "orphaned workspace cache removal failed: path={} error={error}",
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// [`prune_orphaned_workspace_caches`] at most once per day per cache root.
+/// Returns `Ok(None)` when the sweep is not due yet.
+pub fn prune_orphaned_workspace_caches_if_due() -> std::io::Result<Option<OrphanedCachePrune>> {
+    let Some(root) = bonsai_common::names::default_workspaces_cache_root() else {
+        return Ok(None);
+    };
+    let stamp = root.join(ORPHAN_PRUNE_STAMP);
+    let due = match fs::metadata(&stamp).and_then(|meta| meta.modified()) {
+        Ok(modified) => std::time::SystemTime::now()
+            .duration_since(modified)
+            .map(|age| age >= ORPHAN_PRUNE_INTERVAL)
+            .unwrap_or(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error),
+    };
+    if !due {
+        return Ok(None);
+    }
+    // Stamp first so concurrent processes do not all sweep; a sweep that
+    // fails midway simply retries after the interval.
+    fs::create_dir_all(&root)?;
+    fs::write(&stamp, b"")?;
+    prune_orphaned_workspace_caches().map(Some)
+}
+
+/// Extract `workspace_root` from a manifest without decoding the whole
+/// document: the key is written near the top and manifests for large
+/// workspaces carry a multi-megabyte source-file table after it.
+fn manifest_workspace_root_head(manifest_path: &Path) -> std::io::Result<Option<PathBuf>> {
+    use std::io::Read as _;
+    let mut file = fs::File::open(manifest_path)?;
+    let mut head = vec![0u8; 16 * 1024];
+    let mut filled = 0usize;
+    while filled < head.len() {
+        let read = file.read(&mut head[filled..])?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    head.truncate(filled);
+    let text = String::from_utf8_lossy(&head);
+    let Some(key_at) = text.find("\"workspace_root\"") else {
+        return Ok(None);
+    };
+    let rest = &text[key_at + "\"workspace_root\"".len()..];
+    let Some(colon) = rest.find(':') else {
+        return Ok(None);
+    };
+    let value = rest[colon + 1..].trim_start();
+    if !value.starts_with('"') {
+        return Ok(None);
+    }
+    // Find the closing quote of the JSON string literal, honouring escapes.
+    let bytes = value.as_bytes();
+    let mut end = None;
+    let mut index = 1usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => {
+                end = Some(index);
+                break;
+            }
+            _ => index += 1,
+        }
+    }
+    let Some(end) = end else {
+        return Ok(None);
+    };
+    let literal = &value[..=end];
+    Ok(serde_json::from_str::<String>(literal).ok().map(PathBuf::from))
+}
+
+fn directory_bytes(path: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CacheManifest {
     pub schema_version: u32,
@@ -1876,6 +2087,12 @@ pub struct CacheManifestSourceFile {
     pub hash: u64,
     /// Strong change identity captured for the same source snapshot.
     pub stamp: SourceFileStamp,
+    /// Hex SHA-256 of the source text, recorded only when the on-disk bytes
+    /// are the text verbatim (valid UTF-8). With the stamp still matching,
+    /// a warm open interns the file by this identity and reads it on first
+    /// use instead of during ingest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_digest: Option<String>,
 }
 
 /// Git-backed freshness proof for one exact compiler input snapshot.
@@ -2057,6 +2274,8 @@ impl WorkspaceCache {
             bonsai_workspace::taint_index::TaintGraphIndex::latest_sidecar_path(&self.root);
         let export_sidecar = default_export_cache_path(&self.root);
         let total_bytes = dir_size(&bonsai_dir)?;
+        let legacy_in_tree_dir = legacy_in_tree_cache_dir(&self.root, &bonsai_dir);
+        let legacy_in_tree_bytes = legacy_in_tree_dir.as_deref().map_or(Ok(0), dir_size)?;
         let manifest_bytes = file_size(&manifest);
         let dataflow_sidecar_bytes = file_size(&dataflow_sidecar);
         let dataflow_factstore_sidecar_bytes = file_size(&dataflow_factstore_sidecar);
@@ -2110,6 +2329,8 @@ impl WorkspaceCache {
             export_sidecar,
             export_sidecar_bytes,
             validation: CacheValidationReport::unvalidated(),
+            legacy_in_tree_dir,
+            legacy_in_tree_bytes,
         })
     }
 
@@ -2121,6 +2342,19 @@ impl WorkspaceCache {
     pub fn manifest(&self) -> Result<CacheManifest> {
         let stats = self.raw_stats()?;
         self.manifest_from_stats(&stats)
+    }
+
+    /// Whether the recorded manifest is missing or predates the current
+    /// schema, workspace root, or compiler-input profile. Such a manifest
+    /// cannot accelerate cache validation or lazy source ingest, so the next
+    /// structural index republishes it.
+    pub fn manifest_needs_republish(&self) -> Result<bool> {
+        let stable_root = stable_root_path(&self.root);
+        Ok(self.read_manifest()?.is_none_or(|manifest| {
+            manifest.schema_version != CACHE_MANIFEST_SCHEMA_VERSION
+                || manifest.workspace_root != stable_root
+                || manifest.include_minified_sources != self.include_minified_sources
+        }))
     }
 
     pub fn read_manifest(&self) -> Result<Option<CacheManifest>> {
@@ -2137,7 +2371,16 @@ impl WorkspaceCache {
         let manifest = self.manifest()?;
         let mut bytes = serde_json::to_vec_pretty(&manifest)?;
         bytes.push(b'\n');
-        write_atomic_bytes(&self.manifest_path(), &bytes)?;
+        let manifest_path = self.manifest_path();
+        let first_publication = !manifest_path.exists();
+        write_atomic_bytes(&manifest_path, &bytes)?;
+        if first_publication {
+            // A new entry joined the shared cache root: this is the only
+            // moment the entry count grows, so sweep siblings whose
+            // workspace root vanished (throwaway fixtures, deleted clones).
+            // Rate limited; never touches an entry whose root still exists.
+            let _ = prune_orphaned_workspace_caches_if_due();
+        }
         Ok(manifest)
     }
 
@@ -2185,7 +2428,7 @@ impl WorkspaceCache {
     fn manifest_from_stats_with_source_state(
         &self,
         stats: &CacheStats,
-        source_files: &[bonsai_workspace::SourceFileFingerprint],
+        source_files: &[bonsai_workspace::SourceFileIdentity],
         source_stamps: &[SourceFileStamp],
         git_source_state: Option<CacheManifestGitSourceState>,
     ) -> Result<CacheManifest> {
@@ -2215,6 +2458,25 @@ impl WorkspaceCache {
             sidecars,
             validation_note: "Commands validate sidecar headers and pipeline fingerprints before reuse; this manifest records cache coverage and producer fingerprints at write time.".to_string(),
         })
+    }
+
+    /// Legacy in-tree `<root>/.bonsai` directory, when present and not the
+    /// active cache directory.
+    #[must_use]
+    pub fn legacy_in_tree_dir(&self) -> Option<PathBuf> {
+        legacy_in_tree_cache_dir(&self.root, &workspace_bonsai_dir(&self.root))
+    }
+
+    /// Remove the legacy in-tree cache directory. Returns the removed path
+    /// and its size, or `None` when there was nothing to remove. The active
+    /// external cache is never touched.
+    pub fn clear_legacy_in_tree(&self) -> std::io::Result<Option<(PathBuf, u64)>> {
+        let Some(dir) = self.legacy_in_tree_dir() else {
+            return Ok(None);
+        };
+        let bytes = dir_size(&dir)?;
+        fs::remove_dir_all(&dir)?;
+        Ok(Some((dir, bytes)))
     }
 
     pub fn clear_all(&self) -> std::io::Result<()> {
@@ -3054,14 +3316,30 @@ fn validate_manifest_sidecars(
                 };
             };
             match manifest_sidecar.status {
-                CacheManifestSidecarStatus::Missing if input.exists => CacheSidecarValidation {
-                    name: input.name.to_string(),
-                    path: input.path.to_path_buf(),
-                    status: CacheFreshnessStatus::Unvalidated,
-                    exists: true,
-                    bytes: input.bytes,
-                    reason: Some("sidecar was written after the cache manifest".to_string()),
-                },
+                // A query command produced the sidecar after the manifest was
+                // published. The sidecar records the source fingerprints it
+                // was built from, so it is validated exactly like a listed one.
+                CacheManifestSidecarStatus::Missing if input.exists => {
+                    if let Some(reason) = validate_sidecar_payload(input, root, source_files, registry) {
+                        CacheSidecarValidation {
+                            name: input.name.to_string(),
+                            path: input.path.to_path_buf(),
+                            status: CacheFreshnessStatus::Stale,
+                            exists: true,
+                            bytes: input.bytes,
+                            reason: Some(reason),
+                        }
+                    } else {
+                        CacheSidecarValidation {
+                            name: input.name.to_string(),
+                            path: input.path.to_path_buf(),
+                            status: CacheFreshnessStatus::Fresh,
+                            exists: true,
+                            bytes: input.bytes,
+                            reason: None,
+                        }
+                    }
+                }
                 CacheManifestSidecarStatus::Missing => CacheSidecarValidation {
                     name: input.name.to_string(),
                     path: input.path.to_path_buf(),
@@ -3503,6 +3781,23 @@ fn file_size(path: &Path) -> u64 {
 /// Recursive size of every file under `path`. Tolerates entries that
 /// vanish mid-walk (concurrent cleaner, log rotation) by skipping
 /// `NotFound` errors instead of failing the whole stat.
+/// `<root>/.bonsai` from releases that cached inside the workspace. Only a
+/// directory that is not the active cache directory qualifies, so a
+/// `BONSAI_WORKSPACE_DIR` pinned to that path is never reported as legacy.
+fn legacy_in_tree_cache_dir(root: &Path, active: &Path) -> Option<PathBuf> {
+    let candidate = root.join(".bonsai");
+    if !candidate.is_dir() {
+        return None;
+    }
+    let same = candidate == active
+        || candidate
+            .canonicalize()
+            .ok()
+            .zip(active.canonicalize().ok())
+            .is_some_and(|(candidate, active)| candidate == active);
+    (!same).then_some(candidate)
+}
+
 fn dir_size(path: &Path) -> std::io::Result<u64> {
     if !path.exists() {
         return Ok(0);
@@ -3898,7 +4193,7 @@ fn source_file_stamps_from_disk(root: &Path, include_minified_sources: bool) -> 
 fn source_state_from_disk(
     root: &Path,
     include_minified_sources: bool,
-) -> Result<(Vec<bonsai_workspace::SourceFileFingerprint>, Vec<SourceFileStamp>)> {
+) -> Result<(Vec<bonsai_workspace::SourceFileIdentity>, Vec<SourceFileStamp>)> {
     let registry = bonsai_adapters::all_languages_registry();
     let mut options = WorkspaceOpenOptions::lazy_query();
     options.include_minified_sources = include_minified_sources;
@@ -3908,7 +4203,7 @@ fn source_state_from_disk(
             .source_file_stamps(root)
             .with_context(|| format!("scanning workspace source metadata under {}", root.display()))?;
         let fingerprints = workspace
-            .source_file_fingerprints(root)
+            .source_file_identities(root)
             .with_context(|| format!("fingerprinting workspace sources under {}", root.display()))?;
         let after = workspace
             .source_file_stamps(root)
@@ -4301,27 +4596,107 @@ fn prune_obsolete_compiler_object_sidecars(root: &Path) {
 }
 
 fn manifest_source_files(
-    fingerprints: &[bonsai_workspace::SourceFileFingerprint],
+    identities: &[bonsai_workspace::SourceFileIdentity],
     stamps: &[SourceFileStamp],
 ) -> Vec<CacheManifestSourceFile> {
-    let hashes = fingerprints
+    let identities = identities
         .iter()
-        .map(|file| (file.path.as_path(), file.hash))
+        .map(|file| (file.path.as_path(), file))
         .collect::<AHashMap<_, _>>();
     let mut files = stamps
         .iter()
         .filter_map(|stamp| {
-            hashes
+            identities
                 .get(stamp.path.as_path())
-                .copied()
-                .map(|hash| CacheManifestSourceFile {
-                    hash,
+                .map(|identity| CacheManifestSourceFile {
+                    hash: identity.hash,
                     stamp: stamp.clone(),
+                    // The identity is only the text's when the bytes are the
+                    // text verbatim and the stamp describes exactly them.
+                    text_digest: (identity.text_exact && identity.len == stamp.len)
+                        .then(|| hex_digest(&identity.digest)),
                 })
         })
         .collect::<Vec<_>>();
     files.sort_by(|left, right| left.stamp.path.cmp(&right.stamp.path));
     files
+}
+
+fn hex_digest(digest: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn digest_from_hex(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, chunk) in text.as_bytes().chunks(2).enumerate() {
+        let pair = std::str::from_utf8(chunk).ok()?;
+        digest[index] = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(digest)
+}
+
+/// Sources a warm open may intern by identity: every manifest entry with a
+/// recorded text digest, re-rooted at the current stable root. The
+/// workspace re-checks each entry's filesystem stamp during ingest, so a
+/// stale manifest only costs the read it would have done anyway.
+fn lazy_source_table(
+    root: &Path,
+    include_minified_sources: bool,
+) -> Option<bonsai_workspace::LazySourceTable> {
+    let manifest = fs::read(workspace_bonsai_dir(root).join(CACHE_MANIFEST_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<CacheManifest>(&bytes).ok())?;
+    lazy_source_table_from_manifest(root, &manifest, include_minified_sources)
+}
+
+fn lazy_source_table_from_manifest(
+    root: &Path,
+    manifest: &CacheManifest,
+    include_minified_sources: bool,
+) -> Option<bonsai_workspace::LazySourceTable> {
+    // Only the Unix stamp carries ctime and device/inode; elsewhere a stamp
+    // match is not an identity proof.
+    if !cfg!(unix) {
+        return None;
+    }
+    let stable_root = stable_root_path(root);
+    if manifest.schema_version != CACHE_MANIFEST_SCHEMA_VERSION
+        || manifest.workspace_root != stable_root
+        || manifest.include_minified_sources != include_minified_sources
+    {
+        return None;
+    }
+    let mut table = bonsai_workspace::LazySourceTable::with_capacity(manifest.workspace_source_files.len());
+    for file in &manifest.workspace_source_files {
+        let Some(digest) = file.text_digest.as_deref().and_then(digest_from_hex) else {
+            continue;
+        };
+        let path = stable_root.join(stable_relative_path(
+            &stable_root,
+            root,
+            file.stamp.path.as_path(),
+        ));
+        table.insert(
+            path,
+            bonsai_workspace::LazySourceRecord {
+                stamp: file.stamp.clone(),
+                identity: bonsai_workspace::SourceIdentity {
+                    len: file.stamp.len,
+                    hash: file.hash,
+                    digest,
+                },
+            },
+        );
+    }
+    (!table.is_empty()).then_some(table)
 }
 
 fn retrieval_pipeline_hash_from_sources(
@@ -5571,6 +5946,23 @@ impl Security<'_> {
         )
     }
 
+    /// [`Self::dependency_analysis`] over inventories the caller already
+    /// holds (for example cached complete inventories), so no rule scan runs.
+    pub fn dependency_analysis_with_matches(
+        &self,
+        options: bonsai_security::DependencyAnalysisOptions,
+        matches: bonsai_security::DependencyInventoryMatches,
+    ) -> Result<bonsai_security::DependencyAnalysisReport> {
+        self.project.refresh_from_disk_best_effort();
+        bonsai_security::dependency_analysis_with_matches(
+            &self.project.workspace,
+            self.pack()?,
+            &self.project.root,
+            options,
+            matches,
+        )
+    }
+
     pub fn pack_inventory(&self, options: PackInventoryOptions) -> Result<Vec<bonsai_security::PackRuleRow>> {
         self.pack_facade()?.inventory(options)
     }
@@ -5870,3 +6262,15 @@ mod export_cache_tests;
 #[cfg(test)]
 #[path = "git_manifest_tests.rs"]
 mod git_manifest_tests;
+
+#[cfg(test)]
+#[path = "orphan_prune_tests.rs"]
+mod orphan_prune_tests;
+
+#[cfg(test)]
+#[path = "lazy_source_tests.rs"]
+mod lazy_source_tests;
+
+#[cfg(test)]
+#[path = "legacy_cache_tests.rs"]
+mod legacy_cache_tests;

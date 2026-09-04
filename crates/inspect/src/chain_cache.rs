@@ -61,6 +61,9 @@ pub struct ChainCache<'a> {
     pub(crate) taint_facts_r: TaintFactsCache,
     pub(crate) callees_r: CalleesCache,
     pub(crate) enclosing: EnclosingCache,
+    /// Per-file start-sorted callable span index for enclosing lookups.
+    pub(crate) enclosing_spans:
+        Mutex<ahash::AHashMap<FileId, Arc<bonsai_workspace::enclosing_index::EnclosingSpanIndex>>>,
     /// When `true`, every cache method bypasses the memo and
     /// recomputes. Exposed via the top-level `--no-cache` CLI flag
     /// as an escape hatch for benchmarking the cold path and for
@@ -132,6 +135,7 @@ impl<'a> ChainCache<'a> {
             taint_facts_r: Mutex::new(BoundedCache::with_capacity(REACHABLE_CACHE_CAP)),
             callees_r: Mutex::new(BoundedCache::with_capacity(CALLEES_CACHE_CAP)),
             enclosing: Mutex::new(BoundedCache::with_capacity(ENCLOSING_CACHE_CAP)),
+            enclosing_spans: Mutex::new(ahash::AHashMap::new()),
             disabled,
         }
     }
@@ -296,7 +300,27 @@ impl<'a> ChainCache<'a> {
         // filter evidence. Prepare the non-default compiler service before
         // entering Rayon so its AST lowering stays parallel and per-entry
         // closures only query the established graph.
-        let _compiler_idg = bonsai_taint::compiler_idg_service(db);
+        // Per-function facts consult the resolved callgraph and the header
+        // index; hand the dataflow cache the workspace's persisted, validated
+        // artifacts so it never rebuilds them from scratch for a few entries.
+        self.ws
+            .dataflow()
+            .seed_call_graph(self.ws.cached_resolved_call_graph());
+        self.ws
+            .dataflow()
+            .seed_global_index(self.ws.compiler_header_index());
+        // The graph the facts need covers the entries and their callees'
+        // files: a persisted complete graph when one is valid, else a
+        // persisted graph scoped to exactly those files.
+        let mut scope_files: Vec<FileId> = Vec::new();
+        for entry in &missing {
+            scope_files.extend(self.ws.dataflow().dependency_files_for(*entry, db));
+        }
+        scope_files.sort_unstable_by_key(|file| file.raw());
+        scope_files.dedup();
+        let _compiler_idg = self
+            .ws
+            .compiler_idg_service_prefer_persisted_or_scoped(&scope_files);
         let computed: Vec<(FuncId, Arc<bonsai_taint::KindedTokens>)> = missing
             .into_par_iter()
             .map(|entry| (entry, self.ws.dataflow().facts_for(entry, db)))
@@ -344,11 +368,27 @@ impl<'a> ChainCache<'a> {
         if self.disabled {
             return find_enclosing_func(decls, span);
         }
+        // One start-sorted span index per file answers every occurrence in
+        // O(log decls); building it once replaces a linear scan per span.
+        let index = {
+            let mut indexes = self.enclosing_spans.lock();
+            indexes
+                .entry(file)
+                .or_insert_with(|| {
+                    std::sync::Arc::new(
+                        bonsai_workspace::enclosing_index::EnclosingSpanIndex::from_callable_decl_refs(decls),
+                    )
+                })
+                .clone()
+        };
         let key = (file, span.start, span.end);
         if let Some(hit) = self.enclosing.lock().get(&key) {
             return hit.clone();
         }
-        let computed = find_enclosing_func(decls, span);
+        let computed = index
+            .enclosing(span.start)
+            .filter(|entry| entry.end >= span.end)
+            .map(|entry| (FuncId::new(entry.symbol.raw()), entry.name));
         self.enclosing.lock().insert(key, computed.clone());
         computed
     }

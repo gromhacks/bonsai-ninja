@@ -1,10 +1,12 @@
 //! `tree` — workspace navigation surface (CLI renderer).
 //!
-//! Builds and renders a filesystem-only tree as text or JSON. Text mode draws
+//! Builds and renders the workspace tree as text or JSON. Text mode draws
 //! a `tree(1)`-style hierarchy with `├──` / `└──` / `│` connectors, themed via
-//! the global [`crate::ui::Ui`] palette so it matches every other command. This
-//! command never opens the compiler or runs security analysis; findings belong
-//! to `security taint-analysis`.
+//! the global [`crate::ui::Ui`] palette so it matches every other command. By
+//! default the rendered files carry definition counts, imports, and cross-file
+//! call edges projected from the persisted structural index; `--files-only`
+//! renders the plain listing. The command never builds semantic graphs or
+//! runs security analysis; findings belong to `security taint-analysis`.
 
 use anyhow::Result;
 use bonsai_common::{
@@ -32,6 +34,8 @@ pub(crate) struct TreeArgs<'a> {
     pub(crate) page: Option<&'a str>,
     pub(crate) all: bool,
     pub(crate) format: BrowseFormat,
+    /// Skip compiler facts: a plain filesystem listing.
+    pub(crate) files_only: bool,
 }
 
 #[derive(Serialize)]
@@ -57,6 +61,12 @@ struct StructuralTreeSummary {
     files_scanned: usize,
     #[serde(rename = "total_dirs")]
     dirs: usize,
+    /// Declarations across every rendered file (compiler facts attached).
+    #[serde(default)]
+    total_decls: usize,
+    /// Resolved cross-file call edges leaving rendered files.
+    #[serde(default)]
+    total_cross_file_edges: usize,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
@@ -80,6 +90,12 @@ struct StructuralTreeNode {
     depth: usize,
     children: Vec<StructuralTreeNode>,
     children_dropped: usize,
+    /// Compiler facts for a file: declarations, resolved imports, and
+    /// cross-file call edges in both directions.
+    connections: Option<bonsai_sdk::FileConnections>,
+    /// Aggregates for a directory: rendered files and declarations below it.
+    files_below: usize,
+    decls_below: usize,
 }
 
 #[derive(Serialize)]
@@ -92,6 +108,12 @@ struct StructuralTreeNodeJson<'a> {
     children: Vec<StructuralTreeNodeJson<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     truncated: Option<StructuralTreeTruncation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connections: Option<&'a bonsai_sdk::FileConnections>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    files_below: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decls_below: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -121,6 +143,9 @@ impl<'a> From<&'a StructuralTreeNode> for StructuralTreeNodeJson<'a> {
             truncated: (node.children_dropped > 0).then_some(StructuralTreeTruncation {
                 children_dropped: node.children_dropped,
             }),
+            connections: node.connections.as_ref(),
+            files_below: (node.kind == StructuralNodeKind::Dir).then_some(node.files_below),
+            decls_below: (node.kind == StructuralNodeKind::Dir).then_some(node.decls_below),
         }
     }
 }
@@ -128,8 +153,15 @@ impl<'a> From<&'a StructuralTreeNode> for StructuralTreeNodeJson<'a> {
 pub(crate) fn cmd_tree(args: TreeArgs<'_>) -> Result<()> {
     let filters_hash = tree_filters_hash(&args);
     let stage = progress::ScopedSpinner::new("scanning filesystem tree");
-    let out = build_fast_filesystem_tree(&args)?;
+    let mut out = build_fast_filesystem_tree(&args)?;
     stage.finish();
+    // The open guard renders the workspace footer when dropped; keep it
+    // alive until the tree itself has been rendered.
+    let _workspace_footer = if args.files_only {
+        None
+    } else {
+        attach_tree_connections(&args, &mut out)?
+    };
 
     match args.format {
         BrowseFormat::Json => {
@@ -216,8 +248,104 @@ fn build_fast_filesystem_tree(args: &TreeArgs<'_>) -> Result<StructuralTreeOut> 
             files: build.files_rendered,
             files_scanned: build.files_scanned,
             dirs: build.dirs_rendered,
+            total_decls: 0,
+            total_cross_file_edges: 0,
         },
     })
+}
+
+/// Above this many files a cold `tree` (no persisted callgraph yet) stays a
+/// filesystem listing and reports the gap; `index --semantic` publishes the
+/// partitioned callgraph that makes connections cheap on every later run.
+const TREE_COMPLETE_OPEN_FILE_LIMIT: usize = 5_000;
+
+/// Attach compiler facts to every file node: declarations, imports resolved
+/// to workspace files, and cross-file call edges. One workspace open, one
+/// module-map projection; nodes are joined by workspace-relative path.
+fn attach_tree_connections(
+    args: &TreeArgs<'_>,
+    out: &mut StructuralTreeOut,
+) -> Result<Option<crate::footer::WorkspaceFooter>> {
+    let large = super::workspace_file_count_exceeds(args.workspace, TREE_COMPLETE_OPEN_FILE_LIMIT);
+    let (project, footer) = super::open_project_index_only(args.workspace)?;
+    let ws = project.workspace();
+    if large && !ws.has_persisted_callgraph() {
+        out.analysis_incomplete_reasons.push(
+            "tree-connections-unavailable: large workspace without a persisted callgraph; run `bonsai-ninja index <workspace> --semantic` once"
+                .to_string(),
+        );
+        out.analysis_complete = false;
+        return Ok(Some(footer));
+    }
+    let stage = progress::ScopedSpinner::new("projecting module connections");
+    // Only the files this tree renders need their connections; a depth or
+    // child limit must not turn into a whole-workspace projection.
+    fn rendered_files(node: &StructuralTreeNode, out: &mut Vec<String>) {
+        match node.kind {
+            StructuralNodeKind::File => out.push(node.locator.file.clone()),
+            StructuralNodeKind::Dir => {
+                for child in &node.children {
+                    rendered_files(child, out);
+                }
+            }
+        }
+    }
+    let mut rendered = Vec::new();
+    for root in &out.roots {
+        rendered_files(root, &mut rendered);
+    }
+    let rendered_ids: Vec<bonsai_common::FileId> = rendered
+        .iter()
+        .filter_map(|file| bonsai_sdk::workspace_file_id(ws, file))
+        .collect();
+    let mut by_path: std::collections::HashMap<String, bonsai_sdk::FileConnections> =
+        if rendered_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            bonsai_sdk::file_connections(ws, &rendered_ids)
+                .into_iter()
+                .map(|facts| (normalize_path_for_filter(&facts.file), facts))
+                .collect()
+        };
+    stage.finish();
+    fn attach(
+        node: &mut StructuralTreeNode,
+        by_path: &mut std::collections::HashMap<String, bonsai_sdk::FileConnections>,
+    ) -> (usize, usize, usize) {
+        match node.kind {
+            StructuralNodeKind::File => {
+                let facts = by_path.remove(&normalize_path_for_filter(&node.locator.file));
+                let decls = facts.as_ref().map_or(0, |facts| named_decl_counts(facts).0);
+                let edges = facts
+                    .as_ref()
+                    .map_or(0, bonsai_sdk::FileConnections::calls_out_count);
+                node.connections = facts;
+                (1, decls, edges)
+            }
+            StructuralNodeKind::Dir => {
+                let mut totals = (0, 0, 0);
+                for child in &mut node.children {
+                    let (files, decls, edges) = attach(child, by_path);
+                    totals.0 += files;
+                    totals.1 += decls;
+                    totals.2 += edges;
+                }
+                node.files_below = totals.0;
+                node.decls_below = totals.1;
+                totals
+            }
+        }
+    }
+    let mut totals = (0, 0, 0);
+    for root in &mut out.roots {
+        let (files, decls, edges) = attach(root, &mut by_path);
+        totals.0 += files;
+        totals.1 += decls;
+        totals.2 += edges;
+    }
+    out.summary.total_decls = totals.1;
+    out.summary.total_cross_file_edges = totals.2;
+    Ok(Some(footer))
 }
 
 fn build_fast_dir_node(
@@ -328,6 +456,9 @@ fn empty_tree_node(
         depth,
         children: Vec::new(),
         children_dropped: 0,
+        connections: None,
+        files_below: 0,
+        decls_below: 0,
     }
 }
 
@@ -391,6 +522,7 @@ fn tree_filters_hash(args: &TreeArgs<'_>) -> u64 {
         ("file", args.file.unwrap_or("")),
         ("exclude_file", &exclude_file),
         ("limit", &limit),
+        ("files_only", if args.files_only { "1" } else { "0" }),
     ])
 }
 
@@ -418,6 +550,8 @@ enum TreeTextRow<'a> {
         files: usize,
         files_scanned: usize,
         dirs: usize,
+        decls: usize,
+        cross_file_edges: usize,
     },
     Incomplete(&'a [String]),
     RerunHint,
@@ -426,6 +560,11 @@ enum TreeTextRow<'a> {
         node: &'a StructuralTreeNode,
         prefix: String,
         is_last: bool,
+    },
+    /// A file's workspace links, aligned under its row.
+    Link {
+        prefix: String,
+        text: String,
     },
 }
 
@@ -436,7 +575,10 @@ impl TreeTextRow<'_> {
             Self::Incomplete(reasons) => reasons.iter().map(String::len).sum::<usize>() as u64 + 192,
             Self::RerunHint => 192,
             Self::Blank => 32,
-            Self::Node { node, prefix, .. } => (prefix.len() + node.name.len()) as u64 + 128,
+            Self::Node { node, prefix, .. } => {
+                (prefix.len() + node.name.len()) as u64 + 128 + connection_suffix_cost(node)
+            }
+            Self::Link { prefix, text } => (prefix.len() + text.len()) as u64 + 32,
         }
     }
 
@@ -447,6 +589,8 @@ impl TreeTextRow<'_> {
                 files,
                 files_scanned,
                 dirs,
+                decls,
+                cross_file_edges,
             } => {
                 let file_chip = if files_scanned > files {
                     format!(
@@ -458,8 +602,13 @@ impl TreeTextRow<'_> {
                 } else {
                     format!("{} file{}", files, if *files == 1 { "" } else { "s" })
                 };
+                let facts = if *decls > 0 || *cross_file_edges > 0 {
+                    format!(" · {decls} fn · {cross_file_edges} cross-file call edge(s)")
+                } else {
+                    String::new()
+                };
                 u.heading(&format!(
-                    "tree — {} · {} dir{}",
+                    "tree — {} · {} dir{}{facts}",
                     file_chip,
                     dirs,
                     if *dirs == 1 { "" } else { "s" },
@@ -487,10 +636,119 @@ impl TreeTextRow<'_> {
                     StructuralNodeKind::Dir => u.kind(&format!("{}/", node.name)),
                     StructuralNodeKind::File => u.name(&node.name),
                 };
-                format!("{prefix}{}{}", u.dim(connector), name)
+                let suffix = connection_suffix(node);
+                if suffix.is_empty() {
+                    format!("{prefix}{}{}", u.dim(connector), name)
+                } else {
+                    format!("{prefix}{}{}  {}", u.dim(connector), name, u.dim(&suffix))
+                }
+            }
+            Self::Link { prefix, text } => format!("{prefix}{}", u.dim(text)),
+        }
+    }
+}
+
+/// Named callables and types a file declares; synthesized module bodies
+/// and lambdas are real compiler callables but noise in a module map.
+fn named_decl_counts(facts: &bonsai_sdk::FileConnections) -> (usize, usize) {
+    let mut callables = 0;
+    let mut types = 0;
+    for decl in &facts.decls {
+        if decl.name == "__module__" || decl.name.starts_with('<') {
+            continue;
+        }
+        match decl.kind.as_str() {
+            "function" | "method" | "constructor" => callables += 1,
+            "class" | "struct" | "interface" | "enum" | "trait" => types += 1,
+            _ => {}
+        }
+    }
+    (callables, types)
+}
+
+/// Short language tag for a file row.
+fn language_tag(language: &str) -> &str {
+    match language {
+        "javascript" => "js",
+        "typescript" => "ts",
+        "python" => "py",
+        "kotlin" => "kt",
+        "csharp" => "cs",
+        "objc" => "objc",
+        other => other,
+    }
+}
+
+/// One-line compiler facts for a node: a directory's file/callable totals; a
+/// file's language, named callable/type counts, and external import count.
+fn connection_suffix(node: &StructuralTreeNode) -> String {
+    match node.kind {
+        StructuralNodeKind::Dir => {
+            if node.files_below == 0 && node.decls_below == 0 {
+                return String::new();
+            }
+            format!("{} files · {} fn", node.files_below, node.decls_below)
+        }
+        StructuralNodeKind::File => {
+            let Some(facts) = node.connections.as_ref() else {
+                return String::new();
+            };
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(language) = facts.language.as_deref() {
+                parts.push(language_tag(language).to_string());
+            }
+            let (callables, types) = named_decl_counts(facts);
+            if callables > 0 {
+                parts.push(format!("{callables} fn"));
+            }
+            if types > 0 {
+                parts.push(format!("{types} type"));
+            }
+            let external = facts
+                .imports
+                .iter()
+                .filter(|import| import.resolved_files.is_empty())
+                .count();
+            if external > 0 {
+                parts.push(format!("{external} ext"));
+            }
+            parts.join(" · ")
+        }
+    }
+}
+
+/// Workspace links of a file, one line each: `→` the files it imports or
+/// calls into, `←` the files that call into it.
+fn connection_rows(node: &StructuralTreeNode) -> Vec<String> {
+    let Some(facts) = node.connections.as_ref() else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    let mut uses: Vec<&str> = Vec::new();
+    for import in &facts.imports {
+        for file in &import.resolved_files {
+            if !uses.contains(&file.as_str()) {
+                uses.push(file.as_str());
             }
         }
     }
+    for group in &facts.calls_out {
+        if !uses.contains(&group.file.as_str()) {
+            uses.push(group.file.as_str());
+        }
+    }
+    if !uses.is_empty() {
+        rows.push(format!("→ {}", uses.join(", ")));
+    }
+    let used_by: Vec<&str> = facts.callers_in.iter().map(|group| group.file.as_str()).collect();
+    if !used_by.is_empty() {
+        rows.push(format!("← {}", used_by.join(", ")));
+    }
+    rows
+}
+
+fn connection_suffix_cost(node: &StructuralTreeNode) -> u64 {
+    connection_suffix(node).len() as u64
 }
 
 fn tree_text_rows(out: &StructuralTreeOut) -> Vec<TreeTextRow<'_>> {
@@ -504,6 +762,8 @@ fn tree_text_rows(out: &StructuralTreeOut) -> Vec<TreeTextRow<'_>> {
         files: out.summary.files,
         files_scanned: out.summary.files_scanned,
         dirs: out.summary.dirs,
+        decls: out.summary.total_decls,
+        cross_file_edges: out.summary.total_cross_file_edges,
     });
     if !out.analysis_complete {
         rows.push(TreeTextRow::Incomplete(&out.analysis_incomplete_reasons));
@@ -528,11 +788,18 @@ fn collect_tree_node_rows<'a>(
     rows: &mut Vec<TreeTextRow<'a>>,
 ) {
     let next_prefix = format!("{prefix}{}", if is_last { "    " } else { "│   " });
+    let links = connection_rows(node);
     rows.push(TreeTextRow::Node {
         node,
         prefix,
         is_last,
     });
+    for text in links {
+        rows.push(TreeTextRow::Link {
+            prefix: format!("{next_prefix}  "),
+            text,
+        });
+    }
 
     let last = node.children.len().saturating_sub(1);
     for (child_index, child) in node.children.iter().enumerate() {

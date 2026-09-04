@@ -315,7 +315,7 @@ fn dedup_search(lang: &str, fixture: &str) {
 // ─────────────────────────────────────────────────────────────────────
 
 fn dedup_inspect(lang: &str, fixture: &str) {
-    let Some(v) = run_json(&["inspect", &ws(lang, fixture), "--query", "a"]) else {
+    let Some(v) = run_json(&["inspect-graph", &ws(lang, fixture), "--query", "a"]) else {
         return;
     };
     // inspect returns `{flows: [...], occurrences: [...], ...}` or

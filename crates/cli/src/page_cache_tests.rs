@@ -1,8 +1,8 @@
 use super::{
     cache_is_fresh, content_tree_fingerprint, dependency_metadata_fingerprint, page_after_cursor,
-    read_json_cache_file, remember_structural_id_hints, requested_page_window, rulepack_dir_skipped,
-    serialize_json_bounded, structural_id_hint, workspace_fingerprint, CachedPage, PageCacheFile,
-    MAX_PAYLOAD_BYTES, RENDER_CACHE_VERSION,
+    query_report_page_window, read_json_cache_file, remember_structural_id_hints, requested_page_window,
+    rulepack_dir_skipped, serialize_json_bounded, structural_id_hint, workspace_fingerprint, CachedPage,
+    PageCacheFile, MAX_PAYLOAD_BYTES, RENDER_CACHE_VERSION,
 };
 use std::path::PathBuf;
 
@@ -20,6 +20,22 @@ fn tempdir(name: &str) -> PathBuf {
 fn page_window_formats_only_the_requested_page() {
     let window = requested_page_window(10, 100);
     assert_eq!(window.into_iter().collect::<Vec<_>>(), vec![10]);
+}
+
+#[test]
+fn query_report_window_covers_the_successor_and_short_reports() {
+    let window = query_report_page_window(10, 100);
+    assert_eq!(window.into_iter().collect::<Vec<_>>(), vec![10, 11]);
+    assert_eq!(
+        query_report_page_window(3, 5).into_iter().collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5],
+        "short reports render every page once"
+    );
+    assert_eq!(
+        query_report_page_window(100, 100).into_iter().collect::<Vec<_>>(),
+        vec![100],
+        "the last page has no successor"
+    );
 }
 
 #[test]

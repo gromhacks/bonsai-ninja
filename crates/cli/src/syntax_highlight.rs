@@ -18,6 +18,15 @@ pub(crate) struct SyntaxHighlightCache {
     extension_languages: AHashMap<String, String>,
 }
 
+/// First file extension registered by the adapter for `language`, used to
+/// highlight source embedded in rule YAML (`match_examples`).
+pub(crate) fn extension_for_language(language: &str) -> Option<&'static str> {
+    bonsai_adapters::all_adapters()
+        .into_iter()
+        .find(|adapter| adapter.language_id().as_str() == language)
+        .and_then(|adapter| adapter.file_extensions().first().copied())
+}
+
 pub(crate) fn syntax_highlight_cache() -> &'static SyntaxHighlightCache {
     static CACHE: OnceCell<SyntaxHighlightCache> = OnceCell::new();
     CACHE.get_or_init(SyntaxHighlightCache::build)

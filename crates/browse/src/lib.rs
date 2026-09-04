@@ -29,6 +29,7 @@ pub(crate) mod edges;
 pub(crate) mod entrypoints;
 pub(crate) mod graph_export;
 pub(crate) mod imports;
+pub mod module_map;
 pub(crate) mod native_export;
 pub(crate) mod operations;
 pub(crate) mod paths;
@@ -67,6 +68,9 @@ pub use graph_export::{
     GraphExportFormat, GraphNode, GraphProjection,
 };
 pub use imports::{imports, ImportOut, ImportsFilters};
+pub use module_map::{
+    file_connections, FileConnections, ModuleDecl, ModuleEdge, ModuleEdgeGroup, ModuleImport,
+};
 pub use native_export::{
     native_export_json, native_export_json_with_config, render_native_export_json,
     render_native_export_json_with_config, write_native_export_json_with_config,
@@ -87,7 +91,8 @@ pub use slice::{slices, SliceFilters, SliceOutcome, SliceRow, SliceStep};
 pub use strings::{strings, StringOut, StringsFilters};
 pub use summary_labels::SummaryAnnotator;
 pub use symbol_summary::{
-    symbol_summaries, SymbolCallEdge, SymbolEvidenceKind, SymbolImport, SymbolSummary, UnresolvedCallEvidence,
+    symbol_summaries, symbol_summary, SymbolCallEdge, SymbolEvidenceKind, SymbolImport, SymbolSummary,
+    UnresolvedCallEvidence,
 };
 pub use taint::{
     compute_taint_id, dump_taint, TaintFilters, TaintOutcome, TaintRecord, TaintReport, TaintedArgRecord,

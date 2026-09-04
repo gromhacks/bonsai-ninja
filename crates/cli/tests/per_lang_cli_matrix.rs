@@ -833,9 +833,9 @@ fn check_calls_include(ws: &str, lang: &str, callee_needle: &str) {
     }
 }
 
-/// Assert `inspect --query` emits a FLOW block for the target.
+/// Assert `inspect-graph --query` emits a FLOW / decl block for the target.
 fn check_inspect_reaches(ws: &str, lang: &str, query: &str) {
-    let Some((out, _, code)) = run(&["inspect", ws, "--query", query]) else {
+    let Some((out, _, code)) = run(&["inspect-graph", ws, "--query", query]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] inspect --query {query} ec={code}");
@@ -844,7 +844,10 @@ fn check_inspect_reaches(ws: &str, lang: &str, query: &str) {
         "[{lang}] inspect didn't surface `{query}` in output"
     );
     assert!(
-        out.contains("FLOW ") || out.contains("outgoing calls") || out.contains("hit "),
+        out.contains("FLOW ")
+            || out.contains("direct callers")
+            || out.contains("direct callees")
+            || out.contains("hit "),
         "[{lang}] inspect missing flow / hit block for `{query}`"
     );
 }
@@ -852,7 +855,7 @@ fn check_inspect_reaches(ws: &str, lang: &str, query: &str) {
 /// Assert `inspect --flow F:id` round-trips correctly for a flow
 /// surfaced from the initial query.
 fn check_flow_id_roundtrip(ws: &str, lang: &str, query: &str) {
-    let Some((out, _, _)) = run(&["inspect", ws, "--query", query, "--format", "json"]) else {
+    let Some((out, _, _)) = run(&["inspect-graph", ws, "--query", query, "--format", "json"]) else {
         return;
     };
     let parsed: serde_json::Value = match serde_json::from_str(&out) {
@@ -876,39 +879,11 @@ fn check_flow_id_roundtrip(ws: &str, lang: &str, query: &str) {
         }
     }
     let Some(fid) = flow_id else { return };
-    let Some((round, _, code)) = run(&["inspect", ws, "--query", query, "--flow", &fid]) else {
+    let Some((round, _, code)) = run(&["inspect-graph", ws, "--query", query, "--flow", &fid]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] --flow {fid} ec={code}");
     assert!(round.contains(&fid), "[{lang}] --flow {fid} didn't echo id");
-}
-
-/// Assert `trace` emits a populated summary for the handler.
-fn check_trace(ws: &str, lang: &str, handler: &str) {
-    let selector = diagnostic_handler_selector(lang, handler);
-    let Some((out, _, code)) = run(&["trace", ws, selector.as_str(), "--format", "json"]) else {
-        return;
-    };
-    assert_eq!(code, 0, "[{lang}] trace ec={code}");
-    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert!(
-        parsed.get("summary").is_some() || parsed.get("paths").is_some(),
-        "[{lang}] trace missing summary/paths"
-    );
-}
-
-/// Assert `trace --format dot` produces valid-looking Graphviz.
-fn check_trace_dot(ws: &str, lang: &str, handler: &str) {
-    let selector = diagnostic_handler_selector(lang, handler);
-    let Some((out, _, code)) = run(&["trace", ws, selector.as_str(), "--format", "dot"]) else {
-        return;
-    };
-    assert_eq!(code, 0, "[{lang}] trace dot ec={code}");
-    assert!(
-        out.contains("digraph") && out.contains("->"),
-        "[{lang}] trace dot not a graph: {}",
-        &out[..out.len().min(200)]
-    );
 }
 
 /// Assert `index` stats are populated (non-zero file + reparse count).
@@ -1104,106 +1079,36 @@ fn check_dump_resolution(ws: &str, lang: &str) {
     }
 }
 
-/// Assert `path` finds a semantic handler -> verifier route.
-fn check_path(ws: &str, lang: &str, handler: &str, verifier: &str) {
+/// Assert `inspect-graph --from <handler> --to <verifier>` finds a semantic
+/// handler -> verifier corridor: at least one decl or occurrence hit must
+/// survive the explicit endpoint filter.
+fn check_inspect_corridor(ws: &str, lang: &str, handler: &str, verifier: &str) {
     let Some((out, _, code)) = run(&[
-        "path", ws, "--from", handler, "--to", verifier, "--format", "json",
-    ]) else {
-        return;
-    };
-    assert_eq!(code, 0, "[{lang}] path ec={code}: {out}");
-    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(
-        parsed["representation"], "compressed_callgraph",
-        "[{lang}] path did not use compressed graph representation: {out}"
-    );
-    assert!(
-        parsed["node_count"].as_u64().unwrap_or(0) >= 2 && parsed["edge_count"].as_u64().unwrap_or(0) >= 1,
-        "[{lang}] path returned an empty semantic corridor: {out}"
-    );
-    for field in ["nodes", "edges", "analysis_complete"] {
-        assert!(
-            parsed.get(field).is_some(),
-            "[{lang}] path result missing `{field}`: {parsed}"
-        );
-    }
-}
-
-/// Assert `slice` can explain the action argument at the update call.
-fn check_slice(ws: &str, lang: &str, update_user: &str) {
-    let Some((args_out, _, code)) = run(&["args", ws, "--callee", update_user, "--format", "json"]) else {
-        return;
-    };
-    assert_eq!(code, 0, "[{lang}] args --callee {update_user} ec={code}");
-    let args_json: serde_json::Value = serde_json::from_str(&args_out).unwrap();
-    let args_rows = rows_of(&args_json);
-    let action_arg = args_rows
-        .iter()
-        .find(|row| {
-            let value = row.get("value").and_then(|v| v.as_str()).unwrap_or_default();
-            let file = row.get("file").and_then(|v| v.as_str()).unwrap_or_default();
-            value.to_ascii_lowercase().contains("action") && file.to_ascii_lowercase().contains("gateway")
-        })
-        .unwrap_or_else(|| panic!("[{lang}] update call missing action arg: {args_out}"));
-    let symbol = action_arg
-        .get("value")
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| panic!("[{lang}] action arg missing value: {action_arg}"));
-    let line = action_arg
-        .get("line")
-        .and_then(|v| v.as_u64())
-        .unwrap_or_else(|| panic!("[{lang}] action arg missing line: {action_arg}"))
-        .to_string();
-    let file = action_arg
-        .get("file")
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| panic!("[{lang}] action arg missing file: {action_arg}"));
-    let Some((out, _, code)) = run(&[
-        "slice",
+        "inspect-graph",
         ws,
-        "--symbol",
-        symbol,
-        "--line",
-        line.as_str(),
-        "--file",
-        file,
+        "--from",
+        handler,
+        "--to",
+        verifier,
         "--format",
         "json",
     ]) else {
         return;
     };
-    assert_eq!(code, 0, "[{lang}] slice ec={code}: {out}");
-    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(code, 0, "[{lang}] inspect-graph --from/--to ec={code}: {out}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|err| {
+        panic!(
+            "[{lang}] inspect-graph --from {handler} --to {verifier} emitted non-JSON output ({err}): {out}"
+        )
+    });
+    let decl_hits = parsed
+        .get("decl_hits")
+        .and_then(|h| h.as_array())
+        .map_or(0, Vec::len);
+    let hits = parsed.get("hits").and_then(|h| h.as_array()).map_or(0, Vec::len);
     assert!(
-        parsed
-            .get("slices")
-            .and_then(|v| v.as_array())
-            .is_some_and(|slices| !slices.is_empty()),
-        "[{lang}] slice returned no slices for {symbol}@{line}: {out}"
-    );
-    let first = parsed["slices"]
-        .as_array()
-        .and_then(|slices| slices.first())
-        .unwrap();
-    for field in [
-        "slice_id",
-        "function",
-        "target_line",
-        "target_symbol",
-        "influencing_symbols",
-        "steps",
-    ] {
-        assert!(
-            first.get(field).is_some(),
-            "[{lang}] slice row missing `{field}`: {first}"
-        );
-    }
-    assert!(
-        first
-            .get("steps")
-            .and_then(|v| v.as_array())
-            .is_some_and(|steps| !steps.is_empty()),
-        "[{lang}] slice row has no steps: {first}"
+        decl_hits + hits > 0,
+        "[{lang}] inspect-graph --from {handler} --to {verifier} returned an empty corridor: {out}"
     );
 }
 
@@ -2264,16 +2169,6 @@ macro_rules! lang_matrix_tests {
                 }
 
                 #[test]
-                fn micro_trace_handler() {
-                    check_trace(&ws(EXP.lang, "micro"), EXP.lang, EXP.handle_request);
-                }
-
-                #[test]
-                fn micro_trace_handler_dot_format() {
-                    check_trace_dot(&ws(EXP.lang, "micro"), EXP.lang, EXP.handle_request);
-                }
-
-                #[test]
                 fn micro_index_stats() {
                     check_index(&ws(EXP.lang, "micro"), EXP.lang);
                 }
@@ -2304,13 +2199,8 @@ macro_rules! lang_matrix_tests {
                 }
 
                 #[test]
-                fn micro_path_handler_to_verifier() {
-                    check_path(&ws(EXP.lang, "micro"), EXP.lang, EXP.handle_request, EXP.verify_token);
-                }
-
-                #[test]
-                fn micro_slice_action_at_update_call() {
-                    check_slice(&ws(EXP.lang, "micro"), EXP.lang, EXP.update_user);
+                fn micro_inspect_corridor_handler_to_verifier() {
+                    check_inspect_corridor(&ws(EXP.lang, "micro"), EXP.lang, EXP.handle_request, EXP.verify_token);
                 }
 
                 #[test]
@@ -2681,7 +2571,7 @@ lang_matrix_tests! {
 /// Utility: run `inspect --query` against language_gauntlet and return stdout.
 fn language_gauntlet_inspect(query: &str) -> Option<String> {
     let w = ws("python", "language_gauntlet");
-    run(&["inspect", &w, "--query", query]).map(|(o, _, _)| o)
+    run(&["inspect-graph", &w, "--query", query]).map(|(o, _, _)| o)
 }
 
 /// Utility: run `dump-taint` seeded from the source and return stdout.
@@ -2692,10 +2582,11 @@ fn language_gauntlet_dump_taint(source: &str) -> Option<(String, String, i32)> {
     run(&["dump-taint", &w, "--source", source, "--format", "json"])
 }
 
-/// Utility: run `trace --from X --to Y` and return stdout.
-fn language_gauntlet_trace_window(from: &str, to: &str) -> Option<String> {
+/// Utility: run the `inspect-graph --from X --to Y` endpoint corridor and
+/// return stdout.
+fn language_gauntlet_inspect_window(from: &str, to: &str) -> Option<String> {
     let w = ws("python", "language_gauntlet");
-    run(&["trace", &w, "--from", from, "--to", to]).map(|(o, _, _)| o)
+    run(&["inspect-graph", &w, "--from", from, "--to", to]).map(|(o, _, _)| o)
 }
 
 // =============================================================================
@@ -2706,15 +2597,15 @@ fn language_gauntlet_trace_window(from: &str, to: &str) -> Option<String> {
 // generates one `#[test]` per construct, each asserting:
 //   (a) `inspect --query <name>` surfaces the construct
 //   (b) a flow or hit block appears in the output
-//   (c) when given an optional `--from/--to` window, trace finds a
-//       path connecting the construct to the sink
+//   (c) when given an optional `--from/--to` window, the inspect-graph
+//       endpoint corridor connects the construct to the sink
 //
 // The macro's second form also asserts that a flow connecting
 // `handle_request` → <construct> → `execute` exists, which pins the
 // full source→sink chain threading through the specific construct.
 
 /// Assert `inspect --query <name>` surfaces the construct and
-/// contains at least one FLOW / hit / outgoing block.
+/// contains at least one FLOW / hit / decl block.
 fn assert_construct_visible(query: &str) {
     let Some(out) = language_gauntlet_inspect(query) else {
         return;
@@ -2724,7 +2615,10 @@ fn assert_construct_visible(query: &str) {
         "language_gauntlet: construct `{query}` missing from inspect output"
     );
     assert!(
-        out.contains("FLOW ") || out.contains("hit ") || out.contains("outgoing calls"),
+        out.contains("FLOW ")
+            || out.contains("hit ")
+            || out.contains("direct callers")
+            || out.contains("direct callees"),
         "language_gauntlet: construct `{query}` has no flow / hit block"
     );
 }
@@ -2734,11 +2628,11 @@ fn assert_construct_visible(query: &str) {
 /// downward chain, or anywhere in `dump-callgraph` output. This
 /// catches constructs that wrap the source (decorators, wrappers,
 /// closures that sit ABOVE handle_request in the call tree) which
-/// a strict `handle_request → execute` trace would miss.
+/// a strict `handle_request → execute` corridor would miss.
 fn assert_construct_threads_chain(hop: &str) {
     let w = ws("python", "language_gauntlet");
-    // First try the downward trace — cheapest check.
-    if let Some((out, _, 0)) = run(&["trace", &w, "--from", "handle_request", "--to", "execute"]) {
+    // First try the downward endpoint corridor — cheapest check.
+    if let Some((out, _, 0)) = run(&["inspect-graph", &w, "--from", "handle_request", "--to", "execute"]) {
         if out.contains(hop) {
             return;
         }
@@ -3251,10 +3145,10 @@ fn language_gauntlet_dump_taint_threads_every_cross_function_hop() {
 fn language_gauntlet_inspect_compact_surface_is_smaller_than_full() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "language_gauntlet");
-    let Some((full, _, _)) = run(&["inspect", &w, "--query", "execute"]) else {
+    let Some((full, _, _)) = run(&["inspect-graph", &w, "--query", "execute"]) else {
         return;
     };
-    let Some((compact, _, _)) = run(&["inspect", &w, "--query", "execute", "--compact"]) else {
+    let Some((compact, _, _)) = run(&["inspect-graph", &w, "--query", "execute", "--compact"]) else {
         return;
     };
     // Compact mode must drop body lines but keep FLOW / GROUP headers.
@@ -3470,14 +3364,14 @@ fn language_gauntlet_export_does_not_materialize_path_derived_flow_labels() {
 }
 
 #[test]
-fn language_gauntlet_trace_window_from_source_reaches_sink() {
+fn language_gauntlet_inspect_window_from_source_reaches_sink() {
     let Some(_) = bin_path() else { return };
-    let Some(out) = language_gauntlet_trace_window("handle_request", "execute") else {
+    let Some(out) = language_gauntlet_inspect_window("handle_request", "execute") else {
         return;
     };
     assert!(
         out.contains("handle_request") && out.contains("execute"),
-        "language_gauntlet: trace --from handle_request --to execute lost the endpoints"
+        "language_gauntlet: inspect-graph --from handle_request --to execute lost the endpoints"
     );
 }
 
@@ -3489,7 +3383,7 @@ fn language_gauntlet_inspect_from_to_filter_narrows_to_chain() {
     // pass a regex that matches every callable so the filter has
     // chains to whittle down. At least one hit must survive.
     let Some((out, _, code)) = run(&[
-        "inspect",
+        "inspect-graph",
         &w,
         "--query",
         ".+",
@@ -3668,7 +3562,7 @@ fn invalid_regex_errors_readably() {
     let w = ws("python", "micro");
     for args in [
         vec!["defs", &w, "--regex", "--name", "[bad"],
-        vec!["inspect", &w, "--query", "[bad", "--regex"],
+        vec!["inspect-graph", &w, "--query", "[bad", "--regex"],
         vec!["search", &w, "[bad", "--regex"],
         vec!["calls", &w, "--callee", "[bad", "--regex"],
         vec!["operations", &w, "--name", "[bad", "--regex"],
@@ -3691,7 +3585,7 @@ fn unknown_flow_id_errors() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "micro");
     let Some((_out, err, code)) = run(&[
-        "inspect",
+        "inspect-graph",
         &w,
         "--query",
         "handle_request",
@@ -3832,10 +3726,10 @@ fn pagination_cursor_advances_correctly() {
 fn inspect_compact_keeps_headers_drops_bodies() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "micro");
-    let Some((compact, _, _)) = run(&["inspect", &w, "--query", "handle_request", "--compact"]) else {
+    let Some((compact, _, _)) = run(&["inspect-graph", &w, "--query", "handle_request", "--compact"]) else {
         return;
     };
-    let Some((full, _, _)) = run(&["inspect", &w, "--query", "handle_request"]) else {
+    let Some((full, _, _)) = run(&["inspect-graph", &w, "--query", "handle_request"]) else {
         return;
     };
     assert!(compact.contains("FLOW 1"), "compact mode dropped FLOW header");
@@ -3855,8 +3749,14 @@ fn inspect_compact_keeps_headers_drops_bodies() {
 fn inspect_grouped_view_emits_group_blocks() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "micro");
-    let Some((out, _, code)) = run(&["inspect", &w, "--query", "run_admin_command", "--view", "grouped"])
-    else {
+    let Some((out, _, code)) = run(&[
+        "inspect-graph",
+        &w,
+        "--query",
+        "run_admin_command",
+        "--view",
+        "grouped",
+    ]) else {
         return;
     };
     assert_eq!(code, 0);

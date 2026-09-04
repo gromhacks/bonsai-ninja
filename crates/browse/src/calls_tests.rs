@@ -2,7 +2,7 @@ use super::*;
 
 fn call(callee: &str, column: u32, caller: Option<&str>, call_kind: Option<&str>) -> CallOut {
     CallOut {
-        resolution_scope: CALLSITE_RESOLUTION_SCOPE,
+        resolution_scope: CALLSITE_RESOLUTION_SCOPE.to_string(),
         callee: callee.to_string(),
         file: "fixture.py".to_string(),
         line: 7,

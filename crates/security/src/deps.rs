@@ -24,11 +24,11 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_common::dependency_metadata::dependency_metadata_dir_skipped;
 use bonsai_common::workspace_relative_filter_path;
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DependencyRow {
     pub language: String,
     pub key: String,

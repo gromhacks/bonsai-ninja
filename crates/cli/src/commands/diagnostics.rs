@@ -5,7 +5,6 @@
 //! single small module together.
 
 use anyhow::Result;
-use serde::Serialize;
 use serde_json::json;
 use std::io::Write as _;
 use std::process::Command;
@@ -13,14 +12,13 @@ use std::time::Duration;
 
 use crate::args::{BrowseFormat, SemanticWorkerPhase};
 use crate::cli_println;
-use crate::{page_cache, paging, progress, ui};
+use crate::{progress, ui};
 use comfy_table::Cell;
 
 use super::{
     bonsai_for_cli, not_found_with_suggestions, open_project_dataflow_prewarm,
     open_project_index_matching_literal, open_project_index_matching_path, open_project_index_only,
-    open_project_parse_only, open_project_sidecar_validation_only, page_info_to_json,
-    paged_json_incomplete_reasons,
+    open_project_parse_only, open_project_sidecar_validation_only,
 };
 
 const SEMANTIC_PHASE_POSITION_ENV: &str = "BONSAI_SEMANTIC_PHASE_POSITION";
@@ -89,7 +87,10 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
         let cache = bonsai_for_cli().cache(root);
         cache.maintain_persisted_sidecars()?;
         maintenance.finish();
-        if let Some(files) = cache.current_compiler_object_count()? {
+        // `--no-cache` / `BONSAI_NO_CACHE` asks for one exact cold pass: skip
+        // the persisted compiler-object generation and recompile.
+        let cache_disabled = *crate::NO_CACHE.get().unwrap_or(&false);
+        if let Some(files) = cache.current_compiler_object_count()?.filter(|_| !cache_disabled) {
             // A warm structural index is a cache-validation operation, not a
             // request to ingest every source body into a fresh process. Keep
             // the exact compiler-generation proof root-only and derive the
@@ -109,6 +110,14 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
                 "compiler cache/source inventory mismatch: generation has {files} files, metadata scan found {}",
                 context.summary.indexed_files
             );
+            // The manifest records each source's stamp and text identity so
+            // later opens intern unchanged files without reading them; a
+            // binary upgrade or moved checkout leaves it stale until here.
+            if cache.manifest_needs_republish()? {
+                let stage = progress::ScopedSpinner::new("publishing cache manifest");
+                let _ = cache.write_manifest()?;
+                stage.finish();
+            }
             emit_index_value(
                 &json!({
                     "files": files,
@@ -117,6 +126,7 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
                     "compiler_objects": files,
                     "parsed_files": 0,
                     "semantic_context": context.summary,
+                    "context": workspace_context_value(&context),
                 }),
                 options.format,
             )?;
@@ -131,6 +141,15 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
             .save_compiler_object_sidecar_with_progress(root, || compiler.inc(1));
         compiler.finish_and_clear();
         compiler_result?;
+        {
+            // A fresh compiler generation is reusable state: publish the
+            // manifest that describes it (coverage, fingerprints, and the
+            // per-source identities lazy opens rely on).
+            let stage = progress::ScopedSpinner::new("publishing cache manifest");
+            let _ = bonsai_for_cli().cache(root).write_manifest()?;
+            stage.finish();
+        }
+        let context = project.semantic_context();
         emit_index_value(
             &json!({
                 "files": stats.files,
@@ -139,6 +158,7 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
                 "compiler_objects": stats.files,
                 "parsed_files": stats.files,
                 "semantic_context": stats.semantic_context,
+                "context": workspace_context_value(&context),
             }),
             options.format,
         )?;
@@ -152,8 +172,15 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
     };
     let stage = progress::ScopedSpinner::new("collecting index stats");
     let stats = project.stats();
+    let mut stats_value = serde_json::to_value(stats)?;
+    if let Some(fields) = stats_value.as_object_mut() {
+        fields.insert(
+            "context".to_string(),
+            workspace_context_value(&project.semantic_context()),
+        );
+    }
     stage.finish();
-    emit_index_value(&serde_json::to_value(stats)?, options.format)?;
+    emit_index_value(&stats_value, options.format)?;
     flush_stdout()?;
     if !options.watch {
         return Ok(());
@@ -597,39 +624,6 @@ fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Re
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct ContextRow {
-    category: &'static str,
-    #[serde(flatten)]
-    value: serde_json::Value,
-}
-
-fn context_row<T: Serialize>(category: &'static str, value: T) -> Result<ContextRow> {
-    Ok(ContextRow {
-        category,
-        value: serde_json::to_value(value)?,
-    })
-}
-
-fn context_row_json_cost(row: &ContextRow) -> u64 {
-    let Ok(pretty) = serde_json::to_string_pretty(row) else {
-        return 512;
-    };
-    // The page renderer nests each pretty row under the root object's
-    // `rows` array. Account for the four extra indentation bytes on every
-    // rendered line plus the separating comma/newline. Pricing compact JSON
-    // here used to let `context --context 16k` emit ~20k tokens on
-    // Elasticsearch even though the paginator reported 15.5k.
-    let lines = pretty.split('\n').count();
-    pretty
-        .len()
-        .saturating_add(lines.saturating_mul(4))
-        // Array separators and the transition from an empty `rows: []`
-        // wrapper to a populated pretty array add a few more bytes. Keep a
-        // small per-row margin so the advertised ceiling remains a ceiling.
-        .saturating_add(16) as u64
-}
-
 fn emit_index_value(value: &serde_json::Value, format: BrowseFormat) -> Result<()> {
     if crate::filter::active().is_active() && !crate::filter::active().matches_value(value) {
         match format {
@@ -706,160 +700,22 @@ fn flat_scalar_text(value: &serde_json::Value) -> String {
     }
 }
 
-pub(crate) fn cmd_context(
-    root: &std::path::Path,
-    paging_cfg: paging::PagingConfig,
-    format: BrowseFormat,
-) -> Result<()> {
-    // Workspace context is a filesystem/path fact. It does not inspect
-    // declarations, so do not read source contents into a VFS or invoke
-    // Tree-sitter for a metadata-only command.
-    let workspace = bonsai_sdk::Workspace::new(bonsai_adapters::all_languages_registry());
-    let stage = progress::ScopedSpinner::new("collecting workspace context");
-    let context = workspace
-        .semantic_context_for_root(root)
-        .map_err(|error| anyhow::anyhow!("collecting context for {}: {error}", root.display()))?;
-    stage.finish();
-
-    let mut rows = Vec::with_capacity(
-        context.module_roots.len()
-            + context.dependency_roots.len()
-            + context.generated_roots.len()
-            + context.excluded_roots.len()
-            + context.toolchain_manifests.len()
-            + context.configured_source_variants.len()
-            + context.source_transformations.len()
-            + context.incomplete_reasons.len(),
-    );
-    for value in &context.module_roots {
-        rows.push(context_row("module_root", value)?);
-    }
-    for value in &context.dependency_roots {
-        rows.push(context_row("dependency_root", value)?);
-    }
-    for value in &context.generated_roots {
-        rows.push(context_row("generated_root", value)?);
-    }
-    for value in &context.excluded_roots {
-        rows.push(context_row("excluded_root", value)?);
-    }
-    for value in &context.toolchain_manifests {
-        rows.push(context_row("toolchain_manifest", value)?);
-    }
-    for value in &context.configured_source_variants {
-        rows.push(context_row("configured_source_variant", value)?);
-    }
-    for value in &context.source_transformations {
-        rows.push(context_row("source_transformation", value)?);
-    }
-    for reason in &context.incomplete_reasons {
-        rows.push(context_row(
-            "incomplete_reason",
-            serde_json::json!({ "reason": reason }),
-        )?);
-    }
-
-    let workspace_root = context.workspace_root.clone();
-    let summary = context.summary;
-    let summary_value = serde_json::to_value(summary)?;
-    let semantic_incomplete_reasons = context.incomplete_reasons.clone();
-    let filters_hash = paging::hash_filters(&[("command", "context")]);
-    page_cache::emit_paged_text(
-        root,
-        &rows,
-        &paging_cfg,
-        "context",
-        filters_hash,
-        context_row_json_cost,
-        |slice, info, _cfg| match format {
-            BrowseFormat::Json => {
-                // One document shape for every page count: the canonical
-                // context facts as categorized rows plus completeness and
-                // paging metadata.
-                let result_incomplete_reasons = paged_json_incomplete_reasons("context", info);
-                let wrapped = serde_json::json!({
-                    "workspace_root": workspace_root,
-                    "summary": summary,
-                    "analysis_complete": semantic_incomplete_reasons.is_empty(),
-                    "analysis_incomplete_reasons": semantic_incomplete_reasons,
-                    "result_complete": result_incomplete_reasons.is_empty(),
-                    "result_incomplete_reasons": result_incomplete_reasons,
-                    "rows": slice,
-                    "page": page_info_to_json(info),
-                });
-                crate::output::emit_json_document(&wrapped)?;
-                Ok(())
-            }
-            BrowseFormat::Text => {
-                let u = ui();
-                cli_println!();
-                cli_println!("{}", u.heading("workspace context"));
-                cli_println!(
-                    "  {} {}",
-                    u.label("workspace root"),
-                    u.path(workspace_root.as_deref().unwrap_or("-"))
-                );
-                let status = if semantic_incomplete_reasons.is_empty() {
-                    u.name("complete")
-                } else {
-                    u.warn("incomplete")
-                };
-                cli_println!("  {} {}", u.label("analysis"), status);
-                if !semantic_incomplete_reasons.is_empty() {
-                    for line in u.wrapped_warn_labeled_lines(
-                        "analysis incomplete",
-                        &semantic_incomplete_reasons.join("; "),
-                    ) {
-                        cli_println!("{line}");
-                    }
-                }
-                let mut summary_facts = Vec::new();
-                flatten_json_value("", &summary_value, &mut summary_facts);
-                let mut summary_table = u.table(&["summary", "value"]);
-                for (name, value) in summary_facts {
-                    summary_table.add_row(vec![Cell::new(u.kind(&name)), Cell::new(value)]);
-                }
-                cli_println!("{summary_table}");
-                if slice.is_empty() {
-                    cli_println!();
-                    cli_println!(
-                        "{}",
-                        u.dim("(no module, dependency, generated, excluded, toolchain, or variant roots)")
-                    );
-                } else {
-                    cli_println!();
-                    let mut table = u.table(&["category", "fact", "value"]);
-                    for row in slice {
-                        let mut facts = Vec::new();
-                        flatten_json_value("", &row.value, &mut facts);
-                        if facts.is_empty() {
-                            table.add_row(vec![
-                                Cell::new(u.kind(row.category)),
-                                Cell::new(u.dim("-")),
-                                Cell::new(u.dim("-")),
-                            ]);
-                        }
-                        for (index, (name, value)) in facts.into_iter().enumerate() {
-                            table.add_row(vec![
-                                Cell::new(if index == 0 {
-                                    u.kind(row.category)
-                                } else {
-                                    String::new()
-                                }),
-                                Cell::new(u.dim(&name)),
-                                Cell::new(value),
-                            ]);
-                        }
-                    }
-                    cli_println!("{table}");
-                }
-                crate::footer::render_paging_footer(info, "bonsai-ninja context <workspace>");
-                Ok(())
-            }
-        },
-    )?;
-    flush_stdout()?;
-    Ok(())
+/// The workspace-shape facts every `index` report carries: module,
+/// dependency, generated, and excluded roots; toolchain manifests; configured
+/// source variants; source-transformation evidence; and the reasons the
+/// context is incomplete. Same structure as `Project::semantic_context()`.
+fn workspace_context_value(context: &bonsai_sdk::WorkspaceSemanticContext) -> serde_json::Value {
+    serde_json::json!({
+        "workspace_root": context.workspace_root,
+        "module_roots": context.module_roots,
+        "dependency_roots": context.dependency_roots,
+        "generated_roots": context.generated_roots,
+        "excluded_roots": context.excluded_roots,
+        "toolchain_manifests": context.toolchain_manifests,
+        "configured_source_variants": context.configured_source_variants,
+        "source_transformations": context.source_transformations,
+        "incomplete_reasons": context.incomplete_reasons,
+    })
 }
 
 fn flush_stdout() -> Result<()> {
@@ -1277,29 +1133,6 @@ mod semantic_phase_tests {
             .collect::<Vec<_>>();
         assert_eq!(args.first().map(String::as_str), Some("--no-progress"));
         assert_eq!(args.get(1).map(String::as_str), Some("--no-color"));
-    }
-
-    #[test]
-    fn context_row_cost_covers_pretty_nested_json() {
-        let row = context_row(
-            "toolchain_manifest",
-            serde_json::json!({
-                "path": "services/search/build.gradle",
-                "kind": "gradle",
-                "nested": { "targets": ["main", "test"] }
-            }),
-        )
-        .expect("context row");
-        let with_row = serde_json::to_string_pretty(&serde_json::json!({ "rows": [&row] }))
-            .expect("serialize wrapped row");
-        let empty = serde_json::to_string_pretty(&serde_json::json!({ "rows": [] }))
-            .expect("serialize empty wrapper");
-        let cost = context_row_json_cost(&row) as usize;
-        let introduced = with_row.len().saturating_sub(empty.len());
-        assert!(
-            cost >= introduced,
-            "row pricing ({cost}) must cover the bytes introduced by nested pretty JSON ({introduced})"
-        );
     }
 
     #[test]

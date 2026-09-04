@@ -1058,17 +1058,27 @@ impl<'tree> SyntaxKindIndex<'tree> {
     pub fn new(tree: &'tree Tree, wanted: &[&str]) -> Self {
         let wanted = wanted.iter().copied().collect::<std::collections::HashSet<_>>();
         let mut nodes = Vec::new();
+        // One cursor-driven pre-order traversal: no per-node child vector,
+        // no stack of nodes. `goto_first_child` / `goto_next_sibling` /
+        // `goto_parent` visit every node exactly once in source order.
         let mut cursor = tree.walk();
-        let mut stack = vec![tree.root_node()];
-        while let Some(node) = stack.pop() {
+        loop {
+            let node = cursor.node();
             if wanted.contains(node.kind()) {
                 nodes.push(node);
             }
-            let mut children = node.children(&mut cursor).collect::<Vec<_>>();
-            children.reverse();
-            stack.extend(children);
+            if cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    return Self { nodes };
+                }
+            }
         }
-        Self { nodes }
     }
 
     /// Return matching nodes in exact source preorder.

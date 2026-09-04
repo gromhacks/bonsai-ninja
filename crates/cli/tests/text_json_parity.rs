@@ -263,42 +263,8 @@ fn navigation_commands_agree_between_text_and_json() {
     let ws = workspace();
     for (label, args) in [
         (
-            "inspect",
-            vec!["inspect", ws.as_str(), "--query", "verify_token", "--all"],
-        ),
-        (
-            "symbol-summary",
-            vec!["symbol-summary", ws.as_str(), "--symbol", "update_user"],
-        ),
-        (
-            "trace",
-            vec!["trace", ws.as_str(), "--symbol", "handle_request", "--all"],
-        ),
-        (
-            "path",
-            vec![
-                "path",
-                ws.as_str(),
-                "--from",
-                "handle_request",
-                "--to",
-                "run_admin_command",
-                "--all",
-            ],
-        ),
-        (
-            "slice",
-            vec![
-                "slice",
-                ws.as_str(),
-                "--symbol",
-                "verify_token",
-                "--line",
-                "5",
-                "--file",
-                "auth_service.py",
-                "--all",
-            ],
+            "inspect-graph",
+            vec!["inspect-graph", ws.as_str(), "--query", "verify_token", "--all"],
         ),
         ("read-file", vec!["read-file", ws.as_str(), "gateway.py", "--all"]),
     ] {
@@ -330,7 +296,6 @@ fn compiler_dump_commands_agree_between_text_and_json() {
             vec!["dump-cfg", ws.as_str(), "--symbol", "handle_request"],
         ),
         ("diagnostics", vec!["diagnostics", ws.as_str()]),
-        ("context", vec!["context", ws.as_str(), "--all"]),
         ("index", vec!["index", ws.as_str()]),
     ] {
         parity(label, &args);

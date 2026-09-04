@@ -99,7 +99,7 @@ fn fact(callee: &str, position: usize, value: &str, column: u32, origin: ArgOrig
     };
     ArgFact {
         out: ArgOut {
-            resolution_scope: ARG_RESOLUTION_SCOPE,
+            resolution_scope: ARG_RESOLUTION_SCOPE.to_string(),
             callee: callee.to_string(),
             position,
             keyword: None,

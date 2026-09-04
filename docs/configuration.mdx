@@ -26,8 +26,8 @@ bonsai-ninja does not require a project config file for normal scans. Workspace-
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `.bonsai/rules/` | directory | Absent | Optional workspace-local rule overlay. |
-| `$CACHE_DIR/manifest.json` | generated file | `index --semantic`, SDK semantic/full-prewarm facades, or `cache rebuild` | JSON inventory of cache coverage, producer fingerprints, sidecar paths, missing reasons, and the versioned exact source ledger. Unchanged path/size/mtime entries reuse their recorded SHA-256 digest; a metadata change forces content rehashing. Do not use as the analysis payload path; commands validate and read the binary sidecars. |
-| `$CACHE_DIR/compiler-objects.v*.factstore` | generated file | first phase of `index --semantic`, SDK semantic prewarm, or `cache rebuild` | Atomic generation of per-file adapter-lowered compiler objects and diagnostics, validated by relative path, adapter, frontend ABI, SHA-256 source digest, and payload digest. Import indexes, declaration linkage facts (including direct-call receiver-field initializers), and compact syntax targets (calls, exact return targets, assignment aliases, factory assignments, inline callbacks, typed callables, and receiver/type evidence) remain independently decodable without retaining declaration/flow bodies. Publication holds a cross-process lock and removes only unlocked older recognized compiler-object schemas plus abandoned matching staging files; unknown/manual files are preserved. |
+| `$CACHE_DIR/manifest.json` | generated file | `index` (after a compiler-object rebuild, or whenever the stored manifest has an older schema, a different workspace root, or a different minified-source profile), `index --semantic`, SDK semantic/full-prewarm facades, or `cache rebuild` | JSON inventory (schema 8) of cache coverage, producer fingerprints, sidecar paths, missing reasons, and the versioned exact source ledger. Each source entry records its filesystem stamp (length, mtime, ctime, device, inode), FNV-1a hash, and — when the on-disk bytes are the text verbatim — its SHA-256 `text_digest`. Unchanged stamps reuse the recorded digest and, on Unix, let a warm open intern the file by identity and read it only on first semantic use; a stamp change forces content rehashing. Do not use as the analysis payload path; commands validate and read the binary sidecars. |
+| `$CACHE_DIR/compiler-objects.v*.factstore` | generated file | `index`, first phase of `index --semantic`, SDK semantic prewarm, or `cache rebuild` | Atomic generation (currently `v178`) of per-file adapter-lowered compiler objects and diagnostics, validated by relative path, adapter, frontend ABI, SHA-256 source digest, and payload digest. Import indexes, declaration linkage facts (including direct-call receiver-field initializers), compact syntax targets (calls, exact return targets, assignment aliases, factory assignments, inline callbacks, typed callables, and receiver/type evidence), per-declaration frames, and the source's line-start table remain independently decodable without retaining declaration/flow bodies; the line table lets a lazily interned source render line/column locations unread. Publication holds a cross-process lock and removes only unlocked older recognized compiler-object schemas plus abandoned matching staging files; unknown/manual files are preserved. |
 | `$CACHE_DIR/dataflow.v3.factstore` | generated file | SDK full prewarm, explicit dataflow prewarm, or exact query commands | Persisted dataflow sidecar. Do not edit manually. |
 | `$CACHE_DIR/value_flow.v*.factstore` | generated file | explicit compatibility prewarm/save APIs | Persisted `ValueFlowGraph` compatibility projection. Canonical security/export semantics live in the IDG; do not edit manually. |
 | `$CACHE_DIR/flow_ids.v*.factstore` | generated file | SDK full prewarm or exact render/query commands | Persisted flow-id sidecar. Do not edit manually. |
@@ -37,6 +37,7 @@ bonsai-ninja does not require a project config file for normal scans. Workspace-
 | `$CACHE_DIR/taint_graph.v*.<mode>.<config>.factstore` | generated file | Security analysis commands | Versioned, mode/config-specific taint/source graph sidecar. Do not edit manually. |
 | `$CACHE_DIR/export.default.v*.json` | generated file | Explicit `cache rebuild --export` only | Reusable default native export. Normal one-shot `export` streams directly to stdout/`--output-path` and never creates then copies this potentially multi-gigabyte cache. The default export always uses the exact `compressed_callgraph`; capped path-prefix caches are not supported. |
 | `$CACHE_DIR/page-cache.v*/` | generated directory | Generated lazily | Versioned rendered-page cache for paginated CLI output. |
+| `<workspace>/.bonsai/` (legacy) | directory | Absent | Left behind only by releases that cached inside the workspace. It is never read; `cache stats` reports it and `cache clear --legacy` removes it (the active external cache is untouched, and a `BONSAI_WORKSPACE_DIR` pointing at that path is not treated as legacy). |
 | OS cache `bonsai-ninja/rulepacks/<SHA-256>/security-patterns/` | generated directory | First default security command | Immutable materialization of the pack compiled into the binary. It is shared across workspaces and never written into the inspected repository. |
 | `security-patterns/` | directory | Optional | Editable rulepack source. Use `--rules-dir` when testing a specific tree. |
 
@@ -119,7 +120,7 @@ Retrieval follows the candidate-only evidence and validation contract in
 [Architecture](contributing/architecture.mdx#query-browse-trace).
 The taint-graph sidecar is default-on for `security taint-analysis`,
 `security source-analysis`, and `security sink-analysis`. Each exact analysis
-analysis product gets a distinct filename, so source, sink, and taint queries do not overwrite
+product gets a distinct filename, so source, sink, and taint queries do not overwrite
 one another's warm facts. Set `BONSAI_TAINT_GRAPH_PERSIST=0` only when you intentionally
 want to trade repeated-run speed for less cache I/O.
 
@@ -139,36 +140,97 @@ paths.
 
 ## Environment Variables
 
-The table lists supported user-facing configuration. Internal test probes,
-build fingerprints, and phase-tuning variables are implementation details and
-are not a stable deployment interface; prefer the CLI flags and resource
-settings below.
+CLI flags win over environment variables. The binary mirrors `--memory-budget`,
+`--no-color`, `--no-progress`, `--no-cache`, `--minified-js`, and `--debug`
+into the variables below so isolated semantic worker processes inherit the
+same contract. Every variable listed here is read by the current code; the
+test-only variables at the end are not a deployment interface. Worker-count
+and stack variables change scheduling, concurrency, or representation only —
+never the analyzed files, facts, closure, or findings.
+
+### Workspace and cache
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `BONSAI_RULES_DIR` | path | Bundled rulepack | Explicit rulepack directory override. |
-| `BONSAI_PARSE_TIMEOUT_MS` | integer milliseconds | unset (uncapped) | Optional per-file tree-sitter parse timeout. `0` disables the timeout guard. |
-| `BONSAI_MEMORY_BUDGET_MB` | positive integer MiB | detected host/container limit | Lower the compiler's scheduling/spill budget. Linux resolves the current process's nested cgroup v1/v2 memory controller, not only the root controller. Weighted phases subtract measured process RSS and safety headroom before admitting transient units; the exact-body hot cache derives from the same value. This is not an OS hard-RSS limit: clean memory-mapped factstore pages, allocator arenas, stacks, the binary, and output buffers can make RSS/physical footprint exceed it and are reclaimed or paged by the OS under pressure. A smaller value serializes work, evicts bodies sooner, and can cause exact recomputation/I/O; it cannot reduce analyzed files, facts, or graph closure. |
-| `BONSAI_DEBUG` | comma-separated categories | unset | Emit selected diagnostic categories to stderr; `*` enables all categories. Equivalent to global `--debug`. Common categories include `idg-closure`, `idg-resolve`, `recv-state`, `find-group`, `taint-graph`, and `xcall`; security progress notes also use categories such as `security-progress` and `security-phase`. |
-| `BONSAI_COMPILER_JOBS` | positive integer | available CPU count | Upper bound on compiler-object workers before file-size/memory weighting. Every file is still compiled. |
-| `BONSAI_IDG_TRANSFER_BATCH_SEGMENTS` | positive integer | available CPU workers | Compatibility name for the upper bound on dedicated IDG transfer workers. Exact VFS source size and the live memory permit pool determine actual overlap; completed results retain admission until canonical `SegmentId`-ordered stitching consumes them. Every segment and transfer fact is still compiled. |
-| `BONSAI_SECURITY_JOBS` | positive integer | available CPU count | Upper bound on the continuous security header/body CPU worklist. Source-size-weighted permits independently bound memory overlap, so small files can use available CPUs while a large file consumes more of the scheduling budget. It changes throughput only, never the scanned file, rule set, or derived evidence. |
-| `BONSAI_SOURCE_ANALYSIS_JOBS` | positive integer | available CPU count | Upper bound on concurrent source-analysis compiler units before the shared memory scheduler. |
-| `BONSAI_TAINT_ANALYSIS_JOBS` | positive integer | `RAYON_NUM_THREADS` or available CPU count | Upper bound on concurrent exact source closures. Constrained machines run the same closures serially. |
-| `BONSAI_COMPILER_STACK_BYTES` | integer bytes, at least 1 MiB | 64 MiB | Shared virtual stack reservation for parser, compiler-object, IDG transfer, IDG summary, query-accelerator, and security matcher workers. Valid deeply nested typed IR must not inherit a platform's smaller spawned-thread default. Pages are committed on demand; this changes stack capacity, not analyzed work. |
-| `BONSAI_SECURITY_STACK_BYTES` | integer bytes, at least 1 MiB | compiler stack | Security-matcher-specific override of `BONSAI_COMPILER_STACK_BYTES`. |
-| `BONSAI_TAINT_GRAPH_CACHE_MB` | non-negative integer MiB | memory-budget-derived, normally 64 MiB without detection | Byte budget for decoded source-seeded graph retention. Oversize/evicted graphs are still computed and persisted exactly; only in-process reuse changes. |
-| `BONSAI_TAINT_GRAPH_CACHE_ENTRIES` | non-negative integer | 512 | Secondary entry-count bound for decoded taint graph retention. `0` disables resident retention, not analysis or persistence. |
-| `BONSAI_NO_DATAFLOW` | boolean-like | unset | Skip explicit dataflow prewarm and trace eager hydration. Query commands still compute required facts on demand. |
-| `BONSAI_THEME` | string | `moss` | Terminal theme: `moss`, `earthy-dark`, `dracula`, or `retro-amber`. |
-| `BONSAI_WORKSPACE_DIR` | path | OS cache directory keyed by canonical workspace root | Exact per-workspace cache-directory override. Relative values are resolved below the workspace for backward compatibility; prefer an absolute path. |
-| `BONSAI_CONTEXT` | token budget | `32k` for text and JSON | Default paging/context budget. |
-| `BONSAI_NO_CACHE` | boolean-like | unset | Run one exact invocation without loading or publishing reusable semantic sidecars. Command-local compiler memoization may still avoid duplicate parsing within that process and is discarded at exit. |
-| `BONSAI_TAINT_GRAPH_PERSIST` | boolean-like | enabled | Persist exact taint/source graph entries to mode/config-specific `$CACHE_DIR/taint_graph.v*.<mode>.<config>.factstore` files. Set to `0`, `false`, `no`, or `off` to opt out. |
-| `BONSAI_INCLUDE_MINIFIED_JS` | boolean-like | unset | Equivalent to global `--minified-js`. Include adapter-classified minified JavaScript/TypeScript in compiler-backed commands and inherited semantic worker processes. |
-| `BONSAI_RAYON_STACK_BYTES` | integer bytes, at least 1 MiB | unset | Compatibility alias for `BONSAI_COMPILER_STACK_BYTES` when the latter is unset. It applies to dedicated compiler threads as well as Rayon pools. |
-| `NO_COLOR` | boolean-like | unset | Disable color output. |
-| `NO_PROGRESS` | boolean-like | unset | Disable progress output. |
+| `BONSAI_WORKSPACE_DIR` | path | OS cache directory keyed by canonical workspace root | Exact per-workspace cache-directory override. Relative values resolve below the workspace root for backward compatibility; prefer an absolute path. When set, the shared cache root is not enumerated, so `cache clear --orphans` and the daily orphan sweep are inert. |
+| `BONSAI_RULES_DIR` | path | Embedded, content-addressed bundled pack | Rulepack directory override; same as `--rules-dir`. |
+| `BONSAI_NO_CACHE` | `1`, `true`, `yes`, or `on` | unset | Same as global `--no-cache`: the invocation neither loads nor publishes reusable semantic sidecars or taint graphs. Command-local compiler memoization still avoids duplicate parsing within the process. |
+| `BONSAI_TAINT_GRAPH_PERSIST` | `0`, `false`, `no`, or `off` to disable | enabled | Write-through persistence of exact taint/source graphs to `$CACHE_DIR/taint_graph.v*.<mode>.<config>.factstore`. Forced off while `BONSAI_NO_CACHE` is set. |
+| `BONSAI_TAINT_GRAPH_CACHE_MB` | non-negative integer MiB | effective memory limit / 64, clamped to 64 KiB–256 MiB (64 MiB when no limit is detected) | Byte budget for decoded taint graphs retained in process. Oversize or evicted graphs are still computed and persisted exactly; only in-process reuse changes. |
+| `BONSAI_TAINT_GRAPH_CACHE_ENTRIES` | non-negative integer | 512 | Secondary entry-count bound on resident taint graphs. `0` disables resident retention, not analysis or persistence. |
+| `BONSAI_NO_DATAFLOW` | `1`, `true`, `yes`, or `on` | unset | Skip loading/prewarming the compatibility dataflow sidecar; the open reports `dataflow` as skipped. Query commands still compute required facts on demand. |
+| `BONSAI_NO_VALUE_FLOW` | `1`, `true`, `yes`, or `on` | unset | Skip the compatibility `ValueFlowGraph` sidecar (`value_flow.v*.factstore`) in the same way. Security and export read the IDG directly and are unaffected. |
+| `BONSAI_KEEP_DECL_INDEX_CACHE` | boolean-like (`1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`) | unset (drain) | Keep per-file declaration indexes resident after the global linker header is built instead of moving them into it. Memory trade-off only. |
+| `BONSAI_INCLUDE_MINIFIED_JS` | `1`, `true`, `yes`, or `on` | unset | Same as global `--minified-js`: include adapter-classified minified JavaScript/TypeScript in compiler-backed commands and their worker processes. |
+
+### Output
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `BONSAI_CONTEXT` | integer tokens, `<N>k`, `<N>m`, or `0`/`all`/`uncapped`/`none` | `32k` | Default paging/context budget for text and JSON output; same as `--context`. |
+| `BONSAI_THEME` | `moss`, `earthy-dark`, `dracula`, or `retro-amber` | `moss` | Terminal theme; same as `--theme`. |
+| `NO_COLOR` | set to any value | unset | Disable ANSI styling; same as `--no-color`. Does not hide progress. |
+| `NO_PROGRESS` | set to any value | unset | Disable progress bars; same as `--no-progress`. Bars are also hidden when stderr is not a TTY. |
+
+### Performance and parallelism
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `BONSAI_MEMORY_BUDGET_MB` | positive integer MiB | detected host/container limit | Lower the compiler's scheduling/spill budget; same as `--memory-budget`. Linux resolves the process's nested cgroup v1/v2 memory controller. Weighted phases subtract measured process RSS and safety headroom before admitting units; the exact-body hot cache and taint-graph cache derive from the same value. Not an OS hard-RSS limit: clean memory-mapped factstore pages, allocator arenas, stacks, and output buffers can exceed it. A smaller value serializes work and can cause exact recomputation; it cannot reduce analyzed files, facts, or closure. |
+| `BONSAI_PARSE_TIMEOUT_MS` | integer milliseconds | unset (uncapped) | Optional per-file tree-sitter parse timeout; same as `--parse-timeout`. `0` also disables the guard. |
+| `RAYON_NUM_THREADS` | positive integer | available CPU count | Rayon pool size. Also the default for `BONSAI_PARSE_JOBS`, `BONSAI_GLOBAL_INDEX_JOBS`, `BONSAI_CALLGRAPH_JOBS`, `BONSAI_SECURITY_JOBS`, and `BONSAI_TAINT_ANALYSIS_JOBS`. |
+| `BONSAI_PARSE_JOBS` | positive integer | `RAYON_NUM_THREADS` or CPU count | Upper bound on Tree-sitter parse/declaration-index workers, clamped to the CPU count and then memory-weighted. |
+| `BONSAI_COMPILER_JOBS` | positive integer | CPU count | Upper bound on compiler-object workers (clamped to 1..CPU count) before source-size/memory weighting. Every file is still compiled. |
+| `BONSAI_GLOBAL_INDEX_JOBS` | positive integer | `RAYON_NUM_THREADS` or CPU count | Upper bound on global linker-header workers. |
+| `BONSAI_CALLGRAPH_JOBS` | positive integer | `RAYON_NUM_THREADS` or CPU count | Upper bound on callgraph resolver workers; every file remains in one exact worklist. |
+| `BONSAI_IDG_TRANSFER_BATCH_SEGMENTS` | positive integer | Rayon pool size | Compatibility name for the upper bound on dedicated IDG transfer workers (clamped to the pool and to the segment count). Exact VFS source size and the live memory permit pool decide actual overlap; completed results retain admission until canonical `SegmentId`-ordered stitching consumes them. |
+| `BONSAI_SECURITY_JOBS` | positive integer | `RAYON_NUM_THREADS` or CPU count | Upper bound on the continuous security header/body CPU worklist. Source-size-weighted permits independently bound memory overlap. Throughput only, never the scanned files, rule set, or evidence. |
+| `BONSAI_SOURCE_ANALYSIS_JOBS` | positive integer | CPU count | Upper bound on concurrent `source-analysis` source groups and `sink-analysis` origin queries before the shared memory scheduler. |
+| `BONSAI_TAINT_ANALYSIS_JOBS` | positive integer | `RAYON_NUM_THREADS` or CPU count | Upper bound on concurrent exact source closures in `taint-analysis`. Constrained machines run the same closures serially. |
+| `BONSAI_RETRIEVAL_ON_DEMAND_FILE_LIMIT` | non-negative integer files | 512 | Largest complete workspace for which a query command builds the retrieval candidate sidecar on demand; larger workspaces get it only from `index --semantic` or `cache rebuild` and otherwise use canonical syntax-backed collection. Candidate lookup only, never evidence. |
+| `BONSAI_FACTSTORE_QUEUE_BYTES` | positive integer bytes | 4 MiB × producer threads | Backpressure budget of the FactStore writer queue. Oversize facts are admitted one at a time and written losslessly. |
+
+### Stack reservations
+
+Reservations are virtual address space committed on demand. They exist
+because adapter-lowered structured IR retains source nesting; a platform's
+smaller spawned-thread default can abort on valid deeply nested input.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `BONSAI_MAIN_STACK_BYTES` | integer bytes, at least 8 MiB | 512 MiB | Stack of the main analysis thread the CLI runs every command on. |
+| `BONSAI_COMPILER_STACK_BYTES` | integer bytes, at least 1 MiB | 64 MiB | Shared reservation for parser, compiler-object, IDG transfer/summary, query-accelerator, and security matcher workers. |
+| `BONSAI_RAYON_STACK_BYTES` | integer bytes, at least 1 MiB | unset | Compatibility alias consulted when `BONSAI_COMPILER_STACK_BYTES` is unset. |
+| `BONSAI_PARSE_STACK_BYTES` | integer bytes, at least 1 MiB | compiler stack | Parse-worker override of the shared reservation. |
+| `BONSAI_GLOBAL_INDEX_STACK_BYTES` | integer bytes, at least 1 MiB | compiler stack | Global linker-header worker override. |
+| `BONSAI_SECURITY_STACK_BYTES` | integer bytes, at least 1 MiB | compiler stack | Security matcher worker override. |
+
+### Debugging
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `BONSAI_DEBUG` | comma-separated categories; `*` or `all` enables every category | unset | Emit diagnostic lines to stderr; same as global `--debug`. Categories currently emitted by the code: ingest/cache — `workspace-open`, `workspace-cache`, `cache`, `compiler-cache`, `compiler-object`, `compiler-headers`, `page-cache`; structural build — `callgraph-build`, `retrieval-build`, `semantic-index`, `parse-recovery`; IDG — `idg-build`, `idg-transfer`, `idg-stitch-detail`, `idg-summary`, `idg-query`, `idg-closure`, `idg-closure-detail`, `idg-target`, `idg-lineage`, `taint-graph`, `output-arg-flow`, `recv-state`, `find-group`; security — `security-phase`, `security-progress`, `security-taint`, `security-resolution`, `security-lineage`; export — `export-phase`, `export-row`. Output is a developer convenience, not a stable API. |
+| `BONSAI_LAZY_TRACE` | `1`, `true`, `yes`, or `on` | unset | Print a backtrace for the first three lazily interned sources a command loads (`BONSAI_DEBUG=workspace-open` reports the interned/loaded counts). Use it to attribute an unexpected whole-workspace read on a warm open. |
+
+`RUST_LOG` is not consulted: the workspace has no `log`/`tracing` subscriber,
+and all diagnostics go through `BONSAI_DEBUG`.
+
+### Internal
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `BONSAI_SEMANTIC_PHASE_POSITION` | `<ordinal>/<total>` | set by the `index --semantic` parent | Labels the progress line of an isolated semantic worker process. Not user configuration. |
+
+### Test-only
+
+`BONSAI_ES_*_MAX_SECS`, `BONSAI_ES_PROCESS_WATCHDOG_SECS`,
+`BONSAI_ELASTICSEARCH_ROOT`, `BONSAI_REQUIRE_ELASTICSEARCH_GATE`,
+`BONSAI_SCALE_ROOT`, `BONSAI_TEST_BIN`, `BONSAI_UPDATE_GOLDEN`,
+`BONSAI_BUILD_FINGERPRINT`, `BONSAI_BUILD_FINGERPRINT_HASH`,
+`BONSAI_BUILD_FINGERPRINT_OVERRIDE`, `BLESS_TAINT_MATRIX`, and `BLESS_BASELINE`
+are read only by the release gates and test suites documented in
+[Release Readiness](RELEASE_READINESS.md); they do not affect the shipped
+binary's behavior.
 
 ## Progress Output
 
@@ -222,3 +284,6 @@ with `--no-progress` for quiet script/LLM runs.
 | Theme | `--theme` | `BONSAI_THEME` | `moss` |
 | Context budget | `--context` | `BONSAI_CONTEXT` | 32k |
 | Cache behavior | `--no-cache` | `BONSAI_NO_CACHE` | enabled |
+| Minified JS/TS inputs | `--minified-js` | `BONSAI_INCLUDE_MINIFIED_JS` | excluded |
+| Progress | `--no-progress` | `NO_PROGRESS` | shown on a TTY |
+| Color | `--no-color` | `NO_COLOR` | styled on a TTY |

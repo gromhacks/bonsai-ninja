@@ -181,7 +181,7 @@ fn browse_json_and_text_filter_the_same_complete_definition_rows() {
         Command::new(binary())
             .args([
                 "--contains",
-                "os.system",
+                "execute(value)",
                 "--no-color",
                 "--no-progress",
                 "defs",
@@ -304,10 +304,6 @@ fn no_cache_taint_analysis_computes_exact_flow_without_persistent_artifacts() {
 fn leaf_help_names_the_full_command_and_documents_global_options() {
     let top_level = [
         "index",
-        "context",
-        "trace",
-        "path",
-        "slice",
         "show",
         "diagnostics",
         "dump-hir",
@@ -330,7 +326,7 @@ fn leaf_help_names_the_full_command_and_documents_global_options() {
         "classes",
         "refs",
         "search",
-        "inspect",
+        "inspect-graph",
         "export",
         "tree",
         "read-file",
@@ -399,8 +395,8 @@ fn preferred_usage_keeps_workspace_before_the_selector() {
             "USAGE: bonsai-ninja search [OPTIONS] <WORKSPACE> [QUERY]",
         ),
         (
-            "trace",
-            "USAGE: bonsai-ninja trace [OPTIONS] <WORKSPACE> [TARGET]",
+            "inspect-graph",
+            "USAGE: bonsai-ninja inspect-graph [OPTIONS] <WORKSPACE> [QUERY]",
         ),
         (
             "read-file",
@@ -415,15 +411,15 @@ fn preferred_usage_keeps_workspace_before_the_selector() {
 #[test]
 fn help_stays_on_themed_full_path_with_options_before_it() {
     for args in [
-        vec!["--memory-budget", "1024", "inspect", "--help"],
+        vec!["--memory-budget", "1024", "inspect-graph", "--help"],
         vec!["--theme=dracula", "search", "--help"],
-        vec!["inspect", "--query", "target", "--help"],
+        vec!["inspect-graph", "--query", "target", "--help"],
     ] {
         let help = stdout(&args);
         let command = if args.contains(&"search") {
             "search"
         } else {
-            "inspect"
+            "inspect-graph"
         };
         assert!(
             help.contains(&format!("USAGE: bonsai-ninja {command}")),
@@ -436,7 +432,7 @@ fn help_stays_on_themed_full_path_with_options_before_it() {
 
 #[test]
 fn compact_global_help_preserves_the_correctness_contract() {
-    let help = stdout(&["inspect", "--help"]);
+    let help = stdout(&["inspect-graph", "--help"]);
     assert!(help.contains("results remain identical"), "{help}");
     assert!(help.contains("analysis remains exact and exhaustive"), "{help}");
     assert!(help.contains("without enabling extra analysis"), "{help}");
@@ -607,9 +603,8 @@ fn missing_or_duplicate_selectors_are_parse_errors() {
         &["read-file", workspace],
         &["search", workspace, "handle", "--query", "request"],
         &["refs", workspace, "handle", "--symbol", "request"],
-        &["trace", workspace, "handle", "--symbol", "request"],
+        &["inspect-graph", workspace, "handle", "--query", "request"],
         &["read-file", workspace, "gateway.py", "--symbol", "handle_request"],
-        &["trace", workspace, "--from", "handle_request"],
     ];
 
     for args in cases {
@@ -621,7 +616,10 @@ fn missing_or_duplicate_selectors_are_parse_errors() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("Usage:"), "{args:?} omitted usage:\n{stderr}");
+        assert!(
+            stderr.contains("USAGE:") || stderr.contains("Usage:"),
+            "{args:?} omitted usage:\n{stderr}"
+        );
         assert!(
             !stderr.starts_with("Error:"),
             "{args:?} fell through to an application error:\n{stderr}"
@@ -652,13 +650,14 @@ fn explicit_selector_flags_work_and_positionals_remain_compatible() {
             "json",
         ],
         &[
-            "trace",
+            "inspect-graph",
             workspace,
-            "--symbol",
+            "--query",
             "handle_request",
             "--format",
             "json",
         ],
+        &["inspect-graph", workspace, "handle_request", "--format", "json"],
         &["read-file", workspace, "--file", "gateway.py", "--format", "json"],
         &["read-file", workspace, "gateway.py", "--format", "json"],
     ];
@@ -705,8 +704,8 @@ fn output_path_has_standard_short_and_long_aliases() {
 // Whole-parent secondary filtering + stable envelopes.
 //
 // `--contains` / `--not-contains` select complete semantic objects: a match
-// on any child field keeps the whole parent (trace, path corridor, inspect
-// hit, sink-analysis candidate) and the JSON envelope keeps one shape for
+// on any child field keeps the whole parent (inspect-graph hit, sink-analysis
+// candidate) and the JSON envelope keeps one shape for
 // empty, filtered, and populated results.
 // ---------------------------------------------------------------------------
 
@@ -743,183 +742,6 @@ fn assert_envelope(value: &serde_json::Value, context: &str) {
     assert!(
         value["page"].is_object(),
         "{context}: page must be an object:\n{value:#}"
-    );
-}
-
-#[test]
-fn trace_contains_retains_the_complete_trace_or_nothing() {
-    let ws = workspace();
-    let ws = ws.to_str().expect("UTF-8 workspace");
-    let base = json(&[
-        "trace",
-        ws,
-        "--symbol",
-        "handle_request",
-        "--format",
-        "json",
-        "--all",
-    ]);
-    assert_envelope(&base, "trace");
-    let base_steps = base["steps"].as_array().expect("trace steps");
-    assert!(
-        base_steps.len() > 1,
-        "fixture trace should have several steps:\n{base:#}"
-    );
-    assert!(
-        base_steps.iter().any(|step| step["function"] == "handle_request"),
-        "{base:#}"
-    );
-
-    // The matched text lives in one downstream step only; the entry step and
-    // every other step of the trace must still be present.
-    let selected = json(&[
-        "--contains",
-        "run_admin_command",
-        "trace",
-        ws,
-        "--symbol",
-        "handle_request",
-        "--format",
-        "json",
-        "--all",
-    ]);
-    assert_envelope(&selected, "filtered trace");
-    assert_eq!(selected["filter_matched"], true, "{selected:#}");
-    assert_eq!(
-        selected["steps"], base["steps"],
-        "a matching step must keep the complete trace"
-    );
-    assert_eq!(selected["paths"], base["paths"]);
-    assert_eq!(selected["analysis_complete"], base["analysis_complete"]);
-    assert_eq!(selected["result_complete"], true);
-
-    let text = stdout(&[
-        "--contains",
-        "run_admin_command",
-        "trace",
-        ws,
-        "--symbol",
-        "handle_request",
-        "--all",
-    ]);
-    assert!(text.contains("handle_request"), "{text}");
-    assert!(text.contains("run_admin_command"), "{text}");
-
-    let none = json(&[
-        "--contains",
-        "zzz-no-such-text",
-        "trace",
-        ws,
-        "--symbol",
-        "handle_request",
-        "--format",
-        "json",
-        "--all",
-    ]);
-    assert_envelope(&none, "unmatched trace");
-    assert_eq!(none["filter_matched"], false, "{none:#}");
-    assert_eq!(none["steps"], serde_json::json!([]));
-    assert_eq!(none["paths"], serde_json::json!([]));
-    assert_eq!(
-        none["result_complete"], true,
-        "a zero-match filter is still a complete result"
-    );
-    assert_eq!(none["analysis_complete"], base["analysis_complete"]);
-    let none_text = stdout(&[
-        "--contains",
-        "zzz-no-such-text",
-        "trace",
-        ws,
-        "--symbol",
-        "handle_request",
-        "--all",
-    ]);
-    assert!(
-        none_text.contains("does not match the active output filter"),
-        "{none_text}"
-    );
-}
-
-#[test]
-fn path_contains_retains_the_complete_corridor_or_nothing() {
-    let ws = workspace();
-    let ws = ws.to_str().expect("UTF-8 workspace");
-    let base = json(&[
-        "path",
-        ws,
-        "--from",
-        "handle_request",
-        "--to",
-        "run_admin_command",
-        "--format",
-        "json",
-        "--all",
-    ]);
-    assert_envelope(&base, "path");
-    let base_nodes = base["nodes"].as_array().expect("path nodes");
-    let base_edges = base["edges"].as_array().expect("path edges");
-    assert!(
-        base_nodes.len() > 1 && !base_edges.is_empty(),
-        "fixture corridor should have several nodes and edges:\n{base:#}"
-    );
-
-    let selected = json(&[
-        "--contains",
-        "update_user",
-        "path",
-        ws,
-        "--from",
-        "handle_request",
-        "--to",
-        "run_admin_command",
-        "--format",
-        "json",
-        "--all",
-    ]);
-    assert_envelope(&selected, "filtered path");
-    assert_eq!(selected["filter_matched"], true, "{selected:#}");
-    for section in ["nodes", "edges", "terminal_calls"] {
-        assert_eq!(
-            selected[section], base[section],
-            "a matching node or edge must keep the complete corridor ({section})"
-        );
-    }
-    let text = stdout(&[
-        "--contains",
-        "update_user",
-        "path",
-        ws,
-        "--from",
-        "handle_request",
-        "--to",
-        "run_admin_command",
-        "--all",
-    ]);
-    assert!(text.contains("handle_request"), "{text}");
-    assert!(text.contains("run_admin_command"), "{text}");
-
-    let none = json(&[
-        "--contains",
-        "zzz-no-such-text",
-        "path",
-        ws,
-        "--from",
-        "handle_request",
-        "--to",
-        "run_admin_command",
-        "--format",
-        "json",
-        "--all",
-    ]);
-    assert_envelope(&none, "unmatched path");
-    assert_eq!(none["filter_matched"], false, "{none:#}");
-    for section in ["nodes", "edges", "terminal_calls"] {
-        assert_eq!(none[section], serde_json::json!([]), "{none:#}");
-    }
-    assert_eq!(none["result_complete"], true);
-    assert_eq!(
-        none["node_count"], base["node_count"],
-        "analysis facts do not change with a view filter"
     );
 }
 
@@ -1005,7 +827,14 @@ fn empty_results_keep_the_same_json_envelope() {
     let ws = ws.to_str().expect("UTF-8 workspace");
     let rules = rules_dir();
 
-    let inspect = json(&["inspect", ws, "--query", "zzz_no_such_symbol", "--format", "json"]);
+    let inspect = json(&[
+        "inspect-graph",
+        ws,
+        "--query",
+        "zzz_no_such_symbol",
+        "--format",
+        "json",
+    ]);
     assert_envelope(&inspect, "empty inspect");
     for key in ["decl_hits", "hits", "taint_flows"] {
         assert_eq!(inspect[key], serde_json::json!([]), "{inspect:#}");
@@ -1015,21 +844,6 @@ fn empty_results_keep_the_same_json_envelope() {
     let defs = json(&["defs", ws, "--name", "zzz_no_such_symbol", "--format", "json"]);
     assert_envelope(&defs, "empty defs");
     assert_eq!(defs["rows"], serde_json::json!([]));
-
-    let path = json(&[
-        "path",
-        ws,
-        "--from",
-        "zzz_missing",
-        "--to",
-        "yyy_missing",
-        "--format",
-        "json",
-    ]);
-    assert_envelope(&path, "empty path");
-    for section in ["nodes", "edges", "terminal_calls"] {
-        assert_eq!(path[section], serde_json::json!([]), "{path:#}");
-    }
 
     let sources = json(&[
         "security",

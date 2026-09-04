@@ -494,20 +494,37 @@ where
     // identity to every source whose resolved callgraph corridor reaches the
     // host. This is a semantic graph closure over proven FuncIds and edges;
     // API identity remains entirely in the matched typing rule.
+    // One union corridor from every source to every configured host, then
+    // one closure per source restricted to that corridor. This replaces a
+    // whole-graph reachability walk per (source x host) pair with |sources|
+    // walks over the corridor and yields the same reachable-host relation.
+    let configured_hosts: AHashSet<FuncId> =
+        configured_callback_hosts.iter().map(|(_, host)| *host).collect();
+    let host_corridor = callgraph_sources_sink_corridor(
+        &source_funcs,
+        &configured_hosts,
+        request.global,
+        call_graph.graph.as_ref(),
+    );
     for source in &source_funcs {
+        let reached_hosts = host_corridor
+            .as_ref()
+            .map(|corridor| {
+                hosts_reached_within_corridor(
+                    *source,
+                    &configured_hosts,
+                    corridor,
+                    request.global,
+                    call_graph.graph.as_ref(),
+                )
+            })
+            .unwrap_or_default();
         for &(callback, host) in &configured_callback_hosts {
             if *source == callback {
                 callback_targets.entry(*source).or_default().insert(host);
                 continue;
             }
-            let host_is_reachable = *source == host
-                || callgraph_source_sink_corridor(
-                    *source,
-                    &AHashSet::from([host]),
-                    request.global,
-                    call_graph.graph.as_ref(),
-                )
-                .is_some();
+            let host_is_reachable = *source == host || reached_hosts.contains(&host);
             if host_is_reachable {
                 // The callback body and the runtime-invocation host are both
                 // semantic dependencies. The callback carries the invoked
@@ -1049,6 +1066,10 @@ where
     });
 
     let worker_count = security_taint_worker_count();
+    // Every rooted query shares the symbolic runtime and its field demand:
+    // build them once here rather than under the first worker while the
+    // rest of the pool waits.
+    semantic_graph.warm_symbolic_query_runtime();
     let rayon_pool = if worker_count > 1 && total_groups > 1 {
         rayon::ThreadPoolBuilder::new()
             .num_threads(worker_count)
@@ -1818,6 +1839,67 @@ fn callgraph_source_sink_corridor(
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
 ) -> Option<SourceSinkCorridor> {
     callgraph_sources_sink_corridor(&[source_func], sink_func_set, global, call_graph)
+}
+
+/// Hosts reachable from `source` inside an already-proven union corridor.
+///
+/// Same traversal rules as [`callgraph_sources_sink_corridor`] (forward call
+/// edges, plus caller edges out of summary-dependency providers, plus hosts
+/// that call the source directly), restricted to the corridor's lineage set.
+/// Every source-to-host path lies inside that set, so the result equals the
+/// per-pair corridor test without re-walking the whole graph per host.
+fn hosts_reached_within_corridor(
+    source: FuncId,
+    hosts: &AHashSet<FuncId>,
+    corridor: &SourceSinkCorridor,
+    global: &GlobalIndex,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+) -> AHashSet<FuncId> {
+    let admitted = &corridor.lineage_funcs;
+    let mut reached = AHashSet::default();
+    for edge in call_graph.callers_of(source) {
+        if hosts.contains(&edge.from) {
+            reached.insert(edge.from);
+        }
+    }
+    if !admitted.contains(&source) {
+        return reached;
+    }
+    let mut seen: AHashSet<FuncId> = AHashSet::from([source]);
+    let mut reverse_output_funcs: AHashSet<FuncId> = AHashSet::default();
+    if summary_dependency_provider(global, source) {
+        reverse_output_funcs.insert(source);
+    }
+    let mut processed_reverse_funcs = AHashSet::default();
+    let mut stack = vec![source];
+    while let Some(func) = stack.pop() {
+        if hosts.contains(&func) {
+            reached.insert(func);
+        }
+        let mut next: Vec<FuncId> = call_graph
+            .callees_of(func)
+            .map(|edge| edge.to)
+            .filter(|callee| admitted.contains(callee))
+            .collect();
+        if reverse_output_funcs.contains(&func) && processed_reverse_funcs.insert(func) {
+            let callers: Vec<FuncId> = call_graph.callers_of(func).map(|edge| edge.from).collect();
+            for caller in callers {
+                if !admitted.contains(&caller) {
+                    continue;
+                }
+                if summary_dependency_provider(global, caller) && reverse_output_funcs.insert(caller) {
+                    stack.push(caller);
+                }
+                next.push(caller);
+            }
+        }
+        for next_func in next {
+            if seen.insert(next_func) {
+                stack.push(next_func);
+            }
+        }
+    }
+    reached
 }
 
 /// Bind every reachable source to its exact callgraph corridor while sharing

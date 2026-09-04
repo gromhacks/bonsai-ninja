@@ -55,8 +55,11 @@ ignores development-only edges, and rejects upward production edges.
 and metadata primitives. The compiler has one precision level: a fact is in
 the graph only when it follows from syntax and resolved call flow, and call
 edges carry resolver provenance rather than a precision label. Spans
-are half-open byte ranges, line/column lookups go through a thread-local
-LRU cache.
+are half-open byte ranges; line/column lookups go through a thread-local
+`SpanMap` cache (`crates/common/src/span_cache.rs`). A `SpanMap` can also be
+built from a persisted line-start table (`SpanMap::from_line_starts`,
+`cached_span_map_from_line_starts`), which is how `AnalyzerDb::span_map`
+renders locations for a lazily interned source without loading its text.
 
 `crates/common::resources` also owns resource scheduling. Memory limits are
 detected from the host and the process's active nested Linux cgroup v1/v2
@@ -88,11 +91,37 @@ profile permits up to ten workers at 3 GiB, two at 2 GiB, and one at 1 GiB.
 This is concurrency control, not a semantic budget; every entry still reaches
 the same least fixed point.
 
-Raw workspace ingestion has a lighter schedule than parsing. Independent
+Raw workspace ingestion has a lighter schedule than parsing. The
+ignore-aware directory walk (`walk_workspace_entries`) runs in parallel and
+sorts its entries afterwards; one concurrent stat pass then yields both the
+byte weights the batch scheduler needs and the filesystem stamps checked
+against the lazy source table. Independent
 source reads run concurrently in byte-weighted windows derived from the live
 memory budget; each completed window is published to the VFS in canonical path
 order. Consequently I/O concurrency cannot renumber `FileId`s, change the
 snapshot, or create a second whole-workspace source copy on constrained hosts.
+
+A warm open does not read unchanged sources at all. The external-cache
+`manifest.json` records, for every supported source, its filesystem stamp
+(length, mtime, ctime, device, inode) together with the exact text identity
+(byte length, FNV-1a hash, SHA-256 digest; recorded only when the on-disk
+bytes are the text verbatim, i.e. valid UTF-8). The SDK (`lazy_source_table_from_manifest`; Unix only, because only that
+stamp carries ctime and device/inode) turns those records into a
+`LazySourceTable` handed to
+`Workspace::open_with_options_lazy_sources_and_events`; during ingest
+(`stream_supported_source_files`) each admitted path whose current stamp
+still matches is interned by identity (`Vfs::write_lazy`), and everything
+else is read as before. `FileId` assignment, the source fingerprint, compiler-object
+validation, and the sidecar source contracts all come from the identity, so
+they are byte-for-byte the values an eager read would have produced. The
+text is loaded on first semantic use through the VFS loader
+(`install_lazy_source_loader` / `Vfs::set_lazy_loader`), which re-reads the
+file and rejects it unless the length and FNV-1a hash match the recorded
+`SourceIdentity`. A command that renders a handful of files therefore opens a
+30k-file workspace with metadata alone. `BONSAI_DEBUG=workspace-open` reports
+the interned/loaded counts (`Vfs::lazy_source_counts`), and
+`BONSAI_LAZY_TRACE=1` prints a backtrace for the first three loads so an
+unexpected whole-workspace read can be attributed.
 Matcher body scans use one continuous work-stealing pool sized against the
 largest actual source units that could overlap. They do not place a barrier
 after every CPU-sized group of files.
@@ -111,7 +140,14 @@ changes storage and reuse only; it never selects or caps semantic facts.
 
 **`crates/vfs`** is the file registry — single-writer, multi-reader,
 versioned text snapshots, incremental edits. Case-insensitive filesystems
-get folded to lowercase keys.
+get folded to lowercase keys; the probe behind that decision
+(`filesystem_is_case_insensitive`) is memoised per parent directory and, on
+Unix, per device, so one temporary-file probe answers every directory on a
+volume instead of touching each of a large workspace's directories on every
+open. An entry may be interned by identity
+(`write_lazy`): path, version, byte length, and identity are answered without
+loading, `snapshot` loads and verifies the text on first use outside the
+table lock, and any write, edit, or removal clears the lazy state.
 
 **`crates/diagnostics`** is intentionally tiny. Phases push
 `Diagnostic { span, severity, message, code, notes }` into a sink; rendering
@@ -164,8 +200,21 @@ events, syntax facts, and parser/adapter diagnostics. It never persists a raw
 Tree-sitter tree or parser handle.
 
 The object generation exposes independently integrity-checked projections for
-imports, compact syntax targets, function attribution, and normalized browse
-facts. Syntax targets contain adapter-lowered calls, assignment aliases,
+imports, compact syntax targets, function attribution, normalized browse
+facts, per-declaration frames, and the exact line-start table of the source
+(so a span maps to a line and column without the text, which is what lets a
+lazily interned source render locations unread). The declaration frames store every
+declaration of the deduplicated declaration index as its own compressed
+frame behind a small directory (span, local symbol, offset, digest), so a
+consumer that needs one function's exact body — a rendered flow, a read-file
+mark, a callee summary — decodes that declaration alone and remaps it to the
+header symbol table from the directory, without decoding its siblings. The
+whole-file object remains the canonical fallback. The generation file is
+`compiler-objects.v178.factstore` (`COMPILER_OBJECT_CACHE_VERSION`); every
+file has an object payload plus independently keyed header, attribution,
+browse, declaration-frame, and line-table payloads (`load_line_starts`), and
+a generation that predates line tables derives them from the text instead.
+Syntax targets contain adapter-lowered calls, assignment aliases,
 factory assignments, inline-callback argument bindings, typed callable
 bindings, and receiver/type evidence. External callback signatures are typing
 rules: the header proves which source parameter belongs to which callback,
@@ -394,7 +443,29 @@ buffered pass after checked row-count and byte-length validation, then checked
 against the canonical workspace segment layout and stable identities. The
 contextual and symbolic relations remain independently decodable streams. This
 keeps startup proportional to encoded facts and prevents a warm query from
-allocating a second temporary object graph beside the IDG.
+allocating a second temporary object graph beside the IDG. The symbolic
+field demand — which compiler bases can reach some projected place or
+aggregate read through the symbolic transform algebra, and therefore which
+symbolic facts a rooted query must track — is kept at base granularity: a
+bitset over bases, a sound superset of the exact field-level closure (every
+field of an undemanded base is undemanded, so results are identical and
+only pruning work differs). The exact field-level closure of a whole
+workspace grows past tens of millions of keys and could not be loaded per
+query. The IDG worker compiles the base demand once (a frontier-parallel
+reverse closure that takes seconds) and persists it as its own accelerator
+blob; a warm query loads it, and an accelerator without it compiles the
+same demand on first use. The symbolic runtime is warmed on the calling
+thread (`warm_symbolic_query_runtime`) before a parallel batch of rooted
+queries starts, so no worker initialises it while the rest of the pool waits.
+The persisted graph is `idg.v28.factstore` (`IDG_WORKSPACE_VERSION`). Its
+accelerator container (`IDG_QUERY_ACCELERATOR_CONTAINER_VERSION = 2`) wraps
+the core (`IDG_QUERY_ACCELERATOR_VERSION = 7`), contextual, and symbolic
+runtime (`SYMBOLIC_RUNTIME_ACCELERATOR_VERSION = 7`) frames plus typed blobs
+(`QueryAcceleratorBlobKind`; `SymbolicFieldDemand = 13` is the persisted
+base-level demand). Any frame or blob change bumps the container version so
+freshness probes rebuild rather than report an unusable accelerator as
+current, and `validate_accelerated_sidecar_layout_with_pipeline`
+distinguishes a cold canonical-only sidecar from a completed prewarm.
 
 The linkage factstore publishes three independently decodable views of that
 generation:
@@ -407,7 +478,15 @@ generation:
 - compact AST-derived call/return linkage used by callgraph and IDG stitching.
 
 Both carry the same source ledger, semantic ABI, declaration count, and
-canonical `FileId`/`SymbolId` order. A syntax query reads only the symbol
+canonical `FileId`/`SymbolId` order. A scoped open (a `--file` or literal
+scope that ingests only part of the workspace) binds its header and linkage
+indexes to those persisted identities
+(`Workspace::compiler_header_index_for_files` →
+`persisted_compiler_header_index_for_files`, which returns `None` rather than
+a locally renumbered table when no validated partition covers the scope)
+instead of numbering the scoped declarations locally, so a `SymbolId` or `FuncId` recorded by one process
+(a cached security row, a stable id) resolves to the same declaration in
+every later process that opens the same scope. A syntax query reads only the symbol
 payload. It does not deserialize call linkage and does not decode all
 per-file flow-event bodies merely to discard them. File-local inventory reads
 the receiver-ancestry payload, enriches the compact syntax-target header, and
@@ -467,8 +546,14 @@ inputs to the scoped graph.
 
 Commands request the lowest compiler product that can answer their contract:
 
-- `tree` walks the filesystem directly and never opens the compiler,
-  callgraph, rulepack, or IDG.
+- `tree` walks the filesystem first and never loads a rulepack, runs
+  security, or opens the IDG. By default it then opens the structural
+  (lazy-query) workspace and projects declarations, resolved imports, and
+  cross-file call edges for the rendered files only
+  (`bonsai_browse::module_map::file_connections`); a depth or child limit
+  never becomes a whole-workspace projection. A cold workspace above 5,000
+  files without a persisted callgraph stays a plain listing and reports
+  `tree-connections-unavailable`; `--files-only` skips the compiler entirely.
 - Syntax inventories stream file-local `CompiledFileObject` facts. Definitions
   and cross-file symbol labels may retain compact linker headers; none of these
   commands retains all function bodies. Broad body inventories apply file and
@@ -486,8 +571,14 @@ Commands request the lowest compiler product that can answer their contract:
   file's full-workspace ordinal, and decodes its validated compiler object
   when present. Explicit flow, rulepack, or cross-file-body options select
   workspace semantics; the default path never constructs a callgraph.
-- `inspect` matches compact headers, then streams exact occurrence bodies in
-  source-size-weighted file batches. The coordinator initializes the immutable
+- `inspect-graph` may first narrow a large complete workspace to candidate
+  files from a fresh retrieval sidecar
+  (`Bonsai::retrieval_candidate_file_filters`; plain queries of at least three
+  characters only, never regex), then matches compact headers and streams
+  exact occurrence bodies in source-size-weighted file batches. `--kind` is a
+  view over the complete cached report (`apply_kind_view`), so changing it
+  re-renders instead of re-running; phase timers are emitted under
+  `BONSAI_DEBUG=compiler-cache` and `page-cache`. The coordinator initializes the immutable
   linker header before file workers start; workers decode only independently
   addressable compiler bodies/import headers, and their facts are applied in
   canonical path order. Memory changes batch width only. Exact bodies are
@@ -539,11 +630,26 @@ tests can omit it.
 
 The kit is split across several files:
 
-- `kit/mod.rs` — `GrammarHandler`, the shared walker, decl-index pipeline,
-  typed expression-flow extraction, and branch repair entry point.
-- `kit/branch_repair.rs` — span-based then/else partition recovery for
-  grammars that lump both arms together.
-- `kit/bindings.rs` — pattern and foreach lowering from tree-sitter fields.
+- `kit/mod.rs` — `GrammarHandler`, the decl-index pipeline
+  (`decl_index_with_handler`), and the match-arm split
+  (`split_match_arms_in_branch_events`) for grammars that lump every arm into
+  one flat `Branch`.
+- `kit/walker/` — the shared flow-event walker: `assignment.rs`, `call.rs`,
+  and `control.rs` (structured branch/loop/try lowering, typed catch arms,
+  labeled loop control, function exit).
+- `kit/bindings.rs` — pattern, `if let`/`while let`, and foreach binding
+  lowering from tree-sitter fields.
+- `kit/branch_conditions.rs` — `BranchConditionFact` / condition-expression
+  lowering from adapter-declared operator nodes.
+- `kit/call_results.rs` — `target = callee(args)` assignment-source
+  normalization so dataflow crosses the call edge once.
+- `kit/comments.rs`, `kit/decorators.rs` — comment/docstring and
+  decorator/annotation/attribute extraction.
+- `kit/direct_calls.rs` — callee path and positional argument extraction for
+  call-shaped nodes.
+- `kit/expression_flow.rs`, `kit/return_extraction.rs` — typed
+  `ExpressionFlow` for return/yield/throw/catch values.
+- `kit/flow_render.rs` — language-neutral rendering of typed flow facts.
 - `kit/identifiers.rs` — identifier-shape predicates.
 - `kit/param_extraction.rs` — language-neutral parameter names + grammar
   annotations; adapter-specific default-call forms remain in the owning
@@ -552,8 +658,12 @@ The kit is split across several files:
   Concrete JSX, channel-send, delete, echo, subshell, eval, and operator
   grammar vocabulary remains in the owning `lang_*` crate.
 - `kit/qualified.rs` — canonicalises `obj['k']`, `obj.k`, and `obj->k`
-  to the same dotted form.
-- `kit/return_extraction.rs` — return / throw / catch value extraction.
+  to the same dotted form from adapter-declared fields.
+- `kit/receiver_writes.rs` — `receiver_field_writes` / receiver-state source
+  collection and place analysis.
+- `kit/runtime_types.rs` — runtime type-test narrowing facts.
+- `kit/syntax_errors.rs` — syntax-error gating: flow facts are emitted only
+  from syntactically correct regions.
 
 The kit owns language-neutral compiler mechanics: walking a Tree-sitter tree,
 constructing common IR types, stable spans, and reusable algorithms over
@@ -702,8 +812,10 @@ exponential. A `complete_chains` switch is intentionally absent, while schema
 compatibility fields report
 `mode=compressed_callgraph`, zero truncation, and explain that concrete path
 rows are represented by the graph.
-Schema v7 serializes code locations relative to the workspace root and carries
-that absolute root once as metadata. The relative path is the stable compiler
+Since schema v7 (the current schema is v12,
+`schemas/bonsai-native-export-v12.schema.json`) code locations are serialized
+relative to the workspace root, with that absolute root carried once as
+metadata. The relative path is the stable compiler
 identity; absolute paths are reconstructed only when a consumer performs host
 filesystem I/O. Changing this contract requires a native-schema and export
 cache version bump together.
@@ -760,8 +872,10 @@ scoped workspace; stale or missing sidecars fall back to canonical syntax-backed
 collection. Use `index --semantic` or `cache rebuild` when you want to
 front-load that candidate index.
 
-**`crates/index`** drives the parallel indexing pipeline: walk files,
-dispatch to adapters, populate the db, prewarm dataflow.
+**`crates/index`** is the cross-file declaration/reference index: it remaps
+each adapter's file-local `DeclIndex` symbols to workspace-unique
+`SymbolId`s (`GlobalIndex`) while keeping the `(FileId, local_symbol)` pair
+recoverable.
 
 **`crates/resolve`** turns names into symbols. Reads import maps,
 type aliases, base classes, module paths; emits `Ref { resolved: Some(...) }`
@@ -780,20 +894,23 @@ callable aliases, receiver-projected callable storage (`obj.cb`,
 indirect callback calls stay resolver-backed instead of becoming
 name-only fan-out.
 
-`path` builds an exact compressed corridor from the cached resolved callgraph
+The corridor engine (`bonsai_browse::paths`, exposed as `inspect-graph
+--from/--to` on the CLI and `paths` in the SDK) builds an exact compressed
+corridor from the cached resolved callgraph
 plus warmed IDG cross-call edges when an IDG sidecar has been hydrated.
 Forward/reverse fixed points retain every compiler-proven node and edge that is
 both reachable from a selected source and able to reach a selected target.
-The command never enumerates concrete path combinations, so diamonds and
+The engine never enumerates concrete path combinations, so diamonds and
 cycles remain linear in graph size. Edge kind and resolver provenance
 stay attached to the compressed relation. Missing IDG facts or resolution
 gaps mark the result incomplete rather than widening missing calls into
 guessed evidence. When the target pattern matches an indexed call site but no
-callable declaration (for example an external API), `path` retains the
+callable declaration (for example an external API), the corridor retains the
 corridor only to the enclosing callable and attaches `terminal_call` evidence
 for the call site. It never fabricates a callee node for the external API.
 
-Targeted `trace --from/--to` runs over the selected semantic corridor. Calls
+The SDK trace interpreter (`project.trace()`; there is no CLI trace command)
+runs a targeted from/to query over the selected semantic corridor. Calls
 outside that corridor are intentionally omitted evidence, not unresolved
 workspace calls, so they do not make an otherwise exact trace incomplete. A
 successful target hit terminates as `ReachedTarget`; a missing target is
@@ -805,10 +922,13 @@ SDK `read-file` aggregator applies the same contract after composing all
 nested finding, flow, caller/callee, and taint-hop locators; internal source
 hydration joins those paths back to exact `FileId`s through the VFS.
 
-`slice` is the backwards-slice counterpart for "what influences this
-symbol?" It identifies exact adapter-emitted symbol sites first and infers the
-line when one site survives; ambiguous sites require explicit `--line` and
-optionally `--file`. It projects the selected callable's shared value-flow/IDG
+The SDK backwards slice (`bonsai_browse::slices`, `SliceOutcome`) is the
+counterpart for "what influences this symbol?" It has no CLI command; on the
+command line, combine `inspect-graph --query` on the symbol with `refs` /
+`vars` for read and write sites. The engine identifies exact adapter-emitted
+symbol sites first and infers the
+line when one site survives; ambiguous sites require an explicit line and
+optionally a file filter. It projects the selected callable's shared value-flow/IDG
 graph on demand (reusing a compatible cached entry when present), then merges adapter-emitted
 `FlowEvent` facts for local syntax detail: assignments, call arguments,
 returns, structured branches/loops, and lifecycle/use-site events. It does
@@ -895,6 +1015,11 @@ params/assignment-target/bare-call-argument seed logic. Sub-modules:
 - `intra.rs` — single-function taint propagation over `flow_events`.
 - `idg_api.rs` — IDG-backed public compatibility types and entry points.
 - `idg_api/summary.rs` — IDG-derived function-return summaries.
+- `idg_build.rs` — builds and caches the IDG service directly from an
+  `AnalyzerDb` so bare-db callers query the same graph as a `Workspace`.
+- `idg_query.rs` — typed query descriptors (source semantics, transfers,
+  target scope, cache reuse) executed by `reachable.rs`.
+- `tokens.rs` — receiver/method projection token helpers.
 - `assignment.rs` — assignment effect calculation.
 - `reachable.rs` — IDG-backed source-seeded graph builders, filtered
   call-record export, and semantic reachability helpers used by security,
@@ -926,15 +1051,22 @@ skips, and errors; the CLI renders those as stderr notes while progress
 is enabled, and clears any previous phase bar before replacing it so
 interactive output does not accumulate duplicate wheels.
 
-The reuse path is binary factstores, not JSON re-parsing. Explicit cache
-producers such as `index --semantic`, SDK `Bonsai::index_semantic`, and
-`cache rebuild` also write `manifest.json` in the external workspace cache: a descriptive JSON
-inventory of sidecar coverage, producer fingerprints, missing reasons, and a
-versioned source ledger. The ledger stores each path's size, modification
-stamp, and exact SHA-256 digest. A warm validation reuses the digest only when
-the metadata stamp is unchanged; changed metadata always rehashes content.
-This turns an unchanged 30,000-file reopen into metadata validation without
-weakening exact source identity.
+The reuse path is binary factstores, not JSON re-parsing. Cache producers —
+structural `index` after it rebuilds the compiler generation (and on a warm
+hit whenever `WorkspaceCache::manifest_needs_republish` reports an older
+schema, a different workspace root, or a different minified-source profile),
+`index --semantic`, SDK `Bonsai::index_semantic`, and `cache rebuild` — write
+`manifest.json` (`CACHE_MANIFEST_SCHEMA_VERSION = 8`) in the external
+workspace cache: a descriptive JSON inventory of sidecar coverage, producer
+fingerprints, missing reasons, and a versioned source ledger. Each
+`CacheManifestSourceFile` stores the path's filesystem stamp, FNV-1a hash,
+and, when the bytes are the text verbatim, its SHA-256 `text_digest`. A warm
+validation reuses the digest only when the stamp is unchanged; changed
+metadata always rehashes content. This turns an unchanged 30,000-file reopen
+into metadata validation without weakening exact source identity. A legacy
+in-tree `<workspace>/.bonsai` directory left by older releases is never read;
+`cache stats` reports it and `cache clear --legacy`
+(`WorkspaceCache::clear_legacy_in_tree`) removes it.
 Commands still validate each sidecar's own header, payload index, and
 pipeline fingerprint before reuse; the manifest is for diagnostics, SDK
 consumers, and downstream tooling that need to understand what was produced.
@@ -999,7 +1131,7 @@ candidate indexes before they can narrow a query.
   binary-searchable enclosing-decl span array. `O(log decls in
   file)` "what decl contains this position?" lookups.
 - `DeclNameIndex` (`decl_name_index.rs`) — workspace-wide
-  lowercased decl-name table for `inspect --query <pat>`
+  lowercased decl-name table for `inspect-graph --query <pat>`
   `Contains` matching.
 - `ExactBodyCache` (`exact_body_cache.rs`) — single-flight, byte-weighted LRU
   for exact per-file `DeclIndex` bodies. Entries are keyed by file and VFS
@@ -1010,8 +1142,8 @@ candidate indexes before they can narrow a query.
   returned normally and evicted immediately. Eviction therefore trades
   repeated adapter lowering for memory and never truncates compiler work.
 - `cached_resolved_call_graph()` — singleton
-  `Arc<ResolvedCallGraph>` shared with `inspect`, `security`,
-  `dump callgraph`, the dataflow + flow-id caches.
+  `Arc<ResolvedCallGraph>` shared with `inspect-graph`, `security`,
+  `dump-callgraph`, the dataflow + flow-id caches.
 - `inter_taint_caches()` — workspace-wide singleton
   `bonsai_taint::InterTaintCaches` so the engine's resolver memo,
   alias maps, function summaries, and local bindings survive
@@ -1043,7 +1175,20 @@ resolved callgraph, including summary-output caller support, and seeds a scoped
 IDG over only the files/functions needed for the rendered lineage.
 `sink-analysis` runs the shared sink endpoint matcher, compiles one
 sink-relevant compiler/IDG scope, and validates candidate value origins
-forward against exact sink nodes. Source-to-sink security proofs are a
+forward against exact sink nodes. Lineage is composed from function-local
+summaries (`crates/security/src/analysis/sink_lineage.rs`): every admitted
+function is analysed once per entering value — one IDG closure confined to
+that function per parameter, one per storage read another summary writes
+tainted, and one over all places of an entry point (an admitted function no
+admitted function calls, or a member of a call cycle no entry point reaches).
+Callee returns compose through the IDG's contextual return summaries inside
+those closures, so no closure re-explores a callee body. The summaries form a
+graph of `(function, entering value)` nodes joined by tainted call arguments
+and tainted storage writes; a route is a path from an entry point to a sink
+hit, and one route survives per sink endpoint and direct feeder. Work is
+proportional to functions × entering values, never to entry points × sinks.
+A sink no entry point feeds is traced inside its own function, to its own
+sink nodes only. Source-to-sink security proofs are a
 separate demand-driven matcher enrichment under the same endpoint; the
 default source-independent view does not scan source rules, and source filters
 cannot erase compiler lineage. It does not run a backward graph walk per sink. None of these surfaces uses
@@ -1077,10 +1222,11 @@ the same rules appear different.
 ## Query / browse / trace
 
 **`crates/inspect`** supplies matching, filtering, stable-id, and bounded memo
-primitives for `inspect`. Structural graph-flow output owns one source-backed
+primitives for `inspect-graph`. Structural graph-flow output owns one source-backed
 evidence unit per matching callable; it does not enumerate recursive caller
-paths. `symbol-summary` exposes the corresponding declaration packet with
-direct resolved neighbors and explicit unresolved calls, including
+paths. Each declaration hit carries the corresponding declaration packet
+(signature, direct resolved callers/callees with `E:` edge ids, external
+calls, imports) from `bonsai_browse::symbol_summaries`, including
 adapter-proven parameter dispatch that has no resolved binding. Structural `F:`/`G:`
 ids hash exact compiler identities. The CLI records the full originating query provenance,
 including qualified from/to identities and kind/file/function filters, so a
@@ -1090,14 +1236,17 @@ that provenance.
 
 **`crates/browse`** powers the browse commands (`defs`, `calls`,
 `imports`, `refs`, `vars`, `strings`, `args`, `operations`, `classes`,
-`comments`, `search`, `symbol-summary`, `path`, `slice`, `read-file`, `tree`). Most commands
+`comments`, `search`, `read-file`, `tree`) plus the SDK-facing
+`symbol_summaries`, `paths`, and `slices` engines that back `inspect-graph`
+declaration facts and `--from`/`--to` corridors. Most commands
 share the same plumbing: read facts from the db, rank query-shaped rows
 before pagination, paginate, format. The shared textual relevance helper
 ranks plain filters as exact > prefix > substring while regex filters
 retain the deterministic structural order; the ranking happens in the
 browse data layer so CLI and SDK ordering cannot drift.
 
-**`crates/trace`** owns the stable text, JSON, and DOT trace schema.
+**`crates/trace`** owns the stable text, JSON, and DOT trace schema behind
+the SDK `project.trace()` API; the CLI has no trace command.
 `crates/workspace` resolves adapter-emitted callable identities and drives the
 cross-module interpreter. A declared source/target query projects the
 resolved graph with an uncapped linear reverse/forward reachability pass
@@ -1169,7 +1318,7 @@ full-prewarm paths can additionally materialize stages 8–10:
 10. `FlowIdCache::prewarm_all` materialises browse-row flow labels
     using the same shared call graph.
 
-Query commands (`inspect`, `dump`, `trace`, `browse *`) hit the prewarmed
+Query commands (`inspect-graph`, `dump`, `browse *`) hit the prewarmed
 caches. `security taint-analysis` and `security source-analysis` combine those
 caches with scoped source-specific IDG graphs; `security sink-analysis` adds a
 single sink-relevant IDG scope whose candidate origins are validated forward

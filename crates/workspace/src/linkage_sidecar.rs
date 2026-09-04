@@ -16,6 +16,7 @@ use crate::cache_fingerprint::dependency_metadata_fingerprint_for_sidecar;
 use bonsai_common::{wire, workspace_bonsai_dir, FileId, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::{AnalyzerDb, COMPILER_OBJECT_CACHE_VERSION};
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
+#[cfg(test)]
 use bonsai_hash::fnv1a_bytes64;
 use bonsai_index::{GlobalIndex, ReceiverAncestry};
 use bonsai_lang_api::DeclIndex;
@@ -508,13 +509,9 @@ fn current_source_inputs(db: &AnalyzerDb) -> Vec<(u32, String, u64)> {
         .all_files()
         .into_iter()
         .filter_map(|file| {
-            let snapshot = db.vfs().snapshot(file).ok()?;
             let path = db.vfs().path(file).ok()?;
-            Some((
-                file.raw(),
-                path.to_string_lossy().into_owned(),
-                fnv1a_bytes64(snapshot.text.as_bytes()),
-            ))
+            let hash = crate::source_content_hash(db.vfs(), file)?;
+            Some((file.raw(), path.to_string_lossy().into_owned(), hash))
         })
         .collect::<Vec<_>>();
     files.sort_unstable_by_key(|(file, _, _)| *file);

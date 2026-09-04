@@ -69,6 +69,13 @@ impl ExactBodyCache {
         }
     }
 
+    /// True when the file's exact bodies are already resident (or being
+    /// built), so a per-declaration frame read would only duplicate work.
+    pub(crate) fn contains(&self, key: &ExactBodyKey) -> bool {
+        let state = self.state.lock();
+        state.entries.contains(key) || state.in_flight.contains_key(key)
+    }
+
     pub(crate) fn get_or_insert_with(
         &self,
         key: ExactBodyKey,

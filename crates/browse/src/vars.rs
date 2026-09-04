@@ -9,7 +9,7 @@ use crate::common::{
 };
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Filter bundle for [`vars`]. Every field is optional; `None`
 /// skips the corresponding filter.
@@ -29,7 +29,7 @@ pub struct VarsFilters<'a> {
     pub regex: bool,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct VarOut {
     pub name: String,
     pub file: String,

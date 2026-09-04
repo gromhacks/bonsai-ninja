@@ -351,7 +351,7 @@ fn json_opts_into_wrap_with_page_flag() {
 fn inspect_paged_json_exposes_top_level_completeness() {
     let ws = ws();
     let Some(out) = run(&[
-        "inspect",
+        "inspect-graph",
         ws.to_str().unwrap(),
         "--query",
         "request",
@@ -379,37 +379,9 @@ fn inspect_paged_json_exposes_top_level_completeness() {
         reasons.iter().any(|reason| {
             reason
                 .as_str()
-                .is_some_and(|reason| reason.contains("paged inspect result incomplete"))
+                .is_some_and(|reason| reason.contains("paged inspect-graph result incomplete"))
         }),
         "paged inspect JSON must report that only the requested page is present: {v:?}"
-    );
-}
-
-#[test]
-fn trace_paged_json_exposes_top_level_completeness() {
-    let ws = ws();
-    let Some(out) = run(&[
-        "trace",
-        ws.to_str().unwrap(),
-        "handle_request",
-        "--format",
-        "json",
-        "--context",
-        "1",
-    ]) else {
-        return;
-    };
-    let v: serde_json::Value = serde_json::from_str(&out).expect("trace JSON");
-    assert_eq!(
-        v.get("analysis_complete").and_then(|value| value.as_bool()),
-        Some(false),
-        "paged trace JSON must expose top-level incomplete status: {v:?}"
-    );
-    assert!(
-        v.get("analysis_incomplete_reasons")
-            .and_then(|value| value.as_array())
-            .is_some_and(|reasons| !reasons.is_empty()),
-        "paged trace JSON must carry trace/page incompleteness reasons: {v:?}"
     );
 }
 
@@ -764,13 +736,7 @@ const ALL_PAGED_COMMANDS: &[(&str, &[&str])] = &[
     ("dump-resolution", &[]),
     ("dump-ast", &["--file", "gateway.py"]),
     ("dump-taint", &["--source", "handle_request"]),
-    ("inspect", &["--query", "verify"]),
-    ("trace", &["handle_request"]),
-    ("path", &["--from", "handle_request", "--to", "verify_token"]),
-    (
-        "slice",
-        &["--symbol", "result", "--line", "15", "--file", "gateway.py"],
-    ),
+    ("inspect-graph", &["--query", "verify"]),
     ("tree", &[]),
     ("read-file", &["gateway.py"]),
 ];
@@ -836,8 +802,8 @@ fn every_command_json_default_carries_completion_and_page_metadata() {
 fn every_command_json_wraps_when_context_is_set() {
     // Row-based commands wrap as `{rows, page}`. Structural
     // commands keep their native shape and only gain a `page`
-    // sibling: inspect → `{decl_hits, ..., page}`, trace →
-    // `{summary, paths, ..., page}`. The invariant is just
+    // sibling: inspect-graph → `{decl_hits, hits, taint_flows,
+    // ..., page}`. The invariant is just
     // "top-level `page` appears" — the paginated rows live
     // under whichever key that command has always used.
     let ws = ws();
@@ -1102,7 +1068,7 @@ fn inspect_live_budget_caps_total_output() {
     // the stated budget. This guards the actual rendered footer
     // value, not just the paginator's pre-render estimate.
     let Some(out) = run(&[
-        "inspect",
+        "inspect-graph",
         ws().to_str().unwrap(),
         "--query",
         "verify",
@@ -1136,7 +1102,7 @@ fn inspect_truncation_hints_resume_next_page() {
     // shipped in the renderer so a refactor doesn't drop the
     // actionable instruction silently.
     let Some(out) = run(&[
-        "inspect",
+        "inspect-graph",
         repo_root()
             .join("test-fixtures/languages/python/complex")
             .to_str()
@@ -1171,7 +1137,7 @@ fn inspect_truncation_hints_resume_next_page() {
 fn inspect_page_footer_resume_hint_keeps_original_query_shape() {
     let ws = complex_ws();
     let ws_str = ws.to_str().unwrap();
-    let Some(out) = run(&["inspect", ws_str, "--query", "execute", "--context", "2048"]) else {
+    let Some(out) = run(&["inspect-graph", ws_str, "--query", "execute", "--context", "2048"]) else {
         return;
     };
     let next_line = out
@@ -1189,7 +1155,7 @@ fn inspect_page_footer_resume_hint_keeps_original_query_shape() {
         .find(|part| part.starts_with("P:"))
         .unwrap_or_else(|| panic!("inspect next hint missing cursor:\n{next_line}"));
     let Some(page2) = run(&[
-        "inspect",
+        "inspect-graph",
         ws_str,
         "--query",
         "execute",
@@ -1205,7 +1171,7 @@ fn inspect_page_footer_resume_hint_keeps_original_query_shape() {
         "cursor resume should render a page, got:\n{page2}",
     );
     let Some(numeric_page2) = run(&[
-        "inspect",
+        "inspect-graph",
         ws_str,
         "--query",
         "execute",
@@ -1235,10 +1201,17 @@ fn all_flag_uncaps_inspect_occurrence_table() {
         .to_str()
         .unwrap()
         .to_string();
-    let Some(tight) = run(&["inspect", &ws_str, "--query", "request", "--context", "1024"]) else {
+    let Some(tight) = run(&[
+        "inspect-graph",
+        &ws_str,
+        "--query",
+        "request",
+        "--context",
+        "1024",
+    ]) else {
         return;
     };
-    let Some(all) = run(&["inspect", &ws_str, "--query", "request", "--all"]) else {
+    let Some(all) = run(&["inspect-graph", &ws_str, "--query", "request", "--all"]) else {
         return;
     };
     // `--all` output can legitimately equal tight output if the
@@ -1259,7 +1232,7 @@ fn reported_tokens_match_observed_bytes_for_inspect() {
     // heuristic). Allow ±15 % since ANSI-stripping + newline
     // counting differ slightly across platforms.
     let Some(out) = run(&[
-        "inspect",
+        "inspect-graph",
         ws().to_str().unwrap(),
         "--query",
         "verify",
@@ -1615,10 +1588,14 @@ fn rendered_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option
         "cached page turn should render page 2 for {:?}:\n{second}",
         args
     );
+    // Query reports render the requested page and its successor (and every
+    // page of a short report) up front, so the page turn is a replay; the
+    // cache must hold page 2 afterwards either way.
     let after = std::fs::read(&cache_file).expect("cache bytes after page turn");
-    assert_ne!(
-        before, after,
-        "page turn must render on demand instead of pre-rendering future pages for {:?}",
+    let after_text = String::from_utf8_lossy(&after);
+    assert!(
+        after_text.contains("\"number\":2"),
+        "page turn must leave page 2 in the rendered cache for {:?}",
         args
     );
     let page_one_again = run(args)?;
@@ -1670,11 +1647,15 @@ fn rendered_json_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> O
         "cached JSON page turn should render page 2 for {:?}:\n{second}",
         args
     );
+    // Query reports render the requested page and its successor (and every
+    // page of a short report) on the first request, so the page turn is a
+    // replay; the cache must still hold page 2 afterwards either way.
     let after = std::fs::read(&cache_file)
         .unwrap_or_else(|e| panic!("cache bytes after JSON page turn for {args:?}: {e}"));
-    assert_ne!(
-        before, after,
-        "JSON page turn must render on demand instead of pre-rendering future pages for {:?}",
+    let after_text = String::from_utf8_lossy(&after);
+    assert!(
+        after_text.contains("\"number\":2"),
+        "JSON page turn must leave page 2 in the rendered cache for {:?}",
         args
     );
     let page_one_again = run(args)?;
@@ -1726,29 +1707,7 @@ fn main_text_commands_reuse_rendered_page_cache() {
         vec!["dump-edges", ws_str, "--context", "1k"],
         vec!["dump-resolution", ws_str, "--context", "1k"],
         vec!["dump-ast", ws_str, "--context", "1k"],
-        vec!["trace", ws_str, "handle_request", "--context", "1k"],
-        vec![
-            "path",
-            ws_str,
-            "--from",
-            "handle_request",
-            "--to",
-            "verify_token",
-            "--context",
-            "1k",
-        ],
-        vec![
-            "slice",
-            ws_str,
-            "--symbol",
-            "cmd",
-            "--line",
-            "47",
-            "--file",
-            "ml_pipeline.py",
-            "--context",
-            "1k",
-        ],
+        vec!["inspect-graph", ws_str, "--query", "request", "--context", "1k"],
         vec!["security", ws_str, "sources", "--context", "1k"],
         vec!["security", ws_str, "sinks", "--context", "1k"],
         vec!["security", ws_str, "sanitizers", "--context", "1k"],
@@ -1783,42 +1742,7 @@ fn main_json_commands_reuse_rendered_page_cache() {
         vec!["dump-resolution", ws_str, "--format", "json", "--context", "1k"],
         vec!["dump-ast", ws_str, "--format", "json", "--context", "1k"],
         vec![
-            "path",
-            ws_str,
-            "--from",
-            "handle_request",
-            "--to",
-            "verify_token",
-            "--format",
-            "json",
-            "--context",
-            "1k",
-        ],
-        vec![
-            "slice",
-            ws_str,
-            "--symbol",
-            "cmd",
-            "--line",
-            "47",
-            "--file",
-            "ml_pipeline.py",
-            "--format",
-            "json",
-            "--context",
-            "1k",
-        ],
-        vec![
-            "trace",
-            ws_str,
-            "handle_request",
-            "--format",
-            "json",
-            "--context",
-            "1k",
-        ],
-        vec![
-            "inspect",
+            "inspect-graph",
             ws_str,
             "--query",
             "request",
@@ -1879,7 +1803,7 @@ fn inspect_never_exceeds_context_across_budget_sweep() {
     // budgets too small for the workspace's smallest chain.
     for &ctx in &[2048u64, 4096, 8192, 16384, 32768] {
         let Some(out) = run(&[
-            "inspect",
+            "inspect-graph",
             complex_ws().to_str().unwrap(),
             "--query",
             "request",
@@ -1914,7 +1838,7 @@ fn inspect_page_count_reflects_truncation_across_sections() {
     // resume line. Occurrence-table truncation alone is not pageable;
     // its own inline hint points to `--all` instead.
     let Some(out) = run(&[
-        "inspect",
+        "inspect-graph",
         complex_ws().to_str().unwrap(),
         "--query",
         "execute",
@@ -1958,7 +1882,7 @@ fn inspect_page_footer_never_shows_zero_more_on_next_page() {
     // or show real count. Footer must match one of the accepted
     // formats, never `0 more`.
     let Some(out) = run(&[
-        "inspect",
+        "inspect-graph",
         complex_ws().to_str().unwrap(),
         "--query",
         "request",
@@ -1991,7 +1915,7 @@ fn inspect_pages_show_truncation_hints() {
     let mut full_truncation_hit = false;
     for p in 1..=3 {
         let Some(out) = run(&[
-            "inspect",
+            "inspect-graph",
             complex_ws().to_str().unwrap(),
             "--query",
             "execute",
@@ -2021,7 +1945,7 @@ fn inspect_occurrence_hits_table_renders_above_flow_blocks() {
     // HITS table appears BEFORE the FLOW blocks so readers can
     // pick which hits to drill into. This test pins the order.
     let Some(out) = run(&[
-        "inspect",
+        "inspect-graph",
         complex_ws().to_str().unwrap(),
         "--query",
         "request",
@@ -2051,7 +1975,7 @@ fn inspect_cursor_walk_reaches_every_decl_hit() {
     // occurrence + folded sections get a fresh budget on each
     // page so don't benefit from cursor walking the same way.)
     let Some(baseline_out) = run(&[
-        "inspect",
+        "inspect-graph",
         complex_ws().to_str().unwrap(),
         "--query",
         "request",
@@ -2082,7 +2006,7 @@ fn inspect_cursor_walk_reaches_every_decl_hit() {
     let mut cursor: Option<String> = None;
     for _ in 0..20 {
         let mut args: Vec<String> = vec![
-            "inspect".to_string(),
+            "inspect-graph".to_string(),
             complex_ws().to_str().unwrap().to_string(),
             "--query".to_string(),
             "request".to_string(),
@@ -2129,7 +2053,7 @@ fn inspect_all_flag_disables_every_truncation() {
     // `--all` opts out of every budget cap. No truncation
     // hints, no compact-fallback notes, no "row exceeds" cliff.
     let Some(out) = run(&[
-        "inspect",
+        "inspect-graph",
         complex_ws().to_str().unwrap(),
         "--query",
         "request",
@@ -2158,7 +2082,7 @@ fn inspect_budget_scales_output_monotonically() {
     let mut prev_bytes: usize = 0;
     for &ctx in &[2048u64, 4096, 8192, 16384] {
         let Some(out) = run(&[
-            "inspect",
+            "inspect-graph",
             &ws_str,
             "--query",
             "request",
@@ -2189,7 +2113,7 @@ fn inspect_step_counter_numbers_every_chain_link() {
     // the MATCH annotation plus the entry SOURCE annotation (the
     // minimum for any surfaced flow).
     let Some(out) = run(&[
-        "inspect",
+        "inspect-graph",
         complex_ws().to_str().unwrap(),
         "--query",
         "request",

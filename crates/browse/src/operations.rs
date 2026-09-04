@@ -12,7 +12,7 @@ use crate::common::{
 };
 use bonsai_lang_api::operations_from_flow_events;
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Filter bundle for [`operations`].
 #[derive(Copy, Clone, Default, Debug)]
@@ -31,14 +31,14 @@ pub struct OperationsFilters<'a> {
 }
 
 /// One operand inside an [`OperationOut`] row.
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct OperationOperandOut {
     pub role: String,
     pub name: String,
 }
 
 /// One operation fact row.
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct OperationOut {
     pub kind: String,
     pub name: String,

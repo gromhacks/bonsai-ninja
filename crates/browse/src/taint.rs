@@ -49,7 +49,7 @@ impl<'a> Default for TaintFilters<'a> {
     }
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, serde::Deserialize, Clone, Debug)]
 pub struct TaintReport {
     pub source: String,
     pub seeds: Vec<String>,
@@ -59,7 +59,7 @@ pub struct TaintReport {
     pub records: Vec<TaintRecord>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, serde::Deserialize, Clone, Debug)]
 pub struct TaintRecord {
     pub taint_id: String,
     pub caller_name: String,
@@ -89,7 +89,7 @@ pub struct TaintSourceCandidate {
     pub func_id: u32,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, serde::Deserialize, Clone, Debug)]
 pub struct TaintedArgRecord {
     pub index: usize,
     pub value_text: String,

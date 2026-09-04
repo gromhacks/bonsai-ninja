@@ -244,6 +244,82 @@ impl Ui {
     /// whitespace. Guaranteed to not contain line terminators so it sits
     /// nicely in a table cell.
     #[must_use]
+    /// Colorize a YAML block line by line: comments dim, list markers and
+    /// scalar literals as annotations, keys as names, quoted strings as
+    /// kinds. Block scalars (`code: |`) are source in the rule's language and
+    /// are highlighted with that language's grammar. Indentation is kept so
+    /// the block stays valid YAML when copied.
+    pub(crate) fn yaml_block(&self, text: &str, language: &str) -> Vec<String> {
+        let extension = crate::syntax_highlight::extension_for_language(language);
+        let mut out = Vec::new();
+        let mut block_scalar_indent: Option<usize> = None;
+        for raw in text.lines() {
+            let line = raw.trim_end_matches('\r');
+            let indent = line.len() - line.trim_start().len();
+            if let Some(scalar_indent) = block_scalar_indent {
+                if line.trim().is_empty() || indent > scalar_indent {
+                    let body = &line[indent.min(line.len())..];
+                    let painted = match extension {
+                        Some(ext) if self.colors => self.snippet(body, ext),
+                        _ => body.to_string(),
+                    };
+                    out.push(format!("{}{painted}", " ".repeat(indent)));
+                    continue;
+                }
+                block_scalar_indent = None;
+            }
+            if !self.colors {
+                out.push(line.to_string());
+                continue;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
+                out.push(format!("{}{}", " ".repeat(indent), self.dim(trimmed)));
+                continue;
+            }
+            let (marker, rest) = match trimmed.strip_prefix("- ") {
+                Some(rest) => (self.annotation("- "), rest),
+                None => (String::new(), trimmed),
+            };
+            let painted_rest = match split_yaml_key(rest) {
+                Some((key, value)) => {
+                    let value = value.trim_start();
+                    if value == "|" || value == "|-" || value == ">" || value == ">-" {
+                        block_scalar_indent = Some(indent);
+                    }
+                    format!("{}: {}", self.name(key), self.yaml_scalar(value))
+                }
+                None => self.yaml_scalar(rest),
+            };
+            out.push(format!("{}{marker}{painted_rest}", " ".repeat(indent)));
+        }
+        out
+    }
+
+    fn yaml_scalar(&self, value: &str) -> String {
+        if value.is_empty() {
+            return String::new();
+        }
+        let (body, comment) = split_yaml_comment(value);
+        let painted = if body.starts_with('"') || body.starts_with('\'') {
+            self.kind(body)
+        } else if body == "|" || body == "|-" || body == ">" || body == ">-" {
+            self.dim(body)
+        } else if body.starts_with('[') {
+            let inner = body.trim_start_matches('[').trim_end_matches(']');
+            let items: Vec<String> = inner.split(',').map(|item| self.kind(item.trim())).collect();
+            format!("[{}]", items.join(", "))
+        } else if matches!(body, "true" | "false" | "null" | "~") || body.parse::<f64>().is_ok() {
+            self.annotation(body)
+        } else {
+            body.to_string()
+        };
+        match comment {
+            Some(comment) => format!("{painted} {}", self.dim(comment)),
+            None => painted,
+        }
+    }
+
     pub(crate) fn snippet(&self, code: &str, extension: &str) -> String {
         let trimmed = code.trim_end_matches(['\n', '\r']).trim();
         if !self.colors {
@@ -253,6 +329,49 @@ impl Ui {
         // Strip the trailing reset so it doesn't leak past the cell.
         highlighted.trim_end_matches("\x1b[0m").trim_end().to_string()
     }
+}
+
+/// Split `key: value` at the first unquoted `: ` (or trailing `:`).
+fn split_yaml_key(line: &str) -> Option<(&str, &str)> {
+    let mut quote: Option<char> = None;
+    for (index, ch) in line.char_indices() {
+        match (quote, ch) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(ch),
+            (None, ':') => {
+                let rest = &line[index + 1..];
+                if rest.is_empty() || rest.starts_with(' ') {
+                    let key = &line[..index];
+                    if key.is_empty() || key.starts_with('[') || key.starts_with('{') {
+                        return None;
+                    }
+                    return Some((key, rest));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split a scalar from a trailing ` #comment` outside quotes.
+fn split_yaml_comment(value: &str) -> (&str, Option<&str>) {
+    let mut quote: Option<char> = None;
+    let mut previous = ' ';
+    for (index, ch) in value.char_indices() {
+        match (quote, ch) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(ch),
+            (None, '#') if previous == ' ' => {
+                return (value[..index].trim_end(), Some(&value[index..]));
+            }
+            _ => {}
+        }
+        previous = ch;
+    }
+    (value, None)
 }
 
 #[derive(Clone, Copy)]

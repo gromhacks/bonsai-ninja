@@ -22,14 +22,15 @@
 //! being surfaced. Examples:
 //! - `idg-closure` — IDG seed / closure / xcall counts and node
 //!   detail per source.
-//! - `idg-resolve` — callgraph-driven callee resolution per call site.
+//! - `idg-query` — persisted IDG accelerator load, warm-up, and query
+//!   runtime timings.
 //! - `recv-state` — receiver-state propagation matches and seeded
 //!   downstream consumers.
 //! - `find-group` — finding combination + grouping decisions
 //!   (which finding becomes group primary vs additional source).
 //! - `taint-graph` — `EntryTaintGraph` cross-call edge ordering.
-//! - `xcall` — cross-file edge index size and per-closure xcall
-//!   selection.
+//! - `workspace-open`, `compiler-cache`, `page-cache`, `security-phase` —
+//!   ingest, compiler-object, rendered-page, and security phase timings.
 //!
 //! Tests should never depend on debug output — the env variable is
 //! a developer convenience, not a public API.

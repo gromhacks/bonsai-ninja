@@ -21,12 +21,9 @@ pub(crate) mod diagnostics;
 pub(crate) mod dump;
 pub(crate) mod export;
 pub(crate) mod inspect;
-pub(crate) mod path;
 pub(crate) mod read_file;
 pub(crate) mod security;
 pub(crate) mod show;
-pub(crate) mod slice;
-pub(crate) mod trace;
 pub(crate) mod tree;
 
 pub(crate) use bonsai_sdk::{
@@ -35,15 +32,13 @@ pub(crate) use bonsai_sdk::{
 };
 pub(crate) use browse::{
     apply_text_limit, cmd_args, cmd_calls, cmd_classes, cmd_comments, cmd_defs, cmd_entrypoints, cmd_imports,
-    cmd_operations, cmd_refs, cmd_search, cmd_strings, cmd_symbol_summary, cmd_vars, emit_json_paged_cached,
+    cmd_operations, cmd_refs, cmd_search, cmd_strings, cmd_vars, emit_json_paged_cached,
     emit_json_value_paged_cached, emit_json_value_paged_cached_prefiltered, one_line_preview,
-    page_info_to_json, paged_json_incomplete_reasons, paging_from_cli, paging_from_cli_output,
-    paging_with_row_limit, short_file, truncate,
+    page_info_to_json, paged_json_incomplete_reasons, paging_from_cli, paging_with_row_limit, short_file,
+    truncate,
 };
 pub(crate) use cache::cmd_cache;
-pub(crate) use diagnostics::{
-    cmd_context, cmd_diagnostics, cmd_dump_cfg, cmd_dump_hir, cmd_index, IndexCommandOptions,
-};
+pub(crate) use diagnostics::{cmd_diagnostics, cmd_dump_cfg, cmd_dump_hir, cmd_index, IndexCommandOptions};
 pub(crate) use dump::{
     cmd_dump_ast, cmd_dump_callgraph, cmd_dump_edges, cmd_dump_resolution, cmd_dump_resolve, cmd_dump_taint,
 };
@@ -52,9 +47,6 @@ pub(crate) use inspect::{
     cmd_inspect, render_flow_block_with_heading, render_flow_with_cached_call_spans, BodySet,
     InspectCommandOptions, InspectFilters, InspectFlowRendered, InspectRenderOptions,
 };
-pub(crate) use path::{cmd_path, PathCommandOptions};
-pub(crate) use slice::cmd_slice;
-pub(crate) use trace::{cmd_trace, nearest_names, not_found_with_suggestions};
 
 /// Return as soon as a workspace contains more than `limit` source-tree
 /// entries. This cheap probe selects retrieval-backed command plans without
@@ -150,15 +142,6 @@ pub(crate) fn open_project_index_only(root: &std::path::Path) -> Result<(Project
     open_project_with_options(root, bonsai_sdk::OpenOptions::lazy_query())
 }
 
-/// Open a semantic path query without hydrating unrelated compatibility
-/// caches. A fresh IDG sidecar is loaded when present; a miss remains
-/// read-only and the path facade falls back to the exact resolved callgraph.
-pub(crate) fn open_project_path_query(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
-    let mut options = bonsai_sdk::OpenOptions::lazy_query();
-    options.load_idg_sidecar = true;
-    open_project_with_options(root, options)
-}
-
 pub(crate) fn open_project_index_matching_literal(
     root: &std::path::Path,
     literal: &str,
@@ -166,19 +149,6 @@ pub(crate) fn open_project_index_matching_literal(
     let progress = workspace_open_progress();
     let project = bonsai_for_cli()
         .open_query_matching_literal_with_progress(root, literal, progress)?
-        .with_auto_refresh(false);
-    crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
-    let footer = WorkspaceFooter::new();
-    Ok((project, footer))
-}
-
-pub(crate) fn open_project_index_matching_any_literal(
-    root: &std::path::Path,
-    literals: &[&str],
-) -> Result<(Project, WorkspaceFooter)> {
-    let progress = workspace_open_progress();
-    let project = bonsai_for_cli()
-        .open_query_matching_any_literal_with_progress(root, literals, progress)?
         .with_auto_refresh(false);
     crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
     let footer = WorkspaceFooter::new();
@@ -297,6 +267,13 @@ fn build_project_with_bonsai_and_options(
         "workspace-open",
         "workspace construction: {:.3}s",
         open_started.elapsed().as_secs_f64()
+    );
+    let (lazy_installed, lazy_loaded) = project.workspace().vfs().lazy_source_counts();
+    bonsai_diagnostics::debug_log!(
+        "workspace-open",
+        "lazy sources: interned by identity {} · loaded so far {}",
+        lazy_installed,
+        lazy_loaded
     );
     let fingerprint_started = std::time::Instant::now();
     crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
@@ -652,4 +629,127 @@ mod tests {
 
         assert!(lock_progress_slot(&slot).is_some());
     }
+}
+
+// ---- shared "did you mean" suggestions for symbol-taking commands ----
+
+pub(crate) fn not_found_with_suggestions(ws: &Workspace, symbol: &str) -> anyhow::Error {
+    let needle = symbol.to_lowercase();
+    let global = ws.compiler_header_index();
+    // Collect all candidate names with a similarity score. Higher score =
+    // more relevant. Combines: substring containment (either direction),
+    // shared-prefix length, and normalized Levenshtein.
+    let mut scored: Vec<(i32, String)> = Vec::new();
+    for f in global.all_files() {
+        for d in global.decls_in(f) {
+            let n = &d.name;
+            let nl = n.to_lowercase();
+            let prefix = common_prefix_len(&nl, &needle);
+            let contains_ab = nl.contains(&needle);
+            let contains_ba = needle.contains(&nl) && nl.len() >= 3;
+            let max_len = nl.len().max(needle.len()) as i32;
+            let dist = levenshtein(&nl, &needle) as i32;
+            let ratio = if max_len == 0 {
+                0
+            } else {
+                (max_len - dist) * 100 / max_len
+            };
+            let mut score = 0;
+            if contains_ab {
+                score += 80;
+            }
+            if contains_ba {
+                score += 60;
+            }
+            score += (prefix as i32) * 10;
+            score += ratio;
+            if score >= 30 {
+                scored.push((score, n.clone()));
+            }
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())));
+    scored.dedup_by(|a, b| a.1 == b.1);
+    if scored.is_empty() {
+        anyhow::anyhow!("symbol not found: {symbol}")
+    } else {
+        anyhow::anyhow!(
+            "symbol not found: {symbol}\n  did you mean: {}",
+            scored
+                .iter()
+                .take(8)
+                .map(|(_, n)| n.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+/// Number of leading characters two strings share. Powers the
+/// "did you mean" prefix-bias heuristic.
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+}
+
+/// Return up to `limit` workspace decl names that look similar to
+/// `symbol`, sorted by relevance. Shares the scoring heuristic with
+/// [`not_found_with_suggestions`] but returns the names instead of
+/// formatting them into an error.
+pub(crate) fn nearest_names(ws: &Workspace, symbol: &str, limit: usize) -> Vec<String> {
+    let needle = symbol.to_lowercase();
+    let global = ws.compiler_header_index();
+    let mut scored: Vec<(i32, String)> = Vec::new();
+    for f in global.all_files() {
+        for d in global.decls_in(f) {
+            let nl = d.name.to_lowercase();
+            let prefix = common_prefix_len(&nl, &needle);
+            let max_len = nl.len().max(needle.len()) as i32;
+            let dist = levenshtein(&nl, &needle) as i32;
+            let ratio = if max_len == 0 {
+                0
+            } else {
+                (max_len - dist) * 100 / max_len
+            };
+            let mut score = 0;
+            if nl.contains(&needle) {
+                score += 80;
+            }
+            if needle.contains(&nl) && nl.len() >= 3 {
+                score += 60;
+            }
+            score += (prefix as i32) * 10;
+            score += ratio;
+            if score >= 30 {
+                scored.push((score, d.name.clone()));
+            }
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())));
+    scored.dedup_by(|a, b| a.1 == b.1);
+    scored.into_iter().take(limit).map(|(_, n)| n).collect()
+}
+
+/// Classic two-row Levenshtein edit distance over byte slices. Used
+/// only for ranking suggestion candidates, so byte-level is fine.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0; b.len() + 1];
+    for left_index in 1..=a.len() {
+        curr[0] = left_index;
+        for right_index in 1..=b.len() {
+            let cost = usize::from(a[left_index - 1] != b[right_index - 1]);
+            curr[right_index] = (prev[right_index] + 1)
+                .min(curr[right_index - 1] + 1)
+                .min(prev[right_index - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }

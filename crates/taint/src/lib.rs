@@ -44,7 +44,7 @@ pub use reachable::{
     apply_configured_transfer_fixpoint, compose_idg_seed_nodes, compose_idg_seed_nodes_with_decl,
     default_entry_graph_seed, default_entry_taint_seed, entry_taint_call_records_from_idg,
     entry_taint_call_records_from_idg_query, entry_taint_graph_from_idg, entry_taint_graph_from_idg_query,
-    inspect_entry_taint_graph_from_idg_with_target_funcs,
+    entry_taint_graph_with_closure_from_idg_query, inspect_entry_taint_graph_from_idg_with_target_funcs,
     inspect_entry_taint_graph_from_idg_with_target_funcs_and_lineage,
     inspect_entry_taint_graph_from_idg_with_target_funcs_and_lineage_with_caches, merge_into,
     name_reachable_through_chain_kinded, name_reachable_through_decl_kinded,

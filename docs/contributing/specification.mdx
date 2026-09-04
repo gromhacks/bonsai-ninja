@@ -56,9 +56,12 @@ diagnostics, or cap the fixed point.
 
 ## 2. Output schema
 
-### 2.1 `TraceResult` (produced by `trace`)
+### 2.1 `TraceResult` (produced by the SDK `project.trace()`)
 
-`crates/trace/src/lib.rs` defines the public schema:
+The CLI no longer has a `trace` command; step traces are an SDK surface
+(`project.trace().from(entry)` / `.source_to_sink(source, sink)`, rendered by
+`bonsai_sdk::trace_render`). `crates/trace/src/lib.rs` defines the public
+schema:
 
 ```
 TraceResult {
@@ -78,7 +81,8 @@ non-budget gaps such as unresolved call expansion live in
 `summary.analysis_incomplete_reasons`.
 
 `TraceStep` is `{ id, path_id, order, kind, message, function, module, file,
-span, code, state_before, state_after }` with
+span, code, state_before, state_after, notes }` (`code` and `notes` are
+omitted when empty) with
 `TraceStepKind` covering EnterFunction, EvalExpr, Assign, BranchSplit, Return,
 Throw, and the other typed interpreter steps.
 
@@ -118,6 +122,10 @@ Each browse command emits a stable shape:
 - `CallOut { resolution_scope, callee, file, line, column, caller, call_kind }`
 - `RefOut { symbol, file, line, column, kind, snippet }`
 - `ImportOut { file, module, alias, original_name, is_wildcard, line, local_bindings }`
+- `EntryPointOut`, `ArgOut`, `CommentOut`, `OperationOut`, `SearchHit`, and
+  `EdgeRecord` (`dump-edges`: `edge_id`, `kind`, `caller_*`, `callee_*`,
+  `call_file`, `call_line`, `call_column`, `call_text`, `resolver_stage`,
+  `evidence`, `confidence`) follow the same rule.
 - `VarOut { name, file, line, column, in_function, writes, source_name }`
 - `StringOut { text, category, file, line, column }`
 - `ClassOut { name, kind, file, line, method_count, methods }`
@@ -183,10 +191,10 @@ The same workspace + same config produces the same output across:
 - Multiple processes (FNV-1a-64 hashes pin finding / flow / group ids).
 - Cache reload (sidecar validation re-derives identical results).
 
-Security JSON location fields currently reflect the selected workspace's
-filesystem paths, so byte identity and `S:` IDs assume the same canonical
-workspace root as well as the same source/config. Native export instead uses
-workspace-relative code locations plus one top-level `workspace_root`.
+Security JSON and SARIF location fields are workspace-relative, so byte
+identity and `S:` IDs hold for the same source/config regardless of where the
+checkout lives. Native export likewise uses workspace-relative code locations
+plus one top-level absolute `workspace_root`.
 
 The pinning test is `finding_ids_deterministic_across_runs`.
 

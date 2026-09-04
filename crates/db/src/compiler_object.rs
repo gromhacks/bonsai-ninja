@@ -9,15 +9,15 @@
 
 use crate::AnalyzerDb;
 use ahash::AHashSet;
-use bonsai_common::{wire, workspace_bonsai_dir, FileId, Span, MATCHER_POLICY_FINGERPRINT};
+use bonsai_common::{wire, workspace_bonsai_dir, FileId, Span, SymbolId, MATCHER_POLICY_FINGERPRINT};
 use bonsai_diagnostics::{Diagnostic, DiagnosticSink, Severity};
 use bonsai_factstore::{
     FactStoreError, FactStoreReader, FactStoreWriter, PreparedFactStoreEntry, PreparedFactStorePayload,
 };
 use bonsai_hash::fnv1a_bytes64;
 use bonsai_lang_api::{
-    CompilerAttribution, CompilerBrowseHeader, CompilerFunctionAttribution, CompilerSyntaxHeader, DeclIndex,
-    ImportIndex,
+    CompilerAttribution, CompilerBrowseHeader, CompilerFunctionAttribution, CompilerSyntaxHeader, Decl,
+    DeclIndex, ImportIndex,
 };
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -479,7 +479,7 @@ use std::sync::{
 // v174: loop events retain adapter-lowered lexical labels and abrupt loop
 // transfers retain a typed label/lexical-level target. Cached v173 bodies
 // route every break/continue to the nearest loop.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 175;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 178;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 105;
@@ -491,6 +491,8 @@ const COMPILER_OBJECT_COMPRESSION_LEVEL: i32 = 1;
 const COMPILER_OBJECT_PREFETCH_PER_WORKER: usize = 4;
 const ATTRIBUTION_PAYLOAD_MAGIC: [u8; 8] = *b"BNSATTR1";
 const ATTRIBUTION_PAYLOAD_PREFIX_BYTES: usize = 8 + 4 + 32;
+const DECLARATION_PAYLOAD_MAGIC: [u8; 8] = *b"BNSDECL1";
+const DECLARATION_PAYLOAD_PREFIX_BYTES: usize = 8 + 4 + 32;
 
 /// Exact typed compiler output for one source file.
 ///
@@ -540,6 +542,12 @@ struct PreparedCompilerObject {
     browse_compressed: Vec<u8>,
     browse_payload_digest: [u8; 32],
     browse_payload_len: u32,
+    declaration_compressed: Vec<u8>,
+    declaration_payload_digest: [u8; 32],
+    declaration_payload_len: u32,
+    lines_compressed: Vec<u8>,
+    lines_payload_digest: [u8; 32],
+    lines_payload_len: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -584,6 +592,68 @@ impl CompilerAttributionIndex {
     }
 }
 
+/// Directory of one file's declaration frames: every declaration of the
+/// deduplicated declaration index, in index order, as an independently
+/// addressable compressed frame. `local_symbol` lets one frame be remapped to
+/// the header symbol table without decoding its siblings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CompilerDeclarationIndex {
+    pub file: FileId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    frames: Vec<CompilerDeclarationFrame>,
+    #[serde(skip)]
+    frames_payload_offset: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct CompilerDeclarationFrame {
+    declaration_span: Span,
+    local_symbol: SymbolId,
+    relative_offset: u64,
+    compressed_len: u32,
+    compressed_digest: [u8; 32],
+}
+
+impl CompilerDeclarationIndex {
+    /// Local symbols of every framed declaration, in index order.
+    pub(crate) fn local_symbols(&self) -> Vec<SymbolId> {
+        self.frames.iter().map(|frame| frame.local_symbol).collect()
+    }
+}
+
+#[derive(Debug)]
+struct CachedCompilerDeclarationIndex {
+    index: Arc<CompilerDeclarationIndex>,
+    estimated_bytes: u64,
+}
+
+#[derive(Debug)]
+struct CompilerDeclarationIndexCache {
+    entries: lru::LruCache<FileId, CachedCompilerDeclarationIndex>,
+    estimated_bytes: u64,
+}
+
+impl Default for CompilerDeclarationIndexCache {
+    fn default() -> Self {
+        Self {
+            entries: lru::LruCache::unbounded(),
+            estimated_bytes: 0,
+        }
+    }
+}
+
+fn estimated_compiler_declaration_index_bytes(index: &CompilerDeclarationIndex) -> u64 {
+    u64::try_from(std::mem::size_of::<CompilerDeclarationIndex>())
+        .unwrap_or(u64::MAX)
+        .saturating_add(
+            u64::try_from(index.frames.capacity())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(
+                    u64::try_from(std::mem::size_of::<CompilerDeclarationFrame>()).unwrap_or(u64::MAX),
+                ),
+        )
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CompilerObjectMetadata {
     version: u32,
@@ -617,6 +687,10 @@ struct CompilerObjectFileMetadata {
     /// compiler projection.
     browse_payload_digest: [u8; 32],
     browse_payload_len: u32,
+    declaration_payload_digest: [u8; 32],
+    declaration_payload_len: u32,
+    lines_payload_digest: [u8; 32],
+    lines_payload_len: u32,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -799,6 +873,25 @@ fn append_prepared_compiler_object(
         payload_offset: browse_payload_offset,
         payload_len: encoded.browse_payload_len,
     });
+    let (declaration_payload_offset, declaration_persisted_len) = prepared
+        .append(&encoded.declaration_compressed)
+        .map_err(factstore_io)?;
+    debug_assert_eq!(encoded.declaration_payload_len, declaration_persisted_len);
+    prepared_entries.push(PreparedFactStoreEntry {
+        key: declaration_key(descriptor.file),
+        body_hash: declaration_body_hash(descriptor),
+        payload_offset: declaration_payload_offset,
+        payload_len: encoded.declaration_payload_len,
+    });
+    let (lines_payload_offset, lines_persisted_len) =
+        prepared.append(&encoded.lines_compressed).map_err(factstore_io)?;
+    debug_assert_eq!(encoded.lines_payload_len, lines_persisted_len);
+    prepared_entries.push(PreparedFactStoreEntry {
+        key: lines_key(descriptor.file),
+        body_hash: lines_body_hash(descriptor),
+        payload_offset: lines_payload_offset,
+        payload_len: encoded.lines_payload_len,
+    });
     Ok(CompilerObjectFileMetadata {
         file: descriptor.file.raw(),
         path: descriptor.path.clone(),
@@ -813,6 +906,10 @@ fn append_prepared_compiler_object(
         attribution_payload_len: encoded.attribution_payload_len,
         browse_payload_digest: encoded.browse_payload_digest,
         browse_payload_len: encoded.browse_payload_len,
+        declaration_payload_digest: encoded.declaration_payload_digest,
+        declaration_payload_len: encoded.declaration_payload_len,
+        lines_payload_digest: encoded.lines_payload_digest,
+        lines_payload_len: encoded.lines_payload_len,
     })
 }
 
@@ -850,6 +947,7 @@ pub(crate) struct CompilerObjectStore {
     metadata: CompilerObjectMetadata,
     attribution_indexes: parking_lot::Mutex<CompilerAttributionIndexCache>,
     attribution_index_budget_bytes: u64,
+    declaration_indexes: parking_lot::Mutex<CompilerDeclarationIndexCache>,
     /// Keeps a scoped compiler session's directory alive until the last
     /// reader is dropped. Persistent workspace sidecars leave this empty.
     _temporary_root: Option<Arc<tempfile::TempDir>>,
@@ -929,6 +1027,7 @@ impl CompilerObjectStore {
             metadata,
             attribution_indexes: parking_lot::Mutex::new(CompilerAttributionIndexCache::default()),
             attribution_index_budget_bytes: compiler_attribution_index_cache_budget_bytes(),
+            declaration_indexes: parking_lot::Mutex::new(CompilerDeclarationIndexCache::default()),
             _temporary_root: temporary_root,
         })
     }
@@ -985,6 +1084,12 @@ impl CompilerObjectStore {
             browse_compressed: self.compressed_browse_payload(metadata)?,
             browse_payload_digest: metadata.browse_payload_digest,
             browse_payload_len: metadata.browse_payload_len,
+            declaration_compressed: self.compressed_declaration_payload(metadata)?,
+            declaration_payload_digest: metadata.declaration_payload_digest,
+            declaration_payload_len: metadata.declaration_payload_len,
+            lines_compressed: self.compressed_lines_payload(metadata)?,
+            lines_payload_digest: metadata.lines_payload_digest,
+            lines_payload_len: metadata.lines_payload_len,
         }))
     }
 
@@ -1065,6 +1170,196 @@ impl CompilerObjectStore {
             return Err(invalid_data("compiler-object browse payload digest mismatch"));
         }
         Ok(hit.payload)
+    }
+
+    fn compressed_lines_payload(&self, metadata: &CompilerObjectFileMetadata) -> std::io::Result<Vec<u8>> {
+        let hit = self
+            .reader
+            .get(lines_key(FileId::new(metadata.file)))
+            .map_err(factstore_io)?
+            .ok_or_else(|| invalid_data("compiler-object line table is missing"))?;
+        if hit.body_hash != lines_body_hash_from_digest(metadata.source_digest) {
+            return Err(invalid_data("compiler-object line table fingerprint mismatch"));
+        }
+        if digest_bytes(&hit.payload) != metadata.lines_payload_digest
+            || u32::try_from(hit.payload.len()).ok() != Some(metadata.lines_payload_len)
+        {
+            return Err(invalid_data("compiler-object line table digest mismatch"));
+        }
+        Ok(hit.payload)
+    }
+
+    /// Line-start table recorded for the exact source; `None` when the
+    /// generation predates line tables (migrated objects) or the entry is
+    /// absent, in which case callers derive it from the text.
+    fn load_line_starts(&self, descriptor: &SourceDescriptor) -> std::io::Result<Option<Vec<u32>>> {
+        let Some(metadata) = self.metadata_for(descriptor) else {
+            return Ok(None);
+        };
+        let compressed = self.compressed_lines_payload(metadata)?;
+        let decoded = zstd::stream::decode_all(Cursor::new(compressed))?;
+        let line_starts: Vec<u32> = wire::decode(&decoded).map_err(invalid_wire)?;
+        Ok((!line_starts.is_empty()).then_some(line_starts))
+    }
+
+    fn compressed_declaration_payload(
+        &self,
+        metadata: &CompilerObjectFileMetadata,
+    ) -> std::io::Result<Vec<u8>> {
+        let hit = self
+            .reader
+            .get(declaration_key(FileId::new(metadata.file)))
+            .map_err(factstore_io)?
+            .ok_or_else(|| invalid_data("compiler-object declaration payload is missing"))?;
+        if hit.body_hash != declaration_body_hash_from_digest(metadata.source_digest) {
+            return Err(invalid_data(
+                "compiler-object declaration body fingerprint mismatch",
+            ));
+        }
+        if digest_bytes(&hit.payload) != metadata.declaration_payload_digest
+            || u32::try_from(hit.payload.len()).ok() != Some(metadata.declaration_payload_len)
+        {
+            return Err(invalid_data(
+                "compiler-object declaration payload digest mismatch",
+            ));
+        }
+        Ok(hit.payload)
+    }
+
+    fn declaration_payload_range(
+        &self,
+        metadata: &CompilerObjectFileMetadata,
+        relative_offset: u64,
+        length: u64,
+    ) -> std::io::Result<Vec<u8>> {
+        let mut reader = self
+            .reader
+            .payload_range_reader(
+                declaration_key(FileId::new(metadata.file)),
+                relative_offset,
+                length,
+            )
+            .map_err(factstore_io)?
+            .ok_or_else(|| invalid_data("compiler-object declaration payload is missing"))?;
+        if reader.body_hash != declaration_body_hash_from_digest(metadata.source_digest) {
+            return Err(invalid_data(
+                "compiler-object declaration body fingerprint mismatch",
+            ));
+        }
+        let mut bytes = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
+        reader.read_to_end(&mut bytes)?;
+        if u64::try_from(bytes.len()).ok() != Some(length) {
+            return Err(invalid_data("compiler-object declaration range is truncated"));
+        }
+        Ok(bytes)
+    }
+
+    /// The declaration frame directory of one file (cached per file).
+    fn load_declaration_index(
+        &self,
+        descriptor: &SourceDescriptor,
+    ) -> std::io::Result<Option<Arc<CompilerDeclarationIndex>>> {
+        let Some(metadata) = self.metadata_for(descriptor) else {
+            return Ok(None);
+        };
+        if let Some(index) = self
+            .declaration_indexes
+            .lock()
+            .entries
+            .get(&descriptor.file)
+            .map(|entry| Arc::clone(&entry.index))
+        {
+            return Ok(Some(index));
+        }
+        if metadata.declaration_payload_len < DECLARATION_PAYLOAD_PREFIX_BYTES as u32 {
+            return Err(invalid_data("compiler-object declaration payload is truncated"));
+        }
+        let prefix = self.declaration_payload_range(metadata, 0, DECLARATION_PAYLOAD_PREFIX_BYTES as u64)?;
+        if prefix[..8] != DECLARATION_PAYLOAD_MAGIC {
+            return Err(invalid_data("compiler-object declaration payload magic mismatch"));
+        }
+        let index_len = u32::from_le_bytes(prefix[8..12].try_into().expect("fixed declaration index length"));
+        let frames_payload_offset = u64::try_from(DECLARATION_PAYLOAD_PREFIX_BYTES)
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::from(index_len));
+        if frames_payload_offset > u64::from(metadata.declaration_payload_len) {
+            return Err(invalid_data("compiler-object declaration index exceeds payload"));
+        }
+        let index_bytes = self.declaration_payload_range(
+            metadata,
+            DECLARATION_PAYLOAD_PREFIX_BYTES as u64,
+            u64::from(index_len),
+        )?;
+        if digest_bytes(&index_bytes) != prefix[12..44] {
+            return Err(invalid_data("compiler-object declaration index digest mismatch"));
+        }
+        let mut index: CompilerDeclarationIndex = wire::decode(&index_bytes).map_err(invalid_wire)?;
+        index.frames_payload_offset = frames_payload_offset;
+        validate_compiler_declaration_index(&index, metadata)?;
+        let index = Arc::new(index);
+        let estimated_bytes = estimated_compiler_declaration_index_bytes(&index);
+        if self.attribution_index_budget_bytes != 0 && estimated_bytes <= self.attribution_index_budget_bytes
+        {
+            let mut cache = self.declaration_indexes.lock();
+            if let Some(existing) = cache.entries.get(&descriptor.file) {
+                return Ok(Some(Arc::clone(&existing.index)));
+            }
+            cache.estimated_bytes = cache.estimated_bytes.saturating_add(estimated_bytes);
+            if let Some((_file, replaced)) = cache.entries.push(
+                descriptor.file,
+                CachedCompilerDeclarationIndex {
+                    index: Arc::clone(&index),
+                    estimated_bytes,
+                },
+            ) {
+                cache.estimated_bytes = cache.estimated_bytes.saturating_sub(replaced.estimated_bytes);
+            }
+            while cache.estimated_bytes > self.attribution_index_budget_bytes {
+                let Some((_file, evicted)) = cache.entries.pop_lru() else {
+                    break;
+                };
+                cache.estimated_bytes = cache.estimated_bytes.saturating_sub(evicted.estimated_bytes);
+            }
+        }
+        Ok(Some(index))
+    }
+
+    /// One declaration of a file, by its position in the deduplicated
+    /// declaration index, decoded from its own frame.
+    fn load_declaration_frame(
+        &self,
+        descriptor: &SourceDescriptor,
+        index: &CompilerDeclarationIndex,
+        position: usize,
+    ) -> std::io::Result<Option<Decl>> {
+        let Some(metadata) = self.metadata_for(descriptor) else {
+            return Ok(None);
+        };
+        if index.file != descriptor.file {
+            return Err(invalid_data(
+                "compiler-object declaration index identity mismatch",
+            ));
+        }
+        let Some(frame) = index.frames.get(position) else {
+            return Ok(None);
+        };
+        let relative_offset = index
+            .frames_payload_offset
+            .checked_add(frame.relative_offset)
+            .ok_or_else(|| invalid_data("compiler-object declaration frame offset overflow"))?;
+        let compressed =
+            self.declaration_payload_range(metadata, relative_offset, u64::from(frame.compressed_len))?;
+        if digest_bytes(&compressed) != frame.compressed_digest {
+            return Err(invalid_data("compiler-object declaration frame digest mismatch"));
+        }
+        let decoded = zstd::stream::decode_all(Cursor::new(compressed))?;
+        let decl: Decl = wire::decode(&decoded).map_err(invalid_wire)?;
+        if decl.span != frame.declaration_span || decl.symbol != frame.local_symbol {
+            return Err(invalid_data(
+                "compiler-object declaration frame identity mismatch",
+            ));
+        }
+        Ok(Some(decl))
     }
 
     fn load_header(&self, descriptor: &SourceDescriptor) -> std::io::Result<Option<CompilerObjectHeader>> {
@@ -1288,6 +1583,22 @@ impl CompilerObjectStore {
             metadata.browse_payload_digest,
             "compiler-object browse projection",
         )?;
+        validate_streamed_payload(
+            &self.reader,
+            declaration_key(FileId::new(metadata.file)),
+            declaration_body_hash_from_digest(metadata.source_digest),
+            metadata.declaration_payload_len,
+            metadata.declaration_payload_digest,
+            "compiler-object declaration frames",
+        )?;
+        validate_streamed_payload(
+            &self.reader,
+            lines_key(FileId::new(metadata.file)),
+            lines_body_hash_from_digest(metadata.source_digest),
+            metadata.lines_payload_len,
+            metadata.lines_payload_digest,
+            "compiler-object line table",
+        )?;
         Ok(())
     }
 }
@@ -1450,8 +1761,7 @@ impl AnalyzerDb {
     /// coverage without materializing unrelated semantic IR.
     #[must_use]
     pub fn parser_diagnostics_uncached(&self, file: FileId) -> Option<Arc<[Diagnostic]>> {
-        let snapshot = self.inner.vfs.snapshot(file).ok()?;
-        let key = (file, snapshot.version);
+        let key = (file, self.inner.vfs.file_version(file).ok()?);
         if let Some(diagnostics) = self.inner.parser_diagnostics.read().get(&key).cloned() {
             return Some(diagnostics);
         }
@@ -1462,7 +1772,7 @@ impl AnalyzerDb {
             match self.parse(file) {
                 Ok(parsed) => parsed.diagnostics.clone(),
                 Err(error) => vec![Diagnostic::new(
-                    Span::new(file, 0, u64::try_from(snapshot.text.len()).unwrap_or(u64::MAX)),
+                    Span::new(file, 0, self.inner.vfs.text_len(file).unwrap_or(u64::MAX)),
                     Severity::Error,
                     format!("source parsing failed: {error}"),
                 )
@@ -1490,14 +1800,7 @@ impl AnalyzerDb {
     ) {
         let source_bytes = files
             .iter()
-            .map(|file| {
-                self.inner
-                    .vfs
-                    .snapshot(*file)
-                    .ok()
-                    .and_then(|snapshot| u64::try_from(snapshot.text.len()).ok())
-                    .unwrap_or(0)
-            })
+            .map(|file| self.inner.vfs.text_len(*file).unwrap_or(0))
             .collect::<Vec<_>>();
         let workers =
             bonsai_common::syntax_worker_count_for_sources(&source_bytes, compiler_object_cpu_workers());
@@ -1514,13 +1817,7 @@ impl AnalyzerDb {
             max_in_flight,
             ParallelVisitOrder::Input,
             |index, file| {
-                let source_bytes = self
-                    .inner
-                    .vfs
-                    .snapshot(*file)
-                    .ok()
-                    .and_then(|snapshot| u64::try_from(snapshot.text.len()).ok())
-                    .unwrap_or(0);
+                let source_bytes = self.inner.vfs.text_len(*file).unwrap_or(0);
                 // Ordered output retains completed units until every earlier
                 // result has been published. Admit their memory in the same
                 // canonical order so later files can never consume the whole
@@ -1577,6 +1874,47 @@ impl AnalyzerDb {
         // object. This preserves the language frontend contract and keeps
         // package-gated planning lightweight on a cold workspace.
         self.build_import_index_with_diagnostics(file, &self.inner.diagnostics)
+    }
+
+    /// Span → line/column map for `file`. A loaded text builds it directly;
+    /// a lazily interned source uses the line table its compiler object
+    /// recorded, so rendering locations never forces a read.
+    #[must_use]
+    pub fn span_map(&self, file: FileId) -> Option<Arc<bonsai_common::SpanMap>> {
+        let version = self.inner.vfs.file_version(file).ok()?;
+        if self.inner.vfs.lazy_identity(file).is_some() {
+            if let Some(map) = bonsai_common::cached_span_map_from_line_starts(file, version, || {
+                self.compiler_line_starts_uncached(file)
+            }) {
+                return Some(map);
+            }
+        }
+        let snapshot = self.inner.vfs.snapshot(file).ok()?;
+        Some(bonsai_common::cached_span_map_arc(
+            file,
+            snapshot.version,
+            &snapshot.text,
+        ))
+    }
+
+    /// Line-start table of `file` from the persisted compiler object, when
+    /// the current generation recorded one for this exact source.
+    #[must_use]
+    pub fn compiler_line_starts_uncached(&self, file: FileId) -> Option<Vec<u32>> {
+        let descriptor = source_descriptor(self, file)?;
+        let store = self.inner.compiler_object_store.read().as_ref().cloned()?;
+        match store.load_line_starts(&descriptor) {
+            Ok(lines) => lines,
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-object",
+                    "compiler line table miss for {}: {}",
+                    descriptor.path,
+                    error
+                );
+                None
+            }
+        }
     }
 
     /// Load the independently decodable syntax-target header for one exact
@@ -1673,6 +2011,46 @@ impl AnalyzerDb {
             .declarations
             .as_ref()
             .map(CompilerAttribution::from_decl_index)
+    }
+
+    /// One declaration of `file` by its position in the deduplicated
+    /// declaration index, decoded from its persisted frame together with the
+    /// file's local symbols in index order (for remapping to header ids).
+    /// `None` when no persisted generation covers the file: callers then
+    /// fall back to the whole-file declaration index.
+    pub fn compiler_declaration_frame_uncached(
+        &self,
+        file: FileId,
+        position: usize,
+    ) -> Option<(Decl, Vec<SymbolId>)> {
+        let descriptor = source_descriptor(self, file)?;
+        let store = self.inner.compiler_object_store.read().as_ref().cloned()?;
+        let index = match store.load_declaration_index(&descriptor) {
+            Ok(Some(index)) => index,
+            Ok(None) => return None,
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-object",
+                    "compiler declaration index miss for {}: {}",
+                    descriptor.path,
+                    error
+                );
+                return None;
+            }
+        };
+        match store.load_declaration_frame(&descriptor, &index, position) {
+            Ok(Some(decl)) => Some((decl, index.local_symbols())),
+            Ok(None) => None,
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-object",
+                    "compiler declaration frame miss for {}: {}",
+                    descriptor.path,
+                    error
+                );
+                None
+            }
+        }
     }
 
     /// Load one exact function's adapter attribution frame.
@@ -1786,14 +2164,7 @@ impl AnalyzerDb {
     ) {
         let source_bytes = files
             .iter()
-            .map(|file| {
-                self.inner
-                    .vfs
-                    .snapshot(*file)
-                    .ok()
-                    .and_then(|snapshot| u64::try_from(snapshot.text.len()).ok())
-                    .unwrap_or(0)
-            })
+            .map(|file| self.inner.vfs.text_len(*file).unwrap_or(0))
             .collect::<Vec<_>>();
         let workers =
             bonsai_common::syntax_worker_count_for_sources(&source_bytes, compiler_object_cpu_workers());
@@ -1810,13 +2181,7 @@ impl AnalyzerDb {
             max_in_flight,
             ParallelVisitOrder::Input,
             |index, file| {
-                let source_bytes = self
-                    .inner
-                    .vfs
-                    .snapshot(*file)
-                    .ok()
-                    .and_then(|snapshot| u64::try_from(snapshot.text.len()).ok())
-                    .unwrap_or(0);
+                let source_bytes = self.inner.vfs.text_len(*file).unwrap_or(0);
                 // A later completed object retains its permit in the reorder
                 // map. Canonical admission guarantees that such objects cannot
                 // starve the earlier object whose publication releases them.
@@ -2551,7 +2916,7 @@ where
     let legacy_generation_digest = legacy.generation_digest;
     let file_count = legacy.files.len();
     let mut prepared = PreparedFactStorePayload::create_near(&destination).map_err(factstore_io)?;
-    let mut prepared_entries = Vec::with_capacity(file_count.saturating_mul(4));
+    let mut prepared_entries = Vec::with_capacity(file_count.saturating_mul(5));
     let mut files = Vec::with_capacity(file_count);
     let mut previous_file = None;
     let mut descriptors = Vec::with_capacity(file_count);
@@ -2648,6 +3013,35 @@ where
             payload_offset: browse_payload_offset,
             payload_len: browse_payload_len,
         });
+        let declaration_compressed =
+            encode_compiler_declaration_payload(file, legacy_object.declarations.as_ref())?;
+        let declaration_payload_digest = digest_bytes(&declaration_compressed);
+        let declaration_payload_len = u32::try_from(declaration_compressed.len())
+            .map_err(|_| invalid_data("compiler-object declaration payload exceeds 4 GiB"))?;
+        let (declaration_payload_offset, persisted_declaration_len) =
+            prepared.append(&declaration_compressed).map_err(factstore_io)?;
+        debug_assert_eq!(declaration_payload_len, persisted_declaration_len);
+        prepared_entries.push(PreparedFactStoreEntry {
+            key: declaration_key(file),
+            body_hash: declaration_body_hash_from_digest(legacy_file.source_digest),
+            payload_offset: declaration_payload_offset,
+            payload_len: declaration_payload_len,
+        });
+        // A migrated object has no source text at hand: record an empty line
+        // table so readers derive lines from the text until a fresh compile.
+        let lines_compressed = encode_line_starts_payload(&[])?;
+        let lines_payload_digest = digest_bytes(&lines_compressed);
+        let lines_payload_len = u32::try_from(lines_compressed.len())
+            .map_err(|_| invalid_data("compiler-object line table exceeds 4 GiB"))?;
+        let (lines_payload_offset, persisted_lines_len) =
+            prepared.append(&lines_compressed).map_err(factstore_io)?;
+        debug_assert_eq!(lines_payload_len, persisted_lines_len);
+        prepared_entries.push(PreparedFactStoreEntry {
+            key: lines_key(file),
+            body_hash: lines_body_hash_from_digest(legacy_file.source_digest),
+            payload_offset: lines_payload_offset,
+            payload_len: lines_payload_len,
+        });
         descriptors.push(SourceDescriptor {
             file,
             path: legacy_file.path.clone(),
@@ -2671,6 +3065,10 @@ where
             attribution_payload_len,
             browse_payload_digest,
             browse_payload_len,
+            declaration_payload_digest,
+            declaration_payload_len,
+            lines_payload_digest,
+            lines_payload_len,
         });
     }
     if legacy_generation_digest_v11(&descriptors) != legacy_generation_digest {
@@ -2848,8 +3246,21 @@ where
 }
 
 fn source_descriptor(db: &AnalyzerDb, file: FileId) -> Option<SourceDescriptor> {
-    let snapshot = db.inner.vfs.snapshot(file).ok()?;
     let path = db.inner.vfs.path(file).ok()?;
+    let version = db.inner.vfs.file_version(file).ok()?;
+    // A lazily interned source carries the identity of the exact text the
+    // loader returns; the descriptor comes from it without reading the file.
+    let (source_digest, source_hash, source_bytes) = match db.inner.vfs.lazy_identity(file) {
+        Some(identity) => (identity.digest, identity.hash, identity.len),
+        None => {
+            let snapshot = db.inner.vfs.snapshot(file).ok()?;
+            (
+                digest_bytes(snapshot.text.as_bytes()),
+                fnv1a_bytes64(snapshot.text.as_bytes()),
+                u64::try_from(snapshot.text.len()).unwrap_or(u64::MAX),
+            )
+        }
+    };
     let root = db.workspace_root();
     let relative = root
         .as_deref()
@@ -2863,10 +3274,10 @@ fn source_descriptor(db: &AnalyzerDb, file: FileId) -> Option<SourceDescriptor> 
         file,
         path,
         language,
-        source_digest: digest_bytes(snapshot.text.as_bytes()),
-        source_hash: fnv1a_bytes64(snapshot.text.as_bytes()),
-        source_bytes: u64::try_from(snapshot.text.len()).unwrap_or(u64::MAX),
-        version: snapshot.version,
+        source_digest,
+        source_hash,
+        source_bytes,
+        version,
     })
 }
 
@@ -2938,6 +3349,23 @@ fn prepare_compiler_object(
     let browse_payload_digest = digest_bytes(&browse_compressed);
     let browse_payload_len = u32::try_from(browse_compressed.len())
         .map_err(|_| invalid_data("compiler-object browse payload exceeds 4 GiB"))?;
+    let declaration_compressed =
+        encode_compiler_declaration_payload(descriptor.file, object.declarations.as_ref())?;
+    let declaration_payload_digest = digest_bytes(&declaration_compressed);
+    let declaration_payload_len = u32::try_from(declaration_compressed.len())
+        .map_err(|_| invalid_data("compiler-object declaration payload exceeds 4 GiB"))?;
+    // The exact text is resident while compiling; its line table lets every
+    // later process map spans to lines without reading the file.
+    let line_starts = db
+        .inner
+        .vfs
+        .snapshot(descriptor.file)
+        .map(|snapshot| line_starts_of(&snapshot.text))
+        .unwrap_or_default();
+    let lines_compressed = encode_line_starts_payload(&line_starts)?;
+    let lines_payload_digest = digest_bytes(&lines_compressed);
+    let lines_payload_len = u32::try_from(lines_compressed.len())
+        .map_err(|_| invalid_data("compiler-object line table exceeds 4 GiB"))?;
     Ok(PreparedCompilerObject {
         compressed,
         payload_digest,
@@ -2951,18 +3379,42 @@ fn prepare_compiler_object(
         browse_compressed,
         browse_payload_digest,
         browse_payload_len,
+        declaration_compressed,
+        declaration_payload_digest,
+        declaration_payload_len,
+        lines_compressed,
+        lines_payload_digest,
+        lines_payload_len,
     })
 }
 
 fn ensure_source_version(db: &AnalyzerDb, descriptor: &SourceDescriptor) -> std::io::Result<()> {
-    let snapshot = db
-        .inner
-        .vfs
-        .snapshot(descriptor.file)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Interrupted, error))?;
-    if snapshot.version != descriptor.version
-        || u64::try_from(snapshot.text.len()).unwrap_or(u64::MAX) != descriptor.source_bytes
-        || digest_bytes(snapshot.text.as_bytes()) != descriptor.source_digest
+    let (version, source_bytes, source_digest) = match db.inner.vfs.lazy_identity(descriptor.file) {
+        // Still on disk: the identity is the text the loader will verify.
+        Some(identity) => (
+            db.inner
+                .vfs
+                .file_version(descriptor.file)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Interrupted, error))?,
+            identity.len,
+            identity.digest,
+        ),
+        None => {
+            let snapshot = db
+                .inner
+                .vfs
+                .snapshot(descriptor.file)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Interrupted, error))?;
+            (
+                snapshot.version,
+                u64::try_from(snapshot.text.len()).unwrap_or(u64::MAX),
+                digest_bytes(snapshot.text.as_bytes()),
+            )
+        }
+    };
+    if version != descriptor.version
+        || source_bytes != descriptor.source_bytes
+        || source_digest != descriptor.source_digest
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
@@ -3093,6 +3545,91 @@ fn encode_compiler_attribution_payload(attribution: &CompilerAttribution) -> std
     Ok(payload)
 }
 
+/// Encode every declaration of the deduplicated index as its own compressed
+/// frame behind a directory, so one declaration can be read without decoding
+/// the file. Deduplication mirrors header construction exactly, keeping frame
+/// positions aligned with the header symbol table.
+fn encode_compiler_declaration_payload(
+    file: FileId,
+    declarations: Option<&DeclIndex>,
+) -> std::io::Result<Vec<u8>> {
+    let deduped = declarations.map(|index| {
+        let mut index = index.clone();
+        bonsai_index::dedup_decl_index_defs(&mut index);
+        index
+    });
+    let decls: &[Decl] = deduped.as_ref().map_or(&[], |index| index.defs.as_slice());
+    let mut frames = Vec::with_capacity(decls.len());
+    let mut frame_bytes = Vec::new();
+    for decl in decls {
+        let encoded = wire::encode_struct_map(decl).map_err(invalid_wire)?;
+        let compressed = zstd::stream::encode_all(Cursor::new(encoded), COMPILER_OBJECT_COMPRESSION_LEVEL)?;
+        let compressed_len = u32::try_from(compressed.len())
+            .map_err(|_| invalid_data("compiler-object declaration frame exceeds 4 GiB"))?;
+        frames.push(CompilerDeclarationFrame {
+            declaration_span: decl.span,
+            local_symbol: decl.symbol,
+            relative_offset: u64::try_from(frame_bytes.len()).unwrap_or(u64::MAX),
+            compressed_len,
+            compressed_digest: digest_bytes(&compressed),
+        });
+        frame_bytes.extend_from_slice(&compressed);
+    }
+    let index = CompilerDeclarationIndex {
+        file,
+        frames,
+        frames_payload_offset: 0,
+    };
+    let index_bytes = wire::encode_struct_map(&index).map_err(invalid_wire)?;
+    let index_len = u32::try_from(index_bytes.len())
+        .map_err(|_| invalid_data("compiler-object declaration index exceeds 4 GiB"))?;
+    let total_len = DECLARATION_PAYLOAD_PREFIX_BYTES
+        .checked_add(index_bytes.len())
+        .and_then(|len| len.checked_add(frame_bytes.len()))
+        .ok_or_else(|| invalid_data("compiler-object declaration payload length overflow"))?;
+    let mut payload = Vec::with_capacity(total_len);
+    payload.extend_from_slice(&DECLARATION_PAYLOAD_MAGIC);
+    payload.extend_from_slice(&index_len.to_le_bytes());
+    payload.extend_from_slice(&digest_bytes(&index_bytes));
+    payload.extend_from_slice(&index_bytes);
+    payload.extend_from_slice(&frame_bytes);
+    Ok(payload)
+}
+
+fn validate_compiler_declaration_index(
+    index: &CompilerDeclarationIndex,
+    metadata: &CompilerObjectFileMetadata,
+) -> std::io::Result<()> {
+    if index.file.raw() != metadata.file {
+        return Err(invalid_data(
+            "compiler-object declaration index identity mismatch",
+        ));
+    }
+    let frames_bytes = u64::from(metadata.declaration_payload_len)
+        .checked_sub(index.frames_payload_offset)
+        .ok_or_else(|| invalid_data("compiler-object declaration frame directory exceeds payload"))?;
+    let mut expected_offset = 0_u64;
+    for frame in &index.frames {
+        if frame.relative_offset != expected_offset {
+            return Err(invalid_data(
+                "compiler-object declaration frames are not contiguous",
+            ));
+        }
+        expected_offset = expected_offset
+            .checked_add(u64::from(frame.compressed_len))
+            .ok_or_else(|| invalid_data("compiler-object declaration frame length overflow"))?;
+        if expected_offset > frames_bytes {
+            return Err(invalid_data("compiler-object declaration frame exceeds payload"));
+        }
+    }
+    if expected_offset != frames_bytes {
+        return Err(invalid_data(
+            "compiler-object declaration frames do not fill the payload",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_compiler_attribution_index(
     index: &CompilerAttributionIndex,
     metadata: &CompilerObjectFileMetadata,
@@ -3170,7 +3707,7 @@ fn legacy_metadata_pipeline_hash_v11(metadata: &LegacyCompilerObjectMetadataV11)
 }
 
 fn object_key(file: FileId) -> u64 {
-    u64::from(file.raw()).saturating_mul(4).saturating_add(1)
+    u64::from(file.raw()).saturating_mul(6).saturating_add(1)
 }
 
 fn legacy_object_key_v11(file: FileId) -> u64 {
@@ -3178,19 +3715,29 @@ fn legacy_object_key_v11(file: FileId) -> u64 {
 }
 
 fn header_key(file: FileId) -> u64 {
-    u64::from(file.raw()).saturating_mul(4).saturating_add(2)
+    u64::from(file.raw()).saturating_mul(6).saturating_add(2)
 }
 
 fn attribution_key(file: FileId) -> u64 {
-    u64::from(file.raw()).saturating_mul(4).saturating_add(3)
+    u64::from(file.raw()).saturating_mul(6).saturating_add(3)
 }
 
 fn browse_key(file: FileId) -> u64 {
-    u64::from(file.raw()).saturating_mul(4).saturating_add(4)
+    u64::from(file.raw()).saturating_mul(6).saturating_add(4)
+}
+
+fn declaration_key(file: FileId) -> u64 {
+    u64::from(file.raw()).saturating_mul(6).saturating_add(5)
+}
+
+/// Line-start table of the exact source text: span → line/column without
+/// reading the file.
+fn lines_key(file: FileId) -> u64 {
+    u64::from(file.raw()).saturating_mul(6).saturating_add(6)
 }
 
 fn compiler_object_entry_count(files: usize) -> usize {
-    files.saturating_mul(4).saturating_add(1)
+    files.saturating_mul(6).saturating_add(1)
 }
 
 fn object_body_hash(descriptor: &SourceDescriptor) -> u64 {
@@ -3229,6 +3776,40 @@ fn browse_body_hash(descriptor: &SourceDescriptor) -> u64 {
 
 fn browse_body_hash_from_digest(source_digest: [u8; 32]) -> u64 {
     object_body_hash_from_digest(source_digest) ^ 0x4252_4f57_5345_5f31
+}
+
+fn lines_body_hash(descriptor: &SourceDescriptor) -> u64 {
+    lines_body_hash_from_digest(descriptor.source_digest)
+}
+
+fn lines_body_hash_from_digest(source_digest: [u8; 32]) -> u64 {
+    object_body_hash_from_digest(source_digest) ^ 0x4c49_4e45_5354_5254
+}
+
+/// Byte offsets of every line start in `text` (`[0]` is always 0), the
+/// exact table `bonsai_common::SpanMap` builds from the same text.
+fn line_starts_of(text: &str) -> Vec<u32> {
+    let mut starts = Vec::with_capacity(text.len() / 40 + 1);
+    starts.push(0);
+    for (idx, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(u32::try_from(idx + 1).unwrap_or(u32::MAX));
+        }
+    }
+    starts
+}
+
+fn encode_line_starts_payload(line_starts: &[u32]) -> std::io::Result<Vec<u8>> {
+    let encoded = wire::encode(&line_starts.to_vec()).map_err(invalid_wire)?;
+    zstd::stream::encode_all(Cursor::new(encoded), COMPILER_OBJECT_COMPRESSION_LEVEL)
+}
+
+fn declaration_body_hash(descriptor: &SourceDescriptor) -> u64 {
+    declaration_body_hash_from_digest(descriptor.source_digest)
+}
+
+fn declaration_body_hash_from_digest(source_digest: [u8; 32]) -> u64 {
+    object_body_hash_from_digest(source_digest) ^ 0x4445_434c_4652_4d31
 }
 
 fn validate_streamed_payload(
@@ -3538,6 +4119,58 @@ mod tests {
         assert!(!db.compiler_object_sidecar_is_current(root.path()));
         let object = db.compiler_file_object_uncached(file).expect("recompile object");
         assert_eq!(object.source_digest, digest_bytes(b"second"));
+    }
+
+    #[test]
+    fn compiler_object_records_the_line_table_and_lazy_sources_map_spans_without_reading() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("src/input.fixture");
+        let text = "a\nbb\n\nccc";
+        let vfs = Arc::new(Vfs::new());
+        let file = vfs.write(source.to_string_lossy().into_owned(), Arc::<str>::from(text));
+        let db = AnalyzerDb::new(Arc::clone(&vfs), Arc::new(LanguageRegistry::new()));
+        db.set_workspace_root(root.path().to_path_buf());
+        assert_eq!(
+            db.save_compiler_object_sidecar(root.path())
+                .expect("save objects"),
+            1
+        );
+        assert_eq!(db.compiler_line_starts_uncached(file), Some(vec![0, 2, 5, 6]));
+        let loaded_map = db.span_map(file).expect("span map from loaded text");
+        assert_eq!(
+            (loaded_map.line_col(3).line, loaded_map.line_col(3).column),
+            (2, 2)
+        );
+
+        // A second process interns the same source by identity; its span map
+        // comes from the recorded line table and the loader is never asked.
+        let lazy_vfs = Arc::new(Vfs::new());
+        let lazy_file = lazy_vfs.write_lazy(
+            source.to_string_lossy().into_owned(),
+            bonsai_vfs::SourceIdentity {
+                len: text.len() as u64,
+                hash: fnv1a_bytes64(text.as_bytes()),
+                digest: digest_bytes(text.as_bytes()),
+            },
+        );
+        lazy_vfs.set_lazy_loader(Arc::new(|path: &Path, _: &bonsai_vfs::SourceIdentity| {
+            Err(std::io::Error::other(format!(
+                "span mapping must not read {}",
+                path.display()
+            )))
+        }));
+        let lazy_db = AnalyzerDb::new(Arc::clone(&lazy_vfs), Arc::new(LanguageRegistry::new()));
+        lazy_db.set_workspace_root(root.path().to_path_buf());
+        lazy_db
+            .load_compiler_object_store_for_source_fingerprints(
+                root.path(),
+                std::iter::once((&source, fnv1a_bytes64(text.as_bytes()))),
+            )
+            .expect("load persisted generation");
+        let lazy_map = lazy_db.span_map(lazy_file).expect("span map from the line table");
+        assert_eq!((lazy_map.line_col(6).line, lazy_map.line_col(6).column), (4, 1));
+        assert_eq!((lazy_map.line_col(8).line, lazy_map.line_col(8).column), (4, 3));
+        assert_eq!(lazy_vfs.lazy_source_counts(), (1, 0), "no source was read");
     }
 
     #[test]
@@ -3960,7 +4593,7 @@ mod tests {
             1
         );
         let migrated = CompilerObjectStore::open_reusable(root.path()).expect("open migrated store");
-        assert_eq!(migrated.reader.len(), 5);
+        assert_eq!(migrated.reader.len(), compiler_object_entry_count(1));
         let replayed = migrated
             .load(&descriptor)
             .expect("load migrated object")

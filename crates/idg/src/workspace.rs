@@ -64,6 +64,9 @@ pub(crate) enum QueryAcceleratorBlobKind {
     ContextualReverseHeapNodes = 10,
     ContextualReverseCallNodes = 11,
     ContextualReverseReturnNodes = 12,
+    /// Compiled base-level symbolic field demand (a bitset over bases) so a
+    /// warm query loads it instead of closing over every projected fact.
+    SymbolicFieldDemand = 13,
 }
 
 #[derive(Clone, Debug)]
@@ -2085,9 +2088,14 @@ impl IdgWorkspace {
             .ok_or_else(|| invalid_sidecar_payload("workspace IDG sidecar is missing metadata"))?;
         let metadata: IdgWorkspaceMetadataOwned =
             wire::decode(&metadata_hit.payload).map_err(invalid_sidecar_payload)?;
-        if metadata.query_accelerator.is_none() {
+        let Some(layout) = metadata.query_accelerator.as_ref() else {
             return Err(invalid_sidecar_payload(
                 "workspace IDG sidecar has no semantic query accelerator",
+            ));
+        };
+        if layout.version != IDG_QUERY_ACCELERATOR_CONTAINER_VERSION {
+            return Err(invalid_sidecar_payload(
+                "workspace IDG query accelerator predates the current layout",
             ));
         }
         Ok(segment_count)
@@ -2777,7 +2785,12 @@ const IDG_WORKSPACE_TABLE_ID: u32 = 101;
 // argument span as their evaluation boundary. A v25 graph can decode while
 // lacking those inter-callback edges, so it must never be reused.
 const IDG_WORKSPACE_VERSION: u32 = 28;
-const IDG_QUERY_ACCELERATOR_CONTAINER_VERSION: u32 = 1;
+/// Layout version of the persisted query accelerator container. Bump it
+/// whenever any accelerator frame or blob format changes (core, contextual,
+/// symbolic runtime, persisted field demand), so `index --semantic` and the
+/// freshness probes rebuild an accelerator the current binary cannot use
+/// instead of reporting it current.
+const IDG_QUERY_ACCELERATOR_CONTAINER_VERSION: u32 = 2;
 const IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES: u64 = 256 * 1024 * 1024;
 
 #[cfg(not(test))]

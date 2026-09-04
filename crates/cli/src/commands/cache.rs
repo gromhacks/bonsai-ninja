@@ -38,7 +38,18 @@ pub(crate) fn cmd_cache(action: CacheAction) -> Result<()> {
         } => cache_stats(workspace, format),
         CacheAction::Clear {
             workspace,
+            orphans: true,
+            ..
+        } => cache_clear_orphans(workspace),
+        CacheAction::Clear {
+            workspace,
+            legacy: true,
+            ..
+        } => cache_clear_legacy(workspace),
+        CacheAction::Clear {
+            workspace,
             dataflow_only,
+            ..
         } => cache_clear(workspace, dataflow_only),
         CacheAction::Rebuild {
             workspace,
@@ -62,6 +73,27 @@ fn cache_stats(workspace: Option<std::path::PathBuf>, format: BrowseFormat) -> R
     if matches!(format, BrowseFormat::Json) {
         crate::output::emit_json_document(&super::with_completeness(&serde_json::to_value(&stats)?))?;
         return Ok(());
+    }
+    if let Some(root) = bonsai_common::names::default_workspaces_cache_root() {
+        let entries = std::fs::read_dir(&root)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|e| e.path().is_dir())
+                    .count()
+            })
+            .unwrap_or(0);
+        print_kv("workspace caches", &format!("{entries} under {}", root.display()));
+    }
+    if let Some(dir) = stats.legacy_in_tree_dir.as_deref() {
+        print_kv(
+            "legacy in-tree cache",
+            &format!(
+                "{} ({} bytes; not used, remove with `cache clear --legacy`)",
+                dir.display(),
+                stats.legacy_in_tree_bytes
+            ),
+        );
     }
     print_kv("scope", "in-process (per command invocation)");
     print_kv(
@@ -248,6 +280,51 @@ fn cache_stats(workspace: Option<std::path::PathBuf>, format: BrowseFormat) -> R
                  JSON — delete via `cache clear` or rebuild via `cache rebuild`.",
     ) {
         cli_println!("{line}");
+    }
+    Ok(())
+}
+
+fn cache_clear_orphans(workspace: Option<std::path::PathBuf>) -> Result<()> {
+    if let Some(workspace) = workspace {
+        anyhow::bail!(
+            "cache clear --orphans sweeps the shared cache root and takes no workspace (got `{}`)",
+            workspace.display()
+        );
+    }
+    let stage = progress::ScopedSpinner::new("sweeping orphaned workspace caches");
+    let report = bonsai_sdk::prune_orphaned_workspace_caches()?;
+    stage.finish();
+    match &report.root {
+        Some(root) => print_kv("cache root", &root.display().to_string()),
+        None => print_kv(
+            "cache root",
+            "pinned by BONSAI_WORKSPACE_DIR (no shared root to sweep)",
+        ),
+    }
+    print_kv("scanned", &report.scanned.to_string());
+    print_kv("removed", &report.removed.to_string());
+    print_kv("freed", &format!("{} bytes", report.freed_bytes));
+    if report.unattributed > 0 {
+        print_kv("kept (unreadable manifest)", &report.unattributed.to_string());
+    }
+    Ok(())
+}
+
+fn cache_clear_legacy(workspace: Option<std::path::PathBuf>) -> Result<()> {
+    let workspace_root = workspace.unwrap_or(std::env::current_dir()?);
+    let cache = workspace_cache(&workspace_root);
+    let Some(dir) = cache.legacy_in_tree_dir() else {
+        print_kv("legacy in-tree cache", "none (nothing to clear)");
+        return Ok(());
+    };
+    let stage = progress::ScopedSpinner::new("removing legacy in-tree cache");
+    let removed = cache
+        .clear_legacy_in_tree()
+        .with_context(|| format!("removing {}", dir.display()))?;
+    stage.finish();
+    if let Some((dir, bytes)) = removed {
+        print_kv("removed", &dir.display().to_string());
+        print_kv("freed", &format!("{bytes} bytes"));
     }
     Ok(())
 }

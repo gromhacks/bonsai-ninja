@@ -471,3 +471,200 @@ fn root_anchored_filters_do_not_match_java_package_namespaces() {
         "a Java package component named `example` is production namespace syntax, not an example project"
     );
 }
+
+#[test]
+fn lazy_source_table_interns_matching_files_by_identity_and_loads_on_first_use() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    // The workspace interns canonical paths (`/private/var` on macOS).
+    let root_dir = root.path().canonicalize().expect("canonical tempdir");
+    let lazy_path = root_dir.join("lazy.py");
+    let eager_path = root_dir.join("eager.py");
+    std::fs::write(&lazy_path, "def lazy_fn():\n    return 1\n").expect("write lazy");
+    std::fs::write(&eager_path, "def eager_fn():\n    return 2\n").expect("write eager");
+
+    // The identities and stamps a cache manifest would record.
+    let probe = Workspace::new_with_open_options(python_registry(), WorkspaceOpenOptions::lazy_query());
+    let identities = probe.source_file_identities(root.path()).expect("identities");
+    let stamps = probe.source_file_stamps(root.path()).expect("stamps");
+    assert_eq!(identities.len(), 2);
+    assert!(identities.iter().all(|identity| identity.text_exact));
+    let mut table = LazySourceTable::default();
+    for identity in &identities {
+        let stamp = stamps
+            .iter()
+            .find(|stamp| stamp.path == identity.path)
+            .expect("stamp for identity")
+            .clone();
+        let mut stamp = stamp;
+        if identity.path.file_name().and_then(|name| name.to_str()) == Some("eager.py") {
+            // A stale stamp must fall back to reading the file during ingest.
+            stamp.len += 1;
+        }
+        table.insert(
+            identity.path.clone(),
+            LazySourceRecord {
+                stamp,
+                identity: SourceIdentity {
+                    len: identity.len,
+                    hash: identity.hash,
+                    digest: identity.digest,
+                },
+            },
+        );
+    }
+
+    let eager = Workspace::open(root.path(), python_registry()).expect("eager open");
+    let lazy = Workspace::open_with_options_lazy_sources_and_events(
+        root.path(),
+        python_registry(),
+        WorkspaceOpenOptions::lazy_query(),
+        Some(&table),
+        &|_| {},
+    )
+    .expect("lazy open");
+    assert_eq!(
+        lazy.vfs().lazy_source_counts(),
+        (1, 0),
+        "only the still-matching file is lazy"
+    );
+    // Identity-only surfaces agree with the eager open without a read.
+    let mut eager_hashes = eager.complete_source_content_hashes().expect("eager hashes");
+    let mut lazy_hashes = lazy.complete_source_content_hashes().expect("lazy hashes");
+    eager_hashes.sort();
+    lazy_hashes.sort();
+    assert_eq!(eager_hashes, lazy_hashes);
+    assert_eq!(lazy.vfs().lazy_source_counts(), (1, 0));
+    let lazy_file = lazy.vfs().lookup(&lazy_path).expect("lazy file id");
+    assert_eq!(
+        lazy.vfs().text_len(lazy_file).expect("len"),
+        "def lazy_fn():\n    return 1\n".len() as u64
+    );
+    assert!(
+        lazy.db().adapter_for(lazy_file).is_some(),
+        "adapter lookup needs only the path"
+    );
+    assert_eq!(lazy.vfs().lazy_source_counts(), (1, 0));
+
+    // First semantic use loads and verifies the text.
+    let index = lazy.db().decl_index(lazy_file).expect("decl index");
+    assert!(index.defs.iter().any(|decl| decl.name == "lazy_fn"));
+    assert_eq!(lazy.vfs().lazy_source_counts(), (1, 1));
+    assert_eq!(
+        lazy.vfs().snapshot(lazy_file).expect("snapshot").text.as_ref(),
+        "def lazy_fn():\n    return 1\n"
+    );
+}
+
+#[test]
+fn lazy_source_whose_text_changed_after_validation_fails_loudly() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let path = root
+        .path()
+        .canonicalize()
+        .expect("canonical tempdir")
+        .join("a.py");
+    std::fs::write(&path, "def before():\n    return 1\n").expect("write");
+    let probe = Workspace::new_with_open_options(python_registry(), WorkspaceOpenOptions::lazy_query());
+    let identity = probe
+        .source_file_identities(root.path())
+        .expect("identities")
+        .remove(0);
+    let stamp = probe.source_file_stamps(root.path()).expect("stamps").remove(0);
+    let mut table = LazySourceTable::default();
+    table.insert(
+        path.clone(),
+        LazySourceRecord {
+            stamp,
+            identity: SourceIdentity {
+                len: identity.len,
+                hash: identity.hash,
+                digest: identity.digest,
+            },
+        },
+    );
+    let ws = Workspace::open_with_options_lazy_sources_and_events(
+        root.path(),
+        python_registry(),
+        WorkspaceOpenOptions::lazy_query(),
+        Some(&table),
+        &|_| {},
+    )
+    .expect("lazy open");
+    let file = ws.vfs().lookup(&path).expect("file");
+    assert_eq!(ws.vfs().lazy_source_counts(), (1, 0));
+    // Same length so the metadata stamp alone cannot tell; the loader's hash
+    // check must.
+    std::fs::write(&path, "def change():\n    return 1\n").expect("rewrite");
+    let error = ws
+        .vfs()
+        .snapshot(file)
+        .expect_err("changed text must not load silently");
+    assert!(
+        error
+            .to_string()
+            .contains("source changed after cache validation"),
+        "{error}"
+    );
+}
+
+#[test]
+fn filtered_open_interns_scoped_sources_by_identity_and_validates_without_reads() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let root_dir = root.path().canonicalize().expect("canonical tempdir");
+    std::fs::write(root_dir.join("lazy.py"), "def lazy_fn():\n    return 1\n").expect("write lazy");
+    std::fs::write(root_dir.join("other.py"), "def other_fn():\n    return 2\n").expect("write other");
+    let probe = Workspace::new_with_open_options(python_registry(), WorkspaceOpenOptions::lazy_query());
+    let identities = probe.source_file_identities(root.path()).expect("identities");
+    let stamps = probe.source_file_stamps(root.path()).expect("stamps");
+    let mut table = LazySourceTable::default();
+    for identity in &identities {
+        let stamp = stamps
+            .iter()
+            .find(|stamp| stamp.path == identity.path)
+            .expect("stamp")
+            .clone();
+        table.insert(
+            identity.path.clone(),
+            LazySourceRecord {
+                stamp,
+                identity: SourceIdentity {
+                    len: identity.len,
+                    hash: identity.hash,
+                    digest: identity.digest,
+                },
+            },
+        );
+    }
+    let eager = Workspace::open(root.path(), python_registry()).expect("eager open");
+    let scoped = Workspace::open_query_filtered_paths_with_options_lazy_sources_and_events(
+        root.path(),
+        python_registry(),
+        &["lazy.py".to_string()],
+        &[],
+        WorkspaceOpenOptions::lazy_query(),
+        Some(&table),
+        &|_| {},
+    )
+    .expect("scoped lazy open");
+    assert_eq!(
+        scoped.vfs().all_files().len(),
+        1,
+        "only the scoped file is interned"
+    );
+    assert_eq!(scoped.vfs().lazy_source_counts(), (1, 0));
+    // The complete source table (both files) comes from the identities: the
+    // hashes match an eager open, and nothing was read to produce them.
+    let mut eager_hashes = eager.complete_source_content_hashes().expect("eager hashes");
+    let mut scoped_hashes = scoped.complete_source_content_hashes().expect("scoped hashes");
+    eager_hashes.sort();
+    scoped_hashes.sort();
+    assert_eq!(eager_hashes, scoped_hashes);
+    assert_eq!(scoped.vfs().lazy_source_counts(), (1, 0));
+    let file = scoped
+        .vfs()
+        .lookup(&root_dir.join("lazy.py"))
+        .expect("scoped file id");
+    let index = scoped.db().decl_index(file).expect("decl index");
+    assert!(index.defs.iter().any(|decl| decl.name == "lazy_fn"));
+    assert_eq!(scoped.vfs().lazy_source_counts(), (1, 1));
+}

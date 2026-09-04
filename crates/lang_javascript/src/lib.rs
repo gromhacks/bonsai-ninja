@@ -23,10 +23,30 @@ fn javascript_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTa
         "new_expression" => node.child_by_field_name("constructor")?,
         _ => return None,
     };
-    let full_text = node_text(&target, src).trim();
+    // A call whose callee is a function literal (an IIFE) is named the way
+    // the lowering names lambdas, `<iife@line:col>`, instead of carrying
+    // the whole function body as its callee text.
+    let function_literal = |node: Node<'tree>| {
+        matches!(
+            node.kind(),
+            "function_expression" | "function" | "arrow_function" | "generator_function" | "class"
+        )
+    };
+    let literal_callee = function_literal(target)
+        || (target.kind() == "parenthesized_expression"
+            && target.named_child(0).is_some_and(function_literal));
+    let full_text = if literal_callee {
+        format!(
+            "<iife@{}:{}>",
+            target.start_position().row + 1,
+            target.start_position().column + 1
+        )
+    } else {
+        node_text(&target, src).trim().to_string()
+    };
     (!full_text.is_empty()).then_some(CallTargetExtraction {
         node: target,
-        full_text: full_text.to_string(),
+        full_text,
     })
 }
 

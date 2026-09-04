@@ -79,3 +79,35 @@ fn content_hash(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 #[path = "span_cache_tests.rs"]
 mod tests;
+
+thread_local! {
+    static LINE_TABLE_SPAN_MAP_CACHE: RefCell<HashMap<(FileId, u64), Arc<SpanMap>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Span map built from a recorded line-start table instead of the text.
+/// `load` runs only on a miss for `(file, version)`; `None` means no table
+/// was recorded for this source.
+pub fn cached_span_map_from_line_starts(
+    file: FileId,
+    version: u64,
+    load: impl FnOnce() -> Option<Vec<u32>>,
+) -> Option<Arc<SpanMap>> {
+    let key = (file, version);
+    let hit = LINE_TABLE_SPAN_MAP_CACHE.with(|cache| cache.borrow().get(&key).cloned());
+    if let Some(map) = hit {
+        return Some(map);
+    }
+    let line_starts = load()?;
+    let map = Arc::new(SpanMap::from_line_starts(
+        line_starts.into_iter().map(u64::from).collect(),
+    ));
+    LINE_TABLE_SPAN_MAP_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= MAX_THREAD_LOCAL_SPAN_MAPS {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(&map));
+    });
+    Some(map)
+}

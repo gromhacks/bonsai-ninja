@@ -283,12 +283,13 @@ fn language_gauntlet_dump_taint_uses_rulepack_transfer_semantics() {
 }
 
 /// Discovery stays bounded to one evidence unit per matching callable, while
-/// `symbol-summary` exposes its exact direct compiler-resolved neighbors.
+/// the declaration hit block exposes its exact direct compiler-resolved
+/// neighbors (`signature` + `direct_callers` edges).
 #[test]
-fn language_gauntlet_inspect_and_symbol_summary_stay_bounded() {
+fn language_gauntlet_inspect_stays_bounded_and_exposes_direct_callers() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "language_gauntlet");
-    let Some((out, _, code)) = run(&["inspect", &w, "--query", "execute", "--format", "json"]) else {
+    let Some((out, _, code)) = run(&["inspect-graph", &w, "--query", "execute", "--format", "json"]) else {
         return;
     };
     assert_eq!(code, 0, "language_gauntlet inspect ec={code}");
@@ -308,7 +309,7 @@ fn language_gauntlet_inspect_and_symbol_summary_stay_bounded() {
         {
             any_flow = true;
             // Every discovery unit is exactly the selected callable; recursive
-            // reachability belongs to the compressed `path` graph.
+            // reachability belongs to the `--from/--to` endpoint corridor.
             for flow in hit["flows"].as_array().unwrap() {
                 let chain = flow
                     .get("chain")
@@ -325,21 +326,35 @@ fn language_gauntlet_inspect_and_symbol_summary_stay_bounded() {
         any_flow,
         "inspect --query execute produced no bounded structural evidence"
     );
-    let Some((out2, _, code2)) = run(&["symbol-summary", &w, "--symbol", "persist", "--format", "json"])
-    else {
+    let Some((out2, _, code2)) = run(&["inspect-graph", &w, "--query", "persist", "--format", "json"]) else {
         return;
     };
-    assert_eq!(code2, 0, "symbol-summary persist ec={code2}");
-    let summaries: serde_json::Value = serde_json::from_str(&out2).unwrap();
-    let rows = rows_of(&summaries);
-    assert_eq!(rows.len(), 1, "expected one persist summary: {out2}");
-    let summary = &rows[0];
-    assert_eq!(summary["graph_scope"], "direct_resolved_neighbors");
+    assert_eq!(code2, 0, "inspect-graph persist ec={code2}");
+    let parsed2: serde_json::Value = serde_json::from_str(&out2).unwrap();
+    let persist_hits: Vec<&serde_json::Value> = parsed2
+        .get("decl_hits")
+        .and_then(|h| h.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|hit| hit.get("symbol").and_then(|s| s.as_str()) == Some("persist"))
+        .collect();
+    assert_eq!(persist_hits.len(), 1, "expected one persist decl hit: {out2}");
+    let hit = persist_hits[0];
     assert!(
-        summary["direct_callers"]
-            .as_array()
-            .is_some_and(|rows| !rows.is_empty()),
-        "persist summary lost direct compiler-resolved caller evidence: {summary}"
+        hit.get("signature")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| s.contains("persist")),
+        "persist decl hit lost its signature: {hit}"
+    );
+    let callers: Vec<&str> = hit["direct_callers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|edge| edge.get("caller").and_then(|c| c.as_str()))
+        .collect();
+    assert!(
+        !callers.is_empty(),
+        "persist decl hit lost direct compiler-resolved caller evidence: {hit}"
     );
 }
 
@@ -429,7 +444,7 @@ fn language_gauntlet_export_connects_consecutive_hops() {
 fn assert_construct_picked_up(construct: &str) {
     let w = ws("python", "language_gauntlet");
     // 1. inspect must surface the construct by name.
-    let Some((inspect_out, _, _)) = run(&["inspect", &w, "--query", construct]) else {
+    let Some((inspect_out, _, _)) = run(&["inspect-graph", &w, "--query", construct]) else {
         return;
     };
     let inspect_hit = inspect_out.contains(construct);
@@ -655,7 +670,7 @@ macro_rules! complex_e2e_tests {
                     let Some(_) = bin_path() else { return };
                     let w = ws(L, "complex");
                     let Some((out, _, code)) = run(&[
-                        "inspect",
+                        "inspect-graph",
                         &w,
                         "--query",
                         ".+",
@@ -762,145 +777,6 @@ complex_e2e_tests!(
 // =============================================================================
 // Layer 4 — cross-command consistency
 // =============================================================================
-
-/// A security finding's exact chain must fit inside the compiler-projected
-/// compressed path corridor between the same endpoints.
-#[test]
-fn finding_chain_fits_compressed_path_corridor() {
-    let Some(_) = bin_path() else { return };
-    // Use python/complex (known-large workspace with many findings).
-    let w = ws("python", "complex");
-    let Some((flows_out, _, _)) = run(&[
-        "security",
-        &w,
-        "taint-analysis",
-        "--profile",
-        "all",
-        "--inferred-sources",
-        "--format",
-        "json",
-    ]) else {
-        return;
-    };
-    let flows_parsed: serde_json::Value = serde_json::from_str(&flows_out).unwrap();
-    let findings = rows_of(&flows_parsed);
-    assert!(!findings.is_empty(), "complex flows empty");
-
-    // Pick the first unsanitized finding whose chain has at least
-    // 2 hops. Chains the resolver pinned must be reachable from both
-    // surfaces.
-    let rich = findings.iter().find(|f| {
-        f.get("status").and_then(|s| s.as_str()) == Some("unsanitized")
-            && f.get("chain_display")
-                .and_then(|c| c.as_array())
-                .map(|a| a.len() >= 2)
-                .unwrap_or(false)
-    });
-    let Some(finding) = rich else { return };
-    let chain: Vec<String> = finding["chain_display"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|n| n.as_str().map(String::from))
-        .collect();
-    let sink_name = chain.last().unwrap();
-
-    let source_name = chain.first().expect("finding chain source");
-    let Some((path_out, _, path_code)) = run(&[
-        "path",
-        &w,
-        "--from",
-        source_name,
-        "--to",
-        sink_name,
-        "--format",
-        "json",
-        "--all",
-    ]) else {
-        return;
-    };
-    assert_eq!(path_code, 0, "path ec={path_code}: {path_out}");
-    let path: serde_json::Value = serde_json::from_str(&path_out).unwrap();
-    assert_eq!(path["representation"], "compressed_callgraph");
-    let corridor_names = path["nodes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|node| node["name"].as_str())
-        .collect::<std::collections::HashSet<_>>();
-    for hop in &chain {
-        assert!(
-            corridor_names.contains(hop.as_str()),
-            "finding hop `{hop}` missing from exact {source_name}->{sink_name} corridor: {path_out}"
-        );
-    }
-}
-
-/// Export's compressed callgraph must contain every edge in `path`'s exact
-/// compressed corridor. Neither surface materializes concrete route rows.
-#[test]
-fn export_contains_exact_path_corridor_edges() {
-    let Some(_) = bin_path() else { return };
-    let w = ws("python", "language_gauntlet");
-    let Some((out, _, _)) = run(&["export", &w]) else {
-        return;
-    };
-    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    let tg = &parsed["taint_graph"];
-    let fns = tg["functions"].as_array().unwrap();
-    let id_to_name: std::collections::HashMap<u64, String> = fns
-        .iter()
-        .filter_map(|f| {
-            let id = f.get("func_id").and_then(|v| v.as_u64())?;
-            let n = f.get("name").and_then(|v| v.as_str())?;
-            Some((id, n.to_string()))
-        })
-        .collect();
-    assert_eq!(tg["chains_mode"], "compressed_callgraph");
-    assert!(tg["chains"].as_array().is_some_and(Vec::is_empty));
-
-    let Some((path_out, _, path_code)) = run(&[
-        "path",
-        &w,
-        "--from",
-        "handle_request",
-        "--to",
-        "execute",
-        "--format",
-        "json",
-        "--all",
-    ]) else {
-        return;
-    };
-    assert_eq!(path_code, 0, "path ec={path_code}: {path_out}");
-    let path: serde_json::Value = serde_json::from_str(&path_out).unwrap();
-    assert_eq!(path["representation"], "compressed_callgraph");
-    assert!(path["edge_count"].as_u64().unwrap_or(0) > 0);
-
-    let exported_edges: std::collections::HashSet<(u64, u64)> = tg["call_edges"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|edge| Some((edge["from"].as_u64()?, edge["to"].as_u64()?)))
-        .collect();
-    for edge in path["edges"].as_array().into_iter().flatten() {
-        let caller = edge["caller_name"].as_str().expect("path edge caller");
-        let callee = edge["callee_name"].as_str().expect("path edge callee");
-        let from_ids = id_to_name
-            .iter()
-            .filter_map(|(&id, name)| (name == caller).then_some(id));
-        let to_ids = id_to_name
-            .iter()
-            .filter_map(|(&id, name)| (name == callee).then_some(id))
-            .collect::<Vec<_>>();
-        assert!(
-            from_ids
-                .into_iter()
-                .any(|from| { to_ids.iter().any(|to| exported_edges.contains(&(from, *to))) }),
-            "exported compressed callgraph is missing path edge {caller} -> {callee}"
-        );
-    }
-}
 
 /// `security taint-analysis` must produce identical stable finding_ids on
 /// two consecutive runs — the taint graph is deterministic.

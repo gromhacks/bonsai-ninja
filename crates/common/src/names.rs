@@ -65,6 +65,20 @@ pub fn declaration_qualified_suffix<'a>(decl_name: &str, qualified_name: &'a str
     if decl_name.is_empty() || qualified_name.is_empty() {
         return None;
     }
+    // Fast path: the declaration name is the final segment, which is the
+    // common shape (`pkg.Class.method` / `method`). The general search below
+    // returns the last boundary-aligned occurrence, and a boundary-aligned
+    // suffix is always that occurrence, so both paths agree.
+    if let Some(prefix) = qualified_name.strip_suffix(decl_name) {
+        if prefix.is_empty()
+            || prefix
+                .chars()
+                .next_back()
+                .is_some_and(|ch| !is_name_segment_char(ch))
+        {
+            return Some(&qualified_name[prefix.len()..]);
+        }
+    }
     qualified_name
         .match_indices(decl_name)
         .filter_map(|(start, matched)| {
@@ -385,6 +399,24 @@ pub fn ensure_cache_directory_writable(directory: &std::path::Path) -> bool {
         }
     }
     false
+}
+
+/// Shared root holding every workspace cache entry
+/// (`<cache>/bonsai-ninja/workspaces`). `None` when `BONSAI_WORKSPACE_DIR`
+/// pins caches elsewhere: those entries are not siblings the engine may
+/// reason about.
+#[must_use]
+pub fn default_workspaces_cache_root() -> Option<std::path::PathBuf> {
+    if std::env::var_os("BONSAI_WORKSPACE_DIR").is_some_and(|raw| !raw.is_empty()) {
+        return None;
+    }
+    let system_root = dirs::cache_dir();
+    let temporary_root = std::env::temp_dir();
+    let base = match system_root.as_deref() {
+        Some(root) if ensure_cache_directory_writable(&root.join("bonsai-ninja").join("workspaces")) => root,
+        _ => temporary_root.as_path(),
+    };
+    Some(base.join("bonsai-ninja").join("workspaces"))
 }
 
 fn default_workspace_bonsai_dir(

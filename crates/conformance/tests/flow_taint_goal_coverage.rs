@@ -155,9 +155,7 @@ fn flow_taint_cli_command_surfaces_have_per_language_behavioral_coverage() {
             "micro_args_shape",
             "micro_refs_verify_token",
             "micro_inspect_reaches_run_admin_command",
-            "micro_trace_handler",
-            "micro_path_handler_to_verifier",
-            "micro_slice_action_at_update_call",
+            "micro_inspect_corridor_handler_to_verifier",
             "micro_dump_edges",
             "micro_dump_resolution",
             "micro_dump_resolve_handler",
@@ -188,10 +186,7 @@ fn flow_taint_cli_command_surfaces_have_per_language_behavioral_coverage() {
             "\"refs\"",
             "\"dump-edges\"",
             "\"dump-resolution\"",
-            "\"path\"",
-            "\"slice\"",
-            "\"inspect\"",
-            "\"trace\"",
+            "\"inspect-graph\"",
             "every_command_json_wraps_when_context_is_set",
             "every_command_page_2_resolves",
             "every_command_page_object_has_cursor_and_is_last",
@@ -225,9 +220,6 @@ fn sdk_parity_covers_all_flow_taint_commands_for_every_language() {
             "index_and_diagnostics_cli_json_match_sdk_for_every_language",
             "browse_fact_commands_cli_json_match_sdk_for_every_language",
             "dump_and_trace_commands_cli_json_match_sdk_for_every_language",
-            "slice_cli_json_matches_sdk_facade",
-            "fn slice_site",
-            "non-empty syntax-derived slice",
             "cache_commands_cli_json_match_sdk_facade",
             "read_file_cli_json_matches_sdk_facade",
             "inspect_structural_flow_ids_match_sdk_facade",
@@ -256,11 +248,8 @@ fn sdk_parity_covers_all_flow_taint_commands_for_every_language() {
             "\"refs\"",
             "\"dump-edges\"",
             "\"dump-resolution\"",
-            "\"path\"",
-            "\"slice\"",
             "\"dump-resolve\"",
             "\"dump-taint\"",
-            "\"trace\"",
             "\"export\"",
         ],
     );
@@ -592,7 +581,7 @@ fn generated_capability_docs_and_diagnostics_stay_linked() {
     assert_contains_all(
         "CLI diagnostics command",
         &cli_diagnostics,
-        &["diagnostics_report", "serde_json::to_string_pretty"],
+        &["diagnostics_report"],
     );
 
     let parity = read("crates/cli/tests/sdk_cli_parity.rs");
@@ -613,8 +602,8 @@ fn cli_reference_documents_stable_id_and_cache_surfaces() {
         "CLI reference stable id surface",
         &cli_reference,
         &[
-            "| `F:` | `inspect --flow`",
-            "| `G:` | `inspect --group`",
+            "| `F:` | `inspect-graph --flow`",
+            "| `G:` | `inspect-graph --group`",
             "| `T:` | raw inspect taint path",
             "| `E:` | `dump-edges --edge`",
             "| `N:` | `dump-ast --node`",
@@ -749,12 +738,6 @@ fn relevance_ranking_runs_before_render_budget_across_shared_surfaces() {
             "nearest_path_suggestions",
             "score_a.cmp(score_b)",
         ],
-    );
-    let trace = read("crates/cli/src/commands/trace.rs");
-    assert_contains_all(
-        "trace suggestion relevance",
-        &trace,
-        &["let mut scored", "score += 80", "scored.sort_by"],
     );
     let security = read("crates/security/src/analysis/mod.rs");
     assert_contains_all(

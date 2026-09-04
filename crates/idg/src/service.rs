@@ -218,7 +218,7 @@ struct UnifiedAddressSpace {
 /// same immutable graph generation; it never admits or suppresses a semantic
 /// edge. Keeping the wire version separate lets us evolve this acceleration
 /// layer without conflating it with the canonical workspace IDG ABI.
-const IDG_QUERY_ACCELERATOR_VERSION: u32 = 6;
+const IDG_QUERY_ACCELERATOR_VERSION: u32 = 7;
 const IDG_QUERY_CORE_MAGIC: [u8; 8] = *b"BNSIQC01";
 const IDG_QUERY_CORE_COUNT_FIELDS: usize = 12;
 const IDG_QUERY_CORE_HEADER_BYTES: u64 = 8 + 4 + 1 + 3 + 4 + (IDG_QUERY_CORE_COUNT_FIELDS as u64 * 8);
@@ -761,7 +761,7 @@ struct SymbolicRuntimeIndex {
 // Older accelerators remain semantically valid as IDG bodies, but must rebuild
 // this derived query product before symbolic closure can distinguish a real
 // `sink(record)` read from a scalar carrier used by a resolved local call.
-const SYMBOLIC_RUNTIME_ACCELERATOR_VERSION: u32 = 6;
+const SYMBOLIC_RUNTIME_ACCELERATOR_VERSION: u32 = 7;
 
 #[derive(serde::Serialize)]
 struct PersistedSymbolicRuntimeRef<'a> {
@@ -914,6 +914,7 @@ impl PersistedSymbolicRuntime {
             take_blob(QueryAcceleratorBlobKind::ReverseScalarTransforms)?,
         )
         .map_err(invalid_query_accelerator)?;
+        let persisted_demand = blobs.remove(&QueryAcceleratorBlobKind::SymbolicFieldDemand);
         if !blobs.is_empty() {
             return Err(invalid_query_accelerator(
                 "workspace IDG symbolic accelerator has unknown blob relations",
@@ -923,7 +924,7 @@ impl PersistedSymbolicRuntime {
             SymbolicBaseRebaseIndex::specs(workspace.symbolic_field()),
             &persisted.fields,
         );
-        Ok(SymbolicRuntimeIndex {
+        let runtime = SymbolicRuntimeIndex {
             fields: persisted.fields,
             spans: persisted.spans,
             ordering_sensitive_bases: persisted.ordering_sensitive_bases,
@@ -943,32 +944,74 @@ impl PersistedSymbolicRuntime {
             fact_pages: Mutex::new(fact_pages),
             transforms: Mutex::new(transforms),
             field_demands: std::array::from_fn(|_| OnceLock::new()),
-        })
+        };
+        if let Some(blob) = persisted_demand {
+            let len = usize::try_from(blob.len())
+                .map_err(|_| invalid_query_accelerator("demand blob too large"))?;
+            let mut bytes = vec![0_u8; len];
+            blob.read_exact_at(0, &mut bytes)?;
+            let demand = SymbolicFieldDemand::decode(&bytes).map_err(invalid_query_accelerator)?;
+            let _ = runtime.field_demands[0].set(Arc::new(demand));
+        }
+        Ok(runtime)
     }
 }
 
-/// Exact field suffixes that can reach some real adapter-lowered projected
-/// place through the symbolic transform algebra.
+/// Compiler bases from which some adapter-lowered projected place or
+/// aggregate read is reachable through the symbolic transform algebra.
 ///
-/// The relation is compiled backward from the finite syntax fact set.  It is
-/// intentionally independent of any source query: callers may carry an
-/// aggregate through arbitrarily many wrappers, but a scalar carrier cannot
-/// acquire invented descendants merely because the same field spelling exists
-/// elsewhere in the workspace.  The sparse set spills exactly when required;
-/// representation changes never cap or approximate the fixed point.
+/// The demand prunes symbolic facts a closure would otherwise track for
+/// nothing: a fact at a base that can never reach a projected place cannot
+/// contribute a flow. It is kept at base granularity on purpose. The exact
+/// (base, field) closure of a whole workspace grows past tens of millions of
+/// keys and cannot be loaded per query, while the base closure is one bit
+/// per base (well under a megabyte for hundreds of thousands of bases),
+/// compiles in seconds, and is a sound superset of the field-level demand:
+/// every field of an undemanded base is undemanded, so results are
+/// identical and only pruning work differs.
 struct SymbolicFieldDemand {
-    facts: SpillSet,
-    wildcard_bases: SpillSet,
+    /// One bit per base id; `demanded` counts the set bits.
+    bases: Box<[u64]>,
+    demanded: u64,
 }
 
 impl SymbolicFieldDemand {
-    fn is_empty(&self) -> bool {
-        self.facts.len() == 0 && self.wildcard_bases.len() == 0
+    fn from_bits(bits: Vec<u64>) -> Self {
+        let demanded = bits.iter().map(|word| u64::from(word.count_ones())).sum();
+        Self {
+            bases: bits.into_boxed_slice(),
+            demanded,
+        }
     }
 
-    fn contains(&self, base: u32, field: u32) -> bool {
-        self.wildcard_bases.contains(u128::from(base))
-            || self.facts.contains(u128::from(symbolic_fact_key(base, field)))
+    fn is_empty(&self) -> bool {
+        self.demanded == 0
+    }
+
+    fn contains(&self, base: u32, _field: u32) -> bool {
+        self.bases
+            .get(base as usize / u64::BITS as usize)
+            .is_some_and(|word| word & (1_u64 << (base % u64::BITS)) != 0)
+    }
+
+    /// Persisted form: little-endian words of the bitset.
+    fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.bases.len() * 8);
+        for word in self.bases.iter() {
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() % 8 != 0 {
+            return Err("symbolic field demand blob has a malformed length".to_string());
+        }
+        let bits = bytes
+            .chunks_exact(8)
+            .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("eight-byte word")))
+            .collect::<Vec<_>>();
+        Ok(Self::from_bits(bits))
     }
 }
 
@@ -4401,6 +4444,14 @@ impl IdgQueryService {
         let fact_source_file = symbolic.fact_sources.snapshot_file()?;
         let reverse_transform_file = symbolic.reverse_transforms.snapshot_file()?;
         let reverse_scalar_file = symbolic.reverse_scalar_transforms.snapshot_file()?;
+        // The base-level field demand is a pure function of this runtime:
+        // compile it once here and persist it so warm queries load it.
+        let demand_file = {
+            let demand = Self::compile_symbolic_field_demand(&symbolic);
+            let mut file = tempfile::tempfile()?;
+            file.write_all(&demand.encode())?;
+            Arc::new(file)
+        };
         bonsai_diagnostics::debug_log!(
             "idg-query",
             "compile accelerator symbolic-files-ready rss_mib={}",
@@ -4418,6 +4469,7 @@ impl IdgQueryService {
                 QueryAcceleratorBlobKind::ReverseScalarTransforms,
                 reverse_scalar_file,
             )?,
+            compiled_query_blob(QueryAcceleratorBlobKind::SymbolicFieldDemand, demand_file)?,
         ]);
         Ok(CompiledQueryAccelerator {
             core,
@@ -4795,6 +4847,39 @@ impl IdgQueryService {
         visit: impl FnMut(FuncId, Vec<Vec<String>>) -> Result<(), E>,
     ) -> Result<(), E> {
         crate::function_summary::try_visit_local_storage_taint_by_param(&self.workspace, funcs, visit)
+    }
+
+    /// The read nodes the projected (allocation-insensitive) heap relation
+    /// feeds from one write node, across functions.
+    ///
+    /// This is the same relation the forward closure follows at a storage
+    /// boundary; function-local summaries use it to join a tainted write to
+    /// the reads it can reach without re-running a whole-graph closure.
+    #[must_use]
+    pub fn projected_heap_targets(&self, node: WsNodeId) -> Vec<WsNodeId> {
+        let unified = self.ensure_unified();
+        let contextual = self.ensure_contextual_summary_runtime(&unified, None);
+        let mut targets = Vec::new();
+        contextual
+            .heap_by_from
+            .visit(NodeId(node.0), |edge| targets.push(WsNodeId(edge.target.0)));
+        targets.sort_unstable();
+        targets.dedup();
+        targets
+    }
+
+    /// Every workspace node owned by `func`, in address order.
+    ///
+    /// Function-local summary queries seed one compiler place at a time;
+    /// this is the exact inventory they choose from, with no name matching.
+    #[must_use]
+    pub fn nodes_of_func(&self, func: FuncId) -> Vec<WsNodeId> {
+        let unified = self.ensure_unified();
+        unified
+            .nodes_by_func
+            .get(func)
+            .map(|nodes| nodes.iter().map(|node| WsNodeId(node.0)).collect())
+            .unwrap_or_default()
     }
 
     /// Resolve a [`PointRef`] back from a [`WsNodeId`].
@@ -8949,6 +9034,14 @@ impl IdgQueryService {
         reach
     }
 
+    /// Build (or load) the workspace symbolic runtime and its field demand
+    /// before a batch of rooted queries runs in parallel, so no worker
+    /// initialises them while the rest of the pool waits.
+    pub fn warm_symbolic_query_runtime(&self) {
+        let unified = self.ensure_unified();
+        let _ = self.ensure_symbolic_runtime(&unified, None);
+    }
+
     fn ensure_symbolic_runtime(
         &self,
         unified: &Arc<UnifiedAddressSpace>,
@@ -9007,71 +9100,77 @@ impl IdgQueryService {
     }
 
     fn compile_symbolic_field_demand(runtime: &SymbolicRuntimeIndex) -> Arc<SymbolicFieldDemand> {
-        // A whole value passed to an unresolved/external consumer demands
-        // every concrete suffix that can reach that compiler base. Keep this
-        // as a sparse wildcard relation instead of materializing
-        // `bases × fields`; inverse transforms propagate it exactly.
-        let mut wildcard_bases = closure_fact_store();
-        let mut pending_wildcards = pending_fact_store();
-        for &base in runtime.aggregate_reads.keys.iter() {
-            let base = u128::from(base);
-            if wildcard_bases.insert(base) {
-                pending_wildcards.push(base);
+        // Reverse closure over bases: from every base holding a projected
+        // place or an aggregate read, follow base rebases and inverse
+        // transforms. Frontier-parallel: a level's bases are expanded
+        // concurrently, discovered bases are admitted into the bitset
+        // sequentially. The order is immaterial for a set.
+        use rayon::prelude::*;
+        const DEMAND_EXPAND_CHUNK: usize = 4_096;
+        let compile_started = std::time::Instant::now();
+        let mut bits: Vec<u64> = Vec::new();
+        let admit = |bits: &mut Vec<u64>, base: u32| -> bool {
+            let word = base as usize / u64::BITS as usize;
+            if bits.len() <= word {
+                bits.resize(word + 1, 0);
             }
-        }
-        while let Some(base) = pending_wildcards.pop() {
-            let base = base as u32;
-            let mut enqueue = |base: u32| {
-                let base = u128::from(base);
-                if wildcard_bases.insert(base) {
-                    pending_wildcards.push(base);
-                }
-            };
-            for &rebase in runtime.base_rebases.outgoing(base) {
-                enqueue(rebase.target);
+            let mask = 1_u64 << (base % u64::BITS);
+            if bits[word] & mask != 0 {
+                return false;
             }
-            runtime.reverse_transforms.visit_incoming(base, |row| {
-                enqueue(row.source);
-            });
-        }
-
-        let mut facts = closure_fact_store();
-        let mut pending = pending_fact_store();
-        for &key in &runtime.projected_fact_keys {
-            let key = u128::from(key);
-            if facts.insert(key) {
-                pending.push(key);
-            }
-        }
-        while let Some(key) = pending.pop() {
-            let key = key as u64;
+            bits[word] |= mask;
+            true
+        };
+        let mut frontier: Vec<u32> = Vec::new();
+        for &key in runtime.projected_fact_keys.iter() {
             let base = (key >> 32) as u32;
-            let field = key as u32;
-            let mut enqueue = |base: u32, field: u32| {
-                let key = u128::from(symbolic_fact_key(base, field));
-                if facts.insert(key) {
-                    pending.push(key);
-                }
-            };
-            for &rebase in runtime.base_rebases.outgoing(base) {
-                if let Some(rebased_field) = runtime.rebased_field(rebase, field) {
-                    enqueue(rebase.target, rebased_field);
+            if admit(&mut bits, base) {
+                frontier.push(base);
+            }
+        }
+        for &base in runtime.aggregate_reads.keys.iter() {
+            if admit(&mut bits, base) {
+                frontier.push(base);
+            }
+        }
+        let seeds = frontier.len();
+        let mut visited = 0_u64;
+        while !frontier.is_empty() {
+            visited += frontier.len() as u64;
+            let expanded: Vec<Vec<u32>> = frontier
+                .par_chunks(DEMAND_EXPAND_CHUNK)
+                .map(|chunk| {
+                    let mut out = Vec::with_capacity(chunk.len());
+                    for &base in chunk {
+                        for &rebase in runtime.base_rebases.outgoing(base) {
+                            out.push(rebase.target);
+                        }
+                        runtime.reverse_transforms.visit_incoming(base, |row| {
+                            out.push(row.source);
+                        });
+                    }
+                    out
+                })
+                .collect();
+            let mut next: Vec<u32> = Vec::new();
+            for candidates in expanded {
+                for base in candidates {
+                    if admit(&mut bits, base) {
+                        next.push(base);
+                    }
                 }
             }
-            runtime.reverse_transforms.visit_incoming(base, |row| {
-                enqueue(row.source, field);
-            });
+            frontier = next;
         }
-        let demand = Arc::new(SymbolicFieldDemand {
-            facts,
-            wildcard_bases,
-        });
+        let demand = Arc::new(SymbolicFieldDemand::from_bits(bits));
         bonsai_diagnostics::debug_log!(
             "idg-query",
-            "symbolic field demand ready syntax_facts={} demanded_facts={} wildcard_bases={}",
+            "symbolic field demand ready syntax_facts={} seeds={} demanded_bases={} visited={} elapsed={:.3}s",
             runtime.projected_fact_keys.len(),
-            demand.facts.len(),
-            demand.wildcard_bases.len(),
+            seeds,
+            demand.demanded,
+            visited,
+            compile_started.elapsed().as_secs_f64(),
         );
         demand
     }
@@ -9095,6 +9194,7 @@ impl IdgQueryService {
                         | QueryAcceleratorBlobKind::FactSources
                         | QueryAcceleratorBlobKind::ReverseSymbolicTransforms
                         | QueryAcceleratorBlobKind::ReverseScalarTransforms
+                        | QueryAcceleratorBlobKind::SymbolicFieldDemand
                 )
             })
             .map(|(kind, blob)| (*kind, blob.clone()))

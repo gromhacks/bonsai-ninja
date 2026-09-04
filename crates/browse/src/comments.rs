@@ -6,7 +6,7 @@ use crate::common::{
 };
 use crate::strings::enclosing_fn_for_index_line;
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Copy, Clone, Default, Debug)]
 pub struct CommentsFilters<'a> {
@@ -27,7 +27,7 @@ pub struct CommentsFilters<'a> {
     pub regex: bool,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CommentOut {
     pub text: String,
     pub kind: String,

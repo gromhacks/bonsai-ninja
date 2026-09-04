@@ -11,7 +11,7 @@ use bonsai_common::{FuncId, Span, SymbolId};
 use bonsai_hash::edge_id_low32;
 use bonsai_lang_api::{CallArg, Decl, FlowEvent};
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Filter bundle for [`dump_edges`]. Match-anywhere semantics on
 /// `from`/`to`; an `edge_id` filter narrows to a single edge.
@@ -28,7 +28,7 @@ pub struct EdgesFilters<'a> {
 /// `resolver_stage` / `evidence` / `confidence` are forwarded from the
 /// shared resolver provenance on the call edge; the dump layer does not
 /// infer or rewrite them.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, Deserialize)]
 pub struct EdgeRecord {
     pub edge_id: String,
     pub caller_name: String,
@@ -85,6 +85,9 @@ pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
     }
     let global = ws.compiler_header_index();
     let resolved = ws.cached_resolved_call_graph();
+    // Call previews come from one walk of each caller's flow events, shared
+    // by every edge that caller owns.
+    let mut call_texts = CallTextIndex::default();
     let mut records: Vec<EdgeRecord> = resolved
         .inner()
         .edges
@@ -100,7 +103,7 @@ pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
             }) {
                 return None;
             }
-            let record = edge_record_from_decls(ws, caller_decl, callee_decl, edge);
+            let record = edge_record_from_decls(ws, caller_decl, callee_decl, edge, &mut call_texts);
             Some(record)
         })
         .collect();
@@ -291,11 +294,79 @@ fn sort_edge_records(records: &mut [EdgeRecord]) {
     });
 }
 
+/// Call-site previews per caller: every `Call` / call-valued `Assign` event
+/// of a callable is indexed by span once, so rendering N edges of one caller
+/// walks its flow events once instead of N times.
+#[derive(Default)]
+struct CallTextIndex {
+    by_caller: ahash::AHashMap<SymbolId, Vec<(Span, String)>>,
+}
+
+impl CallTextIndex {
+    fn call_text(&mut self, ws: &Workspace, caller_decl: &Decl, edge: &CallEdge) -> Option<String> {
+        let entries = self.by_caller.entry(caller_decl.symbol).or_insert_with(|| {
+            let mut out = Vec::new();
+            collect_call_previews(&caller_decl.flow_events, &mut out);
+            out
+        });
+        entries
+            .iter()
+            .find(|(span, _)| spans_overlap(*span, edge.span))
+            .map(|(_, text)| text.clone())
+            .or_else(|| call_text_for_span(ws, edge.span))
+    }
+}
+
+fn collect_call_previews(events: &[FlowEvent], out: &mut Vec<(Span, String)>) {
+    for event in events {
+        match event {
+            FlowEvent::Call { span, name, args, .. } => out.push((*span, render_call_preview(name, args))),
+            FlowEvent::Assign {
+                span,
+                source_call: Some(name),
+                source_call_args,
+                ..
+            } => out.push((*span, render_assign_call_preview(name, source_call_args))),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_call_previews(then_events, out);
+                collect_call_previews(else_events, out);
+            }
+            FlowEvent::Loop {
+                condition_events,
+                body,
+                update_events,
+                ..
+            } => {
+                collect_call_previews(condition_events, out);
+                collect_call_previews(body, out);
+                collect_call_previews(update_events, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => collect_call_previews(body, out),
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_call_previews(body, out);
+                collect_call_previews(catch_events, out);
+                collect_call_previews(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn edge_record_from_decls(
     ws: &Workspace,
     caller_decl: &Decl,
     callee_decl: &Decl,
     edge: &CallEdge,
+    call_texts: &mut CallTextIndex,
 ) -> EdgeRecord {
     let (caller_file, caller_line, _) = format_span(&caller_decl.name_span, ws);
     let (callee_file, callee_line, _) = format_span(&callee_decl.name_span, ws);
@@ -317,7 +388,9 @@ fn edge_record_from_decls(
         call_file,
         call_line,
         call_column,
-        call_text: call_text_for_edge(ws, caller_decl, edge).unwrap_or_else(|| callee_decl.name.clone()),
+        call_text: call_texts
+            .call_text(ws, caller_decl, edge)
+            .unwrap_or_else(|| callee_decl.name.clone()),
         kind: edge_kind_display(edge.kind).to_string(),
         resolver_stage: edge.provenance.resolver_stage().to_string(),
         evidence: edge.provenance.evidence().to_string(),
@@ -332,73 +405,6 @@ fn edge_kind_display(kind: EdgeKind) -> &'static str {
         EdgeKind::Indirect => "indirect",
         EdgeKind::Unknown => "unknown",
     }
-}
-
-fn call_text_for_edge(ws: &Workspace, caller_decl: &Decl, edge: &CallEdge) -> Option<String> {
-    call_text_for_flow_event(&caller_decl.flow_events, edge.span)
-        .or_else(|| call_text_for_span(ws, edge.span))
-}
-
-fn call_text_for_flow_event(events: &[FlowEvent], target: Span) -> Option<String> {
-    for event in events {
-        match event {
-            FlowEvent::Call { span, name, args, .. } if spans_overlap(*span, target) => {
-                return Some(render_call_preview(name, args))
-            }
-            FlowEvent::Assign {
-                span,
-                source_call: Some(name),
-                source_call_args,
-                ..
-            } if spans_overlap(*span, target) => {
-                return Some(render_assign_call_preview(name, source_call_args))
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                if let Some(found) = call_text_for_flow_event(then_events, target)
-                    .or_else(|| call_text_for_flow_event(else_events, target))
-                {
-                    return Some(found);
-                }
-            }
-            FlowEvent::Loop {
-                condition_events,
-                body,
-                update_events,
-                ..
-            } => {
-                if let Some(found) = call_text_for_flow_event(condition_events, target)
-                    .or_else(|| call_text_for_flow_event(body, target))
-                    .or_else(|| call_text_for_flow_event(update_events, target))
-                {
-                    return Some(found);
-                }
-            }
-            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if let Some(found) = call_text_for_flow_event(body, target) {
-                    return Some(found);
-                }
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                if let Some(found) = call_text_for_flow_event(body, target)
-                    .or_else(|| call_text_for_flow_event(catch_events, target))
-                    .or_else(|| call_text_for_flow_event(finally_events, target))
-                {
-                    return Some(found);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 fn spans_overlap(left: Span, right: Span) -> bool {

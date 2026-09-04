@@ -12,7 +12,7 @@ use crate::common::{
 };
 use bonsai_lang_api::DeclKind;
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Filter bundle for [`classes`].
 #[derive(Copy, Clone, Default, Debug)]
@@ -35,7 +35,7 @@ pub struct ClassesFilters<'a> {
 }
 
 /// One row of `classes` output.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClassOut {
     pub name: String,
     /// Lowercased [`DeclKind`] tag — `"class"`, `"struct"`,

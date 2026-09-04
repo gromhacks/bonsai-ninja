@@ -205,14 +205,9 @@ fn rules_dir() -> PathBuf {
 /// the invariant below fails when a public command is added without scale
 /// ownership.
 const LARGE_REPO_COMMAND_COVERAGE: &[&str] = &[
-    "inspect",
-    "symbol-summary",
-    "trace",
-    "path",
-    "slice",
+    "inspect-graph",
     "show",
     "index",
-    "context",
     "export",
     "cache stats",
     "cache clear",
@@ -235,6 +230,7 @@ const LARGE_REPO_COMMAND_COVERAGE: &[&str] = &[
     "security sinks",
     "security sanitizers",
     "security deps",
+    "security dependency-analysis",
     "security taint-analysis",
     "security source-analysis",
     "security sink-analysis",
@@ -565,22 +561,10 @@ fn elasticsearch_remaining_compiler_command_surfaces_do_not_regress() {
     };
     ensure_elasticsearch_semantic_cache(&bin, &es);
     let commands: &[(&str, &[&str])] = &[
-        ("context", &["context", "{es}", "--context", "4k"]),
         (
-            "trace",
+            "inspect-graph corridor",
             &[
-                "trace",
-                "{es}",
-                "--symbol",
-                "client.rest.org.elasticsearch.client.RestClient.convertResponse",
-                "--context",
-                "4k",
-            ],
-        ),
-        (
-            "path",
-            &[
-                "path",
+                "inspect-graph",
                 "{es}",
                 "--from",
                 "performRequestAsync",
@@ -590,21 +574,6 @@ fn elasticsearch_remaining_compiler_command_surfaces_do_not_regress() {
                 "json",
                 "--context",
                 "4k",
-            ],
-        ),
-        (
-            "slice",
-            &[
-                "slice",
-                "{es}",
-                "--symbol",
-                "internalRequest",
-                "--file",
-                "client/rest/src/main/java/org/elasticsearch/client/RestClient.java",
-                "--line",
-                "291",
-                "--format",
-                "json",
             ],
         ),
         ("diagnostics", &["diagnostics", "{es}"]),
@@ -762,19 +731,6 @@ fn elasticsearch_remaining_compiler_command_surfaces_do_not_regress() {
                 "4k",
             ],
         ),
-        (
-            "symbol-summary",
-            &[
-                "symbol-summary",
-                "{es}",
-                "--symbol",
-                "client.rest.org.elasticsearch.client.RestClient.convertResponse",
-                "--format",
-                "json",
-                "--context",
-                "4k",
-            ],
-        ),
     ];
 
     for (name, command) in commands {
@@ -790,13 +746,6 @@ fn elasticsearch_remaining_compiler_command_surfaces_do_not_regress() {
             !out.trim().is_empty(),
             "Elasticsearch compiler command {name} returned empty output"
         );
-        if *name == "path" {
-            let parsed: serde_json::Value = serde_json::from_str(&out).expect("Elasticsearch path JSON");
-            assert!(
-                parsed["edge_count"].as_u64().is_some_and(|count| count > 0),
-                "Elasticsearch path lost its exact compiler corridor: {parsed}"
-            );
-        }
     }
 
     let edge_args = es_args(
@@ -856,7 +805,10 @@ fn elasticsearch_inspect_modes_do_not_regress() {
     ensure_elasticsearch_semantic_cache(&bin, &es);
     let (default_out, default_elapsed) = assert_success_timed(
         &bin,
-        &es_args(&es, &["inspect", "{es}", "--query", "execute", "--context", "8k"]),
+        &es_args(
+            &es,
+            &["inspect-graph", "{es}", "--query", "execute", "--context", "8k"],
+        ),
     );
     assert_performance(
         "Elasticsearch default inspect",
@@ -865,33 +817,12 @@ fn elasticsearch_inspect_modes_do_not_regress() {
         45,
     );
     assert!(
-        default_out.contains("inspect `execute`"),
+        default_out.contains("inspect-graph `execute`"),
         "default inspect output lost query header:\n{default_out}"
     );
-    let (taint_out, taint_elapsed) = assert_success_timed(
-        &bin,
-        &es_args(
-            &es,
-            &[
-                "inspect",
-                "{es}",
-                "--query",
-                "execute",
-                "--taint-flow",
-                "--context",
-                "8k",
-            ],
-        ),
-    );
-    assert_performance(
-        "Elasticsearch inspect --taint-flow",
-        taint_elapsed,
-        "BONSAI_ES_INSPECT_MAX_SECS",
-        45,
-    );
     assert!(
-        taint_out.contains("TAINT FLOWS") || taint_out.contains("taint flow"),
-        "explicit inspect --taint-flow did not render taint-flow evidence:\n{taint_out}"
+        default_out.contains("TAINT FLOWS") || default_out.contains("taint flow"),
+        "inspect-graph did not render taint-flow evidence:\n{default_out}"
     );
 }
 
@@ -948,18 +879,62 @@ fn elasticsearch_security_inventory_commands_do_not_regress() {
     ];
     for command in commands {
         let args = es_args(&es, command);
+        // The first run builds the complete cached inventory for the scope
+        // (every rule, then the selectors as a view); it is the only run
+        // that scans.
         let (out, elapsed) = assert_success_timed(&bin, &args);
         assert_performance(
-            &format!("Elasticsearch security inventory command {command:?}"),
+            &format!("Elasticsearch security inventory command (cold) {command:?}"),
             elapsed,
-            "BONSAI_ES_SECURITY_INVENTORY_MAX_SECS",
-            35,
+            "BONSAI_ES_SECURITY_INVENTORY_COLD_MAX_SECS",
+            60,
         );
         assert!(
             !out.trim().is_empty(),
             "bonsai-ninja {command:?} produced empty stdout"
         );
+        // Every later view over the same scope replays the cached object:
+        // this is the contract that sub-command filters never re-scan.
+        let (warm, elapsed) = assert_success_timed(&bin, &args);
+        assert_performance(
+            &format!("Elasticsearch security inventory command (warm view) {command:?}"),
+            elapsed,
+            "BONSAI_ES_SECURITY_INVENTORY_MAX_SECS",
+            15,
+        );
+        assert_eq!(
+            warm, out,
+            "a replayed inventory view must render exactly what the cold run rendered: {command:?}"
+        );
     }
+    // `dependency-analysis` renders the taint findings each package appears
+    // in from the cached complete taint report, so its budget follows the
+    // warm taint-analysis budget rather than the inventory scan budget.
+    let args = es_args(
+        &es,
+        &[
+            "security",
+            "{es}",
+            "dependency-analysis",
+            "--severity",
+            "high",
+            "--context",
+            "4k",
+            "--rules-dir",
+            "{rules}",
+        ],
+    );
+    let (out, elapsed) = assert_success_timed(&bin, &args);
+    assert_performance(
+        "Elasticsearch security dependency-analysis",
+        elapsed,
+        "BONSAI_ES_DEPENDENCY_ANALYSIS_MAX_SECS",
+        135,
+    );
+    assert!(
+        !out.trim().is_empty(),
+        "Elasticsearch security dependency-analysis produced no output"
+    );
 }
 
 #[test]

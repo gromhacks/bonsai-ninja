@@ -53,7 +53,7 @@ pub use resources::syntax_worker_count;
 pub use resources::syntax_worker_count_for_sources;
 pub use resources::SyntaxMemoryPermitPool;
 pub use span::{LineCol, Span, SpanMap};
-pub use span_cache::{cached_span_map, cached_span_map_arc};
+pub use span_cache::{cached_span_map, cached_span_map_arc, cached_span_map_from_line_starts};
 
 // Note: a previous version of this crate exposed `FxHasher`,
 // `FxHashMap`, `FxHashSet`, `fx_hash_map`, `fx_hash_set` as a

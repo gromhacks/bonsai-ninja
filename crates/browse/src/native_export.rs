@@ -79,6 +79,8 @@ struct ExportTaintFunction {
     qualified_name: Option<String>,
     file: String,
     line: u32,
+    /// Last source line of the callable body.
+    end_line: u32,
     params: Vec<String>,
     kind: String,
 }
@@ -236,6 +238,9 @@ struct ExportTaintPropagationsRef<'a> {
 
 #[derive(Clone, Serialize)]
 struct ExportTaintRecord {
+    /// Call-site column and exact source text (the line is `call_line`).
+    call_column: u32,
+    call_text: String,
     caller: String,
     callee: String,
     call_line: u32,
@@ -294,6 +299,9 @@ struct ExportSummary {
 struct ExportFile<'a> {
     path: String,
     language: String,
+    /// Full source text; every `span`, `line`, and `start`/`end` in this
+    /// document indexes into it.
+    source: String,
     decls: Vec<ExportDecl<'a>>,
     /// File-local, flat flow-event table. Declarations reference their root
     /// events by id; every nested event references its parent and region.
@@ -318,6 +326,10 @@ struct ExportDecl<'a> {
     line: u32,
     column: u32,
     end_line: u32,
+    /// Byte offsets of the declaration (signature and body) in
+    /// `files[].source`.
+    start: u64,
+    end: u64,
     params: &'a [String],
     /// Root ids in this file's `flow_events` table, in source order.
     flow_event_ids: Vec<u64>,
@@ -771,6 +783,8 @@ struct CallEdgeOut<'a> {
     callee_kind: &'static str,
     call_site_line: u32,
     call_site_column: u32,
+    /// Exact call-site source text.
+    call_text: String,
     resolver_stage: &'a str,
     evidence: &'a str,
     confidence: u8,
@@ -782,11 +796,15 @@ struct CallEdgeOut<'a> {
 /// rebuild the same maps thousands of times.
 struct ExportSpanCache {
     files: ahash::AHashMap<FileId, (String, SpanMap)>,
+    /// Source text per file, so call sites and declarations export their
+    /// exact code alongside their coordinates.
+    texts: ahash::AHashMap<FileId, std::sync::Arc<str>>,
 }
 
 impl ExportSpanCache {
     fn new(ws: &Workspace) -> Self {
         let mut files = ahash::AHashMap::default();
+        let mut texts = ahash::AHashMap::default();
         for file in ws.db().vfs().all_files() {
             let path = ws.vfs().path(file).map_or_else(
                 |_| "<unknown>".to_string(),
@@ -794,9 +812,29 @@ impl ExportSpanCache {
             );
             if let Ok(snap) = ws.vfs().snapshot(file) {
                 files.insert(file, (path, SpanMap::new(snap.text.as_ref())));
+                texts.insert(file, std::sync::Arc::clone(&snap.text));
             }
         }
-        Self { files }
+        Self { files, texts }
+    }
+
+    /// The full source line containing `span.start`, trimmed.
+    fn line_text(&self, span: Span) -> String {
+        let Some(text) = self.texts.get(&span.file) else {
+            return String::new();
+        };
+        let start = usize::try_from(span.start).unwrap_or(0).min(text.len());
+        let line_start = text[..start].rfind('\n').map_or(0, |index| index + 1);
+        let line_end = text[start..].find('\n').map_or(text.len(), |index| start + index);
+        text[line_start..line_end].trim().to_string()
+    }
+
+    /// Full source text of `file`.
+    fn source(&self, file: FileId) -> String {
+        self.texts
+            .get(&file)
+            .map(|text| text.to_string())
+            .unwrap_or_default()
     }
 
     /// Resolve `span` to `(path, line, column)`. Falls back to
@@ -947,7 +985,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     let mut map = serializer.serialize_map(None)?;
 
     map.serialize_entry("schema", "bonsai-native-export")?;
-    map.serialize_entry("schema_version", &11_u32)?;
+    map.serialize_entry("schema_version", &12_u32)?;
     map.serialize_entry("engine_version", env!("CARGO_PKG_VERSION"))?;
     map.serialize_entry("workspace_root", &root.display().to_string())?;
     map.serialize_entry("generated_at_unix_ms", &generated_at_unix_ms())?;
@@ -1251,6 +1289,7 @@ fn build_export_file<'a>(
         return ExportFile {
             path,
             language,
+            source: spans.source(file),
             decls: Vec::new(),
             flow_events: Vec::new(),
             imports: Vec::new(),
@@ -1278,6 +1317,8 @@ fn build_export_file<'a>(
                 line,
                 column,
                 end_line: spans.end_line(decl.body_span.unwrap_or(decl.span)),
+                start: decl.span.start,
+                end: decl.span.end,
                 params: &decl.params,
                 flow_event_ids,
                 parent_symbol_id: decl.parent.map(SymbolId::raw),
@@ -1371,6 +1412,7 @@ fn build_export_file<'a>(
     ExportFile {
         path,
         language,
+        source: spans.source(file),
         decls,
         flow_events,
         imports,
@@ -1850,6 +1892,7 @@ fn export_taint_functions(
                 qualified_name: decl.qualified_name.clone(),
                 file: path,
                 line,
+                end_line: spans.end_line(decl.body_span.unwrap_or(decl.span)),
                 params: decl.params.clone(),
                 kind: format!("{:?}", decl.kind).to_lowercase(),
             });
@@ -1927,6 +1970,7 @@ impl Serialize for ExportStructuralCallgraphStreaming<'_> {
                         callee_kind: export_decl_kind_label(callee_decl.kind),
                         call_site_line,
                         call_site_column,
+                        call_text: self.spans.line_text(edge.span),
                         resolver_stage: edge.provenance.resolver_stage(),
                         evidence: edge.provenance.evidence(),
                         confidence: edge.provenance.confidence(),
@@ -1962,6 +2006,7 @@ impl Serialize for ExportStructuralCallgraphStreaming<'_> {
                         callee_kind: export_decl_kind_label(callee_decl.kind),
                         call_site_line,
                         call_site_column,
+                        call_text: self.spans.line_text(edge.span),
                         resolver_stage: edge.provenance.resolver_stage(),
                         evidence: edge.provenance.evidence(),
                         confidence: edge.provenance.confidence(),
@@ -2506,7 +2551,21 @@ fn export_taint_propagation_row_ref<'a>(
     ep: &'a ExportEntryPoint,
     entry_func: bonsai_common::FuncId,
 ) -> ExportTaintPropagationsRef<'a> {
-    let seed_nodes = canonical_token_seed_nodes(idg, entry_func, &ep.params, global);
+    // The same seed `dump-taint` uses for an entry: its parameters, or, for
+    // a parameterless entry, the locals it binds. Parameter-only seeding
+    // left every `def handle_request():` style entry with zero records.
+    let exact = ws.exact_decl(SymbolId::new(entry_func.raw()));
+    let seed_tokens: bonsai_taint::TokenSet = if ep.params.is_empty() {
+        bonsai_taint::default_entry_taint_seed(exact.as_deref())
+    } else {
+        ep.params.iter().cloned().collect()
+    };
+    let seed_nodes = bonsai_taint::compose_idg_seed_nodes_with_decl(
+        bonsai_taint::IdgSeedRequest::token_api(entry_func, &seed_tokens),
+        global,
+        idg,
+        exact.as_deref(),
+    );
     let mut cross_calls = idg.cross_call_edges_in_closure(&seed_nodes);
     sort_cross_call_edges_for_export(&mut cross_calls);
     let unique_pairs: ahash::AHashSet<(bonsai_common::FuncId, bonsai_common::FuncId)> =
@@ -2524,20 +2583,6 @@ fn export_taint_propagation_row_ref<'a>(
         pairs_analyzed: u32::try_from(pairs_analyzed).unwrap_or(u32::MAX),
         records,
     }
-}
-
-fn canonical_token_seed_nodes(
-    idg: &bonsai_idg::IdgQueryService,
-    entry_func: bonsai_common::FuncId,
-    names: &[String],
-    global: &bonsai_index::GlobalIndex,
-) -> Vec<bonsai_idg::WsNodeId> {
-    let seeds: bonsai_taint::TokenSet = names.iter().cloned().collect();
-    bonsai_taint::compose_idg_seed_nodes(
-        bonsai_taint::IdgSeedRequest::token_api(entry_func, &seeds),
-        global,
-        idg,
-    )
 }
 
 fn sort_cross_call_edges_for_export(cross_calls: &mut [CrossCallEdge]) {
@@ -2626,7 +2671,10 @@ fn export_taint_record_from_cross_call(
         Vec::new()
     };
 
+    let (_, call_column) = spans.line_col(edge.call_span);
     Some(ExportTaintRecord {
+        call_column,
+        call_text: spans.line_text(edge.call_span),
         caller: caller.name,
         callee: callee.name,
         call_line,

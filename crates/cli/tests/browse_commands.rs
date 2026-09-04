@@ -167,42 +167,43 @@ fn parse_rows(output: &str) -> Vec<serde_json::Value> {
 fn run_inspect_graph(ws: &Path, args_after_ws: &[&str]) -> Option<String> {
     let ws_str = ws.to_str().unwrap().to_string();
     let mut args: Vec<&str> = Vec::with_capacity(args_after_ws.len() + 3);
-    args.push("inspect");
+    args.push("inspect-graph");
     args.push(ws_str.as_str());
     args.extend_from_slice(args_after_ws);
     run(&args)
 }
 
-fn semantic_corridor(ws: &Path, from: &str, to: &str) -> Option<serde_json::Value> {
-    let out = run(&[
-        "path",
-        ws.to_str().unwrap(),
-        "--from",
-        from,
-        "--to",
-        to,
-        "--format",
-        "json",
-        "--all",
-    ])?;
-    Some(serde_json::from_str(&out).expect("path JSON"))
+/// Locate the `inspect-graph` declaration hit for `symbol` in a JSON report.
+fn inspect_decl_hit<'a>(report: &'a serde_json::Value, symbol: &str) -> &'a serde_json::Value {
+    report["decl_hits"]
+        .as_array()
+        .and_then(|hits| hits.iter().find(|hit| hit["symbol"].as_str() == Some(symbol)))
+        .unwrap_or_else(|| panic!("missing `{symbol}` decl hit: {report}"))
 }
 
+fn semantic_corridor(ws: &Path, from: &str, to: &str) -> Option<serde_json::Value> {
+    let out = run_inspect_graph(ws, &["--from", from, "--to", to, "--format", "json", "--all"])?;
+    Some(serde_json::from_str(&out).expect("inspect-graph corridor JSON"))
+}
+
+/// `inspect-graph --from X --to Y` is the endpoint corridor surface: the
+/// report must carry at least one compiler-backed unit (a decl hit, an
+/// occurrence hit, or an expanded taint flow) and name both endpoints. The
+/// needles match case-insensitively, so compare lowercased text.
 fn assert_semantic_corridor(lang: &str, ws: &Path, from: &str, to: &str) {
-    let graph = semantic_corridor(ws, from, to).expect("path command available");
-    assert_eq!(
-        graph["representation"], "compressed_callgraph",
-        "[{lang}] {graph}"
-    );
-    let declared_corridor =
-        graph["node_count"].as_u64().unwrap_or(0) >= 2 && graph["edge_count"].as_u64().unwrap_or(0) >= 1;
-    let external_terminal = graph["node_count"].as_u64().unwrap_or(0) >= 1
-        && graph["terminal_calls"]
-            .as_array()
-            .is_some_and(|calls| !calls.is_empty());
+    let report = semantic_corridor(ws, from, to).expect("inspect-graph corridor available");
+    let summary = &report["summary"];
+    let units = summary["total_decl_hits"].as_u64().unwrap_or(0)
+        + summary["total_hits"].as_u64().unwrap_or(0)
+        + summary["total_taint_flows"].as_u64().unwrap_or(0);
     assert!(
-        declared_corridor || external_terminal,
-        "[{lang}] missing compiler-resolved corridor or exact terminal-call evidence {from} -> {to}: {graph}"
+        units > 0,
+        "[{lang}] missing compiler-resolved corridor {from} -> {to}: {report}"
+    );
+    let rendered = report.to_string().to_lowercase();
+    assert!(
+        rendered.contains(&from.to_lowercase()) && rendered.contains(&to.to_lowercase()),
+        "[{lang}] corridor {from} -> {to} must name both endpoints: {report}"
     );
 }
 
@@ -798,8 +799,8 @@ fn index_structural_only_does_not_write_semantic_sidecars() {
         "`index --structural-only` must not write the flow-id sidecar"
     );
     assert!(
-        !cache.join("manifest.json").exists(),
-        "`index --structural-only` must not publish a semantic cache manifest"
+        cache.join("manifest.json").exists(),
+        "`index --structural-only` publishes the cache manifest (source identities and coverage) without semantic sidecars"
     );
 }
 
@@ -882,8 +883,12 @@ fn index_default_stays_structural_and_does_not_write_semantic_sidecars() {
         "`index` should stay structural by default and avoid the flow-id factstore: {stats_out}"
     );
     assert_eq!(
-        stats["manifest_exists"], false,
-        "`index` should not publish a semantic cache manifest by default: {stats_out}"
+        stats["manifest_exists"], true,
+        "`index` publishes the cache manifest so later opens can intern unchanged sources by identity: {stats_out}"
+    );
+    assert_eq!(
+        stats["validation"]["semantic_ready"], false,
+        "`index` must not report semantic readiness without semantic sidecars: {stats_out}"
     );
 }
 
@@ -932,399 +937,21 @@ fn index_semantic_flag_writes_shared_semantic_sidecars() {
         "`cache stats` should report validated semantic readiness: {stats_out}"
     );
 
-    let Some(path_out) = run(&[
-        "path",
-        tmp.to_str().unwrap(),
-        "--from",
-        "handle",
-        "--to",
-        "sink",
-        "--format",
-        "json",
-    ]) else {
+    let Some(inspect_out) = run_inspect_graph(&tmp, &["--query", "sink", "--format", "json", "--all"]) else {
         return;
     };
-    let path: serde_json::Value = serde_json::from_str(&path_out).expect("path JSON");
-    assert_eq!(
-        path["idg_available"], true,
-        "`path` should hydrate and use the warmed IDG sidecar after `index --semantic`: {path_out}"
+    let inspect: serde_json::Value = serde_json::from_str(&inspect_out).expect("inspect-graph JSON");
+    let summary = &inspect["summary"];
+    assert!(
+        summary["semantic_flow_entry_queries"].as_u64().unwrap_or(0) > 0,
+        "`inspect-graph` should expand taint flows through the warmed workspace after `index --semantic`: {inspect_out}"
     );
     assert!(
-        path["backends"]
-            .as_array()
-            .is_some_and(|backends| backends.iter().any(|backend| backend == "warmed-idg-cross-call")),
-        "`path` should report the warmed IDG backend after semantic indexing: {path_out}"
+        summary["semantic_flow_backend_counts"]
+            .as_object()
+            .is_some_and(|backends| backends.contains_key("warmed-idg-target-cut")),
+        "`inspect-graph` should hydrate and use the warmed IDG sidecar after `index --semantic`: {inspect_out}"
     );
-}
-
-#[test]
-fn path_and_slice_text_summaries_are_polished() {
-    let ws = ws_path();
-    let ws_str = ws.to_str().unwrap();
-
-    let Some(path_out) = run(&[
-        "path",
-        ws_str,
-        "--from",
-        "handle_request",
-        "--to",
-        "run_admin_command",
-        "--context",
-        "4k",
-    ]) else {
-        return;
-    };
-    // Status depends on whether the fixture's semantic sidecar is warm
-    // (`index --semantic` flips it to complete) — assert the human label,
-    // not the cache state.
-    assert!(
-        path_out.contains("status complete") || path_out.contains("status incomplete"),
-        "path summary should render a human status label:\n{path_out}"
-    );
-    assert!(
-        path_out.contains("IDG") && path_out.contains("semantic edge"),
-        "path summary should render IDG availability with a count phrase:\n{path_out}"
-    );
-    for raw in [
-        "complete no",
-        "idg available",
-        "idg edges",
-        "resolved-callgraph,warmed",
-    ] {
-        assert!(
-            !path_out.contains(raw),
-            "path summary leaked old/raw wording `{raw}`:\n{path_out}"
-        );
-    }
-
-    let Some(slice_out) = run(&[
-        "slice",
-        ws_str,
-        "--symbol",
-        "user_id",
-        "--line",
-        "12",
-        "--file",
-        "user_service.py",
-        "--context",
-        "4k",
-    ]) else {
-        return;
-    };
-    assert!(
-        slice_out.contains("limit") && slice_out.contains("uncapped"),
-        "slice summary should render the step limit as prose:\n{slice_out}"
-    );
-    assert!(
-        slice_out.contains("status") && slice_out.contains("incomplete"),
-        "slice summary should render a human status label:\n{slice_out}"
-    );
-    assert!(
-        !slice_out.contains("run `bonsai-ninja index --semantic`"),
-        "slice must compute its selected value-flow projection on demand instead of prescribing an artifact that semantic indexing intentionally does not build:\n{slice_out}"
-    );
-    for raw in ["complete no", "max steps"] {
-        assert!(
-            !slice_out.contains(raw),
-            "slice summary leaked old/raw wording `{raw}`:\n{slice_out}"
-        );
-    }
-}
-
-#[test]
-fn slice_accepts_the_one_based_declaration_line_printed_by_defs() {
-    let ws = repo_root().join("examples/python/language_gauntlet");
-    let Some(out) = run(&[
-        "slice",
-        ws.to_str().unwrap(),
-        "--symbol",
-        "execute",
-        "--file",
-        "infrastructure/executor.py",
-        "--line",
-        "25",
-        "--all",
-    ]) else {
-        return;
-    };
-    assert!(
-        out.contains("in execute") && !out.contains("no callable contains line 25"),
-        "slice must accept the exact one-based declaration line shown by defs: {out}"
-    );
-}
-
-#[test]
-fn trace_from_entry_produces_flow() {
-    let ws = ws_path();
-    let Some(out) = run(&["trace", ws.to_str().unwrap(), "handle_request"]) else {
-        return;
-    };
-    // The trace should mention the entry function.
-    assert!(
-        out.contains("handle_request"),
-        "trace output missing entry fn: {out}"
-    );
-}
-
-#[test]
-fn trace_resolves_owner_qualified_method() {
-    let root = tempdir_for_test("trace-qualified-method");
-    std::fs::write(
-        root.join("app.py"),
-        "class Alpha:\n    def run(self):\n        target()\n\nclass Beta:\n    def run(self):\n        decoy()\n\ndef target():\n    pass\n\ndef decoy():\n    pass\n",
-    )
-    .expect("write app.py");
-
-    let Some(out) = run(&["trace", root.to_str().unwrap(), "Alpha.run"]) else {
-        return;
-    };
-    assert!(out.contains("target"), "qualified trace missed Alpha.run: {out}");
-    assert!(
-        !out.contains("decoy"),
-        "qualified trace leaked through same-named Beta.run: {out}"
-    );
-}
-
-/// Default `trace` output is the themed text view (not JSON). Pin
-/// the structural markers so we'd notice if it regressed back to a
-/// flat dump or a plain-text wall.
-#[test]
-fn trace_default_is_themed_text() {
-    let ws = ws_path();
-    let Some(out) = run(&["trace", ws.to_str().unwrap(), "handle_request"]) else {
-        return;
-    };
-    assert!(
-        !out.trim_start().starts_with('{'),
-        "trace default should NOT be JSON; got:\n{out}"
-    );
-    assert!(
-        out.contains("▸ trace handle_request"),
-        "themed header missing: {out}"
-    );
-    assert!(out.contains("PATH 1"), "path header missing: {out}");
-    assert!(
-        out.contains("[enter]") || out.contains("Enter function"),
-        "enter step marker missing: {out}"
-    );
-    assert!(
-        out.contains("language") && out.contains("python"),
-        "summary line missing: {out}"
-    );
-    assert!(
-        out.contains("steps") && out.contains("semantic"),
-        "step summary missing: {out}"
-    );
-    assert!(
-        !out.contains("precision") && !out.contains("narrowed"),
-        "trace text must describe one compiler graph without precision modes: {out}"
-    );
-    assert!(
-        !out.contains("/Users/")
-            || out.matches("test-fixtures/languages/python/micro/").count()
-                > out.matches("/Users/").count() / 2,
-        "trace should use workspace-relative paths in most lines:\n{out}"
-    );
-}
-
-/// `--format json` still emits valid JSON for scripts that want the
-/// raw shape.
-#[test]
-fn trace_json_format_still_emits_json() {
-    let ws = ws_path();
-    let Some(out) = run(&[
-        "trace",
-        ws.to_str().unwrap(),
-        "handle_request",
-        "--format",
-        "json",
-    ]) else {
-        return;
-    };
-    assert!(
-        out.trim_start().starts_with('{'),
-        "trace --format json must emit JSON; got:\n{out}"
-    );
-    assert!(out.contains("\"trace_id\""), "JSON missing trace_id: {out}");
-}
-
-#[test]
-fn trace_source_to_sink_json_rebuilds_summary_after_sink_slice() {
-    let ws = ws_path();
-    let Some(out) = run(&[
-        "trace",
-        ws.to_str().unwrap(),
-        "--from",
-        "handle_request",
-        "--to",
-        "os.system",
-        "--format",
-        "json",
-    ]) else {
-        return;
-    };
-    let v: serde_json::Value = serde_json::from_str(&out).expect("trace JSON parses");
-    let steps = v["steps"].as_array().expect("steps array");
-    assert!(
-        steps.iter().all(|step| {
-            !step["message"]
-                .as_str()
-                .is_some_and(|message| message.starts_with("Call outside selected corridor"))
-        }),
-        "source-to-target trace must omit calls excluded by the exact corridor:\n{out}"
-    );
-    let step_ids: std::collections::HashSet<u64> =
-        steps.iter().filter_map(|step| step["id"].as_u64()).collect();
-    assert_eq!(
-        v["summary"]["total_steps"].as_u64(),
-        Some(steps.len() as u64),
-        "source-to-sink trace summary must match the sliced step list:\n{out}"
-    );
-    assert!(
-        v["edges"].as_array().expect("edges array").iter().all(|edge| {
-            edge["from_step"]
-                .as_u64()
-                .is_some_and(|id| step_ids.contains(&id))
-                && edge["to_step"].as_u64().is_some_and(|id| step_ids.contains(&id))
-        }),
-        "source-to-sink trace edges must not point past the sliced step list:\n{out}"
-    );
-    let max_step = step_ids.iter().copied().max().unwrap_or(0);
-    assert!(
-        v["paths"].as_array().expect("paths array").iter().all(|path| {
-            path["first_step"].as_u64().unwrap_or(u64::MAX) <= max_step
-                && path["last_step"].as_u64().unwrap_or(u64::MAX) <= max_step
-        }),
-        "source-to-sink trace path summaries must be rebuilt after slicing:\n{out}"
-    );
-}
-
-#[test]
-fn trace_source_to_sink_external_match_is_exact_not_substring() {
-    let tmp = tempdir_for_test("bonsai_trace_external_sink_exact");
-    std::fs::write(
-        tmp.join("app.py"),
-        r#"
-import os
-
-def entry(value):
-    os.system_safe(value)
-    os.system(value)
-"#,
-    )
-    .expect("write trace fixture");
-
-    let Some(out) = run(&[
-        "trace",
-        tmp.to_str().unwrap(),
-        "--from",
-        "entry",
-        "--to",
-        "os.system",
-        "--format",
-        "json",
-    ]) else {
-        return;
-    };
-    let v: serde_json::Value = serde_json::from_str(&out).expect("trace JSON parses");
-    let steps = v["steps"].as_array().expect("steps array");
-    let last_message = steps
-        .last()
-        .and_then(|step| step["message"].as_str())
-        .unwrap_or_default();
-    assert_eq!(
-        last_message, "Unresolved call os.system",
-        "external sink matching must stop on the exact call, not an earlier substring match:\n{out}"
-    );
-    assert!(
-        v["diagnostics"]
-            .as_array()
-            .expect("diagnostics array")
-            .iter()
-            .all(|diag| diag["code"].as_str() != Some("sink-not-reached")),
-        "exact external sink should be reached:\n{out}"
-    );
-
-    let _ = std::fs::remove_dir_all(tmp);
-}
-
-#[test]
-fn trace_rejects_ambiguous_bare_entry_and_accepts_file_context() {
-    let tmp = tempdir_for_test("bonsai_trace_ambiguous_entry");
-    let a = tmp.join("a.py");
-    let b = tmp.join("b.py");
-    std::fs::write(
-        &a,
-        r#"
-def dup(value):
-    return a_only(value)
-
-def a_only(value):
-    return value
-"#,
-    )
-    .expect("write a.py");
-    std::fs::write(
-        &b,
-        r#"
-def dup(value):
-    return b_only(value)
-
-def b_only(value):
-    return value
-"#,
-    )
-    .expect("write b.py");
-    let Some(bin) = bin_path() else {
-        return;
-    };
-
-    let ambiguous = Command::new(&bin)
-        .args([
-            "trace",
-            tmp.to_str().unwrap(),
-            "dup",
-            "--format",
-            "json",
-            "--no-color",
-        ])
-        .output()
-        .expect("run ambiguous trace");
-    assert!(
-        !ambiguous.status.success(),
-        "ambiguous trace must fail instead of choosing one candidate"
-    );
-    let stderr = String::from_utf8_lossy(&ambiguous.stderr);
-    assert!(
-        stderr.contains("ambiguous") && stderr.contains("path:line:name"),
-        "ambiguous trace should explain exact disambiguation; stderr:\n{stderr}"
-    );
-
-    let disambiguator = format!("{}:2:dup", a.display());
-    let qualified = Command::new(&bin)
-        .args([
-            "trace",
-            tmp.to_str().unwrap(),
-            &disambiguator,
-            "--format",
-            "json",
-            "--no-color",
-        ])
-        .output()
-        .expect("run qualified trace");
-    assert!(
-        qualified.status.success(),
-        "file-qualified trace should resolve exactly; stderr:\n{}",
-        String::from_utf8_lossy(&qualified.stderr)
-    );
-    let parsed: serde_json::Value = serde_json::from_slice(&qualified.stdout).expect("qualified trace JSON");
-    let rendered = serde_json::to_string(&parsed).expect("trace JSON renders");
-    assert!(
-        rendered.contains("a_only") && !rendered.contains("b_only"),
-        "file-qualified trace should stay on the selected duplicate:\n{rendered}"
-    );
-
-    let _ = std::fs::remove_dir_all(tmp);
 }
 
 #[test]
@@ -1334,32 +961,17 @@ fn semantic_navigation_rejects_removed_analysis_caps() {
     };
     let workspace = ws_path();
     let workspace = workspace.to_str().expect("utf-8 workspace");
-    let cases: &[(&[&str], &[&str])] = &[
-        (
-            &["trace", workspace, "handle_request"],
-            &[
-                "--max-depth",
-                "--max-steps",
-                "--max-branch-fanout",
-                "--max-loop-iters",
-            ],
-        ),
-        (
-            &[
-                "path",
-                workspace,
-                "--from",
-                "handle_request",
-                "--to",
-                "verify_token",
-            ],
-            &["--max-paths", "--max-depth", "--max-probes"],
-        ),
-        (
-            &["slice", workspace, "--symbol", "token", "--line", "1"],
-            &["--max-steps"],
-        ),
-    ];
+    let cases: &[(&[&str], &[&str])] = &[(
+        &["inspect-graph", workspace, "--query", "handle_request"],
+        &[
+            "--max-depth",
+            "--max-steps",
+            "--max-paths",
+            "--max-probes",
+            "--max-branch-fanout",
+            "--max-loop-iters",
+        ],
+    )];
     for (prefix, flags) in cases {
         for flag in *flags {
             let mut args = prefix.to_vec();
@@ -1375,87 +987,6 @@ fn semantic_navigation_rejects_removed_analysis_caps() {
             );
         }
     }
-}
-
-#[test]
-fn trace_json_marks_unresolved_call_incomplete_without_depth_limit() {
-    let tmp = tempdir_for_test("bonsai_trace_unresolved_call_incomplete");
-    std::fs::write(
-        tmp.join("app.py"),
-        r#"
-def entry(value):
-    missing_call(value)
-"#,
-    )
-    .expect("write trace fixture");
-
-    let Some(out) = run(&["trace", tmp.to_str().unwrap(), "entry", "--format", "json"]) else {
-        return;
-    };
-    let v: serde_json::Value = serde_json::from_str(&out).expect("trace JSON parses");
-    assert_eq!(
-        v["summary"]["analysis_complete"], false,
-        "trace must not claim completeness when a call cannot be resolved:\n{out}"
-    );
-    let incomplete_reasons = v["summary"]["analysis_incomplete_reasons"]
-        .as_array()
-        .expect("analysis_incomplete_reasons array");
-    assert!(
-        incomplete_reasons
-            .iter()
-            .any(|reason| reason.as_str() == Some("unresolved-call:missing_call")),
-        "trace must explain unresolved call incompleteness:\n{out}"
-    );
-    assert!(
-        v["summary"]["truncation_reasons"]
-            .as_array()
-            .is_none_or(|reasons| reasons.is_empty()),
-        "unresolved calls are not budget truncation:\n{out}"
-    );
-    assert!(
-        v["paths"]
-            .as_array()
-            .expect("paths array")
-            .iter()
-            .all(|path| path["terminated_by"].as_str() != Some("DepthLimit")),
-        "unresolved calls must not masquerade as path depth limits:\n{out}"
-    );
-    assert!(
-        v["paths"]
-            .as_array()
-            .expect("paths array")
-            .iter()
-            .any(|path| path["terminated_by"].as_str() == Some("UnknownCall")),
-        "unresolved call paths should terminate as UnknownCall:\n{out}"
-    );
-    assert!(
-        v["steps"].as_array().expect("steps array").iter().any(|step| {
-            step["kind"].as_str() == Some("Diagnostic")
-                && step["message"].as_str() == Some("Unresolved call missing_call")
-        }),
-        "unresolved call should be diagnostic metadata, not call evidence:\n{out}"
-    );
-    assert!(
-        v["steps"].as_array().expect("steps array").iter().all(|step| {
-            !(step["kind"].as_str() == Some("Call") && step["message"].as_str() == Some("Call missing_call"))
-        }),
-        "unresolved calls must not be emitted as call evidence:\n{out}"
-    );
-
-    let _ = std::fs::remove_dir_all(tmp);
-}
-
-/// `--format dot` produces a Graphviz digraph for piping to `dot`.
-#[test]
-fn trace_dot_format_emits_digraph() {
-    let ws = ws_path();
-    let Some(out) = run(&["trace", ws.to_str().unwrap(), "handle_request", "--format", "dot"]) else {
-        return;
-    };
-    assert!(
-        out.contains("digraph trace"),
-        "trace --format dot must emit digraph; got:\n{out}"
-    );
 }
 
 #[test]
@@ -1884,7 +1415,7 @@ fn inspect_decl_sidebar_uses_semantic_callgraph_edges() {
         .as_array()
         .expect("direct_callers array")
         .iter()
-        .filter_map(|caller| caller["symbol"].as_str().map(str::to_string))
+        .filter_map(|edge| edge["caller"].as_str().map(str::to_string))
         .collect();
     assert_eq!(
         callers,
@@ -1892,15 +1423,21 @@ fn inspect_decl_sidebar_uses_semantic_callgraph_edges() {
         "direct_callers must be resolved caller functions, not raw target-name refs:\n{out}"
     );
 
-    let callees: Vec<String> = decl["callees"]
+    let callees: Vec<String> = decl["direct_callees"]
         .as_array()
-        .expect("callees array")
+        .expect("direct_callees array")
         .iter()
-        .filter_map(|callee| callee.as_str().map(str::to_string))
+        .filter_map(|edge| edge["callee"].as_str().map(str::to_string))
         .collect();
     assert!(
         callees.is_empty(),
-        "verify_token has no resolved workspace callees; lexical external calls must not appear as flow edges: {callees:?}"
+        "verify_token has no resolved workspace callees; lexical external calls must not appear as resolved edges: {callees:?}"
+    );
+    assert!(
+        decl["external_calls"]
+            .as_array()
+            .is_none_or(|calls| calls.is_empty()),
+        "verify_token's library calls have no workspace candidates, so they are not unresolved evidence either:\n{out}"
     );
 }
 
@@ -1909,14 +1446,7 @@ fn inspect_json_reports_semantic_flow_backend_summary() {
     let ws = ws_path();
     let Some(out) = run_inspect_graph(
         &ws,
-        &[
-            "--query",
-            "run_admin_command",
-            "--taint-flow",
-            "--format",
-            "json",
-            "--all",
-        ],
+        &["--query", "run_admin_command", "--format", "json", "--all"],
     ) else {
         return;
     };
@@ -2096,63 +1626,89 @@ fn inspect_graph_flow_is_symbol_bounded_and_path_is_transitive() {
     let Some(out) = run_inspect_graph(&ws, &["--query", "run_admin_command"]) else {
         return;
     };
+    // Structural evidence (everything before the raw taint section) stays
+    // one bounded symbol unit; the taint call stacks after it legitimately
+    // expand the full caller lineage.
+    let structural = out.split("══ TAINT FLOWS").next().unwrap_or(&out);
     assert!(
-        out.contains("run_admin_command") && !out.contains("handle_request → update_user"),
+        structural.contains("run_admin_command") && !structural.contains("handle_request → update_user"),
         "inspect must render one bounded symbol unit instead of recursive paths: {out}"
     );
     assert_semantic_corridor("python", &ws, "handle_request", "run_admin_command");
 }
-
 #[test]
-fn symbol_summary_reports_direct_edges_without_transitive_markers() {
+fn inspect_graph_decl_reports_direct_edges_without_transitive_markers() {
     let ws = ws_path();
-    let Some(out) = run(&[
-        "symbol-summary",
-        ws.to_str().unwrap(),
-        "--symbol",
-        "update_user",
-        "--format",
-        "json",
-        "--all",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "update_user", "--format", "json", "--all"]) else {
         return;
     };
-    let rows = parse_rows(&out);
-    let row = rows.first().expect("update_user summary");
-    assert!(row["direct_callers"]
+    let report: serde_json::Value = serde_json::from_str(&out).expect("inspect-graph JSON");
+    let decl = inspect_decl_hit(&report, "update_user");
+    assert!(
+        decl["direct_callers"]
+            .as_array()
+            .is_some_and(|edges| !edges.is_empty()),
+        "update_user must list its resolved direct callers: {out}"
+    );
+    assert!(
+        decl["direct_callees"]
+            .as_array()
+            .is_some_and(|edges| !edges.is_empty()),
+        "update_user must list its resolved direct callees: {out}"
+    );
+    for edge in decl["direct_callers"]
         .as_array()
-        .is_some_and(|rows| !rows.is_empty()));
-    assert!(row["direct_callees"]
-        .as_array()
-        .is_some_and(|rows| !rows.is_empty()));
-    assert_eq!(row["graph_scope"], "direct_resolved_neighbors");
+        .into_iter()
+        .flatten()
+        .chain(decl["direct_callees"].as_array().into_iter().flatten())
+    {
+        for field in [
+            "evidence_kind",
+            "edge_id",
+            "caller_symbol_id",
+            "caller",
+            "callee_symbol_id",
+            "callee",
+            "file",
+            "line",
+            "column",
+            "call_text",
+            "dispatch",
+            "resolver_stage",
+            "resolver_evidence",
+        ] {
+            assert!(edge.get(field).is_some(), "direct edge missing `{field}`: {edge}");
+        }
+        assert!(
+            edge["edge_id"].as_str().is_some_and(|id| id.starts_with("E:")),
+            "direct edges must carry stable `E:` ids: {edge}"
+        );
+    }
 }
 
 #[test]
-fn symbol_summary_includes_source_and_parameters() {
+fn inspect_graph_decl_includes_signature_and_parameters() {
     let ws = ws_path();
-    let Some(out) = run(&[
-        "symbol-summary",
-        ws.to_str().unwrap(),
-        "--symbol",
-        "update_user",
-        "--format",
-        "json",
-        "--all",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "update_user", "--format", "json", "--all"]) else {
         return;
     };
-    let rows = parse_rows(&out);
-    let row = rows.first().expect("update_user summary");
-    assert!(row["source"]
-        .as_str()
-        .is_some_and(|source| source.contains("token") && source.contains("action")));
-    assert!(row["params"].as_array().is_some_and(|params| !params.is_empty()));
+    let report: serde_json::Value = serde_json::from_str(&out).expect("inspect-graph JSON");
+    let decl = inspect_decl_hit(&report, "update_user");
+    assert!(
+        decl["signature"]
+            .as_str()
+            .is_some_and(|signature| signature.contains("token") && signature.contains("action")),
+        "decl signature must carry the parameter list: {out}"
+    );
+    assert!(
+        decl["params"].as_array().is_some_and(|params| !params.is_empty()),
+        "decl params must be populated: {out}"
+    );
 }
 
 #[test]
-fn symbol_summary_preserves_unresolved_callable_parameter_without_resolving_default() {
-    let tmp = tempdir_for_test("bonsai_symbol_summary_callable_parameter");
+fn inspect_graph_decl_preserves_unresolved_callable_parameter_without_resolving_default() {
+    let tmp = tempdir_for_test("bonsai_inspect_graph_callable_parameter");
     std::fs::write(
         tmp.join("app.py"),
         r#"
@@ -2173,52 +1729,13 @@ def wrapper(
     )
     .expect("write callable-parameter fixture");
 
-    let Some(trace) = run(&["trace", tmp.to_str().unwrap(), "wrapper", "--format", "json"]) else {
+    let Some(out) = run_inspect_graph(&tmp, &["--query", "wrapper", "--format", "json", "--all"]) else {
         return;
     };
-    let trace: serde_json::Value = serde_json::from_str(&trace).expect("trace JSON");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("inspect-graph JSON");
+    let decl = inspect_decl_hit(&report, "wrapper");
     assert!(
-        trace["summary"]["analysis_incomplete_reasons"]
-            .as_array()
-            .is_some_and(|reasons| reasons
-                .iter()
-                .any(|reason| reason.as_str() == Some("unresolved-call:apply_engine"))),
-        "trace must retain the unresolved callable-parameter invocation: {trace}"
-    );
-
-    let Some(out) = run(&[
-        "symbol-summary",
-        tmp.to_str().unwrap(),
-        "--symbol",
-        "wrapper",
-        "--format",
-        "json",
-        "--all",
-    ]) else {
-        return;
-    };
-    let rows = parse_rows(&out);
-    let row = rows.first().expect("wrapper summary");
-    assert_eq!(row["graph_scope"], "direct_resolved_neighbors");
-    assert_eq!(row["analysis_complete"], false);
-    assert!(
-        row["analysis_incomplete_reasons"]
-            .as_array()
-            .is_some_and(|reasons| reasons.iter().any(|reason| {
-                reason
-                    .as_str()
-                    .is_some_and(|reason| reason.contains("parameter-dispatched call"))
-            })),
-        "symbol-summary must explain the unresolved callable-parameter invocation: {out}"
-    );
-    assert!(
-        row["source"].as_str().is_some_and(
-            |source| source.contains("apply_engine") && source.contains("apply_authorized_patch")
-        ),
-        "summary source must retain the callable default expression: {out}"
-    );
-    assert!(
-        row["direct_callees"]
+        decl["direct_callees"]
             .as_array()
             .is_some_and(|callees| callees.iter().all(|callee| !matches!(
                 callee["callee"].as_str(),
@@ -2226,20 +1743,26 @@ def wrapper(
             ))),
         "a parameter default or shadowed same-name global must not become a resolved direct callee: {out}"
     );
+    let external = decl["external_calls"]
+        .as_array()
+        .unwrap_or_else(|| panic!("external_calls missing from wrapper decl hit: {out}"));
     assert!(
-        row["unresolved_calls"]
-            .as_array()
-            .is_some_and(|calls| calls.iter().any(|call| call["call_text"]
+        external.iter().any(|call| {
+            call["call_text"]
                 .as_str()
-                .is_some_and(|text| text.contains("apply_engine")))),
-        "symbol-summary must preserve unresolved callable-parameter evidence: {out}"
+                .is_some_and(|text| text.contains("apply_engine"))
+                && call["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("parameter-dispatched"))
+        }),
+        "inspect-graph must preserve the unresolved callable-parameter invocation as external-call evidence: {out}"
     );
 
     let _ = std::fs::remove_dir_all(tmp);
 }
 
 #[test]
-fn symbol_summary_reports_or_resolves_parameter_dispatch_for_every_language() {
+fn inspect_graph_decl_reports_or_resolves_parameter_dispatch_for_every_language() {
     const CASES: &[(&str, &str)] = &[
         ("c", "run_cb"),
         ("cpp", "run_cb"),
@@ -2268,48 +1791,36 @@ fn symbol_summary_reports_or_resolves_parameter_dispatch_for_every_language() {
             .join("test-fixtures/languages")
             .join(language)
             .join("callback_flow");
-        let Some(out) = run(&[
-            "symbol-summary",
-            workspace.to_str().expect("UTF-8 fixture path"),
-            "--symbol",
-            symbol,
-            "--format",
-            "json",
-            "--all",
-            "--no-progress",
-        ]) else {
+        let Some(out) = run_inspect_graph(
+            &workspace,
+            &["--query", symbol, "--format", "json", "--all", "--no-progress"],
+        ) else {
             return;
         };
-        let rows = parse_rows(&out);
-        let row = rows
-            .first()
-            .unwrap_or_else(|| panic!("{language}: missing `{symbol}` summary"));
-        let resolved_from_callable_value = row["direct_callees"].as_array().is_some_and(|callees| {
+        let report: serde_json::Value = serde_json::from_str(&out).expect("inspect-graph JSON");
+        let decl = report["decl_hits"]
+            .as_array()
+            .and_then(|hits| hits.iter().find(|hit| hit["symbol"].as_str() == Some(symbol)))
+            .unwrap_or_else(|| panic!("{language}: missing `{symbol}` decl hit: {out}"));
+        let resolved_from_callable_value = decl["direct_callees"].as_array().is_some_and(|callees| {
             callees.iter().any(|callee| {
                 callee["resolver_stage"] == "callable_value" && callee["evidence_kind"] == "resolved"
             })
         });
-        let unresolved_calls = row["unresolved_calls"]
-            .as_array()
-            .is_some_and(|calls| !calls.is_empty());
-        let explains_unresolved_parameter_dispatch = row["analysis_incomplete_reasons"]
-            .as_array()
-            .is_some_and(|reasons| {
-                reasons.iter().any(|reason| {
-                    reason
-                        .as_str()
-                        .is_some_and(|reason| reason.contains("parameter-dispatched call"))
-                })
-            });
+        let external_calls = decl["external_calls"].as_array().cloned().unwrap_or_default();
+        let explains_unresolved_parameter_dispatch = external_calls.iter().any(|call| {
+            call["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("parameter-dispatched"))
+        });
 
         assert!(
-            resolved_from_callable_value
-                || (unresolved_calls && explains_unresolved_parameter_dispatch),
+            resolved_from_callable_value || explains_unresolved_parameter_dispatch,
             "{language}: callable-parameter dispatch must be compiler-resolved or retained as explicit unresolved evidence: {out}"
         );
         if resolved_from_callable_value {
             assert!(
-                row["unresolved_calls"].as_array().is_some_and(Vec::is_empty),
+                external_calls.is_empty(),
                 "{language}: an exactly compiler-bound callback must not also be reported unresolved: {out}"
             );
         }
@@ -2317,8 +1828,8 @@ fn symbol_summary_reports_or_resolves_parameter_dispatch_for_every_language() {
 }
 
 #[test]
-fn symbol_summary_does_not_mark_compiler_resolved_parameter_method_unresolved() {
-    let tmp = tempdir_for_test("bonsai_symbol_summary_resolved_parameter_method");
+fn inspect_graph_decl_does_not_mark_compiler_resolved_parameter_method_unresolved() {
+    let tmp = tempdir_for_test("bonsai_inspect_graph_resolved_parameter_method");
     std::fs::write(
         tmp.join("App.java"),
         r#"
@@ -2335,24 +1846,29 @@ class App {
     )
     .expect("write resolved parameter-method fixture");
 
-    let Some(out) = run(&[
-        "symbol-summary",
-        tmp.to_str().expect("UTF-8 temp path"),
-        "--symbol",
-        "App.wrapper",
-        "--format",
-        "json",
-        "--all",
-        "--no-progress",
-    ]) else {
+    let Some(out) = run_inspect_graph(
+        &tmp,
+        &[
+            "--query",
+            "App.wrapper",
+            "--format",
+            "json",
+            "--all",
+            "--no-progress",
+        ],
+    ) else {
         return;
     };
-    let rows = parse_rows(&out);
-    let row = rows.first().expect("wrapper summary");
-    assert_eq!(row["analysis_complete"], true, "{out}");
-    assert_eq!(row["unresolved_calls"].as_array().map(Vec::len), Some(0), "{out}");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("inspect-graph JSON");
+    let decl = inspect_decl_hit(&report, "wrapper");
     assert!(
-        row["direct_callees"]
+        decl["external_calls"]
+            .as_array()
+            .is_none_or(|calls| calls.is_empty()),
+        "typed parameter dispatch must not be reported as unresolved evidence: {out}"
+    );
+    assert!(
+        decl["direct_callees"]
             .as_array()
             .is_some_and(|callees| callees.iter().any(|callee| callee["callee"] == "consume")),
         "typed parameter dispatch must retain its compiler-resolved edge: {out}"
@@ -2399,9 +1915,9 @@ fn inspect_from_to_markers_work_on_java() {
     assert_semantic_corridor("java", &ws, "updateUser", "runAdminCommand");
 }
 
-/// Shared helper for per-language endpoint assertions. The `path` command
-/// exposes one exact compressed relation rather than recursively rendering
-/// every concrete route through the graph.
+/// Shared helper for per-language endpoint assertions. `inspect-graph
+/// --from/--to` exposes one exact endpoint corridor rather than recursively
+/// rendering every concrete route through the graph.
 fn assert_from_to_markers(lang: &str, from: &str, to: &str) {
     let repo_root: std::path::PathBuf = {
         let mut p = std::env::current_dir().expect("cwd");
@@ -2494,14 +2010,14 @@ fn inspect_from_to_filters_are_case_insensitive() {
 fn inspect_from_to_work_standalone_without_query() {
     let ws = ws_path();
 
-    assert_semantic_corridor("python", &ws, "handle_request", "os.system");
+    assert_semantic_corridor("python", &ws, "update_user", "run_admin_command");
 
     // `inspect <workspace>` with no query AND no filters must error.
     let Some(bin) = bin_path() else {
         return;
     };
     let result = Command::new(&bin)
-        .args(["inspect", ws.to_str().unwrap(), "--no-color"])
+        .args(["inspect-graph", ws.to_str().unwrap(), "--no-color"])
         .env("COLUMNS", "200")
         .output()
         .expect("run");
@@ -2538,7 +2054,10 @@ fn inspect_from_to_excludes_sibling_branches_outside_exact_corridor() {
     .expect("write app.py");
 
     let report = semantic_corridor(&root, "Source.run", "Target.run").expect("path report");
-    assert!(!report["edges"].as_array().expect("corridor edges").is_empty());
+    assert!(!report["corridor"]["edges"]
+        .as_array()
+        .expect("corridor edges")
+        .is_empty());
     let encoded = report.to_string();
     assert!(encoded.contains("Source.run") && encoded.contains("Target.run"));
     assert!(
@@ -2551,7 +2070,7 @@ fn inspect_from_to_excludes_sibling_branches_outside_exact_corridor() {
 fn inspect_file_and_in_fn_filter() {
     let ws = ws_path();
     let Some(out) = run(&[
-        "inspect",
+        "inspect-graph",
         ws.to_str().unwrap(),
         "--query",
         "os.system",
@@ -2563,7 +2082,7 @@ fn inspect_file_and_in_fn_filter() {
     assert!(out.contains("run_admin_command"));
 
     let Some(out) = run(&[
-        "inspect",
+        "inspect-graph",
         ws.to_str().unwrap(),
         "--query",
         "verify_token",
@@ -2604,7 +2123,7 @@ fn top_level_help_contains_examples_and_theme_note() {
 
 #[test]
 fn inspect_help_is_concise_and_has_examples() {
-    let Some(out) = run(&["inspect", "--help"]) else {
+    let Some(out) = run(&["inspect-graph", "--help"]) else {
         return;
     };
     assert!(out.contains("EXAMPLES"), "inspect help missing EXAMPLES");
@@ -2625,15 +2144,6 @@ fn defs_help_has_examples() {
     };
     assert!(out.contains("EXAMPLES"));
     assert!(out.contains("--kind method"));
-}
-
-#[test]
-fn trace_help_has_examples() {
-    let Some(out) = run(&["trace", "--help"]) else {
-        return;
-    };
-    assert!(out.contains("EXAMPLES"));
-    assert!(out.contains("--from") && out.contains("--to"));
 }
 
 #[test]
@@ -2692,11 +2202,7 @@ fn top_level_help_groups_commands() {
     );
     // Each group's commands appear under the grouping block.
     for (group, cmd) in [
-        ("Flow", "inspect"),
-        ("Flow", "symbol-summary"),
-        ("Flow", "trace"),
-        ("Flow", "path"),
-        ("Flow", "slice"),
+        ("Flow", "inspect-graph"),
         ("Workspace", "index"),
         ("Browse", "defs"),
         ("Browse", "entrypoints"),
@@ -2768,10 +2274,7 @@ fn top_level_help_has_no_duplicate_commands_block() {
     assert!(out.contains("COMMAND GROUPS"));
     // Each subcommand name is listed exactly once at help-index depth.
     for cmd in [
-        "inspect",
-        "trace",
-        "path",
-        "slice",
+        "inspect-graph",
         "defs",
         "calls",
         "imports",
@@ -2828,6 +2331,57 @@ fn cache_clear_help_labels_dataflow_only_correctly() {
 }
 
 #[test]
+fn cache_clear_legacy_removes_only_the_in_tree_directory() {
+    if std::env::var_os("BONSAI_WORKSPACE_DIR").is_some() {
+        return;
+    }
+    let tmp = std::env::temp_dir().join(format!(
+        "bonsai-legacy-cache-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let legacy = tmp.join(".bonsai");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(tmp.join("main.py"), "def main():\n    return 1\n").unwrap();
+    std::fs::write(legacy.join("old.sidecar"), [0u8; 24]).unwrap();
+    let root = tmp.to_str().unwrap();
+    let Some(stats) = run(&["cache", "stats", root, "--format", "json"]) else {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return;
+    };
+    let value: serde_json::Value = serde_json::from_str(&stats).expect("cache stats JSON");
+    // The cache handle records the canonical root (`/private/var` on macOS).
+    let canonical_legacy = legacy.canonicalize().unwrap();
+    assert_eq!(
+        value["legacy_in_tree_dir"].as_str().map(std::path::PathBuf::from),
+        Some(canonical_legacy),
+        "stats must report the in-tree directory: {stats}"
+    );
+    assert_eq!(value["legacy_in_tree_bytes"].as_u64(), Some(24));
+    let text = run(&["cache", "stats", root]).unwrap();
+    assert!(
+        text.contains("legacy in-tree cache") && text.contains("cache clear --legacy"),
+        "text stats must point at the removal command:\n{text}"
+    );
+    let cleared = run(&["cache", "clear", root, "--legacy"]).unwrap();
+    assert!(
+        cleared.contains("removed") && cleared.contains("24 bytes"),
+        "{cleared}"
+    );
+    assert!(!legacy.exists(), "legacy directory must be gone");
+    assert!(tmp.join("main.py").exists(), "workspace sources are untouched");
+    let again = run(&["cache", "clear", root, "--legacy"]).unwrap();
+    assert!(again.contains("nothing to clear"), "{again}");
+    let stats = run(&["cache", "stats", root, "--format", "json"]).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stats).expect("cache stats JSON");
+    assert!(value.get("legacy_in_tree_dir").is_none(), "{stats}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn cache_stats_json_reports_analysis_sidecars() {
     let ws = ws_path();
     let Some(out) = run(&["cache", "stats", ws.to_str().unwrap(), "--format", "json"]) else {
@@ -2879,9 +2433,6 @@ fn every_help_menu_renders_and_documents_core_surface() {
     let cases: Vec<Vec<&str>> = vec![
         vec!["--help"],
         vec!["index", "--help"],
-        vec!["trace", "--help"],
-        vec!["path", "--help"],
-        vec!["slice", "--help"],
         vec!["diagnostics", "--help"],
         vec!["dump-hir", "--help"],
         vec!["dump-cfg", "--help"],
@@ -2902,7 +2453,7 @@ fn every_help_menu_renders_and_documents_core_surface() {
         vec!["classes", "--help"],
         vec!["refs", "--help"],
         vec!["search", "--help"],
-        vec!["inspect", "--help"],
+        vec!["inspect-graph", "--help"],
         vec!["tree", "--help"],
         vec!["read-file", "--help"],
         vec!["export", "--help"],
@@ -3013,19 +2564,13 @@ fn sarif_is_only_accepted_by_security_taint_analysis() {
     let ws = ws.to_str().unwrap();
     let unsupported = [
         vec!["defs", ws, "--format", "sarif"],
-        vec!["inspect", ws, "--query", "verify_token", "--format", "sarif"],
         vec![
-            "path",
+            "inspect-graph",
             ws,
-            "--from",
-            "handle_request",
-            "--to",
+            "--query",
             "verify_token",
             "--format",
             "sarif",
-        ],
-        vec![
-            "slice", ws, "--symbol", "token", "--line", "1", "--format", "sarif",
         ],
         vec!["tree", ws, "--format", "sarif"],
         vec!["read-file", ws, "app.py", "--format", "sarif"],
@@ -3323,8 +2868,12 @@ fn tree_has_only_structural_options_and_ignores_ambient_rulepacks() {
             "tree must not advertise a security-analysis trigger ({removed}):\n{help}"
         );
     }
+    // Compare on whitespace-normalised text: clap re-wraps the paragraph, so a
+    // phrase may straddle a line break.
+    let flat_help = help.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        help.contains("never opens the compiler") && help.contains("security <workspace> taint-analysis"),
+        flat_help.contains("never builds semantic graphs")
+            && flat_help.contains("security <workspace> taint-analysis"),
         "tree help must state the lightweight command boundary:\n{help}"
     );
 
@@ -4058,7 +3607,7 @@ function entry(cmd) {
 #[test]
 fn inspect_zero_hits_reports_no_matches_not_error() {
     let ws = ws_path();
-    let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--query", "xyzzy_no_match"]) else {
+    let Some(out) = run(&["inspect-graph", ws.to_str().unwrap(), "--query", "xyzzy_no_match"]) else {
         return;
     };
     assert!(
@@ -4188,7 +3737,12 @@ fn universal_query() -> &'static str {
 fn inspect_query_works_for_every_lang() {
     for lang in LANG_MICROS {
         let ws = lang_ws(lang);
-        let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--query", universal_query()]) else {
+        let Some(out) = run(&[
+            "inspect-graph",
+            ws.to_str().unwrap(),
+            "--query",
+            universal_query(),
+        ]) else {
             return;
         };
         assert!(
@@ -4209,7 +3763,13 @@ fn inspect_query_works_for_every_lang() {
 fn inspect_regex_works_for_every_lang() {
     for lang in LANG_MICROS {
         let ws = lang_ws(lang);
-        let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--query", "token.*", "--regex"]) else {
+        let Some(out) = run(&[
+            "inspect-graph",
+            ws.to_str().unwrap(),
+            "--query",
+            "token.*",
+            "--regex",
+        ]) else {
             return;
         };
         // `--regex` mode: if the fixture has a `token`-ish identifier
@@ -4226,7 +3786,7 @@ fn inspect_kind_filter_works_for_every_lang() {
     for lang in LANG_MICROS {
         let ws = lang_ws(lang);
         let Some(out) = run(&[
-            "inspect",
+            "inspect-graph",
             ws.to_str().unwrap(),
             "--query",
             universal_query(),
@@ -4273,7 +3833,7 @@ fn inspect_file_filter_works_for_every_lang() {
         // First: a file substring that definitely WON'T match any
         // path in the fixture.
         let Some(out) = run(&[
-            "inspect",
+            "inspect-graph",
             ws.to_str().unwrap(),
             "--query",
             universal_query(),
@@ -4300,7 +3860,7 @@ fn inspect_in_fn_filter_works_for_every_lang() {
     for lang in LANG_MICROS {
         let ws = lang_ws(lang);
         let Some(out) = run(&[
-            "inspect",
+            "inspect-graph",
             ws.to_str().unwrap(),
             "--query",
             universal_query(),
@@ -4325,7 +3885,7 @@ fn inspect_format_json_valid_for_every_lang() {
     for lang in LANG_MICROS {
         let ws = lang_ws(lang);
         let Some(out) = run(&[
-            "inspect",
+            "inspect-graph",
             ws.to_str().unwrap(),
             "--query",
             universal_query(),
@@ -4727,18 +4287,6 @@ fn cli_search_content_correct_for_every_lang() {
     }
 }
 
-/// `trace <entry>`: output mentions the entry.
-#[test]
-fn cli_trace_content_correct_for_every_lang() {
-    for e in lang_expectations() {
-        let selector = executable_entry_selector(&e);
-        let Some(out) = run_on(e.lang, &["trace", selector.as_str()]) else {
-            return;
-        };
-        assert_contains(e.lang, "trace", &out, e.entry);
-    }
-}
-
 /// `inspect --query <sink>`: produces a MATCH annotation.
 #[test]
 fn cli_inspect_query_content_correct_for_every_lang() {
@@ -5008,7 +4556,10 @@ fn inspect_both_sinks_reachable_for_every_lang() {
 fn inspect_finds_module_level_calls() {
     // JavaScript: `const { execSync } = require("child_process");`
     // sits at the top of auth_service.js — no enclosing function.
-    let Some(out) = run_on("javascript", &["inspect", "--query", "require", "--kind", "call"]) else {
+    let Some(out) = run_on(
+        "javascript",
+        &["inspect-graph", "--query", "require", "--kind", "call"],
+    ) else {
         return;
     };
     assert!(
@@ -5114,7 +4665,7 @@ fn inspect_positional_symbol_works_for_every_lang() {
     ];
     for (lang, sym) in cases {
         let ws = lang_ws(lang);
-        let Some(out) = run(&["inspect", ws.to_str().unwrap(), sym]) else {
+        let Some(out) = run(&["inspect-graph", ws.to_str().unwrap(), sym]) else {
             return;
         };
         assert!(
@@ -5328,7 +4879,7 @@ fn inspect_rejects_removed_semantic_caps() {
     for flag in ["--max-flows", "--max-entry-probes", "--max-hits"] {
         let output = Command::new(&bin)
             .args([
-                "inspect",
+                "inspect-graph",
                 ws.to_str().expect("utf-8 workspace"),
                 "--query",
                 "verify_token",
@@ -5364,25 +4915,6 @@ fn search_limit_flag_runs() {
     assert!(
         out.contains("verify_token") || out.contains("(1 match"),
         "--limit broke search:\n{out}"
-    );
-}
-
-#[test]
-fn trace_function_flag_runs() {
-    let ws = ws_path();
-    let Some(out) = run(&[
-        "trace",
-        ws.to_str().unwrap(),
-        "--function",
-        "verify_token",
-        "--format",
-        "text",
-    ]) else {
-        return;
-    };
-    assert!(
-        out.contains("verify_token") || out.contains("flow"),
-        "--function flag broke trace:\n{out}"
     );
 }
 
@@ -5709,7 +5241,7 @@ fn every_lang_micro_chain_reaches_entry_to_sink() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
         let graph = semantic_corridor(&ws, c.entry, c.sink).expect("path report");
-        let names = graph["nodes"].as_array().expect("corridor nodes");
+        let names = graph["corridor"]["nodes"].as_array().expect("corridor nodes");
         assert!(
             [c.entry, c.mid, c.sink]
                 .iter()
@@ -5807,28 +5339,28 @@ fn from_needle_matches_var_target() {
     );
 }
 
-/// --from on a parameter name (args, formal) matches. The Ruby
-/// `--from params` case that exposed this gap.
+/// The bounded decl evidence unit hydrates the callable's own source, so
+/// parameter-derived syntax (`token = request.args.get("token")`) stays
+/// visible on the hit.
 #[test]
-fn from_needle_matches_parameter_name() {
+fn inspect_graph_decl_source_preserves_parameter_derived_syntax() {
     let ws = py_ws();
-    let Some(out) = run(&[
-        "symbol-summary",
-        ws.to_str().unwrap(),
-        "--symbol",
-        "handle_request",
-        "--format",
-        "json",
-        "--all",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "handle_request", "--format", "json", "--all"])
+    else {
         return;
     };
-    let rows = parse_rows(&out);
+    let report: serde_json::Value = serde_json::from_str(&out).expect("inspect-graph JSON");
+    let decl = inspect_decl_hit(&report, "handle_request");
+    let has_token_line = decl["flows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|flow| flow["functions"].as_array().into_iter().flatten())
+        .flat_map(|function| function["lines"].as_array().into_iter().flatten())
+        .any(|line| line["text"].as_str().is_some_and(|text| text.contains("token")));
     assert!(
-        rows[0]["source"]
-            .as_str()
-            .is_some_and(|source| source.contains("token")),
-        "symbol source must preserve parameter-derived syntax: {out}"
+        has_token_line,
+        "decl source must preserve parameter-derived syntax: {out}"
     );
 }
 
@@ -5877,25 +5409,18 @@ fn from_needle_rejects_bare_class_name() {
     );
 }
 
-/// --from on a ref name (refs). Refs include every read / call /
-/// type reference captured by the adapter.
+/// Direct compiler evidence on the decl hit names every resolved callee.
 #[test]
-fn from_needle_matches_ref_name() {
+fn inspect_graph_decl_direct_callees_include_resolved_call_targets() {
     let ws = py_ws();
-    let Some(out) = run(&[
-        "symbol-summary",
-        ws.to_str().unwrap(),
-        "--symbol",
-        "handle_request",
-        "--format",
-        "json",
-        "--all",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "handle_request", "--format", "json", "--all"])
+    else {
         return;
     };
-    let rows = parse_rows(&out);
+    let report: serde_json::Value = serde_json::from_str(&out).expect("inspect-graph JSON");
+    let decl = inspect_decl_hit(&report, "handle_request");
     assert!(
-        rows[0]["direct_callees"]
+        decl["direct_callees"]
             .as_array()
             .is_some_and(|edges| edges.iter().any(|edge| edge["callee"] == "get_user")),
         "direct compiler evidence should include get_user: {out}"
@@ -5922,7 +5447,7 @@ fn query_needle_matches_every_browse_fact_kind() {
     ];
     for (lang, label, needle) in cases {
         let ws = lang_ws(lang);
-        let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--query", needle]) else {
+        let Some(out) = run(&["inspect-graph", ws.to_str().unwrap(), "--query", needle]) else {
             return;
         };
         assert!(
@@ -6192,13 +5717,7 @@ fn show_edge_id_reopens_dump_edges_drilldown() {
 #[test]
 fn show_taint_id_reopens_inspect_taint_drilldown() {
     let ws = ws_path();
-    let Some(full) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "os.system",
-        "--taint-flow",
-    ]) else {
+    let Some(full) = run(&["inspect-graph", ws.to_str().unwrap(), "--query", "os.system"]) else {
         return;
     };
     let ids = extract_taint_ids(&full);
@@ -6458,7 +5977,7 @@ fn inspect_flow_unknown_id_errors() {
     let ws = ws_path();
     let out = std::process::Command::new(&bin)
         .args([
-            "inspect",
+            "inspect-graph",
             ws.to_str().unwrap(),
             "--query",
             "run_admin_command",
@@ -6622,7 +6141,7 @@ fn inspect_group_unknown_id_errors() {
     let ws = ws_path();
     let out = std::process::Command::new(&bin)
         .args([
-            "inspect",
+            "inspect-graph",
             ws.to_str().unwrap(),
             "--query",
             "run_admin_command",
@@ -7940,7 +7459,7 @@ fn inspect_from_to_match_via_interproc_param_name() {
     // even though `cmd` never appears on the syntactic chain.
     let ws = ws_path();
     let Some(out) = run(&[
-        "inspect",
+        "inspect-graph",
         ws.to_str().unwrap(),
         "--query",
         "run_admin_command",
@@ -7964,7 +7483,7 @@ fn inspect_kind_narrowers_require_their_needle() {
     for (kind_flag, needle_flag) in [("--from-kind", "--from"), ("--to-kind", "--to")] {
         let out = Command::new(&bin)
             .args([
-                "inspect",
+                "inspect-graph",
                 ws.to_str().unwrap(),
                 "--query",
                 "run_admin_command",

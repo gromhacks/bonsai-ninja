@@ -75,9 +75,6 @@ pub(crate) enum FormatClass {
     /// Scripts that need exhaustive JSON must pass `--all` or
     /// `--context 0/all/uncapped`.
     Programmatic,
-    /// Render-only output (DOT). Paging a partial graph is
-    /// meaningless; these formats always return everything.
-    RenderOnly,
 }
 
 /// The page identity requested on the command line. Internally
@@ -184,7 +181,6 @@ impl PagingConfig {
         }
         match self.format_class {
             FormatClass::Text | FormatClass::Programmatic => Some(DEFAULT_CONTEXT_TEXT),
-            FormatClass::RenderOnly => None,
         }
     }
 }

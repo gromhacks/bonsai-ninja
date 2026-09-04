@@ -378,13 +378,21 @@ fn show_raw_taint_flow(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
+    // A raw taint id is minted under the query that produced it (its target
+    // cut and caller-lineage roots). Reopen that exact query when its
+    // provenance is remembered; otherwise fall back to the workspace-wide
+    // entry scan.
+    let hint = crate::page_cache::structural_id_hint(workspace, id)?;
+    let hint_filters = hint.as_ref().map(inspect_filters_from_hint).transpose()?;
     cmd_inspect(
         workspace,
         InspectCommandOptions {
-            pattern: None,
-            is_regex: false,
-            kind_filter: &[],
-            filters: InspectFilters::default(),
+            pattern: hint
+                .as_ref()
+                .and_then(|hint| (!hint.query.is_empty()).then_some(hint.query.as_str())),
+            is_regex: hint.as_ref().is_some_and(|hint| hint.regex),
+            kind_filter: hint.as_ref().map_or(&[], |hint| hint.kind_filter.as_slice()),
+            filters: hint_filters.unwrap_or_default(),
             render: InspectRenderOptions {
                 compact,
                 flow_id_filter: Some(id.to_string()),
@@ -418,109 +426,113 @@ fn show_dump_taint_propagation(args: ShowArgs<'_>, id: &str, paging_cfg: paging:
     )
 }
 
+/// Reopens a stable security id as a view over the cached default-profile
+/// report (the report the id was printed from), and only when that report
+/// does not contain the id widens to the unprofiled complete run, which is a
+/// superset of every review profile. No profile name is spelled here.
+fn reopen_security_view(workspace: &Path, action: impl Fn() -> SecurityAction) -> Result<()> {
+    match super::security::cmd_security_default_profile(workspace, action()) {
+        Err(err) if err.downcast_ref::<super::security::MissingStableId>().is_some() => {
+            super::security::cmd_security_unprofiled(workspace, action())
+        }
+        other => other,
+    }
+}
+
 fn show_security_finding(args: ShowArgs<'_>, id: &str) -> Result<()> {
-    super::security::cmd_security_unprofiled(
-        args.workspace,
-        SecurityAction::TaintAnalysis {
-            rules_dir: args.rules_dir.map(Path::to_path_buf),
-            profile: None,
-            source: None,
-            finding: Some(id.to_string()),
-            flow: None,
-            group: None,
-            trust: None,
-            category: None,
-            sink: None,
-            severity: None,
-            tag: None,
-            files: Vec::new(),
-            exclude_files: Vec::new(),
-            inferred_sources: false,
-            include_pattern_only: true,
-            exclude_tests: false,
-            show_sanitized: true,
-            context: args.context.map(str::to_string),
-            page: args.page.map(str::to_string),
-            all: args.all,
-            summary: false,
-            format: args.format.into(),
-            baseline: None,
-            explain: false,
-            output: OutputPathArg {
-                output_path: Option::<PathBuf>::None,
-            },
+    reopen_security_view(args.workspace, || SecurityAction::TaintAnalysis {
+        rules_dir: args.rules_dir.map(Path::to_path_buf),
+        profile: None,
+        source: None,
+        finding: Some(id.to_string()),
+        flow: None,
+        group: None,
+        trust: None,
+        category: None,
+        sink: None,
+        severity: None,
+        tag: None,
+        files: Vec::new(),
+        exclude_files: Vec::new(),
+        inferred_sources: false,
+        include_pattern_only: true,
+        exclude_tests: false,
+        show_sanitized: true,
+        context: args.context.map(str::to_string),
+        page: args.page.map(str::to_string),
+        all: args.all,
+        summary: false,
+        format: args.format.into(),
+        baseline: None,
+        explain: false,
+        output: OutputPathArg {
+            output_path: Option::<PathBuf>::None,
         },
-    )
+    })
 }
 
 fn show_security_flow(args: &ShowArgs<'_>, id: &str) -> Result<()> {
-    super::security::cmd_security_unprofiled(
-        args.workspace,
-        SecurityAction::TaintAnalysis {
-            rules_dir: args.rules_dir.map(Path::to_path_buf),
-            profile: None,
-            source: None,
-            finding: None,
-            flow: Some(id.to_string()),
-            group: None,
-            trust: None,
-            category: None,
-            sink: None,
-            severity: None,
-            tag: None,
-            files: Vec::new(),
-            exclude_files: Vec::new(),
-            inferred_sources: false,
-            include_pattern_only: true,
-            exclude_tests: false,
-            show_sanitized: true,
-            context: args.context.map(str::to_string),
-            page: args.page.map(str::to_string),
-            all: args.all,
-            summary: false,
-            format: args.format.into(),
-            baseline: None,
-            explain: false,
-            output: OutputPathArg {
-                output_path: Option::<PathBuf>::None,
-            },
+    reopen_security_view(args.workspace, || SecurityAction::TaintAnalysis {
+        rules_dir: args.rules_dir.map(Path::to_path_buf),
+        profile: None,
+        source: None,
+        finding: None,
+        flow: Some(id.to_string()),
+        group: None,
+        trust: None,
+        category: None,
+        sink: None,
+        severity: None,
+        tag: None,
+        files: Vec::new(),
+        exclude_files: Vec::new(),
+        inferred_sources: false,
+        include_pattern_only: true,
+        exclude_tests: false,
+        show_sanitized: true,
+        context: args.context.map(str::to_string),
+        page: args.page.map(str::to_string),
+        all: args.all,
+        summary: false,
+        format: args.format.into(),
+        baseline: None,
+        explain: false,
+        output: OutputPathArg {
+            output_path: Option::<PathBuf>::None,
         },
-    )
+    })
 }
 
 fn show_security_group(args: &ShowArgs<'_>, id: &str) -> Result<()> {
-    super::security::cmd_security_unprofiled(
-        args.workspace,
-        SecurityAction::TaintAnalysis {
-            rules_dir: args.rules_dir.map(Path::to_path_buf),
-            profile: None,
-            source: None,
-            finding: None,
-            flow: None,
-            group: Some(id.to_string()),
-            trust: None,
-            category: None,
-            sink: None,
-            severity: None,
-            tag: None,
-            files: Vec::new(),
-            exclude_files: Vec::new(),
-            inferred_sources: false,
-            include_pattern_only: true,
-            exclude_tests: false,
-            show_sanitized: true,
-            context: args.context.map(str::to_string),
-            page: args.page.map(str::to_string),
-            all: args.all,
-            summary: false,
-            format: args.format.into(),
-            baseline: None,
-            explain: false,
-            output: OutputPathArg {
-                output_path: Option::<PathBuf>::None,
-            },
+    reopen_security_view(args.workspace, || SecurityAction::TaintAnalysis {
+        rules_dir: args.rules_dir.map(Path::to_path_buf),
+        profile: None,
+        source: None,
+        finding: None,
+        flow: None,
+        group: Some(id.to_string()),
+        trust: None,
+        category: None,
+        sink: None,
+        severity: None,
+        tag: None,
+        files: Vec::new(),
+        exclude_files: Vec::new(),
+        inferred_sources: false,
+        include_pattern_only: true,
+        exclude_tests: false,
+        show_sanitized: true,
+        context: args.context.map(str::to_string),
+        page: args.page.map(str::to_string),
+        all: args.all,
+        summary: false,
+        format: args.format.into(),
+        baseline: None,
+        explain: false,
+        output: OutputPathArg {
+            output_path: Option::<PathBuf>::None,
         },
-    )
+    })
 }
 
 fn id_prefix(id: &str) -> Result<&str> {

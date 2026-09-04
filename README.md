@@ -28,8 +28,8 @@ source code, or reserve analysis features for a paid tier.
 
 **Give agents facts, not file dumps.** With tight symbol, file, and kind
 selectors, bonsai-ninja lets an agent ask for the smallest useful slice of a
-repository: the definition, callers, references, arguments, path, backward
-slice, raw dataflow, or source file around one symbol. That means less prompt
+repository: the definition, callers, references, arguments, exact corridor,
+raw taint flow, or source file around one symbol. That means less prompt
 waste, less repeated reading, and answers tied to compiler evidence.
 
 Use it to map an unfamiliar repository, find the code behind a symptom, follow
@@ -54,7 +54,7 @@ views support graph tooling. These artifacts can be inputs to retrieval,
 training-data construction, evaluations, code-reasoning experiments, or
 tool-using agents; bonsai-ninja produces the evidence and does not train or
 validate a model by itself. The versioned native contract is published as
-[JSON Schema v11](schemas/bonsai-native-export-v11.schema.json).
+[JSON Schema v12](schemas/bonsai-native-export-v12.schema.json).
 
 Our small exploratory tests produced encouraging results, but they are not a
 general model-quality claim. We would love to see independent teams take the
@@ -68,8 +68,8 @@ academic and independent labs, or local-model hobbyists.
 |---|---|
 | Tree-sitter compiler frontends | Parse 20 languages into typed declarations, calls, imports, values, control flow, and dataflow facts |
 | Focused `search`, `refs`, `calls`, and `read-file` | Retrieve a small, source-backed context slice before asking for heavier semantics |
-| Bounded `symbol-summary` and `inspect` packets | Retrieve source, signature, imports, direct resolved neighbors, and unresolved-call evidence without recursively expanding a call tree |
-| Compiler-resolved `trace`, compressed `path`, and `slice` | Follow compiler-evidenced behavior across files and report unresolved dynamic edges instead of inventing them |
+| Bounded `inspect-graph` declaration packets | Retrieve source, signature, imports, direct resolved callers and callees, and external-call evidence without recursively expanding a call tree |
+| Compressed `inspect-graph --from/--to` corridors | Follow compiler-evidenced behavior across files and report unresolved dynamic edges instead of inventing them |
 | AST, HIR, CFG, resolver, edge, and taint diagnostics | Inspect both the target program and the analyzer's reasoning instead of guessing from text |
 | Sparse IDG taint fixed point | Complete source-to-sink reachability over the admitted static graph without a hidden depth, file, iteration, or result cap |
 | Stable IDs, explicit page cursors, JSON, and the Rust SDK | Let agents cite evidence, detect when coverage continues, and automate repeatable review workflows |
@@ -92,7 +92,7 @@ separate the first explicit semantic index from commands run after it exists:
 | After index: semantic generation reopen | 2.4s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
 | After index: search | 4.6s | Compiler-proven requested matches |
 | After index: call lookup | 3.9s | Compiler-resolved call rows |
-| After index: default inspect | 10.5s | Structural evidence for the requested target with an empty rendered-page cache |
+| After index: default `inspect-graph` | 10.5s | Structural evidence for the requested target with an empty rendered-page cache |
 | After index: complete diagnostics | 8.3s | One streaming compiler-object pass; no duplicate parse-all phase |
 | After index: stable edge lookup with `show E:<id>` | 7.3s | Exact persisted edge-ID lookup; no whole-graph ID scan |
 | After index: complete production taint analysis | 15.7s | Requested fixed point completed without a semantic cap |
@@ -211,18 +211,15 @@ workflows.
 
 ```bash
 # Explain workspace roots and language coverage.
-./target/release/bonsai-ninja context ./my-app --no-color --no-progress
+./target/release/bonsai-ninja index ./my-app --no-color --no-progress --format json
 
 # Find an anchor before requesting heavier semantic work.
 ./target/release/bonsai-ninja search ./my-app --query verify_token \
   --context 8k --no-color --no-progress
 
-# Inspect the target and request raw dataflow only when needed.
-./target/release/bonsai-ninja inspect ./my-app --query verify_token \
-  --taint-flow --context 16k --no-color --no-progress
-
-# Get one bounded compiler packet without expanding transitive paths.
-./target/release/bonsai-ninja symbol-summary ./my-app --symbol verify_token \
+# Inspect the target: signature, direct callers/callees, imports, its compiler
+# flow, and expanded taint call stacks, without expanding transitive paths.
+./target/release/bonsai-ninja inspect-graph ./my-app --query verify_token \
   --context 16k --no-color --no-progress
 
 # Run production-oriented security analysis.
@@ -264,15 +261,13 @@ For any unfamiliar option, use the binary's `--help` and the
 | Need | Command |
 |---|---|
 | Files and directories | `tree` |
-| Workspace and language summary | `context` |
+| Workspace and language summary | `index` (prints the workspace `context`) |
 | Text or symbol anchor | `search` |
 | Declarations, classes, imports, entry points | `defs`, `classes`, `imports`, `entrypoints` |
 | Calls, arguments, references | `calls`, `args`, `refs` |
-| Local facts around one target | `inspect` |
-| Bounded compiler packet for one callable | `symbol-summary` |
-| Exact compressed source-to-target corridor | `path` |
-| Execution trace from an entry | `trace` |
-| Backward influence around a symbol | `slice` |
+| Local facts and the bounded compiler packet for one target | `inspect-graph --query` |
+| Exact compressed source-to-target corridor | `inspect-graph --from ... --to ...` |
+| Backward influence around a symbol | No CLI command: `inspect-graph --query` on the symbol plus `refs` / `vars` for read and write sites; the SDK `slices` API for programmatic slices |
 | One source file and connected context | `read-file` |
 | Reopen a stable result ID | `show` |
 | Parser or semantic internals | `dump-*`, `diagnostics` |

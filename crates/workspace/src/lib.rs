@@ -41,7 +41,21 @@ use bonsai_index::{GlobalIndex, ReceiverAncestry};
 use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FlowEvent, LanguageRegistry, SourceFileRepresentation};
 use bonsai_taint::{InterTaintCaches, KindedTokens};
 use bonsai_trace::{finalize, FinalizeCtx, TraceQuery, TraceQueryKind, TraceResult};
+pub use bonsai_vfs::SourceIdentity;
 use bonsai_vfs::Vfs;
+
+/// FNV-1a hash of a file's text: the recorded identity for a lazily interned
+/// source (no read), the loaded text otherwise. Every sidecar source
+/// contract validates against this value.
+pub(crate) fn source_content_hash(vfs: &Vfs, file: FileId) -> Option<u64> {
+    match vfs.lazy_identity(file) {
+        Some(identity) => Some(identity.hash),
+        None => vfs
+            .snapshot(file)
+            .ok()
+            .map(|snapshot| bonsai_hash::fnv1a_bytes64(snapshot.text.as_bytes())),
+    }
+}
 use class_index::ClassMemberIndex;
 use cross_module::CrossModuleTracer;
 use dataflow::DataFlowCache;
@@ -90,6 +104,14 @@ pub struct SourceReachableCallGraph {
 /// selected declaration through [`std::ops::Deref`]. Compiler consumers can
 /// therefore inspect complete flow events without cloning a function body.
 /// The workspace retains only a memory-scheduled hot set of file bodies.
+/// One file's persisted callgraph relation: its callable nodes, the edges
+/// leaving it, and the edges entering it.
+pub type PersistedFileEdges = (
+    Vec<bonsai_callgraph::CallGraphNode>,
+    Vec<bonsai_callgraph::CallEdge>,
+    Vec<bonsai_callgraph::CallEdge>,
+);
+
 pub struct ExactDecl {
     file_index: Arc<DeclIndex>,
     position: usize,
@@ -863,6 +885,9 @@ struct Inner {
     /// phases still stream every file; repeated query/attribution lookups reuse
     /// these immutable bodies until LRU eviction.
     exact_bodies: ExactBodyCache,
+    /// Single declarations decoded from persisted frames, keyed by file,
+    /// source version, and header symbol.
+    exact_decl_frames: parking_lot::Mutex<lru::LruCache<(FileId, u64, SymbolId), Arc<DeclIndex>>>,
     /// Workspace-wide cache of `(source_func, seed_set) →
     /// EntryTaintGraph`. Lifted out of the per-invocation
     /// `build_findings_chain_aware` map so a second
@@ -960,6 +985,73 @@ pub struct SourceFileStamp {
     pub change_nanoseconds: i64,
     pub device: u64,
     pub inode: u64,
+}
+
+impl SourceFileStamp {
+    /// Same on-disk identity, ignoring the path the stamp was taken under.
+    #[must_use]
+    pub fn identity_matches(&self, other: &Self) -> bool {
+        self.len == other.len
+            && self.modified == other.modified
+            && self.change_seconds == other.change_seconds
+            && self.change_nanoseconds == other.change_nanoseconds
+            && self.device == other.device
+            && self.inode == other.inode
+    }
+}
+
+/// Exact identity of one supported source as read from disk: the same
+/// length, FNV-1a hash, and SHA-256 digest a loaded snapshot's text carries
+/// whenever `text_exact` holds (the bytes are valid UTF-8).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceFileIdentity {
+    pub path: std::path::PathBuf,
+    pub len: u64,
+    pub hash: u64,
+    pub digest: [u8; 32],
+    pub text_exact: bool,
+}
+
+/// One validated source a warm open may intern without reading it.
+#[derive(Clone, Debug)]
+pub struct LazySourceRecord {
+    /// Filesystem identity recorded when the identity was computed.
+    pub stamp: SourceFileStamp,
+    pub identity: bonsai_vfs::SourceIdentity,
+}
+
+/// Sources whose text a warm open leaves on disk until first use, keyed by
+/// the path the workspace walk yields.
+#[derive(Clone, Debug, Default)]
+pub struct LazySourceTable {
+    entries: AHashMap<std::path::PathBuf, LazySourceRecord>,
+}
+
+impl LazySourceTable {
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: AHashMap::with_capacity(capacity),
+        }
+    }
+
+    pub fn insert(&mut self, path: std::path::PathBuf, record: LazySourceRecord) {
+        self.entries.insert(path, record);
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn get(&self, path: &Path) -> Option<&LazySourceRecord> {
+        self.entries.get(path)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1378,6 +1470,9 @@ impl Workspace {
                 compiler_headers: parking_lot::RwLock::new(None),
                 compiler_receiver_ancestry: parking_lot::RwLock::new(None),
                 exact_bodies: ExactBodyCache::default(),
+                exact_decl_frames: parking_lot::Mutex::new(lru::LruCache::new(
+                    std::num::NonZeroUsize::new(4096).expect("non-zero frame cache capacity"),
+                )),
                 taint_index: TaintGraphIndex::new(),
                 taint_analysis_serial: Mutex::new(()),
                 idg_build_serial: Mutex::new(()),
@@ -1961,6 +2056,23 @@ impl Workspace {
                 }
             }
         }
+        // A scoped open addresses declarations by the persisted compiler
+        // generation's identities, the same ids the scoped linkage index is
+        // rebound to. Ids are then stable across processes, so a cached
+        // security row resolves its functions exactly on replay.
+        if !self.is_complete_workspace_index() {
+            let files = self.inner.vfs.all_files();
+            if let Some(headers) = self.persisted_compiler_header_index_for_files(&files) {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "scoped compiler headers bound to persisted identities: files={} decls={}",
+                    files.len(),
+                    headers.len()
+                );
+                *slot = Some(headers.clone());
+                return headers;
+            }
+        }
         let headers = self.inner.db.build_global_header_index();
         *slot = Some(headers.clone());
         headers
@@ -2268,6 +2380,7 @@ impl Workspace {
     /// prior file bodies from overlapping a workspace IDG fixed point.
     pub fn release_exact_body_cache(&self) {
         self.inner.exact_bodies.clear();
+        self.inner.exact_decl_frames.lock().clear();
     }
 
     /// Release the lowercased declaration-name projection after a syntax
@@ -2288,10 +2401,11 @@ impl Workspace {
     /// symbols.
     #[must_use]
     pub fn exact_decl_index_shared(&self, file: FileId) -> Option<Arc<DeclIndex>> {
-        let snapshot = self.inner.vfs.snapshot(file).ok()?;
+        let version = self.inner.vfs.file_version(file).ok()?;
+        let text_len = usize::try_from(self.inner.vfs.text_len(file).ok()?).unwrap_or(usize::MAX);
         self.inner.exact_bodies.get_or_insert_with(
-            (file, snapshot.version),
-            estimated_exact_body_bytes(snapshot.text.len()),
+            (file, version),
+            estimated_exact_body_bytes(text_len),
             || {
                 let headers = self.compiler_index_for_exact_bodies();
                 self.inner
@@ -2365,10 +2479,20 @@ impl Workspace {
     #[must_use]
     pub fn exact_decl_with_headers(&self, symbol: SymbolId, headers: Arc<GlobalIndex>) -> Option<ExactDecl> {
         let file = headers.declaring_file(symbol)?;
-        let snapshot = self.inner.vfs.snapshot(file).ok()?;
+        let version = self.inner.vfs.file_version(file).ok()?;
+        // Fast path: when the file's exact bodies are not resident, read just
+        // this declaration's persisted frame instead of decoding the whole
+        // file object. The frame is remapped to header ids from the frame
+        // directory alone; the whole-file path remains the fallback.
+        if !self.inner.exact_bodies.contains(&(file, version)) {
+            if let Some(hit) = self.exact_decl_from_frame(symbol, file, version, &headers) {
+                return Some(hit);
+            }
+        }
+        let text_len = usize::try_from(self.inner.vfs.text_len(file).ok()?).unwrap_or(usize::MAX);
         let file_index = self.inner.exact_bodies.get_or_insert_with(
-            (file, snapshot.version),
-            estimated_exact_body_bytes(snapshot.text.len()),
+            (file, version),
+            estimated_exact_body_bytes(text_len),
             || {
                 self.inner
                     .db
@@ -2376,7 +2500,19 @@ impl Workspace {
                     .map(Arc::new)
             },
         )?;
-        let position = file_index.defs.iter().position(|decl| decl.symbol == symbol)?;
+        // The header table records each symbol's local position; the exact
+        // body index is remapped to the same declaration order, so the
+        // lookup is one slot read. A linear scan remains only as a guard
+        // against a body/header shape mismatch.
+        let position = headers
+            .local_index_of(symbol)
+            .filter(|&index| {
+                file_index
+                    .defs
+                    .get(index)
+                    .is_some_and(|decl| decl.symbol == symbol)
+            })
+            .or_else(|| file_index.defs.iter().position(|decl| decl.symbol == symbol))?;
         Some(ExactDecl { file_index, position })
     }
 
@@ -2386,6 +2522,130 @@ impl Workspace {
     /// sidecars are reported as `Ok(None)` so query opens can stay
     /// read-only and compute only if a later command explicitly needs
     /// the graph.
+    /// The compiler IDG service for this workspace: the one already
+    /// installed, else the persisted complete sidecar when this is a complete
+    /// workspace index and the sidecar is fresh, else a fresh build. Callers
+    /// that only need per-function facts must never pay a whole-workspace
+    /// rebuild while a valid persisted graph exists on disk.
+    fn exact_decl_from_frame(
+        &self,
+        symbol: SymbolId,
+        file: FileId,
+        version: u64,
+        headers: &Arc<GlobalIndex>,
+    ) -> Option<ExactDecl> {
+        let key = (file, version, symbol);
+        if let Some(index) = self.inner.exact_decl_frames.lock().get(&key).cloned() {
+            return Some(ExactDecl {
+                file_index: index,
+                position: 0,
+            });
+        }
+        let position = headers.local_index_of(symbol)?;
+        let (mut decl, local_symbols) = self
+            .inner
+            .db
+            .compiler_declaration_frame_uncached(file, position)?;
+        if !headers.remap_single_decl_to_existing_symbols(file, &local_symbols, &mut decl)
+            || decl.symbol != symbol
+        {
+            return None;
+        }
+        let index = Arc::new(DeclIndex {
+            file,
+            defs: vec![decl],
+            ..DeclIndex::default()
+        });
+        self.inner.exact_decl_frames.lock().put(key, Arc::clone(&index));
+        Some(ExactDecl {
+            file_index: index,
+            position: 0,
+        })
+    }
+
+    /// Like [`Self::compiler_idg_service_prefer_persisted`], but when no
+    /// persisted complete graph is usable, a query over a small file scope
+    /// gets a persisted *scoped* graph over exactly `files` instead of a
+    /// whole-workspace build; a large scope builds and persists the complete
+    /// graph once so every later command reuses it.
+    pub fn compiler_idg_service_prefer_persisted_or_scoped(
+        &self,
+        files: &[FileId],
+    ) -> Arc<bonsai_idg::IdgQueryService> {
+        const SCOPED_IDG_FILE_LIMIT: usize = 2048;
+        if let Some(service) = self.inner.db.idg_service() {
+            return service;
+        }
+        let complete = self.is_complete_workspace_index();
+        if complete {
+            if let Some(root) = self.root_path() {
+                if let Ok(Some(_)) = self.load_idg_sidecar(&root) {
+                    if let Some(service) = self.inner.db.idg_service() {
+                        return service;
+                    }
+                }
+            }
+        }
+        if !files.is_empty() && files.len() <= SCOPED_IDG_FILE_LIMIT {
+            let headers = self.compiler_header_index();
+            let mut included_files: Vec<FileId> = files.to_vec();
+            included_files.sort_unstable_by_key(|file| file.raw());
+            included_files.dedup();
+            let included_funcs: Vec<FuncId> = included_files
+                .iter()
+                .flat_map(|file| headers.functions_in(*file))
+                .map(|decl| FuncId::new(decl.symbol.raw()))
+                .collect();
+            let call_graph = self.cached_resolved_call_graph();
+            let transfer_options = bonsai_idg::TransferOptions::compiler_semantics(
+                self.inner.db.complete_field_place_languages(),
+            );
+            let service = self
+                .build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph(
+                    &transfer_options,
+                    &included_files,
+                    &included_funcs,
+                    &call_graph,
+                );
+            self.inner.db.set_idg_service(Arc::clone(&service));
+            return service;
+        }
+        if complete && self.persistent_semantic_cache_enabled() {
+            match self.build_and_persist_idg_sidecar() {
+                Ok(Some(_)) => {
+                    if let Some(service) = self.inner.db.idg_service() {
+                        return service;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => bonsai_diagnostics::debug_log!(
+                    "idg-query",
+                    "complete IDG sidecar publication failed, building resident graph: {error}"
+                ),
+            }
+        }
+        bonsai_taint::compiler_idg_service(&self.inner.db)
+    }
+
+    pub fn compiler_idg_service_prefer_persisted(&self) -> Arc<bonsai_idg::IdgQueryService> {
+        if let Some(service) = self.inner.db.idg_service() {
+            return service;
+        }
+        if let Some(root) = self.root_path() {
+            if self.is_complete_workspace_index() {
+                match self.load_idg_sidecar(&root) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {}
+                    Err(error) => bonsai_diagnostics::debug_log!(
+                        "idg-query",
+                        "persisted IDG sidecar unusable, rebuilding: {error}"
+                    ),
+                }
+            }
+        }
+        bonsai_taint::compiler_idg_service(&self.inner.db)
+    }
+
     pub fn load_idg_sidecar(&self, root: &Path) -> bonsai_idg::IdgResult<Option<usize>> {
         if let Some(service) = self.inner.db.idg_service() {
             return Ok(Some(service.segment_count()));
@@ -2434,8 +2694,14 @@ impl Workspace {
             return Ok(None);
         }
         let pipeline_hash = self.cached_idg_workspace_pipeline_hash(Some(root));
-        bonsai_idg::workspace::IdgWorkspace::validate_sidecar_layout_with_pipeline(&sidecar, pipeline_hash)
-            .map(Some)
+        // A sidecar is current only with a query accelerator this binary can
+        // use: a missing or older accelerator makes warm queries fall back to
+        // exact in-memory recomputation, so the semantic index rebuilds it.
+        bonsai_idg::workspace::IdgWorkspace::validate_accelerated_sidecar_layout_with_pipeline(
+            &sidecar,
+            pipeline_hash,
+        )
+        .map(Some)
     }
 
     pub fn cached_resolved_call_graph(&self) -> Arc<bonsai_callgraph::ResolvedCallGraph> {
@@ -2484,6 +2750,22 @@ impl Workspace {
             }
         }
         arc
+    }
+
+    /// Whether a validated partitioned callgraph sidecar can answer scoped
+    /// graph questions without building the resident workspace graph.
+    #[must_use]
+    pub fn has_persisted_callgraph(&self) -> bool {
+        self.callgraph_query_service().is_some()
+    }
+
+    /// Whether validated persisted header partitions exist for every file
+    /// this session ingested, so a scoped session binds to the same stable
+    /// symbol identities the persisted callgraph uses.
+    #[must_use]
+    pub fn has_persisted_linkage(&self) -> bool {
+        let files = self.inner.vfs.all_files();
+        self.persisted_compiler_header_index_for_files(&files).is_some()
     }
 
     fn callgraph_query_service(&self) -> Option<Arc<callgraph_sidecar::CallgraphQueryService>> {
@@ -2646,6 +2928,17 @@ impl Workspace {
     /// endpoint without hydrating the complete callable table. `None` means
     /// no reusable sidecar exists; the caller must take its canonical
     /// resident-graph fallback.
+    /// One file's persisted callgraph relation (`nodes`, `outgoing`,
+    /// `incoming`) from the validated partitioned sidecar; `None` when no
+    /// such sidecar is available.
+    pub fn persisted_callgraph_file_edges(
+        &self,
+        file: FileId,
+    ) -> Option<std::io::Result<PersistedFileEdges>> {
+        let service = self.callgraph_query_service()?;
+        Some(service.file_partition_edges(file))
+    }
+
     pub fn persisted_callgraph_node(
         &self,
         function: FuncId,
@@ -4082,6 +4375,13 @@ impl Workspace {
         self.inner.idg_sidecar_root.lock().clone()
     }
 
+    /// The complete workspace source table `(FileId, path, content hash)`,
+    /// including files a scoped session did not ingest. Streams the input
+    /// fingerprints once per process and memoizes them.
+    pub fn complete_source_inputs(&self) -> Option<Arc<Vec<(u32, String, u64)>>> {
+        self.sidecar_source_inputs().ok()
+    }
+
     fn sidecar_source_inputs(&self) -> std::io::Result<Arc<Vec<(u32, String, u64)>>> {
         let mut slot = self.inner.sidecar_source_inputs.lock();
         if let Some(inputs) = slot.as_ref() {
@@ -4099,16 +4399,9 @@ impl Workspace {
                         .vfs
                         .path(file)
                         .map_err(|error| std::io::Error::other(error.to_string()))?;
-                    let snapshot = self
-                        .inner
-                        .vfs
-                        .snapshot(file)
-                        .map_err(|error| std::io::Error::other(error.to_string()))?;
-                    Ok((
-                        file.raw(),
-                        path.to_string_lossy().into_owned(),
-                        bonsai_hash::fnv1a_bytes64(snapshot.text.as_bytes()),
-                    ))
+                    let hash = source_content_hash(&self.inner.vfs, file)
+                        .ok_or_else(|| std::io::Error::other(format!("unknown source file id {file:?}")))?;
+                    Ok((file.raw(), path.to_string_lossy().into_owned(), hash))
                 })
                 .collect::<std::io::Result<Vec<_>>>()?;
             inputs.sort_unstable_by_key(|(file, _, _)| *file);
@@ -4283,6 +4576,7 @@ impl Workspace {
         *self.inner.compiler_headers.write() = None;
         *self.inner.compiler_receiver_ancestry.write() = None;
         self.inner.exact_bodies.clear();
+        self.inner.exact_decl_frames.lock().clear();
         self.inner.taint_index.clear();
         self.inner.class_members.clear();
         self.inner.enclosing.invalidate_file(file);
@@ -4390,6 +4684,7 @@ impl Workspace {
                 path,
                 text,
                 full_workspace_file,
+                ..
             } = source;
             let old_id = ws.inner.vfs.lookup(&path);
             let id = match full_workspace_file {
@@ -4447,6 +4742,7 @@ impl Workspace {
                 path,
                 text,
                 full_workspace_file,
+                ..
             } = source;
             let id = match full_workspace_file {
                 Some(file) => ws.inner.vfs.write_with_id(file, path, Arc::<str>::from(text)),
@@ -4516,32 +4812,82 @@ impl Workspace {
     where
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
+        Self::open_query_filtered_paths_with_options_lazy_sources_and_events(
+            root,
+            registry,
+            include_filters,
+            exclude_filters,
+            options,
+            None,
+            on_event,
+        )
+    }
+
+    /// [`Self::open_query_filtered_paths_with_options_and_events`] with
+    /// validated source identities: scoped files whose filesystem stamp still
+    /// matches are interned by identity, and the complete source table the
+    /// persisted compiler generation is validated against comes from the
+    /// identities instead of re-reading every workspace file.
+    pub fn open_query_filtered_paths_with_options_lazy_sources_and_events<F>(
+        root: &Path,
+        registry: Arc<LanguageRegistry>,
+        include_filters: &[String],
+        exclude_filters: &[String],
+        options: WorkspaceOpenOptions,
+        lazy: Option<&LazySourceTable>,
+        on_event: &F,
+    ) -> Result<Self, WorkspaceError>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
+        let lazy = lazy.filter(|table| !table.is_empty());
         let ws = Self::new_with_open_options(registry, options);
+        if lazy.is_some() {
+            ws.install_lazy_source_loader();
+        }
         ws.set_idg_sidecar_root(root)?;
         ws.set_complete_workspace_index(false);
         let canonical_root = canonical_workspace_root(root);
         *ws.inner.root_label.lock() = root.display().to_string();
         ws.inner.db.set_scoped_workspace_root(canonical_root.clone());
         on_event(WorkspaceOpenEvent::IngestStarted);
-        let files = read_supported_source_files_filtered_paths(
-            &canonical_root,
-            &ws.inner.registry,
-            include_filters,
-            exclude_filters,
-            ws.inner.include_minified_sources,
-            on_event,
-        )?;
+        let (files, complete_table) = if options.load_compiler_object_sidecar {
+            let (files, table) = read_supported_source_files_filtered_paths_with_complete_table(
+                &canonical_root,
+                &ws.inner.registry,
+                include_filters,
+                exclude_filters,
+                ws.inner.include_minified_sources,
+                lazy,
+                on_event,
+            )?;
+            (files, Some(table))
+        } else {
+            let files = read_supported_source_files_filtered_paths(
+                &canonical_root,
+                &ws.inner.registry,
+                include_filters,
+                exclude_filters,
+                ws.inner.include_minified_sources,
+                lazy,
+                on_event,
+            )?;
+            (files, None)
+        };
         let file_count = files.len();
         for source in files {
             let SourceFileContent {
                 path,
                 text,
+                lazy: identity,
                 full_workspace_file,
             } = source;
             let old_id = ws.inner.vfs.lookup(&path);
-            let id = match full_workspace_file {
-                Some(file) => ws.inner.vfs.write_with_id(file, path, Arc::<str>::from(text)),
-                None => ws.inner.vfs.write(path, Arc::<str>::from(text)),
+            let id = match (full_workspace_file, identity) {
+                (Some(file), Some(identity)) => ws.inner.vfs.write_lazy_with_id(file, path, identity),
+                (None, Some(identity)) => ws.inner.vfs.write_lazy(path, identity),
+                (Some(file), None) => ws.inner.vfs.write_with_id(file, path, Arc::<str>::from(text)),
+                (None, None) => ws.inner.vfs.write(path, Arc::<str>::from(text)),
             };
             if let Some(prev) = old_id {
                 ws.invalidate_after_file_change(prev);
@@ -4550,6 +4896,37 @@ impl Workspace {
             let _ = id;
         }
         on_event(WorkspaceOpenEvent::IngestFinished { files: file_count });
+        // A path-filtered scope reuses the persisted compiler objects exactly
+        // like an exact-files scope; without this every declaration, import,
+        // or attribution read re-lowers source. The generation is validated
+        // against the complete workspace source table (the same table the
+        // scoped sidecar validators use), so it is computed once here and
+        // kept for them.
+        if let Some(complete) = complete_table {
+            if let Err(error) = ws.inner.db.load_compiler_object_store_for_source_fingerprints(
+                &canonical_root,
+                complete.iter().map(|source| (&source.path, source.hash)),
+            ) {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "filtered query compiler-object generation rejected at {}: {}",
+                    canonical_root.display(),
+                    error
+                );
+            }
+            let table: Vec<(u32, String, u64)> = complete
+                .into_iter()
+                .enumerate()
+                .filter_map(|(ordinal, source)| {
+                    Some((
+                        u32::try_from(ordinal).ok()?,
+                        source.path.to_string_lossy().into_owned(),
+                        source.hash,
+                    ))
+                })
+                .collect();
+            *ws.inner.sidecar_source_inputs.lock() = Some(Arc::new(table));
+        }
         if options.eager_decl_index {
             let files = ws.vfs().all_files();
             on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
@@ -4638,6 +5015,7 @@ impl Workspace {
                 Ok(SourceFileContent {
                     path,
                     text,
+                    lazy: None,
                     full_workspace_file: Some(file),
                 })
             })
@@ -4764,10 +5142,26 @@ impl Workspace {
     where
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
+        Self::open_with_options_lazy_sources_and_events(root, registry, options, None, on_event)
+    }
+
+    /// [`Self::open_with_options_and_events`] with sources the caller has
+    /// already validated: entries of `lazy` whose filesystem stamp still
+    /// matches are interned by identity and read on first use.
+    pub fn open_with_options_lazy_sources_and_events<F>(
+        root: &Path,
+        registry: Arc<LanguageRegistry>,
+        options: WorkspaceOpenOptions,
+        lazy: Option<&LazySourceTable>,
+        on_event: &F,
+    ) -> Result<Self, WorkspaceError>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
         let ws = Self::new_with_open_options(registry, options);
         ws.set_idg_sidecar_root(root)?;
         on_event(WorkspaceOpenEvent::IngestStarted);
-        ws.ingest_dir_with_events(root, on_event)?;
+        ws.ingest_dir_with_events(root, lazy, on_event)?;
         let files = ws.vfs().all_files();
         on_event(WorkspaceOpenEvent::IngestFinished { files: files.len() });
         if options.eager_decl_index {
@@ -5083,10 +5477,35 @@ impl Workspace {
     }
 
     pub fn ingest_dir(&self, root: &Path) -> Result<Vec<FileId>, WorkspaceError> {
-        self.ingest_dir_with_events(root, &|_| {})
+        self.ingest_dir_with_events(root, None, &|_| {})
     }
 
-    fn ingest_dir_with_events<F>(&self, root: &Path, on_event: &F) -> Result<Vec<FileId>, WorkspaceError>
+    /// First use of a lazily interned source reads the file and proves it is
+    /// the recorded text before it is pinned.
+    fn install_lazy_source_loader(&self) {
+        let registry = Arc::clone(&self.inner.registry);
+        self.inner.vfs.set_lazy_loader(Arc::new(
+            move |path: &Path, identity: &bonsai_vfs::SourceIdentity| {
+                let text = read_supported_source_text(path, &registry)?;
+                if u64::try_from(text.len()).unwrap_or(u64::MAX) != identity.len
+                    || bonsai_hash::fnv1a_bytes64(text.as_bytes()) != identity.hash
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("source changed after cache validation: {}", path.display()),
+                    ));
+                }
+                Ok(Arc::<str>::from(text))
+            },
+        ));
+    }
+
+    fn ingest_dir_with_events<F>(
+        &self,
+        root: &Path,
+        lazy: Option<&LazySourceTable>,
+        on_event: &F,
+    ) -> Result<Vec<FileId>, WorkspaceError>
     where
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
@@ -5102,17 +5521,25 @@ impl Workspace {
             cache_fingerprint::register_workspace_cache_root(&canonical_root)?;
         }
         self.inner.db.set_workspace_root(canonical_root.clone());
+        let lazy = lazy.filter(|table| !table.is_empty());
+        if lazy.is_some() {
+            self.install_lazy_source_loader();
+        }
         let mut ingested = Vec::new();
         stream_supported_source_files(
             &canonical_root,
             &self.inner.registry,
             self.inner.include_minified_sources,
+            lazy,
             |files| on_event(WorkspaceOpenEvent::IngestFilesStarted { files }),
             || on_event(WorkspaceOpenEvent::IngestFileRead),
             |source| {
                 let path = &source.path;
                 let old_id = self.inner.vfs.lookup(path);
-                let id = self.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
+                let id = match source.lazy {
+                    Some(identity) => self.inner.vfs.write_lazy(path.clone(), identity),
+                    None => self.inner.vfs.write(path.clone(), Arc::<str>::from(source.text)),
+                };
                 if let Some(prev) = old_id {
                     self.invalidate_after_file_change_locked(prev);
                 }
@@ -5133,6 +5560,18 @@ impl Workspace {
     ) -> Result<Vec<SourceFileFingerprint>, WorkspaceError> {
         let canonical_root = canonical_workspace_root(root);
         read_supported_source_file_fingerprints(
+            &canonical_root,
+            &self.inner.registry,
+            self.inner.include_minified_sources,
+        )
+    }
+
+    /// Current supported source files under `root` with their exact content
+    /// identity (length, FNV-1a hash, SHA-256 digest). Cache manifests record
+    /// these so a later open can intern unchanged files without reading them.
+    pub fn source_file_identities(&self, root: &Path) -> Result<Vec<SourceFileIdentity>, WorkspaceError> {
+        let canonical_root = canonical_workspace_root(root);
+        read_supported_source_file_identities(
             &canonical_root,
             &self.inner.registry,
             self.inner.include_minified_sources,
@@ -5651,10 +6090,10 @@ impl Workspace {
                     .is_ok_and(|path| file_matches_qualifier(path.as_ref(), qualifier))
             });
             let line_matches = lookup.line.is_none_or(|wanted| {
-                self.inner.db.vfs().snapshot(node.file).is_ok_and(|snapshot| {
-                    let map = bonsai_common::cached_span_map_arc(node.file, snapshot.version, &snapshot.text);
-                    map.line_col(node.name_span.start).line == wanted
-                })
+                self.inner
+                    .db
+                    .span_map(node.file)
+                    .is_some_and(|map| map.line_col(node.name_span.start).line == wanted)
             });
             let qualified_matches = lookup.qualified.is_none_or(|wanted| {
                 node.qualified_name
@@ -5703,18 +6142,8 @@ impl Workspace {
                         let line = self
                             .inner
                             .db
-                            .vfs()
-                            .snapshot(node.file)
-                            .ok()
-                            .map(|snapshot| {
-                                bonsai_common::cached_span_map_arc(
-                                    node.file,
-                                    snapshot.version,
-                                    &snapshot.text,
-                                )
-                                .line_col(node.name_span.start)
-                                .line
-                            })
+                            .span_map(node.file)
+                            .map(|map| map.line_col(node.name_span.start).line)
                             .unwrap_or(0);
                         format!("{path}:{line}:{} (FuncId:{})", node.name, node.func.raw())
                     })
@@ -5743,8 +6172,7 @@ impl Workspace {
     }
 
     fn decl_name_line(&self, decl: &Decl) -> Option<u32> {
-        let snapshot = self.inner.db.vfs().snapshot(decl.name_span.file).ok()?;
-        let map = bonsai_common::cached_span_map_arc(decl.name_span.file, snapshot.version, &snapshot.text);
+        let map = self.inner.db.span_map(decl.name_span.file)?;
         Some(map.line_col(decl.name_span.start).line)
     }
 
@@ -6246,6 +6674,12 @@ fn collect_unindexed_named_decls<F>(
 ) where
     F: Fn(&Decl) -> bool,
 {
+    // The name index already covers every inserted declaration; the
+    // whole-workspace scan is the fallback for a name the index cannot
+    // answer, not an unconditional second pass per lookup.
+    if !out.is_empty() {
+        return;
+    }
     let global = ws.compiler_header_index();
     for file in global.all_files() {
         for decl in global.decls_in(file) {
@@ -6728,7 +7162,9 @@ mod idg_pipeline_hash_tests;
 
 struct SourceFileContent {
     path: std::path::PathBuf,
+    /// Empty when `lazy` is set: the text stays on disk until first use.
     text: String,
+    lazy: Option<bonsai_vfs::SourceIdentity>,
     /// Deterministic ordinal among all supported sources in the complete
     /// workspace. Scoped readers retain it so immutable compiler objects
     /// remain addressable by the same `FileId`.
@@ -6761,6 +7197,49 @@ fn canonical_workspace_root(root: &Path) -> std::path::PathBuf {
 /// the whole repository before it could compare one hash. Each Rayon worker
 /// now owns one fixed-size read buffer and the result retains only path/hash
 /// pairs, matching a compiler's streaming input-fingerprint phase.
+fn read_supported_source_file_identities(
+    canonical_root: &Path,
+    registry: &LanguageRegistry,
+    include_minified_sources: bool,
+) -> Result<Vec<SourceFileIdentity>, WorkspaceError> {
+    use rayon::prelude::*;
+    use sha2::Digest as _;
+    let entries = walk_workspace_entries(canonical_root)?;
+    let outcomes: Vec<Result<Option<SourceFileIdentity>, std::io::Error>> = entries
+        .into_par_iter()
+        .map(|entry| {
+            if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
+                return Ok(None);
+            }
+            let path = entry.path();
+            if !source_path_is_admitted(registry, path, include_minified_sources) {
+                return Ok(None);
+            }
+            let bytes = std::fs::read(path)?;
+            Ok(Some(SourceFileIdentity {
+                path: path.to_path_buf(),
+                len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                hash: bonsai_hash::fnv1a_bytes64(&bytes),
+                digest: sha2::Sha256::digest(&bytes).into(),
+                // `read_supported_source_text` returns these bytes verbatim
+                // only when they are valid UTF-8; otherwise the adapter
+                // normalises them and the text identity differs.
+                text_exact: std::str::from_utf8(&bytes).is_ok(),
+            }))
+        })
+        .collect();
+    let mut identities = Vec::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        match outcome {
+            Ok(Some(identity)) => identities.push(identity),
+            Ok(None) => {}
+            Err(error) => return Err(WorkspaceError::Io(error)),
+        }
+    }
+    identities.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(identities)
+}
+
 fn read_supported_source_file_fingerprints(
     canonical_root: &Path,
     registry: &LanguageRegistry,
@@ -6884,8 +7363,23 @@ fn walk_workspace_entries(canonical_root: &Path) -> Result<Vec<ignore::DirEntry>
         .ignore(true)
         .add_custom_ignore_filename(".bonsaiignore");
     builder.filter_entry(|entry| entry.file_name() != ".bonsai");
-    let mut entries = builder
-        .build()
+    // The ignore-aware walk is I/O and rule-matching bound; walk directories
+    // concurrently and restore the canonical path order afterwards so the
+    // entry set and every FileId derived from it are unchanged.
+    let (sender, receiver) =
+        std::sync::mpsc::channel::<std::result::Result<ignore::DirEntry, ignore::Error>>();
+    builder.build_parallel().run(|| {
+        let sender = sender.clone();
+        Box::new(move |entry| {
+            if sender.send(entry).is_err() {
+                return ignore::WalkState::Quit;
+            }
+            ignore::WalkState::Continue
+        })
+    });
+    drop(sender);
+    let mut entries = receiver
+        .into_iter()
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|error| WorkspaceError::Io(std::io::Error::other(error.to_string())))?;
     entries.sort_by(|left, right| left.path().cmp(right.path()));
@@ -6913,10 +7407,145 @@ fn source_path_is_admitted(registry: &LanguageRegistry, path: &Path, include_min
 /// syntax, strings, or an ambiguous grammar interpretation still fail closed.
 fn read_supported_source_text(path: &Path, registry: &LanguageRegistry) -> std::io::Result<String> {
     let bytes = std::fs::read(path)?;
+    source_text_from_bytes(path, registry, bytes)
+}
+
+fn source_text_from_bytes(
+    path: &Path,
+    registry: &LanguageRegistry,
+    bytes: Vec<u8>,
+) -> std::io::Result<String> {
     match String::from_utf8(bytes) {
         Ok(text) => Ok(text),
         Err(error) => normalize_grammar_proven_comment_bytes(path, registry, error.into_bytes()),
     }
+}
+
+/// Path-scoped sources plus the complete workspace fingerprint table from one
+/// walk and one read pass: in-scope files are read (or interned by identity),
+/// out-of-scope files contribute their recorded or streamed hash only.
+fn read_supported_source_files_filtered_paths_with_complete_table(
+    canonical_root: &Path,
+    registry: &LanguageRegistry,
+    include_filters: &[String],
+    exclude_filters: &[String],
+    include_minified_sources: bool,
+    lazy: Option<&LazySourceTable>,
+    on_event: &(impl Fn(WorkspaceOpenEvent) + Sync),
+) -> Result<(Vec<SourceFileContent>, Vec<SourceFileFingerprint>), WorkspaceError> {
+    let filter = PathFilterSpec {
+        include_filters,
+        exclude_filters,
+    };
+    let entries = walk_workspace_entries(canonical_root)?;
+    use rayon::prelude::*;
+    enum Outcome {
+        InScope(SourceFileContent, u64),
+        OutOfScope(u64),
+        Err(std::io::Error),
+    }
+    let supported_entries = entries
+        .into_iter()
+        .filter(|entry| {
+            entry.file_type().is_some_and(|file_type| file_type.is_file())
+                && source_path_is_admitted(registry, entry.path(), include_minified_sources)
+        })
+        .enumerate()
+        .map(|(ordinal, entry)| {
+            (
+                FileId::new(u32::try_from(ordinal).expect("too many supported source files")),
+                entry,
+            )
+        })
+        .collect::<Vec<_>>();
+    let in_scope_count = supported_entries
+        .iter()
+        .filter(|(_, entry)| source_path_allowed(canonical_root, entry.path(), filter))
+        .count();
+    on_event(WorkspaceOpenEvent::IngestFilesStarted {
+        files: in_scope_count,
+    });
+    let outcomes: Vec<(std::path::PathBuf, Outcome)> = supported_entries
+        .into_par_iter()
+        .map(|(file, entry)| {
+            let path = entry.path();
+            let in_scope = source_path_allowed(canonical_root, path, filter);
+            let recorded = lazy.and_then(|table| table.get(path)).and_then(|record| {
+                source_file_stamp(path)
+                    .ok()
+                    .filter(|current| record.stamp.identity_matches(current))
+                    .map(|_| record.identity)
+            });
+            let outcome = match (in_scope, recorded) {
+                (true, Some(identity)) => Outcome::InScope(
+                    SourceFileContent {
+                        path: path.to_path_buf(),
+                        text: String::new(),
+                        lazy: Some(identity),
+                        full_workspace_file: Some(file),
+                    },
+                    identity.hash,
+                ),
+                (false, Some(identity)) => Outcome::OutOfScope(identity.hash),
+                (true, None) => match std::fs::read(path) {
+                    Ok(bytes) => {
+                        let hash = bonsai_hash::fnv1a_bytes64(&bytes);
+                        match source_text_from_bytes(path, registry, bytes) {
+                            Ok(text) => {
+                                on_event(WorkspaceOpenEvent::IngestFileRead);
+                                Outcome::InScope(
+                                    SourceFileContent {
+                                        path: path.to_path_buf(),
+                                        text,
+                                        lazy: None,
+                                        full_workspace_file: Some(file),
+                                    },
+                                    hash,
+                                )
+                            }
+                            Err(error) => Outcome::Err(error),
+                        }
+                    }
+                    Err(error) => Outcome::Err(error),
+                },
+                (false, None) => {
+                    let hashed = (|| -> std::io::Result<u64> {
+                        let mut file = std::fs::File::open(path)?;
+                        let mut hasher = StableHasher::new();
+                        let mut buffer = vec![0_u8; 64 * 1024];
+                        loop {
+                            let read = file.read(&mut buffer)?;
+                            if read == 0 {
+                                break;
+                            }
+                            hasher.absorb(&buffer[..read]);
+                        }
+                        Ok(hasher.finish())
+                    })();
+                    match hashed {
+                        Ok(hash) => Outcome::OutOfScope(hash),
+                        Err(error) => Outcome::Err(error),
+                    }
+                }
+            };
+            (path.to_path_buf(), outcome)
+        })
+        .collect();
+    let mut files = Vec::with_capacity(in_scope_count);
+    let mut fingerprints = Vec::with_capacity(outcomes.len());
+    for (path, outcome) in outcomes {
+        match outcome {
+            Outcome::InScope(content, hash) => {
+                fingerprints.push(SourceFileFingerprint { path, hash });
+                files.push(content);
+            }
+            Outcome::OutOfScope(hash) => fingerprints.push(SourceFileFingerprint { path, hash }),
+            Outcome::Err(error) => return Err(WorkspaceError::Io(error)),
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    fingerprints.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok((files, fingerprints))
 }
 
 fn normalize_grammar_proven_comment_bytes(
@@ -7046,6 +7675,7 @@ fn stream_supported_source_files<F>(
     canonical_root: &Path,
     registry: &LanguageRegistry,
     include_minified_sources: bool,
+    lazy: Option<&LazySourceTable>,
     on_started: impl FnOnce(usize),
     on_file_read: impl Fn() + Sync,
     mut on_file: F,
@@ -7056,6 +7686,7 @@ where
     // Inclusion is structural: explicit ignore rules, adapter ownership, and
     // the caller's compiler-input profile. Shared workspace code never
     // guesses which language owns a generated representation.
+    let walk_started = std::time::Instant::now();
     let entries = walk_workspace_entries(canonical_root)?
         .into_iter()
         .filter(|entry| {
@@ -7063,11 +7694,26 @@ where
                 && source_path_is_admitted(registry, entry.path(), include_minified_sources)
         })
         .collect::<Vec<_>>();
+    bonsai_diagnostics::debug_log!(
+        "workspace-open",
+        "ingest walk: {:.3}s · sources {}",
+        walk_started.elapsed().as_secs_f64(),
+        entries.len()
+    );
     on_started(entries.len());
-    let source_bytes = entries
+    // One concurrent stat pass provides both the byte weights the batch
+    // scheduler needs and the stamps the lazy table is checked against.
+    use rayon::prelude::*;
+    let stat_started = std::time::Instant::now();
+    let stamps: Vec<Option<SourceFileStamp>> = entries
+        .par_iter()
+        .map(|entry| source_file_stamp(entry.path()).ok())
+        .collect();
+    let source_bytes = stamps
         .iter()
-        .map(|entry| entry.metadata().map_or(0, |metadata| metadata.len()))
+        .map(|stamp| stamp.as_ref().map_or(0, |stamp| stamp.len))
         .collect::<Vec<_>>();
+    let stat_elapsed = stat_started.elapsed();
     let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
 
     // Read independent compiler inputs concurrently, but publish each bounded
@@ -7076,26 +7722,55 @@ where
     // pass from every cold CLI process. The shared syntax scheduler accounts
     // for current RSS and file size, so constrained machines execute smaller
     // batches instead of retaining a second whole-workspace source copy.
+    let mut publish = std::time::Duration::ZERO;
+    let mut lazy_interned = 0usize;
     for range in bonsai_common::source_ingestion_batches(&source_bytes, workers) {
-        use rayon::prelude::*;
-        let batch = entries[range]
+        let batch = entries[range.clone()]
             .par_iter()
-            .map(|entry| {
+            .zip(stamps[range].par_iter())
+            .map(|(entry, stamp)| {
                 let path = entry.path();
+                // A recorded identity whose filesystem stamp still matches is
+                // the exact text on disk: intern it and read on first use.
+                if let (Some(record), Some(current)) =
+                    (lazy.and_then(|table| table.get(path)), stamp.as_ref())
+                {
+                    if record.stamp.identity_matches(current) {
+                        return Ok(SourceFileContent {
+                            path: path.to_path_buf(),
+                            text: String::new(),
+                            lazy: Some(record.identity),
+                            full_workspace_file: None,
+                        });
+                    }
+                }
                 read_supported_source_text(path, registry).map(|text| {
                     on_file_read();
                     SourceFileContent {
                         path: path.to_path_buf(),
                         text,
+                        lazy: None,
                         full_workspace_file: None,
                     }
                 })
             })
             .collect::<Vec<_>>();
+        let publish_started = std::time::Instant::now();
         for source in batch {
-            on_file(source.map_err(WorkspaceError::Io)?)?;
+            let source = source.map_err(WorkspaceError::Io)?;
+            lazy_interned += usize::from(source.lazy.is_some());
+            on_file(source)?;
         }
+        publish += publish_started.elapsed();
     }
+    bonsai_diagnostics::debug_log!(
+        "workspace-open",
+        "ingest phases: stat {:.3}s · publish {:.3}s · lazy {} of {}",
+        stat_elapsed.as_secs_f64(),
+        publish.as_secs_f64(),
+        lazy_interned,
+        entries.len()
+    );
 
     Ok(())
 }
@@ -7113,6 +7788,7 @@ fn read_supported_source_files_matching_literal(
         Some(std::slice::from_ref(&literal)),
         None,
         include_minified_sources,
+        None,
         on_event,
     )
 }
@@ -7130,6 +7806,7 @@ fn read_supported_source_files_matching_literals(
         Some(literals),
         None,
         include_minified_sources,
+        None,
         on_event,
     )
 }
@@ -7140,6 +7817,7 @@ fn read_supported_source_files_filtered_paths(
     include_filters: &[String],
     exclude_filters: &[String],
     include_minified_sources: bool,
+    lazy: Option<&LazySourceTable>,
     on_event: &(impl Fn(WorkspaceOpenEvent) + Sync),
 ) -> Result<Vec<SourceFileContent>, WorkspaceError> {
     read_supported_source_files_impl(
@@ -7151,6 +7829,7 @@ fn read_supported_source_files_filtered_paths(
             exclude_filters,
         }),
         include_minified_sources,
+        lazy,
         on_event,
     )
 }
@@ -7187,6 +7866,7 @@ fn read_supported_source_file_at_path(
     Ok(SourceFileContent {
         path,
         text,
+        lazy: None,
         full_workspace_file: None,
     })
 }
@@ -7248,6 +7928,7 @@ fn read_supported_source_files_impl(
     literal_filters: Option<&[&str]>,
     path_filter: Option<PathFilterSpec<'_>>,
     include_minified_sources: bool,
+    lazy: Option<&LazySourceTable>,
     on_event: &(impl Fn(WorkspaceOpenEvent) + Sync),
 ) -> Result<Vec<SourceFileContent>, WorkspaceError> {
     // Match the streaming path's compiler contract. Literal/path filters are
@@ -7306,6 +7987,20 @@ fn read_supported_source_files_impl(
         .into_par_iter()
         .map(|(file, entry)| {
             let path = entry.path();
+            // A literal scan needs the text; a path scope does not, so a
+            // recorded identity whose stamp still matches is interned lazily.
+            if literal_filters.is_none() {
+                if let Some(record) = lazy.and_then(|table| table.get(path)) {
+                    if source_file_stamp(path).is_ok_and(|current| record.stamp.identity_matches(&current)) {
+                        return ReadOutcome::Keep(SourceFileContent {
+                            path: path.to_path_buf(),
+                            text: String::new(),
+                            lazy: Some(record.identity),
+                            full_workspace_file: Some(file),
+                        });
+                    }
+                }
+            }
             let text = match read_supported_source_text(path, registry) {
                 Ok(text) => {
                     on_event(WorkspaceOpenEvent::IngestFileRead);
@@ -7326,6 +8021,7 @@ fn read_supported_source_files_impl(
             ReadOutcome::Keep(SourceFileContent {
                 path: path.to_path_buf(),
                 text,
+                lazy: None,
                 full_workspace_file: Some(file),
             })
         })

@@ -2843,6 +2843,15 @@ pub fn entry_taint_graph_from_idg(
 /// query.
 #[must_use]
 pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTaintGraph {
+    entry_taint_graph_with_closure_from_idg_query(request).0
+}
+
+/// [`entry_taint_graph_from_idg_query`] that also returns every IDG node the
+/// closure reached. Function-local summaries read the tainted storage writes
+/// out of that set.
+pub fn entry_taint_graph_with_closure_from_idg_query(
+    request: IdgTaintQuery<'_>,
+) -> (EntryTaintGraph, Vec<bonsai_idg::WsNodeId>) {
     let IdgTaintQuery {
         source,
         transfers,
@@ -2880,7 +2889,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
     // Rule matches compose their source span and declared output carriers.
     let composed = compose_idg_taint_query_seeds(source_func, seeds, seed, global, idg);
     if composed.nodes.is_empty() {
-        return graph;
+        return (graph, Vec::new());
     }
 
     // Call sites whose RETURN is a tainted seed — i.e. the source is a
@@ -2934,7 +2943,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         idg,
     );
     if closure_nodes.is_empty() {
-        return graph;
+        return (graph, closure_nodes);
     }
     let closure_set: ahash::AHashSet<bonsai_idg::WsNodeId> = closure_nodes.iter().copied().collect();
 
@@ -2985,7 +2994,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
             budget_bytes
         );
     }
-    graph
+    (graph, closure_nodes)
 }
 
 /// Translate an assignment-backed IDG call identity to the exact parsed call

@@ -9,7 +9,7 @@ use crate::common::{
     source_files_small_first, textual_relevance_key,
 };
 use bonsai_workspace::{decl_decorator_names, Workspace};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Filter bundle for [`defs`]. All fields are optional; any
 /// `None` skips that filter. `regex` controls how `name` is
@@ -35,7 +35,7 @@ pub struct DefsFilters<'a> {
 
 /// One row of `defs` output. Field names match the JSON schema the
 /// CLI emits.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DefOut {
     pub name: String,
     pub qualified_name: Option<String>,
@@ -88,10 +88,9 @@ pub fn defs(ws: &Workspace, f: &DefsFilters<'_>) -> Result<Vec<DefOut>, regex::E
             if !global.decls_in(file).iter().any(&header_matches) {
                 return acc;
             }
-            let source_bytes = ws
-                .vfs()
-                .snapshot(file)
-                .map_or(0, |snapshot| snapshot.text.len() as u64);
+            // Byte length is metadata; a lazily interned source is not read
+            // to weigh its memory permit.
+            let source_bytes = ws.vfs().text_len(file).unwrap_or(0);
             let _memory_permit = needs_exact_body.then(|| memory_permits.acquire(source_bytes));
             let exact_index = needs_exact_body
                 .then(|| ws.db().decl_index_uncached(file))

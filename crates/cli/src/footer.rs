@@ -346,8 +346,8 @@ fn paging_total_label(cmd_line_hint: &str, total: u64) -> &'static str {
         pluralize("reference", "references")
     } else if cmd_line_hint.contains(" search ") {
         pluralize("match", "matches")
-    } else if cmd_line_hint.contains(" inspect ") {
-        pluralize("inspect item", "inspect items")
+    } else if cmd_line_hint.contains(" inspect-graph ") {
+        pluralize("inspect-graph item", "inspect-graph items")
     } else if cmd_line_hint.contains(" trace ") {
         pluralize("trace line", "trace lines")
     } else if cmd_line_hint.contains(" tree ") {

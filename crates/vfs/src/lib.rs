@@ -17,13 +17,49 @@ use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
 };
 use thiserror::Error;
 
+/// Exact content identity of one interned source, derived from the same
+/// bytes a loaded snapshot's `text` would carry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceIdentity {
+    /// Byte length of the text.
+    pub len: u64,
+    /// FNV-1a 64-bit hash of the text bytes.
+    pub hash: u64,
+    /// SHA-256 digest of the text bytes.
+    pub digest: [u8; 32],
+}
+
+/// Reads the text of a lazily interned source. Returns the exact text the
+/// identity was computed from, or an error when the file changed.
+pub type LazySourceLoader = dyn Fn(&Path, &SourceIdentity) -> std::io::Result<Arc<str>> + Send + Sync;
+
+struct LazyLoader(Arc<LazySourceLoader>);
+
+impl std::fmt::Debug for LazyLoader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LazyLoader")
+    }
+}
+
 static VFS_INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// How many first-use loads `BONSAI_LAZY_TRACE=1` reports with a backtrace,
+/// so the caller that materialises lazily interned sources is attributable.
+const LAZY_TRACE_LOADS: usize = 3;
+
+fn lazy_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("BONSAI_LAZY_TRACE")
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+    })
+}
 
 /// A text edit applied between two snapshots of the same file. Byte offsets
 /// refer to the *old* snapshot.
@@ -52,6 +88,10 @@ pub enum VfsError {
     UnknownPath(PathBuf),
     #[error("edit batch spans multiple files: expected {expected}, got {actual}")]
     MixedEditFiles { expected: FileId, actual: FileId },
+    #[error("loading lazily interned source {path}: {error}")]
+    LazyLoad { path: PathBuf, error: String },
+    #[error("lazily interned source {0} has no loader")]
+    MissingLazyLoader(PathBuf),
 }
 
 /// Interned file registry with versioned snapshots.
@@ -59,6 +99,8 @@ pub enum VfsError {
 pub struct Vfs {
     instance_id: u64,
     inner: RwLock<Inner>,
+    lazy_installed: AtomicUsize,
+    lazy_loaded: AtomicUsize,
 }
 
 impl Default for Vfs {
@@ -66,6 +108,8 @@ impl Default for Vfs {
         Self {
             instance_id: VFS_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed),
             inner: RwLock::new(Inner::default()),
+            lazy_installed: AtomicUsize::new(0),
+            lazy_loaded: AtomicUsize::new(0),
         }
     }
 }
@@ -77,8 +121,31 @@ struct Inner {
     /// Basenames narrow a suffix query without scanning every source file.
     by_basename: AHashMap<PathBuf, Vec<FileId>>,
     files: Vec<Option<FileSnapshot>>,
+    /// Identity of entries whose text is still on disk; `None` once loaded.
+    lazy: Vec<Option<SourceIdentity>>,
+    loader: Option<LazyLoader>,
     edits_since: Vec<Vec<TextEdit>>,
     revision: u64,
+}
+
+impl Drop for Vfs {
+    fn drop(&mut self) {
+        // Final lazy-load accounting for `BONSAI_DEBUG=workspace-open`.
+        let installed = self.lazy_installed.load(Ordering::Relaxed);
+        if installed > 0
+            && std::env::var("BONSAI_DEBUG").is_ok_and(|debug| {
+                debug.split(',').any(|category| {
+                    let category = category.trim();
+                    category == "workspace-open" || category == "all" || category == "*"
+                })
+            })
+        {
+            eprintln!(
+                "[workspace-open] lazy sources at close: interned by identity {installed} · loaded {}",
+                self.lazy_loaded.load(Ordering::Relaxed)
+            );
+        }
+    }
 }
 
 impl Vfs {
@@ -120,6 +187,7 @@ impl Vfs {
                 text,
                 version: old.version + 1,
             });
+            inner.lazy[id.raw() as usize] = None;
             return id;
         }
         // INTENTIONAL: panic at the structural u32 boundary. `FileId`
@@ -139,6 +207,7 @@ impl Vfs {
         };
         inner.files.push(Some(snapshot));
         inner.edits_since.push(Vec::new());
+        inner.lazy.push(None);
         inner.by_path.insert(lookup_key, id);
         insert_basename_candidate(&mut inner.by_basename, &path, id);
         inner.revision = inner.revision.wrapping_add(1);
@@ -183,6 +252,7 @@ impl Vfs {
                 text,
                 version: old.version + 1,
             });
+            inner.lazy[file_id.raw() as usize] = None;
             return file_id;
         }
 
@@ -190,6 +260,7 @@ impl Vfs {
         if inner.files.len() <= index {
             inner.files.resize_with(index + 1, || None);
             inner.edits_since.resize_with(index + 1, Vec::new);
+            inner.lazy.resize_with(index + 1, || None);
         }
         assert!(
             inner.files[index].is_none(),
@@ -201,6 +272,7 @@ impl Vfs {
             text,
             version: 0,
         });
+        inner.lazy[index] = None;
         inner.by_path.insert(lookup_key, file_id);
         insert_basename_candidate(&mut inner.by_basename, &path, file_id);
         inner.revision = inner.revision.wrapping_add(1);
@@ -232,6 +304,9 @@ impl Vfs {
         if let Some(slot) = inner.files.get_mut(idx) {
             *slot = None;
         }
+        if let Some(slot) = inner.lazy.get_mut(idx) {
+            *slot = None;
+        }
         if let Some(edits) = inner.edits_since.get_mut(idx) {
             edits.clear();
         }
@@ -245,10 +320,13 @@ impl Vfs {
         edits: Vec<TextEdit>,
         new_text: impl Into<Arc<str>>,
     ) -> Result<FileId, VfsError> {
-        let mut inner = self.inner.write();
         let Some(file_id) = edits.first().map(|e| e.file_id) else {
             return Err(VfsError::UnknownFile(FileId::INVALID));
         };
+        // Edits address the previous text; a lazily interned file loads it
+        // first so the snapshot sequence stays exact.
+        self.snapshot(file_id)?;
+        let mut inner = self.inner.write();
         if let Some(edit) = edits.iter().find(|edit| edit.file_id != file_id) {
             return Err(VfsError::MixedEditFiles {
                 expected: file_id,
@@ -275,6 +353,7 @@ impl Vfs {
             version: prev.version + 1,
         });
         inner.edits_since[idx].extend(edits);
+        inner.lazy[idx] = None;
         inner.revision = inner.revision.wrapping_add(1);
         Ok(file_id)
     }
@@ -282,18 +361,202 @@ impl Vfs {
     /// Current snapshot for `file`. Errors when the id is unknown
     /// (typically a stale id after `remove_file` / VFS reset).
     pub fn snapshot(&self, file: FileId) -> Result<FileSnapshot, VfsError> {
+        let idx = file.raw() as usize;
+        let (snapshot, pending) = {
+            let inner = self.inner.read();
+            let snapshot = inner
+                .files
+                .get(idx)
+                .and_then(Option::as_ref)
+                .cloned()
+                .ok_or(VfsError::UnknownFile(file))?;
+            let pending = inner.lazy.get(idx).copied().flatten().map(|identity| {
+                (
+                    identity,
+                    inner.loader.as_ref().map(|loader| Arc::clone(&loader.0)),
+                )
+            });
+            (snapshot, pending)
+        };
+        let Some((identity, loader)) = pending else {
+            return Ok(snapshot);
+        };
+        let loader = loader.ok_or_else(|| VfsError::MissingLazyLoader(snapshot.path.as_ref().clone()))?;
+        // Read outside the table lock: other files stay readable and
+        // parallel first uses load concurrently.
+        let text = loader(&snapshot.path, &identity).map_err(|error| VfsError::LazyLoad {
+            path: snapshot.path.as_ref().clone(),
+            error: error.to_string(),
+        })?;
+        let mut inner = self.inner.write();
+        let Inner { files, lazy, .. } = &mut *inner;
+        let Some(entry) = files.get_mut(idx).and_then(Option::as_mut) else {
+            return Err(VfsError::UnknownFile(file));
+        };
+        if entry.version == snapshot.version && lazy[idx].is_some() {
+            entry.text = text;
+            lazy[idx] = None;
+            let loaded = self.lazy_loaded.fetch_add(1, Ordering::Relaxed) + 1;
+            if loaded <= LAZY_TRACE_LOADS && lazy_trace_enabled() {
+                eprintln!(
+                    "[lazy-trace] load #{loaded} {}\n{}",
+                    snapshot.path.display(),
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }
+        }
+        // A concurrent load or write already replaced the text; return the
+        // current entry so every caller observes one coherent snapshot.
+        Ok(entry.clone())
+    }
+
+    /// Intern `path` by identity, leaving the text on disk until first use.
+    /// Requires a loader from [`Self::set_lazy_loader`] before any
+    /// [`Self::snapshot`] of the file.
+    pub fn write_lazy(&self, path: impl Into<PathBuf>, identity: SourceIdentity) -> FileId {
+        let path = path.into();
+        let lookup_key = canonical_path_key(&path);
+        let mut inner = self.inner.write();
+        if let Some(&id) = inner.by_path.get(&lookup_key) {
+            let old = inner.files[id.raw() as usize]
+                .clone()
+                .expect("path table pointed at removed file");
+            inner.revision = inner.revision.wrapping_add(1);
+            inner.files[id.raw() as usize] = Some(FileSnapshot {
+                file_id: id,
+                path: old.path,
+                text: Arc::from(""),
+                version: old.version + 1,
+            });
+            inner.lazy[id.raw() as usize] = Some(identity);
+            self.lazy_installed.fetch_add(1, Ordering::Relaxed);
+            return id;
+        }
+        let raw = u32::try_from(inner.files.len()).expect("workspace exceeds u32::MAX files");
+        let id = FileId::new(raw);
+        inner.files.push(Some(FileSnapshot {
+            file_id: id,
+            path: Arc::new(path.clone()),
+            text: Arc::from(""),
+            version: 0,
+        }));
+        inner.edits_since.push(Vec::new());
+        inner.lazy.push(Some(identity));
+        inner.by_path.insert(lookup_key, id);
+        insert_basename_candidate(&mut inner.by_basename, &path, id);
+        inner.revision = inner.revision.wrapping_add(1);
+        self.lazy_installed.fetch_add(1, Ordering::Relaxed);
+        id
+    }
+
+    /// [`Self::write_lazy`] at a fixed compiler file id (see
+    /// [`Self::write_with_id`]).
+    pub fn write_lazy_with_id(
+        &self,
+        file_id: FileId,
+        path: impl Into<PathBuf>,
+        identity: SourceIdentity,
+    ) -> FileId {
+        let path = path.into();
+        let lookup_key = canonical_path_key(&path);
+        let mut inner = self.inner.write();
+        if let Some(&existing) = inner.by_path.get(&lookup_key) {
+            assert_eq!(
+                existing, file_id,
+                "path was interned at a different compiler file id"
+            );
+            let old = inner.files[file_id.raw() as usize]
+                .clone()
+                .expect("path table pointed at removed file");
+            inner.revision = inner.revision.wrapping_add(1);
+            inner.files[file_id.raw() as usize] = Some(FileSnapshot {
+                file_id,
+                path: old.path,
+                text: Arc::from(""),
+                version: old.version + 1,
+            });
+            inner.lazy[file_id.raw() as usize] = Some(identity);
+            self.lazy_installed.fetch_add(1, Ordering::Relaxed);
+            return file_id;
+        }
+        let index = file_id.raw() as usize;
+        if inner.files.len() <= index {
+            inner.files.resize_with(index + 1, || None);
+            inner.edits_since.resize_with(index + 1, Vec::new);
+            inner.lazy.resize_with(index + 1, || None);
+        }
+        assert!(
+            inner.files[index].is_none(),
+            "compiler file id was already occupied by a different path"
+        );
+        inner.files[index] = Some(FileSnapshot {
+            file_id,
+            path: Arc::new(path.clone()),
+            text: Arc::from(""),
+            version: 0,
+        });
+        inner.lazy[index] = Some(identity);
+        inner.by_path.insert(lookup_key, file_id);
+        insert_basename_candidate(&mut inner.by_basename, &path, file_id);
+        inner.revision = inner.revision.wrapping_add(1);
+        self.lazy_installed.fetch_add(1, Ordering::Relaxed);
+        file_id
+    }
+
+    /// Install the loader that materialises lazily interned sources.
+    pub fn set_lazy_loader(&self, loader: Arc<LazySourceLoader>) {
+        self.inner.write().loader = Some(LazyLoader(loader));
+    }
+
+    /// Identity of a lazily interned file whose text is still on disk.
+    /// `None` for loaded files and unknown ids.
+    pub fn lazy_identity(&self, file: FileId) -> Option<SourceIdentity> {
+        self.inner.read().lazy.get(file.raw() as usize).copied().flatten()
+    }
+
+    /// Current version of `file` without loading its text.
+    pub fn file_version(&self, file: FileId) -> Result<u64, VfsError> {
         self.inner
             .read()
             .files
             .get(file.raw() as usize)
             .and_then(Option::as_ref)
-            .cloned()
+            .map(|snapshot| snapshot.version)
             .ok_or(VfsError::UnknownFile(file))
     }
 
-    /// Path the VFS interned this file under.
+    /// Byte length of the file's text without loading it.
+    pub fn text_len(&self, file: FileId) -> Result<u64, VfsError> {
+        let inner = self.inner.read();
+        let idx = file.raw() as usize;
+        let snapshot = inner
+            .files
+            .get(idx)
+            .and_then(Option::as_ref)
+            .ok_or(VfsError::UnknownFile(file))?;
+        Ok(match inner.lazy.get(idx).copied().flatten() {
+            Some(identity) => identity.len,
+            None => u64::try_from(snapshot.text.len()).unwrap_or(u64::MAX),
+        })
+    }
+
+    /// Files interned by identity so far, and how many of them were loaded.
+    pub fn lazy_source_counts(&self) -> (usize, usize) {
+        (
+            self.lazy_installed.load(Ordering::Relaxed),
+            self.lazy_loaded.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Path the VFS interned this file under. Never loads the text.
     pub fn path(&self, file: FileId) -> Result<Arc<PathBuf>, VfsError> {
-        self.snapshot(file).map(|snap| snap.path)
+        self.inner
+            .read()
+            .files
+            .get(file.raw() as usize)
+            .and_then(Option::as_ref)
+            .map(|snapshot| Arc::clone(&snapshot.path))
+            .ok_or(VfsError::UnknownFile(file))
     }
 
     /// `FileId` for `path`, or `None` if the path was never written.
@@ -398,23 +661,83 @@ fn insert_basename_candidate(by_basename: &mut AHashMap<PathBuf, Vec<FileId>>, p
 /// the containing directory rather than by changing that directory's own
 /// name in its parent. Cached per canonical directory to keep the cost a
 /// one-time hit.
+fn probe_case_insensitive_for_directory(dir: &Path) -> bool {
+    let default = cfg!(any(target_os = "macos", target_os = "windows"));
+    probe_case_insensitive_with_temp(dir)
+        .or_else(|| probe_case_insensitive_from_entries(dir))
+        .unwrap_or(default)
+}
+
 fn filesystem_is_case_insensitive(path: &Path) -> bool {
     use std::sync::Mutex;
     use std::sync::OnceLock;
     static CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, bool>>> = OnceLock::new();
+    // Every VFS lookup asks this question; the answer is a property of the
+    // directory's volume, so the raw parent directory is memoized first and
+    // the filesystem (stat, realpath, probe) is consulted once per directory.
+    static BY_PARENT: OnceLock<Mutex<std::collections::HashMap<PathBuf, bool>>> = OnceLock::new();
+    let raw_parent: PathBuf = if path.is_absolute() {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        PathBuf::new()
+    };
+    let by_parent = BY_PARENT.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if !raw_parent.as_os_str().is_empty() {
+        if let Some(hit) = by_parent.lock().ok().and_then(|m| m.get(&raw_parent).copied()) {
+            return hit;
+        }
+    }
+    // Case sensitivity is a property of the volume, not of one directory:
+    // one probe per device answers every directory on it. Without this a
+    // 30k-file workspace probed (and wrote a temporary file into) each of
+    // its thousands of directories on every open.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        static BY_DEVICE: OnceLock<Mutex<std::collections::HashMap<u64, bool>>> = OnceLock::new();
+        if !raw_parent.as_os_str().is_empty() {
+            if let Ok(device) = std::fs::metadata(&raw_parent).map(|metadata| metadata.dev()) {
+                let by_device = BY_DEVICE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+                if let Some(hit) = by_device.lock().ok().and_then(|m| m.get(&device).copied()) {
+                    if let Ok(mut m) = by_parent.lock() {
+                        m.insert(raw_parent, hit);
+                    }
+                    return hit;
+                }
+                let probe = probe_case_insensitive_for_directory(&raw_parent);
+                if let Ok(mut m) = by_device.lock() {
+                    m.insert(device, probe);
+                }
+                if let Ok(mut m) = by_parent.lock() {
+                    m.insert(raw_parent, probe);
+                }
+                return probe;
+            }
+        }
+    }
     let dir = nearest_existing_directory(path);
     let cache_key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
     let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    if let Some(hit) = cache.lock().ok().and_then(|m| m.get(&cache_key).copied()) {
-        return hit;
-    }
-    // Fallback: trust the OS default if we can't probe.
-    let default = cfg!(any(target_os = "macos", target_os = "windows"));
-    let probe = probe_case_insensitive_with_temp(&dir)
-        .or_else(|| probe_case_insensitive_from_entries(&dir))
-        .unwrap_or(default);
-    if let Ok(mut m) = cache.lock() {
-        m.insert(cache_key, probe);
+    let probe = match cache.lock().ok().and_then(|m| m.get(&cache_key).copied()) {
+        Some(hit) => hit,
+        None => {
+            // Fallback: trust the OS default if we can't probe.
+            let default = cfg!(any(target_os = "macos", target_os = "windows"));
+            let probe = probe_case_insensitive_with_temp(&dir)
+                .or_else(|| probe_case_insensitive_from_entries(&dir))
+                .unwrap_or(default);
+            if let Ok(mut m) = cache.lock() {
+                m.insert(cache_key, probe);
+            }
+            probe
+        }
+    };
+    if !raw_parent.as_os_str().is_empty() {
+        if let Ok(mut m) = by_parent.lock() {
+            m.insert(raw_parent, probe);
+        }
     }
     probe
 }

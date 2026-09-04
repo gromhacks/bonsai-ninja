@@ -43,13 +43,12 @@ mod ui;
 
 use args::{CacheAction, Cli, Cmd, SecurityAction};
 use commands::{
-    cmd_args, cmd_cache, cmd_calls, cmd_classes, cmd_comments, cmd_context, cmd_defs, cmd_diagnostics,
-    cmd_dump_ast, cmd_dump_callgraph, cmd_dump_cfg, cmd_dump_edges, cmd_dump_hir, cmd_dump_resolution,
-    cmd_dump_resolve, cmd_dump_taint, cmd_entrypoints, cmd_export, cmd_imports, cmd_index, cmd_inspect,
-    cmd_operations, cmd_path, cmd_refs, cmd_search, cmd_slice, cmd_strings, cmd_symbol_summary, cmd_trace,
-    cmd_vars, paging_from_cli, paging_from_cli_output, resolve_selector_arg, ArgsFilters, CallsFilters,
-    ClassesFilters, CommentsFilters, DefsFilters, EntryPointsFilters, ImportsFilters, IndexCommandOptions,
-    InspectCommandOptions, InspectFilters, InspectRenderOptions, OperationsFilters, PathCommandOptions,
+    cmd_args, cmd_cache, cmd_calls, cmd_classes, cmd_comments, cmd_defs, cmd_diagnostics, cmd_dump_ast,
+    cmd_dump_callgraph, cmd_dump_cfg, cmd_dump_edges, cmd_dump_hir, cmd_dump_resolution, cmd_dump_resolve,
+    cmd_dump_taint, cmd_entrypoints, cmd_export, cmd_imports, cmd_index, cmd_inspect, cmd_operations,
+    cmd_refs, cmd_search, cmd_strings, cmd_vars, paging_from_cli, resolve_selector_arg, ArgsFilters,
+    CallsFilters, ClassesFilters, CommentsFilters, DefsFilters, EntryPointsFilters, ImportsFilters,
+    IndexCommandOptions, InspectCommandOptions, InspectFilters, InspectRenderOptions, OperationsFilters,
     RefsFilters, SearchFilters, StringsFilters, VarsFilters,
 };
 use help_theme::try_themed_help;
@@ -344,7 +343,18 @@ fn real_main() -> Result<()> {
         }
     }
 
-    let mut cli = Cli::parse();
+    // Every parse error renders through the same themed help path as
+    // `help` / `--help`: the error line, the menu the input addressed, and
+    // the `help` hint.
+    let mut cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => match err.kind() {
+            clap::error::ErrorKind::DisplayHelp
+            | clap::error::ErrorKind::DisplayVersion
+            | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => err.exit(),
+            _ => std::process::exit(help_theme::render_themed_clap_error(&err)),
+        },
+    };
     // Set the explicit process budget before any compiler phase asks the
     // shared resource detector. The detector is cached after first use so SDK
     // and CLI scheduling observe one stable contract for the whole run.
@@ -444,73 +454,6 @@ fn real_main() -> Result<()> {
                 structural_only,
                 format,
             },
-        ),
-        Cmd::Context {
-            workspace,
-            context,
-            page,
-            all,
-            format,
-            output: _,
-        } => cmd_context(
-            &workspace,
-            paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
-            format,
-        ),
-        Cmd::Trace {
-            workspace,
-            target,
-            function,
-            from,
-            to,
-            context,
-            page,
-            all,
-            format,
-            output: _,
-        } => {
-            let fn_arg = function.or(target);
-            let paging = paging_from_cli_output(context.as_deref(), page.as_deref(), all, format)?;
-            let trace_opts = bonsai_sdk::CrossModuleOptions::default();
-            cmd_trace(&workspace, fn_arg, from, to, paging, format, trace_opts)
-        }
-        Cmd::Path {
-            workspace,
-            from,
-            to,
-            regex,
-            context,
-            page,
-            all,
-            format,
-            output: _,
-        } => cmd_path(
-            &workspace,
-            PathCommandOptions {
-                from: &from,
-                to: &to,
-                regex,
-                paging_cfg: paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
-                format,
-            },
-        ),
-        Cmd::Slice {
-            workspace,
-            symbol,
-            line,
-            file,
-            context,
-            page,
-            all,
-            format,
-            output: _,
-        } => cmd_slice(
-            &workspace,
-            &symbol,
-            line,
-            file.as_deref(),
-            paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
-            format,
         ),
         Cmd::Show {
             workspace,
@@ -1057,26 +1000,6 @@ fn real_main() -> Result<()> {
                 format,
             )
         }
-        Cmd::SymbolSummary {
-            workspace,
-            symbol_pos,
-            symbol,
-            regex,
-            context,
-            page,
-            all,
-            format,
-            output: _,
-        } => {
-            let symbol = resolve_selector_arg(symbol_pos, symbol, "symbol")?;
-            cmd_symbol_summary(
-                &workspace,
-                &symbol,
-                regex,
-                paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
-                format,
-            )
-        }
         Cmd::Inspect {
             workspace,
             symbol_pos,
@@ -1094,7 +1017,6 @@ fn real_main() -> Result<()> {
             flow,
             view,
             group,
-            taint_flow,
             context,
             page,
             format,
@@ -1107,7 +1029,46 @@ fn real_main() -> Result<()> {
             // <id>` alone also satisfies the "some signal" rule — a
             // flow id pins a specific chain independently of the
             // query that originally produced it.
-            let q = symbol_pos.or(query);
+            let mut q = symbol_pos.or(query);
+            let mut regex = regex;
+            let mut kind = kind;
+            let (mut from, mut to, mut file, mut in_fn) = (from, to, file, in_fn);
+            let (mut from_kind, mut to_kind) = (from_kind, to_kind);
+            // A bare `--flow T:<id>` reopens the raw taint path under the query
+            // that minted it (its target cut and lineage roots), when that
+            // provenance is remembered.
+            let bare_taint_lookup = q.is_none()
+                && from.is_none()
+                && to.is_none()
+                && file.is_none()
+                && in_fn.is_none()
+                && kind.is_empty()
+                && group.is_none()
+                && flow.as_deref().is_some_and(|id| id.starts_with("T:"));
+            if bare_taint_lookup {
+                if let Some(hint) = flow
+                    .as_deref()
+                    .and_then(|id| page_cache::structural_id_hint(&workspace, id).ok().flatten())
+                {
+                    if !hint.query.is_empty() {
+                        q = Some(hint.query.clone());
+                    }
+                    regex = hint.regex;
+                    kind.clone_from(&hint.kind_filter);
+                    from.clone_from(&hint.from);
+                    to.clone_from(&hint.to);
+                    file.clone_from(&hint.file);
+                    in_fn.clone_from(&hint.in_fn);
+                    from_kind = hint
+                        .from_kind
+                        .as_deref()
+                        .and_then(args::FactKindFilter::from_stable_name);
+                    to_kind = hint
+                        .to_kind
+                        .as_deref()
+                        .and_then(args::FactKindFilter::from_stable_name);
+                }
+            }
             let filters = InspectFilters {
                 from: from.as_deref(),
                 from_kind,
@@ -1124,19 +1085,16 @@ fn real_main() -> Result<()> {
                 && kind.is_empty()
                 && flow.is_none()
                 && group.is_none()
-                && !taint_flow
             {
                 anyhow::bail!(
-                    "inspect needs a query, a filter (--from / --to / --file / \
-                     --in-fn / --kind), --flow <flow_id>, --group <group_id>, \
-                     or --taint-flow"
+                    "inspect-graph needs a query, a filter (--from / --to / --file / \
+                     --in-fn / --kind), --flow <flow_id>, or --group <group_id>"
                 );
             }
             // `--flow <id>` on its own should still surface something
             // even when no `--query` / filters are set: enumerate every
             // decl + hit, then the flow-id filter in `cmd_inspect`
             // drops everything except the one matching flow.
-            let taint_id_lookup = flow.as_deref().is_some_and(|id| id.starts_with("T:"));
             let render = InspectRenderOptions {
                 compact,
                 flow_id_filter: flow,
@@ -1146,7 +1104,6 @@ fn real_main() -> Result<()> {
                 endpoint_drilldown: false,
             };
             let paging = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
-            let taint_flow = taint_flow || taint_id_lookup;
             cmd_inspect(
                 &workspace,
                 InspectCommandOptions {
@@ -1155,7 +1112,7 @@ fn real_main() -> Result<()> {
                     kind_filter: &kind,
                     filters,
                     render,
-                    taint_flow,
+                    taint_flow: true,
                     paging_cfg: paging,
                     format,
                 },
@@ -1168,6 +1125,7 @@ fn real_main() -> Result<()> {
             output: _,
         } => cmd_export(&workspace, full_propagations, format),
         Cmd::Cache { action } => cmd_cache(action),
+        Cmd::Help { command } => std::process::exit(help_theme::run_help_command(&command)),
         Cmd::Security { workspace, action } => commands::security::cmd_security(&workspace, action),
         Cmd::Tree {
             workspace,
@@ -1179,6 +1137,7 @@ fn real_main() -> Result<()> {
             page,
             all,
             format,
+            files_only,
             output: _,
         } => commands::tree::cmd_tree(commands::tree::TreeArgs {
             workspace: &workspace,
@@ -1190,6 +1149,7 @@ fn real_main() -> Result<()> {
             page: page.as_deref(),
             all,
             format,
+            files_only,
         }),
         Cmd::ReadFile {
             workspace,
@@ -1259,11 +1219,7 @@ fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
         // more importantly, must never be allowed to replay presentation
         // bytes in place of required side effects.
         Cmd::Index { .. } => None,
-        Cmd::Context { workspace, .. }
-        | Cmd::Trace { workspace, .. }
-        | Cmd::Path { workspace, .. }
-        | Cmd::Slice { workspace, .. }
-        | Cmd::Show { workspace, .. }
+        Cmd::Show { workspace, .. }
         | Cmd::Diagnostics { workspace, .. }
         | Cmd::DumpHir { workspace, .. }
         | Cmd::DumpCfg { workspace, .. }
@@ -1285,26 +1241,21 @@ fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
         | Cmd::Classes { workspace, .. }
         | Cmd::Refs { workspace, .. }
         | Cmd::Search { workspace, .. }
-        | Cmd::SymbolSummary { workspace, .. }
         | Cmd::Inspect { workspace, .. }
         | Cmd::Export { workspace, .. }
         | Cmd::Security { workspace, .. }
         | Cmd::Tree { workspace, .. }
         | Cmd::ReadFile { workspace, .. } => Some(workspace.as_path()),
-        Cmd::Cache { .. } => None,
+        Cmd::Cache { .. } | Cmd::Help { .. } => None,
     }
 }
 
 /// `--html-output` renders the canonical JSON document, so every command
 /// runs in its JSON mode regardless of the `--format` it was given.
 fn force_json_format(cmd: &mut Cmd) -> Result<()> {
-    use args::{BrowseFormat, OutputFormat, SecurityFormat};
+    use args::{BrowseFormat, SecurityFormat};
     match cmd {
-        Cmd::Trace { format, .. } => *format = OutputFormat::Json,
         Cmd::Index { format, .. }
-        | Cmd::Context { format, .. }
-        | Cmd::Path { format, .. }
-        | Cmd::Slice { format, .. }
         | Cmd::Show { format, .. }
         | Cmd::Diagnostics { format, .. }
         | Cmd::DumpHir { format, .. }
@@ -1327,7 +1278,6 @@ fn force_json_format(cmd: &mut Cmd) -> Result<()> {
         | Cmd::Classes { format, .. }
         | Cmd::Refs { format, .. }
         | Cmd::Search { format, .. }
-        | Cmd::SymbolSummary { format, .. }
         | Cmd::Inspect { format, .. }
         | Cmd::Tree { format, .. }
         | Cmd::ReadFile { format, .. } => *format = BrowseFormat::Json,
@@ -1353,6 +1303,7 @@ fn force_json_format(cmd: &mut Cmd) -> Result<()> {
         Cmd::Export { .. } => {
             anyhow::bail!("--html-output is not supported for `export`; export streams a native graph artifact, use --format and --output-path")
         }
+        Cmd::Help { .. } => {}
     }
     Ok(())
 }
@@ -1360,9 +1311,6 @@ fn force_json_format(cmd: &mut Cmd) -> Result<()> {
 fn command_output_path(cmd: &Cmd) -> Option<&std::path::Path> {
     match cmd {
         Cmd::Index { output, .. }
-        | Cmd::Trace { output, .. }
-        | Cmd::Path { output, .. }
-        | Cmd::Slice { output, .. }
         | Cmd::Show { output, .. }
         | Cmd::DumpCallgraph { output, .. }
         | Cmd::DumpEdges { output, .. }
@@ -1382,10 +1330,8 @@ fn command_output_path(cmd: &Cmd) -> Option<&std::path::Path> {
         | Cmd::Classes { output, .. }
         | Cmd::Refs { output, .. }
         | Cmd::Search { output, .. }
-        | Cmd::SymbolSummary { output, .. }
         | Cmd::Inspect { output, .. }
         | Cmd::Export { output, .. }
-        | Cmd::Context { output, .. }
         | Cmd::Diagnostics { output, .. }
         | Cmd::DumpHir { output, .. }
         | Cmd::DumpCfg { output, .. }
@@ -1395,7 +1341,7 @@ fn command_output_path(cmd: &Cmd) -> Option<&std::path::Path> {
         Cmd::Cache {
             action: CacheAction::Stats { output, .. },
         } => output.output_path.as_deref(),
-        Cmd::Cache { .. } => None,
+        Cmd::Cache { .. } | Cmd::Help { .. } => None,
     }
 }
 

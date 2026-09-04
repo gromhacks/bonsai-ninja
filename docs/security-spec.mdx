@@ -511,22 +511,29 @@ safe/local option without parsing source tokens in the matcher.
 
 ## Output formats
 
-Three:
+Three `--format` values, plus one presentation sink:
 
 - **text** (default) - themed terminal output.
-- **json** - stable schema documented in `crates/security/src/report.rs`.
-- **sarif** - SARIF 2.1.0 for `security taint-analysis` findings,
+- **json** - stable schema documented in `crates/security/src/report.rs`
+  and rendered through the shared row envelope described in
+  [Output Formats](output-formats.mdx#json-envelope).
+- **sarif** - SARIF 2.1.0 for `security taint-analysis` findings only
+  (`source-analysis` and `sink-analysis` reject it),
   GitHub code scanning, and other standards-based consumers. SARIF includes
   exact source-independent API/config misuse findings by default; those
   rows have no `codeFlows` and use `pattern:<sink-rule-id>` as their
   source id. Lifecycle-audit transition sites are not emitted as
   findings until later same-value use is proved.
+- **html** is not a `--format` value: the global `--html-output <PATH>`
+  renders the same canonical JSON document as a self-contained report for
+  any security command.
 
-Each finding format is content-stable when the same snapshot, configuration,
-and canonical workspace root are used: rows are sorted, `finding_id`s are
-deterministic, and default emission contains no timestamps. Location fields
-currently include the selected workspace path, so moving an otherwise
-identical checkout can change serialized bytes and IDs. Stable IDs are exercised by
+Each finding format is content-stable for the same snapshot and
+configuration: rows are sorted, `finding_id`s are deterministic, and default
+emission contains no timestamps. Location fields (`file`, `hops[].file`,
+SARIF artifact URIs) are workspace-relative, so an otherwise identical
+checkout analyzed from a different absolute path produces the same
+serialized findings and IDs. Stable IDs are exercised by
 `crates/security/tests/finding_id_stability.rs`; repeated CLI analysis and
 export rendering are covered by `crates/cli/tests/taint_engine_e2e.rs` and
 `crates/cli/tests/determinism.rs`.
@@ -552,12 +559,14 @@ source-lineage scope from resolved callgraph edges, adds summary-output caller
 support for source-returning helpers, and seeds a scoped IDG for only the files
 and functions in that lineage. Text output is labelled
 `SOURCE n · DOWNSTREAM FLOW m` and retains the source rule id, distinguishing
-the path and its parent boundary from generic `inspect` call flows.
+the path and its parent boundary from generic `inspect-graph` call flows.
 
 Each JSON row carries `analysis_complete`, `analysis_incomplete_reasons`,
-and `lineage`. If representative lineage rendering hits its hop or path
-budget, the row is explicitly marked incomplete instead of being presented
-as complete evidence.
+the matched `source`, and the downstream `flow` (`flow_id`, `chain`,
+`chain_display`, and the `functions[]` bodies the text view prints). If
+representative lineage rendering hits its hop or path budget, the row is
+explicitly marked incomplete instead of being presented as complete
+evidence.
 
 ## Sink-analysis command
 
@@ -570,9 +579,19 @@ its `upstream_flows`.
 
 Sink-analysis shares the taint-analysis endpoint matcher, compiler-resolved
 call graph, typed transfer facts, and sparse IDG fixed point. It compiles one
-sink-relevant scope and validates each candidate compiler origin forward to
-the exact sink node; reverse relevance is pruning evidence, never the public
-proof. Source-rule matching is a separate demand-driven enrichment and is not
+sink-relevant scope, then analyses every admitted function once per entering
+value with an exact IDG closure confined to that function: one per
+parameter, one per storage read the projected heap feeds from another
+function's tainted write, and one over all places of an entry point (an
+admitted function no admitted function calls, or a member of a call cycle no
+entry point reaches). Callee returns compose through the IDG's contextual
+return summaries, so no callee body is re-explored. Those summaries form a
+graph of `(function, entering value)` nodes joined by tainted call arguments
+and heap relations; an upstream route is a path from an entry point to a sink
+hit, and one exact route is reported per sink endpoint and direct feeder. A
+sink no entry point feeds is traced inside its own function to its own sink
+nodes. Reverse relevance is pruning evidence, never the public proof.
+Source-rule matching is a separate demand-driven enrichment and is not
 performed for the default source-independent view. Pagination affects only
 which sink rows and bodies are rendered; it does not cap matching or
 propagation.
@@ -583,7 +602,8 @@ Text output uses distinct labels for different evidence surfaces:
 
 | Label | Surface | Evidence |
 |---|---|---|
-| `FLOW` | `inspect` and navigation views | Stable bounded structural evidence; endpoint reachability remains a compressed compiler corridor. |
+| `FLOW` | `inspect-graph` and navigation views | Stable bounded structural evidence; endpoint reachability remains a compressed compiler corridor (`CORRIDOR FLOW` for `--from`/`--to`). |
+| `TAINT CALL STACK n` | `inspect-graph` | Rulepack-free taint-engine paths through the inspect query; JSON `taint_flows[]` with `taint_id`. |
 | `SOURCE n · DOWNSTREAM FLOW m` | `security source-analysis` | Taint propagation from numbered source `n` without sink attribution. |
 | `SINK n · UPSTREAM FLOW m` | `security sink-analysis` | Exact source-independent compiler lineage attached to numbered sink `n` and presented sink-first. |
 | `TAINT FLOW` | `security taint-analysis` | Source-to-sink propagation with tainted args, receiver evidence, sanitizer context, and sink attribution. |

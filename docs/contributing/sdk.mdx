@@ -10,11 +10,14 @@ analysis surface exposed.
 
 ```toml
 [dependencies]
-bonsai_sdk = "0.1"
+bonsai-ninja-sdk = "0.2"
 ```
 
-The SDK re-exports the types and facades CLI consumers need —
-no need to depend on lower crates directly.
+The package is `bonsai-ninja-sdk`; its library crate is imported as
+`bonsai_sdk`. The SDK re-exports the types and facades CLI consumers need —
+no need to depend on lower crates directly (the one exception is
+`bonsai_lang_api`, whose `Decl` / `LanguageRegistry` types appear in a few
+signatures and are not re-exported).
 
 ---
 
@@ -72,25 +75,31 @@ let bonsai = Bonsai::new()
 | `.with_parse_timeout(d)` | Override per-file parse timeout |
 | `.with_rulepack(path)` | Load a rulepack from disk |
 | `.with_loaded_rulepack(path, pack)` | Inject a pre-loaded `Rulepack` (saves a re-parse) |
+| `.with_minified_sources(bool)` | Admit adapter-classified minified JavaScript/TypeScript (CLI `--minified-js`); excluded by default |
+| `.with_persistent_semantic_cache(bool)` | Disable reusable persistent sidecars for a cold run (CLI `--no-cache`) |
 | `.index(root)` | Parse/index syntax and construct facts without warming persisted semantic sidecars |
 | `.index_with_progress(root, callback)` | Same with `WorkspaceOpenEvent` callbacks |
 | `.index_structural(root)` | Explicit spelling for `.index(root)` |
 | `.index_structural_with_progress(root, callback)` | Same with `WorkspaceOpenEvent` callbacks |
 | `.index_semantic(root)` | Explicitly prebuild immutable compiler objects, resolved callgraph, retrieval factstore, compiler linkage, and streamed workspace IDG |
 | `.index_semantic_with_progress(root, callback)` | Same with `WorkspaceOpenEvent` callbacks |
-| `.open_query(root)` | Load sidecar, compute requested missing facts on demand |
-| `.open_query_matching_literal_with_progress(root, literal, cb)` | Open only files whose text contains a literal and emit ingest/parse progress |
-| `.open_query_filtered_paths_with_progress(root, includes, excludes, cb)` | Open an explicit path scope and emit file-selection progress |
-| `.open_query_matching_path_with_progress(root, path, cb)` | Open one supported source file and emit single-file ingest/parse progress |
+| `.open_query(root)` | Ingest the workspace with `OpenOptions::lazy_query()`; each semantic sidecar is hydrated on first use |
+| `.open_query_matching_literal(root, literal)` / `..._with_progress(root, literal, cb)` | Open only files whose text contains a literal (the progress form emits ingest/parse events) |
+| `.open_query_matching_any_literal_with_progress(root, literals, cb)` | Same for the union of several literals |
+| `.open_query_filtered_paths(root, includes, excludes)` / `..._with_progress(root, includes, excludes, cb)` | Open an explicit include/exclude path scope |
+| `.open_query_matching_path(root, path)` / `..._with_progress(root, path, cb)` | Open one supported source file |
+| `.open_query_retrieval_candidates_with_progress(root, query, filters, cb)` / `.open_query_retrieval_candidate_union_with_progress(root, queries, filters, cb)` | Open the retrieval-candidate file scope for one or several search queries; `Ok(None)` when no fresh retrieval sidecar answers the query |
 | `.retrieval_candidate_file_filters(root, query, filters)` | Validate a warmed retrieval sidecar and return workspace-relative candidate files for canonical search/browse/inspect hydration |
 | `.retrieval_hydration_include_filters(root, query, filters)` | Return retrieval candidate include filters safe for `open_query_filtered_paths`, including the no-candidate case |
 | `.retrieval_search_candidate_file_filters(root, query, filters)` | Compatibility spelling for search integrations; delegates to `.retrieval_candidate_file_filters(...)` |
 | `.retrieval_search_hydration_include_filters(root, query, filters)` | Compatibility spelling for search integrations; delegates to `.retrieval_hydration_include_filters(...)` |
 | `.open_with_options(root, opts)` | Explicit sidecar / prewarm control |
 | `.open_with_options_and_progress(root, opts, cb)` | Same plus progress callbacks |
-| `.cache(root)` | Rootless cache handle (clear, stats, default export cache) |
+| `.cache(root)` | Rootless `WorkspaceCache` handle (stats, clear, legacy in-tree cleanup, manifest, default export cache) |
+| `.callgraph_summary_from_cache(root)` | `dump-callgraph` rows straight from a fresh callgraph sidecar without opening the workspace; `Ok(None)` when it is missing or stale |
 | `.rebuild_structural_cache(root, warm_export)` | SDK equivalent of `bonsai-ninja cache rebuild`: refresh compiler-object/callgraph/linkage/IDG/retrieval sidecars and optionally the default export cache |
 | `.security_pack()` | Direct rulepack access |
+| `Bonsai::discover_rulepack_root(ws)` / `Bonsai::default_rulepack_root(ws)` | Resolve the rulepack root the CLI would load (`BONSAI_RULES_DIR` override or the default pack); the `Result` form keeps invalid-override errors |
 
 ### `Project` — analysis facade
 
@@ -198,11 +207,21 @@ let source_report = project.security().source_analysis(Default::default())?;
 let sink_report = project.security().sink_analysis(Default::default())?;
 let sources = project.security().sources(Default::default())?;
 let sinks = project.security().sinks(Default::default())?;
+let sanitizers = project.security().sanitizers(Default::default())?;
+let deps = project.security().deps(Default::default())?;
 
 let inventory = pack.inventory(Default::default())?;
 let audit = pack.audit(None)?;
 let validation = pack.validate(Default::default())?;
 ```
+
+`deps` is the SDK twin of `security deps`;
+`dependency_analysis(DependencyAnalysisOptions)` is the twin of
+`security dependency-analysis` and returns each package's bound names, use
+sites, and the taint findings that reach it. `taint_analysis`,
+`source_analysis`, `sink_analysis`, `sources`, `sinks`, and `sanitizers` all
+have `*_with_progress` forms, and the three analyses also have
+`*_with_phase_progress` forms.
 
 ### Inspect and symbol evidence
 
@@ -217,8 +236,11 @@ and unresolved workspace calls. It never recursively enumerates call paths.
 
 ### Trace
 
+Step traces are an SDK-only surface; the CLI has no `trace` command.
+
 ```rust
 let trace = project.trace().from("main")?;
+let route = project.trace().source_to_sink("handle_request", "os.system")?;
 let json = project.trace().to_json(&trace)?;
 let text = project.trace().to_text(&trace);
 let dot = project.trace().to_dot(&trace);
@@ -283,8 +305,9 @@ planner decision. `PathOutcome` contains `representation:
 not enumerate route combinations. When a target pattern matches an indexed
 call site but no callable declaration, `terminal_calls` identifies the exact
 call and location while the graph corridor stops at the enclosing callable.
-`slices` projects the selected callable's workspace value-flow/IDG graph on
-demand, reuses a compatible cached entry when present, merges adapter-emitted syntax-flow detail, and reports `backends` so
+`paths` backs CLI `inspect-graph --from`/`--to`; `slices` is SDK-only (the
+CLI `slice` command was removed). `slices` projects the selected callable's
+workspace value-flow/IDG graph on demand, reuses a compatible cached entry when present, merges adapter-emitted syntax-flow detail, and reports `backends` so
 SDK callers can distinguish `value-flow` evidence from `flow-events`.
 Parameter boundaries, unavailable semantic graphs, ambiguity, or caps are
 incomplete instead of guessed.
@@ -378,13 +401,18 @@ let graphml = project.export().graphml()?;
 let cypher = project.export().cypher()?;
 ```
 
-Native JSON schema v11 emits workspace-relative code locations, typed
-loop-control targets, and one top-level absolute `workspace_root`. SDK
+Native JSON schema v12 emits workspace-relative code locations, typed
+loop-control targets, one top-level absolute `workspace_root`, and the code
+itself: `files[].source` is the full file text that every span indexes into,
+`decls[]` carry `start` / `end` byte spans, `callgraph[]` edges and taint
+propagation records carry `call_text`, and `taint_graph.functions[]` carry
+`end_line`. `write_native_json(options, &mut writer)` streams the same
+document without materializing it in memory. SDK
 consumers should join locations to that root only at
 the filesystem boundary; storing or comparing location identities by absolute
 host path is unsupported. Explicit export-cache rebuilds validate the schema
 version before reuse. The complete machine-readable contract is
-[`schemas/bonsai-native-export-v11.schema.json`](../../schemas/bonsai-native-export-v11.schema.json).
+[`schemas/bonsai-native-export-v12.schema.json`](../../schemas/bonsai-native-export-v12.schema.json).
 
 ---
 
@@ -395,6 +423,10 @@ let cache = bonsai.cache("./my-app");
 let stats = cache.stats()?;
 cache.clear_dataflow_only()?;
 cache.clear_all()?;
+if cache.legacy_in_tree_dir().is_some() {
+    // Some((path, bytes)) when a legacy `<root>/.bonsai` directory was removed.
+    let removed = cache.clear_legacy_in_tree()?;
+}
 
 let stats = bonsai.rebuild_structural_cache("./my-app", false)?;
 
@@ -408,7 +440,7 @@ match CLI `cache rebuild`: they refresh the reusable compiler-object,
 callgraph, linkage, IDG, and retrieval sidecars and warm the default export
 cache only when requested.
 They do not run the full dataflow prewarm; use
-`open_with_options(root, WorkspaceOpenOptions::full_prewarm())` when reusable
+`open_with_options(root, OpenOptions::full_prewarm())` when reusable
 dataflow, flow-id, callgraph, and IDG sidecars should be built up front. The
 per-entry compatibility value-flow projection remains on demand because
 eagerly closing the whole IDG once per callable is quadratic-scale work. SDK
@@ -433,6 +465,12 @@ that file through its Tree-sitter adapter without admitting stale facts.
 taint/export readiness, per-sidecar freshness, and stale reasons. The
 validation path checks binary sidecar payloads as well as manifest
 fingerprints; raw `*_exists` fields only mean an artifact is present on disk.
+`CacheStats.legacy_in_tree_dir` / `legacy_in_tree_bytes` report a legacy
+in-tree `<root>/.bonsai` directory left by releases that cached inside the
+workspace (only when it is not the active cache directory);
+`WorkspaceCache::clear_legacy_in_tree()` removes it and is what CLI
+`cache clear --legacy` calls. The external cache is never touched by that
+call.
 Retrieval uses the candidate-only evidence contract described in
 [Architecture](architecture.mdx#query-browse-trace). CLI and SDK query paths
 can validate warmed
@@ -479,25 +517,29 @@ let decl_names = ws.decl_name_index();    // lowercased decl-name table for insp
 ```
 
 `Project::semantic_context()` returns the same normalized workspace
-context JSON that `bonsai-ninja context` prints: module roots,
+`context` object that `bonsai-ninja index <workspace> --format json` prints: module roots,
 dependency/generated/excluded roots, toolchain manifests, configured
 source hints, source-transformation evidence, and summary counts.
 
-`WorkspaceOpenOptions` controls which of these get prewarmed:
+`OpenOptions` (the SDK re-export of `bonsai_workspace::WorkspaceOpenOptions`)
+controls which of these get prewarmed:
 
 ```rust
-WorkspaceOpenOptions::default() // load fresh sidecars, compute requested facts on demand
-WorkspaceOpenOptions::query_only() // load sidecars but skip eager prewarm
-WorkspaceOpenOptions::parse_only() // diagnostics-only; no sidecars
-WorkspaceOpenOptions::full_prewarm() // dataflow/flow-id plus canonical callgraph/IDG and manifest
+use bonsai_sdk::OpenOptions;
+
+OpenOptions::default()      // same as query_only()
+OpenOptions::query_only()   // load fresh sidecars, compute requested facts on demand
+OpenOptions::lazy_query()   // ingest only; hydrate each semantic sidecar on first use (open_query default)
+OpenOptions::parse_only()   // cold parse/index; no sidecar effects (index / diagnostics)
+OpenOptions::full_prewarm() // dataflow/flow-id plus canonical callgraph/IDG and manifest
 ```
 
 The high-level `bonsai-ninja index` and SDK `Bonsai::index(root)` paths use
-`WorkspaceOpenOptions::parse_only()` so an index pass stays focused on syntax
+`OpenOptions::parse_only()` so an index pass stays focused on syntax
 and construct facts. Use `bonsai-ninja index <workspace> --semantic` or
 `Bonsai::index_semantic(root)` when a workflow deliberately wants structural
 semantic sidecars, including retrieval, built up front. Use
-`open_with_options(root, WorkspaceOpenOptions::full_prewarm())` only for the
+`open_with_options(root, OpenOptions::full_prewarm())` only for the
 heavier all-entry dataflow/flow-id prewarm. Legacy per-entry value-flow graphs
 are projected from the canonical IDG only when a compatibility client asks.
 The semantic index path
@@ -507,6 +549,16 @@ cache coverage and fingerprint metadata surfaced by CLI
 `cache stats --format json`.
 `Project::cache().stats()` additionally validates that metadata against the
 current workspace before marking sidecars reusable.
+
+The manifest (`CacheManifest`, `schema_version` 8) records
+`workspace_source_files[]` as `CacheManifestSourceFile { hash, stamp,
+text_digest }`: `hash` is the FNV-1a content hash semantic sidecars are keyed
+by, `stamp` the filesystem change identity, and `text_digest` the hex SHA-256
+of the source text, present only when the on-disk bytes are the text verbatim
+(valid UTF-8). On Unix, a warm query open whose stamps still match interns
+each file by that digest and reads its text on first use instead of during
+ingest; a manifest with a different schema version, workspace root, or
+minified-source profile falls back to the full read.
 
 `Workspace::ingest_dir` clears or invalidates every cache when a
 file edit lands, so subsequent queries observe current state.
@@ -518,22 +570,34 @@ file edit lands, so subsequent queries observe current state.
 The SDK re-exports the most commonly-needed types so consumers don't need
 multiple bonsai crates as dependencies:
 
-- From `bonsai_workspace`: `Workspace`, `WorkspaceOpenOptions`,
-  `WorkspaceStats`, `WorkspaceSemanticContext`,
-  `WorkspaceSemanticContextSummary`, `WorkspaceContextRoot`,
-  `WorkspaceContextRootKind`, `WorkspaceToolchainManifest`,
-  `WorkspaceSourceVariant`, `WorkspaceSourceTransformation`
-- From `bonsai_lang_api`: `LanguageRegistry`, `LanguageId`, `Decl`,
-  `DeclKind`, `FlowEvent`, `CallArg`, `CallKind`, `ImportSpec`, `RefKind`
+- From `bonsai_workspace`: `Workspace`, `WorkspaceOpenOptions` (as
+  `OpenOptions`), `WorkspaceOpenEvent`, `WorkspaceCacheStatus`,
+  `WorkspaceError`, `CrossModuleOptions`, `WorkspaceStats`,
+  `WorkspaceSemanticContext`, `WorkspaceSemanticContextSummary`,
+  `WorkspaceContextRoot`, `WorkspaceContextRootKind`,
+  `WorkspaceToolchainManifest`, `WorkspaceSourceVariant`,
+  `WorkspaceSourceTransformation`, `CompilerLinkageProgress`,
+  `IdgPersistenceProgress`, the `flow_query` session types
+  (`EntryTaintGraph`, `SyntaxFlowSession`, `TaintedCall`, …), and the
+  `value_flow` compatibility types
 - From `bonsai_security`: `Rule`, `RuleKind`, `Rulepack`, `Finding`,
-  `FindingMatch`, `Severity`, `TaintAnalysisReport`,
-  `SourceAnalysisReport`, `SinkAnalysisOptions`, `SinkAnalysisCandidate`,
-  `SinkAnalysisReport`
+  `FindingMatch`, `FindingStatus`, `Severity`, `TrustClass`,
+  `TaintAnalysisOptions`, `TaintAnalysisReport`, `TaintPropagationStep`,
+  `SourceAnalysisOptions`, `SourceAnalysisReport`, `SinkAnalysisOptions`,
+  `SinkAnalysisCandidate`, `SinkAnalysisReport`, `DependencyInventory`,
+  `DependencyAnalysisReport`, the `Pack*` inventory/audit/tree/validation
+  types, and `AnalysisProgress`
 - From `bonsai_inspect`: `InspectFilters`, `FactKindFilter`, `FilterHit`,
   `Matcher`
-- From `bonsai_trace`: `TraceResult`, `TraceQuery`, `TraceStep`,
-  `TraceStepKind`
-- From `bonsai_browse`: every `*Out` type and the dump helpers
+- From `bonsai_trace`: `TraceResult`, `TraceStep`, `TraceStepKind`,
+  `PathSummary`, `PathTermination`; the renderers live in
+  `bonsai_sdk::trace_render::{to_json, to_text, to_dot}`
+- From `bonsai_browse`: every `*Out` / `*Filters` type, `EdgeRecord`,
+  `SymbolSummary`, `PathOutcome`, `SliceOutcome`, `GraphExportFormat`, and
+  the dump helpers
+- Not re-exported: `bonsai_lang_api` (`Decl`, `LanguageRegistry`,
+  `FlowEvent`, …). Depend on it directly when you construct a registry or
+  inspect raw declarations.
 
 ---
 
@@ -551,7 +615,8 @@ The CLI is a thin renderer over this SDK; both surfaces evolve together.
 Version 0.2 removes recursive materialization of concrete call-path
 combinations from navigation and export:
 
-- `path` now returns the exact compiler-resolved source-to-target corridor as
+- The SDK `paths` API (`inspect-graph --from/--to` on the CLI) now returns the
+  exact compiler-resolved source-to-target corridor as
   `nodes` plus `edges`, including branches and cycles without path explosion.
 - Browse `--flows` is replaced by `--summaries`; reopen an emitted `F:` id with
   `show` for one callable's declaration, body, direct resolved neighbors,

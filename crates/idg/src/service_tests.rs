@@ -415,10 +415,9 @@ fn symbolic_local_provenance_is_retained_only_for_order_sensitive_bases() {
 fn symbolic_worklist_spills_exact_fact_states_and_preserves_every_context() {
     let mut demanded = closure_fact_store();
     demanded.insert(u128::from(symbolic_fact_key(7, 11)));
-    let demand = SymbolicFieldDemand {
-        facts: demanded,
-        wildcard_bases: closure_fact_store(),
-    };
+    let mut bits = vec![0_u64; 1];
+    bits[0] |= 1_u64 << 7;
+    let demand = SymbolicFieldDemand::from_bits(bits);
     let mut worklist = SymbolicClosureWorklist::new(1, 0, None, None, None, &demand);
     let first = SymbolicNodeFact::new(7, 11, Some(13), false, 3);
     let second_context = SymbolicNodeFact::new(7, 11, Some(13), false, 5);
@@ -874,6 +873,52 @@ fn persisted_query_accelerator_restores_exact_narrowed_runtime() {
         loaded.scoped_symbolic_runtime.lock().is_none(),
         "a warm scope must page the validated global symbolic representation"
     );
+}
+
+#[test]
+fn persisted_query_accelerator_carries_the_base_level_field_demand() {
+    let func = FuncId::new(11);
+    let mut segment = crate::segment::IdgSegment::new();
+    let param_place = segment.intern_place(Place::Param { idx: 0 });
+    let return_place = segment.intern_place(Place::Return);
+    let param = segment.intern_node(func, param_place);
+    let returned = segment.intern_node(func, return_place);
+    segment.add_edge(IdgEdge::intra_assign(param, returned, span(0, 1, 2)));
+    segment.record_func(func);
+
+    let mut workspace = IdgWorkspace::new();
+    workspace.register_segment(segment);
+    let workspace = Arc::new(workspace);
+    let compiler = IdgQueryService::new(Arc::clone(&workspace), Arc::new(GlobalIndex::new()));
+    let payload = compiler
+        .compile_default_query_accelerator()
+        .expect("compile query accelerator");
+    assert!(
+        payload
+            .blobs
+            .iter()
+            .any(|blob| blob.kind == QueryAcceleratorBlobKind::SymbolicFieldDemand),
+        "the accelerator persists the compiled field demand"
+    );
+    let mut workspace = Arc::try_unwrap(workspace).expect("compiler released workspace");
+    workspace.install_query_accelerator(payload);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sidecar = dir.path().join("demand-idg.factstore");
+    workspace
+        .save_to_disk(&sidecar, 0xDE3A_11D5)
+        .expect("save accelerated sidecar");
+    let loaded = IdgQueryService::load_from_disk(&sidecar, 0xDE3A_11D5, Arc::new(GlobalIndex::new()))
+        .expect("load accelerated sidecar")
+        .expect("current accelerated sidecar");
+    let unified = loaded.ensure_unified();
+    let runtime = loaded.ensure_symbolic_runtime(&unified, None);
+    let preset = runtime.field_demands[0]
+        .get()
+        .expect("the persisted demand is installed at load, not compiled on first use");
+    let fresh = IdgQueryService::compile_symbolic_field_demand(&runtime);
+    assert_eq!(preset.demanded, fresh.demanded);
+    assert_eq!(preset.bases.as_ref(), fresh.bases.as_ref());
 }
 
 #[test]

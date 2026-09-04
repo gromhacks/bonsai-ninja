@@ -285,7 +285,7 @@ fn record_runtime_disabled_rule(rule_id: &str, reason: impl Into<String>) {
 }
 
 /// One rule match — the specific fact + location that triggered.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RuleMatch {
     /// Typed provenance used by analysis policy. Generated rule ids remain
     /// stable display identities and are never parsed to recover this value.
@@ -1544,7 +1544,14 @@ where
         .map(|files| files.to_vec())
         .unwrap_or_else(|| db.vfs().all_files());
     let total = files.len();
-    let prepared: Vec<PreparedRule<'_>> = rules.iter().filter_map(|rule| PreparedRule::new(rule)).collect();
+    let prepared: Vec<PreparedRule<'_>> = rules
+        .iter()
+        .filter_map(|rule| {
+            let mut prepared = PreparedRule::new(rule)?;
+            add_lifecycle_producer_anchors(&mut prepared, factory);
+            Some(prepared)
+        })
+        .collect();
     if prepared.is_empty() {
         for _ in 0..total {
             on_file_done();
@@ -3147,6 +3154,40 @@ impl<'a> PreparedRule<'a> {
 fn empty_rule_target() -> &'static RuleTarget {
     static EMPTY: std::sync::OnceLock<RuleTarget> = std::sync::OnceLock::new();
     EMPTY.get_or_init(RuleTarget::default)
+}
+
+/// A `requires_state` constraint can only hold when the state's producing
+/// call (a rulepack lifecycle transition, e.g. `cancel` → `cancelled`) is in
+/// the same file as the matched call: the state is a per-binding fact
+/// observed within one function's events. Requiring one producer spelling as
+/// a text anchor keeps such rules from retaining every file that merely
+/// mentions the sink callee (`get`), without changing what matches.
+fn add_lifecycle_producer_anchors(prepared: &mut PreparedRule<'_>, typing: &RulepackTyping) {
+    let Some(specs) = typing.lifecycle_specs_for(&prepared.rule.language) else {
+        return;
+    };
+    for constraint in &prepared.rule.constraints.0 {
+        let ConstraintKind::RequiresState { requires_state } = constraint else {
+            continue;
+        };
+        let mut producers: Vec<String> = Vec::new();
+        for spec in specs.iter().filter(|spec| spec.state == requires_state.expected) {
+            let Some(group) = text_anchor_groups_for_target(&spec.target, MatchKind::Call)
+                .into_iter()
+                .next()
+            else {
+                continue;
+            };
+            for anchor in group {
+                if !producers.contains(&anchor) {
+                    producers.push(anchor);
+                }
+            }
+        }
+        if !producers.is_empty() {
+            prepared.text_anchor_groups.push(producers);
+        }
+    }
 }
 
 fn text_anchor_groups_for_rule(rule: &Rule, target: &RuleTarget) -> Vec<Vec<String>> {

@@ -30,8 +30,7 @@ fn cache_path_error(error: io::Error, operation: &str, path: &Path) -> io::Error
 pub(crate) fn workspace_content_fingerprint(db: &AnalyzerDb) -> u64 {
     let entries = db.vfs().all_files().into_iter().filter_map(|file| {
         let path = db.vfs().path(file).ok()?.display().to_string();
-        let snap = db.vfs().snapshot(file).ok()?;
-        Some((path, fnv1a_bytes64(snap.text.as_bytes())))
+        Some((path, crate::source_content_hash(db.vfs(), file)?))
     });
     workspace_content_fingerprint_from_entries(entries)
 }

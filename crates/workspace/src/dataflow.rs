@@ -152,6 +152,10 @@ pub struct DataFlowCache {
     /// graph is constructed at most once per cache lifetime instead
     /// of three times. Cleared on `invalidate_file`.
     cached_call_graph: RwLock<Option<Arc<bonsai_callgraph::ResolvedCallGraph>>>,
+    /// Header index seeded by the owner (the workspace's cached, persisted
+    /// headers) so dependency-file resolution never builds the full semantic
+    /// index for a handful of functions.
+    cached_global_index: RwLock<Option<Arc<bonsai_index::GlobalIndex>>>,
     /// Optional shared `InterTaintCaches` seeded by the workspace at
     /// open time. When present, prewarm + lazy-fault paths thread
     /// it into `taint_facts_and_graph_for_entry_with_caches` so the
@@ -224,6 +228,12 @@ impl DataFlowCache {
     /// open time so the dataflow cache skips a second build.
     pub fn seed_call_graph(&self, graph: Arc<bonsai_callgraph::ResolvedCallGraph>) {
         *self.cached_call_graph.write() = Some(graph);
+    }
+
+    /// Provide the index used to resolve declaring files; the header index
+    /// suffices and is already cached by the workspace.
+    pub fn seed_global_index(&self, global: Arc<bonsai_index::GlobalIndex>) {
+        *self.cached_global_index.write() = Some(global);
     }
 
     /// Release only the shared callgraph allocation. Cached dataflow facts
@@ -440,8 +450,8 @@ impl DataFlowCache {
         // diffs across CLI processes. VFS versions reset in a fresh
         // process and are only valid for live edit invalidation.
         for file in db.vfs().all_files() {
-            if let Ok(snap) = db.vfs().snapshot(file) {
-                inner.file_hashes.insert(file, content_hash(snap.text.as_bytes()));
+            if let Some(hash) = crate::source_content_hash(db.vfs(), file) {
+                inner.file_hashes.insert(file, hash);
             }
         }
         inner.prewarmed = true;
@@ -580,8 +590,8 @@ impl DataFlowCache {
         // Record file content hashes so snapshot reload validation uses the
         // same source state as the disk-backed entries.
         for file in db.vfs().all_files() {
-            if let Ok(snap) = db.vfs().snapshot(file) {
-                inner.file_hashes.insert(file, content_hash(snap.text.as_bytes()));
+            if let Some(hash) = crate::source_content_hash(db.vfs(), file) {
+                inner.file_hashes.insert(file, hash);
             }
         }
         inner.matcher_policy_fingerprint = MATCHER_POLICY_FINGERPRINT;
@@ -805,11 +815,8 @@ impl DataFlowCache {
             .into_iter()
             .filter_map(|f| {
                 let path = vfs.path(f).ok()?;
-                let snap = vfs.snapshot(f).ok()?;
-                Some((
-                    path.display().to_string(),
-                    (f, content_hash(snap.text.as_bytes())),
-                ))
+                let hash = crate::source_content_hash(vfs, f)?;
+                Some((path.display().to_string(), (f, hash)))
             })
             .collect();
 
@@ -1004,26 +1011,27 @@ impl DataFlowCache {
     }
 }
 
-fn content_hash(bytes: &[u8]) -> u64 {
-    bonsai_hash::fnv1a_bytes64(bytes)
-}
-
 fn current_file_hashes(db: &AnalyzerDb) -> AHashMap<FileId, u64> {
     db.vfs()
         .all_files()
         .into_iter()
-        .filter_map(|file| {
-            let snap = db.vfs().snapshot(file).ok()?;
-            Some((file, content_hash(snap.text.as_bytes())))
-        })
+        .filter_map(|file| Some((file, crate::source_content_hash(db.vfs(), file)?)))
         .collect()
 }
 
 impl DataFlowCache {
     /// Compute the file dependency set for `func` using the cache's
     /// internally-cached call graph (built once per cache lifetime).
+    /// Files a function's exact facts depend on: its own file and the files
+    /// of every callee reachable through the resolved callgraph.
+    #[must_use]
+    pub fn dependency_files_for(&self, func: FuncId, db: &AnalyzerDb) -> AHashSet<FileId> {
+        self.dependency_files_via_cache(func, db)
+    }
+
     fn dependency_files_via_cache(&self, func: FuncId, db: &AnalyzerDb) -> AHashSet<FileId> {
-        let global = db.global_index();
+        let seeded = self.cached_global_index.read().as_ref().cloned();
+        let global = seeded.unwrap_or_else(|| db.global_index());
         let call_graph = self.call_graph_for(db);
         dependency_files(func, &call_graph, &global)
     }

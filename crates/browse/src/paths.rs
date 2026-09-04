@@ -13,7 +13,7 @@ use bonsai_idg::{CrossCallEdge, IdgQueryService};
 use bonsai_inspect::{matching_func_ids_in_headers, Matcher};
 use bonsai_lang_api::{DeclKind, FlowEvent};
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Filter bundle for [`paths`].
 #[derive(Copy, Clone, Debug)]
@@ -54,27 +54,50 @@ pub struct PathOutcome {
     pub edges: Vec<EdgeRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub terminal_calls: Vec<PathTerminalCallRow>,
+    /// Raw `FuncId`s of the matched source callables (not serialized).
+    #[serde(skip)]
+    pub source_funcs: Vec<u32>,
+    /// Raw `FuncId`s of the corridor targets: the matched target callables,
+    /// or the callables enclosing the matched terminal call sites (not
+    /// serialized).
+    #[serde(skip)]
+    pub target_funcs: Vec<u32>,
+    /// Corridor edges as raw `(caller, callee)` `FuncId` pairs (not
+    /// serialized).
+    #[serde(skip)]
+    pub corridor_edges: Vec<(u32, u32)>,
 }
 
 /// Function node in the selected graph corridor.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PathFunctionRow {
     pub name: String,
     pub file: String,
     pub line: u32,
+    /// Raw workspace `FuncId` of this corridor node (not serialized; the
+    /// CLI uses it to expand the corridor into source bodies).
+    #[serde(skip)]
+    pub func: u32,
 }
 
 /// Syntax-backed call site that matched `--to` when no callable
 /// declaration did. The semantic path ends at this call site's
 /// enclosing function; this row is evidence for the terminal call
 /// inside that function, not an invented edge to an external API.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PathTerminalCallRow {
     pub name: String,
     pub file: String,
     pub line: u32,
     pub column: u32,
     pub enclosing_function: String,
+    /// Raw `FuncId` of the enclosing callable (not serialized).
+    #[serde(skip)]
+    pub func: u32,
+    /// Exact call-site span (not serialized; the CLI marks it in the
+    /// expanded corridor body).
+    #[serde(skip)]
+    pub span: Option<Span>,
 }
 
 #[derive(Clone, Debug)]
@@ -172,6 +195,15 @@ pub fn paths(ws: &Workspace, filters: &PathFilters<'_>) -> Result<PathOutcome, r
         to_funcs.clone()
     };
     let path_graph = semantic_path_graph(ws, &from_funcs, &graph_targets, warmed_idg.as_deref());
+    outcome.source_funcs = from_funcs.iter().map(|func| func.raw()).collect();
+    outcome.target_funcs = graph_targets.iter().map(|func| func.raw()).collect();
+    outcome.corridor_edges = path_graph
+        .graph
+        .inner()
+        .edges
+        .iter()
+        .map(|edge| (edge.from.raw(), edge.to.raw()))
+        .collect();
     outcome.backends.clone_from(&path_graph.backends);
     outcome.idg_available = path_graph.idg_available;
     outcome.idg_semantic_edges = path_graph.idg_semantic_edges;
@@ -319,6 +351,8 @@ fn collect_terminal_call_targets_for_events(
                             line,
                             column,
                             enclosing_function: enclosing_function.to_string(),
+                            func: func.raw(),
+                            span: Some(*span),
                         },
                     });
                 }
@@ -523,6 +557,7 @@ fn function_row(ws: &Workspace, graph: &ResolvedCallGraph, func: FuncId) -> Opti
         name: node.name.as_ref().to_string(),
         file,
         line,
+        func: func.raw(),
     })
 }
 

@@ -38,16 +38,25 @@ inventories, analyses) wrap their rows:
   "result_complete": false,
   "result_incomplete_reasons": ["paged defs result incomplete: page 1 of 3; continue with --page P:1f2e3d4c or pass --all"],
   "rows": [],
-  "page": {"number": 1, "total_pages": 3, "cursor": "P:9a8b7c6d", "next_cursor": "P:1f2e3d4c", "is_last": false, "budget_exceeded": false}
+  "page": {"number": 1, "total_pages": 3, "page_size": 20, "shown_rows": 20, "total_rows": 55, "cursor": "P:9a8b7c6d", "next_cursor": "P:1f2e3d4c", "is_last": false, "budget": 32768, "tokens_used": 3178, "total_tokens_uncapped": 9800, "budget_exceeded": false}
 }
 ```
 
+`page.shown_rows` counts the rows rendered on this page and `page.total_rows`
+the complete selected result; `page.budget` is `null` when paging is disabled
+with `--all`. The text footer prints the same counts.
+
 Commands with sectioned results keep the same completeness and `page`
-fields next to their own sections (`inspect`: `decl_hits` / `hits` /
-`taint_flows`; `trace`: `paths` / `steps` / `edges` / `states`; `path`:
-`nodes` / `edges` / `terminal_calls`; `slice`: `slices`). Atomic documents
-(`dump-hir`, `dump-cfg`, `diagnostics`, `index`, `read-file`, `show`,
-`cache stats`) carry the completeness fields on the object itself. Empty,
+fields next to their own sections (`inspect-graph`: `decl_hits` / `hits` /
+`taint_flows` plus a `summary`). Those sections always carry the compiler
+evidence the text view prints: every `decl_hits[]` row is a symbol summary
+(`signature`, `params`, `imports`, `direct_callers`, `direct_callees`,
+`flows`, `groups`, `summary`), every `hits[]` row carries its `flows` and
+`groups`, and every `taint_flows[]` row carries its `taint_id`, `steps`, and
+`flow`. Atomic documents
+(`dump-hir`, `dump-cfg`, `diagnostics`, `index`, `read-file`,
+`cache stats`) carry the completeness fields on the object itself, and
+`show` re-opens the document shape of the command that owns the id. Empty,
 single, multiple, filtered, and paged results all keep the same shape; a
 structured object is never split into serialized lines, and one object that
 exceeds the context budget is kept whole with `page.budget_exceeded: true`.
@@ -61,8 +70,8 @@ matches is still complete. Text output prints the same two facts in its
 header and footer.
 
 Secondary filters (`--contains` / `--not-contains`) select complete semantic
-objects after the analysis has run: a match anywhere inside a finding, trace,
-path corridor, inspect hit, slice, sink-analysis candidate, or read-file view
+objects after the analysis has run: a match anywhere inside a finding,
+inspect hit or corridor, sink-analysis candidate, or read-file view
 keeps the whole object, and the filter is applied exactly once, never to the
 child rows of an already selected parent.
 
@@ -74,11 +83,15 @@ and the current rows or JSON lines. Use `--page next` or the printed
 artifact.
 
 Paging is deterministic and fail-closed. A numeric page beyond the reported
-last page is an error rather than an alias for the last page. Only the
-requested page is formatted and cached; later pages are rendered on demand
-through `--page next`, a number, or the printed cursor. Repeating the same
-page reuses it after binary, source, dependency, and rulepack freshness
-validation. The footer's uncapped token estimate describes the complete
+last page is an error rather than an alias for the last page. Query reports
+(browse commands, `inspect-graph`) format and cache the requested page, the
+page after it, and every page of a report that has at most 12 pages, so page
+turns replay instead of re-running the query; longer reports render later
+pages on demand through `--page next`, a number, or the printed cursor.
+Security reports format and cache only the requested page: their complete
+result is already a cached object and each page hydrates flow bodies.
+Repeating the same page reuses it after binary, source, dependency, and
+rulepack freshness validation. The footer's uncapped token estimate describes the complete
 result consistently on every page, not only the rows currently rendered.
 An oversized security finding keeps its original `FINDING N` identity on
 every part and uses `FLOW X/Y` for the page-sized units; there is no separate
@@ -94,15 +107,22 @@ output exists or that the preview was truncated.
 Grouped view clusters flows that share a tail. Use it when a sink has many source paths but the same final call chain.
 
 ```text
-GROUP 1 G:701fc172b976025d  3 flow(s)
-  FLOW 1a F:c48be683d9e53628
-  handle_request -> orchestrate -> persist -> execute
+GROUP 1 G:701fc172b976025d 3 flow(s) execute
+shared: persist → execute
+  FLOW 1 F:c48be683d9e53628 prefix: handle_request → orchestrate
+  FLOW 2 F:2b7d0e9c4f6a1c33 prefix: run_batch
+  FLOW 3 F:9e1f4a6b8c0d2e55 prefix: (no unique prefix)
 ```
+
+`--view auto` selects `trace` for 10 or fewer flows and `grouped` otherwise;
+`--group G:...` re-renders one cluster and `--flow F:...` one chain.
 
 ## Compact
 
 Compact text keeps flow headers and step labels while omitting repeated source
-bodies. `inspect` uses `FLOW`; security source mapping uses
+bodies. `inspect-graph` uses `FLOW` for compiler flows, `CORRIDOR FLOW` for
+`--from`/`--to` corridors, and `TAINT CALL STACK` for its rulepack-free taint
+section; security source mapping uses
 `SOURCE n · DOWNSTREAM FLOW m`; sink mapping uses
 `SINK n · UPSTREAM FLOW m`; security findings use `TAINT FLOW`. Endpoint
 numbers remain global across pages, and each lineage header retains its rule
@@ -111,20 +131,38 @@ compact security blocks remain only when full source bodies cannot be resolved
 for a finding.
 
 ```bash
-bonsai-ninja inspect ./src --query execute --compact
+bonsai-ninja inspect-graph ./src --query os.system --compact
 ```
 
 ```text
-TAINT FLOW 2 F:0123456789abcdef python.cmdi.os_system
-handle_request -> run_pipeline -> orchestrate -> execute
-  1 SOURCE app.py:29 request.args.get
-  2 TAINT  app.py:48 run_pipeline arg[0] envelope -> envelope
-  3 SINK   executor.py:29 os.system arg[0] cmd
+FLOW 1 F:9b95a3278f68f9f8 run_admin_command  group G:5083418eb0c02a7b
+run_admin_command
+    1 line run_admin_command(user_id, cmd)  auth_service.py:19  [FLOW 1 MATCH: call os.system]
+       os.system("notify-admin " + cmd)
+
+  match points: 1
+    call os.system (auth_service.py:19:9)
+```
+
+The security equivalent keeps the same shape under its own label:
+
+```text
+TAINT FLOW 1 F:63c3c4d6e4765b25 python.cmdi.os_system
+handle_request -> update_user -> run_admin_command
+  # [TAINT FLOW 1 SOURCE: python.flask.request_args_get request.args.get]
+  # [TAINT FLOW 1 TAINT: handle_request -> update_user arg[1] action -> action]
+  # [TAINT FLOW 1 SINK: python.cmdi.os_system arg[0] "notify-admin " + cmd]
 ```
 
 ## Graph
 
 `export --format networkx`, `graphml`, and `cypher` project the same workspace graph into graph-tooling formats.
+`CALLS` edges are one per resolved call site: each carries `kind`,
+`call_file`, `call_line`, and `call_column`, and its id hashes those
+coordinates, so a caller that invokes the same callee from several sites
+exports several distinct edges (GraphML ids stay unique and Cypher `MERGE`
+does not collapse them). Node and edge counts agree across the three formats
+and with `dump-edges --format json`.
 
 Native `export` preserves exhaustive semantics in an exact compressed form
 when a derived path family could be quadratic. Add
@@ -146,13 +184,19 @@ in-memory JSON document.
 
 ### Native JSON schema
 
-The committed Draft 2020-12 schema for native export v11 is
-[`schemas/bonsai-native-export-v11.schema.json`](../schemas/bonsai-native-export-v11.schema.json).
+The committed Draft 2020-12 schema for native export v12 is
+[`schemas/bonsai-native-export-v12.schema.json`](../schemas/bonsai-native-export-v12.schema.json).
 It defines the top-level document, compiler file tables, normalized flow-event
 variants, callgraph rows, completeness fields, and IDG/taint projections. The
 release archive includes this file under `schemas/`.
 
-`schema: "bonsai-native-export"` and `schema_version: 10` select this contract.
+`schema: "bonsai-native-export"` and `schema_version: 12` select this contract.
+v12 carries the code with the graph: `files[].source` is the full file text
+(every span, line, `start`, and `end` in the document indexes into it),
+`decls[]` carry byte spans, `callgraph[]` edges and every taint propagation
+record carry the exact `call_text`, and `taint_graph.functions[]` carry
+`end_line`, so call stacks replay with their source lines from the document
+alone.
 Schema versions are immutable: an incompatible wire-format change requires a
 new schema file and a version increment. CI validates default exports for all
 supported language fixtures plus a materialized `--full-propagations` export
@@ -161,7 +205,7 @@ against the committed schema, and rejects unknown top-level fields.
 ```bash
 bonsai-ninja export ./src --format json --output-path bonsai-export.json
 # Validate bonsai-export.json with any Draft 2020-12 JSON Schema validator
-# against schemas/bonsai-native-export-v11.schema.json.
+# against schemas/bonsai-native-export-v12.schema.json.
 ```
 
 Treat a whole-repository native export as a bulk artifact, not as model prompt
@@ -190,39 +234,68 @@ steps, completeness metadata, and stable IDs.
 
 Use `security taint-analysis --summary --format json` when a tool only
 needs aggregate triage counts. Summary mode emits the summary object
-directly, including severity, status, tag, language, source rule, and
-sink rule counts, without paged finding rows.
+directly (`total_findings`, `severity_counts`, `status_counts`,
+`tag_counts`, `language_counts`, `source_rule_counts`, `sink_rule_counts`,
+`sink_file_counts`, `source_trust_counts`, `source_category_counts`, the
+loaded-rule counts, and a `view` block with the profile's trust filter and
+`hidden_total`) without paged finding rows.
 
 Every security finding text block prints its stable `S:` finding ID plus its
 representative `F:` flow ID and `G:` group ID before the evidence body. Native
 JSON is always an envelope so a proven-clean result can be distinguished from
-an incomplete scan. With `--baseline`, the envelope also contains the aggregate
-`baseline` diff while each current row carries `baseline_status`.
+an incomplete scan. With `--baseline <prev.json>` (a prior `--format json
+--all` report), the envelope also contains the aggregate `baseline` diff
+(`{"new": N, "unchanged": N, "fixed": N}`) while each current row carries
+`baseline_status` of `new` or `unchanged`; `fixed` counts baseline finding ids
+with no current match and does not add rows. The classification is
+render-only and reuses the current analysis.
 
 ```json
 {
   "analysis_complete": true,
   "analysis_incomplete_reasons": [],
-  "summary": { "total_findings": 1 },
+  "result_complete": true,
+  "result_incomplete_reasons": [],
+  "summary": { "kind": "compact", "total_findings": 1, "severity_counts": { "critical": 1 }, "status_counts": { "unsanitized": 1 }, "tag_counts": { "command-injection": 1 } },
+  "runtime_disabled_rules": [],
   "rows": [{
-    "finding_id": "S:979a7231afe45297",
-    "representative_flow_id": "F:0123456789abcdef",
-    "group_id": "G:701fc172b976025d",
-    "source": { "rule_id": "python.flask.request_args_get", "line": 29 },
-    "sink": { "rule_id": "python.cmdi.os_system", "line": 29 },
-    "chain_display": ["handle_request", "run_pipeline", "orchestrate", "execute"],
+    "finding_id": "S:41bc176d1da10ae8",
+    "representative_flow_id": "F:63c3c4d6e4765b25",
+    "group_id": "G:68b12ed91980b231",
+    "member_finding_ids": ["S:41bc176d1da10ae8"],
+    "language": "python",
+    "severity": "critical",
+    "status": "unsanitized",
+    "tag": "command-injection",
+    "cwe": ["CWE-78"],
+    "analysis_complete": true,
+    "analysis_incomplete_reasons": [],
+    "source": { "rule_id": "python.flask.request_args_get", "file": "gateway.py", "line": 12, "column": 14, "enclosing_fn": "handle_request", "text": "request.args.get", "trust": "remote", "category": "http-input", "tag": "http-input", "payload_types": ["query"] },
+    "sink": { "rule_id": "python.cmdi.os_system", "file": "auth_service.py", "line": 19, "column": 9, "enclosing_fn": "run_admin_command", "text": "os.system", "severity": "critical", "category": "process-exec", "tag": "command-injection",
+              "tainted_args": [{ "index": 0, "value_text": "\"notify-admin \" + cmd", "source_names": ["cmd"] }] },
+    "chain_display": ["handle_request", "update_user", "run_admin_command"],
     "taint_path": [
-      { "caller": "handle_request", "callee": "run_pipeline", "tainted_args": [{ "index": 0, "value_text": "envelope" }] },
-      { "caller": "execute", "callee": "os.system", "tainted_args": [{ "index": 0, "value_text": "cmd" }] }
-    ]
+      { "caller": "handle_request", "callee": "update_user", "file": "gateway.py", "line": 15, "column": 14, "tainted_args": [{ "index": 1, "param_name": "action", "value_text": "action" }] },
+      { "caller": "update_user", "callee": "run_admin_command", "file": "user_service.py", "line": 12, "column": 9, "tainted_args": [{ "index": 1, "param_name": "cmd", "value_text": "action" }] },
+      { "caller": "run_admin_command", "callee": "os.system", "file": "auth_service.py", "line": 19, "column": 9, "tainted_args": [{ "index": 0, "param_name": "", "value_text": "\"notify-admin \" + cmd" }] }
+    ],
+    "flow": { "flow_id": "F:63c3c4d6e4765b25", "flow_number": 1, "flow_label": "1", "chain": ["handle_request", "update_user", "run_admin_command"], "chain_display": "handle_request -> update_user -> run_admin_command",
+              "functions": [{ "name": "handle_request", "signature": "handle_request", "module_path": "gateway.py", "start_line": 10, "end_line": 17, "lines": [{ "line_no": 10, "text": "def handle_request():" }] }] },
+    "hops": [{ "function": "handle_request", "file": "gateway.py", "start_line": 10, "lines": [{ "n": 10, "text": "def handle_request():" }] }],
+    "presentation": { "summary": "…", "rules": { "python.cmdi.os_system": { "severity": "critical", "cwe": ["CWE-78"], "tag": "command-injection", "category": "process-exec", "description": "…" } } }
   }],
-  "page": { "number": 1, "is_last": true, "total_rows": 1 }
+  "page": { "number": 1, "total_pages": 1, "page_size": 1, "shown_rows": 1, "total_rows": 1, "cursor": "P:90dfd035", "next_cursor": null, "is_last": true, "budget": null, "tokens_used": 3178, "total_tokens_uncapped": 3178, "budget_exceeded": false }
 }
 ```
 
+Location fields (`file`, `hops[].file`, `flow.functions[].module_path`) are
+workspace-relative; `S:`, `F:`, and `G:` ids do not change when the same
+checkout is analyzed from a different absolute path. `presentation` holds the
+text view's rule metadata and one-line summary and is not analysis evidence.
+
 ## SARIF
 
-SARIF 2.1.0 is available from `security taint-analysis`. Results include standard locations, code flows, rules, CWE properties, and bonsai-specific metadata under `properties.bonsai`. One concrete vulnerability sink is one SARIF result; when several complete source-to-sink routes reach it, each route is preserved as a separate `codeFlows` entry on that result. Security code flows are built from the same source-specific propagation used by text `TAINT FLOW` output.
+SARIF 2.1.0 is available from `security taint-analysis` only. Results include standard locations, code flows, rules, CWE taxonomies, `fingerprints` / `partialFingerprints`, and bonsai-specific metadata under `properties.bonsai` (`finding_id`, `flow_id`, `flow_ids`, `group_id`, `source_rule_id`, `sink_rule_id`, `status`, `tag`, `cwe`, `owasp`, `chain_display`, `taint_path`, `alternate_flows`, `sanitizer_rule_ids`, `taint_transform_rule_ids`, `analysis_complete`, `analysis_incomplete_reasons`). Artifact URIs are workspace-relative and resolve through `originalUriBaseIds`. One concrete vulnerability sink is one SARIF result; when several complete source-to-sink routes reach it, each route is preserved as a separate `codeFlows` entry on that result. Security code flows are built from the same source-specific propagation used by text `TAINT FLOW` output.
 
 SARIF also includes exact source-independent findings by default, such as weak crypto, weak random, JWT, TLS, cookie, CORS, and memory API misuse rules. These results intentionally omit `codeFlows` and use a synthetic `pattern:<sink-rule-id>` source id so consumers do not mistake a local API misuse for a proven source-to-sink taint path. Lifecycle-audit transition sites are excluded from SARIF/taint findings until the engine proves the later same-value use.
 
@@ -251,24 +324,35 @@ source-to-sink security proofs under `security_source_flows`.
 
 ## Deps
 
-Dependency output emits one object per matched package/framework key. Each
-object groups the rules and rulepack signals that named the key with every
-workspace-relative file that supplied import evidence.
+Dependency output is the same row envelope with one row per matched
+package/framework key. Each row groups the rule ids, the rule records
+(`rule_id`, `kind`, `tag`, `description`), and the rulepack signals that named
+the key with every workspace-relative file that supplied import evidence.
+`security dependency-analysis` wraps the same `dependency` object per row and
+adds `bound_names`, `sites[]`, and `findings[]` for where the package is used.
 
 ```bash
 bonsai-ninja security ./src deps --severity critical --format json --output-path deps.json
 ```
 
 ```json
-[
-  {
-    "language": "python",
-    "key": "flask",
-    "rule_ids": ["python.flask.request_args_get"],
-    "signals": ["frameworks:flask", "imports:flask"],
-    "evidence_files": ["app.py"],
-    "severity": "critical",
-    "tags": ["http-input"]
-  }
-]
+{
+  "analysis_complete": true,
+  "analysis_incomplete_reasons": [],
+  "result_complete": true,
+  "result_incomplete_reasons": [],
+  "rows": [
+    {
+      "language": "python",
+      "key": "flask",
+      "rule_ids": ["python.flask.request_args_get"],
+      "rules": [{ "rule_id": "python.flask.request_args_get", "kind": "source", "tag": "http-input", "description": "…" }],
+      "signals": ["frameworks:flask", "imports:flask"],
+      "evidence_files": ["gateway.py"],
+      "severity": "critical",
+      "tags": ["http-input"]
+    }
+  ],
+  "page": { "number": 1, "total_pages": 1, "shown_rows": 1, "total_rows": 1, "is_last": true, "budget_exceeded": false }
+}
 ```

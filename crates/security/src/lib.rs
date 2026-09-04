@@ -34,28 +34,28 @@ pub mod rule;
 pub(crate) mod sanitizer_credit;
 
 pub use analysis::{
-    dependency_inventory, filter_rules_to_workspace_languages, pack_audit, pack_inventory, pack_tree,
-    pack_tree_for_rules, rule_family, run_sink_analysis, run_sink_analysis_with_phase_progress,
-    run_sink_analysis_with_progress, run_source_analysis, run_source_analysis_with_phase_progress,
-    run_source_analysis_with_progress, run_taint_analysis, run_taint_analysis_with_phase_progress,
-    run_taint_analysis_with_progress, sanitizer_inventory, sanitizer_inventory_with_progress,
-    security_match_rows, seed_idg_service_for_rulepack, select_pack_rules, select_rules, sink_inventory,
-    sink_inventory_with_progress, source_inventory, source_inventory_with_progress,
-    source_rule_matches_filters, taint_transfers_from_rulepack, tree_file_rel, validate_pack,
-    workspace_languages, AnalysisProgress, CombinedFindingWithChain, CombinedSourceAnalysisCandidate,
-    DependencyInventoryOptions, FindingWithChain, PackAuditCount, PackAuditFamilyCount, PackAuditLanguage,
-    PackAuditReport, PackInventoryOptions, PackRuleRow, PackTreeFile, PackTreeLanguage, PackTreeReport,
-    PackTreeRule, PackValidationIssue, PackValidationReport, RulepackTaintTransfers,
-    SecurityInventoryOptions, SecurityMatchRow, SinkAnalysisCandidate, SinkAnalysisFlow, SinkAnalysisOptions,
-    SinkAnalysisReport, SourceAnalysisCandidate, SourceAnalysisOptions, SourceAnalysisReport,
-    TaintAnalysisOptions, TaintAnalysisReport,
+    dependency_inventory, filter_rules_to_workspace_languages, inventory_rule_ids, pack_audit,
+    pack_inventory, pack_tree, pack_tree_for_rules, rule_family, rule_yaml_block, run_sink_analysis,
+    run_sink_analysis_with_phase_progress, run_sink_analysis_with_progress, run_source_analysis,
+    run_source_analysis_with_phase_progress, run_source_analysis_with_progress, run_taint_analysis,
+    run_taint_analysis_with_phase_progress, run_taint_analysis_with_progress, sanitizer_inventory,
+    sanitizer_inventory_with_progress, security_match_rows, seed_idg_service_for_rulepack, select_pack_rules,
+    select_rules, sink_inventory, sink_inventory_with_progress, source_inventory,
+    source_inventory_with_progress, source_rule_matches_filters, taint_transfers_from_rulepack,
+    tree_file_rel, validate_pack, workspace_languages, AnalysisProgress, CombinedFindingWithChain,
+    CombinedSourceAnalysisCandidate, DependencyInventoryOptions, FindingWithChain, PackAuditCount,
+    PackAuditFamilyCount, PackAuditLanguage, PackAuditReport, PackInventoryOptions, PackRuleRow,
+    PackTreeFile, PackTreeLanguage, PackTreeReport, PackTreeRule, PackValidationIssue, PackValidationReport,
+    RulepackTaintTransfers, SecurityInventoryOptions, SecurityMatchRow, SinkAnalysisCandidate,
+    SinkAnalysisFlow, SinkAnalysisOptions, SinkAnalysisReport, SourceAnalysisCandidate,
+    SourceAnalysisOptions, SourceAnalysisReport, TaintAnalysisOptions, TaintAnalysisReport,
 };
 pub use bundled::bundled_rulepack_root;
 pub use compile::{compile_rule_to_inspect_args, CompiledRule};
 pub use deps::{build_inventory, DependencyInventory, DependencyRow};
 pub use deps_analysis::{
-    dependency_analysis, DependencyAnalysisCandidate, DependencyAnalysisOptions, DependencyAnalysisReport,
-    DependencyFunctionRow, DependencyUsageSite,
+    dependency_analysis, dependency_analysis_with_matches, DependencyAnalysisCandidate,
+    DependencyAnalysisOptions, DependencyAnalysisReport, DependencyInventoryMatches, DependencyUsageSite,
 };
 pub use finding::{
     compute_finding_id, AlternateTaintFlow, Finding, FindingMatch, FindingStatus, TaintFlowRef,

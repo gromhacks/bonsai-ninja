@@ -14,12 +14,14 @@
 //! original declaration search
 //! for name-shaped facts, extended to the other kinds.
 
-use crate::common::{file_path_matches_filter, format_span, source_files_small_first};
+use crate::common::{
+    file_path_matches_filter, format_span, source_files_small_first, workspace_relative_path,
+};
 use crate::refs::{read_anchor_line, read_matched_line};
 use ahash::AHashSet;
 use bonsai_lang_api::{FlowEvent, RefKind};
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// Filter bundle for [`search`].
@@ -38,7 +40,7 @@ pub struct SearchFilters<'a> {
 
 /// One ranked search result. Shape is uniform across every fact
 /// kind — callers don't have to destructure an enum to render.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchHit {
     /// Text the matcher matched (decl name / callee / module /
     /// assign target / string body / arg value / ref name).
@@ -171,11 +173,15 @@ fn search_canonical(
             // and canonical search must expose the same row shape so
             // retrieval candidates hydrate instead of rendering from
             // candidate metadata.
-            let file_name = std::path::Path::new(&file_path)
+            // Rows are workspace-relative like every other location the
+            // CLI renders: the query matches the relative path, never the
+            // checkout's parent directories.
+            let relative_path = workspace_relative_path(ws, &file_path);
+            let file_name = std::path::Path::new(&relative_path)
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or(file_path.as_str());
-            if matcher(&file_path) || matcher(file_name) {
+                .unwrap_or(relative_path.as_str());
+            if matcher(&relative_path) || matcher(file_name) {
                 let language = ws
                     .db()
                     .adapter_for(file_id)
@@ -191,9 +197,9 @@ fn search_canonical(
                     SearchHit {
                         name: file_name.to_string(),
                         kind: "file".to_string(),
-                        qualified_name: Some(file_path.clone()),
+                        qualified_name: Some(relative_path.clone()),
                         context: language,
-                        file: file_path.clone(),
+                        file: relative_path.clone(),
                         line: 1,
                         column: 1,
                         code,

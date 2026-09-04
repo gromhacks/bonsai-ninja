@@ -8,7 +8,7 @@ use anyhow::Result;
 use bonsai_sdk::Workspace;
 use comfy_table::Cell;
 
-use crate::args::{BrowseFormat, OutputFormat};
+use crate::args::BrowseFormat;
 use crate::footer::{render_paging_footer, render_truncation_notice, WorkspaceFooter};
 use crate::page_cache;
 use crate::paging;
@@ -127,26 +127,169 @@ fn canonical_browse_row<T: serde::Serialize>(
     Ok(value)
 }
 
-fn filter_browse_rows_by_canonical_value<T, P>(rows: &[T], project: &P) -> Result<Option<Vec<T>>>
+/// Apply the global `--contains` / `--not-contains` view to browse rows.
+///
+/// The filter reads the semantic row — every field the JSON `rows[]` entry
+/// carries — plus its rendered `location` (`file:line[:column]`). It never
+/// projects rows through the workspace (source lines, enclosing functions,
+/// callee summaries), so narrowing a 300k-row result costs one serialization
+/// per row and no engine work; the projection runs only for the rows that
+/// reach the page. `_project` is kept in the signature so call sites keep
+/// naming the projection they render with.
+fn filter_browse_rows_by_canonical_value<T, P>(rows: &[T], _project: &P) -> Result<Option<Vec<T>>>
 where
-    T: Clone,
+    T: Clone + serde::Serialize,
     P: Fn(&T) -> Result<serde_json::Value>,
 {
     let secondary = crate::filter::active();
     if !secondary.is_active() {
         return Ok(None);
     }
-    rows.iter()
-        .filter_map(|row| match project(row) {
-            Ok(value) if secondary.matches_value(&value) => Some(Ok(row.clone())),
-            Ok(_) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .collect::<Result<Vec<_>>>()
-        .map(Some)
+    let mut scratch = crate::filter::FilterScratch::default();
+    let mut location = String::new();
+    Ok(Some(
+        rows.iter()
+            .filter(|row| {
+                location.clear();
+                row_location_leaf(*row, &mut location);
+                let extra = (!location.is_empty()).then_some(location.as_str());
+                secondary.matches_row(*row, &mut scratch, extra)
+            })
+            .cloned()
+            .collect(),
+    ))
+}
+
+/// The presentation strings a row renders that are pure functions of its
+/// own fields — `location` (`file:line[:column]`) and `signature`
+/// (`name(params)`) — derived without touching the workspace, one per line.
+fn row_location_leaf<T: serde::Serialize>(row: &T, out: &mut String) {
+    #[derive(serde::Deserialize, Default)]
+    struct Derived {
+        #[serde(default)]
+        file: String,
+        #[serde(default)]
+        line: u32,
+        #[serde(default)]
+        column: u32,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        params: Option<Vec<String>>,
+    }
+    let Ok(json) = serde_json::to_vec(row) else {
+        return;
+    };
+    let Ok(derived) = serde_json::from_slice::<Derived>(&json) else {
+        return;
+    };
+    use std::fmt::Write as _;
+    if !derived.file.is_empty() {
+        if derived.column == 0 {
+            let _ = writeln!(out, "{}:{}", short_file(&derived.file), derived.line);
+        } else {
+            let _ = writeln!(
+                out,
+                "{}:{}:{}",
+                short_file(&derived.file),
+                derived.line,
+                derived.column
+            );
+        }
+    }
+    if let (Some(name), Some(params)) = (derived.name.as_deref(), derived.params.as_deref()) {
+        let params = dedup_sigil_params(params);
+        let _ = writeln!(out, "{name}({})", params.join(", "));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Files a browse row renders from; every cached row type carries `file`.
+pub(crate) trait BrowseRowFile {
+    fn row_file(&self) -> &str;
+}
+
+macro_rules! browse_row_file {
+    ($($ty:ty),* $(,)?) => {
+        $(impl BrowseRowFile for $ty {
+            fn row_file(&self) -> &str {
+                &self.file
+            }
+        })*
+    };
+}
+
+browse_row_file!(
+    bonsai_sdk::DefOut,
+    bonsai_sdk::CallOut,
+    bonsai_sdk::RefOut,
+    bonsai_sdk::ImportOut,
+    bonsai_sdk::EntryPointOut,
+    bonsai_sdk::ClassOut,
+    bonsai_sdk::ArgOut,
+    bonsai_sdk::StringOut,
+    bonsai_sdk::VarOut,
+    bonsai_sdk::OperationOut,
+    bonsai_sdk::CommentOut,
+    bonsai_sdk::SearchHit,
+);
+
+/// Above this many distinct files the scoped open stops paying off and the
+/// normal index-only open is used instead.
+const ROWS_WINDOW_SCOPED_OPEN_FILE_LIMIT: usize = 512;
+
+/// Open the workspace for rendering a cached complete row set: apply the text
+/// filter, plan the pages exactly as the renderer will, and open only the
+/// files of the rows in the render window. Falls back to the index-only open
+/// when the window spans too many files or the whole result (`--all`).
+fn open_project_for_rows_window<T>(
+    root: &std::path::Path,
+    rows: &[T],
+    cfg: &paging::PagingConfig,
+    command: &str,
+    filters_hash: u64,
+    cost: &dyn Fn(&T) -> u64,
+) -> Result<(bonsai_sdk::Project, WorkspaceFooter, bool)>
+where
+    T: Clone + serde::Serialize + BrowseRowFile,
+{
+    let filtered = filter_browse_rows_by_canonical_value(rows, &|_: &T| Ok(serde_json::Value::Null))?;
+    let rows: &[T] = filtered.as_deref().unwrap_or(rows);
+    let mut files: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut scoped = !cfg.all;
+    if scoped {
+        let (_, info) = paging::paginate(rows, cfg, command, filters_hash, cost)?;
+        for page_number in page_cache::query_report_page_window(info.page_number, info.total_pages) {
+            let mut page_cfg = cfg.clone();
+            page_cfg.page = paging::PageArg::Number(page_number);
+            let (slice, _) = paging::paginate(rows, &page_cfg, command, filters_hash, cost)?;
+            files.extend(slice.iter().map(|row| row.row_file().to_string()));
+            if files.len() > ROWS_WINDOW_SCOPED_OPEN_FILE_LIMIT {
+                scoped = false;
+                break;
+            }
+        }
+    }
+    if !scoped || files.is_empty() {
+        let (project, footer) = open_project(root)?;
+        return Ok((project, footer, false));
+    }
+    let include: Vec<String> = files.into_iter().collect();
+    let (project, footer) = open_project_index_filtered_paths(root, &include, &[])?;
+    // Rendering projects rows through exact compiler facts (attributions,
+    // enclosing functions); attach the persisted compiler objects for the
+    // window's files so those reads decode instead of re-lowering source.
+    let ws = project.workspace();
+    let window_files = ws.vfs().all_files();
+    if let Err(error) = ws
+        .db()
+        .attach_reusable_compiler_object_store_for_files(&window_files)
+    {
+        tracing::debug!("scoped open could not attach compiler objects: {error}");
+    }
+    Ok((project, footer, true))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_canonical_browse_json<T, C, P>(
     workspace: &std::path::Path,
@@ -380,15 +523,6 @@ pub(crate) fn cmd_defs(
     } else {
         f.kind
     };
-    let (project, _footer, _partial_workspace) =
-        open_browse_project_with_retrieval(root, prefilter_literal, retrieval_kind, f.file, f.regex)?;
-    let ws = project.workspace();
-    let out = with_browse_progress("collecting definitions", || {
-        project
-            .browse()
-            .defs(f)
-            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
-    })?;
     let filters_hash = paging::hash_filters(&[
         ("kind", f.kind.unwrap_or("")),
         ("file", f.file.unwrap_or("")),
@@ -402,6 +536,35 @@ pub(crate) fn cmd_defs(
         (d.name.len() + d.file.len() + 24 + d.params.iter().map(|p| p.len() + 2).sum::<usize>()) as u64
             + paging::TABLE_ROW_CHROME_BYTES
     };
+    let cached_rows = page_cache::read_rows_payload::<bonsai_sdk::DefOut>(root, "defs", filters_hash)?;
+    // A cached complete row set needs the workspace only for the rows it
+    // renders: open exactly their files instead of ingesting the tree.
+    let (project, _footer, _partial_workspace) = match cached_rows.as_ref() {
+        Some(payload) => {
+            let scoped =
+                open_project_for_rows_window(root, &payload.rows, &paging_cfg, "defs", filters_hash, &cost)?;
+            (scoped.0, scoped.1, scoped.2)
+        }
+        None => open_browse_project_with_retrieval(root, prefilter_literal, retrieval_kind, f.file, f.regex)?,
+    };
+    let ws = project.workspace();
+    let (out, cached_analysis_reasons) = match cached_rows {
+        Some(payload) => (payload.rows, Some(payload.analysis_incomplete_reasons)),
+        None => {
+            let out = with_browse_progress("collecting definitions", || {
+                project
+                    .browse()
+                    .defs(f)
+                    .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+            })?;
+            let reasons = super::touched_parser_incomplete_reasons(project.workspace());
+            page_cache::save_rows_payload(root, "defs", filters_hash, &out, &reasons);
+            (out, None)
+        }
+    };
+    // The complete row set is a cached object keyed by the semantic
+    // filters; page turns, formats, and text filters reuse it.
+
     let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
     let project_row = |definition: &bonsai_sdk::DefOut| {
         let mut value = canonical_browse_row(ws, &canonical_ann, definition, flows)?;
@@ -419,7 +582,8 @@ pub(crate) fn cmd_defs(
     };
     let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
     let rows = filtered_rows.as_deref().unwrap_or(&out);
-    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
+    let analysis_reasons =
+        cached_analysis_reasons.unwrap_or_else(|| super::touched_parser_incomplete_reasons(ws));
     match format {
         BrowseFormat::Json => {
             emit_canonical_browse_json(
@@ -507,17 +671,6 @@ pub(crate) fn cmd_entrypoints(
     format: BrowseFormat,
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
-    let (project, _footer) = if let Some(file) = f.file.filter(|file| !file.trim().is_empty()) {
-        open_project_index_filtered_paths(root, &[file.to_string()], &[])?
-    } else {
-        open_project(root)?
-    };
-    let out = with_browse_progress("collecting entrypoints", || {
-        project
-            .browse()
-            .entrypoints(f)
-            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
-    })?;
     let filters_hash = paging::hash_filters(&[
         ("kind", f.kind.unwrap_or("")),
         ("file", f.file.unwrap_or("")),
@@ -537,13 +690,55 @@ pub(crate) fn cmd_entrypoints(
             e.reason.len(),
         ])
     };
+    let cached_rows =
+        page_cache::read_rows_payload::<bonsai_sdk::EntryPointOut>(root, "entrypoints", filters_hash)?;
+    // A cached complete row set needs the workspace only for the rows it
+    // renders: open exactly their files instead of ingesting the tree.
+    let (project, _footer) = match cached_rows.as_ref() {
+        Some(payload) => {
+            let scoped = open_project_for_rows_window(
+                root,
+                &payload.rows,
+                &paging_cfg,
+                "entrypoints",
+                filters_hash,
+                &cost,
+            )?;
+            (scoped.0, scoped.1)
+        }
+        None => {
+            if let Some(file) = f.file.filter(|file| !file.trim().is_empty()) {
+                open_project_index_filtered_paths(root, &[file.to_string()], &[])?
+            } else {
+                open_project(root)?
+            }
+        }
+    };
+    let (out, cached_analysis_reasons) = match cached_rows {
+        Some(payload) => (payload.rows, Some(payload.analysis_incomplete_reasons)),
+        None => {
+            let out = with_browse_progress("collecting entrypoints", || {
+                project
+                    .browse()
+                    .entrypoints(f)
+                    .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+            })?;
+            let reasons = super::touched_parser_incomplete_reasons(project.workspace());
+            page_cache::save_rows_payload(root, "entrypoints", filters_hash, &out, &reasons);
+            (out, None)
+        }
+    };
+    // The complete row set is a cached object keyed by the semantic
+    // filters; page turns, formats, and text filters reuse it.
+
     let canonical_ann = bonsai_sdk::SummaryAnnotator::new(project.workspace());
     let project_row = |entrypoint: &bonsai_sdk::EntryPointOut| {
         canonical_browse_row(project.workspace(), &canonical_ann, entrypoint, false)
     };
     let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
     let rows = filtered_rows.as_deref().unwrap_or(&out);
-    let analysis_reasons = super::touched_parser_incomplete_reasons(project.workspace());
+    let analysis_reasons = cached_analysis_reasons
+        .unwrap_or_else(|| super::touched_parser_incomplete_reasons(project.workspace()));
     match format {
         BrowseFormat::Json => {
             emit_canonical_browse_json(
@@ -774,39 +969,6 @@ pub(crate) fn paging_from_cli(
     ))
 }
 
-/// Paging config for commands with the three-way `OutputFormat`
-/// (text / json / dot) — `trace` is the only caller today.
-/// Classifies `dot` as `RenderOnly` since a half-dot file is
-/// meaningless; text paginates, default JSON is budgeted.
-pub(crate) fn paging_from_cli_output(
-    context: Option<&str>,
-    page: Option<&str>,
-    all: bool,
-    format: OutputFormat,
-) -> Result<paging::PagingConfig> {
-    let ctx = match context {
-        Some(s) => paging::parse_context(s).map_err(anyhow::Error::msg)?,
-        None => None,
-    };
-    let pg = match page {
-        Some(s) => paging::PageArg::parse(s).map_err(anyhow::Error::msg)?,
-        None => paging::PageArg::First,
-    };
-    let format_class = match format {
-        OutputFormat::Text => paging::FormatClass::Text,
-        OutputFormat::Json => paging::FormatClass::Programmatic,
-        OutputFormat::Dot => paging::FormatClass::RenderOnly,
-    };
-    let explicit_uncapped = context.is_some() && ctx.is_none();
-    Ok(paging::PagingConfig::new(
-        ctx,
-        pg,
-        None,
-        all || explicit_uncapped,
-        format_class,
-    ))
-}
-
 /// Header helper: extend `base` with a trailing `"summaries"` column
 /// when compiler summary ids are enabled. Keeps the column list in
 /// one place per renderer so ordering stays consistent.
@@ -916,18 +1078,20 @@ fn render_summary_column_notice(u: &Ui, status: &SummaryColumnStatus) {
 /// Long source lines and flow-id lists wrap inside the terminal,
 /// and every wrap repeats table borders and padding. The paginator
 /// needs the post-wrap shape, not just the raw string length.
+/// Cost of one cell on the rendered-line model (see
+/// [`rendered_table_row_cost`]): the physical lines the cell folds into,
+/// each charged a generous per-line allowance.
 fn wrapped_table_cell_cost(len: usize) -> u64 {
-    let len = len as u64;
-    let wraps = len / 60;
-    len.saturating_mul(3)
-        .saturating_add(wraps.saturating_mul(180))
-        .saturating_add(32)
+    rendered_table_row_cost(&[len])
 }
 
+/// Estimate one table row from its cell widths. Comfy-table folds the row
+/// into physical lines of at most the canonical CLI width, so the cost is
+/// the number of rendered lines times a generous per-line allowance plus a
+/// small per-row chrome; charging every character three times over made
+/// pages stop at roughly a tenth of their stated budget.
 fn browse_table_row_cost(cells: &[usize]) -> u64 {
-    paging::TABLE_ROW_CHROME_BYTES
-        .saturating_add(700)
-        .saturating_add(cells.iter().map(|len| wrapped_table_cell_cost(*len)).sum::<u64>())
+    rendered_table_row_cost(cells).saturating_add(48)
 }
 
 /// Estimate a row whose complete visible cells are already known.
@@ -1060,18 +1224,6 @@ pub(crate) fn cmd_calls(
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.callee.or(f.caller);
-    let (project, _footer, _partial_workspace) =
-        open_browse_project_with_retrieval(root, prefilter_literal, Some("call"), f.file, f.regex)?;
-    let ws = project.workspace();
-    let out = with_browse_progress("collecting call sites", || {
-        project
-            .browse()
-            .calls(f)
-            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
-    })?;
-    // Filter-signature hash: same `(cmd, filters_hash, offset)`
-    // tuple used to derive the cursor must be stable across runs
-    // so a `P:xxxxxxxx` cursor from a bug report reproduces.
     let filters_hash = paging::hash_filters(&[
         ("callee", f.callee.unwrap_or("")),
         ("file", f.file.unwrap_or("")),
@@ -1080,6 +1232,61 @@ pub(crate) fn cmd_calls(
         ("regex", if f.regex { "1" } else { "0" }),
     ]);
     let text_cost = matches!(format, BrowseFormat::Text);
+    // Workspace-free page cost: identical to the model below whenever
+    // summaries are off, which is when a cached row set may open only the
+    // render window's files.
+    let window_cost = |c: &bonsai_sdk::CallOut| {
+        if !text_cost {
+            return (c.callee.len() + c.caller.as_deref().map_or(1, str::len) + c.file.len() + 16) as u64
+                + paging::TABLE_ROW_CHROME_BYTES;
+        }
+        let caller = c.caller.as_deref().unwrap_or("-");
+        let loc_len = short_file(&c.file).len() + 24;
+        browse_table_row_cost(&[c.callee.len(), caller.len(), loc_len])
+            .saturating_add(source_line_estimated_cell_cost())
+            .saturating_add(location_flow_labels_cell_cost(
+                None::<&bonsai_sdk::SummaryAnnotator<'_>>,
+                flows,
+                &c.file,
+                c.line,
+            ))
+    };
+    let cached_rows = page_cache::read_rows_payload::<bonsai_sdk::CallOut>(root, "calls", filters_hash)?;
+    let (project, _footer, _partial_workspace) = match cached_rows.as_ref() {
+        Some(payload) if !flows => {
+            let scoped = open_project_for_rows_window(
+                root,
+                &payload.rows,
+                &paging_cfg,
+                "calls",
+                filters_hash,
+                &window_cost,
+            )?;
+            (scoped.0, scoped.1, scoped.2)
+        }
+        _ => open_browse_project_with_retrieval(root, prefilter_literal, Some("call"), f.file, f.regex)?,
+    };
+    let ws = project.workspace();
+    let (out, cached_analysis_reasons) = match cached_rows {
+        Some(payload) => (payload.rows, Some(payload.analysis_incomplete_reasons)),
+        None => {
+            let out = with_browse_progress("collecting call sites", || {
+                project
+                    .browse()
+                    .calls(f)
+                    .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+            })?;
+            let reasons = super::touched_parser_incomplete_reasons(project.workspace());
+            page_cache::save_rows_payload(root, "calls", filters_hash, &out, &reasons);
+            (out, None)
+        }
+    };
+    // The complete row set is a cached object keyed by the semantic
+    // filters; page turns, formats, and text filters reuse it.
+
+    // Filter-signature hash: same `(cmd, filters_hash, offset)`
+    // tuple used to derive the cursor must be stable across runs
+    // so a `P:xxxxxxxx` cursor from a bug report reproduces.
     let exact_flow_cost_ann =
         (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::SummaryAnnotator::new(ws));
     let cost_bytes = |c: &bonsai_sdk::CallOut| {
@@ -1102,7 +1309,8 @@ pub(crate) fn cmd_calls(
     let project_row = |call: &bonsai_sdk::CallOut| canonical_browse_row(ws, &canonical_ann, call, flows);
     let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
     let rows = filtered_rows.as_deref().unwrap_or(&out);
-    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
+    let analysis_reasons =
+        cached_analysis_reasons.unwrap_or_else(|| super::touched_parser_incomplete_reasons(ws));
     match format {
         BrowseFormat::Json => {
             emit_canonical_browse_json(
@@ -1144,7 +1352,7 @@ pub(crate) fn cmd_calls(
                         let line_text = read_line(ws, &c.file, c.line);
                         let code_cell = Cell::new(u.snippet(&line_text, ext));
                         let mut cells = vec![
-                            Cell::new(u.name(&c.callee)),
+                            Cell::new(u.name(&one_line_preview(&c.callee, 120))),
                             Cell::new(u.kind(caller)),
                             Cell::new(u.path(&loc)),
                             code_cell,
@@ -1423,24 +1631,80 @@ pub(crate) fn cmd_imports(
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.module.or(f.alias);
-    let (project, _footer, _partial_workspace) =
-        open_browse_project_with_retrieval(root, prefilter_literal, Some("import"), f.file, f.regex)?;
-    let ws = project.workspace();
+    // Summaries resolve workspace bindings while collecting, which changes
+    // the rows: the setting is part of the row set's identity.
     f.resolve_workspace_bindings = flows;
-    let out = with_browse_progress("collecting imports", || {
-        project
-            .browse()
-            .imports(f)
-            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
-    })?;
     let filters_hash = paging::hash_filters(&[
         ("file", f.file.unwrap_or("")),
         ("module", f.module.unwrap_or("")),
         ("alias", f.alias.unwrap_or("")),
         ("wildcard", if f.wildcard { "1" } else { "0" }),
         ("regex", if f.regex { "1" } else { "0" }),
+        ("resolve_bindings", if flows { "1" } else { "0" }),
     ]);
     let text_cost = matches!(format, BrowseFormat::Text);
+    // Workspace-free page cost: identical to the model below whenever
+    // summaries are off, which is when a cached row set may open only the
+    // render window's files.
+    let window_cost = |import: &bonsai_sdk::ImportOut| {
+        if !text_cost {
+            return (import.module.len()
+                + import.alias.as_deref().map_or(1, str::len)
+                + import.original_name.as_deref().map_or(1, str::len)
+                + import.file.len()
+                + 16) as u64
+                + paging::TABLE_ROW_CHROME_BYTES;
+        }
+        let alias = import.alias.as_deref().unwrap_or("-");
+        let symbol = import.original_name.as_deref().unwrap_or("-");
+        let kind = import_kind_label(import.is_wildcard, import.original_name.as_deref());
+        let loc_len = short_file(&import.file).len() + 16;
+        let flow_len = None::<&bonsai_sdk::SummaryAnnotator<'_>>
+            .map(|ann| import_flow_labels(ann, import).len().min(120))
+            .unwrap_or(0);
+        rendered_table_row_cost(&[
+            import.module.len(),
+            symbol.len(),
+            alias.len(),
+            kind.len(),
+            loc_len,
+            flow_len,
+        ])
+        .saturating_add(source_line_estimated_cell_cost())
+    };
+    let cached_rows = page_cache::read_rows_payload::<bonsai_sdk::ImportOut>(root, "imports", filters_hash)?;
+    let (project, _footer, _partial_workspace) = match cached_rows.as_ref() {
+        Some(payload) if !flows => {
+            let scoped = open_project_for_rows_window(
+                root,
+                &payload.rows,
+                &paging_cfg,
+                "imports",
+                filters_hash,
+                &window_cost,
+            )?;
+            (scoped.0, scoped.1, scoped.2)
+        }
+        _ => open_browse_project_with_retrieval(root, prefilter_literal, Some("import"), f.file, f.regex)?,
+    };
+    let ws = project.workspace();
+    let (out, cached_analysis_reasons) = match cached_rows {
+        Some(payload) => (payload.rows, Some(payload.analysis_incomplete_reasons)),
+        None => {
+            let out = with_browse_progress("collecting imports", || {
+                project
+                    .browse()
+                    .imports(f)
+                    .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+            })?;
+            let reasons = super::touched_parser_incomplete_reasons(project.workspace());
+            page_cache::save_rows_payload(root, "imports", filters_hash, &out, &reasons);
+            (out, None)
+        }
+    };
+    // The complete row set is a cached object keyed by the semantic
+    // filters; page turns, formats, and text filters reuse it.
+
     let flow_cost_ann = (flows && text_cost).then(|| bonsai_sdk::SummaryAnnotator::new(ws));
     let cost = |import: &bonsai_sdk::ImportOut| {
         if !text_cost {
@@ -1489,7 +1753,8 @@ pub(crate) fn cmd_imports(
     };
     let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
     let rows = filtered_rows.as_deref().unwrap_or(&out);
-    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
+    let analysis_reasons =
+        cached_analysis_reasons.unwrap_or_else(|| super::touched_parser_incomplete_reasons(ws));
     match format {
         BrowseFormat::Json => {
             emit_canonical_browse_json(
@@ -1592,15 +1857,6 @@ pub(crate) fn cmd_vars(
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.name.or(f.source).or(f.in_fn);
-    let (project, _footer, _partial_workspace) =
-        open_browse_project_with_retrieval(root, prefilter_literal, Some("var"), f.file, f.regex)?;
-    let ws = project.workspace();
-    let out = with_browse_progress("collecting variables", || {
-        project
-            .browse()
-            .vars(f)
-            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
-    })?;
     let filters_hash = paging::hash_filters(&[
         ("name", f.name.unwrap_or("")),
         ("file", f.file.unwrap_or("")),
@@ -1609,6 +1865,62 @@ pub(crate) fn cmd_vars(
         ("regex", if f.regex { "1" } else { "0" }),
     ]);
     let text_cost = matches!(format, BrowseFormat::Text);
+    // Workspace-free page cost: identical to the model below whenever
+    // summaries are off, which is when a cached row set may open only the
+    // render window's files.
+    let window_cost = |v: &bonsai_sdk::VarOut| {
+        if !text_cost {
+            return (v.name.len()
+                + v.in_function.len()
+                + v.source_name.as_deref().map_or(1, str::len)
+                + v.file.len()
+                + 16) as u64
+                + paging::TABLE_ROW_CHROME_BYTES;
+        }
+        let src = v.source_name.as_deref().unwrap_or("-");
+        let loc_len = short_file(&v.file).len() + 24;
+        browse_table_row_cost(&[v.name.len(), v.in_function.len(), src.len(), loc_len])
+            .saturating_add(source_line_estimated_cell_cost())
+            .saturating_add(location_flow_labels_cell_cost(
+                None::<&bonsai_sdk::SummaryAnnotator<'_>>,
+                flows,
+                &v.file,
+                v.line,
+            ))
+    };
+    let cached_rows = page_cache::read_rows_payload::<bonsai_sdk::VarOut>(root, "vars", filters_hash)?;
+    let (project, _footer, _partial_workspace) = match cached_rows.as_ref() {
+        Some(payload) if !flows => {
+            let scoped = open_project_for_rows_window(
+                root,
+                &payload.rows,
+                &paging_cfg,
+                "vars",
+                filters_hash,
+                &window_cost,
+            )?;
+            (scoped.0, scoped.1, scoped.2)
+        }
+        _ => open_browse_project_with_retrieval(root, prefilter_literal, Some("var"), f.file, f.regex)?,
+    };
+    let ws = project.workspace();
+    let (out, cached_analysis_reasons) = match cached_rows {
+        Some(payload) => (payload.rows, Some(payload.analysis_incomplete_reasons)),
+        None => {
+            let out = with_browse_progress("collecting variables", || {
+                project
+                    .browse()
+                    .vars(f)
+                    .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+            })?;
+            let reasons = super::touched_parser_incomplete_reasons(project.workspace());
+            page_cache::save_rows_payload(root, "vars", filters_hash, &out, &reasons);
+            (out, None)
+        }
+    };
+    // The complete row set is a cached object keyed by the semantic
+    // filters; page turns, formats, and text filters reuse it.
+
     let exact_flow_cost_ann =
         (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::SummaryAnnotator::new(ws));
     let cost = |v: &bonsai_sdk::VarOut| {
@@ -1636,7 +1948,8 @@ pub(crate) fn cmd_vars(
         |variable: &bonsai_sdk::VarOut| canonical_browse_row(ws, &canonical_ann, variable, flows);
     let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
     let rows = filtered_rows.as_deref().unwrap_or(&out);
-    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
+    let analysis_reasons =
+        cached_analysis_reasons.unwrap_or_else(|| super::touched_parser_incomplete_reasons(ws));
     match format {
         BrowseFormat::Json => {
             emit_canonical_browse_json(
@@ -1715,15 +2028,6 @@ pub(crate) fn cmd_strings(
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.contains.or(f.in_fn);
-    let (project, _footer, _partial_workspace) =
-        open_browse_project_with_retrieval(root, prefilter_literal, Some("string"), f.file, f.regex)?;
-    let ws = project.workspace();
-    let out = with_browse_progress("collecting strings", || {
-        project
-            .browse()
-            .strings(f)
-            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
-    })?;
     let filters_hash = paging::hash_filters(&[
         ("category", f.category.unwrap_or("")),
         ("contains", f.contains.unwrap_or("")),
@@ -1732,12 +2036,69 @@ pub(crate) fn cmd_strings(
         ("min_len", &f.min_len.map(|n| n.to_string()).unwrap_or_default()),
         ("regex", if f.regex { "1" } else { "0" }),
     ]);
+    let text_cost = matches!(format, BrowseFormat::Text);
+    // Workspace-free page cost: identical to the model below whenever
+    // summaries are off, which is when a cached row set may open only the
+    // render window's files.
+    let window_cost = |s: &bonsai_sdk::StringOut| {
+        if !text_cost {
+            return (s.category.len() + s.text.len().min(120) + s.file.len() + 16 + 180) as u64
+                + paging::TABLE_ROW_CHROME_BYTES;
+        }
+        let loc_len = short_file(&s.file).len() + 24;
+        let enclosing_len = 24;
+        browse_table_row_cost(&[
+            s.category.len(),
+            truncate(&s.text, 60).len(),
+            enclosing_len,
+            loc_len,
+        ])
+        .saturating_add(source_line_estimated_cell_cost())
+        .saturating_add(location_flow_labels_cell_cost(
+            None::<&bonsai_sdk::SummaryAnnotator<'_>>,
+            flows,
+            &s.file,
+            s.line,
+        ))
+    };
+    let cached_rows = page_cache::read_rows_payload::<bonsai_sdk::StringOut>(root, "strings", filters_hash)?;
+    let (project, _footer, _partial_workspace) = match cached_rows.as_ref() {
+        Some(payload) if !flows => {
+            let scoped = open_project_for_rows_window(
+                root,
+                &payload.rows,
+                &paging_cfg,
+                "strings",
+                filters_hash,
+                &window_cost,
+            )?;
+            (scoped.0, scoped.1, scoped.2)
+        }
+        _ => open_browse_project_with_retrieval(root, prefilter_literal, Some("string"), f.file, f.regex)?,
+    };
+    let ws = project.workspace();
+    let (out, cached_analysis_reasons) = match cached_rows {
+        Some(payload) => (payload.rows, Some(payload.analysis_incomplete_reasons)),
+        None => {
+            let out = with_browse_progress("collecting strings", || {
+                project
+                    .browse()
+                    .strings(f)
+                    .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+            })?;
+            let reasons = super::touched_parser_incomplete_reasons(project.workspace());
+            page_cache::save_rows_payload(root, "strings", filters_hash, &out, &reasons);
+            (out, None)
+        }
+    };
+    // The complete row set is a cached object keyed by the semantic
+    // filters; page turns, formats, and text filters reuse it.
+
     // Strings table has a syntax-highlighted `code` column (the
     // enclosing source line, up to ~120 bytes) + a `flows` column
     // that accretes F:<16-hex> ids for rows inside hot functions.
     // Account for both — the original estimate only covered the
     // text preview + file path.
-    let text_cost = matches!(format, BrowseFormat::Text);
     let exact_flow_cost_ann =
         (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::SummaryAnnotator::new(ws));
     let cost = |s: &bonsai_sdk::StringOut| {
@@ -1766,7 +2127,8 @@ pub(crate) fn cmd_strings(
         |string: &bonsai_sdk::StringOut| canonical_browse_row(ws, &canonical_ann, string, flows);
     let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
     let rows = filtered_rows.as_deref().unwrap_or(&out);
-    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
+    let analysis_reasons =
+        cached_analysis_reasons.unwrap_or_else(|| super::touched_parser_incomplete_reasons(ws));
     match format {
         BrowseFormat::Json => {
             emit_canonical_browse_json(
@@ -1850,15 +2212,6 @@ pub(crate) fn cmd_comments(
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.contains.or(f.in_fn);
-    let (project, _footer, _partial_workspace) =
-        open_browse_project_with_retrieval(root, prefilter_literal, Some("comment"), f.file, f.regex)?;
-    let ws = project.workspace();
-    let out = with_browse_progress("collecting comments", || {
-        project
-            .browse()
-            .comments(f)
-            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
-    })?;
     let filters_hash = paging::hash_filters(&[
         ("kind", f.kind.unwrap_or("")),
         ("contains", f.contains.unwrap_or("")),
@@ -1870,12 +2223,51 @@ pub(crate) fn cmd_comments(
     let cost = |c: &bonsai_sdk::CommentOut| {
         (c.kind.len() + c.text.len().min(200) + c.file.len() + 16) as u64 + paging::TABLE_ROW_CHROME_BYTES
     };
+    let cached_rows =
+        page_cache::read_rows_payload::<bonsai_sdk::CommentOut>(root, "comments", filters_hash)?;
+    // A cached complete row set needs the workspace only for the rows it
+    // renders: open exactly their files instead of ingesting the tree.
+    let (project, _footer, _partial_workspace) = match cached_rows.as_ref() {
+        Some(payload) => {
+            let scoped = open_project_for_rows_window(
+                root,
+                &payload.rows,
+                &paging_cfg,
+                "comments",
+                filters_hash,
+                &cost,
+            )?;
+            (scoped.0, scoped.1, scoped.2)
+        }
+        None => {
+            open_browse_project_with_retrieval(root, prefilter_literal, Some("comment"), f.file, f.regex)?
+        }
+    };
+    let ws = project.workspace();
+    let (out, cached_analysis_reasons) = match cached_rows {
+        Some(payload) => (payload.rows, Some(payload.analysis_incomplete_reasons)),
+        None => {
+            let out = with_browse_progress("collecting comments", || {
+                project
+                    .browse()
+                    .comments(f)
+                    .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+            })?;
+            let reasons = super::touched_parser_incomplete_reasons(project.workspace());
+            page_cache::save_rows_payload(root, "comments", filters_hash, &out, &reasons);
+            (out, None)
+        }
+    };
+    // The complete row set is a cached object keyed by the semantic
+    // filters; page turns, formats, and text filters reuse it.
+
     let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
     let project_row =
         |comment: &bonsai_sdk::CommentOut| canonical_browse_row(ws, &canonical_ann, comment, false);
     let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
     let rows = filtered_rows.as_deref().unwrap_or(&out);
-    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
+    let analysis_reasons =
+        cached_analysis_reasons.unwrap_or_else(|| super::touched_parser_incomplete_reasons(ws));
     match format {
         BrowseFormat::Json => {
             emit_canonical_browse_json(
@@ -1946,15 +2338,6 @@ pub(crate) fn cmd_args(
     } else {
         Some("arg")
     };
-    let (project, _footer, _partial_workspace) =
-        open_browse_project_with_retrieval(root, prefilter_literal, retrieval_kind, f.file, f.regex)?;
-    let ws = project.workspace();
-    let out = with_browse_progress("collecting arguments", || {
-        project
-            .browse()
-            .args(f)
-            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
-    })?;
     let filters_hash = paging::hash_filters(&[
         ("callee", f.callee.unwrap_or("")),
         ("file", f.file.unwrap_or("")),
@@ -1965,6 +2348,72 @@ pub(crate) fn cmd_args(
         ("regex", if f.regex { "1" } else { "0" }),
     ]);
     let text_cost = matches!(format, BrowseFormat::Text);
+    // Workspace-free page cost: identical to the model below whenever
+    // summaries are off, which is when a cached row set may open only the
+    // render window's files.
+    let window_cost = |a: &bonsai_sdk::ArgOut| {
+        if !text_cost {
+            return (a.callee.len()
+                + a.value.len().min(80)
+                + a.keyword.as_deref().map_or(0, str::len)
+                + a.file.len()
+                + 16) as u64
+                + paging::TABLE_ROW_CHROME_BYTES;
+        }
+        let pos_len = a
+            .keyword
+            .as_deref()
+            .map_or_else(|| a.position.to_string().len(), |k| k.len() + 1);
+        let loc_len = short_file(&a.file).len() + 24;
+        let caller_len = 24;
+        browse_table_row_cost(&[
+            a.callee.len(),
+            pos_len,
+            truncate(&a.value, 50).len(),
+            caller_len,
+            loc_len,
+        ])
+        .saturating_add(source_line_estimated_cell_cost())
+        .saturating_add(location_flow_labels_cell_cost(
+            None::<&bonsai_sdk::SummaryAnnotator<'_>>,
+            flows,
+            &a.file,
+            a.line,
+        ))
+    };
+    let cached_rows = page_cache::read_rows_payload::<bonsai_sdk::ArgOut>(root, "args", filters_hash)?;
+    let (project, _footer, _partial_workspace) = match cached_rows.as_ref() {
+        Some(payload) if !flows => {
+            let scoped = open_project_for_rows_window(
+                root,
+                &payload.rows,
+                &paging_cfg,
+                "args",
+                filters_hash,
+                &window_cost,
+            )?;
+            (scoped.0, scoped.1, scoped.2)
+        }
+        _ => open_browse_project_with_retrieval(root, prefilter_literal, retrieval_kind, f.file, f.regex)?,
+    };
+    let ws = project.workspace();
+    let (out, cached_analysis_reasons) = match cached_rows {
+        Some(payload) => (payload.rows, Some(payload.analysis_incomplete_reasons)),
+        None => {
+            let out = with_browse_progress("collecting arguments", || {
+                project
+                    .browse()
+                    .args(f)
+                    .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+            })?;
+            let reasons = super::touched_parser_incomplete_reasons(project.workspace());
+            page_cache::save_rows_payload(root, "args", filters_hash, &out, &reasons);
+            (out, None)
+        }
+    };
+    // The complete row set is a cached object keyed by the semantic
+    // filters; page turns, formats, and text filters reuse it.
+
     let exact_flow_cost_ann =
         (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::SummaryAnnotator::new(ws));
     let cost = |a: &bonsai_sdk::ArgOut| {
@@ -2002,7 +2451,8 @@ pub(crate) fn cmd_args(
         |argument: &bonsai_sdk::ArgOut| canonical_browse_row(ws, &canonical_ann, argument, flows);
     let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
     let rows = filtered_rows.as_deref().unwrap_or(&out);
-    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
+    let analysis_reasons =
+        cached_analysis_reasons.unwrap_or_else(|| super::touched_parser_incomplete_reasons(ws));
     match format {
         BrowseFormat::Json => {
             emit_canonical_browse_json(
@@ -2050,7 +2500,7 @@ pub(crate) fn cmd_args(
                         let line_text = read_line(ws, &a.file, a.line);
                         let code_cell = Cell::new(u.snippet(&line_text, ext));
                         let mut cells = vec![
-                            Cell::new(u.name(&a.callee)),
+                            Cell::new(u.name(&one_line_preview(&a.callee, 120))),
                             Cell::new(u.loc(&pos_label)),
                             Cell::new(u.dim(&value)),
                             Cell::new(u.kind(&caller)),
@@ -2094,15 +2544,6 @@ pub(crate) fn cmd_operations(
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.name.or(f.in_fn);
-    let (project, _footer, _partial_workspace) =
-        open_browse_project_with_retrieval(root, prefilter_literal, Some("operation"), f.file, f.regex)?;
-    let ws = project.workspace();
-    let out = with_browse_progress("collecting operations", || {
-        project
-            .browse()
-            .operations(f)
-            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
-    })?;
     let filters_hash = paging::hash_filters(&[
         ("kind", f.kind.unwrap_or("")),
         ("name", f.name.unwrap_or("")),
@@ -2111,6 +2552,76 @@ pub(crate) fn cmd_operations(
         ("regex", if f.regex { "1" } else { "0" }),
     ]);
     let text_cost = matches!(format, BrowseFormat::Text);
+    // Workspace-free page cost: identical to the model below whenever
+    // summaries are off, which is when a cached row set may open only the
+    // render window's files.
+    let window_cost = |op: &bonsai_sdk::OperationOut| {
+        let operands_len = op
+            .operands
+            .iter()
+            .map(|operand| operand.role.len() + operand.name.len() + 2)
+            .sum::<usize>();
+        if !text_cost {
+            return (op.kind.len()
+                + op.name.len()
+                + op.in_function.len()
+                + op.detail.as_deref().map_or(0, str::len)
+                + operands_len
+                + op.file.len()
+                + 16) as u64
+                + paging::TABLE_ROW_CHROME_BYTES;
+        }
+        let loc_len = short_file(&op.file).len() + 24;
+        browse_table_row_cost(&[
+            op.kind.len(),
+            op.name.len(),
+            op.in_function.len(),
+            op.detail.as_deref().unwrap_or("-").len(),
+            operands_len.min(80),
+            loc_len,
+        ])
+        .saturating_add(source_line_estimated_cell_cost())
+        .saturating_add(location_flow_labels_cell_cost(
+            None::<&bonsai_sdk::SummaryAnnotator<'_>>,
+            flows,
+            &op.file,
+            op.line,
+        ))
+    };
+    let cached_rows =
+        page_cache::read_rows_payload::<bonsai_sdk::OperationOut>(root, "operations", filters_hash)?;
+    let (project, _footer, _partial_workspace) = match cached_rows.as_ref() {
+        Some(payload) if !flows => {
+            let scoped = open_project_for_rows_window(
+                root,
+                &payload.rows,
+                &paging_cfg,
+                "operations",
+                filters_hash,
+                &window_cost,
+            )?;
+            (scoped.0, scoped.1, scoped.2)
+        }
+        _ => open_browse_project_with_retrieval(root, prefilter_literal, Some("operation"), f.file, f.regex)?,
+    };
+    let ws = project.workspace();
+    let (out, cached_analysis_reasons) = match cached_rows {
+        Some(payload) => (payload.rows, Some(payload.analysis_incomplete_reasons)),
+        None => {
+            let out = with_browse_progress("collecting operations", || {
+                project
+                    .browse()
+                    .operations(f)
+                    .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+            })?;
+            let reasons = super::touched_parser_incomplete_reasons(project.workspace());
+            page_cache::save_rows_payload(root, "operations", filters_hash, &out, &reasons);
+            (out, None)
+        }
+    };
+    // The complete row set is a cached object keyed by the semantic
+    // filters; page turns, formats, and text filters reuse it.
+
     let exact_flow_cost_ann =
         (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::SummaryAnnotator::new(ws));
     let cost = |op: &bonsai_sdk::OperationOut| {
@@ -2151,7 +2662,8 @@ pub(crate) fn cmd_operations(
         |operation: &bonsai_sdk::OperationOut| canonical_browse_row(ws, &canonical_ann, operation, flows);
     let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
     let rows = filtered_rows.as_deref().unwrap_or(&out);
-    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
+    let analysis_reasons =
+        cached_analysis_reasons.unwrap_or_else(|| super::touched_parser_incomplete_reasons(ws));
     match format {
         BrowseFormat::Json => {
             emit_canonical_browse_json(
@@ -2251,15 +2763,6 @@ pub(crate) fn cmd_classes(
     } else {
         f.kind
     };
-    let (project, _footer, _partial_workspace) =
-        open_browse_project_with_retrieval(root, prefilter_literal, retrieval_kind, f.file, prefilter_regex)?;
-    let ws = project.workspace();
-    let out = with_browse_progress("collecting classes", || {
-        project
-            .browse()
-            .classes(f)
-            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
-    })?;
     let filters_hash = paging::hash_filters(&[
         ("name", f.name.unwrap_or("")),
         ("file", f.file.unwrap_or("")),
@@ -2279,6 +2782,47 @@ pub(crate) fn cmd_classes(
             + c.methods.iter().take(8).map(|m| m.len() + 2).sum::<usize>()) as u64
             + paging::TABLE_ROW_CHROME_BYTES
     };
+    let cached_rows = page_cache::read_rows_payload::<bonsai_sdk::ClassOut>(root, "classes", filters_hash)?;
+    // A cached complete row set needs the workspace only for the rows it
+    // renders: open exactly their files instead of ingesting the tree.
+    let (project, _footer, _partial_workspace) = match cached_rows.as_ref() {
+        Some(payload) => {
+            let scoped = open_project_for_rows_window(
+                root,
+                &payload.rows,
+                &paging_cfg,
+                "classes",
+                filters_hash,
+                &cost,
+            )?;
+            (scoped.0, scoped.1, scoped.2)
+        }
+        None => open_browse_project_with_retrieval(
+            root,
+            prefilter_literal,
+            retrieval_kind,
+            f.file,
+            prefilter_regex,
+        )?,
+    };
+    let ws = project.workspace();
+    let (out, cached_analysis_reasons) = match cached_rows {
+        Some(payload) => (payload.rows, Some(payload.analysis_incomplete_reasons)),
+        None => {
+            let out = with_browse_progress("collecting classes", || {
+                project
+                    .browse()
+                    .classes(f)
+                    .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+            })?;
+            let reasons = super::touched_parser_incomplete_reasons(project.workspace());
+            page_cache::save_rows_payload(root, "classes", filters_hash, &out, &reasons);
+            (out, None)
+        }
+    };
+    // The complete row set is a cached object keyed by the semantic
+    // filters; page turns, formats, and text filters reuse it.
+
     let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
     let project_row = |class: &bonsai_sdk::ClassOut| {
         let mut value = canonical_browse_row(ws, &canonical_ann, class, flows)?;
@@ -2299,7 +2843,8 @@ pub(crate) fn cmd_classes(
     };
     let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
     let rows = filtered_rows.as_deref().unwrap_or(&out);
-    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
+    let analysis_reasons =
+        cached_analysis_reasons.unwrap_or_else(|| super::touched_parser_incomplete_reasons(ws));
     match format {
         BrowseFormat::Json => {
             emit_canonical_browse_json(
@@ -2385,15 +2930,6 @@ pub(crate) fn cmd_refs(
     format: BrowseFormat,
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
-    let (project, _footer, _partial_workspace) =
-        open_browse_project_with_retrieval(root, Some(symbol), Some("ref"), f.file, f.regex)?;
-    let ws = project.workspace();
-    let out = with_browse_progress("collecting references", || {
-        project
-            .browse()
-            .refs(symbol, f)
-            .map_err(|e| anyhow::anyhow!("invalid regex `{symbol}`: {e}"))
-    })?;
     let filters_hash = paging::hash_filters(&[
         ("symbol", symbol),
         ("kind", f.kind.unwrap_or("")),
@@ -2405,12 +2941,42 @@ pub(crate) fn cmd_refs(
         (r.symbol.len() + r.kind.len() + r.file.len() + 16 + r.snippet.len().min(100)) as u64
             + paging::TABLE_ROW_CHROME_BYTES
     };
+    let cached_rows = page_cache::read_rows_payload::<bonsai_sdk::RefOut>(root, "refs", filters_hash)?;
+    // A cached complete row set needs the workspace only for the rows it
+    // renders: open exactly their files instead of ingesting the tree.
+    let (project, _footer, _partial_workspace) = match cached_rows.as_ref() {
+        Some(payload) => {
+            let scoped =
+                open_project_for_rows_window(root, &payload.rows, &paging_cfg, "refs", filters_hash, &cost)?;
+            (scoped.0, scoped.1, scoped.2)
+        }
+        None => open_browse_project_with_retrieval(root, Some(symbol), Some("ref"), f.file, f.regex)?,
+    };
+    let ws = project.workspace();
+    let (out, cached_analysis_reasons) = match cached_rows {
+        Some(payload) => (payload.rows, Some(payload.analysis_incomplete_reasons)),
+        None => {
+            let out = with_browse_progress("collecting references", || {
+                project
+                    .browse()
+                    .refs(symbol, f)
+                    .map_err(|e| anyhow::anyhow!("invalid regex `{symbol}`: {e}"))
+            })?;
+            let reasons = super::touched_parser_incomplete_reasons(project.workspace());
+            page_cache::save_rows_payload(root, "refs", filters_hash, &out, &reasons);
+            (out, None)
+        }
+    };
+    // The complete row set is a cached object keyed by the semantic
+    // filters; page turns, formats, and text filters reuse it.
+
     let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
     let project_row =
         |reference: &bonsai_sdk::RefOut| canonical_browse_row(ws, &canonical_ann, reference, flows);
     let filtered_rows = filter_browse_rows_by_canonical_value(&out, &project_row)?;
     let rows = filtered_rows.as_deref().unwrap_or(&out);
-    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
+    let analysis_reasons =
+        cached_analysis_reasons.unwrap_or_else(|| super::touched_parser_incomplete_reasons(ws));
     match format {
         BrowseFormat::Json => {
             emit_canonical_browse_json(
@@ -2500,18 +3066,6 @@ pub(crate) fn cmd_search(
     } else {
         None
     };
-    let (project, _footer, _partial_workspace) = if let Some((project, footer)) = retrieval_project {
-        (project, footer, true)
-    } else {
-        open_browse_project(root, Some(query), f.regex)?
-    };
-    let ws = project.workspace();
-    let hits = with_browse_progress("hydrating verified facts", || {
-        project
-            .browse()
-            .search(query, f, usize::MAX)
-            .map_err(|e| anyhow::anyhow!("invalid regex `{query}`: {e}"))
-    })?;
     let filters_hash = paging::hash_filters(&[
         ("query", query),
         ("kind", f.kind.unwrap_or("")),
@@ -2528,11 +3082,53 @@ pub(crate) fn cmd_search(
             + 16) as u64
             + paging::TABLE_ROW_CHROME_BYTES
     };
+    let cached_rows = page_cache::read_rows_payload::<bonsai_sdk::SearchHit>(root, "search", filters_hash)?;
+    // A cached complete row set needs the workspace only for the rows it
+    // renders: open exactly their files instead of ingesting the tree.
+    let (project, _footer, _partial_workspace) = match cached_rows.as_ref() {
+        Some(payload) => {
+            let scoped = open_project_for_rows_window(
+                root,
+                &payload.rows,
+                &paging_cfg,
+                "search",
+                filters_hash,
+                &cost,
+            )?;
+            (scoped.0, scoped.1, scoped.2)
+        }
+        None => {
+            if let Some((project, footer)) = retrieval_project {
+                (project, footer, true)
+            } else {
+                open_browse_project(root, Some(query), f.regex)?
+            }
+        }
+    };
+    let ws = project.workspace();
+    let (hits, cached_analysis_reasons) = match cached_rows {
+        Some(payload) => (payload.rows, Some(payload.analysis_incomplete_reasons)),
+        None => {
+            let hits = with_browse_progress("hydrating verified facts", || {
+                project
+                    .browse()
+                    .search(query, f, usize::MAX)
+                    .map_err(|e| anyhow::anyhow!("invalid regex `{query}`: {e}"))
+            })?;
+            let reasons = super::touched_parser_incomplete_reasons(project.workspace());
+            page_cache::save_rows_payload(root, "search", filters_hash, &hits, &reasons);
+            (hits, None)
+        }
+    };
+    // The complete row set is a cached object keyed by the semantic
+    // filters; page turns, formats, and text filters reuse it.
+
     let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
     let project_row = |hit: &bonsai_sdk::SearchHit| canonical_browse_row(ws, &canonical_ann, hit, flows);
     let filtered_rows = filter_browse_rows_by_canonical_value(&hits, &project_row)?;
     let rows = filtered_rows.as_deref().unwrap_or(&hits);
-    let analysis_reasons = super::touched_parser_incomplete_reasons(ws);
+    let analysis_reasons =
+        cached_analysis_reasons.unwrap_or_else(|| super::touched_parser_incomplete_reasons(ws));
     match format {
         BrowseFormat::Json => {
             emit_canonical_browse_json(
@@ -2607,171 +3203,6 @@ pub(crate) fn cmd_search(
         }
     }
     Ok(())
-}
-
-pub(crate) fn cmd_symbol_summary(
-    root: &std::path::Path,
-    symbol: &str,
-    regex: bool,
-    paging_cfg: paging::PagingConfig,
-    format: BrowseFormat,
-) -> Result<()> {
-    // Summary edges are semantic resolver products. Candidate retrieval is
-    // intentionally not used here because a partial workspace cannot prove
-    // the complete direct caller/callee set.
-    let (project, _footer) = open_project(root)?;
-    let rows = with_browse_progress("building compiler symbol summary", || {
-        project
-            .browse()
-            .symbol_summaries(Some(symbol), regex)
-            .map_err(|error| anyhow::anyhow!("invalid symbol regex `{symbol}`: {error}"))
-    })?;
-    let filters_hash = paging::hash_filters(&[("symbol", symbol), ("regex", if regex { "1" } else { "0" })]);
-    let cost = |row: &bonsai_sdk::SymbolSummary| {
-        serde_json::to_string(row).map_or(512, |encoded| {
-            encoded.len() as u64 + paging::TABLE_ROW_CHROME_BYTES
-        })
-    };
-    match format {
-        BrowseFormat::Json => {
-            page_cache::emit_paged_text(
-                root,
-                &rows,
-                &paging_cfg,
-                "symbol-summary",
-                filters_hash,
-                cost,
-                |paged, info, _cfg| {
-                    let analysis_incomplete_reasons = paged
-                        .iter()
-                        .flat_map(|row| row.analysis_incomplete_reasons.iter().cloned())
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                    let result_incomplete_reasons = paged_json_incomplete_reasons("symbol-summary", info);
-                    let payload = serde_json::json!({
-                        "analysis_complete": analysis_incomplete_reasons.is_empty(),
-                        "analysis_incomplete_reasons": analysis_incomplete_reasons,
-                        "result_complete": result_incomplete_reasons.is_empty(),
-                        "result_incomplete_reasons": result_incomplete_reasons,
-                        "rows": paged,
-                        "page": page_info_to_json(info),
-                    });
-                    crate::output::emit_json_document(&payload)?;
-                    Ok(())
-                },
-            )?;
-        }
-        BrowseFormat::Text => {
-            page_cache::emit_paged_text(
-                root,
-                &rows,
-                &paging_cfg,
-                "symbol-summary",
-                filters_hash,
-                cost,
-                |page, info, _cfg| {
-                    let u = ui();
-                    for row in page {
-                        let qualified = row.qualified_name.as_deref().unwrap_or(&row.name);
-                        cli_println!();
-                        cli_println!("{}", u.heading(&format!("{}  {}", qualified, row.summary_id)));
-                        cli_println!(
-                            "{}",
-                            u.dim(&format!(
-                                "{}:{}-{} · {} · {} · {}",
-                                short_file(&row.file),
-                                row.start_line,
-                                row.end_line,
-                                row.language,
-                                row.kind,
-                                row.graph_scope
-                            ))
-                        );
-                        cli_println!("{}", u.snippet(&row.signature, extension_for(&row.file)));
-                        if !row.source.trim().is_empty() {
-                            cli_println!();
-                            cli_println!("{}", u.label("SOURCE EVIDENCE"));
-                            cli_println!("{}", u.snippet(&row.source, extension_for(&row.file)));
-                        }
-                        render_summary_edges(u, "DIRECT CALLERS", &row.direct_callers);
-                        render_summary_edges(u, "DIRECT CALLEES", &row.direct_callees);
-                        if !row.unresolved_calls.is_empty() {
-                            cli_println!();
-                            cli_println!("{}", u.label("UNRESOLVED WORKSPACE CALLS"));
-                            for call in &row.unresolved_calls {
-                                cli_println!(
-                                    "  {}:{}:{}  {}",
-                                    short_file(&call.file),
-                                    call.line,
-                                    call.column,
-                                    call.call_text.trim()
-                                );
-                            }
-                        }
-                        if !row.imports.is_empty() {
-                            cli_println!();
-                            cli_println!("{}", u.label("IMPORTS"));
-                            for import in &row.imports {
-                                // Same facts as the JSON `imports` entry:
-                                // module, imported name, local alias, and
-                                // wildcard form.
-                                let mut detail = import.module.clone();
-                                if import.wildcard {
-                                    detail.push_str(" *");
-                                }
-                                if let Some(original) = import.original_name.as_deref() {
-                                    detail.push_str(&format!(" → {original}"));
-                                }
-                                if let Some(alias) = import.alias.as_deref() {
-                                    detail.push_str(&format!(" as {alias}"));
-                                }
-                                cli_println!(
-                                    "  {}:{}  {}  {}",
-                                    short_file(&row.file),
-                                    import.line,
-                                    u.name(&detail),
-                                    u.dim(&format!("{:?}", import.evidence_kind).to_lowercase())
-                                );
-                            }
-                        }
-                    }
-                    render_paging_footer(info, "bonsai-ninja symbol-summary <workspace> --symbol <name>");
-                    Ok(())
-                },
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn render_summary_edges(u: &Ui, title: &str, edges: &[bonsai_sdk::SymbolCallEdge]) {
-    if edges.is_empty() {
-        return;
-    }
-    cli_println!();
-    cli_println!("{}", u.label(title));
-    for edge in edges {
-        cli_println!(
-            "  {} {} → {}  {}:{}:{}  {}",
-            edge.edge_id,
-            edge.caller,
-            edge.callee,
-            short_file(&edge.file),
-            edge.line,
-            edge.column,
-            u.dim(&edge.resolver_stage)
-        );
-        if !edge.call_text.trim().is_empty() {
-            cli_println!(
-                "    {}",
-                u.snippet(edge.call_text.trim(), extension_for(&edge.file))
-            );
-        }
-        if !edge.resolver_evidence.trim().is_empty() {
-            cli_println!("    {}", u.dim(&edge.resolver_evidence));
-        }
-    }
 }
 
 #[cfg(test)]

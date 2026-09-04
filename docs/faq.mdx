@@ -21,7 +21,7 @@ in its adapter, not in a shared union of token or method names.
 
 No. It first publishes an atomic generation of content-addressed per-file
 compiler objects containing typed adapter IR and diagnostics. Callgraph,
-retrieval, linkage, IDG, security, inspect, and export stream those objects.
+retrieval, linkage, IDG, security, inspect-graph, and export stream those objects.
 The persisted IDG path lowers transfer facts once and replays a compact typed
 stitch spool; it does not run a second AST/transfer pass. Changed objects are
 recompiled, while exact unchanged payloads are reused. The workspace linker
@@ -93,7 +93,7 @@ missing fact.
 
 <Accordion title="How do I clear stale cache data?">
 
-Run `bonsai-ninja cache clear ./src --dataflow-only` to clear the dataflow sidecar, or `bonsai-ninja cache clear ./src` to remove the workspace's external analysis cache. `cache stats ./src` prints its exact path.
+Run `bonsai-ninja cache clear ./src --dataflow-only` to clear the dataflow sidecar, or `bonsai-ninja cache clear ./src` to remove the workspace's external analysis cache. `cache stats ./src` prints its exact path. If `cache stats` reports a `legacy in-tree cache` (a `<workspace>/.bonsai` directory left by releases that cached inside the repository), remove it with `bonsai-ninja cache clear ./src --legacy`; it cannot be combined with `--orphans` or `--dataflow-only`.
 
 </Accordion>
 

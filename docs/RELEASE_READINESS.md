@@ -232,9 +232,7 @@ measure the complete analysis, not a trust-scoped subset. Re-measured
 | Arguments | 0.82 s | 35 s |
 | Scoped `read-file` | 1.77 s | 35 s |
 | Context summary | 1.07 s | 35 s |
-| Compiler-resolved trace | 1.00 s | 35 s |
-| Compressed path corridor | 5.37 s | 35 s |
-| Backward slice | 3.29 s | 35 s |
+| Compressed corridor (`inspect-graph --from/--to`) | 5.37 s | 35 s |
 | Complete diagnostics | 8.29 s | 35 s |
 | `dump-hir` | 3.57 s | 35 s |
 | `dump-cfg` | 3.07 s | 35 s |
@@ -248,7 +246,6 @@ measure the complete analysis, not a trust-scoped subset. Re-measured
 | Comment inventory | 1.61 s | 35 s |
 | Operation inventory | 1.11 s | 35 s |
 | Reference lookup | 1.60 s | 35 s |
-| Symbol summary | 10.71 s | 35 s |
 | Exact persisted edge lookup (`show E:<id>`) | 7.30 s | 35 s |
 | Exact edge dump | 7.64 s | 35 s |
 | Source inventory | 4.93 s | 35 s |
@@ -262,7 +259,7 @@ measure the complete analysis, not a trust-scoped subset. Re-measured
 The interactive rows above are the observed final gate values and may reuse a
 validated rendered-page entry from an earlier exact run. Separate runs with an
 empty rendered-page cache measured default inspect at 10.46 seconds and
-`inspect --taint-flow` at 28.99 seconds with byte-identical output. Semantic
+the same query with expanded taint flows at 28.99 seconds with byte-identical output. Semantic
 and rendered caches affect recomputation only; they do not change the selected
 facts.
 
@@ -449,7 +446,7 @@ The release workflow verifies:
 - SARIF 2.1.0 parsing and code-flow metadata;
 - HTML report generation from the canonical JSON result;
 - native JSON and graph export formats;
-- native JSON schema v11 validation across every language fixture and
+- native JSON schema v12 validation across every language fixture and
   materialized propagation mode;
 - stable IDs and page/cursor reopening;
 - the locked parser manifest contains every adapter grammar and all six native
@@ -465,9 +462,12 @@ The release workflow verifies:
 - signed GitHub/Sigstore provenance for every tagged archive and checksum;
 - Linux, macOS, and Windows archives for x64 and arm64.
 
-`tree` is separately pinned as a filesystem-only command: it does not open the
-compiler, rulepack, callgraph, or IDG. `--html-output` renders a command's
-canonical JSON result and cannot enable additional analysis.
+`tree` is separately pinned: it walks the filesystem first, attaches
+declarations, resolved imports, and cross-file call edges only for the files it
+renders (from the structural workspace and persisted callgraph), and never
+loads a rulepack, runs security, or opens the IDG; `--files-only` is a plain
+listing. `--html-output` renders a command's canonical JSON result and cannot
+enable additional analysis.
 
 ## Publish gate
 

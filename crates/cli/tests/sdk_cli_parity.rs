@@ -452,49 +452,39 @@ fn assert_json_rows_eq(label: &str, cli: Value, sdk: Value) {
 /// `context` renders the SDK semantic context as categorized rows plus the
 /// shared completeness/paging envelope.
 fn assert_context_covers(label: &str, cli: Value, sdk: Value) {
+    // The CLI carries the SDK's workspace semantic context inside the
+    // `index` report as one `context` object with the same field names.
     let cli = normalized_json(cli);
     let sdk = normalized_json(sdk);
-    for key in ["workspace_root", "summary"] {
-        assert_eq!(cli[key], sdk[key], "{label}: `{key}` differs");
-    }
     assert_eq!(
-        cli["analysis_incomplete_reasons"], sdk["incomplete_reasons"],
+        cli["workspace_root"], sdk["workspace_root"],
+        "{label}: `workspace_root` differs"
+    );
+    assert_eq!(
+        cli["incomplete_reasons"], sdk["incomplete_reasons"],
         "{label}: incomplete reasons differ"
     );
-    let rows = cli["rows"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{label}: context JSON lacks rows: {}", summarize_json(&cli)));
-    for (category, key) in [
-        ("module_root", "module_roots"),
-        ("dependency_root", "dependency_roots"),
-        ("generated_root", "generated_roots"),
-        ("excluded_root", "excluded_roots"),
-        ("toolchain_manifest", "toolchain_manifests"),
-        ("configured_source_variant", "configured_source_variants"),
-        ("source_transformation", "source_transformations"),
+    for key in [
+        "module_roots",
+        "dependency_roots",
+        "generated_roots",
+        "excluded_roots",
+        "toolchain_manifests",
+        "configured_source_variants",
+        "source_transformations",
     ] {
         let expected = sdk[key].as_array().cloned().unwrap_or_default();
-        let actual = rows
-            .iter()
-            .filter(|row| row["category"] == category)
-            .map(|row| {
-                let mut row = row.clone();
-                if let Some(fields) = row.as_object_mut() {
-                    fields.remove("category");
-                }
-                row
-            })
-            .collect::<Vec<_>>();
+        let actual = cli[key].as_array().cloned().unwrap_or_default();
         assert_eq!(
             actual.len(),
             expected.len(),
-            "{label}: `{key}` row count differs\ncli: {}\nsdk: {}",
+            "{label}: `{key}` entry count differs\ncli: {}\nsdk: {}",
             summarize_json(&cli),
             summarize_json(&sdk)
         );
         for (row, value) in actual.iter().zip(&expected) {
             assert!(
-                json_covers(row, value) || row.get("value") == Some(value),
+                json_covers(row, value) || row == value,
                 "{label}: `{key}` entry not covered: cli={} sdk={}",
                 summarize_json(row),
                 summarize_json(value)
@@ -609,16 +599,6 @@ fn entry_symbol(lang: &str) -> &'static str {
     }
 }
 
-fn trace_source_symbol(lang: &str) -> &'static str {
-    match lang {
-        // Objective-C preserves the interface prototype and implementation as
-        // separate compiler declarations. Trace must select the executable
-        // implementation instead of relying on an ambiguous short selector.
-        "objc" => "Gateway.m:9:handleRequestWithToken",
-        _ => entry_symbol(lang),
-    }
-}
-
 fn diagnostic_entry_symbol(lang: &str) -> String {
     match lang {
         // Objective-C preserves the interface prototype and implementation as
@@ -626,32 +606,6 @@ fn diagnostic_entry_symbol(lang: &str) -> String {
         // name the executable syntax site explicitly.
         "objc" => "Gateway.m:9:handleRequestWithToken".to_string(),
         _ => entry_symbol(lang).to_string(),
-    }
-}
-
-fn slice_site(lang: &str) -> (&'static str, u32, &'static str) {
-    match lang {
-        "c" => ("result", 13, "gateway.c"),
-        "cpp" => ("result", 12, "gateway.cpp"),
-        "csharp" => ("result", 19, "Gateway.cs"),
-        "dart" => ("result", 5, "gateway.dart"),
-        "elixir" => ("result", 6, "gateway.ex"),
-        "erlang" => ("Result", 6, "gateway.erl"),
-        "go" => ("result", 19, "gateway.go"),
-        "java" => ("result", 25, "Gateway.java"),
-        "javascript" => ("result", 18, "gateway.js"),
-        "kotlin" => ("result", 17, "Gateway.kt"),
-        "lua" => ("result", 7, "gateway.lua"),
-        "objc" => ("result", 12, "Gateway.m"),
-        "perl" => ("result", 8, "gateway.pl"),
-        "php" => ("$result", 10, "gateway.php"),
-        "python" => ("result", 15, "gateway.py"),
-        "ruby" => ("result", 13, "gateway.rb"),
-        "rust" => ("result", 12, "gateway.rs"),
-        "scala" => ("result", 17, "Gateway.scala"),
-        "swift" => ("result", 11, "Gateway.swift"),
-        "typescript" => ("result", 18, "gateway.ts"),
-        other => panic!("missing slice fixture site for {other}"),
     }
 }
 
@@ -936,9 +890,11 @@ fn index_and_diagnostics_cli_json_match_sdk_for_every_language() {
             .expect("stats json"),
         );
 
+        // The workspace context now travels inside the `index` report.
+        let index_report = run_cli(&["index", ws_arg, "--format", "json"]);
         assert_context_covers(
-            &format!("{lang} context"),
-            run_cli(&["context", ws_arg, "--format", "json"]),
+            &format!("{lang} index context"),
+            index_report["context"].clone(),
             serde_json::to_value(project.semantic_context()).expect("context json"),
         );
 
@@ -953,39 +909,6 @@ fn index_and_diagnostics_cli_json_match_sdk_for_every_language() {
             &format!("{lang} diagnostics"),
             run_cli(&["diagnostics", ws_arg, "--format", "json"]),
             serde_json::to_value(project.diagnostics_report()).expect("diagnostics json"),
-        );
-    }
-}
-
-#[test]
-fn slice_cli_json_matches_sdk_facade() {
-    for &lang in LANGS {
-        let project = basic_project_for_lang(lang);
-        let ws_arg = lang_workspace_arg(lang);
-        let (symbol, line, file) = slice_site(lang);
-        let line_s = line.to_string();
-        let cli = run_cli(&[
-            "slice", &ws_arg, "--symbol", symbol, "--line", &line_s, "--file", file, "--format", "json",
-        ]);
-        let sdk = serde_json::to_value(project.browse().slices(bonsai_sdk::SliceFilters {
-            symbol,
-            line,
-            file: Some(file),
-            ..Default::default()
-        }))
-        .expect("slice json");
-        assert_json_covers(&format!("{lang} slice"), cli.clone(), sdk);
-        let slices = cli
-            .get("slices")
-            .and_then(Value::as_array)
-            .unwrap_or_else(|| panic!("{lang} slice JSON missing slices array:\n{cli:#}"));
-        assert!(
-            slices.iter().any(|slice| slice
-                .get("step_count")
-                .and_then(Value::as_u64)
-                .unwrap_or_default()
-                > 0),
-            "{lang} slice parity must exercise a non-empty syntax-derived slice:\n{cli:#}"
         );
     }
 }
@@ -1638,7 +1561,13 @@ fn inspect_structural_flow_ids_match_sdk_facade() {
     let workspace = "test-fixtures/languages/python/micro";
     let target = "run_admin_command";
     let cli = run_cli(&[
-        "inspect", workspace, "--query", target, "--format", "json", "--all",
+        "inspect-graph",
+        workspace,
+        "--query",
+        target,
+        "--format",
+        "json",
+        "--all",
     ]);
     let sdk_summaries = project
         .browse()
@@ -1992,28 +1921,6 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
             serde_json::to_value(project.dump().resolution_coverage(Default::default()))
                 .expect("resolution coverage json"),
         );
-        let mut path_options = bonsai_sdk::OpenOptions::lazy_query();
-        path_options.load_idg_sidecar = true;
-        let path_project = sdk()
-            .open_with_options(lang_workspace_path(lang), path_options)
-            .unwrap_or_else(|err| panic!("open {lang} SDK path project: {err}"));
-        assert_json_covers(
-            &format!("{lang} path"),
-            run_cli(&[
-                "path", ws_arg, "--from", entry, "--to", "verify", "--format", "json",
-            ]),
-            serde_json::to_value(
-                path_project
-                    .browse()
-                    .paths(bonsai_sdk::PathFilters {
-                        from: entry,
-                        to: "verify",
-                        ..Default::default()
-                    })
-                    .expect("sdk path"),
-            )
-            .expect("path json"),
-        );
         let ast = match project.dump().ast(bonsai_sdk::AstFilters {
             function: Some(&diagnostic_entry),
             max_depth: Some(3),
@@ -2091,19 +1998,6 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
                 "json",
             ]),
             serde_json::to_value(taint).expect("taint json"),
-        );
-
-        let trace_symbol = trace_source_symbol(lang);
-        assert_json_covers(
-            &format!("{lang} trace"),
-            run_cli(&["trace", ws_arg, trace_symbol, "--format", "json"]),
-            serde_json::to_value(
-                project
-                    .trace()
-                    .from(trace_symbol)
-                    .unwrap_or_else(|err| panic!("{lang} sdk trace_from {trace_symbol}: {err}")),
-            )
-            .expect("trace json"),
         );
     }
 }

@@ -180,15 +180,29 @@ fn dump_ast_deterministic_across_threads() {
 
 #[test]
 fn inspect_compact_deterministic_across_threads() {
-    assert_deterministic(&["inspect", "--query", "request", "--compact"]);
+    assert_deterministic(&["inspect-graph", "--query", "request", "--compact"]);
 }
 
 #[test]
 fn inspect_with_filters_deterministic_across_threads() {
-    assert_deterministic(&["inspect", "--query", "request", "--from", "session", "--compact"]);
+    assert_deterministic(&[
+        "inspect-graph",
+        "--query",
+        "request",
+        "--from",
+        "session",
+        "--compact",
+    ]);
 }
 
 #[test]
 fn inspect_grouped_view_deterministic_across_threads() {
-    assert_deterministic(&["inspect", "--query", "request", "--view", "grouped", "--compact"]);
+    assert_deterministic(&[
+        "inspect-graph",
+        "--query",
+        "request",
+        "--view",
+        "grouped",
+        "--compact",
+    ]);
 }

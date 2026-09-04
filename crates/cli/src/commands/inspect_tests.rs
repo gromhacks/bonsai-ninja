@@ -24,16 +24,21 @@ fn span(start: u32) -> Span {
 }
 
 #[test]
-fn inspect_render_caches_only_the_requested_page() {
+fn inspect_render_caches_the_requested_page_and_its_successor() {
     assert_eq!(
         inspect_requested_window(7, 100_000)
             .into_iter()
             .collect::<Vec<_>>(),
-        vec![7]
+        vec![7, 8]
     );
     assert_eq!(
         inspect_requested_window(7, 100).into_iter().collect::<Vec<_>>(),
-        vec![7]
+        vec![7, 8]
+    );
+    assert_eq!(
+        inspect_requested_window(2, 3).into_iter().collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "short reports render every page once"
     );
 }
 
@@ -417,6 +422,11 @@ fn sample_taint_flow() -> InspectTaintFlow {
             }],
         }],
         json_size_upper_bound: 0,
+        flow: None,
+        lineage: Vec::new(),
+        lineage_func_ids: Vec::new(),
+        alternate_lineages: Vec::new(),
+        alternate_lineage_func_ids: Vec::new(),
     };
     flow.json_size_upper_bound = calculate_inspect_taint_flow_json_upper_bound(&flow);
     flow
@@ -550,8 +560,11 @@ fn inspect_json_page_unit_serializes_one_flow_not_the_whole_declaration() {
         line: 7,
         column: 3,
         params: Vec::new(),
+        signature: String::new(),
         direct_callers: Vec::new(),
-        callees: Vec::new(),
+        direct_callees: Vec::new(),
+        external_calls: Vec::new(),
+        imports: Vec::new(),
         flows: vec![sample_structural_flow(1), sample_structural_flow(2)],
         groups: Vec::new(),
         summary: InspectSummary {

@@ -75,7 +75,13 @@ fn run_command(args: &[&str], envs: &[(&str, &str)]) -> Option<CommandOutput> {
     let bin = bin_path()?;
     let full = normalized_args(args);
     let mut cmd = Command::new(&bin);
-    cmd.args(&full).env("COLUMNS", "200");
+    // Phase assertions read `[security-phase]` lines, which the CLI mutes
+    // when progress is explicitly disabled; keep the harness environment
+    // from deciding that for the command under test.
+    cmd.args(&full)
+        .env("COLUMNS", "200")
+        .env_remove("NO_PROGRESS")
+        .env_remove("BONSAI_CONTEXT");
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -3063,19 +3069,19 @@ def handle():
         first.stderr
     );
 
-    let second = run_command(&args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    // An identical command line replays its rendered page before the
+    // workspace opens: no analysis phase runs and no report is re-rendered.
+    let second = run_command(&args, &[("BONSAI_DEBUG", "security-phase,page-cache")]).unwrap();
     assert!(
-        second.stderr.contains("rendering cached taint report"),
-        "second identical run should replay the semantic render payload:\n{}",
-        second.stderr
-    );
-    assert_eq!(
         second
             .stderr
-            .matches("[security-phase] rendering cached taint report:")
-            .count(),
-        1,
-        "cached render progress/timing should be emitted exactly once:\n{}",
+            .contains("replaying rendered security/taint-analysis page 1/1"),
+        "second identical run should replay the rendered page:\n{}",
+        second.stderr
+    );
+    assert!(
+        !second.stderr.contains("rendering cached taint report"),
+        "second identical run should not re-render the report:\n{}",
         second.stderr
     );
     assert!(
@@ -3088,10 +3094,41 @@ def handle():
         "second identical run should not rerun sink matching after cache replay:\n{}",
         second.stderr
     );
+    assert_eq!(
+        second.stdout, first.stdout,
+        "replayed page must be byte-identical to the first render"
+    );
+
+    // A presentation-only change (a different page budget) is a new
+    // rendered page but the same analysis: it renders from the semantic
+    // render payload exactly once and runs no analysis phase.
+    let mut wider = args.to_vec();
+    let context_slot = wider.len() - 1;
+    wider[context_slot] = "64k";
+    let third = run_command(&wider, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    assert_eq!(
+        third
+            .stderr
+            .matches("[security-phase] rendering cached taint report:")
+            .count(),
+        1,
+        "cached render progress/timing should be emitted exactly once:\n{}",
+        third.stderr
+    );
     assert!(
-        second.stdout.contains("FINDING 1"),
-        "cached second render should preserve finding bodies:\n{}",
-        second.stdout
+        !third.stderr.contains("semantic graph scope"),
+        "presentation-only rerun should not rebuild semantic graph scope:\n{}",
+        third.stderr
+    );
+    assert!(
+        !third.stderr.contains("matching sink rules"),
+        "presentation-only rerun should not rerun sink matching:\n{}",
+        third.stderr
+    );
+    assert!(
+        third.stdout.contains("FINDING 1"),
+        "cached render should preserve finding bodies:\n{}",
+        third.stdout
     );
 }
 
@@ -3174,16 +3211,41 @@ def handle():
         first_json_all.stdout
     );
 
-    let second_json_all = run_command(&json_all_args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    // An identical JSON --all command line replays its rendered page
+    // before the workspace opens.
+    let second_json_all =
+        run_command(&json_all_args, &[("BONSAI_DEBUG", "security-phase,page-cache")]).unwrap();
     assert!(
-        second_json_all.stderr.contains("rendering cached taint report"),
-        "second JSON --all should reuse the bulk-flow render payload:\n{}",
+        second_json_all
+            .stderr
+            .contains("replaying rendered security/taint-analysis page 1/1"),
+        "second JSON --all should replay the rendered page:\n{}",
         second_json_all.stderr
     );
     assert!(
         !second_json_all.stderr.contains("semantic graph scope"),
         "second JSON --all should not rebuild semantic graph scope once bulk flow evidence is cached:\n{}",
         second_json_all.stderr
+    );
+    assert_eq!(
+        second_json_all.stdout, first_json_all.stdout,
+        "replayed JSON --all must be byte-identical to the first render"
+    );
+    // A presentation-only change (a page budget instead of --all) renders
+    // from the bulk-flow render payload without new analysis.
+    let mut json_context_args = json_all_args.to_vec();
+    json_context_args.retain(|arg| *arg != "--all");
+    json_context_args.extend(["--context", "64k"]);
+    let json_context = run_command(&json_context_args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    assert!(
+        json_context.stderr.contains("rendering cached taint report"),
+        "a presentation-only JSON rerun should reuse the bulk-flow render payload:\n{}",
+        json_context.stderr
+    );
+    assert!(
+        !json_context.stderr.contains("semantic graph scope"),
+        "a presentation-only JSON rerun should not rebuild semantic graph scope:\n{}",
+        json_context.stderr
     );
 
     // `--html-output` is another presentation sink over the same canonical
@@ -3738,8 +3800,7 @@ fn language_gauntlet_cli_surfaces_run_across_every_language() {
         let rules = rules_dir();
 
         let commands: Vec<Vec<&str>> = vec![
-            vec!["inspect", workspace, "--query", target, "--format", "json"],
-            vec!["trace", workspace, entry, "--format", "json"],
+            vec!["inspect-graph", workspace, "--query", target, "--format", "json"],
             vec!["export", workspace],
             vec!["dump-hir", workspace, entry],
             vec!["dump-cfg", workspace, entry],
@@ -4878,4 +4939,121 @@ def isolated_sink():
         out.contains("\"verdict\": \"no-source-match\""),
         "an unmatched source rule must explain as no-source-match:\n{out}"
     );
+}
+
+#[test]
+fn file_scoped_source_analysis_replays_the_same_rows_it_first_rendered() {
+    // A `--file` scope opens a partial workspace. Cached rows address their
+    // functions by persisted compiler identity, so the replay must resolve
+    // them exactly like the run that produced them instead of dropping rows.
+    let ws = temp_workspace("file-scoped-source-replay");
+    std::fs::write(
+        ws.join("gateway.py"),
+        r#"
+from flask import request
+
+def handler():
+    value = request.args.get("value")
+    return value
+"#,
+    )
+    .expect("write gateway fixture");
+    // Files that sort before the scoped one carry several declarations, so
+    // the persisted generation's ids differ from a scoped-only numbering.
+    std::fs::write(
+        ws.join("a_helpers.py"),
+        r#"
+def first():
+    return 1
+
+def second():
+    return 2
+
+def third():
+    return 3
+"#,
+    )
+    .expect("write helpers fixture");
+    std::fs::write(
+        ws.join("other.py"),
+        r#"
+from flask import request
+
+def other():
+    return request.args.get("other")
+"#,
+    )
+    .expect("write other fixture");
+    let base = [
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "source-analysis",
+        "--profile",
+        "all",
+        "--format",
+        "json",
+        "--all",
+        "--file",
+        "gateway.py",
+    ];
+    let first = run(&base).unwrap();
+    let first_rows = json_rows(&serde_json::from_str::<serde_json::Value>(&first).expect("first JSON")).len();
+    assert!(
+        first_rows >= 1,
+        "the file scope must render its source rows:\n{first}"
+    );
+    // An identical command line replays its rendered page before the
+    // workspace opens.
+    let replay = run_command(&base, &[("BONSAI_DEBUG", "page-cache")]).unwrap();
+    assert!(
+        replay
+            .stderr
+            .contains("replaying rendered security/source-analysis page 1/1"),
+        "second identical run should replay the rendered page:\n{}",
+        replay.stderr
+    );
+    assert_eq!(
+        replay.stdout, first,
+        "replayed file-scoped rows must be byte-identical to the first render"
+    );
+    // A presentation-only change renders the same scoped rows again from
+    // the keyed report payload, resolving the persisted identities of the
+    // scoped open.
+    let mut payload_args = base.to_vec();
+    payload_args.retain(|arg| *arg != "--all");
+    payload_args.extend(["--context", "64k"]);
+    let payload = run_command(&payload_args, &[("BONSAI_DEBUG", "page-cache")]).unwrap();
+    assert!(
+        payload.stderr.contains("keyed payload hit"),
+        "presentation-only rerun should replay the cached report payload:\n{}",
+        payload.stderr
+    );
+    let payload_json: serde_json::Value = serde_json::from_str(&payload.stdout).expect("payload JSON");
+    let first_json: serde_json::Value = serde_json::from_str(&first).expect("first JSON");
+    assert_eq!(
+        json_rows(&payload_json),
+        json_rows(&first_json),
+        "rows rendered from the cached payload must equal the first render"
+    );
+    let text_args = [
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "source-analysis",
+        "--profile",
+        "all",
+        "--all",
+        "--file",
+        "gateway.py",
+    ];
+    let text_first = run(&text_args).unwrap();
+    assert!(
+        text_first.contains("gateway.py") && text_first.contains("handler"),
+        "text render must show the scoped row:\n{text_first}"
+    );
+    let text_replay = run(&text_args).unwrap();
+    assert_eq!(text_replay, text_first, "text replay must equal the first render");
 }

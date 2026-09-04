@@ -467,6 +467,11 @@ struct CallableNameIndex {
     tail_ids: AHashMap<String, u32>,
     offsets: Vec<usize>,
     names: Vec<u32>,
+    /// Per function (dense by `FuncId`): the tail ids of its declared name
+    /// and of its call identity, `u32::MAX` when absent. Lets candidate
+    /// loops compare declared spellings as two integers instead of
+    /// re-deriving qualified-name tails per (site × candidate).
+    declared: Vec<[u32; 2]>,
 }
 
 impl CallableNameIndex {
@@ -482,19 +487,22 @@ impl CallableNameIndex {
             .unwrap_or(0);
         let mut tail_ids = AHashMap::new();
         let mut rows = Vec::with_capacity(included_funcs.len().saturating_mul(2));
-        let mut add_name = |func: FuncId, name: &str| {
+        let mut declared = vec![[u32::MAX; 2]; max_func.saturating_add(1)];
+        let mut add_name = |func: FuncId, name: &str| -> u32 {
             let tail = bonsai_common::short_qualified_tail(name);
             if tail.is_empty() {
-                return;
+                return u32::MAX;
             }
             let next_id = u32::try_from(tail_ids.len()).expect("callable name dictionary exceeds u32");
             let id = *tail_ids.entry(tail.to_string()).or_insert(next_id);
             rows.push((func.raw(), id));
+            id
         };
         for &func in included_funcs.keys() {
             if let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) {
-                add_name(func, &decl.name);
-                add_name(func, decl_call_identity(decl));
+                let name_id = add_name(func, &decl.name);
+                let identity_id = add_name(func, decl_call_identity(decl));
+                declared[func.raw() as usize] = [name_id, identity_id];
             }
             if let Some(names) = aliases.get(&func) {
                 for name in names {
@@ -524,7 +532,26 @@ impl CallableNameIndex {
             tail_ids,
             offsets,
             names,
+            declared,
         }
+    }
+
+    /// Dictionary id of a call-site spelling's qualified tail; `None` when
+    /// no declared callable shares that tail (so nothing can match).
+    fn event_tail_id(&self, event_name: &str) -> Option<u32> {
+        let tail = bonsai_common::short_qualified_tail(event_name);
+        if tail.is_empty() {
+            return None;
+        }
+        self.tail_ids.get(tail).copied()
+    }
+
+    /// True when `func`'s declared name or call identity has tail
+    /// `event_tail`: the integer form of `decl_names_match_for_callee`.
+    fn declared_matches(&self, func: FuncId, event_tail: u32) -> bool {
+        self.declared
+            .get(func.raw() as usize)
+            .is_some_and(|ids| ids[0] == event_tail || ids[1] == event_tail)
     }
 
     fn matches(&self, func: FuncId, event_name: &str) -> bool {
@@ -2239,6 +2266,11 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         let mut frontier = self.class_candidates_for_typed_receiver(caller, class_name);
         frontier.retain(|symbol| self.symbol_shares_language_with_func(caller, *symbol));
         let mut seen = ahash::AHashSet::default();
+        // One dictionary lookup for the call spelling; every candidate method
+        // then compares two integers instead of re-deriving name tails.
+        let Some(event_tail) = self.callable_names.event_tail_id(callee_name) else {
+            return;
+        };
 
         while !frontier.is_empty() {
             let mut next = Vec::new();
@@ -2250,9 +2282,7 @@ impl<'a> WorkspaceCalleeResolver<'a> {
                 if let Some(candidates) = self.class_methods_by_parent.get(&class_sym) {
                     for &func in candidates {
                         if self.funcs_share_language(caller, func)
-                            && self
-                                .func_decl(func)
-                                .is_some_and(|decl| decl_names_match_for_callee(decl, callee_name))
+                            && self.callable_names.declared_matches(func, event_tail)
                         {
                             methods.push(func);
                         }

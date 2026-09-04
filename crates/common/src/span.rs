@@ -122,6 +122,18 @@ impl SpanMap {
         Self { line_starts }
     }
 
+    /// A map from a recorded line-start table (byte offsets, `[0] == 0`),
+    /// identical to [`Self::new`] over the text it was recorded from.
+    #[must_use]
+    pub fn from_line_starts(line_starts: Vec<u64>) -> Self {
+        let line_starts = if line_starts.first() == Some(&0) {
+            line_starts
+        } else {
+            std::iter::once(0).chain(line_starts).collect()
+        };
+        Self { line_starts }
+    }
+
     /// Convert a byte offset to a one-based line/column. Columns are measured
     /// in bytes; callers that need grapheme columns should do their own
     /// conversion on the raw text.

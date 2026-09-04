@@ -40,6 +40,12 @@ pub(crate) struct ReadFileArgs<'a> {
     pub(crate) rules_dir: Option<&'a Path>,
 }
 
+/// Above this many files a cold `read-file` keeps its single-file open
+/// instead of opening the complete workspace for cross-file connections;
+/// `index --semantic` publishes the partitioned callgraph that makes the
+/// connections available to every later single-file open.
+const READ_FILE_COMPLETE_OPEN_FILE_LIMIT: usize = 5_000;
+
 pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
     let target_stage = progress::ScopedSpinner::new("resolving file target");
     let resolved_path = resolve_read_file_target(args.workspace, args.path, args.symbol)?;
@@ -49,10 +55,26 @@ pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
         || args.to.is_some()
         || args.rules_dir.is_some()
         || args.max_inlined_bodies.is_some();
+    // The default view carries module connections (imports resolved to
+    // workspace files, cross-file call edges). A partial single-file open
+    // answers them from the persisted partitioned callgraph; without one, a
+    // small workspace opens completely, and a large cold workspace keeps
+    // the single-file open and reports the gap.
     let (project, _footer) = if needs_workspace_analysis {
         open_project_index_only_with_rulepack(args.workspace, args.rules_dir)?
     } else {
-        open_project_index_matching_path(args.workspace, Path::new(path))?
+        let partial = open_project_index_matching_path(args.workspace, Path::new(path))?;
+        let persisted = {
+            let ws = partial.0.workspace();
+            ws.has_persisted_callgraph() && ws.has_persisted_linkage()
+        };
+        if persisted
+            || super::workspace_file_count_exceeds(args.workspace, READ_FILE_COMPLETE_OPEN_FILE_LIMIT)
+        {
+            partial
+        } else {
+            open_project_index_only(args.workspace)?
+        }
     };
     let line_range = parse_line_range(args.lines)?;
     let filters = ReadFileFilters {
@@ -549,6 +571,8 @@ fn render_text(out: &ReadFileOut, compact: bool) {
         }
     }
 
+    render_connections(out);
+
     if !out.findings_in_view.is_empty() {
         cli_println!();
         cli_println!(
@@ -627,14 +651,15 @@ fn render_no_compact(out: &ReadFileOut) {
     let highlighted = u.highlight(&out.source, ext);
     for (idx, line) in highlighted.lines().enumerate() {
         let line_no = lo + idx as u32;
-        let mark = out.marks.iter().find(|m| m.line == line_no);
-        let gutter = if mark.is_some() {
+        let line_marks: Vec<&LineMark> = out.marks.iter().filter(|m| m.line == line_no).collect();
+        let flagged = line_marks.iter().any(|m| !matches!(m.kind, MarkKind::ImportUse));
+        let gutter = if flagged {
             u.warn(&format!("> {:>4} │ ", line_no))
         } else {
             u.dim(&format!("  {:>4} │ ", line_no))
         };
         cli_println!("{gutter}{line}");
-        if let Some(m) = mark {
+        for m in line_marks {
             cli_println!("{} {}", u.dim("              ←"), format_mark(m));
         }
     }
@@ -716,6 +741,104 @@ fn print_flow_entry_exit(f: &FlowEntryExit) {
     );
 }
 
+/// Imports (with the workspace files they resolve to) and the resolved
+/// cross-file call edges in both directions, grouped by the other file.
+fn render_connections(out: &ReadFileOut) {
+    let u = ui();
+    let connections = &out.connections;
+    if !connections.imports.is_empty() {
+        cli_println!();
+        cli_println!(
+            "{}",
+            u.label(&format!("imports ({}):", connections.imports.len()))
+        );
+        for import in &connections.imports {
+            let names = import.names.join(", ");
+            let binding = if names.is_empty() || names == import.module {
+                u.name(&import.module)
+            } else {
+                format!("{} {} {}", u.name(&names), u.dim("from"), u.name(&import.module))
+            };
+            let target = if import.resolved_files.is_empty() {
+                u.dim("external")
+            } else {
+                format!("{} {}", u.dim("→"), u.path(&import.resolved_files.join(", ")))
+            };
+            let uses = if import.uses > 0 {
+                let lines: Vec<String> = import
+                    .use_lines
+                    .iter()
+                    .take(8)
+                    .map(|line| format!("L{line}"))
+                    .collect();
+                let more = import.use_lines.len().saturating_sub(8);
+                let where_used = if lines.is_empty() {
+                    String::new()
+                } else if more > 0 {
+                    format!(" at {} +{more}", lines.join(", "))
+                } else {
+                    format!(" at {}", lines.join(", "))
+                };
+                u.dim(&format!(" · {} use(s){where_used}", import.uses))
+            } else {
+                u.dim(" · unused")
+            };
+            cli_println!(
+                "  {}:{}  {binding}  {target}{uses}",
+                u.dim("L"),
+                u.loc(&import.line.to_string())
+            );
+        }
+    }
+    if !connections.calls_out.is_empty() || !connections.callers_in.is_empty() {
+        cli_println!();
+        cli_println!(
+            "{}",
+            u.label(&format!(
+                "connections ({} out, {} in):",
+                connections.calls_out.iter().map(|g| g.edges.len()).sum::<usize>(),
+                connections
+                    .callers_in
+                    .iter()
+                    .map(|g| g.edges.len())
+                    .sum::<usize>()
+            ))
+        );
+        for group in &connections.calls_out {
+            let hops = group
+                .edges
+                .iter()
+                .map(|edge| {
+                    format!(
+                        "{} {} {}",
+                        u.name(&edge.callee),
+                        u.dim(&edge.edge_id),
+                        u.loc(&format!(":{}", edge.line))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(&u.dim(", "));
+            cli_println!("  {} {}  {hops}", u.dim("→"), u.path(&group.file));
+        }
+        for group in &connections.callers_in {
+            let hops = group
+                .edges
+                .iter()
+                .map(|edge| {
+                    format!(
+                        "{} {} {}",
+                        u.name(&edge.caller),
+                        u.dim(&edge.edge_id),
+                        u.loc(&format!("→ {}:{}", edge.callee, edge.callee_line))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(&u.dim(", "));
+            cli_println!("  {} {}  {hops}", u.dim("←"), u.path(&group.file));
+        }
+    }
+}
+
 fn format_mark(m: &LineMark) -> String {
     let u = ui();
     let kind_label = match m.kind {
@@ -725,13 +848,27 @@ fn format_mark(m: &LineMark) -> String {
         MarkKind::Through => "THROUGH",
         MarkKind::CallOut => "CALL→",
         MarkKind::CallIn => "→CALL",
+        MarkKind::ImportUse => "USES",
     };
     let kind_styled = match m.kind {
         MarkKind::Sink => u.warn(kind_label),
         MarkKind::Source => u.annotation(kind_label),
+        MarkKind::ImportUse => u.dim(kind_label),
         _ => u.kind(kind_label),
     };
     let mut parts: Vec<String> = vec![kind_styled];
+    if m.kind == MarkKind::ImportUse {
+        if let Some(name) = m.at.decl.as_deref() {
+            parts.push(u.name(name));
+        }
+        if let Some(module) = m.at.module.as_deref() {
+            parts.push(u.dim(&format!("from {module}")));
+        }
+        if let Some(target) = &m.target {
+            parts.push(u.path(&format!("→ {}", target.file)));
+        }
+        return parts.join(" ");
+    }
     if let Some(rid) = &m.rule_id {
         parts.push(u.name(rid));
     }
@@ -753,6 +890,22 @@ fn format_mark(m: &LineMark) -> String {
     }
     if let Some(t) = &m.taint_source_name {
         parts.push(u.dim(&format!("taint←{t}")));
+    }
+    if let Some(edge) = &m.edge_id {
+        parts.push(u.dim(edge));
+    }
+    if let Some(target) = &m.target {
+        let arrow = match m.kind {
+            MarkKind::CallIn => "from",
+            _ => "to",
+        };
+        let name = target.decl.as_deref().unwrap_or("");
+        parts.push(format!(
+            "{} {} {}",
+            u.dim(arrow),
+            u.name(name),
+            u.path(&format!("({}:{})", target.file, target.line))
+        ));
     }
     parts.join(" ")
 }

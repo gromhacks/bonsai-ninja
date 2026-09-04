@@ -364,18 +364,20 @@ impl AnalyzerDb {
     /// tie-breaker. The result is cached by `(FileId, version)` and invalidated
     /// with the file.
     pub fn adapter_for(&self, file: FileId) -> Option<DynAdapter> {
-        let snapshot = self.inner.vfs.snapshot(file).ok()?;
-        let path = &snapshot.path;
+        let path = self.inner.vfs.path(file).ok()?;
         let ext = path.extension()?.to_str()?;
         let candidates = self.inner.registry.adapters_for_extension(ext);
         match candidates.as_slice() {
             [] => None,
             [only] => Some(only.clone()),
             _ => {
-                let key = (file, snapshot.version);
+                let key = (file, self.inner.vfs.file_version(file).ok()?);
                 if let Some(language) = self.inner.cache.read().adapter_languages.get(&key).copied() {
                     return self.inner.registry.adapter(language);
                 }
+                // Several adapters claim the extension: the syntax decides,
+                // which is the one adapter lookup that needs the text.
+                let snapshot = self.inner.vfs.snapshot(file).ok()?;
 
                 let mut selected_index = 0usize;
                 let mut selected_evidence_rank = 0u8;
@@ -522,8 +524,7 @@ impl AnalyzerDb {
     /// Declaration index for `file`, computed once per `(file,
     /// version)` pair. `None` when no adapter handles the file.
     pub fn decl_index(&self, file: FileId) -> Option<Arc<DeclIndex>> {
-        let snap = self.inner.vfs.snapshot(file).ok()?;
-        let key = (file, snap.version);
+        let key = (file, self.inner.vfs.file_version(file).ok()?);
         // Drop the read guard's temporary before any subsequent
         // `cache.write()` further down. parking_lot RwLock is
         // non-reentrant; this is the same hazard B1 hit.
@@ -665,8 +666,7 @@ impl AnalyzerDb {
     /// Most callers should use [`Self::imports_for`] instead. Both surfaces
     /// preserve the adapter's authoritative result, including an empty index.
     pub fn import_index(&self, file: FileId) -> Option<Arc<ImportIndex>> {
-        let snap = self.inner.vfs.snapshot(file).ok()?;
-        let key = (file, snap.version);
+        let key = (file, self.inner.vfs.file_version(file).ok()?);
         let cached = self.inner.cache.read().import_index.get(&key).cloned();
         if let Some(v) = cached {
             return Some(v);
@@ -833,14 +833,7 @@ impl AnalyzerDb {
         let mut global = GlobalIndex::new();
         let source_bytes = files
             .iter()
-            .map(|file| {
-                self.inner
-                    .vfs
-                    .snapshot(*file)
-                    .ok()
-                    .and_then(|snapshot| u64::try_from(snapshot.text.len()).ok())
-                    .unwrap_or(0)
-            })
+            .map(|file| self.inner.vfs.text_len(*file).unwrap_or(0))
             .collect::<Vec<_>>();
         stream_decl_indexes_in_order(
             &files,
@@ -910,14 +903,7 @@ impl AnalyzerDb {
     ) {
         let source_bytes = files
             .iter()
-            .map(|file| {
-                self.inner
-                    .vfs
-                    .snapshot(*file)
-                    .ok()
-                    .and_then(|snapshot| u64::try_from(snapshot.text.len()).ok())
-                    .unwrap_or(0)
-            })
+            .map(|file| self.inner.vfs.text_len(*file).unwrap_or(0))
             .collect::<Vec<_>>();
         stream_decl_indexes_in_order(
             files,
@@ -933,8 +919,7 @@ impl AnalyzerDb {
     }
 
     fn take_decl_index_for_global(&self, file: FileId) -> Option<DeclIndex> {
-        let snap = self.inner.vfs.snapshot(file).ok()?;
-        let key = (file, snap.version);
+        let key = (file, self.inner.vfs.file_version(file).ok()?);
         // Bind the removed entry before branching. A write guard created in
         // an `if let` scrutinee lives through the entire expression, which
         // would put the expensive parse/lower `else` branch under this
@@ -962,8 +947,8 @@ impl AnalyzerDb {
         let decl = self.decl_for_func(func);
         let version = decl
             .as_ref()
-            .and_then(|d| self.inner.vfs.snapshot(d.span.file).ok())
-            .map_or(0, |snap| snap.version);
+            .and_then(|d| self.inner.vfs.file_version(d.span.file).ok())
+            .unwrap_or(0);
         let key = (func, version);
         let cached = self.inner.cache.read().cfgs.get(&key).cloned();
         if let Some(v) = cached {

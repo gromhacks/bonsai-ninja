@@ -176,3 +176,114 @@ fn canonical_path_key_matches_directory_case_behavior() {
     }
     let _ = std::fs::remove_dir_all(root);
 }
+
+fn identity_for(text: &str) -> SourceIdentity {
+    SourceIdentity {
+        len: text.len() as u64,
+        hash: text.len() as u64 ^ 0x5eed,
+        digest: [7; 32],
+    }
+}
+
+#[test]
+fn lazy_entries_answer_metadata_without_a_loader() {
+    let vfs = Vfs::new();
+    let text = "print('hello')\n";
+    let id = vfs.write_lazy("/lazy/a.py", identity_for(text));
+    assert_eq!(vfs.lookup(Path::new("/lazy/a.py")), Some(id));
+    assert_eq!(vfs.path(id).unwrap().as_path(), Path::new("/lazy/a.py"));
+    assert_eq!(vfs.file_version(id).unwrap(), 0);
+    assert_eq!(vfs.text_len(id).unwrap(), text.len() as u64);
+    assert_eq!(vfs.lazy_identity(id), Some(identity_for(text)));
+    assert_eq!(vfs.lazy_source_counts(), (1, 0));
+    assert!(matches!(vfs.snapshot(id), Err(VfsError::MissingLazyLoader(_))));
+    // Eager files report no identity and their real length.
+    let eager = vfs.write("/lazy/b.py", "x = 1\n");
+    assert_eq!(vfs.lazy_identity(eager), None);
+    assert_eq!(vfs.text_len(eager).unwrap(), 6);
+}
+
+#[test]
+fn lazy_snapshot_loads_once_then_behaves_like_an_eager_write() {
+    let vfs = Vfs::new();
+    let text = "def f():\n    return 1\n";
+    let id = vfs.write_lazy("/lazy/a.py", identity_for(text));
+    let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&loads);
+    let expected = identity_for(text);
+    vfs.set_lazy_loader(Arc::new(move |path: &Path, identity: &SourceIdentity| {
+        assert_eq!(path, Path::new("/lazy/a.py"));
+        assert_eq!(*identity, expected);
+        counter.fetch_add(1, Ordering::Relaxed);
+        Ok(Arc::<str>::from("def f():\n    return 1\n"))
+    }));
+    let first = vfs.snapshot(id).unwrap();
+    assert_eq!(first.text.as_ref(), text);
+    assert_eq!(first.version, 0);
+    let second = vfs.snapshot(id).unwrap();
+    assert_eq!(second.text.as_ref(), text);
+    assert_eq!(
+        loads.load(Ordering::Relaxed),
+        1,
+        "the text is pinned after the first load"
+    );
+    assert_eq!(vfs.lazy_identity(id), None);
+    assert_eq!(vfs.text_len(id).unwrap(), text.len() as u64);
+    assert_eq!(vfs.lazy_source_counts(), (1, 1));
+    // A later write bumps the version exactly like an eager file.
+    vfs.write("/lazy/a.py", "changed\n");
+    assert_eq!(vfs.file_version(id).unwrap(), 1);
+    assert_eq!(vfs.snapshot(id).unwrap().text.as_ref(), "changed\n");
+    assert_eq!(loads.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn lazy_loader_errors_surface_and_leave_the_entry_lazy() {
+    let vfs = Vfs::new();
+    let id = vfs.write_lazy("/lazy/a.py", identity_for("x\n"));
+    vfs.set_lazy_loader(Arc::new(|_: &Path, _: &SourceIdentity| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "changed on disk",
+        ))
+    }));
+    let error = vfs.snapshot(id).unwrap_err();
+    assert!(matches!(error, VfsError::LazyLoad { .. }), "{error}");
+    assert!(error.to_string().contains("changed on disk"));
+    assert_eq!(vfs.lazy_identity(id), Some(identity_for("x\n")));
+    assert_eq!(vfs.lazy_source_counts(), (1, 0));
+}
+
+#[test]
+fn writes_edits_and_removal_clear_lazy_identity() {
+    let vfs = Vfs::new();
+    let id = vfs.write_lazy("/lazy/a.py", identity_for("abc\n"));
+    vfs.set_lazy_loader(Arc::new(|_: &Path, _: &SourceIdentity| {
+        Ok(Arc::<str>::from("abc\n"))
+    }));
+    // Edits address the loaded text, so applying them loads first.
+    let edit = TextEdit {
+        file_id: id,
+        old_start_byte: 0,
+        old_end_byte: 1,
+        new_end_byte: 1,
+    };
+    vfs.apply_edits(vec![edit], "Xbc\n").unwrap();
+    assert_eq!(vfs.lazy_identity(id), None);
+    assert_eq!(vfs.snapshot(id).unwrap().text.as_ref(), "Xbc\n");
+    assert_eq!(vfs.file_version(id).unwrap(), 1);
+
+    // A lazy re-intern of the same path replaces the text with the identity.
+    let again = vfs.write_lazy("/lazy/a.py", identity_for("zz\n"));
+    assert_eq!(again, id);
+    assert_eq!(vfs.file_version(id).unwrap(), 2);
+    assert_eq!(vfs.text_len(id).unwrap(), 3);
+    vfs.write_with_id(id, "/lazy/a.py", "eager\n");
+    assert_eq!(vfs.lazy_identity(id), None);
+    assert_eq!(vfs.snapshot(id).unwrap().text.as_ref(), "eager\n");
+
+    let lazy_b = vfs.write_lazy("/lazy/b.py", identity_for("b\n"));
+    assert_eq!(vfs.remove(Path::new("/lazy/b.py")), Some(lazy_b));
+    assert_eq!(vfs.lazy_identity(lazy_b), None);
+    assert!(vfs.snapshot(lazy_b).is_err());
+}

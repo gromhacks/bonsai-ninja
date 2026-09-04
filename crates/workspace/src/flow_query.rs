@@ -49,7 +49,8 @@ impl SyntaxFlowBackend {
 #[derive(Clone)]
 pub struct SyntaxFlowSession {
     idg: Arc<bonsai_idg::IdgQueryService>,
-    _lease: Arc<tempfile::TempDir>,
+    /// Only a non-persistent (cache-disabled) session owns a temp lease.
+    _lease: Option<Arc<tempfile::TempDir>>,
 }
 
 impl SyntaxFlowSession {
@@ -367,6 +368,55 @@ impl Workspace {
         Some(funcs)
     }
 
+    /// Every entry-point caller chain (entry point … parent) per target
+    /// callable, deepest first, from a single breadth-first reverse walk over
+    /// persisted partitions. `None` when no validated partitioned callgraph
+    /// is available.
+    #[must_use]
+    pub fn target_inspect_lineage_chains(
+        &self,
+        target_funcs: &[FuncId],
+    ) -> Option<AHashMap<FuncId, Vec<Vec<FuncId>>>> {
+        if target_funcs.is_empty() {
+            return Some(AHashMap::new());
+        }
+        let service = self.callgraph_query_service()?;
+        match service.lineage_chains(target_funcs) {
+            Ok(chains) => Some(chains),
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "target inspect lineage chains rejected: {}",
+                    error
+                );
+                None
+            }
+        }
+    }
+
+    /// Entry points of the caller lineage of `target_funcs`: the callables
+    /// that reach a target and have no caller of their own (plus targets
+    /// without callers). `None` when no validated partitioned callgraph is
+    /// available.
+    #[must_use]
+    pub fn target_inspect_lineage_roots(&self, target_funcs: &[FuncId]) -> Option<Vec<FuncId>> {
+        if target_funcs.is_empty() {
+            return None;
+        }
+        let service = self.callgraph_query_service()?;
+        match service.lineage_roots(target_funcs) {
+            Ok(roots) => Some(roots),
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "target inspect lineage roots rejected: {}",
+                    error
+                );
+                None
+            }
+        }
+    }
+
     fn persisted_source_flow_corridor(
         &self,
         source_funcs: &[FuncId],
@@ -450,28 +500,62 @@ impl Workspace {
             return None;
         }
         let transfer_options = crate::default_workspace_idg_transfer_options(self.db());
-        let lease = match tempfile::Builder::new().prefix("bonsai-syntax-flow-").tempdir() {
-            Ok(lease) => Arc::new(lease),
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "query-scoped IDG temp directory unavailable; using canonical resident fallback"
-                );
-                return None;
-            }
-        };
-        let sidecar = lease.path().join("idg.factstore");
         let transfer_hash = crate::idg_transfer_options_fingerprint(&transfer_options);
         let file_scope_hash = crate::idg_file_scope_fingerprint(&corridor.files);
         let func_scope_hash = crate::idg_func_scope_fingerprint(&corridor.funcs);
         let call_graph_hash = crate::idg_call_graph_fingerprint(corridor.graph.as_ref());
-        let pipeline_hash = crate::idg_scoped_semantics_fingerprint(
+        let scoped_hash = crate::idg_scoped_semantics_fingerprint(
             transfer_hash,
             file_scope_hash,
             Some(func_scope_hash),
             Some(call_graph_hash),
         );
         let global = corridor.linkage_index.clone();
+        // The scoped semantics fingerprint is a complete content key for this
+        // session (transfer options, admitted files and callables, and the
+        // exact corridor callgraph). Persist the compiled IDG under the
+        // workspace cache keyed by it, and reopen it for every later query
+        // with the same corridor instead of recompiling into a discarded
+        // temporary directory. The header pipeline hash additionally folds in
+        // the workspace content fingerprint, so an edit invalidates it.
+        let persistent_root = self
+            .root_path()
+            .filter(|_| self.persistent_semantic_cache_enabled());
+        let (sidecar, pipeline_hash, lease, _writer_guard) = match persistent_root.as_deref() {
+            Some(root) => {
+                let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
+                let pipeline_hash = self.cached_idg_transfer_pipeline_hash(Some(root), scoped_hash);
+                if let Ok(Some(idg)) =
+                    bonsai_idg::IdgQueryService::load_from_disk(&sidecar, pipeline_hash, global.clone())
+                {
+                    bonsai_diagnostics::debug_log!(
+                        "compiler-cache",
+                        "query-scoped IDG reused: {}",
+                        sidecar.display()
+                    );
+                    return Some(SyntaxFlowSession {
+                        idg: Arc::new(idg),
+                        _lease: None,
+                    });
+                }
+                match crate::idg_persistence::IdgSidecarWriteGuard::acquire(&sidecar) {
+                    Ok(guard) => (sidecar, pipeline_hash, None, Some(guard)),
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %sidecar.display(),
+                            error = %error,
+                            "query-scoped IDG writer lock unavailable; compiling a temporary session"
+                        );
+                        let (sidecar, lease) = Self::temporary_syntax_flow_sidecar()?;
+                        (sidecar, scoped_hash, Some(lease), None)
+                    }
+                }
+            }
+            None => {
+                let (sidecar, lease) = Self::temporary_syntax_flow_sidecar()?;
+                (sidecar, scoped_hash, Some(lease), None)
+            }
+        };
         let semantics = bonsai_taint::compiler_idg_file_semantics(self.db());
         let persisted = bonsai_idg::workspace_adapter::
             build_for_persistence_streaming_with_file_semantics_and_options_for_files_and_funcs(
@@ -495,6 +579,11 @@ impl Workspace {
                     global,
                 )
             });
+        if lease.is_none() {
+            if let Some(root) = persistent_root.as_deref() {
+                prune_scoped_transfer_sidecars(root, &sidecar);
+            }
+        }
         match persisted {
             Ok(Some(idg)) => Some(SyntaxFlowSession {
                 idg: Arc::new(idg),
@@ -512,6 +601,22 @@ impl Workspace {
                     path = %sidecar.display(),
                     error = %error,
                     "query-scoped IDG persistence failed; using canonical resident fallback"
+                );
+                None
+            }
+        }
+    }
+
+    fn temporary_syntax_flow_sidecar() -> Option<(std::path::PathBuf, Arc<tempfile::TempDir>)> {
+        match tempfile::Builder::new().prefix("bonsai-syntax-flow-").tempdir() {
+            Ok(lease) => {
+                let sidecar = lease.path().join("idg.factstore");
+                Some((sidecar, Arc::new(lease)))
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "query-scoped IDG temp directory unavailable; using canonical resident fallback"
                 );
                 None
             }
@@ -797,6 +902,61 @@ impl Workspace {
                 fallback_reasons,
                 analysis_incomplete_reasons: Vec::new(),
             },
+        }
+    }
+}
+
+/// Keep the query-scoped transfer IDG cache bounded: beyond the newest
+/// `SCOPED_TRANSFER_SIDECAR_KEEP` files, sidecars older than one day are
+/// removed. Files another writer holds are skipped; the one just written is
+/// never removed. Cache maintenance only: a pruned session is recompiled on
+/// its next query.
+const SCOPED_TRANSFER_SIDECAR_KEEP: usize = 48;
+
+fn prune_scoped_transfer_sidecars(workspace_root: &std::path::Path, keep_path: &std::path::Path) {
+    let cache_dir = bonsai_common::workspace_bonsai_dir(workspace_root);
+    let Ok(entries) = std::fs::read_dir(&cache_dir) else {
+        return;
+    };
+    let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            if !(name.starts_with("idg.v") && name.contains(".transfer.") && name.ends_with(".factstore")) {
+                return None;
+            }
+            if path == keep_path {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    if candidates.len() < SCOPED_TRANSFER_SIDECAR_KEEP {
+        return;
+    }
+    candidates.sort_by(|left, right| right.0.cmp(&left.0));
+    let now = std::time::SystemTime::now();
+    for (modified, path) in candidates
+        .into_iter()
+        .skip(SCOPED_TRANSFER_SIDECAR_KEEP.saturating_sub(1))
+    {
+        let old_enough = now
+            .duration_since(modified)
+            .is_ok_and(|age| age >= std::time::Duration::from_secs(24 * 60 * 60));
+        if !old_enough {
+            continue;
+        }
+        let Ok(_guard) = crate::idg_persistence::IdgSidecarWriteGuard::try_acquire(&path) else {
+            continue;
+        };
+        if std::fs::remove_file(&path).is_ok() {
+            bonsai_diagnostics::debug_log!(
+                "compiler-cache",
+                "pruned query-scoped IDG sidecar: {}",
+                path.display()
+            );
         }
     }
 }

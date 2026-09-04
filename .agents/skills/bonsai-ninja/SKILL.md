@@ -94,16 +94,14 @@ command requires a duplicate whole-workspace lowering or edge scan.
 | Need | Command |
 |---|---|
 | Files and directories | `tree` |
-| Workspace and language summary | `context` |
+| Workspace and language summary | `index` (prints the workspace `context`) |
 | Text or symbol anchor | `search` |
 | Declarations, classes, imports, entry points | `defs`, `classes`, `imports`, `entrypoints` |
 | Calls, arguments, references | `calls`, `args`, `refs` |
 | Variables, strings, comments, operations | `vars`, `strings`, `comments`, `operations` |
-| One target and nearby behavior | `inspect` |
-| Bounded compiler packet for one callable | `symbol-summary` |
-| Exact compressed corridor between two targets | `path` |
-| Execution trace from an entry | `trace` |
-| Backward influence around a symbol | `slice` |
+| One target, nearby behavior, and its bounded compiler packet | `inspect-graph --query` |
+| Exact compressed corridor between two targets | `inspect-graph --from ... --to ...` |
+| Backward influence around a symbol | No CLI command: `inspect-graph --query` on the symbol plus `refs` / `vars` for read and write sites; the SDK `slices` API for programmatic slices |
 | One file with optional connected context | `read-file` |
 | Reopen stable evidence | `show` |
 | Parser, HIR, CFG, resolution, edge, taint internals | `dump-*`, `diagnostics` |
@@ -113,11 +111,11 @@ command requires a duplicate whole-workspace lowering or edge scan.
 ## Map a repository
 
 For an unfamiliar repository, start with only the shape needed for the task.
-Usually `context` plus a shallow `tree` is enough; add imports, entry points, or
+Usually `index` plus a shallow `tree` is enough; add imports, entry points, or
 declarations only when they help answer the current question:
 
 ```shell
-./target/release/bonsai-ninja context <workspace> --no-color --no-progress
+./target/release/bonsai-ninja index <workspace> --no-color --no-progress --format json
 ./target/release/bonsai-ninja tree <workspace> --max-depth 3 \
   --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja imports <workspace> \
@@ -139,7 +137,7 @@ Find one concrete anchor, then inspect its relationships:
   --context 8k --no-color --no-progress
 ./target/release/bonsai-ninja args <workspace> --callee <callee> \
   --context 8k --no-color --no-progress
-./target/release/bonsai-ninja symbol-summary <workspace> --symbol <symbol> \
+./target/release/bonsai-ninja inspect-graph <workspace> --query <symbol> \
   --context 16k --no-color --no-progress
 ```
 
@@ -151,51 +149,43 @@ entry point -> validation -> business logic -> storage/external call -> response
 
 ## Trace behavior and dataflow
 
-`inspect` is rulepack-free and attaches one bounded compiler evidence unit
-(a stable `F:` flow) to every matching callable by default. Add `--taint-flow`
-for raw taint paths.
+`inspect-graph` is rulepack-free. It attaches one bounded compiler evidence
+unit (a stable `F:` flow) to every matching callable and expands every raw
+taint flow through a match into its full call stack.
 
-For lookup, start with plain `inspect`, `refs`, or `calls`. Use
-`symbol-summary` when one callable needs a self-contained packet with source,
-signature, imports, direct resolved callers/callees, and explicit unresolved
-calls. Inspect rows carry the same bounded callable evidence; it never
-enumerates transitive caller/callee paths. When both
-endpoints are known, use `path --from ... --to ...` for the exact compressed
-compiler corridor or `trace --from ... --to ...` to interpret it.
+For lookup, start with plain `inspect-graph`, `refs`, or `calls`. Each
+`inspect-graph` declaration hit is a self-contained packet with source,
+signature, imports, direct resolved callers/callees (stable `E:` edge ids),
+and explicit external calls; it never enumerates transitive caller/callee
+paths. When both endpoints are known, use `inspect-graph --from ... --to ...`
+for the exact compressed compiler corridor.
 
 ```shell
-./target/release/bonsai-ninja inspect <workspace> --query <target> \
+./target/release/bonsai-ninja inspect-graph <workspace> --query <target> \
   --context 16k --no-color --no-progress
-./target/release/bonsai-ninja inspect <workspace> --query <target> \
-  --taint-flow --context 16k --no-color --no-progress
-./target/release/bonsai-ninja symbol-summary <workspace> --symbol <target> \
-  --context 16k --no-color --no-progress
-./target/release/bonsai-ninja inspect <workspace> \
+./target/release/bonsai-ninja inspect-graph <workspace> \
   --from <entry> --to <target> \
-  --context 16k --no-color --no-progress
-./target/release/bonsai-ninja path <workspace> \
-  --from <entry> --to <target> \
-  --context 16k --no-color --no-progress
-./target/release/bonsai-ninja trace <workspace> --symbol <entry> \
   --context 16k --no-color --no-progress
 ```
 
-Use qualified `Owner.member` selectors when short method names collide.
-`path:name` and `path:line:name` provide file disambiguation. When both ends
-are known, prefer the narrowed `--from`/`--to` corridor.
+Use qualified `Owner.member` selectors when short method names collide. When
+both ends are known, prefer the narrowed `--from`/`--to` corridor.
 
 For local evidence:
 
 ```shell
-./target/release/bonsai-ninja slice <workspace> --symbol <symbol> \
+./target/release/bonsai-ninja refs <workspace> --symbol <symbol> \
+  --context 16k --no-color --no-progress
+./target/release/bonsai-ninja vars <workspace> --name <symbol> \
   --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja read-file <workspace> --file <path> --lines A:B \
   --context 16k --no-color --no-progress
 ```
 
-`slice` infers the line when one compiler syntax-flow site exists. If it
-reports ambiguity, add the printed `--line` and optionally `--file`; it does
-not fall back to raw-text matching. `read-file` is file-local by default;
+There is no CLI backward slice. For "what influences this symbol?", combine
+`inspect-graph --query <symbol>` with `refs` / `vars` for its read and write
+sites; the SDK `slices` API remains available for programmatic slices.
+`read-file` is file-local by default;
 connected or security overlays are explicit options.
 
 ## Security review
@@ -320,7 +310,7 @@ will receive repeated queries:
   --format json --no-color --no-progress
 ```
 
-Do not use semantic prewarm for `tree`, `context`, or a single narrow syntax
+Do not use semantic prewarm for `tree`, `index`, or a single narrow syntax
 query. Analysis sidecars live in an OS cache keyed by the canonical workspace,
 not in the repository. `<workspace>/.bonsai/rules/` is only a rule overlay.
 Repeated default `index` runs validate the compiler generation root-only and
@@ -347,8 +337,8 @@ with `--output-path` and let downstream code stream or index it. Do not request
 only.
 
 Native JSON documents identify themselves as `bonsai-native-export` plus a
-numeric `schema_version`. Validate v9 artifacts against
-`schemas/bonsai-native-export-v9.schema.json`; release archives include the
+numeric `schema_version` (currently 12). Validate artifacts against
+`schemas/bonsai-native-export-v12.schema.json`; release archives include the
 same Draft 2020-12 schema.
 
 ## Rulepack work
