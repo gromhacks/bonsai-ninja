@@ -360,10 +360,10 @@ jobs:
             >/tmp/bonsai-index.txt
           "$bin" diagnostics examples/python/language_gauntlet --no-color --no-progress \
             >/tmp/bonsai-diagnostics.txt
-          "$bin" inspect examples/python/language_gauntlet --query os.system --context 4k \
-            --format json --no-color --no-progress >/tmp/bonsai-inspect.json
-          "$bin" trace examples/python/language_gauntlet handle_request --format json \
-            --no-color --no-progress >/tmp/bonsai-trace.json
+          "$bin" inspect-graph examples/python/language_gauntlet --query os.system --context 4k \
+            --format json --no-color --no-progress >/tmp/bonsai-inspect-graph.json
+          "$bin" inspect-graph examples/python/language_gauntlet --query handle_request --format json \
+            --no-color --no-progress >/tmp/bonsai-inspect-graph-query.json
           "$bin" security examples/python/language_gauntlet taint-analysis --format sarif --all \
             --no-color --no-progress >/tmp/bonsai-taint.sarif.json
           "$bin" export examples/python/language_gauntlet --format networkx \
@@ -375,8 +375,8 @@ jobs:
           from pathlib import Path
 
           for path in [
-              "/tmp/bonsai-inspect.json",
-              "/tmp/bonsai-trace.json",
+              "/tmp/bonsai-inspect-graph.json",
+              "/tmp/bonsai-inspect-graph-query.json",
               "/tmp/bonsai-networkx.json",
           ]:
               json.loads(Path(path).read_text())
