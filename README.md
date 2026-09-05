@@ -5,6 +5,24 @@
 [![Rulepack audit](https://github.com/gromhacks/bonsai-ninja/actions/workflows/pack-audit.yml/badge.svg)](https://github.com/gromhacks/bonsai-ninja/actions/workflows/pack-audit.yml)
 [![crates.io](https://img.shields.io/crates/v/bonsai-ninja.svg)](https://crates.io/crates/bonsai-ninja)
 
+## See it in a few seconds
+
+![bonsai-ninja compiler-backed Python trace](assets/bonsai-ninja-python-demo.gif)
+
+The short terminal demo walks a deliberately vulnerable Python project from
+compiler indexing, through its cross-module tree and HTTP entrypoint, to an
+exact compiler corridor and a source-to-sink command-injection finding. After
+installing bonsai-ninja, the same flow is:
+
+```bash
+cd examples/python/language_gauntlet
+bonsai-ninja index . --no-progress
+bonsai-ninja tree . --max-depth 2 --context 8k --no-progress
+bonsai-ninja read-file . --file entrypoints/http.py --lines 14:55 --context 8k --no-progress
+bonsai-ninja inspect-graph . --from handle_request --to os.system --compact --context 8k --no-progress
+bonsai-ninja security . taint-analysis --tag command-injection --context 16k --no-progress
+```
+
 > **Project maturity:** bonsai-ninja is an ambitious early-stage project.
 > Compiler-backed analysis and security modeling across 20 languages leave a
 > lot of room for parser gaps, unresolved dynamic behavior, incorrect findings,
@@ -59,8 +77,8 @@ validate a model by itself. The versioned native contract is published as
 Our small exploratory tests produced encouraging results, but they are not a
 general model-quality claim. We would love to see independent teams take the
 idea further, publish reproducible evaluations, and tell us where it fails—
-whether that is OpenAI, Anthropic, Google, Poolside/Laguna, Qwen, DeepSeek,
-academic and independent labs, or local-model hobbyists.
+whether that is an academic or independent lab, a product team, or a
+local-model hobbyist.
 
 ### What the pipeline provides
 
