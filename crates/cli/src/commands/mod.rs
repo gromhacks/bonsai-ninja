@@ -1,7 +1,7 @@
 //! Per-subcommand handlers and renderers.
 //!
 //! Sub-modules: [`browse`] (browse commands), [`dump`] (structural
-//! dumps), [`trace`], [`inspect`], [`export`]. Shared helpers
+//! dumps), `trace` output, [`inspect`], [`export`]. Shared helpers
 //! (project open, symbol resolution, paging plumbing) live here.
 
 use anyhow::Result;
