@@ -11,6 +11,13 @@ fn registry() -> Arc<LanguageRegistry> {
     r
 }
 
+fn c_registry() -> Arc<LanguageRegistry> {
+    let registry = Arc::new(LanguageRegistry::new());
+    let adapter: AdapterArc = Arc::new(bonsai_lang_c::CAdapter::new());
+    registry.register(adapter);
+    registry
+}
+
 fn ruby_registry() -> Arc<LanguageRegistry> {
     let registry = Arc::new(LanguageRegistry::new());
     let adapter: AdapterArc = Arc::new(bonsai_lang_ruby::RubyAdapter::new());
@@ -167,6 +174,117 @@ fn source_reachable_summary_fixed_point_promotes_already_reached_callers() {
         reachable.funcs.contains(&outer),
         "relay's summary-output capability must propagate to its caller even when relay was already forward-reachable"
     );
+}
+
+#[test]
+fn cold_source_reachable_summary_walk_discovers_cross_file_callers_from_linkage() {
+    let root = tempdir("cold-cross-file-summary");
+    std::fs::write(
+        root.join("auth.c"),
+        "char *verify_token(const char *token) { return (char *)token; }\n\nvoid run_admin_command(char *user_id) {}\n",
+    )
+    .expect("write source file");
+    std::fs::write(
+        root.join("users.c"),
+        concat!(
+            "char *get_user(const char *token) { return verify_token(token); }\n\n",
+            "char *update_user(const char *token) {\n",
+            "    char *user_id = verify_token(token);\n",
+            "    run_admin_command(user_id);\n",
+            "    return user_id;\n",
+            "}\n",
+        ),
+    )
+    .expect("write caller file");
+
+    let mut options = WorkspaceOpenOptions::lazy_query();
+    options.disable_persistent_semantic_cache();
+    let workspace =
+        Workspace::open_with_options(&root, c_registry(), options).expect("open cold C workspace");
+    let global = workspace.compiler_linkage_index();
+    let func = |name: &str| {
+        let symbol = global
+            .find_by_name(name)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("missing {name}"));
+        bonsai_common::FuncId::new(symbol.raw())
+    };
+    let source = func("verify_token");
+    let get_user = func("get_user");
+    let update_user = func("update_user");
+    let run_admin_command = func("run_admin_command");
+
+    let reachable = workspace.source_reachable_resolved_call_graph(&[source], &[]);
+    assert!(reachable.funcs.contains(&get_user));
+    assert!(reachable.funcs.contains(&update_user));
+    assert!(reachable.funcs.contains(&run_admin_command));
+    assert!(reachable.graph.callees_of(get_user).any(|edge| edge.to == source));
+    assert!(reachable
+        .graph
+        .callees_of(update_user)
+        .any(|edge| edge.to == run_admin_command));
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn cold_source_reachable_summary_walk_discovers_cross_file_callback_consumers() {
+    let root = tempdir("cold-cross-file-callback-summary");
+    std::fs::write(root.join("source.py"), "def source(value):\n    return value\n")
+        .expect("write source file");
+    std::fs::write(
+        root.join("consumer.py"),
+        concat!(
+            "from source import source\n\n",
+            "def apply(callback, value):\n",
+            "    return callback(value)\n\n",
+            "def consume_alias():\n",
+            "    callback = source\n",
+            "    return apply(callback, \"payload\")\n",
+        ),
+    )
+    .expect("write callback consumer");
+
+    let mut options = WorkspaceOpenOptions::lazy_query();
+    options.disable_persistent_semantic_cache();
+    let workspace =
+        Workspace::open_with_options(&root, registry(), options).expect("open cold Python workspace");
+    let global = workspace.compiler_linkage_index();
+    let func = |name: &str| {
+        let symbol = global
+            .find_by_name(name)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("missing {name}"));
+        bonsai_common::FuncId::new(symbol.raw())
+    };
+    let source = func("source");
+    let apply = func("apply");
+    let consume_alias = func("consume_alias");
+
+    let reachable = workspace.source_reachable_resolved_call_graph(&[source], &[]);
+    assert!(
+        reachable.funcs.contains(&apply),
+        "callback host was not discovered from the exact callback relation"
+    );
+    assert!(
+        reachable.graph.callees_of(apply).any(|edge| edge.to == source),
+        "callback execution edge was not materialized"
+    );
+    assert!(
+        reachable.funcs.contains(&consume_alias),
+        "callable alias consumer was not discovered from compact compiler linkage"
+    );
+    assert!(
+        reachable
+            .graph
+            .callees_of(consume_alias)
+            .any(|edge| edge.to == apply),
+        "callable alias consumer-to-host edge was not retained"
+    );
+
+    std::fs::remove_dir_all(root).ok();
 }
 
 #[test]

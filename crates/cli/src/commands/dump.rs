@@ -89,9 +89,10 @@ pub(crate) fn cmd_dump_callgraph(
                         t.add_row(vec![
                             comfy_table::Cell::new(u.name(&row.function)),
                             comfy_table::Cell::new(u.path(&format!(
-                                "{}:@{}",
+                                "{}:{}:{}",
                                 short_file(&row.file),
-                                row.name_start
+                                row.line,
+                                row.column
                             ))),
                             comfy_table::Cell::new(u.dim(&row.callers.to_string())),
                             comfy_table::Cell::new(u.dim(&row.outgoing.to_string())),
@@ -110,6 +111,10 @@ pub(crate) fn cmd_dump_callgraph(
     Ok(())
 }
 
+/// Callgraph sidecars retain exact declaration byte offsets because those are
+/// the stable compiler coordinates. Human text needs the corresponding line
+/// and column, however; convert that offset through the source line table
+/// once per file while leaving the machine-readable offset unchanged.
 // dump-edges — the renderer. `EdgeRecord` collection lives in `bonsai_sdk::edges`.
 #[allow(clippy::too_many_arguments)] // stable parameter list — one field per --flag
 pub(crate) fn cmd_dump_edges(
@@ -219,9 +224,7 @@ pub(crate) fn cmd_dump_resolution(
         ("file", file_filter.unwrap_or("")),
         ("unresolved_only", if unresolved_only { "1" } else { "0" }),
     ]);
-    let cost = |row: &bonsai_sdk::ResolutionCoverageFileRow| {
-        (row.file.len() + row.decls.len().saturating_mul(48) + 96) as u64 + paging::TABLE_ROW_CHROME_BYTES
-    };
+    let cost = |row: &bonsai_sdk::ResolutionCoverageFileRow| resolution_coverage_row_cost(row);
     let analysis_reasons = super::touched_parser_incomplete_reasons(project.workspace());
     match format {
         BrowseFormat::Json => {
@@ -255,6 +258,39 @@ pub(crate) fn cmd_dump_resolution(
         }
     }
     Ok(())
+}
+
+/// The resolution text view renders one file summary row and a second
+/// declaration table row for every nested declaration. Pricing only a small
+/// fixed amount per declaration used to let a default page emit hundreds of
+/// thousands of bytes because the 13-column table wraps across many physical
+/// lines. Keep the estimate conservative and tied to every variable-width
+/// field so text stays near the advertised context budget while JSON remains
+/// exact.
+fn resolution_coverage_row_cost(row: &bonsai_sdk::ResolutionCoverageFileRow) -> u64 {
+    let file_width = row.file.len() as u64;
+    let file_gap_width = row
+        .analysis_incomplete_reasons
+        .iter()
+        .map(String::len)
+        .sum::<usize>() as u64;
+    let file_row = 2_400_u64
+        .saturating_add(file_width.saturating_mul(4))
+        .saturating_add(file_gap_width.saturating_mul(4));
+    let declaration_rows = row.decls.iter().map(|decl| {
+        let gap_width = decl
+            .analysis_incomplete_reasons
+            .iter()
+            .map(String::len)
+            .sum::<usize>() as u64;
+        4_096_u64
+            .saturating_add(file_width.saturating_mul(4))
+            .saturating_add((decl.name.len() + decl.kind.len()) as u64 * 4)
+            .saturating_add(gap_width.saturating_mul(4))
+    });
+    file_row
+        .saturating_add(declaration_rows.sum::<u64>())
+        .saturating_add(paging::TABLE_ROW_CHROME_BYTES)
 }
 
 fn render_resolution_coverage_text(rows: &[bonsai_sdk::ResolutionCoverageFileRow], total: usize) {

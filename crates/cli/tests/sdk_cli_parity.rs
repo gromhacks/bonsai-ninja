@@ -127,6 +127,35 @@ fn run_cli(args: &[&str]) -> Value {
     })
 }
 
+fn run_cli_with_cache_root(args: &[&str], cache_root: &Path, no_cache: bool) -> Value {
+    let mut command = Command::new(bin_path());
+    command
+        .args(args)
+        .arg("--no-color")
+        .current_dir(repo_root())
+        .env("COLUMNS", "200")
+        .env("BONSAI_WORKSPACE_DIR", cache_root)
+        .env_remove("BONSAI_CONTEXT");
+    if no_cache {
+        command.arg("--no-cache");
+    }
+    let out = command.output().expect("run bonsai-ninja");
+    assert!(
+        out.status.success(),
+        "bonsai-ninja {:?} exited with {}:\nstdout={}\nstderr={}",
+        args,
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|err| {
+        panic!(
+            "invalid JSON for {args:?}: {err}\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
+}
+
 fn run_cli_text(args: &[&str]) -> String {
     let out = Command::new(bin_path())
         .args(args)
@@ -1257,6 +1286,48 @@ fn security_analysis_cli_json_matches_sdk_for_every_language() {
         );
         assert_json_rows_eq(&format!("{lang} sink-analysis"), cli_sink, sdk_sink);
     }
+}
+
+#[test]
+fn kotlin_sink_analysis_matches_between_resident_persisted_and_warm_idg() {
+    let cache_root = std::env::temp_dir().join(format!(
+        "bonsai-cli-idg-parity-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&cache_root).expect("create isolated cache root");
+    let args = [
+        "security",
+        "test-fixtures/languages/kotlin/micro",
+        "sink-analysis",
+        "--rules-dir",
+        "security-patterns",
+        "--profile",
+        "all",
+        "--all",
+        "--format",
+        "json",
+    ];
+    let resident = rows_or_array(run_cli_with_cache_root(&args, &cache_root, true));
+    let persisted = rows_or_array(run_cli_with_cache_root(&args, &cache_root, false));
+    let warm = rows_or_array(run_cli_with_cache_root(&args, &cache_root, false));
+    let _ = std::fs::remove_dir_all(&cache_root);
+
+    let mut resident = resident;
+    let mut persisted = persisted;
+    let mut warm = warm;
+    normalize_json_files(&mut resident);
+    normalize_json_files(&mut persisted);
+    normalize_json_files(&mut warm);
+    assert_json_eq(
+        "Kotlin resident/persisted sink-analysis",
+        resident,
+        persisted.clone(),
+    );
+    assert_json_eq("Kotlin persisted/warm sink-analysis", persisted, warm);
 }
 
 #[test]

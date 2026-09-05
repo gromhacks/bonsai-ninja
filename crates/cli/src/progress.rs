@@ -22,6 +22,37 @@ const COLOR_COUNTED_SPINNER_TEMPLATE: &str = "  {spinner:.cyan} {msg} · {pos} c
 /// [`progress_bar`] call reads it.
 static NO_PROGRESS: OnceLock<bool> = OnceLock::new();
 static NO_COLOR_PROGRESS: OnceLock<bool> = OnceLock::new();
+static ACTIVE_PROGRESS: OnceLock<Mutex<Vec<ProgressBar>>> = OnceLock::new();
+
+fn active_progress() -> &'static Mutex<Vec<ProgressBar>> {
+    ACTIVE_PROGRESS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn track(bar: &ProgressBar) {
+    active_progress()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(bar.clone());
+}
+
+/// Clear every live progress bar before writing user-visible command output.
+///
+/// Progress bars write to stderr while command reports write to stdout (or an
+/// output file). Those streams are independent, so leaving a ticking bar
+/// alive while a report is emitted lets a redraw land in the middle of source
+/// code or a table. Every bar created by this module is registered here; the
+/// output boundary drains and clears the registry before the first visible
+/// byte is written. Later `finish_and_clear` calls remain harmless.
+pub(crate) fn finish_all_for_output() {
+    let bars = std::mem::take(
+        &mut *active_progress()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for bar in bars {
+        bar.finish_and_clear();
+    }
+}
 
 /// Install the `--no-progress` toggle. Called once from the
 /// top-level CLI dispatch before any command runs.
@@ -97,6 +128,7 @@ pub(crate) fn progress_bar(label: &str, total: u64) -> ProgressBar {
         bar.set_style(style.progress_chars("━━╸ "));
     }
     bar.set_message(label.to_string());
+    track(&bar);
     bar
 }
 
@@ -119,6 +151,7 @@ pub(crate) fn spinner(label: &str) -> ProgressBar {
     }
     spin.set_message(label.to_string());
     spin.enable_steady_tick(std::time::Duration::from_millis(120));
+    track(&spin);
     spin
 }
 
@@ -278,5 +311,14 @@ mod tests {
             ProgressStyle::with_template(template)
                 .unwrap_or_else(|error| panic!("invalid progress template {template:?}: {error}"));
         }
+    }
+
+    #[test]
+    fn output_boundary_finishes_every_registered_bar() {
+        let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::hidden());
+        track(&bar);
+        assert!(!bar.is_finished());
+        finish_all_for_output();
+        assert!(bar.is_finished());
     }
 }

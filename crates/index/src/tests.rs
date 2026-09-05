@@ -311,6 +311,16 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
                 }],
             },
             FlowEvent::Assign {
+                span: Span::new(file, 12, 19),
+                target: "callback".to_string(),
+                source_name: Some("handler".to_string()),
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: vec!["handler".to_string()],
+                declares_new_binding: true,
+                value_kind: None,
+            },
+            FlowEvent::Assign {
                 span: call_span,
                 target: "output".to_string(),
                 source_name: None,
@@ -395,6 +405,9 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
     assert_eq!(facts.calls[0].receiver.as_deref(), Some("receiver"));
     assert_eq!(&*facts.calls[0].arg_spans, &[arg_span]);
     assert!(facts.calls[0].has_writeback_arg);
+    assert_eq!(facts.callable_aliases.len(), 1);
+    assert_eq!(&*facts.callable_aliases[0].target, "callback");
+    assert_eq!(&*facts.callable_aliases[0].source, "handler");
     assert_eq!(facts.call_result_assignments.len(), 1);
     assert!(facts.call_result_assignments[0].has_explicit_args);
     assert_eq!(facts.consumed_call_results, vec![call_span]);

@@ -154,6 +154,11 @@ pub struct CallgraphRow {
     pub qualified_name: Option<String>,
     pub file: String,
     pub name_start: u64,
+    /// One-based source location for the callable name. `name_start` remains
+    /// the exact byte anchor; these fields make the JSON row sufficient for
+    /// the human renderer without deriving a hidden location at print time.
+    pub line: u32,
+    pub column: u32,
     pub callers: usize,
     pub outgoing: usize,
 }
@@ -186,6 +191,14 @@ pub fn callgraph_summary(ws: &Workspace, resolved: &ResolvedCallGraph) -> Vec<Ca
                 let func = bonsai_common::FuncId::new(func_decl.symbol.raw());
                 let caller_count = unique_semantic_callers(resolved, func).len();
                 let outgoing_count = unique_semantic_callees(resolved, func).len();
+                let (line, column) = ws
+                    .db()
+                    .span_map(file)
+                    .map(|map| {
+                        let location = map.line_col(func_decl.name_span.start);
+                        (location.line, location.column)
+                    })
+                    .unwrap_or((0, 0));
                 per_file.push(CallgraphRow {
                     function: func_decl.name.clone(),
                     qualified_name: func_decl.qualified_name.clone(),
@@ -194,6 +207,8 @@ pub fn callgraph_summary(ws: &Workspace, resolved: &ResolvedCallGraph) -> Vec<Ca
                         |path| workspace_relative_path(ws, &path.display().to_string()),
                     ),
                     name_start: func_decl.name_span.start,
+                    line,
+                    column,
                     callers: caller_count,
                     outgoing: outgoing_count,
                 });

@@ -36,6 +36,12 @@ struct DeclDedupKey {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FunctionLinkageFacts {
     pub calls: Vec<CallLinkageFact>,
+    /// Simple adapter-lowered place aliases (`callback = source`) retained
+    /// for cold higher-order candidate planning. These facts do not assert
+    /// that `source` is callable; exact body resolution proves that before
+    /// admitting an indirect call edge.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callable_aliases: Vec<CallableAliasLinkageFact>,
     pub call_result_assignments: Vec<CallResultLinkageFact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consumed_call_results: Vec<Span>,
@@ -48,12 +54,20 @@ impl FunctionLinkageFacts {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.calls.is_empty()
+            && self.callable_aliases.is_empty()
             && self.call_result_assignments.is_empty()
             && self.consumed_call_results.is_empty()
             && self.returned_constructor_calls.is_empty()
             && self.returned_projection_tails.is_empty()
             && !self.has_summary_output
     }
+}
+
+/// One simple assignment alias between adapter-normalized storage places.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CallableAliasLinkageFact {
+    pub target: Box<str>,
+    pub source: Box<str>,
 }
 
 /// One grammar-derived call site needed by interprocedural stitching.
@@ -451,12 +465,13 @@ impl GlobalIndex {
     /// needed while stitching a streamed IDG.
     ///
     /// Transfer still consumes the complete freshly lowered file body. The
-    /// retained facts are only calls, call-result assignment arity, returned
-    /// constructor identity, return presence, and returned projection tails:
-    /// the exact information used for call-site ownership, callback argument
-    /// spans, receiver dispatch, summary planning, and accessor returns after
-    /// per-function transfer outputs exist. No [`FlowEvent`] body survives
-    /// this compiler phase boundary.
+    /// retained facts are only calls, simple callable-place aliases,
+    /// call-result assignment arity, returned constructor identity, return
+    /// presence, and returned projection tails: the exact information used
+    /// for call-site ownership, callback argument spans, receiver dispatch,
+    /// summary planning, and accessor returns after per-function transfer
+    /// outputs exist. No [`FlowEvent`] body survives this compiler phase
+    /// boundary.
     pub fn insert_linkage_header_preprocessed(&mut self, mut index: DeclIndex) {
         dedup_decl_index_defs(&mut index);
         let mut consumed_by_symbol = consumed_call_results_by_symbol(&index);
@@ -1210,6 +1225,9 @@ fn function_linkage_facts(events: &[FlowEvent]) -> FunctionLinkageFacts {
     let returned_call_sites = ReturnedCallSiteIndex::new(events);
     collect_function_linkage_facts(events, &returned_call_sites, &mut facts);
     facts.calls.shrink_to_fit();
+    facts.callable_aliases.sort_unstable();
+    facts.callable_aliases.dedup();
+    facts.callable_aliases.shrink_to_fit();
     facts.call_result_assignments.shrink_to_fit();
     facts.consumed_call_results.sort_unstable();
     facts.consumed_call_results.dedup();
@@ -1409,6 +1427,19 @@ fn collect_function_linkage_facts(
                 span: *span,
                 has_explicit_args: !source_call_args.is_empty(),
             }),
+            FlowEvent::Assign {
+                target,
+                source_name: Some(source_name),
+                source_call: None,
+                source_names,
+                value_kind,
+                ..
+            } if simple_assignment_alias(source_name, source_names, *value_kind) => {
+                facts.callable_aliases.push(CallableAliasLinkageFact {
+                    target: target.trim().to_owned().into_boxed_str(),
+                    source: source_name.trim().to_owned().into_boxed_str(),
+                });
+            }
             FlowEvent::Return {
                 value_text,
                 value_name,
@@ -1485,6 +1516,20 @@ fn collect_function_linkage_facts(
             _ => {}
         }
     }
+}
+
+fn simple_assignment_alias(
+    source_name: &str,
+    source_names: &[String],
+    value_kind: Option<bonsai_lang_api::AssignValueKind>,
+) -> bool {
+    let source_name = source_name.trim();
+    !source_name.is_empty()
+        && !matches!(
+            value_kind,
+            Some(bonsai_lang_api::AssignValueKind::Literal | bonsai_lang_api::AssignValueKind::CallResult)
+        )
+        && (source_names.is_empty() || source_names.iter().all(|name| name.trim() == source_name))
 }
 
 fn merge_duplicate_decl(into: &mut Decl, mut duplicate: Decl) {

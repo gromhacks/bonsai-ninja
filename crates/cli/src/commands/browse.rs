@@ -127,6 +127,117 @@ fn canonical_browse_row<T: serde::Serialize>(
     Ok(value)
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+struct BrowseUsedIn {
+    file: String,
+    callers_in: Vec<bonsai_sdk::ModuleEdgeGroup>,
+}
+
+/// Exact incoming cross-module call sites for the callable identities
+/// represented by a browse page. A source row first resolves through the
+/// compiler's enclosing-function ranges; incoming edges are then joined by
+/// the target declaration name and declaration line. This keeps filtered
+/// browse pages from inheriting unrelated callers from the same file.
+fn browse_used_in_connections<T: BrowseRowLocation>(ws: &Workspace, rows: &[T]) -> Vec<BrowseUsedIn> {
+    let annotator = bonsai_sdk::SummaryAnnotator::new(ws);
+    let headers = ws.compiler_header_index();
+    let mut targets =
+        std::collections::BTreeMap::<bonsai_common::FileId, std::collections::BTreeSet<(String, u32)>>::new();
+    for row in rows {
+        let Some(file) = bonsai_sdk::workspace_file_id(ws, row.row_file()) else {
+            continue;
+        };
+        let Some(func) = annotator.enclosing_function_id(row.row_file(), row.row_line()) else {
+            continue;
+        };
+        let Some(decl) = headers
+            .decls_in(file)
+            .iter()
+            .find(|decl| decl.symbol.raw() == func.raw())
+        else {
+            continue;
+        };
+        let (_, declaration_line, _) = bonsai_sdk::format_span(&decl.name_span, ws);
+        targets
+            .entry(file)
+            .or_default()
+            .insert((decl.name.clone(), declaration_line));
+    }
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let file_ids = targets.keys().copied().collect::<Vec<_>>();
+    bonsai_sdk::file_connections(ws, &file_ids)
+        .into_iter()
+        .filter_map(|facts| {
+            let wanted = targets.get(&facts.file_id)?;
+            let callers_in = facts
+                .callers_in
+                .into_iter()
+                .filter_map(|mut group| {
+                    group.edges.retain(|edge| {
+                        wanted
+                            .iter()
+                            .any(|(name, line)| edge.callee == *name && edge.callee_line == *line)
+                    });
+                    (!group.edges.is_empty()).then_some(group)
+                })
+                .collect::<Vec<_>>();
+            (!callers_in.is_empty()).then_some(BrowseUsedIn {
+                file: facts.file,
+                callers_in,
+            })
+        })
+        .collect()
+}
+
+/// Render the incoming compiler-resolved cross-module uses for the current
+/// page. This is intentionally a section rather than a table column: it is a
+/// callable-level relation shared by all syntax row kinds, and keeping it out
+/// of the dense row table preserves the exact source fact without widening
+/// every browse schema. Empty sections are still rendered so every browse
+/// command has the same discoverable cross-module affordance.
+fn render_browse_used_in_section<T: BrowseRowLocation>(u: &Ui, ws: &Workspace, rows: &[T]) {
+    let connections = browse_used_in_connections(ws, rows);
+    cli_println!("{}", u.heading("used in (cross-module)"));
+    if connections.is_empty() {
+        cli_println!(
+            "  {}",
+            u.dim("no compiler-resolved cross-module callers on this page")
+        );
+        return;
+    }
+    let mut table = u.table(&["target", "caller", "callee", "call site", "edge"]);
+    for facts in connections {
+        for group in facts.callers_in {
+            for edge in group.edges {
+                let caller = format!("{} ({})", edge.caller, group.file);
+                let call_site = format!("{}:{}:{}", group.file, edge.line, edge.column);
+                table.add_row(vec![
+                    Cell::new(u.path(&facts.file)),
+                    Cell::new(u.name(&caller)),
+                    Cell::new(u.name(&edge.callee)),
+                    Cell::new(u.path(&call_site)),
+                    Cell::new(u.annotation(&edge.edge_id)),
+                ]);
+            }
+        }
+    }
+    cli_println!("{table}");
+}
+
+fn browse_used_in_json<T: BrowseRowLocation>(ws: &Workspace, rows: &[T]) -> Vec<serde_json::Value> {
+    browse_used_in_connections(ws, rows)
+        .into_iter()
+        .map(|facts| {
+            serde_json::json!({
+                "file": facts.file,
+                "callers_in": facts.callers_in,
+            })
+        })
+        .collect()
+}
+
 /// Apply the global `--contains` / `--not-contains` view to browse rows.
 ///
 /// The filter reads the semantic row — every field the JSON `rows[]` entry
@@ -203,23 +314,29 @@ fn row_location_leaf<T: serde::Serialize>(row: &T, out: &mut String) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Files a browse row renders from; every cached row type carries `file`.
-pub(crate) trait BrowseRowFile {
+/// Source location a browse row renders from. Every cached row type carries a
+/// file and line, so the compiler can resolve its enclosing callable without
+/// reparsing or name-based cross-module lookup.
+pub(crate) trait BrowseRowLocation {
     fn row_file(&self) -> &str;
+    fn row_line(&self) -> u32;
 }
 
-macro_rules! browse_row_file {
+macro_rules! browse_row_location {
     ($($ty:ty),* $(,)?) => {
-        $(impl BrowseRowFile for $ty {
+        $(impl BrowseRowLocation for $ty {
             fn row_file(&self) -> &str {
                 &self.file
+            }
+
+            fn row_line(&self) -> u32 {
+                self.line
             }
         })*
     };
 }
 
-browse_row_file!(
+browse_row_location!(
     bonsai_sdk::DefOut,
     bonsai_sdk::CallOut,
     bonsai_sdk::RefOut,
@@ -251,7 +368,7 @@ fn open_project_for_rows_window<T>(
     cost: &dyn Fn(&T) -> u64,
 ) -> Result<(bonsai_sdk::Project, WorkspaceFooter, bool)>
 where
-    T: Clone + serde::Serialize + BrowseRowFile,
+    T: Clone + serde::Serialize + BrowseRowLocation,
 {
     let filtered = filter_browse_rows_by_canonical_value(rows, &|_: &T| Ok(serde_json::Value::Null))?;
     let rows: &[T] = filtered.as_deref().unwrap_or(rows);
@@ -293,6 +410,7 @@ where
 #[allow(clippy::too_many_arguments)]
 fn emit_canonical_browse_json<T, C, P>(
     workspace: &std::path::Path,
+    ws: &Workspace,
     rows: &[T],
     cfg: &paging::PagingConfig,
     command: &str,
@@ -302,7 +420,7 @@ fn emit_canonical_browse_json<T, C, P>(
     analysis_incomplete_reasons: &[String],
 ) -> Result<()>
 where
-    T: Clone + serde::Serialize,
+    T: Clone + serde::Serialize + BrowseRowLocation,
     C: Fn(&T) -> u64,
     P: Fn(&T) -> Result<serde_json::Value>,
 {
@@ -326,6 +444,7 @@ where
                     paged_json_incomplete_reasons(command, info)
                 },
                 "rows": rendered,
+                "used_in": browse_used_in_json(ws, slice),
                 "page": page_info_to_json(info),
             });
             crate::output::emit_json_document(&wrapped)?;
@@ -588,6 +707,7 @@ pub(crate) fn cmd_defs(
         BrowseFormat::Json => {
             emit_canonical_browse_json(
                 root,
+                ws,
                 rows,
                 &paging_cfg,
                 "defs",
@@ -654,6 +774,7 @@ pub(crate) fn cmd_defs(
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
+                    render_browse_used_in_section(u, ws, &rows);
                     render_paging_footer(info, "bonsai-ninja defs <workspace>");
                     Ok(())
                 },
@@ -681,6 +802,12 @@ pub(crate) fn cmd_entrypoints(
         let loc_len = short_file(&e.file).len() + 24;
         let params_len = e.params.iter().map(|p| p.len() + 2).sum::<usize>();
         let callees_len = e.callees.iter().map(|c| c.len() + 3).sum::<usize>();
+        // Entry-point rows have six independently wrapped columns. The
+        // shared table model prices their combined width, while comfy-table
+        // repeats borders/padding at each column wrap and the renderer also
+        // formats the signature/callee preview. Keep this command's estimate
+        // conservative so a normal context page does not render over its
+        // advertised budget.
         browse_table_row_cost(&[
             e.name.len(),
             e.kind.len(),
@@ -689,6 +816,8 @@ pub(crate) fn cmd_entrypoints(
             callees_len,
             e.reason.len(),
         ])
+        .saturating_mul(5)
+        .saturating_div(4)
     };
     let cached_rows =
         page_cache::read_rows_payload::<bonsai_sdk::EntryPointOut>(root, "entrypoints", filters_hash)?;
@@ -743,6 +872,7 @@ pub(crate) fn cmd_entrypoints(
         BrowseFormat::Json => {
             emit_canonical_browse_json(
                 root,
+                project.workspace(),
                 rows,
                 &paging_cfg,
                 "entrypoints",
@@ -793,6 +923,7 @@ pub(crate) fn cmd_entrypoints(
                     cli_println!("{}", u.dim(&format!("({} entry points)", info.total_rows)));
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
+                    render_browse_used_in_section(u, project.workspace(), &rows);
                     render_paging_footer(info, "bonsai-ninja entrypoints <workspace>");
                     Ok(())
                 },
@@ -1315,6 +1446,7 @@ pub(crate) fn cmd_calls(
         BrowseFormat::Json => {
             emit_canonical_browse_json(
                 root,
+                ws,
                 rows,
                 &paging_cfg,
                 "calls",
@@ -1343,7 +1475,7 @@ pub(crate) fn cmd_calls(
                     let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
                     let mut flow_status = SummaryColumnStatus::default();
                     let headers =
-                        with_summaries_header(&["callee text", "caller", "location", "code"], flows);
+                        with_summaries_header(&["callee text", "caller function", "location", "code"], flows);
                     let mut t = u.table(&headers);
                     for c in &rows {
                         let caller = c.caller.as_deref().unwrap_or("-");
@@ -1374,6 +1506,7 @@ pub(crate) fn cmd_calls(
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
+                    render_browse_used_in_section(u, ws, &rows);
                     render_paging_footer(info, "bonsai-ninja calls <workspace>");
                     Ok(())
                 },
@@ -1759,6 +1892,7 @@ pub(crate) fn cmd_imports(
         BrowseFormat::Json => {
             emit_canonical_browse_json(
                 root,
+                ws,
                 rows,
                 &paging_cfg,
                 "imports",
@@ -1824,6 +1958,7 @@ pub(crate) fn cmd_imports(
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
+                    render_browse_used_in_section(u, ws, &rows);
                     render_paging_footer(info, "bonsai-ninja imports <workspace>");
                     Ok(())
                 },
@@ -1954,6 +2089,7 @@ pub(crate) fn cmd_vars(
         BrowseFormat::Json => {
             emit_canonical_browse_json(
                 root,
+                ws,
                 rows,
                 &paging_cfg,
                 "vars",
@@ -1976,7 +2112,8 @@ pub(crate) fn cmd_vars(
                     let u = ui();
                     let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
                     let mut flow_status = SummaryColumnStatus::default();
-                    let headers = with_summaries_header(&["var", "in", "source", "location", "code"], flows);
+                    let headers =
+                        with_summaries_header(&["var", "in function", "source", "location", "code"], flows);
                     let mut t = u.table(&headers);
                     for v in &rows {
                         let loc = format!("{}:{}:{}", short_file(&v.file), v.line, v.column);
@@ -2008,6 +2145,7 @@ pub(crate) fn cmd_vars(
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
+                    render_browse_used_in_section(u, ws, &rows);
                     render_paging_footer(info, "bonsai-ninja vars <workspace>");
                     Ok(())
                 },
@@ -2133,6 +2271,7 @@ pub(crate) fn cmd_strings(
         BrowseFormat::Json => {
             emit_canonical_browse_json(
                 root,
+                ws,
                 rows,
                 &paging_cfg,
                 "strings",
@@ -2156,8 +2295,10 @@ pub(crate) fn cmd_strings(
                     let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
                     let enclosing_ann = bonsai_sdk::SummaryAnnotator::new(ws);
                     let mut flow_status = SummaryColumnStatus::default();
-                    let headers =
-                        with_summaries_header(&["category", "text", "in", "location", "code"], flows);
+                    let headers = with_summaries_header(
+                        &["category", "text", "in function", "location", "code"],
+                        flows,
+                    );
                     let mut t = u.table(&headers);
                     for s in &rows {
                         let preview = truncate(&s.text, 60);
@@ -2192,6 +2333,7 @@ pub(crate) fn cmd_strings(
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
+                    render_browse_used_in_section(u, ws, &rows);
                     render_paging_footer(info, "bonsai-ninja strings <workspace>");
                     Ok(())
                 },
@@ -2272,6 +2414,7 @@ pub(crate) fn cmd_comments(
         BrowseFormat::Json => {
             emit_canonical_browse_json(
                 root,
+                ws,
                 rows,
                 &paging_cfg,
                 "comments",
@@ -2293,7 +2436,7 @@ pub(crate) fn cmd_comments(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let enclosing_ann = bonsai_sdk::SummaryAnnotator::new(ws);
-                    let headers = &["kind", "text", "in", "location"];
+                    let headers = &["kind", "text", "in function", "location"];
                     let mut t = u.table(headers);
                     for c in &rows {
                         let preview = truncate(&c.text.replace('\n', " "), 100);
@@ -2313,6 +2456,7 @@ pub(crate) fn cmd_comments(
                     cli_println!("{}", u.dim(&format!("({} comments)", info.total_rows)));
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
+                    render_browse_used_in_section(u, ws, &rows);
                     render_paging_footer(info, "bonsai-ninja comments <workspace>");
                     Ok(())
                 },
@@ -2457,6 +2601,7 @@ pub(crate) fn cmd_args(
         BrowseFormat::Json => {
             emit_canonical_browse_json(
                 root,
+                ws,
                 rows,
                 &paging_cfg,
                 "args",
@@ -2481,7 +2626,14 @@ pub(crate) fn cmd_args(
                     let enclosing_ann = bonsai_sdk::SummaryAnnotator::new(ws);
                     let mut flow_status = SummaryColumnStatus::default();
                     let headers = with_summaries_header(
-                        &["callee text", "pos", "arg", "caller", "location", "code"],
+                        &[
+                            "callee text",
+                            "position",
+                            "value",
+                            "in function",
+                            "location",
+                            "code",
+                        ],
                         flows,
                     );
                     let mut t = u.table(&headers);
@@ -2524,6 +2676,7 @@ pub(crate) fn cmd_args(
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
+                    render_browse_used_in_section(u, ws, &rows);
                     render_paging_footer(info, "bonsai-ninja args <workspace>");
                     Ok(())
                 },
@@ -2668,6 +2821,7 @@ pub(crate) fn cmd_operations(
         BrowseFormat::Json => {
             emit_canonical_browse_json(
                 root,
+                ws,
                 rows,
                 &paging_cfg,
                 "operations",
@@ -2691,7 +2845,15 @@ pub(crate) fn cmd_operations(
                     let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
                     let mut flow_status = SummaryColumnStatus::default();
                     let headers = with_summaries_header(
-                        &["kind", "name", "in", "detail", "operands", "location", "code"],
+                        &[
+                            "kind",
+                            "name",
+                            "in function",
+                            "detail",
+                            "operands",
+                            "location",
+                            "code",
+                        ],
                         flows,
                     );
                     let mut t = u.table(&headers);
@@ -2737,6 +2899,7 @@ pub(crate) fn cmd_operations(
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
+                    render_browse_used_in_section(u, ws, &rows);
                     render_paging_footer(info, "bonsai-ninja operations <workspace>");
                     Ok(())
                 },
@@ -2849,6 +3012,7 @@ pub(crate) fn cmd_classes(
         BrowseFormat::Json => {
             emit_canonical_browse_json(
                 root,
+                ws,
                 rows,
                 &paging_cfg,
                 "classes",
@@ -2871,7 +3035,10 @@ pub(crate) fn cmd_classes(
                     let u = ui();
                     let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
                     let mut flow_status = SummaryColumnStatus::default();
-                    let headers = with_summaries_header(&["name", "kind", "location", "#", "methods"], flows);
+                    let headers = with_summaries_header(
+                        &["name", "kind", "location", "method count", "methods"],
+                        flows,
+                    );
                     let mut t = u.table(&headers);
                     for c in &rows {
                         let loc = format!("{}:{}", short_file(&c.file), c.line);
@@ -2910,6 +3077,7 @@ pub(crate) fn cmd_classes(
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
+                    render_browse_used_in_section(u, ws, &rows);
                     render_paging_footer(info, "bonsai-ninja classes <workspace>");
                     Ok(())
                 },
@@ -2981,6 +3149,7 @@ pub(crate) fn cmd_refs(
         BrowseFormat::Json => {
             emit_canonical_browse_json(
                 root,
+                ws,
                 rows,
                 &paging_cfg,
                 "refs",
@@ -3004,7 +3173,8 @@ pub(crate) fn cmd_refs(
                     let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
                     let enclosing_ann = bonsai_sdk::SummaryAnnotator::new(ws);
                     let mut flow_status = SummaryColumnStatus::default();
-                    let headers = with_summaries_header(&["symbol", "kind", "in", "location", "code"], flows);
+                    let headers =
+                        with_summaries_header(&["symbol", "kind", "in function", "location", "code"], flows);
                     let mut t = u.table(&headers);
                     for r in &rows {
                         let loc = format!("{}:{}:{}", short_file(&r.file), r.line, r.column);
@@ -3038,6 +3208,7 @@ pub(crate) fn cmd_refs(
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
+                    render_browse_used_in_section(u, ws, &rows);
                     render_paging_footer(info, "bonsai-ninja refs <workspace> <symbol>");
                     Ok(())
                 },
@@ -3133,6 +3304,7 @@ pub(crate) fn cmd_search(
         BrowseFormat::Json => {
             emit_canonical_browse_json(
                 root,
+                ws,
                 rows,
                 &paging_cfg,
                 "search",
@@ -3196,6 +3368,7 @@ pub(crate) fn cmd_search(
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
+                    render_browse_used_in_section(u, ws, &rows);
                     render_paging_footer(info, "bonsai-ninja search <workspace> <query>");
                     Ok(())
                 },

@@ -9042,6 +9042,16 @@ impl IdgQueryService {
         let _ = self.ensure_symbolic_runtime(&unified, None);
     }
 
+    /// Build the exact contextual call/return relation before a batch of
+    /// function-local closures starts. Function-local queries still apply
+    /// their own compiler corridor while traversing this immutable runtime;
+    /// publishing it first prevents one worker's projected-heap lookup from
+    /// changing which scoped representation another worker observes.
+    pub fn warm_contextual_query_runtime(&self) {
+        let unified = self.ensure_unified();
+        let _ = self.ensure_contextual_summary_runtime(&unified, None);
+    }
+
     fn ensure_symbolic_runtime(
         &self,
         unified: &Arc<UnifiedAddressSpace>,

@@ -21,7 +21,7 @@ use ahash::{AHashMap, AHashSet};
 use anyhow::{anyhow, Context, Result};
 use bonsai_common::{
     dependency_metadata::collect_dependency_metadata_fingerprints, workspace_bonsai_dir, write_atomic_bytes,
-    FileId, FuncId, MATCHER_POLICY_FINGERPRINT,
+    FileId, FuncId, SpanMap, MATCHER_POLICY_FINGERPRINT,
 };
 use bonsai_lang_api::{Decl, LanguageRegistry};
 use bonsai_workspace::{FileRefreshKind, SourceFileStamp, WorkspaceOpenOptions};
@@ -841,7 +841,9 @@ impl Bonsai {
     }
 
     /// Read a complete per-callable callgraph summary from the exact
-    /// partitioned sidecar without opening source bodies.
+    /// partitioned sidecar without parsing source bodies. The display line
+    /// table is read once per file so callers receive the same exact
+    /// line/column fields as a cold compiler-backed build.
     ///
     /// `None` means the sidecar is absent, stale, or unreadable; callers can
     /// then use the canonical workspace build. Retrieval is an acceleration
@@ -891,23 +893,33 @@ impl Bonsai {
                 return Ok(None);
             }
         };
+        let mut line_maps: AHashMap<String, Option<SpanMap>> = AHashMap::new();
         let mut rows = raw
             .into_iter()
             .map(|row| {
+                let path = paths
+                    .get(&row.file.raw())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "callgraph function {} references missing compiler source {}",
+                            row.function.raw(),
+                            row.file.raw()
+                        )
+                    })?
+                    .clone();
+                let location = line_maps
+                    .entry(path.clone())
+                    .or_insert_with(|| fs::read_to_string(&path).ok().map(|source| SpanMap::new(&source)))
+                    .as_ref()
+                    .map(|map| map.line_col(row.name_start))
+                    .unwrap_or(bonsai_common::LineCol { line: 0, column: 0 });
                 Ok(bonsai_browse::CallgraphRow {
                     function: row.name,
                     qualified_name: row.qualified_name,
-                    file: paths
-                        .get(&row.file.raw())
-                        .map(|path| bonsai_common::workspace_relative_filter_path(Some(root), path))
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "callgraph function {} references missing compiler source {}",
-                                row.function.raw(),
-                                row.file.raw()
-                            )
-                        })?,
+                    file: bonsai_common::workspace_relative_filter_path(Some(root), &path),
                     name_start: row.name_start,
+                    line: location.line,
+                    column: location.column,
                     callers: row.callers,
                     outgoing: row.outgoing,
                 })

@@ -254,13 +254,13 @@ persists it as a cached object; `--framework`, `--severity`, `--page`, and
 `--format` are views rendered from those rows and the loaded rulepack without
 opening the workspace again.
 
-`dependency-analysis` is the usage view behind `deps`. For every package the
+`dependency-analysis` is the dependency-centered security view behind `deps`. For every package the
 inventory reports, it lists the import statements that bring it in, the local
 names those imports bind (`serialize` in `const serialize = require("node-serialize")`,
 `S` in `use X\Service as S`, the module tail for plain imports), every call or
 reference that reaches the package through one of those names (`serialize.unserialize(...)`),
 every rulepack source / sink / sanitizer match whose rule claims the package,
-and every `taint-analysis` finding the package appears in: a finding whose
+and every complete `taint-analysis` finding the package appears in: a finding whose
 source or sink rule claims the package, or whose propagation steps land on one
 of its usage sites. The findings come from the same cached complete
 taint-analysis report the `taint-analysis` command uses (computed once if it
@@ -275,7 +275,9 @@ both commands share one complete cached taint report, and it projects the
 cached complete source, sink, and sanitizer inventories — the same objects
 `sources`, `sinks`, and `sanitizers` render — instead of scanning the rulepack
 again. `--framework`, `--severity`, `--page`, and `--format` are views over
-that result.
+that result. This is not a package-name heuristic: the taint projection is
+joined to exact compiler source/sink/propagation locations and retains the
+same finding ids, call stacks, and hydrated bodies as `taint-analysis`.
 
 ```bash
 bonsai-ninja security ./src dependency-analysis --framework node-serialize
@@ -874,6 +876,16 @@ the complete copyable `F:<16-hex>` ids. Open one with `show F:...`, or run
 `inspect-graph --query` on the callable; use `inspect-graph --from ...
 --to ...` when the question is transitive reachability.
 
+Every browse command also renders a `used in (cross-module)` text section for
+callable rows on the current page. It lists only incoming callgraph edges
+resolved by the compiler, joined to the exact target declaration (not merely
+the target file), including the stable `E:` edge id and call-site location; an
+empty section explicitly reports that no cross-module callers were proven.
+Native JSON carries the same page-scoped projection as top-level `used_in[]`
+entries shaped as `{file, callers_in[]}`. Paging changes only which page's
+files are projected; it never turns this into name matching or path
+enumeration.
+
 ## Navigation
 
 `tree` is the workspace module map: a filesystem tree where every file row
@@ -957,9 +969,9 @@ bonsai-ninja dump-taint ./src --source handle_request --seed cmd
 | `dump-ast` | Tree-sitter parse tree by file, function, or stable `N:` node id. | `--file`, `--function` (or positional function), `--compact`, `--max-depth`, `--node`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `dump-hir` | Flow-event tree for one function, grouped by compiler structure in text or as one structured object with `--format json`. | `--symbol` (preferred), positional symbol, `--format`, `--output-path` |
 | `dump-cfg` | Basic-block CFG for one function, grouped by block in text or as one structured object with `--format json`. | `--symbol` (preferred), positional symbol, `--format`, `--output-path` |
-| `dump-callgraph` | Per-function caller and outgoing counts. | `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
+| `dump-callgraph` | Per-function caller and outgoing counts with exact source line/column locations in both JSON and text; JSON also retains the byte anchor. | `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `dump-edges` | Resolved call edges with stable `E:` ids, resolver stage, evidence, and confidence. | `--from`, `--to`, `--compact`, `--edge`, `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
-| `dump-resolution` | Per-file and per-decl call resolution coverage from shared `FlowEvent::Call` facts and canonical callgraph edges. | `--file`, `--unresolved-only`, `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
+| `dump-resolution` | Per-file and per-decl call resolution coverage from shared `FlowEvent::Call` facts and canonical callgraph edges; nested declaration rows are paged as one lossless table. | `--file`, `--unresolved-only`, `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `dump-resolve` | Resolver stages and candidates for a name. | `--name` (preferred), positional name, `--in-file`, `--compact`, `--candidate`, `--format`, `--output-path` |
 | `dump-taint` | Taint propagation records from one source function with stable `T:` ids. | `--source`, `--seed`, `--sink`, `--compact`, `--taint`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `diagnostics` | Adapter diagnostic report with parser diagnostics, workspace languages, and per-language capability/evidence tables for adapters present in the workspace; readable text by default, one structured object with `--format json`. | `<WORKSPACE>`, `--format`, `--output-path` |

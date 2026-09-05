@@ -320,6 +320,7 @@ where
     F: FnMut(AnalysisProgress),
 {
     let started = Instant::now();
+    context.idg.warm_contextual_query_runtime();
     let admitted: AHashSet<FuncId> = admitted_funcs.iter().copied().collect();
     let roots: AHashSet<FuncId> = sink_lineage_roots(admitted_funcs, context.call_graph)
         .into_iter()

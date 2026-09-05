@@ -580,11 +580,10 @@ its `upstream_flows`.
 Sink-analysis shares the taint-analysis endpoint matcher, compiler-resolved
 call graph, typed transfer facts, and sparse IDG fixed point. It compiles one
 sink-relevant scope, then analyses every admitted function once per entering
-value with an exact IDG closure confined to that function: one per
-parameter, one per storage read the projected heap feeds from another
-function's tainted write, and one over all places of an entry point (an
-admitted function no admitted function calls, or a member of a call cycle no
-entry point reaches). Callee returns compose through the IDG's contextual
+value with an exact IDG closure confined to that function. The entering
+values are parameters, projected heap-fed reads, and root-owned places;
+roots are functions without admitted callers plus members of unreachable
+call cycles. Callee returns compose through the IDG's contextual
 return summaries, so no callee body is re-explored. Those summaries form a
 graph of `(function, entering value)` nodes joined by tainted call arguments
 and heap relations; an upstream route is a path from an entry point to a sink

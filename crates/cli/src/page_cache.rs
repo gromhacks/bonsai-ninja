@@ -42,7 +42,11 @@ thread_local! {
 // Version 13 stores only the page the caller requested. Earlier versions
 // eagerly formatted neighboring pages, multiplying render cost for commands
 // whose exact analysis had already completed.
-const RENDER_CACHE_VERSION: u32 = 14;
+// Version 15 invalidates compiler-backed security report payloads after
+// lineage rendering changed to retain exact multi-hop chains. The Git-based
+// build fingerprint is intentionally stable for an uncommitted worktree, so
+// semantic report changes must also advance this cache generation.
+const RENDER_CACHE_VERSION: u32 = 15;
 
 /// Stable structural ids are hashes of rendered chains, so the id alone
 /// cannot be inverted into the target declaration that made the query
@@ -209,6 +213,10 @@ where
 }
 
 pub(crate) fn emit_cached_text(text: &str) -> anyhow::Result<()> {
+    // A renderer may have prepared this page while a stage spinner was still
+    // alive. Clear all progress chrome before the first visible report byte so
+    // spinner redraws cannot land inside source snippets or tables.
+    progress::finish_all_for_output();
     if output::write_raw_counted(text) {
         return Ok(());
     }

@@ -330,6 +330,10 @@ package/framework key. Each row groups the rule ids, the rule records
 the key with every workspace-relative file that supplied import evidence.
 `security dependency-analysis` wraps the same `dependency` object per row and
 adds `bound_names`, `sites[]`, and `findings[]` for where the package is used.
+Each `findings[]` value is the complete taint-analysis finding shape: it keeps
+the compiler `source`, `sink`, `taint_path`, stable finding/flow/group ids, and
+the hydrated `flow.functions[].lines[]` bodies used by text rendering. The
+summary's `taint_flow_count` is the exact count of those projected flows.
 
 ```bash
 bonsai-ninja security ./src deps --severity critical --format json --output-path deps.json

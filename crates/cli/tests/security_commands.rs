@@ -2148,6 +2148,70 @@ fn sink_analysis_maps_python_endpoints_and_exact_upstream_paths() {
 }
 
 #[test]
+fn dependency_analysis_projects_complete_taint_flows() {
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let json = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "dependency-analysis",
+        "--framework",
+        "flask",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("dependency-analysis JSON");
+    let rows = json_rows(&parsed);
+    assert!(!rows.is_empty(), "expected the Flask dependency row:\n{json}");
+    assert!(
+        parsed["summary"]["taint_flow_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "dependency-analysis must count projected taint flows:\n{json}"
+    );
+    let flows = rows
+        .iter()
+        .flat_map(|row| row["findings"].as_array().into_iter().flatten())
+        .collect::<Vec<_>>();
+    assert!(
+        !flows.is_empty(),
+        "dependency row must carry taint findings:\n{json}"
+    );
+    assert!(
+        flows.iter().all(|finding| {
+            finding["source"]["rule_id"].as_str().is_some()
+                && finding["sink"]["rule_id"].as_str().is_some()
+                && finding["taint_path"]
+                    .as_array()
+                    .is_some_and(|path| !path.is_empty())
+                && finding["flow"]["flow_id"].as_str().is_some()
+                && finding["flow"]["functions"]
+                    .as_array()
+                    .is_some_and(|functions| !functions.is_empty())
+        }),
+        "dependency-analysis findings must retain the complete taint flow shape:\n{json}"
+    );
+
+    let text = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "dependency-analysis",
+        "--framework",
+        "flask",
+        "--all",
+    ])
+    .unwrap();
+    assert!(
+        text.contains("TAINT FLOWS:") && text.contains("TAINT FLOW 1"),
+        "dependency-analysis text must render the same taint-flow blocks as taint-analysis:\n{text}"
+    );
+}
+
+#[test]
 fn security_analysis_defaults_to_all_severities_and_reports_explicit_floor() {
     let ws = temp_workspace("effective-severity-floor");
     std::fs::write(

@@ -479,7 +479,10 @@ use std::sync::{
 // v174: loop events retain adapter-lowered lexical labels and abrupt loop
 // transfers retain a typed label/lexical-level target. Cached v173 bodies
 // route every break/continue to the nearest loop.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 178;
+// v179: compact function linkage retains adapter-lowered simple assignment
+// aliases so cold reverse callback planning can discover exact consumers
+// without hydrating unrelated workspace bodies.
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 179;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 105;

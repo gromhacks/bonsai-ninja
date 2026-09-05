@@ -729,6 +729,7 @@ const ALL_PAGED_COMMANDS: &[(&str, &[&str])] = &[
     ("args", &[]),
     ("operations", &[]),
     ("classes", &[]),
+    ("entrypoints", &[]),
     ("refs", &["handle_request"]),
     ("search", &["--query", "request"]),
     ("dump-callgraph", &[]),

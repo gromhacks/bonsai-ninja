@@ -595,7 +595,12 @@ pub fn file_connections(ws: &Workspace, files: &[FileId]) -> Vec<FileConnections
                     count_uses(&decl.flow_events, &mut uses);
                 }
                 for reference in &index.refs {
-                    if matches!(reference.kind, RefKind::Read | RefKind::Write) {
+                    // Module-scope calls are represented in the canonical
+                    // reference inventory rather than a named callable's
+                    // flow events. Count them as import uses too: `from x
+                    // import app; app.run()` must not be rendered as an
+                    // unused import merely because the call is top-level.
+                    if matches!(reference.kind, RefKind::Read | RefKind::Write | RefKind::Call) {
                         if let Some(offsets) = uses.get_mut(qualified_head(&reference.name)) {
                             offsets.push(reference.span.start);
                         }

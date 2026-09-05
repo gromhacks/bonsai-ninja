@@ -4215,6 +4215,7 @@ where
                 transfer_options.include_field_argument_forwarding,
                 transfer_options.symbolic_field_forwarding,
                 symbolic_funcs.as_ref(),
+                Some(&capture_funcs),
             ))
         }
     })?;

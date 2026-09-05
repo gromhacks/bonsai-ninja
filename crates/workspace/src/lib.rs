@@ -33,7 +33,9 @@ pub mod value_flow;
 pub mod value_flow_disk;
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{normalize_path_for_filter, scoped_path_filter_matches, FileId, FuncId, SymbolId};
+use bonsai_common::{
+    normalize_path_for_filter, scoped_path_filter_matches, short_qualified_tail, FileId, FuncId, SymbolId,
+};
 use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
 use bonsai_hash::Hasher as StableHasher;
@@ -225,6 +227,128 @@ fn has_summary_output(global: &bonsai_index::GlobalIndex, func: FuncId) -> bool 
             .linkage_facts(SymbolId::new(func.raw()))
             .is_some_and(|facts| facts.has_summary_output)
         || summary_output_shape(&decl.flow_events)
+}
+
+/// Candidate caller files keyed by the exact call names emitted into compact
+/// compiler linkage. This is a planning index only: the callgraph resolver
+/// still proves every admitted edge from the selected file's exact body and
+/// caller context. Keeping the index over compact call facts lets a cold
+/// reverse summary walk discover callers in files that have not been hydrated
+/// yet, without compiling every workspace body or guessing from API names.
+fn linkage_caller_files_by_name(global: &bonsai_index::GlobalIndex) -> AHashMap<String, Vec<FileId>> {
+    let mut files_by_name: AHashMap<String, Vec<FileId>> = AHashMap::new();
+    for file in global.all_files() {
+        for decl in global.functions_in(file) {
+            let Some(facts) = global.linkage_facts(decl.symbol) else {
+                continue;
+            };
+            let mut aliases_by_target: AHashMap<&str, Vec<&str>> = AHashMap::new();
+            for alias in &facts.callable_aliases {
+                let target = alias.target.trim();
+                let source = alias.source.trim();
+                if target.is_empty() || source.is_empty() {
+                    continue;
+                }
+                aliases_by_target.entry(target).or_default().push(source);
+                let tail = short_qualified_tail(target);
+                if tail != target {
+                    aliases_by_target.entry(tail).or_default().push(source);
+                }
+            }
+            for call in &facts.calls {
+                let name = call.name.trim();
+                if name.is_empty() {
+                    continue;
+                }
+                files_by_name.entry(name.to_owned()).or_default().push(file);
+                let tail = short_qualified_tail(name);
+                if tail != name {
+                    files_by_name.entry(tail.to_owned()).or_default().push(file);
+                }
+                // A callable passed as a value is not an execution edge, so
+                // its target is absent from `call.name`. The adapter has
+                // nevertheless proved each addressable argument place in the
+                // compact call fact. Index places that name callable
+                // declarations as reverse candidates; exact body
+                // resolution still decides whether the place is a callable
+                // value at this call site (and rejects shadowed data values).
+                for place in call.arg_places.iter().flatten() {
+                    let place = place.trim().to_owned();
+                    if place.is_empty() {
+                        continue;
+                    }
+                    // Follow only adapter-proven simple place aliases. This
+                    // is a finite compiler projection, not a name search:
+                    // every candidate is still checked against a callable
+                    // declaration and exact body resolution proves the edge.
+                    let mut pending = vec![place];
+                    let mut visited = AHashSet::new();
+                    while let Some(place) = pending.pop() {
+                        if !visited.insert(place.clone()) {
+                            continue;
+                        }
+                        // CONTEXTLESS_LOOKUP_JUSTIFICATION: this is only a
+                        // compiler-index candidate-kind gate; exact body
+                        // resolution remains authoritative for the edge.
+                        if global.find_by_name(&place).iter().any(|symbol| {
+                            global.decl_of(*symbol).is_some_and(|decl| {
+                                matches!(
+                                    decl.kind,
+                                    bonsai_lang_api::DeclKind::Function
+                                        | bonsai_lang_api::DeclKind::Method
+                                        | bonsai_lang_api::DeclKind::Constructor
+                                )
+                            })
+                        }) {
+                            files_by_name.entry(place.clone()).or_default().push(file);
+                            let tail = short_qualified_tail(&place);
+                            if tail != place {
+                                files_by_name.entry(tail.to_owned()).or_default().push(file);
+                            }
+                        }
+                        if let Some(sources) = aliases_by_target.get(place.as_str()) {
+                            pending.extend(sources.iter().map(|source| (*source).to_owned()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for files in files_by_name.values_mut() {
+        files.sort_unstable_by_key(|file| file.raw());
+        files.dedup();
+    }
+    files_by_name
+}
+
+fn queue_linkage_caller_files(
+    global: &bonsai_index::GlobalIndex,
+    files_by_name: &AHashMap<String, Vec<FileId>>,
+    callee: FuncId,
+    queued_files: &mut AHashSet<FileId>,
+) {
+    let Some(decl) = global.decl_of(SymbolId::new(callee.raw())) else {
+        return;
+    };
+    let mut names = Vec::with_capacity(4);
+    for name in std::iter::once(decl.name.as_str()).chain(decl.qualified_name.as_deref()) {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !names.iter().any(|known| known == name) {
+            names.push(name.to_owned());
+        }
+        let tail = short_qualified_tail(name);
+        if tail != name && !names.iter().any(|known| known == tail) {
+            names.push(tail.to_owned());
+        }
+    }
+    for name in names {
+        if let Some(files) = files_by_name.get(&name) {
+            queued_files.extend(files.iter().copied());
+        }
+    }
 }
 
 fn target_emission_requires_callee(
@@ -3180,6 +3304,15 @@ impl Workspace {
         let mut built_files: AHashSet<FileId> = AHashSet::new();
         let mut queued_funcs: AHashSet<FuncId> = AHashSet::new();
         let mut built_funcs: AHashSet<FuncId> = AHashSet::new();
+        // A cold reverse summary walk has no persisted incoming-edge index.
+        // Use the compact compiler call facts to schedule only files whose
+        // syntax can name one of the current reverse targets; exact body
+        // resolution below remains authoritative for edge admission.
+        let linkage_caller_files = if !function_scoped && !reverse_output_funcs.is_empty() {
+            Some(linkage_caller_files_by_name(global.as_ref()))
+        } else {
+            None
+        };
         // Forward propagation starts at sources, while return-value
         // propagation may enter a target caller from one of its callees.
         // Compile both endpoint file sets up front so a target in another
@@ -3190,6 +3323,12 @@ impl Workspace {
                 queued_funcs.insert(*func);
             } else if let Some(file) = global.declaring_file(SymbolId::new(func.raw())) {
                 queued_files.insert(file);
+            }
+        }
+        if let Some(files_by_name) = linkage_caller_files.as_ref() {
+            let initial_reverse_funcs = reverse_output_funcs.iter().copied().collect::<Vec<_>>();
+            for callee in initial_reverse_funcs {
+                queue_linkage_caller_files(global.as_ref(), files_by_name, callee, &mut queued_files);
             }
         }
 
@@ -3287,6 +3426,14 @@ impl Workspace {
                     admitted_edge_ids.insert(edge_id);
                     if reverse_output_funcs.insert(edge.from) {
                         pending_reverse_output.push(edge.from);
+                        if let Some(files_by_name) = linkage_caller_files.as_ref() {
+                            queue_linkage_caller_files(
+                                global.as_ref(),
+                                files_by_name,
+                                edge.from,
+                                &mut queued_files,
+                            );
+                        }
                     }
                     if reached_funcs.insert(edge.from) {
                         pending_reached.push(edge.from);
@@ -3403,6 +3550,14 @@ impl Workspace {
                     admitted_edge_ids.insert(edge_id);
                     if reverse_output_funcs.insert(edge.from) {
                         pending_reverse_output.push(edge.from);
+                        if let Some(files_by_name) = linkage_caller_files.as_ref() {
+                            queue_linkage_caller_files(
+                                global.as_ref(),
+                                files_by_name,
+                                edge.from,
+                                &mut queued_files,
+                            );
+                        }
                     }
                     if reached_funcs.insert(edge.from) {
                         pending_reached.push(edge.from);

@@ -1080,8 +1080,10 @@ fn check_dump_resolution(ws: &str, lang: &str) {
 }
 
 /// Assert `inspect-graph --from <handler> --to <verifier>` finds a semantic
-/// handler -> verifier corridor: at least one decl or occurrence hit must
-/// survive the explicit endpoint filter.
+/// handler -> verifier corridor: the endpoint query is represented by the
+/// dedicated exact `corridor` product, not by ordinary query hit rows. Keep
+/// this assertion on the canonical corridor facts so a language cannot pass
+/// by emitting an unrelated lexical hit.
 fn check_inspect_corridor(ws: &str, lang: &str, handler: &str, verifier: &str) {
     let Some((out, _, code)) = run(&[
         "inspect-graph",
@@ -1101,14 +1103,60 @@ fn check_inspect_corridor(ws: &str, lang: &str, handler: &str, verifier: &str) {
             "[{lang}] inspect-graph --from {handler} --to {verifier} emitted non-JSON output ({err}): {out}"
         )
     });
-    let decl_hits = parsed
-        .get("decl_hits")
-        .and_then(|h| h.as_array())
+    let corridor = parsed.get("corridor").unwrap_or_else(|| {
+        panic!("[{lang}] inspect-graph --from {handler} --to {verifier} omitted its corridor product: {out}")
+    });
+    assert_eq!(
+        corridor.get("from").and_then(serde_json::Value::as_str),
+        Some(handler),
+        "[{lang}] corridor source endpoint mismatch: {out}"
+    );
+    assert_eq!(
+        corridor.get("to").and_then(serde_json::Value::as_str),
+        Some(verifier),
+        "[{lang}] corridor target endpoint mismatch: {out}"
+    );
+    let node_count = corridor
+        .get("node_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let edge_count = corridor
+        .get("edge_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let node_rows = corridor
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
         .map_or(0, Vec::len);
-    let hits = parsed.get("hits").and_then(|h| h.as_array()).map_or(0, Vec::len);
+    let edge_rows = corridor
+        .get("edges")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let stack_functions = corridor
+        .get("stack")
+        .and_then(|stack| stack.get("functions"))
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
     assert!(
-        decl_hits + hits > 0,
+        node_count > 0 && edge_count > 0,
         "[{lang}] inspect-graph --from {handler} --to {verifier} returned an empty corridor: {out}"
+    );
+    assert_eq!(
+        node_rows as u64, node_count,
+        "[{lang}] corridor node_count does not match node rows: {out}"
+    );
+    assert_eq!(
+        edge_rows as u64, edge_count,
+        "[{lang}] corridor edge_count does not match edge rows: {out}"
+    );
+    assert_eq!(
+        corridor.get("representation").and_then(serde_json::Value::as_str),
+        Some("compressed_callgraph"),
+        "[{lang}] corridor must identify its exact representation: {out}"
+    );
+    assert_eq!(
+        stack_functions as u64, node_count,
+        "[{lang}] corridor stack must render every corridor callable: {out}"
     );
 }
 
@@ -1913,6 +1961,21 @@ fn check_language_gauntlet_sink_analysis(ws: &str, lang: &str) {
             );
             if flow
                 .get("chain_names")
+                .and_then(|value| value.as_array())
+                .is_some_and(|chain| chain.len() > 1)
+            {
+                has_multi_hop_semantic_flow = true;
+            }
+        }
+        let security_source_flows = row
+            .get("security_source_flows")
+            .and_then(|value| value.as_array())
+            .unwrap_or_else(|| {
+                panic!("[{lang}] language_gauntlet sink row missing security_source_flows: {row}")
+            });
+        for flow in security_source_flows {
+            if flow
+                .pointer("/chain_display")
                 .and_then(|value| value.as_array())
                 .is_some_and(|chain| chain.len() > 1)
             {

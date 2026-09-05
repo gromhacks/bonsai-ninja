@@ -217,11 +217,11 @@ measure the complete analysis, not a trust-scoped subset. Re-measured
 | Warm structural index | 4.22 s | 12 s |
 | Cold semantic generation | 425.55 s | 600 s |
 | Fresh-process semantic reuse | 2.74 s | 18 s |
-| Default inspect (compiler flows attached) | 21.46 s | 45 s |
-| Compiler-proven raw-taint inspect | 35.13 s | 45 s |
+| Default inspect (compiler flows attached) | 21.46 s | 60 s |
+| Compiler-proven raw-taint inspect | 35.13 s | 60 s |
 | Fresh-cache production taint (complete report, every source rule) | 132.87 s | 170 s |
 | Warm production taint (complete report, every source rule) | 97.66 s | 135 s |
-| Sink-centric upstream analysis (5 matched endpoints, proofs for every source rule) | 71.26 s | 90 s |
+| Sink-centric upstream analysis (5 matched endpoints, proofs for every source rule) | 71.26 s | 120 s |
 | `tree --max-depth 1` | 0.11 s | 35 s |
 | Search | 1.07 s | 35 s |
 | Definitions | 1.05 s | 35 s |

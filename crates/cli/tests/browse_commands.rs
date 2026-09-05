@@ -195,7 +195,11 @@ fn assert_semantic_corridor(lang: &str, ws: &Path, from: &str, to: &str) {
     let summary = &report["summary"];
     let units = summary["total_decl_hits"].as_u64().unwrap_or(0)
         + summary["total_hits"].as_u64().unwrap_or(0)
-        + summary["total_taint_flows"].as_u64().unwrap_or(0);
+        + summary["total_taint_flows"].as_u64().unwrap_or(0)
+        // Endpoint corridors are a separate exact report product rather than
+        // a decl/occurrence/taint row collection. Count their compiler
+        // projected nodes when validating the corridor surface.
+        + report["corridor"]["node_count"].as_u64().unwrap_or(0);
     assert!(
         units > 0,
         "[{lang}] missing compiler-resolved corridor {from} -> {to}: {report}"
@@ -327,7 +331,7 @@ fn calls_lists_callees_with_caller_and_code_snippet() {
     let Some(out) = run(&["calls", ws.to_str().unwrap()]) else {
         return;
     };
-    for h in &["callee text", "caller", "location", "code"] {
+    for h in &["callee text", "caller function", "location", "code"] {
         assert!(out.contains(h), "calls header missing `{h}`: {out}");
     }
     assert!(out.contains("os.system"), "os.system call not listed: {out}");
@@ -414,7 +418,7 @@ fn vars_lists_assignments_with_enclosing_fn() {
     let Some(out) = run(&["vars", ws.to_str().unwrap()]) else {
         return;
     };
-    for h in &["var", "in", "source", "location", "code"] {
+    for h in &["var", "in function", "source", "location", "code"] {
         assert!(out.contains(h), "vars header missing `{h}`: {out}");
     }
     // `cursor = conn.cursor()` inside verify_token is the canonical row.
@@ -442,7 +446,7 @@ fn strings_table_surfaces_sql_classification() {
     let Some(out) = run(&["strings", ws.to_str().unwrap()]) else {
         return;
     };
-    for h in &["category", "text", "in", "location", "code"] {
+    for h in &["category", "text", "in function", "location", "code"] {
         assert!(out.contains(h), "strings header missing `{h}`: {out}");
     }
     // The fixture has a hand-crafted SQL string that should classify as `sql`.
@@ -469,7 +473,14 @@ fn args_table_shows_callee_pos_and_value() {
     let Some(out) = run(&["args", ws.to_str().unwrap()]) else {
         return;
     };
-    for h in &["callee text", "pos", "arg", "caller", "location", "code"] {
+    for h in &[
+        "callee text",
+        "position",
+        "value",
+        "in function",
+        "location",
+        "code",
+    ] {
         assert!(out.contains(h), "args header missing `{h}`: {out}");
     }
     assert!(out.contains("os.system"), "args: os.system missing: {out}");
@@ -512,7 +523,15 @@ fn operations_table_shows_use_site_facts() {
     let Some(out) = run(&["operations", ws.to_str().unwrap(), "--kind", "call"]) else {
         return;
     };
-    for h in &["kind", "name", "in", "detail", "operands", "location", "code"] {
+    for h in &[
+        "kind",
+        "name",
+        "in function",
+        "detail",
+        "operands",
+        "location",
+        "code",
+    ] {
         assert!(out.contains(h), "operations header missing `{h}`: {out}");
     }
     assert!(
@@ -614,7 +633,7 @@ fn classes_table_has_headers_even_when_empty() {
     let Some(out) = run(&["classes", ws.to_str().unwrap()]) else {
         return;
     };
-    for h in &["name", "kind", "location", "methods"] {
+    for h in &["name", "kind", "location", "method count", "methods"] {
         assert!(out.contains(h), "classes header missing `{h}`: {out}");
     }
     assert!(out.contains("0 types"), "classes empty summary missing: {out}");
@@ -630,7 +649,7 @@ fn refs_lists_every_reference_with_snippet() {
     let Some(out) = run(&["refs", ws.to_str().unwrap(), "run_admin_command"]) else {
         return;
     };
-    for h in &["symbol", "kind", "in", "location", "code"] {
+    for h in &["symbol", "kind", "in function", "location", "code"] {
         assert!(out.contains(h), "refs header missing `{h}`: {out}");
     }
     assert!(out.contains("run_admin_command"), "refs: self row missing: {out}");
@@ -667,6 +686,65 @@ fn search_json_shape() {
         return;
     };
     assert!(!parse_rows(&out).is_empty(), "search JSON empty");
+}
+
+#[test]
+fn every_browse_command_has_a_cross_module_used_in_section() {
+    let ws = ws_path();
+    let ws = ws.to_str().unwrap();
+    let cases: &[&[&str]] = &[
+        &["defs", ws],
+        &["entrypoints", ws],
+        &["calls", ws],
+        &["imports", ws],
+        &["vars", ws],
+        &["strings", ws],
+        &["comments", ws],
+        &["args", ws],
+        &["operations", ws, "--kind", "call"],
+        &["classes", ws],
+        &["refs", ws, "run_admin_command"],
+        &["search", ws, "verify"],
+    ];
+    for args in cases {
+        let out = run(args).expect("browse binary");
+        assert!(
+            out.contains("used in (cross-module)"),
+            "browse command {:?} omitted its used-in section:\n{out}",
+            args[0]
+        );
+    }
+}
+
+#[test]
+fn every_browse_json_page_has_a_compiler_used_in_projection() {
+    let ws = ws_path();
+    let ws = ws.to_str().unwrap();
+    let cases: &[&[&str]] = &[
+        &["defs", ws],
+        &["entrypoints", ws],
+        &["calls", ws],
+        &["imports", ws],
+        &["vars", ws],
+        &["strings", ws],
+        &["comments", ws],
+        &["args", ws],
+        &["operations", ws, "--kind", "call"],
+        &["classes", ws],
+        &["refs", ws, "run_admin_command"],
+        &["search", ws, "verify"],
+    ];
+    for base in cases {
+        let mut args = base.to_vec();
+        args.extend(["--format", "json"]);
+        let out = run(&args).expect("browse binary");
+        let value: serde_json::Value = serde_json::from_str(&out).expect("browse JSON");
+        assert!(
+            value.get("used_in").is_some_and(serde_json::Value::is_array),
+            "browse JSON command {:?} omitted used_in[]: {out}",
+            base[0]
+        );
+    }
 }
 
 #[test]
@@ -1537,7 +1615,15 @@ fn vars_in_fn_and_source_filter() {
         return;
     };
     assert!(out.contains("cursor"), "verify_token vars missing: {out}");
-    assert!(!out.contains("update_user"));
+    let table = out.split("used in (cross-module)").next().unwrap_or(&out);
+    assert!(
+        !table.contains("update_user"),
+        "--in-fn must keep unrelated rows out of the browse table: {out}"
+    );
+    assert!(
+        out.contains("update_user") && out.contains("verify_token"),
+        "the exact used-in section should retain proven cross-module callers: {out}"
+    );
 }
 
 #[test]
@@ -2936,6 +3022,10 @@ fn tree_text_marks_depth_limited_view_incomplete() {
         out.contains("tree-files-truncated:"),
         "compact tree output must show the machine-readable reason:\n{out}"
     );
+    assert!(
+        out.contains("partial view"),
+        "tree heading must explain that the visible file count is depth-limited:\n{out}"
+    );
 }
 
 #[test]
@@ -2975,6 +3065,43 @@ fn read_file_plain_json_uses_fast_file_local_view() {
     assert!(
         missing_or_empty_array("callers_in") && missing_or_empty_array("callees_out"),
         "plain read-file should stay file-local unless semantic body options are requested:\n{out}"
+    );
+}
+
+#[test]
+fn read_file_counts_top_level_import_calls_as_import_uses() {
+    let root = tempdir_for_test("read-file-top-level-import-use");
+    std::fs::write(root.join("library.py"), "def run():\n    return 1\n").expect("write library.py");
+    std::fs::write(root.join("app.py"), "from library import run\nrun()\n").expect("write app.py");
+    let Some(out) = run(&["read-file", root.to_str().unwrap(), "app.py", "--format", "json"]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("read-file JSON must parse");
+    let import = &parsed["connections"]["imports"][0];
+    assert_eq!(
+        import["uses"].as_u64(),
+        Some(1),
+        "top-level call must use its import: {out}"
+    );
+    assert_eq!(
+        import["use_lines"]
+            .as_array()
+            .and_then(|lines| lines.first())
+            .and_then(|line| line.as_u64()),
+        Some(2),
+        "import use line must point at the top-level call: {out}"
+    );
+}
+
+#[test]
+fn dump_resolution_text_pages_the_nested_declaration_table() {
+    let ws = ws_path();
+    let Some(out) = run(&["dump-resolution", ws.to_str().unwrap(), "--context", "4k"]) else {
+        return;
+    };
+    assert!(
+        !out.contains("rendered output exceeded --context budget"),
+        "resolution coverage should price its nested declaration rows before rendering:\n{out}"
     );
 }
 

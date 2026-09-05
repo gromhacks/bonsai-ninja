@@ -1438,6 +1438,7 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
         include_field_argument_forwarding,
         symbolic_field_forwarding,
         symbolic_funcs,
+        None,
     )
 }
 
@@ -1826,6 +1827,7 @@ pub(crate) fn stitch_idg_from_segment_batches<B, I>(
     include_field_argument_forwarding: bool,
     symbolic_field_forwarding: bool,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
+    capture_funcs: Option<&AHashSet<FuncId>>,
 ) -> IdgWorkspace
 where
     B: IntoIterator<Item = I>,
@@ -1885,7 +1887,7 @@ where
                 &stitch_data,
                 &ws,
                 &mut callee_endpoints,
-                None,
+                capture_funcs,
             );
         }
     }
@@ -2283,17 +2285,22 @@ fn extend_callee_endpoints_for_segment(
             })
         });
         // `None` means the resident builder did not request endpoint
-        // filtering, matching capture-read retention above. Treating it as
-        // "retain none" dropped callback lexical writes only on no-cache /
-        // resident graphs while the persisted path remained correct.
+        // filtering, matching capture-read retention above. Persisted
+        // endpoint summaries still retain exact receiver/argument anchors;
+        // otherwise ordinary receiver state disappears during typed replay.
         let retain_projected_storage =
             capture_funcs.is_none_or(|targets| targets.contains(&func)) || retain_callback_map_storage;
+        let call_sites = stitch_data
+            .get(&func)
+            .map(|data| data.call_sites.as_slice())
+            .unwrap_or(&[]);
         let (projected_places, projected_read_consumers) = collect_projected_stitch_places(
             segment,
             func,
             function_nodes,
             &scan_index,
             retain_projected_storage,
+            call_sites,
         );
         out.insert(
             func,
@@ -2451,6 +2458,7 @@ fn collect_projected_stitch_places(
     function_nodes: &[NodeId],
     scan_index: &SegmentEndpointScanIndex,
     retain_capture_storage: bool,
+    call_sites: &[CallSiteRef],
 ) -> (Vec<ProjectedPlaceInput>, Vec<ProjectedReadConsumerInput>) {
     let mut places = Vec::new();
     let mut read_consumers = Vec::new();
@@ -2464,7 +2472,10 @@ fn collect_projected_stitch_places(
         let Some(storage) = place_storage_name(segment, place) else {
             continue;
         };
-        if !retain_capture_storage && imported_projected_storage(&storage).is_none() {
+        if !retain_capture_storage
+            && imported_projected_storage(&storage).is_none()
+            && !projected_storage_is_stitch_anchor(&storage, call_sites)
+        {
             continue;
         }
         match place {
@@ -2513,6 +2524,35 @@ fn collect_projected_stitch_places(
         }
     }
     (places, read_consumers)
+}
+
+/// Keep projected places that a later stitch pass can address through an
+/// adapter-emitted receiver or argument place. Persistence intentionally
+/// omits unrelated local projected storage from endpoint summaries, but
+/// receiver-state and argument forwarding are ordinary compiler relations,
+/// not closure-only facts. Matching the complete emitted place (or one of its
+/// exact prefixes) preserves those relations without retaining every
+/// projected local in every endpoint row.
+fn projected_storage_is_stitch_anchor(storage: &str, call_sites: &[CallSiteRef]) -> bool {
+    let storage = storage.trim();
+    if storage.is_empty() {
+        return false;
+    }
+    call_sites.iter().any(|site| {
+        site.receiver
+            .iter()
+            .chain(site.receiver_storage_base.iter())
+            .chain(site.call_arg_places.iter())
+            .map(String::as_str)
+            .map(str::trim)
+            .any(|anchor| {
+                !anchor.is_empty()
+                    && (storage == anchor
+                        || storage
+                            .strip_prefix(anchor)
+                            .is_some_and(|suffix| suffix.starts_with('.')))
+            })
+    })
 }
 
 fn collect_unrooted_scalar_reads(segment: &IdgSegment, func: FuncId) -> Vec<(String, NodeId)> {

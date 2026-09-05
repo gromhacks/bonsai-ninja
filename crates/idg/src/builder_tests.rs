@@ -505,7 +505,7 @@ fn spooled_stitch_preserves_the_exact_canonical_graph() {
     let batches = || vec![vec![(SegmentId(0), vec![output.clone()])]];
     let resolver = MockResolver::new();
 
-    let queryable = stitch_idg_from_segment_batches(batches(), 1, &resolver, true, false, None);
+    let queryable = stitch_idg_from_segment_batches(batches(), 1, &resolver, true, false, None, None);
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("spooled-idg.factstore");
     let persisted = stitch_idg_from_spooled_segment_batches(
@@ -604,7 +604,7 @@ fn spooled_sidecar_preserves_cross_segment_calls_byte_for_byte() {
     };
     let mut resolver = MockResolver::new();
     resolver.add(FuncId::new(1), "callee", vec![FuncId::new(2)]);
-    let queryable = stitch_idg_from_segment_batches(batches(), 2, &resolver, true, false, None);
+    let queryable = stitch_idg_from_segment_batches(batches(), 2, &resolver, true, false, None, None);
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("cross-segment.factstore");
     let persisted = stitch_idg_from_spooled_segment_batches(
@@ -718,7 +718,7 @@ fn spooled_sidecar_preserves_symbolic_field_graph_byte_for_byte() {
         AHashSet::from([FuncId::new(1)]),
     ] {
         let queryable =
-            stitch_idg_from_segment_batches(batches(), 2, &resolver, true, true, Some(&symbolic_funcs));
+            stitch_idg_from_segment_batches(batches(), 2, &resolver, true, true, Some(&symbolic_funcs), None);
         if symbolic_funcs.contains(&FuncId::new(1)) {
             assert!(
                 queryable

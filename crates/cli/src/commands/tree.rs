@@ -552,6 +552,7 @@ enum TreeTextRow<'a> {
         dirs: usize,
         decls: usize,
         cross_file_edges: usize,
+        partial: bool,
     },
     Incomplete(&'a [String]),
     RerunHint,
@@ -591,6 +592,7 @@ impl TreeTextRow<'_> {
                 dirs,
                 decls,
                 cross_file_edges,
+                partial,
             } => {
                 let file_chip = if files_scanned > files {
                     format!(
@@ -607,8 +609,9 @@ impl TreeTextRow<'_> {
                 } else {
                     String::new()
                 };
+                let scope = if *partial { " · partial view" } else { "" };
                 u.heading(&format!(
-                    "tree — {} · {} dir{}{facts}",
+                    "tree — {} · {} dir{}{facts}{scope}",
                     file_chip,
                     dirs,
                     if *dirs == 1 { "" } else { "s" },
@@ -764,6 +767,7 @@ fn tree_text_rows(out: &StructuralTreeOut) -> Vec<TreeTextRow<'_>> {
         dirs: out.summary.dirs,
         decls: out.summary.total_decls,
         cross_file_edges: out.summary.total_cross_file_edges,
+        partial: !out.analysis_complete,
     });
     if !out.analysis_complete {
         rows.push(TreeTextRow::Incomplete(&out.analysis_incomplete_reasons));

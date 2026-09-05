@@ -710,8 +710,8 @@ pub(crate) enum Cmd {
                       # Semantic edges, full detail\n  \
                       $ bonsai-ninja dump-edges ./src\n  \
                       \n  \
-                      # Edges into a specific callee (every caller of os.system)\n  \
-                      $ bonsai-ninja dump-edges ./src --to os.system\n  \
+                      # Edges into a compiler-resolved workspace callable\n  \
+                      $ bonsai-ninja dump-edges ./src --to orchestrate\n  \
                       \n  \
                       # Compact: one line per edge, ideal for piping\n  \
                       $ bonsai-ninja dump-edges ./src --compact\n  \
@@ -2798,8 +2798,8 @@ pub(crate) enum SecurityAction {
     /// sites, the local names they bind, every call or reference that
     /// reaches the package through those names, every rulepack source /
     /// sink / sanitizer match on the package, and the enclosing callables
-    /// with their resolved direct callers. Triage dependency code without
-    /// running taint analysis.
+    /// with their resolved direct callers, plus complete compiler-backed
+    /// taint flows whose source, sink, or propagation crosses the package.
     #[command(
         name = "dependency-analysis",
         long_about = themed_subcommand_long_about("Dependency usage analysis. `deps` says which flagged packages \
@@ -2809,12 +2809,15 @@ pub(crate) enum SecurityAction {
                       reference that reaches the package through one of those \
                       names, every rulepack source / sink / sanitizer match on \
                       the package, and each enclosing callable with its resolved \
-                      direct callers from the compiler call graph.\n\
+                      direct callers from the compiler call graph, and every \
+                      complete source-to-sink taint flow whose source, sink, or \
+                      exact propagation crosses the package.\n\
                       \n\
-                      One pass over the exact per-file compiler objects plus one \
-                      call-graph lookup per callable; it never enumerates call \
-                      paths and never runs taint analysis. Use `security \
-                      taint-analysis` for source-to-sink findings."),
+                      Usage sites and taint flows are projected from the same \
+                      compiler-backed facts as the dedicated security commands; \
+                      no call paths are enumerated heuristically. Use `security \
+                      taint-analysis` for the workspace-wide source-to-sink \
+                      finding view."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Every flagged package with its usage sites\n  \
                       $ bonsai-ninja security ./src dependency-analysis\n  \

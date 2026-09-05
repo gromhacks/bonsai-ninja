@@ -185,24 +185,28 @@ pub(crate) mod out_count {
 macro_rules! cli_println {
     () => {{
         if $crate::page_cache::write("\n") {
-        } else if $crate::output::write_line("") {
         } else {
-            use std::io::Write as _;
-            let mut h = std::io::stdout().lock();
-            let _ = h.write_all(b"\n");
-            $crate::out_count::add_counting("", true);
+            $crate::progress::finish_all_for_output();
+            if !$crate::output::write_line("") {
+                use std::io::Write as _;
+                let mut h = std::io::stdout().lock();
+                let _ = h.write_all(b"\n");
+                $crate::out_count::add_counting("", true);
+            }
         }
     }};
     ($($arg:tt)*) => {{
         use std::io::Write as _;
         let s: String = std::fmt::format(std::format_args!($($arg)*));
         if $crate::page_cache::write(&format!("{s}\n")) {
-        } else if $crate::output::write_line(&s) {
         } else {
-            let mut h = std::io::stdout().lock();
-            let _ = h.write_all(s.as_bytes());
-            let _ = h.write_all(b"\n");
-            $crate::out_count::add_counting(&s, true);
+            $crate::progress::finish_all_for_output();
+            if !$crate::output::write_line(&s) {
+                let mut h = std::io::stdout().lock();
+                let _ = h.write_all(s.as_bytes());
+                let _ = h.write_all(b"\n");
+                $crate::out_count::add_counting(&s, true);
+            }
         }
     }};
 }
@@ -215,11 +219,13 @@ macro_rules! cli_print {
         use std::io::Write as _;
         let s: String = std::fmt::format(std::format_args!($($arg)*));
         if $crate::page_cache::write(&s) {
-        } else if $crate::output::write_str(&s) {
         } else {
-            let mut h = std::io::stdout().lock();
-            let _ = h.write_all(s.as_bytes());
-            $crate::out_count::add_counting(&s, false);
+            $crate::progress::finish_all_for_output();
+            if !$crate::output::write_str(&s) {
+                let mut h = std::io::stdout().lock();
+                let _ = h.write_all(s.as_bytes());
+                $crate::out_count::add_counting(&s, false);
+            }
         }
     }};
 }

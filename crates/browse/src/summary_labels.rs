@@ -72,6 +72,15 @@ impl<'ws> SummaryAnnotator<'ws> {
             .map(|range| range.name.clone())
     }
 
+    /// Exact stable callable identity enclosing a rendered source line.
+    /// Browse projections use this when they need to join a row to resolved
+    /// callgraph edges; the name-only helper above remains the presentation
+    /// surface for human-readable tables.
+    #[must_use]
+    pub fn enclosing_function_id(&self, file_path: &str, line: u32) -> Option<FuncId> {
+        self.enclosing_range(file_path, line).map(|range| range.func)
+    }
+
     /// Look up summary ids by symbol name. Used by browse rows
     /// whose "enclosing function" is actually the symbol itself
     /// — e.g. an import statement (`from .x import foo`) which
