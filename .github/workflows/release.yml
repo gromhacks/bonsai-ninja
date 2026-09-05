@@ -255,12 +255,18 @@ jobs:
           # scheduling headroom. This assertion runs only after exact work and
           # all semantic-generation integrity checks complete.
           BONSAI_ES_COLD_SEMANTIC_INDEX_MAX_SECS: "1200"
-          BONSAI_ES_COLD_TAINT_MAX_SECS: "125"
-          BONSAI_ES_INSPECT_MAX_SECS: "85"
+          # Hosted-runner measurements completed cold taint in 382.92s and
+          # inspect in 109.82s. These are completion envelopes only; the
+          # per-command watchdog remains the separate hang detector.
+          BONSAI_ES_COLD_TAINT_MAX_SECS: "500"
+          BONSAI_ES_INSPECT_MAX_SECS: "150"
           BONSAI_ES_NAVIGATION_MAX_SECS: "55"
-          BONSAI_ES_TAINT_MAX_SECS: "120"
-          BONSAI_ES_SINK_ANALYSIS_MAX_SECS: "180"
-          BONSAI_ES_SECURITY_INVENTORY_MAX_SECS: "60"
+          # The same hosted runner completed warm taint in 238.52s, sink
+          # lineage in 252.08s, and the cold inventory view in 125.24s.
+          BONSAI_ES_TAINT_MAX_SECS: "300"
+          BONSAI_ES_SINK_ANALYSIS_MAX_SECS: "300"
+          BONSAI_ES_SECURITY_INVENTORY_COLD_MAX_SECS: "180"
+          BONSAI_ES_SECURITY_INVENTORY_MAX_SECS: "90"
           # Public runners can be substantially slower than the pinned local
           # reference while constructing the first exact semantic generation.
           # This is a hang detector only: completed work must still satisfy
