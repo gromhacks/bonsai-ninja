@@ -723,11 +723,7 @@ fn filesystem_is_case_insensitive(path: &Path) -> bool {
     let probe = match cache.lock().ok().and_then(|m| m.get(&cache_key).copied()) {
         Some(hit) => hit,
         None => {
-            // Fallback: trust the OS default if we can't probe.
-            let default = cfg!(any(target_os = "macos", target_os = "windows"));
-            let probe = probe_case_insensitive_with_temp(&dir)
-                .or_else(|| probe_case_insensitive_from_entries(&dir))
-                .unwrap_or(default);
+            let probe = probe_case_insensitive_for_directory(&dir);
             if let Ok(mut m) = cache.lock() {
                 m.insert(cache_key, probe);
             }
