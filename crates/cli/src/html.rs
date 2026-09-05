@@ -117,19 +117,31 @@ fn portable_argument(arg: &str) -> String {
         Some((flag, value)) if flag.starts_with("--") => (Some(flag), value),
         _ => (None, arg),
     };
-    let path = std::path::Path::new(value);
-    if !path.is_absolute() {
+    if !is_absolute_path_like(value) {
         return arg.to_string();
     }
-    let shortened = path
-        .file_name()
-        .and_then(|name| name.to_str())
+    let shortened = value
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
         .filter(|name| !name.is_empty())
         .map_or_else(|| value.to_string(), |name| format!("<…>/{name}"));
     match flag {
         Some(flag) => format!("{flag}={shortened}"),
         None => shortened,
     }
+}
+
+fn is_absolute_path_like(value: &str) -> bool {
+    let path = std::path::Path::new(value);
+    path.is_absolute()
+        || value.starts_with('/')
+        || value.starts_with('\\')
+        || value.as_bytes().get(1) == Some(&b':')
+            && value
+                .as_bytes()
+                .get(2)
+                .is_some_and(|byte| *byte == b'/' || *byte == b'\\')
 }
 
 fn shell_quote(arg: &str) -> String {
@@ -731,6 +743,21 @@ mod tests {
         );
         assert!(ctx.command_line.contains("repo"), "{}", ctx.command_line);
         assert!(ctx.command_line.contains("--name verify"), "{}", ctx.command_line);
+
+        let windows_ctx = HtmlDocumentContext::from_args(&[
+            "defs".to_string(),
+            r"C:\Users\someone\private\repo".to_string(),
+        ]);
+        assert!(
+            !windows_ctx.command_line.contains(r"C:\Users\someone"),
+            "{}",
+            windows_ctx.command_line
+        );
+        assert!(
+            windows_ctx.command_line.contains("repo"),
+            "{}",
+            windows_ctx.command_line
+        );
     }
 
     #[test]

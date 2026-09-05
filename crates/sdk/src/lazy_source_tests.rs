@@ -26,6 +26,7 @@ fn digest_hex_round_trips_and_rejects_malformed_text() {
 }
 
 #[test]
+#[cfg(unix)]
 fn manifest_records_text_digests_only_for_verbatim_utf8_sources() {
     let root = tempdir("lazy-manifest");
     std::fs::write(root.join("plain.py"), "def plain():\n    return 1\n").expect("plain");
