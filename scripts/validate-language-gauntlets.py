@@ -534,7 +534,15 @@ class Validator:
         inspect = self.check(
             lang,
             "inspect derive",
-            ["inspect", ws, "--query", target, "--format", "json", "--all"],
+            [
+                "inspect-graph",
+                ws,
+                "--query",
+                target,
+                "--format",
+                "json",
+                "--all",
+            ],
             ok=(0, 1),
             json_out=True,
         )
@@ -691,7 +699,7 @@ class Validator:
             "global --no-cache",
             [
                 "--no-cache",
-                "inspect",
+                "inspect-graph",
                 ws,
                 "--query",
                 target,
@@ -730,12 +738,15 @@ class Validator:
             json_out=True,
         )
         add(
-            "symbol-summary",
+            "inspect-graph declaration",
             [
-                "symbol-summary",
+                "inspect-graph",
                 ws,
-                "--symbol",
+                "--query",
                 entry,
+                "--kind",
+                "decl",
+                "--compact",
                 "--format",
                 "json",
                 "--all",
@@ -743,30 +754,64 @@ class Validator:
             json_out=True,
         )
         add(
-            "path compressed corridor",
-            ["path", ws, "--from", entry, "--to", target, "--format", "json", "--all"],
+            "inspect-graph compressed corridor",
+            [
+                "inspect-graph",
+                ws,
+                "--from",
+                entry,
+                "--to",
+                target,
+                "--format",
+                "json",
+                "--all",
+            ],
             json_out=True,
         )
         add(
-            "trace positional json",
-            ["trace", ws, entry, "--format", "json"],
+            "inspect-graph positional json",
+            ["inspect-graph", ws, entry, "--format", "json"],
             json_out=True,
         )
         add(
-            "trace --function",
-            ["trace", ws, "--function", entry, "--format", "json"],
+            "inspect-graph --query",
+            ["inspect-graph", ws, "--query", entry, "--format", "json"],
             json_out=True,
         )
         add(
-            "trace --from --to",
-            ["trace", ws, "--from", entry, "--to", target, "--format", "json"],
+            "inspect-graph --from --to",
+            [
+                "inspect-graph",
+                ws,
+                "--from",
+                entry,
+                "--to",
+                target,
+                "--format",
+                "json",
+            ],
             json_out=True,
         )
-        add("trace --context", ["trace", ws, entry, "--context", "4k"], nonempty=True)
-        add("trace --page", ["trace", ws, entry, "--page", "1"], nonempty=True)
-        add("trace --all", ["trace", ws, entry, "--all"], nonempty=True)
-        add("trace text", ["trace", ws, entry, "--format", "text"], nonempty=True)
-        add("trace dot", ["trace", ws, entry, "--format", "dot"], nonempty=True)
+        add(
+            "inspect-graph --context",
+            ["inspect-graph", ws, entry, "--context", "4k"],
+            nonempty=True,
+        )
+        add(
+            "inspect-graph --page",
+            ["inspect-graph", ws, entry, "--page", "1"],
+            nonempty=True,
+        )
+        add(
+            "inspect-graph --all",
+            ["inspect-graph", ws, entry, "--all"],
+            nonempty=True,
+        )
+        add(
+            "inspect-graph text",
+            ["inspect-graph", ws, entry, "--format", "text"],
+            nonempty=True,
+        )
         add("diagnostics", ["diagnostics", ws])
         add("dump-hir positional", ["dump-hir", ws, entry], nonempty=True)
         add("dump-hir --symbol", ["dump-hir", ws, "--symbol", entry], nonempty=True)
@@ -807,8 +852,6 @@ class Validator:
                 entry,
                 "--to",
                 target,
-                "--precision",
-                "exact",
                 "--compact",
                 "--limit",
                 "10",
@@ -1273,15 +1316,15 @@ class Validator:
         )
 
         add(
-            "inspect positional",
-            ["inspect", ws, target, "--format", "json", "--all"],
+            "inspect-graph positional",
+            ["inspect-graph", ws, target, "--format", "json", "--all"],
             ok=(0, 1),
             json_out=True,
         )
         add(
-            "inspect decl-kind switches",
+            "inspect-graph decl-kind switches",
             [
-                "inspect",
+                "inspect-graph",
                 ws,
                 "--query",
                 entry,
@@ -1309,9 +1352,9 @@ class Validator:
             json_out=True,
         )
         add(
-            "inspect call filters",
+            "inspect-graph call filters",
             [
-                "inspect",
+                "inspect-graph",
                 ws,
                 "--query",
                 call_filter_query,
@@ -1329,9 +1372,9 @@ class Validator:
             json_out=True,
         )
         add(
-            "inspect grouped",
+            "inspect-graph grouped",
             [
-                "inspect",
+                "inspect-graph",
                 ws,
                 "--query",
                 target,
@@ -1347,9 +1390,9 @@ class Validator:
         append_optional_entry(
             matrix,
             flow_id,
-            "inspect --flow",
+            "inspect-graph --flow",
             [
-                "inspect",
+                "inspect-graph",
                 ws,
                 "--query",
                 target,
@@ -1364,9 +1407,9 @@ class Validator:
         append_optional_entry(
             matrix,
             group_id,
-            "inspect --group",
+            "inspect-graph --group",
             [
-                "inspect",
+                "inspect-graph",
                 ws,
                 "--query",
                 target,
@@ -1630,8 +1673,8 @@ class Validator:
             ("dump-callgraph", ["dump-callgraph", ws]),
             ("dump-edges", ["dump-edges", ws]),
             ("dump-ast", ["dump-ast", ws, "--file", "src/server.c"]),
-            ("inspect", ["inspect", ws, "--query", "strcpy"]),
-            ("trace", ["trace", ws, "main"]),
+            ("inspect-graph", ["inspect-graph", ws, "--query", "strcpy"]),
+            ("inspect-graph query", ["inspect-graph", ws, "--query", "main"]),
             ("security sources", ["security", ws, "sources"]),
             ("security sinks", ["security", ws, "sinks"]),
             ("security sanitizers", ["security", ws, "sanitizers"]),
