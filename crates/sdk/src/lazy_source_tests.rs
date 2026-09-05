@@ -1,9 +1,8 @@
 use std::path::PathBuf;
 
-use super::{
-    digest_from_hex, hex_digest, lazy_source_table_from_manifest, manifest_source_files, WorkspaceCache,
-    CACHE_MANIFEST_SCHEMA_VERSION,
-};
+#[cfg(unix)]
+use super::{digest_from_hex, lazy_source_table_from_manifest, CACHE_MANIFEST_SCHEMA_VERSION};
+use super::{hex_digest, manifest_source_files, WorkspaceCache};
 
 fn tempdir(name: &str) -> PathBuf {
     let stamp = std::time::SystemTime::now()
