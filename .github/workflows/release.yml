@@ -403,9 +403,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $bin diagnostics examples/python/language_gauntlet --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-diagnostics.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin inspect examples/python/language_gauntlet --query os.system --context 4k --format json --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-inspect.json"
+          & $bin inspect-graph examples/python/language_gauntlet --query os.system --context 4k --format json --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-inspect-graph.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin trace examples/python/language_gauntlet handle_request --format json --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-trace.json"
+          & $bin inspect-graph examples/python/language_gauntlet --query handle_request --format json --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-inspect-graph-query.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $bin security examples/python/language_gauntlet taint-analysis --format sarif --all --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-taint.sarif.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -415,8 +415,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           @(
-            "$env:RUNNER_TEMP/bonsai-inspect.json",
-            "$env:RUNNER_TEMP/bonsai-trace.json",
+            "$env:RUNNER_TEMP/bonsai-inspect-graph.json",
+            "$env:RUNNER_TEMP/bonsai-inspect-graph-query.json",
             "$env:RUNNER_TEMP/bonsai-networkx.json"
           ) | ForEach-Object { Get-Content $_ -Raw | ConvertFrom-Json | Out-Null }
           $sarif = Get-Content "$env:RUNNER_TEMP/bonsai-taint.sarif.json" -Raw | ConvertFrom-Json
