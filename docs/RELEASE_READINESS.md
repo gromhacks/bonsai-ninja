@@ -6,7 +6,7 @@ not duplicate dated performance history.
 
 ## Status
 
-The v0.2.13 candidate incorporates the expanded compiler, adapter, rulepack,
+The v0.2.14 candidate incorporates the expanded compiler, adapter, rulepack,
 CLI, cache, scheduling, and publication checks described below. Local status
 is determined from a fresh run of the listed commands; historical measurements
 are retained only where they document a reproducible scale baseline. A tag is
@@ -503,6 +503,41 @@ after use, preventing a many-crate release from retaining one compiled
 dependency graph per package. Remote CI state and publication permissions
 remain external deployment conditions and are not asserted by a local test
 run.
+
+## Post-release verification
+
+A successful release workflow dispatched against `main` proves the release
+preflight, exact scale gate, and six platform build jobs, but it intentionally
+skips the crates.io and GitHub publication jobs. Publication is enabled only
+for a `v<workspace-semver>` tag. Do not report a main-branch workflow as a
+published release unless the registry and release records are checked
+separately.
+
+After a tagged workflow completes, verify the same commit and every
+publishable package from a clean checkout:
+
+```bash
+git status --short --branch
+git fetch origin main --tags
+git rev-parse HEAD origin/main
+python3 scripts/publish-crates.py --check-registry
+gh run view <release-run-id> --json conclusion,jobs,headSha,url
+gh release view v<workspace-semver>
+```
+
+The registry audit is the authoritative package check. It reads Cargo
+metadata, validates the production dependency order and exact internal
+version requirements, then checks every publishable crate name, repository,
+owner, and requested version on crates.io. A successful result must report
+zero available names and all publishable packages already present at the
+workspace version. The tag release job uses the same package graph with
+`--publish --resume --confirm-version`; a resumed publication skips only an
+identical version already verified on crates.io.
+
+The release job must show successful preflight, scale, all six build jobs,
+`publish crates.io workspace`, and `publish GitHub release`. The release
+record and downloaded archive checksums are the final confirmation that the
+published binaries correspond to the committed tag.
 
 ## Commands to repeat before tagging
 

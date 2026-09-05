@@ -39,10 +39,15 @@ cannot silently accumulate here.
 - `audit-release-metadata.py` — validates public Cargo package and repository metadata.
 - `audit-release-binary.py` — rejects distributable binaries that retain the
   builder's checkout, home, or Cargo source path.
-- `publish-crates.py` — audits the crates.io package graph and performs an
-  explicit, resumable dependency-ordered publication when requested. Package
-  verification uses disposable per-crate build storage so a workspace release
-  cannot accumulate duplicate dependency graphs on the publisher runner.
+- `publish-crates.py` — audits the crates.io package graph with the
+  read-only `--check-registry` mode and performs an explicit, resumable
+  dependency-ordered publication with `--publish --resume
+  --confirm-version <VERSION>` when requested. The audit checks every
+  publishable package's repository, owner, exact version, and production
+  dependency order. Package verification uses disposable per-crate build
+  storage so a workspace release cannot accumulate duplicate dependency graphs
+  on the publisher runner. A successful workflow run on `main` does not
+  publish; only the tag-gated release job performs the upload.
 - `audit-rust-duplication.py` — rejects large exact clones in shared production Rust code.
 - `audit-secrets.sh` — scans reachable Git history with a checksum-pinned Gitleaks binary.
 - `audit-workflows.sh` — validates GitHub Actions syntax with a checksum-pinned Actionlint binary.

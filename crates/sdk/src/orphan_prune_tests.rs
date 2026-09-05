@@ -18,7 +18,7 @@ fn manifest_head_yields_workspace_root_without_full_decode() {
     let manifest = root.join("manifest.json");
     // A large trailing source table must not be decoded to answer the query.
     let mut body = String::from(
-        "{\n  \"schema_version\": 7,\n  \"engine_version\": \"0.2.13\",\n  \"workspace_root\": \"/tmp/with \\\"quote\\\" and \\\\ slash\",\n  \"cache_dir\": \"/x\",\n  \"workspace_source_files\": [\n",
+        "{\n  \"schema_version\": 7,\n  \"engine_version\": \"0.2.14\",\n  \"workspace_root\": \"/tmp/with \\\"quote\\\" and \\\\ slash\",\n  \"cache_dir\": \"/x\",\n  \"workspace_source_files\": [\n",
     );
     for index in 0..20_000 {
         body.push_str(&format!(
