@@ -70,9 +70,14 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "runner calibration must remain tied to a completed exact measurement",
         )
         self.assertIn(
-            'BONSAI_ES_SINK_ANALYSIS_MAX_SECS: "180"',
+            'BONSAI_ES_SINK_ANALYSIS_MAX_SECS: "300"',
             workflow,
             "the tag workflow must budget the measured sink-centric scale gate",
+        )
+        self.assertIn(
+            'BONSAI_ES_SECURITY_INVENTORY_COLD_MAX_SECS: "180"',
+            workflow,
+            "the tag workflow must budget the measured cold inventory gate",
         )
 
     def test_elasticsearch_semantic_slo_uses_completed_runner_measurement(self) -> None:
