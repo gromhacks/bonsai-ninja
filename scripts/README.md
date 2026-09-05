@@ -46,8 +46,10 @@ cannot silently accumulate here.
   publishable package's repository, owner, exact version, and production
   dependency order. Package verification uses disposable per-crate build
   storage so a workspace release cannot accumulate duplicate dependency graphs
-  on the publisher runner. A successful workflow run on `main` does not
-  publish; only the tag-gated release job performs the upload.
+  on the publisher runner. Registry 429 responses honor the server retry time,
+  while transient connection resets and timeouts use bounded exponential
+  backoff. A successful workflow run on `main` does not publish; only the
+  tag-gated release job performs the upload.
 - `audit-rust-duplication.py` — rejects large exact clones in shared production Rust code.
 - `audit-secrets.sh` — scans reachable Git history with a checksum-pinned Gitleaks binary.
 - `audit-workflows.sh` — validates GitHub Actions syntax with a checksum-pinned Actionlint binary.

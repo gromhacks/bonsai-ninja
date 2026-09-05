@@ -6,7 +6,7 @@ not duplicate dated performance history.
 
 ## Status
 
-The v0.2.14 candidate incorporates the expanded compiler, adapter, rulepack,
+The v0.2.15 candidate incorporates the expanded compiler, adapter, rulepack,
 CLI, cache, scheduling, and publication checks described below. Local status
 is determined from a fresh run of the listed commands; historical measurements
 are retained only where they document a reproducible scale baseline. A tag is
@@ -496,8 +496,9 @@ makes a partial upload resumable only after verifying the `gromhacks` registry
 owner and canonical identity of every already-published package path, file,
 mode, link, generated manifest, and VCS record. Gzip and tar container metadata
 do not affect that comparison. New-crate HTTP 429 responses are retried at the
-registry-provided UTC time with a safety margin, so throttling pauses the
-release instead of leaving a failed partial publication. Each Cargo package
+registry-provided UTC time with a safety margin, and transient API connection
+resets/timeouts use bounded exponential backoff, so a temporary registry
+failure does not abort the release before the first upload. Each Cargo package
 verification runs in disposable build storage and removes its staging archive
 after use, preventing a many-crate release from retaining one compiled
 dependency graph per package. Remote CI state and publication permissions

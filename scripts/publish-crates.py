@@ -38,6 +38,8 @@ RATE_LIMIT_FALLBACK_SECONDS = 10 * 60
 RATE_LIMIT_SAFETY_SECONDS = 5
 RATE_LIMIT_TIMESTAMP = re.compile(r"try again after (.+? GMT)", re.IGNORECASE)
 REGISTRY_REQUEST_ATTEMPTS = 8
+REGISTRY_TRANSPORT_RETRY_BASE_SECONDS = 2.0
+REGISTRY_TRANSPORT_RETRY_MAX_SECONDS = 60.0
 
 
 def run(*args: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
@@ -241,10 +243,18 @@ def http_retry_delay(error: urllib.error.HTTPError) -> float | None:
     return crates_io_retry_delay(f"429 Too Many Requests: {body}")
 
 
+def registry_transport_retry_delay(attempt: int) -> float:
+    """Return bounded exponential backoff for a transient API transport error."""
+    return min(
+        REGISTRY_TRANSPORT_RETRY_MAX_SECONDS,
+        REGISTRY_TRANSPORT_RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
+    )
+
+
 def registry_bytes(
     url: str, *, timeout: int, allow_not_found: bool = False
 ) -> bytes | None:
-    """Read one registry response with bounded server-directed 429 backoff."""
+    """Read one registry response with bounded transient-error backoff."""
     for attempt in range(1, REGISTRY_REQUEST_ATTEMPTS + 1):
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         try:
@@ -262,6 +272,19 @@ def registry_bytes(
             print(
                 "  crates.io API rate limit reached; "
                 f"retrying at {retry_at:%Y-%m-%d %H:%M:%S} UTC "
+                f"({delay:.0f}s, attempt {attempt + 1}/{REGISTRY_REQUEST_ATTEMPTS})",
+                flush=True,
+            )
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            if attempt == REGISTRY_REQUEST_ATTEMPTS:
+                raise
+            delay = registry_transport_retry_delay(attempt)
+            retry_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=delay)
+            reason = getattr(error, "reason", error)
+            print(
+                "  crates.io API transport error "
+                f"({reason}); retrying at {retry_at:%Y-%m-%d %H:%M:%S} UTC "
                 f"({delay:.0f}s, attempt {attempt + 1}/{REGISTRY_REQUEST_ATTEMPTS})",
                 flush=True,
             )

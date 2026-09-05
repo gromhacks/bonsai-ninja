@@ -133,6 +133,27 @@ class CratesIoRetryDelayTests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 2)
         sleep.assert_called_once_with(7.0)
 
+    def test_registry_api_retries_connection_reset_with_bounded_backoff(self) -> None:
+        reset = urllib.error.URLError(ConnectionResetError(104, "Connection reset by peer"))
+        accepted = mock.MagicMock()
+        accepted.__enter__.return_value.read.return_value = b'{"crate": {}}'
+        accepted.__exit__.return_value = False
+        with (
+            mock.patch.object(
+                publish_crates.urllib.request,
+                "urlopen",
+                side_effect=[reset, accepted],
+            ) as urlopen,
+            mock.patch.object(publish_crates.time, "sleep") as sleep,
+            redirect_stdout(io.StringIO()),
+        ):
+            payload = publish_crates.registry_json("demo")
+        self.assertEqual(payload, {"crate": {}})
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(
+            publish_crates.REGISTRY_TRANSPORT_RETRY_BASE_SECONDS
+        )
+
 
 class PublicationPreflightTests(unittest.TestCase):
     def test_publish_preflights_every_source_payload_before_first_upload(self) -> None:
