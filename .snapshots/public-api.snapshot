@@ -16,6 +16,7 @@ pub fn all_adapters() -> Vec<AdapterArc> {
 pub fn all_languages_registry() -> Arc<LanguageRegistry> {
 
 === browse ===
+pub mod module_map;
 pub mod refs;
 pub mod strings;
 pub use args::{args, ArgOut, ArgsFilters};
@@ -27,10 +28,11 @@ pub use comments::{comments, CommentOut, CommentsFilters};
 pub use common::{
 pub use defs::{defs, DefOut, DefsFilters};
 pub use dumps::{
-pub use edges::{compute_edge_id, dump_edges, EdgeRecord, EdgesFilters, PrecisionClass};
+pub use edges::{compute_edge_id, dump_edges, EdgeRecord, EdgesFilters};
 pub use entrypoints::{entrypoints, EntryPointOut, EntryPointsFilters};
 pub use graph_export::{
 pub use imports::{imports, ImportOut, ImportsFilters};
+pub use module_map::{
 pub use native_export::{
 pub use operations::{operations, OperationOperandOut, OperationOut, OperationsFilters};
 pub use paths::{paths, PathFilters, PathFunctionRow, PathOutcome, PathTerminalCallRow};
@@ -90,7 +92,6 @@ pub mod ids;
 pub mod names;
 pub mod path_filter;
 pub mod policy;
-pub mod precision;
 pub mod resources;
 pub mod span;
 pub mod span_cache;
@@ -101,7 +102,6 @@ pub use ids::{BasicBlockId, FileId, FuncId, PackageId, SymbolId, TraceStepId, Ty
 pub use names::{
 pub use path_filter::{
 pub use policy::MATCHER_POLICY_FINGERPRINT;
-pub use precision::Precision;
 pub use resources::SyntaxMemoryPermitPool;
 pub use resources::callgraph_worker_count;
 pub use resources::candidate_index_worker_count;
@@ -119,7 +119,7 @@ pub use resources::syntax_weighted_batches;
 pub use resources::syntax_worker_count;
 pub use resources::syntax_worker_count_for_sources;
 pub use span::{LineCol, Span, SpanMap};
-pub use span_cache::{cached_span_map, cached_span_map_arc};
+pub use span_cache::{cached_span_map, cached_span_map_arc, cached_span_map_from_line_starts};
 
 === conformance ===
 pub mod capability_matrix;
@@ -191,8 +191,10 @@ pub use transfer::{
 pub use workspace::{CrossFileEdge, CrossFileEdges, FieldFlowLink, IdgWorkspace, SegmentId};
 
 === index ===
+pub fn dedup_decl_index_defs(index: &mut DeclIndex) {
 pub struct CallLinkageFact {
 pub struct CallResultLinkageFact {
+pub struct CallableAliasLinkageFact {
 pub struct FunctionLinkageFacts {
 pub struct GlobalIndex {
 pub struct GlobalIndexHeaderProjection<'a>(&'a GlobalIndex);
@@ -384,7 +386,7 @@ pub struct ResolveContext<'a> {
 pub type PeerClassIndex = AHashMap<(String, ModulePath), Vec<SymbolId>>;
 
 === retrieval ===
-pub const RETRIEVAL_SCHEMA_VERSION: u32 = 16;
+pub const RETRIEVAL_SCHEMA_VERSION: u32 = 17;
 pub const RETRIEVAL_TABLE_ID: u32 = 0x5254_5631;
 pub enum RetrievalBuildProgress {
 pub enum RetrievalSidecarStatus {
@@ -417,6 +419,8 @@ pub trait CandidateRanker {
 pub enum CacheFreshnessStatus {
 pub enum CacheManifestSidecarStatus {
 pub enum ShowOutcome {
+pub fn prune_orphaned_workspace_caches() -> std::io::Result<OrphanedCachePrune> {
+pub fn prune_orphaned_workspace_caches_if_due() -> std::io::Result<Option<OrphanedCachePrune>> {
 pub fn workspace_source_fingerprint_for_cache_validation(root: &Path) -> Result<WorkspaceContentFingerprint> {
 pub fn workspace_source_fingerprint_for_cache_validation_with_minified(
 pub fn workspace_source_fingerprint_from_disk(root: &Path) -> Result<WorkspaceContentFingerprint> {
@@ -453,6 +457,7 @@ pub struct InspectFlowGroupDrilldown {
 pub struct InspectFlowGroupShow {
 pub struct InspectFlowShow {
 pub struct NativeExportOptions {
+pub struct OrphanedCachePrune {
 pub struct Project {
 pub struct Security<'a> {
 pub struct SecurityFindingGroupShow {
@@ -464,9 +469,12 @@ pub struct WorkspaceCache {
 pub struct WorkspaceContentFingerprint {
 pub struct WorkspaceRefreshReport {
 pub use bonsai_browse::decl_decorator_names;
+pub use bonsai_browse::paths as compiler_corridor;
+pub use bonsai_browse::{
 pub use bonsai_browse::{
 pub use bonsai_inspect::{
 pub use bonsai_retrieval::RetrievalBuildProgress;
+pub use bonsai_security::inventory_rule_ids;
 pub use bonsai_security::{
 pub use bonsai_trace::{
 pub use bonsai_workspace::flow_ids::compute_structural_flow_id;
@@ -484,6 +492,7 @@ pub use analysis::{
 pub use bundled::bundled_rulepack_root;
 pub use compile::{compile_rule_to_inspect_args, CompiledRule};
 pub use deps::{build_inventory, DependencyInventory, DependencyRow};
+pub use deps_analysis::{
 pub use finding::{
 pub use flow_evidence::{build_flow_bodies, FlowBodyCache, FlowFunctionBody, FlowRole, FlowSourceLine};
 pub use loader::{
@@ -533,8 +542,10 @@ pub struct TraceSummary {
 === vfs ===
 pub enum VfsError {
 pub struct FileSnapshot {
+pub struct SourceIdentity {
 pub struct TextEdit {
 pub struct Vfs {
+pub type LazySourceLoader = dyn Fn(&Path, &SourceIdentity) -> std::io::Result<Arc<str>> + Send + Sync;
 
 === workspace ===
 pub const fn idg_sidecar_enabled_for_file_count(_file_count: usize) -> bool {
@@ -548,7 +559,6 @@ pub fn analyzer_build_fingerprint() -> &'static str {
 pub fn extend_func_set_with_semantic_callback_dispatchers(
 pub fn idg_sidecar_path(workspace_root: &Path) -> std::path::PathBuf {
 pub fn maintain_persisted_sidecars(workspace_root: &Path) -> std::io::Result<()> {
-pub fn summarize_precision(trace: &TraceResult) -> PrecisionReport {
 pub fn validate_idg_sidecar_file(path: &Path) -> bonsai_idg::IdgResult<usize> {
 pub fn validate_idg_sidecar_layout_file(path: &Path) -> bonsai_idg::IdgResult<usize> {
 pub fn validate_idg_sidecar_layout_with_source_fingerprints<I, P, J, S>(
@@ -570,14 +580,18 @@ pub mod value_flow;
 pub mod value_flow_disk;
 pub struct ExactDecl {
 pub struct FileRefresh {
-pub struct PrecisionReport {
+pub struct LazySourceRecord {
+pub struct LazySourceTable {
 pub struct SourceFileFingerprint {
+pub struct SourceFileIdentity {
 pub struct SourceFileStamp {
 pub struct SourceReachableCallGraph {
 pub struct Workspace {
 pub struct WorkspaceOpenOptions {
 pub struct WorkspaceStats {
+pub type PersistedFileEdges = (
 pub use bonsai_db::{
+pub use bonsai_vfs::SourceIdentity;
 pub use cross_module::CrossModuleOptions;
 pub use decorators::decl_decorator_names;
 pub use semantic_context::{

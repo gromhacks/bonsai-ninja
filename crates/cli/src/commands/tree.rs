@@ -671,15 +671,9 @@ fn named_decl_counts(facts: &bonsai_sdk::FileConnections) -> (usize, usize) {
 
 /// Short language tag for a file row.
 fn language_tag(language: &str) -> &str {
-    match language {
-        "javascript" => "js",
-        "typescript" => "ts",
-        "python" => "py",
-        "kotlin" => "kt",
-        "csharp" => "cs",
-        "objc" => "objc",
-        other => other,
-    }
+    // The adapter owns the language-to-extension vocabulary. Reuse that
+    // registration instead of duplicating a language-id table in the CLI.
+    crate::syntax_highlight::extension_for_language(language).unwrap_or(language)
 }
 
 /// One-line compiler facts for a node: a directory's file/callable totals; a
