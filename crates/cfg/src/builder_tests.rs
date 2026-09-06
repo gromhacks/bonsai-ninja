@@ -47,6 +47,50 @@ fn try_finally(start: u32, body: Vec<FlowEvent>, finally_events: Vec<FlowEvent>)
     }
 }
 
+#[test]
+fn finally_without_a_handler_does_not_fabricate_a_catch_path() {
+    let cfg = build_cfg_from_flow(
+        "f",
+        &[try_finally(
+            10,
+            vec![return_event(11)],
+            vec![call_event(12, "cleanup")],
+        )],
+    );
+    assert!(cfg
+        .blocks
+        .iter()
+        .all(|block| block.synthetic_kind != Some(SyntheticBlockKind::Catch)));
+    assert!(cfg
+        .blocks
+        .iter()
+        .all(|block| block.terminator != Terminator::TryFork));
+}
+
+#[test]
+fn an_empty_catch_arm_still_allows_normal_fallthrough_after_a_throw() {
+    let events = [
+        FlowEvent::Try {
+            span: span(10),
+            body: vec![throw_event(11)],
+            catch_events: Vec::new(),
+            finally_events: Vec::new(),
+            catch_param: None,
+            catch_types: Vec::new(),
+            catch_arms: vec![bonsai_lang_api::CatchArmFact {
+                span: span(12),
+                parameter: None,
+                types: Vec::new(),
+            }],
+        },
+        call_event(13, "after_handler"),
+    ];
+    let normalized = normalize_executable_flow(&events);
+    assert!(normalized
+        .iter()
+        .any(|event| matches!(event, FlowEvent::Call { name, .. } if name == "after_handler")));
+}
+
 fn block_has_call(block: &BasicBlock, name: &str) -> bool {
     block.events.iter().any(|event| {
         matches!(
@@ -322,6 +366,76 @@ fn continue_inside_try_finally_runs_cleanup_then_loop_header() {
     assert_eq!(cleanup.synthetic_kind, Some(SyntheticBlockKind::Finally));
     assert!(block_has_call(cleanup, "cleanup"));
     assert_eq!(cleanup.successors, vec![header]);
+}
+
+#[test]
+fn loop_control_does_not_unwind_a_try_that_still_contains_its_target() {
+    for is_continue in [false, true] {
+        for inner_try in [false, true] {
+            let abrupt = if is_continue {
+                FlowEvent::Continue {
+                    span: span(30),
+                    target: None,
+                }
+            } else {
+                FlowEvent::Break {
+                    span: span(30),
+                    target: None,
+                }
+            };
+            let body = if inner_try {
+                vec![try_finally(
+                    25,
+                    vec![abrupt],
+                    vec![call_event(35, "inner_cleanup")],
+                )]
+            } else {
+                vec![abrupt]
+            };
+            let events = [try_finally(
+                10,
+                vec![
+                    FlowEvent::Loop {
+                        span: span(20),
+                        loop_kind: LoopKind::While,
+                        label: None,
+                        condition_events: Vec::new(),
+                        update_events: Vec::new(),
+                        body,
+                    },
+                    call_event(40, "still_in_outer_try"),
+                ],
+                vec![call_event(50, "outer_cleanup")],
+            )];
+            let cfg = build_cfg_from_flow("f", &events);
+            let terminator = if is_continue {
+                Terminator::Continue
+            } else {
+                Terminator::Break
+            };
+            let transfer = cfg
+                .blocks
+                .iter()
+                .find(|block| block.terminator == terminator)
+                .unwrap();
+            assert_eq!(transfer.successors.len(), 1);
+            let mut destination = cfg.block(transfer.successors[0]).unwrap();
+            if inner_try {
+                assert!(block_has_call(destination, "inner_cleanup"));
+                assert_eq!(destination.successors.len(), 1);
+                destination = cfg.block(destination.successors[0]).unwrap();
+            }
+            assert_eq!(
+                destination.synthetic_kind,
+                Some(if is_continue {
+                    SyntheticBlockKind::LoopHeader
+                } else {
+                    SyntheticBlockKind::LoopAfter
+                }),
+                "outer finally ran before leaving the outer try"
+            );
+        }
+    }
 }
 
 #[test]

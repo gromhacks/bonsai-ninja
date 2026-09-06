@@ -1,4 +1,4 @@
-use super::{cached_span_map, cached_span_map_arc};
+use super::{cached_span_map, cached_span_map_arc, cached_span_map_from_line_starts};
 use crate::FileId;
 use std::sync::Arc;
 
@@ -42,4 +42,17 @@ fn arc_snapshot_cache_keeps_same_snapshot_fast_but_distinguishes_new_snapshot() 
     let replacement_text: Arc<str> = Arc::from("c\nd\n");
     let replacement = cached_span_map_arc(FileId::new(5), 1, &replacement_text);
     assert!(!std::sync::Arc::ptr_eq(&first, &replacement));
+}
+
+#[test]
+fn line_tables_cache_within_but_not_across_workspace_instances() {
+    let file = FileId::new(6);
+    let first = cached_span_map_from_line_starts(1, file, 0, || Some(vec![0, 2])).unwrap();
+    let hit = cached_span_map_from_line_starts(1, file, 0, || panic!("cache miss")).unwrap();
+    assert!(Arc::ptr_eq(&first, &hit));
+    let second = cached_span_map_from_line_starts(2, file, 0, || Some(vec![0])).unwrap();
+    assert_eq!(first.line_col(2).line, 2);
+    assert_eq!(second.line_col(2).line, 1);
+    let edited = cached_span_map_from_line_starts(1, file, 1, || Some(vec![0])).unwrap();
+    assert_eq!(edited.line_col(2).line, 1);
 }

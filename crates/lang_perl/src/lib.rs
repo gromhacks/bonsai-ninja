@@ -1384,8 +1384,17 @@ fn perl_compound_static_allowlist_guards(tree: &Tree, file: FileId, src: &[u8]) 
         let Some(body) = function.child_by_field_name("body") else {
             continue;
         };
-        let calls = perl_collect_kinds_below(body, &["method_call_expression"]);
-        for branch in perl_collect_kinds_below(body, &["postfix_conditional_expression"]) {
+        let mut cursor = body.walk();
+        let statements = body
+            .named_children(&mut cursor)
+            .filter_map(perl_single_statement_value)
+            .collect::<Vec<_>>();
+        let scalar_uses = perl_collect_kinds_below(body, &["scalar"]);
+        for branch in statements
+            .iter()
+            .copied()
+            .filter(|node| node.kind() == "postfix_conditional_expression")
+        {
             let (Some(terminal), Some(condition)) =
                 (branch.named_child(0), branch.child_by_field_name("condition"))
             else {
@@ -1402,8 +1411,10 @@ fn perl_compound_static_allowlist_guards(tree: &Tree, file: FileId, src: &[u8]) 
             else {
                 continue;
             };
-            let Some(parser) = perl_collect_kinds_below(body, &["assignment_expression"])
-                .into_iter()
+            let Some(parser) = statements
+                .iter()
+                .copied()
+                .filter(|node| node.kind() == "assignment_expression")
                 .filter(|assignment| assignment.end_byte() <= branch.start_byte())
                 .filter_map(|assignment| perl_parser_assignment(assignment, src))
                 .filter(|assignment| assignment.output == predicate.parsed_place)
@@ -1411,11 +1422,27 @@ fn perl_compound_static_allowlist_guards(tree: &Tree, file: FileId, src: &[u8]) 
             else {
                 continue;
             };
-            for guarded_call in calls
+            for guarded_call in statements
                 .iter()
                 .copied()
+                .filter_map(perl_statement_method_call)
                 .filter(|call| call.start_byte() > branch.end_byte())
             {
+                // The parser result must retain the same binding and state.
+                // Reads are admitted only inside the proven predicate and
+                // this consumer's exact accessor arguments; other uses can
+                // mutate, replace, alias, or escape the parsed object.
+                if !perl_scalar_uses_are_guarded(
+                    &scalar_uses,
+                    &predicate.parsed_place,
+                    parser.end,
+                    guarded_call.end_byte(),
+                    condition,
+                    guarded_call,
+                    src,
+                ) {
+                    continue;
+                }
                 let guarded_args = perl_direct_method_arguments(guarded_call);
                 let component_relations = guarded_args
                     .iter()
@@ -1437,11 +1464,24 @@ fn perl_compound_static_allowlist_guards(tree: &Tree, file: FileId, src: &[u8]) 
                 ) else {
                     continue;
                 };
-                let Some(factory) =
-                    perl_receiver_factory_before(body, guarded_call.start_byte(), &guarded_receiver, src)
-                else {
+                let Some(factory) = perl_receiver_factory_before(
+                    &statements,
+                    guarded_call.start_byte(),
+                    &guarded_receiver,
+                    src,
+                ) else {
                     continue;
                 };
+                if scalar_uses.iter().any(|scalar| {
+                    factory.end <= scalar.start_byte()
+                        && scalar.end_byte() <= guarded_call.end_byte()
+                        && perl_exact_place(*scalar, src).as_deref() == Some(&guarded_receiver)
+                        && scalar
+                            .parent()
+                            .is_none_or(|parent| parent.id() != guarded_call.id())
+                }) {
+                    continue;
+                }
                 let mut evidence = vec![
                     "predicate-complete:true".to_string(),
                     "finite-static-string-membership:true".to_string(),
@@ -1486,8 +1526,75 @@ fn perl_compound_static_allowlist_guards(tree: &Tree, file: FileId, src: &[u8]) 
 
 struct PerlParserAssignment {
     start: usize,
+    end: usize,
     output: String,
     call_name: String,
+}
+
+fn perl_single_statement_value(mut node: Node<'_>) -> Option<Node<'_>> {
+    while matches!(node.kind(), "expression_statement" | "parenthesized_expression") {
+        let mut cursor = node.walk();
+        let mut children = node.named_children(&mut cursor);
+        let child = children.next()?;
+        if children.next().is_some() {
+            return None;
+        }
+        node = child;
+    }
+    Some(node)
+}
+
+fn perl_statement_method_call(node: Node<'_>) -> Option<Node<'_>> {
+    let node = perl_single_statement_value(node)?;
+    let value = match node.kind() {
+        "assignment_expression" => node.child_by_field_name("right")?,
+        "return_expression" if node.named_child_count() == 1 => node.named_child(0)?,
+        _ => node,
+    };
+    let call = perl_single_statement_value(value)?;
+    (call.kind() == "method_call_expression").then_some(call)
+}
+
+fn perl_binary_operator(node: Node<'_>) -> Option<&'static str> {
+    let left = node.child_by_field_name("left")?;
+    let right = node.child_by_field_name("right")?;
+    let mut cursor = node.walk();
+    let operator = node
+        .children(&mut cursor)
+        .find(|child| {
+            !child.is_named()
+                && left.end_byte() <= child.start_byte()
+                && child.end_byte() <= right.start_byte()
+        })
+        .map(|child| child.kind());
+    operator
+}
+
+fn perl_scalar_uses_are_guarded(
+    uses: &[Node<'_>],
+    name: &str,
+    after: usize,
+    before: usize,
+    condition: Node<'_>,
+    consumer: Node<'_>,
+    src: &[u8],
+) -> bool {
+    let arguments = perl_direct_method_arguments(consumer);
+    uses.iter()
+        .filter(|scalar| after <= scalar.start_byte() && scalar.end_byte() <= before)
+        .filter(|scalar| perl_exact_place(**scalar, src).as_deref() == Some(name))
+        .all(|scalar| {
+            let Some(accessor) = scalar
+                .parent()
+                .filter(|parent| parent.kind() == "method_call_expression")
+            else {
+                return false;
+            };
+            perl_accessor_call(accessor, src).is_some()
+                && (condition.start_byte() <= accessor.start_byte()
+                    && accessor.end_byte() <= condition.end_byte()
+                    || arguments.iter().any(|argument| argument.id() == accessor.id()))
+        })
 }
 
 struct PerlCompoundPredicate {
@@ -1498,12 +1605,13 @@ struct PerlCompoundPredicate {
 }
 
 struct PerlReceiverFactory {
+    end: usize,
     call_name: String,
     argument_evidence: Vec<String>,
 }
 
 fn perl_parser_assignment(assignment: Node<'_>, src: &[u8]) -> Option<PerlParserAssignment> {
-    let output = perl_assignment_target_place(assignment.child_by_field_name("left")?, src)?;
+    let output = perl_fresh_lexical_scalar(assignment.child_by_field_name("left")?, src)?;
     let call = assignment.child_by_field_name("right")?;
     let (receiver, method) = perl_method_identity(call, src)?;
     let arguments = perl_direct_method_arguments(call);
@@ -1512,44 +1620,99 @@ fn perl_parser_assignment(assignment: Node<'_>, src: &[u8]) -> Option<PerlParser
     };
     Some(PerlParserAssignment {
         start: assignment.start_byte(),
+        end: assignment.end_byte(),
         output,
         call_name: format!("{receiver}.{method}"),
     })
 }
 
+fn perl_fresh_lexical_scalar(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() != "variable_declaration" || node.child(0)?.kind() != "my" {
+        return None;
+    }
+    let scalar = node.child_by_field_name("variable")?;
+    (scalar.kind() == "scalar")
+        .then(|| perl_exact_place(scalar, src))
+        .flatten()
+}
+
 fn perl_compound_acceptance_predicate(
     condition: Node<'_>,
     src: &[u8],
-    static_collections: &std::collections::HashMap<String, Vec<String>>,
+    static_collections: &std::collections::HashMap<String, PerlStaticCollection<'_>>,
 ) -> Option<PerlCompoundPredicate> {
-    let equality = perl_collect_kinds_below(condition, &["equality_expression"])
-        .into_iter()
-        .next()?;
+    // Both predicates must be necessary on every accepting path. Descendant
+    // searches cannot prove this: an OR, negation, callback, or different
+    // comparison operator can contain the same tokens with opposite meaning.
+    let mut leaves = Vec::new();
+    let mut stack = vec![condition];
+    while let Some(node) = stack.pop() {
+        let node = perl_single_statement_value(node)?;
+        if node.kind() == "binary_expression" && matches!(perl_binary_operator(node), Some("&&" | "and")) {
+            stack.push(node.child_by_field_name("right")?);
+            stack.push(node.child_by_field_name("left")?);
+        } else {
+            leaves.push(node);
+        }
+    }
+    let mut equalities = leaves
+        .iter()
+        .copied()
+        .filter(|node| node.kind() == "equality_expression");
+    let equality = equalities.next()?;
+    if equalities.next().is_some() || perl_binary_operator(equality) != Some("eq") {
+        return None;
+    }
     let (equality_left, equality_right) = (
         equality.child_by_field_name("left")?,
         equality.child_by_field_name("right")?,
     );
     let (parsed_place, scheme_component, _) = perl_accessor_call(equality_left, src)?;
     let scheme_value = perl_static_string(equality_right, src)?;
-    let membership = perl_collect_kinds_below(condition, &["hash_element_expression"])
-        .into_iter()
-        .next()?;
+    let mut memberships = leaves
+        .iter()
+        .copied()
+        .filter(|node| node.kind() == "hash_element_expression");
+    let membership = memberships.next()?;
+    if memberships.next().is_some() {
+        return None;
+    }
     let collection = membership
         .child_by_field_name("hash")
         .or_else(|| membership.named_child(0))
         .and_then(|node| perl_exact_place(node, src))?;
-    if !static_collections.contains_key(perl_place_key(&collection)) {
+    let static_collection = static_collections.get(perl_place_key(&collection))?;
+    if static_collection.end > membership.start_byte()
+        || static_collection.scope.start_byte() > membership.start_byte()
+        || static_collection.scope.end_byte() < membership.end_byte()
+    {
         return None;
     }
     let key = membership
         .child_by_field_name("key")
         .or_else(|| membership.named_child(1))?;
-    let host_call = perl_collect_kinds_below(key, &["method_call_expression"])
-        .into_iter()
-        .next()?;
+    let key = perl_single_statement_value(key)?;
+    let host_call = if key.kind() == "binary_expression" && perl_binary_operator(key) == Some("//") {
+        let fallback = perl_static_string(key.child_by_field_name("right")?, src)?;
+        if static_collection.values.contains(&fallback) {
+            return None;
+        }
+        perl_single_statement_value(key.child_by_field_name("left")?)?
+    } else {
+        key
+    };
     let (host_receiver, host_component, _) = perl_accessor_call(host_call, src)?;
     if host_receiver != parsed_place {
         return None;
+    }
+    for leaf in leaves {
+        if leaf.id() == equality.id() || leaf.id() == membership.id() {
+            continue;
+        }
+        let (receiver, component, _) = perl_accessor_call(leaf, src)?;
+        if receiver != parsed_place || (component != scheme_component && component != host_component) {
+            return None;
+        }
     }
     Some(PerlCompoundPredicate {
         parsed_place,
@@ -1559,16 +1722,41 @@ fn perl_compound_acceptance_predicate(
     })
 }
 
-fn perl_static_map_collections(tree: &Tree, src: &[u8]) -> std::collections::HashMap<String, Vec<String>> {
+struct PerlStaticCollection<'tree> {
+    scope: Node<'tree>,
+    end: usize,
+    values: Vec<String>,
+}
+
+fn perl_static_map_collections<'tree>(
+    tree: &'tree Tree,
+    src: &[u8],
+) -> std::collections::HashMap<String, PerlStaticCollection<'tree>> {
     let mut collections = std::collections::HashMap::new();
     for assignment in collect_kinds(tree, &["assignment_expression"]) {
-        let Some(target) = assignment
-            .child_by_field_name("left")
-            .and_then(|left| perl_collect_kinds_below(left, &["hash"]).into_iter().next())
-            .and_then(|hash| perl_exact_place(hash, src))
+        let Some(left) = assignment.child_by_field_name("left").filter(|left| {
+            left.kind() == "variable_declaration"
+                && left.child(0).is_some_and(|keyword| keyword.kind() == "my")
+        }) else {
+            continue;
+        };
+        let Some(hash) = perl_collect_kinds_below(left, &["hash"]).into_iter().next() else {
+            continue;
+        };
+        let Some(target) = perl_exact_place(hash, src) else {
+            continue;
+        };
+        let Some(scope) = assignment
+            .parent()
+            .filter(|parent| parent.kind() == "expression_statement")
+            .and_then(|statement| statement.parent())
+            .filter(|scope| matches!(scope.kind(), "source_file" | "block"))
         else {
             continue;
         };
+        if !perl_hash_binding_is_stable(tree, hash.id(), perl_place_key(&target), src) {
+            continue;
+        }
         let Some(map) = assignment
             .child_by_field_name("right")
             .filter(|right| right.kind() == "map_grep_expression")
@@ -1585,11 +1773,10 @@ fn perl_static_map_collections(tree: &Tree, src: &[u8]) -> std::collections::Has
         if callback_text != "{$_=>1}" {
             continue;
         }
-        let Some(words) = map.child_by_field_name("list").or_else(|| {
-            perl_collect_kinds_below(map, &["quoted_word_list"])
-                .into_iter()
-                .next()
-        }) else {
+        let Some(words) = map
+            .child_by_field_name("list")
+            .filter(|list| list.kind() == "quoted_word_list")
+        else {
             continue;
         };
         let Some(content) = words
@@ -1604,34 +1791,47 @@ fn perl_static_map_collections(tree: &Tree, src: &[u8]) -> std::collections::Has
         }
         let values = raw.split_whitespace().map(str::to_string).collect::<Vec<_>>();
         if !values.is_empty() {
-            collections.insert(perl_place_key(&target).to_string(), values);
+            collections.insert(
+                perl_place_key(&target).to_string(),
+                PerlStaticCollection {
+                    scope,
+                    end: assignment.end_byte(),
+                    values,
+                },
+            );
         }
     }
     collections
 }
 
 fn perl_receiver_factory_before(
-    body: Node<'_>,
+    statements: &[Node<'_>],
     before: usize,
     receiver: &str,
     src: &[u8],
 ) -> Option<PerlReceiverFactory> {
-    perl_collect_kinds_below(body, &["assignment_expression"])
-        .into_iter()
+    statements
+        .iter()
+        .copied()
+        .filter(|node| node.kind() == "assignment_expression")
         .filter(|assignment| assignment.end_byte() <= before)
         .filter_map(|assignment| {
-            let target = perl_assignment_target_place(assignment.child_by_field_name("left")?, src)?;
+            let target = perl_fresh_lexical_scalar(assignment.child_by_field_name("left")?, src)?;
             if target != receiver {
                 return None;
             }
             let call = assignment.child_by_field_name("right")?;
             let (factory_receiver, method) = perl_method_identity(call, src)?;
             let arguments = perl_direct_method_arguments(call);
+            if arguments.len() % 2 != 0 {
+                return None;
+            }
             let mut argument_evidence = Vec::new();
+            let mut keys = std::collections::HashSet::new();
             for pair in arguments.chunks_exact(2) {
-                let key = node_text(&pair[0], src).trim();
+                let key = perl_static_string(pair[0], src)?;
                 let value = perl_compiler_evidence_operand(pair[1], src)?;
-                if key.is_empty() {
+                if key.is_empty() || !keys.insert(key.clone()) {
                     return None;
                 }
                 argument_evidence.push(format!("receiver-config:{key}={value}"));
@@ -1639,6 +1839,7 @@ fn perl_receiver_factory_before(
             Some((
                 assignment.start_byte(),
                 PerlReceiverFactory {
+                    end: assignment.end_byte(),
                     call_name: format!("{factory_receiver}.{method}"),
                     argument_evidence,
                 },
@@ -1646,16 +1847,6 @@ fn perl_receiver_factory_before(
         })
         .max_by_key(|(start, _)| *start)
         .map(|(_, factory)| factory)
-}
-
-fn perl_assignment_target_place(node: Node<'_>, src: &[u8]) -> Option<String> {
-    if let Some(place) = perl_exact_place(node, src) {
-        return Some(place);
-    }
-    perl_collect_kinds_below(node, &["scalar", "hash", "array"])
-        .into_iter()
-        .next()
-        .and_then(|node| perl_exact_place(node, src))
 }
 
 fn perl_exact_place(node: Node<'_>, src: &[u8]) -> Option<String> {
@@ -1736,18 +1927,53 @@ fn perl_collect_kinds_below<'tree>(node: Node<'tree>, kinds: &[&str]) -> Vec<Nod
 fn perl_static_string(node: Node<'_>, src: &[u8]) -> Option<String> {
     match node.kind() {
         "autoquoted_bareword" => Some(node_text(&node, src).trim().to_string()),
-        "string_content" if !node_has_descendant_kind(node, "scalar") => {
+        "string_content"
+            if !node_has_descendant_kind(node, "scalar") && !node_has_descendant_kind(node, "array") =>
+        {
             let text = node_text(&node, src);
             (!text.contains(['\\', '\n', '\r'])).then(|| text.to_string())
         }
-        "string_literal" | "interpolated_string_literal" if !node_has_descendant_kind(node, "scalar") => {
+        "string_literal" | "interpolated_string_literal"
+            if !node_has_descendant_kind(node, "scalar") && !node_has_descendant_kind(node, "array") =>
+        {
             let text = node_text(&node, src).trim();
             if text.len() < 2 {
                 return None;
             }
             let quote = text.as_bytes()[0];
-            ((quote == b'\'' || quote == b'"') && text.as_bytes().last() == Some(&quote))
-                .then(|| text[1..text.len() - 1].to_string())
+            if !matches!(quote, b'\'' | b'"') || text.as_bytes().last() != Some(&quote) {
+                return None;
+            }
+            let mut value = String::new();
+            let mut chars = text[1..text.len() - 1].chars();
+            while let Some(character) = chars.next() {
+                if character != '\\' {
+                    value.push(character);
+                    continue;
+                }
+                let escaped = chars.next()?;
+                if quote == b'\'' {
+                    if !matches!(escaped, '\\' | '\'') {
+                        value.push('\\');
+                    }
+                    value.push(escaped);
+                } else {
+                    value.push(match escaped {
+                        '\\' | '"' | '$' | '@' => escaped,
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        'b' => '\u{0008}',
+                        'f' => '\u{000c}',
+                        'a' => '\u{0007}',
+                        'e' => '\u{001b}',
+                        // Unsupported escapes/interpolation directives have
+                        // no exact scalar value, never their raw source text.
+                        _ => return None,
+                    });
+                }
+            }
+            Some(value)
         }
         _ => None,
     }
@@ -1888,14 +2114,7 @@ fn populate_perl_constant_static_values(index: &mut DeclIndex, tree: &Tree, file
 fn perl_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
     ConditionOperandFact {
         span: span_of(file, &node),
-        direct_call_span: matches!(
-            node.kind(),
-            "function_call_expression"
-                | "method_call_expression"
-                | "ambiguous_function_call_expression"
-                | "func1op_call_expression"
-        )
-        .then(|| span_of(file, &node)),
+        direct_call_span: bonsai_lang_api::kit::direct_call_callee_span(node, file, src, &HANDLER),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER),
         static_string: perl_static_string(node, src),
         static_value: perl_static_scalar(node, src),
@@ -2127,7 +2346,18 @@ fn perl_hash_binding_is_stable(tree: &Tree, declaration_hash_id: usize, name: &s
         };
         let mut current = Some(projected);
         while let Some(node) = current {
-            if matches!(node.kind(), "delete_expression" | "undef_expression") {
+            if matches!(
+                node.kind(),
+                "delete_expression"
+                    | "undef_expression"
+                    | "refgen_expression"
+                    | "function_call_expression"
+                    | "ambiguous_function_call_expression"
+                    | "method_call_expression"
+            ) || node
+                .children(&mut node.walk())
+                .any(|token| !token.is_named() && matches!(token.kind(), "++" | "--"))
+            {
                 return false;
             }
             if node.kind() == "assignment_expression" {

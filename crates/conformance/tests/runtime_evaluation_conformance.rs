@@ -216,7 +216,6 @@ const ABRUPT_FIXTURES: &[Fixture] = &[
     Fixture { language: "perl", path: "throw.pl", function: "fail", source: "sub fail { my ($input) = @_; die $input; dead_after_throw($input); }\n" },
     Fixture { language: "php", path: "throw.php", function: "fail", source: "<?php\nfunction fail($input) { throw new Exception($input); dead_after_throw($input); }\n" },
     Fixture { language: "python", path: "throw.py", function: "fail", source: "def fail(input):\n    raise RuntimeError(input)\n    dead_after_throw(input)\n" },
-    Fixture { language: "ruby", path: "throw.rb", function: "fail", source: "def fail(input)\n  raise input\n  dead_after_throw(input)\nend\n" },
     Fixture { language: "scala", path: "ThrowCase.scala", function: "fail", source: "object ThrowCase { def fail(input: String): Unit = { throw new RuntimeException(input); dead_after_throw(input) } }\n" },
     Fixture { language: "swift", path: "throw.swift", function: "fail", source: "func fail(_ input: Error) throws { throw input; dead_after_throw(input) }\n" },
     Fixture { language: "typescript", path: "throw.ts", function: "fail", source: "function fail(input: unknown): never { throw input; dead_after_throw(input); }\n" },
@@ -238,6 +237,10 @@ const NO_GRAMMAR_OWNED_ABRUPT_EXCEPTION: &[(&str, &str)] = &[
     (
         "lua",
         "error is a replaceable standard-library function, not a grammar-owned terminator",
+    ),
+    (
+        "ruby",
+        "raise is an overridable method, not a grammar-owned terminator",
     ),
     (
         "rust",

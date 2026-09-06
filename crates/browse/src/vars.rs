@@ -10,6 +10,7 @@ use crate::common::{
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// Filter bundle for [`vars`]. Every field is optional; `None`
 /// skips the corresponding filter.
@@ -37,14 +38,18 @@ pub struct VarOut {
     pub column: u32,
     pub in_function: String,
     pub writes: u32,
-    /// Best-effort RHS identifier captured during flow extraction
-    /// — lets callers see `cb = some_callback` without re-reading
-    /// the file.
+    /// Comma-separated display projection of `source_names`; retained for
+    /// clients using the original single-field inventory contract.
     pub source_name: Option<String>,
+    /// Sorted unique RHS identifiers and call names from every compiler
+    /// projection of this exact write. These are syntax facts, not a claim
+    /// that every operand reaches the assigned value through a callee.
+    #[serde(default)]
+    pub source_names: Vec<String>,
 }
 
 /// Collect every assignment matching the filters. Sorted by
-/// `(name, in_function, file, line)` after the dedup pass.
+/// relevance, then `(name, in_function, file, line, column)`.
 pub fn vars(ws: &Workspace, f: &VarsFilters<'_>) -> Result<Vec<VarOut>, regex::Error> {
     use rayon::prelude::*;
     let name_match = make_name_filter(f.name, f.regex)?;
@@ -66,6 +71,12 @@ pub fn vars(ws: &Workspace, f: &VarsFilters<'_>) -> Result<Vec<VarOut>, regex::E
             let Some(index) = admitted_file_decl_index(ws, file, &memory_permits) else {
                 return acc;
             };
+            let assignment_targets = index
+                .assignment_values
+                .iter()
+                .filter_map(|fact| Some(((fact.assignment_span, fact.target.as_deref()?), fact.target_span?)))
+                .collect::<ahash::AHashMap<_, _>>();
+            let mut assignments = ahash::AHashMap::new();
             for decl in &index.defs {
                 if f.in_fn.is_some_and(|needle| !decl.name.contains(needle)) {
                     continue;
@@ -73,11 +84,29 @@ pub fn vars(ws: &Workspace, f: &VarsFilters<'_>) -> Result<Vec<VarOut>, regex::E
                 walk_assigns(
                     &decl.flow_events,
                     &decl.name,
-                    ws,
                     &*name_match,
-                    f.source,
-                    &mut acc,
+                    &assignment_targets,
+                    &mut assignments,
                 );
+            }
+            for ((span, target, in_function), sources) in assignments {
+                if f.source
+                    .is_some_and(|needle| !sources.iter().any(|source| source.contains(needle)))
+                {
+                    continue;
+                }
+                let (file, line, column) = format_span(&span, ws);
+                let source_names: Vec<String> = sources.into_iter().map(str::to_owned).collect();
+                acc.push(VarOut {
+                    name: target.to_string(),
+                    file,
+                    line,
+                    column,
+                    in_function: in_function.to_string(),
+                    writes: 1,
+                    source_name: (!source_names.is_empty()).then(|| source_names.join(", ")),
+                    source_names,
+                });
             }
             acc
         })
@@ -88,26 +117,9 @@ pub fn vars(ws: &Workspace, f: &VarsFilters<'_>) -> Result<Vec<VarOut>, regex::E
             larger.extend(smaller);
             larger
         });
-    // Dedup: several grammars (C# `local_declaration_statement →
-    // variable_declaration → variable_declarator`, Go `short_var_
-    // declaration`) emit the same assignment at multiple nested
-    // node kinds because each kind sits in `assignment_kinds`. The
-    // rows differ only in column (each parent span starts a few
-    // columns earlier). Collapse to one row per `(name,
-    // in_function, file, line)` — take the innermost (largest
-    // column) since it's the tightest span around the identifier.
-    out.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| a.in_function.cmp(&b.in_function))
-            .then_with(|| a.file.cmp(&b.file))
-            .then_with(|| a.line.cmp(&b.line))
-            .then_with(|| b.column.cmp(&a.column))
-    });
-    out.dedup_by(|a, b| {
-        a.name == b.name && a.in_function == b.in_function && a.file == b.file && a.line == b.line
-    });
-    // Final display order matches the old grouping.
+    // Exact target spans unify wrapper projections before allocating rows;
+    // same-line writes remain distinct. The source predicate selects a whole
+    // write and cannot discard another RHS fact from that same assignment.
     out.sort_by(|a, b| {
         var_relevance_key(a, f)
             .cmp(&var_relevance_key(b, f))
@@ -117,6 +129,7 @@ pub fn vars(ws: &Workspace, f: &VarsFilters<'_>) -> Result<Vec<VarOut>, regex::E
                     .then_with(|| a.in_function.cmp(&b.in_function))
                     .then_with(|| a.file.cmp(&b.file))
                     .then_with(|| a.line.cmp(&b.line))
+                    .then_with(|| a.column.cmp(&b.column))
             })
     });
     Ok(out)
@@ -127,9 +140,11 @@ fn var_relevance_key(row: &VarOut, f: &VarsFilters<'_>) -> ((u8, usize), (u8, us
         textual_relevance_key(&row.name, Some(name), false)
     });
     let source = f.source.map_or((u8::MAX, usize::MAX), |source| {
-        row.source_name.as_deref().map_or((u8::MAX, usize::MAX), |value| {
-            textual_relevance_key(value, Some(source), false)
-        })
+        row.source_names
+            .iter()
+            .map(|value| textual_relevance_key(value, Some(source), false))
+            .min()
+            .unwrap_or((u8::MAX, usize::MAX))
     });
     let in_fn = f.in_fn.map_or((u8::MAX, usize::MAX), |in_fn| {
         textual_relevance_key(&row.in_function, Some(in_fn), false)
@@ -137,84 +152,110 @@ fn var_relevance_key(row: &VarOut, f: &VarsFilters<'_>) -> ((u8, usize), (u8, us
     (name, source, in_fn)
 }
 
-/// Walk a decl's flow events and emit one [`VarOut`] per
-/// `FlowEvent::Assign`. RHS preference: explicit `source_name` >
-/// RHS-call name > comma-joined `source_names` (multi-source
-/// assignments).
-fn walk_assigns(
-    events: &[FlowEvent],
-    in_fn: &str,
-    ws: &Workspace,
+type AssignmentSources<'a> = ahash::AHashMap<(bonsai_common::Span, &'a str, &'a str), BTreeSet<&'a str>>;
+
+/// Coalesce typed projections by the exact compiler target span. Borrow the
+/// source facts until the complete write passes the user's source selector.
+fn walk_assigns<'a>(
+    events: &'a [FlowEvent],
+    in_fn: &'a str,
     name_matches: &(dyn Fn(&str) -> bool + Send + Sync),
-    source_filter: Option<&str>,
-    out: &mut Vec<VarOut>,
+    assignment_targets: &ahash::AHashMap<(bonsai_common::Span, &str), bonsai_common::Span>,
+    out: &mut AssignmentSources<'a>,
 ) {
-    for event in events {
-        match event {
-            FlowEvent::Assign {
-                span,
-                target,
-                source_name,
-                source_call,
-                source_names,
-                ..
-            } => {
-                if !name_matches(target) {
-                    continue;
-                }
-                let source = source_name.clone().or_else(|| {
-                    source_call
-                        .clone()
-                        .or_else(|| (!source_names.is_empty()).then(|| source_names.join(",")))
-                });
-                if source_filter
-                    .is_some_and(|needle| !source.as_deref().is_some_and(|source| source.contains(needle)))
-                {
-                    continue;
-                }
-                let (path, line, column) = format_span(span, ws);
-                out.push(VarOut {
-                    name: target.clone(),
-                    file: path,
-                    line,
-                    column,
-                    in_function: in_fn.to_string(),
-                    writes: 1,
-                    source_name: source,
-                });
+    bonsai_lang_api::for_each_flow_event(events, &mut |event| {
+        if let FlowEvent::Assign {
+            span,
+            target,
+            source_name,
+            source_call,
+            source_names,
+            ..
+        } = event
+        {
+            if !name_matches(target) {
+                return;
             }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                walk_assigns(then_events, in_fn, ws, name_matches, source_filter, out);
-                walk_assigns(else_events, in_fn, ws, name_matches, source_filter, out);
-            }
-            FlowEvent::Loop {
-                condition_events,
-                body,
-                update_events,
-                ..
-            } => {
-                walk_assigns(condition_events, in_fn, ws, name_matches, source_filter, out);
-                walk_assigns(body, in_fn, ws, name_matches, source_filter, out);
-                walk_assigns(update_events, in_fn, ws, name_matches, source_filter, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                walk_assigns(body, in_fn, ws, name_matches, source_filter, out);
-                walk_assigns(catch_events, in_fn, ws, name_matches, source_filter, out);
-                walk_assigns(finally_events, in_fn, ws, name_matches, source_filter, out);
-            }
-            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                walk_assigns(body, in_fn, ws, name_matches, source_filter, out);
-            }
-            _ => {}
+            let target_span = assignment_targets.get(&(*span, target.as_str())).unwrap_or(span);
+            let sources = out.entry((*target_span, target.as_str(), in_fn)).or_default();
+            sources.extend(
+                source_name
+                    .iter()
+                    .chain(source_call.iter())
+                    .chain(source_names.iter())
+                    .map(String::as_str),
+            );
         }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_assignment_projections_are_one_write_with_all_rhs_evidence() {
+        let workspace = Workspace::new(bonsai_adapters::all_languages_registry());
+        workspace.vfs().write(
+            "app.py",
+            "def entry(request):\n    value: str = request.args.get('cmd', '')\n",
+        );
+        let all = vars(
+            &workspace,
+            &VarsFilters {
+                name: Some("value"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(all.len(), 1, "one typed assignment is one write: {all:?}");
+        assert_eq!(all[0].writes, 1);
+        assert!(all[0]
+            .source_names
+            .iter()
+            .any(|source| source == "request.args.cmd"));
+        assert!(all[0]
+            .source_names
+            .iter()
+            .any(|source| source == "request.args.get"));
+        let filtered = vars(
+            &workspace,
+            &VarsFilters {
+                name: Some("value"),
+                source: Some("get"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(filtered.len(), 1, "RHS call remains searchable: {filtered:?}");
+        assert_eq!(
+            filtered[0].source_name, all[0].source_name,
+            "a selector must not remove other facts from the same write"
+        );
+        assert_eq!(filtered[0].source_names, all[0].source_names);
+    }
+
+    #[test]
+    fn separate_writes_on_one_line_remain_separate_rows() {
+        let workspace = Workspace::new(bonsai_adapters::all_languages_registry());
+        workspace.vfs().write(
+            "app.py",
+            "def entry(first, second):\n    value = first; value = second\n",
+        );
+        let rows = vars(
+            &workspace,
+            &VarsFilters {
+                name: Some("value"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2, "both writes are compiler facts: {rows:?}");
+        assert!(rows
+            .iter()
+            .any(|row| row.column == 5 && row.source_name.as_deref() == Some("first")));
+        assert!(rows
+            .iter()
+            .any(|row| row.column == 20 && row.source_name.as_deref() == Some("second")));
     }
 }

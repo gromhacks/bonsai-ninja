@@ -4,6 +4,7 @@
 //! detection assigns `.m` to Objective-C by default (same convention
 //! `tree-sitter-language-pack` uses). If a project mixes the two, the
 //! user can scope `--include` / `--exclude` to disambiguate.
+mod method_identity;
 mod parse_recovery;
 
 use bonsai_common::{FileId, Span};
@@ -119,7 +120,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     method_context_kinds: &["class_implementation", "class_interface"],
     method_owner_barrier_kinds: &[],
     constructor_method_kinds: &[],
-    constructor_names: &["init"],
+    constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     if_kinds: &["if_statement", "switch_statement"],
     branch_then_field_names: &["consequence", "body"],
     branch_else_field_names: &["alternative"],
@@ -570,13 +571,10 @@ impl LanguageAdapter for ObjCAdapter {
         // flow through a `_`-prefixed helper to zero candidates. Leave
         // visibility at the kit default and let the resolver's name +
         // receiver-type narrowing do the work instead.
-        mark_objc_initializer_methods(&mut decl_index);
-        let constructor_selectors = decl_index
-            .defs
-            .iter()
-            .filter(|decl| decl.kind == DeclKind::Constructor)
-            .map(|decl| decl.name.clone())
-            .collect::<std::collections::HashSet<_>>();
+        if let Some((snapshot, tree)) = parsed.as_ref() {
+            method_identity::mark_initializers(&mut decl_index, tree, snapshot.text.as_bytes());
+        }
+        let constructor_selectors = method_identity::initializer_selectors(&decl_index);
         // Per-decl `type_aliases` from typed parameters
         // (`(NSString *)name`, `(HTTPRequest *)req`). Objective-C
         // method signatures and C-style function parameters both
@@ -863,7 +861,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
 /// resolution.
 fn tag_objc_alloc_receiver_types(
     events: &mut [bonsai_lang_api::FlowEvent],
-    constructor_selectors: &std::collections::HashSet<String>,
+    constructor_selectors: &std::collections::HashMap<(String, String), bool>,
     value_binding_starts: &std::collections::HashMap<String, u64>,
 ) {
     for event in events {
@@ -890,16 +888,20 @@ fn tag_objc_alloc_receiver_types(
                         .get(name)
                         .is_none_or(|binding_start| *binding_start > span.start)
                 }) {
-                    if !receiver_types.iter().any(|existing| existing == &class_name) {
-                        receiver_types.push(class_name);
-                    }
                     // The nested allocation receiver plus a selector that
                     // resolved to an adapter-declared constructor proves this
                     // is construction syntax. Use those AST/declaration facts
                     // instead of teaching the IDG selector spellings.
                     let selector = name.rsplit('.').next().unwrap_or(name).trim();
-                    if constructor_selectors.contains(selector) || objc_selector_is_initializer(selector) {
+                    let initializer = constructor_selectors
+                        .get(&(class_name.clone(), selector.to_string()))
+                        .copied()
+                        .unwrap_or_else(|| objc_selector_is_initializer(selector));
+                    if initializer {
                         *call_kind = bonsai_lang_api::CallKind::Constructor;
+                    }
+                    if !receiver_types.iter().any(|existing| existing == &class_name) {
+                        receiver_types.push(class_name);
                     }
                 }
             }
@@ -929,18 +931,14 @@ fn tag_objc_alloc_receiver_types(
     }
 }
 
-fn mark_objc_initializer_methods(decl_index: &mut DeclIndex) {
-    for decl in &mut decl_index.defs {
-        if matches!(decl.kind, DeclKind::Method | DeclKind::Function)
-            && objc_selector_is_initializer(&decl.name)
-        {
-            decl.kind = DeclKind::Constructor;
-        }
-    }
-}
-
 fn objc_selector_is_initializer(selector: &str) -> bool {
-    selector == "init" || selector.starts_with("initWith")
+    selector
+        .split(':')
+        .next()
+        .unwrap_or(selector)
+        .trim_start_matches('_')
+        .strip_prefix("init")
+        .is_some_and(|suffix| suffix.chars().next().is_none_or(|ch| !ch.is_ascii_lowercase()))
 }
 
 fn objc_value_binding_starts(decl: &bonsai_lang_api::Decl) -> std::collections::HashMap<String, u64> {
@@ -1130,11 +1128,14 @@ fn objc_assignment_dictionary_literal<'tree>(root: Node<'tree>, span: Span) -> O
     if node.kind() == "dictionary_literal" {
         return Some(node);
     }
-    let rhs = node
+    let mut rhs = node
         .child_by_field_name("value")
         .or_else(|| node.child_by_field_name("right"))
         .unwrap_or(node);
-    first_descendant_of_kind(rhs, "dictionary_literal")
+    while rhs.kind() == "parenthesized_expression" && rhs.named_child_count() == 1 {
+        rhs = rhs.named_child(0)?;
+    }
+    (rhs.kind() == "dictionary_literal").then_some(rhs)
 }
 
 fn first_descendant_of_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
@@ -1621,8 +1622,7 @@ fn objc_static_string_key(node: Node<'_>, src: &[u8]) -> Option<String> {
             without_at
                 .strip_prefix('\'')
                 .and_then(|part| part.strip_suffix('\''))
-        })?
-        .trim();
+        })?;
     if key.is_empty()
         || !key
             .chars()

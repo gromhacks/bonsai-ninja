@@ -1,8 +1,25 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-static IDG_SIDECAR_LIMIT_ENV_LOCK: Mutex<()> = Mutex::new(());
-static DATAFLOW_ENV_LOCK: Mutex<()> = Mutex::new(());
+fn run_with_isolated_env(test: &str, key: &str, value: &str) -> bool {
+    if std::env::var("BONSAI_SDK_ENV_TEST").as_deref() == Ok(test) {
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", test, "--nocapture"])
+        .env("BONSAI_SDK_ENV_TEST", test)
+        .env(key, value)
+        .env_remove("NO_PROGRESS")
+        .output()
+        .expect("isolated environment test");
+    assert!(
+        output.status.success(),
+        "isolated {test} failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -223,7 +240,6 @@ fn diagnostics_report_attributes_errors_to_workspace_relative_paths() {
 
 #[test]
 fn facade_cache_rebuild_structural_matches_cli_rebuild_scope() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("structural-cache");
     let sdk = sdk();
 
@@ -298,7 +314,6 @@ fn root_cache_stats_preserve_builder_rulepack_validation() {
 
 #[test]
 fn facade_index_semantic_writes_structural_sidecars_and_query_stays_lazy() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("semantic-index");
     let sdk = sdk();
 
@@ -439,7 +454,6 @@ fn facade_index_semantic_writes_structural_sidecars_and_query_stays_lazy() {
 
 #[test]
 fn long_lived_lazy_query_does_not_poll_unrequested_idg_sidecars() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("late-idg-hydration");
     let sdk = sdk();
     let queried = sdk.open_query(&root).expect("query before semantic index");
@@ -570,7 +584,6 @@ fn semantic_manifest_is_bound_to_the_minified_source_profile() {
 
 #[test]
 fn cache_stats_reuses_independently_versioned_sidecars_when_only_manifest_build_changes() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("semantic-cache-stale-build-manifest");
     let sdk = sdk();
     let indexed = sdk.index_semantic(&root).expect("semantic index");
@@ -619,7 +632,6 @@ fn cache_stats_reuses_independently_versioned_sidecars_when_only_manifest_build_
 
 #[test]
 fn cache_stats_validation_requires_fresh_retrieval_sidecar() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("semantic-cache-validation-retrieval-missing");
     let sdk = sdk();
     let indexed = sdk.index_semantic(&root).expect("semantic index");
@@ -660,7 +672,6 @@ fn cache_stats_validation_requires_fresh_retrieval_sidecar() {
 
 #[test]
 fn cache_stats_validation_rejects_retrieval_sidecar_from_moved_workspace() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("semantic-cache-validation-retrieval-moved-src");
     let moved = tempdir("semantic-cache-validation-retrieval-moved-dst");
     let sdk = sdk();
@@ -716,8 +727,6 @@ fn cache_stats_validation_rejects_retrieval_sidecar_from_moved_workspace() {
 
 #[test]
 fn cache_stats_validation_rejects_moved_full_prewarm_factstores() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
-    let _dataflow_guard = DATAFLOW_ENV_LOCK.lock().expect("dataflow env lock");
     let root = temp_python_micro("semantic-cache-validation-full-prewarm-moved-src");
     let moved = tempdir("semantic-cache-validation-full-prewarm-moved-dst");
     let sdk = sdk();
@@ -1100,7 +1109,6 @@ fn sdk_browse_file_filters_are_workspace_relative() {
 
 #[test]
 fn cache_stats_validation_rejects_corrupt_retrieval_sidecar_even_when_size_matches() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("semantic-cache-validation-retrieval-corrupt");
     let sdk = sdk();
     let indexed = sdk.index_semantic(&root).expect("semantic index");
@@ -1152,7 +1160,6 @@ fn cache_stats_validation_rejects_corrupt_retrieval_sidecar_even_when_size_match
 
 #[test]
 fn cache_stats_validation_rejects_corrupt_callgraph_sidecar_even_when_size_matches() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("semantic-cache-validation-callgraph-corrupt");
     let sdk = sdk();
     let indexed = sdk.index_semantic(&root).expect("semantic index");
@@ -1204,7 +1211,6 @@ fn cache_stats_validation_rejects_corrupt_callgraph_sidecar_even_when_size_match
 
 #[test]
 fn cache_stats_validation_rejects_corrupt_idg_sidecar_even_when_size_matches() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("semantic-cache-validation-idg-corrupt");
     let sdk = sdk();
     let indexed = sdk.index_semantic(&root).expect("semantic index");
@@ -1250,8 +1256,6 @@ fn cache_stats_validation_rejects_corrupt_idg_sidecar_even_when_size_matches() {
 
 #[test]
 fn cache_stats_validation_rejects_corrupt_flow_ids_sidecar_even_when_size_matches() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
-    let _dataflow_guard = DATAFLOW_ENV_LOCK.lock().expect("dataflow env lock");
     let root = temp_python_micro("semantic-cache-validation-flow-ids-corrupt");
     let project = sdk()
         .open_with_options(&root, bonsai_sdk::OpenOptions::full_prewarm())
@@ -1301,8 +1305,6 @@ fn cache_stats_validation_rejects_corrupt_flow_ids_sidecar_even_when_size_matche
 
 #[test]
 fn cache_stats_validation_rejects_corrupt_full_prewarm_factstore_even_when_size_matches() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
-    let _dataflow_guard = DATAFLOW_ENV_LOCK.lock().expect("dataflow env lock");
     let root = temp_python_micro("semantic-cache-validation-full-prewarm-corrupt");
     let project = sdk()
         .open_with_options(&root, bonsai_sdk::OpenOptions::full_prewarm())
@@ -1353,7 +1355,6 @@ fn cache_stats_validation_rejects_corrupt_full_prewarm_factstore_even_when_size_
 
 #[test]
 fn facade_index_semantic_explicitly_prewarms_sidecars() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("semantic-index-alias");
     let indexed = sdk().index_semantic(&root).expect("semantic index alias");
     let stats = indexed.cache().stats().expect("semantic alias cache stats");
@@ -1369,9 +1370,13 @@ fn facade_index_semantic_explicitly_prewarms_sidecars() {
 
 #[test]
 fn facade_semantic_manifest_ignores_legacy_idg_file_limit() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
-    let old_limit = std::env::var("BONSAI_IDG_SIDECAR_FILE_LIMIT").ok();
-    std::env::set_var("BONSAI_IDG_SIDECAR_FILE_LIMIT", "0");
+    if run_with_isolated_env(
+        "facade_semantic_manifest_ignores_legacy_idg_file_limit",
+        "BONSAI_IDG_SIDECAR_FILE_LIMIT",
+        "0",
+    ) {
+        return;
+    }
 
     let root = temp_python_micro("semantic-index-idg-unbounded");
     let indexed = sdk().index_semantic(&root).expect("semantic index");
@@ -1408,18 +1413,18 @@ fn facade_semantic_manifest_ignores_legacy_idg_file_limit() {
         "persisted IDG sidecar should not appear in missing reasons: {manifest:#?}"
     );
 
-    match old_limit {
-        Some(value) => std::env::set_var("BONSAI_IDG_SIDECAR_FILE_LIMIT", value),
-        None => std::env::remove_var("BONSAI_IDG_SIDECAR_FILE_LIMIT"),
-    }
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn query_open_loads_callgraph_sidecar_when_dataflow_is_disabled() {
-    let _guard = DATAFLOW_ENV_LOCK.lock().expect("dataflow env lock");
-    let old = std::env::var("BONSAI_NO_DATAFLOW").ok();
-    std::env::set_var("BONSAI_NO_DATAFLOW", "1");
+    if run_with_isolated_env(
+        "query_open_loads_callgraph_sidecar_when_dataflow_is_disabled",
+        "BONSAI_NO_DATAFLOW",
+        "1",
+    ) {
+        return;
+    }
 
     let root = temp_python_micro("query-no-dataflow-callgraph");
     sdk().index_semantic(&root).expect("semantic index");
@@ -1453,16 +1458,11 @@ fn query_open_loads_callgraph_sidecar_when_dataflow_is_disabled() {
         "query open should still load a fresh callgraph sidecar when dataflow is disabled: {events:#?}"
     );
 
-    match old {
-        Some(value) => std::env::set_var("BONSAI_NO_DATAFLOW", value),
-        None => std::env::remove_var("BONSAI_NO_DATAFLOW"),
-    }
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn idg_rebuild_reuses_callgraph_without_an_aggregate_manifest() {
-    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("idg-reuses-independent-callgraph");
     let sdk = sdk();
     let indexed = sdk.index_semantic(&root).expect("semantic index");
@@ -1911,7 +1911,6 @@ fn facade_index_with_progress_reports_structural_lifecycle() {
 
 #[test]
 fn facade_full_prewarm_with_progress_reports_analysis_prewarm() {
-    let _dataflow_guard = DATAFLOW_ENV_LOCK.lock().expect("dataflow env lock");
     let root = temp_python_micro("progress-full-prewarm");
     let events = Mutex::new(Vec::new());
     let project = sdk()

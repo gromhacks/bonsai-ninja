@@ -263,7 +263,10 @@ fn prune_event(event: &FlowEvent) -> (FlowEvent, bool) {
             let (body, body_falls_through) = prune_unreachable_sequence(body);
             let (catch_events, catch_falls_through) = prune_unreachable_sequence(catch_events);
             let (finally_events, finally_falls_through) = prune_unreachable_sequence(finally_events);
-            let has_catch = catch_param.is_some() || !catch_types.is_empty() || !catch_events.is_empty();
+            let has_catch = catch_param.is_some()
+                || !catch_types.is_empty()
+                || !catch_events.is_empty()
+                || !catch_arms.is_empty();
             (
                 FlowEvent::Try {
                     span: *span,
@@ -342,6 +345,9 @@ struct LoopTargets {
     label: Option<String>,
     break_to: usize,
     continue_to: usize,
+    /// Finally scopes that contain both this loop and its destinations.
+    /// Break/continue retain these scopes rather than running their cleanup.
+    retained_finally_depth: usize,
 }
 
 /// Walk `events` appending to `current`. Returns the id of the final
@@ -375,14 +381,14 @@ fn walk_with_finally<'a>(
 ) -> usize {
     let mut cur = current;
     for event in events {
-        match event.clone() {
+        match event {
             FlowEvent::Branch {
                 span,
                 then_events,
                 else_events,
                 ..
             } => {
-                record_span(blocks, cur, span);
+                record_span(blocks, cur, *span);
                 blocks[cur].terminator = Terminator::Branch;
                 let join = new_block(
                     blocks,
@@ -402,9 +408,9 @@ fn walk_with_finally<'a>(
                 link(blocks, cur, then_id);
                 link(blocks, cur, else_id);
                 let then_tail =
-                    walk_with_finally(&then_events, then_id, exit, blocks, loop_targets, pending_finally);
+                    walk_with_finally(then_events, then_id, exit, blocks, loop_targets, pending_finally);
                 let else_tail =
-                    walk_with_finally(&else_events, else_id, exit, blocks, loop_targets, pending_finally);
+                    walk_with_finally(else_events, else_id, exit, blocks, loop_targets, pending_finally);
                 link(blocks, then_tail, join);
                 link(blocks, else_tail, join);
                 cur = join;
@@ -417,7 +423,7 @@ fn walk_with_finally<'a>(
                 update_events,
                 body,
             } => {
-                record_span(blocks, cur, span);
+                record_span(blocks, cur, *span);
                 let header = new_block(
                     blocks,
                     format!("loop-header@{}", span.start),
@@ -434,7 +440,7 @@ fn walk_with_finally<'a>(
                     Some(SyntheticBlockKind::LoopAfter),
                 );
                 let condition_tail = walk_with_finally(
-                    &condition_events,
+                    condition_events,
                     header,
                     exit,
                     blocks,
@@ -448,13 +454,13 @@ fn walk_with_finally<'a>(
                 // edge at all; only an adapter-emitted `break` can reach its
                 // after block. These are typed compiler semantics, not a
                 // source-text test for `do`, `repeat`, or `loop`.
-                if loop_kind == bonsai_lang_api::LoopKind::DoWhile {
+                if *loop_kind == bonsai_lang_api::LoopKind::DoWhile {
                     link(blocks, cur, body_id);
                 } else {
                     link(blocks, cur, header);
                 }
                 link(blocks, condition_tail, body_id);
-                if loop_kind != bonsai_lang_api::LoopKind::Loop {
+                if *loop_kind != bonsai_lang_api::LoopKind::Loop {
                     link(blocks, condition_tail, after);
                 }
                 let update_entry = if update_events.is_empty() {
@@ -468,26 +474,21 @@ fn walk_with_finally<'a>(
                 };
                 let mut nested_loop_targets = loop_targets.to_vec();
                 nested_loop_targets.push(LoopTargets {
-                    label,
+                    label: label.clone(),
                     break_to: after,
-                    continue_to: if loop_kind == bonsai_lang_api::LoopKind::DoWhile {
+                    continue_to: if *loop_kind == bonsai_lang_api::LoopKind::DoWhile {
                         header
                     } else {
                         update_entry
                     },
+                    retained_finally_depth: pending_finally.len(),
                 });
-                let body_tail = walk_with_finally(
-                    &body,
-                    body_id,
-                    exit,
-                    blocks,
-                    &nested_loop_targets,
-                    pending_finally,
-                );
+                let body_tail =
+                    walk_with_finally(body, body_id, exit, blocks, &nested_loop_targets, pending_finally);
                 link(blocks, body_tail, update_entry);
                 if !update_events.is_empty() {
                     let update_tail = walk_with_finally(
-                        &update_events,
+                        update_events,
                         update_entry,
                         exit,
                         blocks,
@@ -503,9 +504,11 @@ fn walk_with_finally<'a>(
                 body,
                 catch_events,
                 finally_events,
-                ..
+                catch_param,
+                catch_types,
+                catch_arms,
             } => {
-                record_span(blocks, cur, span);
+                record_span(blocks, cur, *span);
                 // Anchor block sits BETWEEN the predecessor's
                 // straight-line events and the try/catch fork.
                 // Without it, marking `cur.terminator = TryFork`
@@ -524,46 +527,50 @@ fn walk_with_finally<'a>(
                 // `dump-cfg` doesn't render a `FileId::INVALID@0:0`
                 // row for the anchor — the anchor has no events of
                 // its own for `record_span` to fire on.
-                record_span(blocks, anchor, span);
+                record_span(blocks, anchor, *span);
                 let try_id = new_block(
                     blocks,
                     format!("try@{}", span.start),
                     Some(SyntheticBlockKind::TryBody),
                 );
-                let catch_id = new_block(
-                    blocks,
-                    format!("catch@{}", span.start),
-                    Some(SyntheticBlockKind::Catch),
-                );
                 link(blocks, anchor, try_id);
-                link(blocks, anchor, catch_id);
-                blocks[anchor].terminator = Terminator::TryFork;
+                let has_catch = catch_param.is_some()
+                    || !catch_types.is_empty()
+                    || !catch_events.is_empty()
+                    || !catch_arms.is_empty();
+                let catch_id = has_catch.then(|| {
+                    let id = new_block(
+                        blocks,
+                        format!("catch@{}", span.start),
+                        Some(SyntheticBlockKind::Catch),
+                    );
+                    link(blocks, anchor, id);
+                    blocks[anchor].terminator = Terminator::TryFork;
+                    id
+                });
                 let mut inner_finally = pending_finally.to_vec();
                 inner_finally.push(FinallyFrame {
-                    span,
-                    events: &finally_events,
+                    span: *span,
+                    events: finally_events,
                 });
                 // Inside the try body and catch arm, early terminators get
                 // their own finally path so they can continue to exit / loop
                 // target after cleanup instead of falling through normally.
-                let try_tail = walk_with_finally(&body, try_id, exit, blocks, loop_targets, &inner_finally);
-                let catch_tail = walk_with_finally(
-                    &catch_events,
-                    catch_id,
-                    exit,
-                    blocks,
-                    loop_targets,
-                    &inner_finally,
-                );
+                let try_tail = walk_with_finally(body, try_id, exit, blocks, loop_targets, &inner_finally);
+                let catch_tail = catch_id.map(|id| {
+                    walk_with_finally(catch_events, id, exit, blocks, loop_targets, &inner_finally)
+                });
                 let finally_id = new_block(
                     blocks,
                     format!("finally@{}", span.start),
                     Some(SyntheticBlockKind::Finally),
                 );
                 link(blocks, try_tail, finally_id);
-                link(blocks, catch_tail, finally_id);
+                if let Some(catch_tail) = catch_tail {
+                    link(blocks, catch_tail, finally_id);
+                }
                 cur = walk_with_finally(
-                    &finally_events,
+                    finally_events,
                     finally_id,
                     exit,
                     blocks,
@@ -572,15 +579,15 @@ fn walk_with_finally<'a>(
                 );
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                cur = walk_with_finally(&body, cur, exit, blocks, loop_targets, pending_finally);
+                cur = walk_with_finally(body, cur, exit, blocks, loop_targets, pending_finally);
             }
             terminal @ (FlowEvent::Return { .. }
             | FlowEvent::Throw { .. }
             | FlowEvent::Break { .. }
             | FlowEvent::Continue { .. }) => {
-                let span = flow_event_span(&terminal);
+                let span = flow_event_span(terminal);
                 record_span(blocks, cur, span);
-                blocks[cur].terminator = match &terminal {
+                blocks[cur].terminator = match terminal {
                     FlowEvent::Return { .. } => Terminator::Return,
                     FlowEvent::Throw { .. } => Terminator::Throw,
                     FlowEvent::Break { .. } => Terminator::Break,
@@ -590,16 +597,25 @@ fn walk_with_finally<'a>(
                 // When a finally is in flight, route every early
                 // exit through it so cleanup work runs before the
                 // edge to exit / loop target.
-                let final_target = control_transfer_target(&terminal, loop_targets, exit);
-                blocks[cur].events.push(terminal);
-                if pending_finally.is_empty() {
+                let (final_target, retained_finally_depth) =
+                    control_transfer_target(terminal, loop_targets, exit);
+                blocks[cur].events.push(terminal.clone());
+                if pending_finally.len() == retained_finally_depth {
                     match blocks[cur].terminator {
                         Terminator::Break | Terminator::Continue => link(blocks, cur, final_target),
                         Terminator::Return | Terminator::Throw => {}
                         _ => unreachable!(),
                     }
                 } else {
-                    append_finally_path(cur, final_target, exit, blocks, loop_targets, pending_finally);
+                    append_finally_path(
+                        cur,
+                        final_target,
+                        exit,
+                        blocks,
+                        loop_targets,
+                        pending_finally,
+                        retained_finally_depth,
+                    );
                 }
                 // Events after an early terminator live in a fresh
                 // `unreachable` block — common in structured flow.
@@ -612,9 +628,9 @@ fn walk_with_finally<'a>(
                 cur = dead;
             }
             other => {
-                let span = flow_event_span(&other);
+                let span = flow_event_span(other);
                 record_span(blocks, cur, span);
-                blocks[cur].events.push(other);
+                blocks[cur].events.push(other.clone());
             }
         }
     }
@@ -628,9 +644,10 @@ fn append_finally_path<'a>(
     blocks: &mut Vec<BasicBlock>,
     loop_targets: &[LoopTargets],
     pending_finally: &[FinallyFrame<'a>],
+    retained_finally_depth: usize,
 ) {
     let mut cur = from;
-    for idx in (0..pending_finally.len()).rev() {
+    for idx in (retained_finally_depth..pending_finally.len()).rev() {
         let frame = pending_finally[idx];
         let finally_id = new_block(
             blocks,
@@ -651,11 +668,11 @@ fn append_finally_path<'a>(
     link(blocks, cur, final_target);
 }
 
-fn control_transfer_target(event: &FlowEvent, loop_targets: &[LoopTargets], exit: usize) -> usize {
+fn control_transfer_target(event: &FlowEvent, loop_targets: &[LoopTargets], exit: usize) -> (usize, usize) {
     let (target, select): (Option<&LoopControlTarget>, fn(&LoopTargets) -> usize) = match event {
         FlowEvent::Break { target, .. } => (target.as_ref(), |loop_target| loop_target.break_to),
         FlowEvent::Continue { target, .. } => (target.as_ref(), |loop_target| loop_target.continue_to),
-        FlowEvent::Return { .. } | FlowEvent::Throw { .. } => return exit,
+        FlowEvent::Return { .. } | FlowEvent::Throw { .. } => return (exit, 0),
         _ => unreachable!("only abrupt control transfers have explicit targets"),
     };
     let selected = match target {
@@ -671,7 +688,9 @@ fn control_transfer_target(event: &FlowEvent, loop_targets: &[LoopTargets], exit
             level.and_then(|level| loop_targets.iter().rev().nth(level))
         }
     };
-    selected.map_or(exit, select)
+    selected.map_or((exit, 0), |target| {
+        (select(target), target.retained_finally_depth)
+    })
 }
 
 /// Every `FlowEvent` carries a span; surface it so the builder can

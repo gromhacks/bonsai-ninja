@@ -80,7 +80,7 @@ void restore(const char *input, unsigned long claimed) {
 #[test]
 fn c_compound_static_allowlist_credits_only_the_guarded_url_configuration() {
     let source = r#"#include <curl/curl.h>
-static const char *TRUSTED[] = {"api.example", "hooks.example", NULL};
+static const char *const TRUSTED[] = {"api.example", "hooks.example", NULL};
 static int accepted(const char *value) {
   if (strncmp(value, "https://", 8) != 0) return 0;
   const char *token = value + 8;
@@ -131,6 +131,72 @@ void fetch(void *client, const char *value) {
         FindingStatus::Sanitized,
         "{report:#?}"
     );
+
+    for (label, before, after) in [
+        ("inverted prefix", "8) != 0", "8) == 0"),
+        ("inverted membership", "n) == 0", "n) != 0"),
+        ("unrelated boundary index", "token[n]", "token[0]"),
+        ("wrong boundary", "token[n] == '/'", "token[n] == '@'"),
+        (
+            "unknown length provider",
+            "strlen(TRUSTED[i])",
+            "unknown_length(TRUSTED[i])",
+        ),
+        ("narrowed length", "size_t n", "unsigned char n"),
+        (
+            "shadowed length type",
+            "#include <curl/curl.h>",
+            "#include <curl/curl.h>\ntypedef unsigned char size_t;",
+        ),
+        ("mutable membership", "*const TRUSTED", "*TRUSTED"),
+        (
+            "conditional guard",
+            "if (!accepted(value))",
+            "if (enabled) if (!accepted(value))",
+        ),
+        (
+            "mutated input",
+            "curl_easy_setopt(client, CURLOPT_URL",
+            "value = source(); curl_easy_setopt(client, CURLOPT_URL",
+        ),
+        (
+            "late configuration",
+            "curl_easy_setopt(client, CURLOPT_FOLLOWLOCATION",
+            "curl_easy_perform(client); curl_easy_setopt(client, CURLOPT_FOLLOWLOCATION",
+        ),
+        (
+            "conditional configuration",
+            "curl_easy_setopt(client, CURLOPT_FOLLOWLOCATION",
+            "if (enabled) curl_easy_setopt(client, CURLOPT_FOLLOWLOCATION",
+        ),
+        (
+            "overwritten configuration",
+            "0L);",
+            "0L); curl_easy_setopt(client, CURLOPT_FOLLOWLOCATION, 1L);",
+        ),
+        (
+            "mixed configuration arguments",
+            "CURLOPT_FOLLOWLOCATION, 0L",
+            "CURLOPT_FOLLOWLOCATION, 1L); curl_easy_setopt(client, CURLOPT_TIMEOUT, 0L",
+        ),
+        (
+            "dynamic option identity",
+            "void fetch(void *client,",
+            "void fetch(int CURLOPT_FOLLOWLOCATION, void *client,",
+        ),
+        (
+            "guard bypass",
+            "if (!accepted(value)) return;",
+            "goto accepted_value; if (!accepted(value)) return; accepted_value:",
+        ),
+    ] {
+        let unsafe_report = analyze(&source.replace(before, after));
+        assert_eq!(
+            sink_status(&unsafe_report, "c.ssrf.curl_easy_setopt"),
+            FindingStatus::Unsanitized,
+            "{label}: {unsafe_report:#?}"
+        );
+    }
 }
 
 fn sink_status(report: &TaintAnalysisReport, sink_rule: &str) -> FindingStatus {
@@ -178,4 +244,89 @@ void fetch(void *client, const std::string& value) {
         FindingStatus::Sanitized,
         "{report:#?}"
     );
+
+    for (label, before, after) in [
+        ("inverted prefix", "0) != 0", "0) == 0"),
+        ("inverted membership", "count(token) > 0", "count(token) == 0"),
+        ("wrong token offset", "rest.substr(0,", "rest.substr(1,"),
+        ("unrelated boundary input", "rest.find('/')", "value.find('/')"),
+        ("wrong delimiter", "rest.find('/')", "rest.find('@')"),
+        (
+            "unknown token operation",
+            "rest.substr(0,",
+            "rest.unknown_substr(0,",
+        ),
+        (
+            "unknown boundary operation",
+            "rest.find('/')",
+            "rest.unknown_find('/')",
+        ),
+        (
+            "unknown projection",
+            "value.c_str()",
+            "value.unknown_projection()",
+        ),
+        ("unknown value type", "std::string", "UserString"),
+        (
+            "unknown collection type",
+            "std::set<std::string>",
+            "UserSet<std::string>",
+        ),
+        ("mutable collection", "static const std::set", "static std::set"),
+        (
+            "conditional guard",
+            "if (!accepted(value, token))",
+            "if (enabled) if (!accepted(value, token))",
+        ),
+        (
+            "mutated input",
+            "curl_easy_setopt(client, CURLOPT_URL",
+            "value = source(); curl_easy_setopt(client, CURLOPT_URL",
+        ),
+        (
+            "late configuration",
+            "curl_easy_setopt(client, CURLOPT_FOLLOWLOCATION",
+            "curl_easy_perform(client); curl_easy_setopt(client, CURLOPT_FOLLOWLOCATION",
+        ),
+        (
+            "conditional configuration",
+            "curl_easy_setopt(client, CURLOPT_FOLLOWLOCATION",
+            "if (enabled) curl_easy_setopt(client, CURLOPT_FOLLOWLOCATION",
+        ),
+        (
+            "overwritten configuration",
+            "0L);",
+            "0L); curl_easy_setopt(client, CURLOPT_FOLLOWLOCATION, 1L);",
+        ),
+        (
+            "mixed configuration arguments",
+            "CURLOPT_FOLLOWLOCATION, 0L",
+            "CURLOPT_FOLLOWLOCATION, 1L); curl_easy_setopt(client, CURLOPT_TIMEOUT, 0L",
+        ),
+        (
+            "shadowed configuration",
+            "void fetch(void *client,",
+            "void fetch(int CURLOPT_FOLLOWLOCATION, void *client,",
+        ),
+    ] {
+        let workspace = Workspace::new(bonsai_adapters::all_languages_registry());
+        workspace
+            .vfs()
+            .write("fetch.cpp", Arc::<str>::from(source.replace(before, after)));
+        let unsafe_report = bonsai_security::run_taint_analysis(
+            &workspace,
+            rulepack(),
+            bonsai_security::TaintAnalysisOptions {
+                include_inferred_sources: true,
+                show_sanitized: true,
+                ..Default::default()
+            },
+        )
+        .expect("C++ taint analysis");
+        assert_eq!(
+            sink_status(&unsafe_report, "cpp.ssrf.curl_easy_setopt_url"),
+            FindingStatus::Unsanitized,
+            "{label}: {unsafe_report:#?}"
+        );
+    }
 }

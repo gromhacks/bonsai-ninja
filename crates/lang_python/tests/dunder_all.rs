@@ -26,7 +26,7 @@ fn visibility_of(db: &AnalyzerDb, name: &str) -> Visibility {
         .iter()
         .find_map(|s| g.decl_of(*s).cloned())
         .map(|d| d.visibility)
-        .unwrap_or(Visibility::Public)
+        .unwrap_or_else(|| panic!("missing declaration {name}"))
 }
 
 #[test]
@@ -75,8 +75,7 @@ def helper(x): return x
 def public_api(x): return helper(x)
 "#;
     let db = db_with(src);
-    // Without __all__, every top-level name remains Public (the
-    // dunder rule is the only narrowing).
+    // Wildcard export lists never change explicit import visibility.
     assert_eq!(visibility_of(&db, "helper"), Visibility::Public);
     assert_eq!(visibility_of(&db, "public_api"), Visibility::Public);
 }
@@ -84,7 +83,7 @@ def public_api(x): return helper(x)
 #[test]
 fn computed_dunder_all_falls_open() {
     // `__all__ = list(SOMETHING)` is not a literal list/tuple of
-    // strings; we deliberately do not narrow in that case.
+    // strings; dynamic wildcard exports also leave explicit imports public.
     let src = r#"
 _NAMES = ["api_a"]
 __all__ = list(_NAMES)

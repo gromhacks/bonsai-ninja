@@ -1182,15 +1182,29 @@ fn python_docstring_comments(tree: &Tree, file: FileId, src: &[u8]) -> Vec<Comme
     let mut out = Vec::new();
     for scope in collect_kinds(tree, &["module", "function_definition", "class_definition"]) {
         let body = scope.child_by_field_name("body").unwrap_or(scope);
-        let Some(first_statement) = body.named_child(0) else {
+        let Some(first_statement) = body
+            .named_children(&mut body.walk())
+            .find(|child| child.kind() != "comment")
+        else {
             continue;
         };
-        let value = if first_statement.kind() == "expression_statement" {
-            first_statement.named_child(0).unwrap_or(first_statement)
-        } else {
-            first_statement
-        };
-        if !HANDLER.string_literal_kinds.contains(&value.kind()) {
+        // The current grammar inlines bare expression statements; accept an
+        // explicit wrapper too, but never peel one element from a tuple.
+        let mut value = first_statement;
+        if value.kind() == "expression_statement" {
+            if value.named_child_count() != 1 {
+                continue;
+            }
+            let Some(inner) = value.named_child(0) else {
+                continue;
+            };
+            value = inner;
+        }
+        while value.kind() == "parenthesized_expression" && value.named_child_count() == 1 {
+            let Some(inner) = value.named_child(0) else { break };
+            value = inner;
+        }
+        if !python_is_docstring_literal(value, src) {
             continue;
         }
         let text = node_text(&value, src).trim().to_string();
@@ -1206,6 +1220,39 @@ fn python_docstring_comments(tree: &Tree, file: FileId, src: &[u8]) -> Vec<Comme
     out.sort_by_key(|comment| (comment.span.start, comment.span.end));
     out.dedup_by_key(|comment| comment.span);
     out
+}
+
+fn python_is_docstring_literal(node: Node<'_>, src: &[u8]) -> bool {
+    let mut pending = vec![node];
+    while let Some(value) = pending.pop() {
+        if value.has_error() {
+            return false;
+        }
+        if value.kind() == "concatenated_string" {
+            pending.extend(
+                value
+                    .named_children(&mut value.walk())
+                    .filter(|child| child.kind() != "comment"),
+            );
+            continue;
+        }
+        if value.kind() != "string" {
+            return false;
+        }
+        let text = node_text(&value, src);
+        let Some(quote_start) = text.find(['\'', '"']) else {
+            return false;
+        };
+        // Raw and Unicode text literals are docstrings; byte strings and
+        // formatted expressions never are, even without interpolations.
+        if !text[..quote_start]
+            .chars()
+            .all(|ch| matches!(ch, 'r' | 'R' | 'u' | 'U'))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Lower Python's boolean-expression grammar into the shared semantic
@@ -1331,6 +1378,9 @@ fn lower_python_condition_expression(node: Node<'_>, file: FileId, src: &[u8]) -
                 if !type_name.is_empty() {
                     return ConditionExpressionFact::TypeTest {
                         span,
+                        predicate_call_span: bonsai_lang_api::kit::direct_call_callee_span(
+                            node, file, src, &HANDLER,
+                        ),
                         subject: python_condition_operand(values[0], file, src),
                         type_name,
                     };
@@ -1374,7 +1424,7 @@ fn python_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> Conditi
     let value_node = python_condition_dynamic_value_node(node, src);
     ConditionOperandFact {
         span: span_of(file, &node),
-        direct_call_span: (value_node.kind() == "call").then(|| span_of(file, &value_node)),
+        direct_call_span: bonsai_lang_api::kit::direct_call_callee_span(value_node, file, src, &HANDLER),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(
             value_node, file, src, &HANDLER,
         ),
@@ -1627,7 +1677,7 @@ fn python_finite_literal_selections(
         });
     }
     for call in collect_kinds(tree, &["call"]) {
-        let Some((function, _)) = python_call_parts(call) else {
+        let Some((function, arguments)) = python_call_parts(call) else {
             continue;
         };
         let Some((receiver, method)) = python_attribute_parts(function, src) else {
@@ -1648,14 +1698,54 @@ fn python_finite_literal_selections(
         if !finite_match {
             continue;
         }
+        // `dict.get` can return its default. Accept exactly one key and an
+        // optional proven constant; no keyword/spread argument may be hidden
+        // by the generic positional argument view.
+        let arguments = arguments
+            .named_children(&mut arguments.walk())
+            .filter(|child| child.kind() != "comment")
+            .collect::<Vec<_>>();
+        if !(1..=2).contains(&arguments.len())
+            || arguments.iter().any(|argument| {
+                matches!(
+                    argument.kind(),
+                    "keyword_argument" | "list_splat" | "dictionary_splat" | "parenthesized_list_splat"
+                )
+            })
+        {
+            continue;
+        }
+        if let Some(fallback) = arguments.get(1) {
+            let finite_map_read = fallback.kind() == "subscript"
+                && fallback.child_by_field_name("value").is_some_and(|base| {
+                    base.kind() == "identifier"
+                        && binding_visible(
+                            &binding_resolver,
+                            &finite_maps,
+                            node_text(&base, src).trim(),
+                            fallback.start_byte(),
+                            span_of(file, fallback),
+                        )
+                });
+            if !python_statically_constructed_value(*fallback, src) && !finite_map_read {
+                continue;
+            }
+        }
+        // Only the complete RHS can establish a clean assignment. A lookup
+        // inside concatenation or another call proves nothing about that
+        // surrounding expression's value.
+        let mut value = call;
+        while let Some(parent) = value
+            .parent()
+            .filter(|parent| parent.kind() == "parenthesized_expression" && parent.named_child_count() == 1)
+        {
+            value = parent;
+        }
+        let value_span = span_of(file, &value);
         let Some(assignment) = index
             .assignment_values
             .iter()
-            .filter(|fact| {
-                fact.target.is_some()
-                    && fact.value_span.start <= selection_span.start
-                    && selection_span.end <= fact.value_span.end
-            })
+            .filter(|fact| fact.target.is_some() && fact.value_span == value_span)
             .min_by_key(|fact| fact.value_span.len())
         else {
             continue;
@@ -1967,13 +2057,25 @@ impl<'a, 'tree> PythonLexicalBindingResolver<'a, 'tree> {
         src: &'a [u8],
         assignments: &'a [Node<'tree>],
     ) -> Self {
+        let mut resolver = Self::for_binding_owners(index, tree, file, src, assignments);
+        resolver.identifiers = collect_kinds(tree, &["identifier"]);
+        resolver
+    }
+
+    fn for_binding_owners(
+        index: &'a DeclIndex,
+        tree: &'tree Tree,
+        file: FileId,
+        src: &'a [u8],
+        assignments: &'a [Node<'tree>],
+    ) -> Self {
         Self {
             index,
             file,
             src,
             assignments,
             directives: collect_kinds(tree, &["global_statement", "nonlocal_statement"]),
-            identifiers: collect_kinds(tree, &["identifier"]),
+            identifiers: Vec::new(),
         }
     }
 
@@ -2188,30 +2290,16 @@ fn python_statically_constructed_value(node: Node<'_>, src: &[u8]) -> bool {
     match node.kind() {
         "string" | "concatenated_string" => python_static_string(node, src).is_some(),
         "integer" | "float" | "true" | "false" | "none" => true,
-        "list" | "tuple" | "set" | "dictionary" => {
+        "tuple" => {
             let mut cursor = node.walk();
-            let finite = node.named_children(&mut cursor).all(|child| {
-                if child.kind() == "pair" {
-                    child
-                        .child_by_field_name("key")
-                        .is_some_and(|key| python_statically_constructed_value(key, src))
-                        && child
-                            .child_by_field_name("value")
-                            .is_some_and(|value| python_statically_constructed_value(value, src))
-                } else {
-                    python_statically_constructed_value(child, src)
-                }
-            });
+            let finite = node
+                .named_children(&mut cursor)
+                .all(|child| python_statically_constructed_value(child, src));
             finite
         }
-        "call" => {
-            let Some((_, arguments)) = python_call_parts(node) else {
-                return false;
-            };
-            python_argument_nodes(arguments)
-                .into_iter()
-                .all(|argument| python_statically_constructed_value(argument, src))
-        }
+        // Literal arguments do not make a call result constant; a factory can
+        // read external input. Mutable literal containers can acquire tainted
+        // state through a selected alias, so they are not clean-value proofs.
         _ => false,
     }
 }
@@ -2486,6 +2574,8 @@ fn python_regex_substitution_constraints(
     imports: &[ImportSpec],
 ) -> Vec<CharacterConstraintFact> {
     let assignments = collect_kinds(tree, &["assignment"]);
+    let binding_resolver =
+        PythonLexicalBindingResolver::for_binding_owners(index, tree, file, src, &assignments);
     let mut compiled = Vec::new();
     for assignment in &assignments {
         let (Some(target), Some(value)) = (
@@ -2511,8 +2601,10 @@ fn python_regex_substitution_constraints(
         ) else {
             continue;
         };
-        let args = python_argument_nodes(arguments);
-        let Some(pattern) = args.first().and_then(|node| python_static_string(*node, src)) else {
+        let Some([pattern]) = python_exact_positional_arguments(arguments) else {
+            continue;
+        };
+        let Some(pattern) = python_static_string(pattern, src) else {
             continue;
         };
         let Some(characters) = python_exact_regex_character_class(&pattern) else {
@@ -2550,18 +2642,20 @@ fn python_regex_substitution_constraints(
         let Some((_, _, mut excluded, factory_call)) = compiled
             .iter()
             .find(|(name, assignment_span, _, _)| {
-                name == receiver_name && assignment_span.start < return_node.start_byte() as u64
+                name == receiver_name
+                    && assignment_span.start < return_node.start_byte() as u64
+                    && binding_resolver.owner_for_use(*assignment_span, name)
+                        == binding_resolver.owner_for_use(span_of(file, &return_node), name)
             })
             .cloned()
         else {
             continue;
         };
-        let args = python_argument_nodes(arguments);
-        let [replacement, input] = args.as_slice() else {
+        let Some([replacement, input]) = python_exact_positional_arguments(arguments) else {
             continue;
         };
         let (Some(replacement), true) = (
-            python_exact_replacement_string(*replacement, src),
+            python_exact_replacement_string(replacement, src),
             input.kind() == "identifier",
         ) else {
             continue;
@@ -2577,7 +2671,7 @@ fn python_regex_substitution_constraints(
         if !python_is_single_statement_return(return_node) {
             continue;
         }
-        let input_place = node_text(input, src).trim().to_string();
+        let input_place = node_text(&input, src).trim().to_string();
         let Some(input_param_index) = decl.params.iter().position(|param| param == &input_place) else {
             continue;
         };
@@ -2611,6 +2705,8 @@ fn python_regex_validation_constraints(
     imports: &[ImportSpec],
 ) -> Vec<CharacterConstraintFact> {
     let assignments = collect_kinds(tree, &["assignment"]);
+    let binding_resolver =
+        PythonLexicalBindingResolver::for_binding_owners(index, tree, file, src, &assignments);
     let mut compiled = Vec::new();
     for assignment in &assignments {
         let (Some(target), Some(value)) = (
@@ -2636,8 +2732,10 @@ fn python_regex_validation_constraints(
         ) else {
             continue;
         };
-        let args = python_argument_nodes(arguments);
-        let Some(pattern) = args.first().and_then(|node| python_static_string(*node, src)) else {
+        let Some([pattern]) = python_exact_positional_arguments(arguments) else {
+            continue;
+        };
+        let Some(pattern) = python_static_string(pattern, src) else {
             continue;
         };
         let Some(domain) = python_anchored_regex_character_domain(&pattern) else {
@@ -2682,17 +2780,21 @@ fn python_regex_validation_constraints(
         if receiver.kind() != "identifier" {
             continue;
         }
-        let args = python_argument_nodes(arguments);
-        let [input] = args.as_slice() else {
+        let Some([input]) = python_exact_positional_arguments(arguments) else {
             continue;
         };
-        let Some(input_place) = python_exact_guarded_identifier(*input, src) else {
+        let Some(input_place) = python_exact_guarded_identifier(input, src) else {
             continue;
         };
         let receiver_name = node_text(&receiver, src).trim();
         let Some((_, _, factory_call, domain)) = compiled
             .iter()
-            .filter(|(name, span, _, _)| name == receiver_name && span.start < branch.start_byte() as u64)
+            .filter(|(name, span, _, _)| {
+                name == receiver_name
+                    && span.start < branch.start_byte() as u64
+                    && binding_resolver.owner_for_use(*span, name)
+                        == binding_resolver.owner_for_use(span_of(file, &branch), name)
+            })
             .max_by_key(|(_, span, _, _)| (span.start, span.end))
             .cloned()
         else {
@@ -2764,6 +2866,7 @@ fn python_anchored_regex_character_domain(pattern: &str) -> Option<CharacterCons
     let mut in_class = false;
     let mut escaped = false;
     let mut class = String::new();
+    let mut group_depth = 0usize;
     for character in body.chars() {
         if escaped {
             if !matches!(character, '.' | '-' | '_' | 'd' | 'w') {
@@ -2790,11 +2893,14 @@ fn python_anchored_regex_character_domain(pattern: &str) -> Option<CharacterCons
             '/' => return None,
             '.' if !in_class => return None,
             character if in_class => class.push(character),
-            character if character.is_ascii_alphanumeric() || "_-()|{}?+*,".contains(character) => {}
+            '(' => group_depth += 1,
+            ')' => group_depth = group_depth.checked_sub(1)?,
+            '|' if group_depth == 0 => return None,
+            character if character.is_ascii_alphanumeric() || "_-|{}?+*,".contains(character) => {}
             _ => return None,
         }
     }
-    if escaped || in_class {
+    if escaped || in_class || group_depth != 0 {
         return None;
     }
     Some(CharacterConstraintDomain::ExcludesExact {
@@ -2806,10 +2912,29 @@ fn python_safe_regex_character_class(class: &str) -> bool {
     if class.is_empty() || class.contains('/') || class.contains('\\') {
         return false;
     }
-    let without_ranges = class.replace("A-Z", "").replace("a-z", "").replace("0-9", "");
-    without_ranges
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+    let characters = class.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < characters.len() {
+        if index + 2 < characters.len() && characters[index + 1] == '-' {
+            if !matches!(
+                (characters[index], characters[index + 2]),
+                ('A', 'Z') | ('a', 'z') | ('0', '9')
+            ) {
+                return false;
+            }
+            index += 3;
+        } else {
+            let character = characters[index];
+            if !(character.is_ascii_alphanumeric()
+                || matches!(character, '_' | '.')
+                || (character == '-' && (index == 0 || index + 1 == characters.len())))
+            {
+                return false;
+            }
+            index += 1;
+        }
+    }
+    true
 }
 
 fn python_exact_replacement_string(node: Node<'_>, src: &[u8]) -> Option<String> {
@@ -2824,7 +2949,7 @@ fn python_exact_regex_character_class(pattern: &str) -> Option<Vec<String>> {
     let mut characters = Vec::new();
     let mut chars = inner.chars().peekable();
     while let Some(character) = chars.next() {
-        if character == '-' {
+        if matches!(character, '-' | '[' | ']') {
             return None;
         }
         let decoded = if character != '\\' {
@@ -2874,6 +2999,23 @@ fn python_argument_nodes(arguments: Node<'_>) -> Vec<Node<'_>> {
         .named_children(&mut cursor)
         .filter(|node| node.kind() != "keyword_argument")
         .collect()
+}
+
+/// A proof requiring a fixed call shape cannot ignore keywords or expansion.
+fn python_exact_positional_arguments<const N: usize>(arguments: Node<'_>) -> Option<[Node<'_>; N]> {
+    let arguments = arguments
+        .named_children(&mut arguments.walk())
+        .filter(|node| node.kind() != "comment")
+        .collect::<Vec<_>>();
+    if arguments.iter().any(|node| {
+        matches!(
+            node.kind(),
+            "keyword_argument" | "list_splat" | "dictionary_splat" | "parenthesized_list_splat"
+        )
+    }) {
+        return None;
+    }
+    arguments.try_into().ok()
 }
 
 fn python_enclosing_callable(index: &DeclIndex, span: Span) -> Option<&bonsai_lang_api::Decl> {

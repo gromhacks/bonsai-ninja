@@ -551,7 +551,10 @@ fn push_param_name(param: Node<'_>, src: &[u8], handler: &GrammarHandler, param_
     let method_param_bound_name = handler
         .last_identifier_parameter_kinds
         .contains(&param.kind())
-        .then(|| last_identifier_descendant_by_position(param, handler))
+        .then(|| {
+            direct_non_type_identifier_child(param, handler)
+                .or_else(|| last_identifier_descendant_by_position(param, handler))
+        })
         .flatten();
     let name_node = declarator_chain_name
         .or(method_param_bound_name)

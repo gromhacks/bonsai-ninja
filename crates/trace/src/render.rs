@@ -78,8 +78,8 @@ pub fn to_dot(trace: &TraceResult) -> String {
     let mut out =
         String::from("digraph trace {\n  rankdir=LR;\n  node [shape=box, fontname=\"Helvetica\"];\n");
     for step in &trace.steps {
-        let label = format!("[{}] {:?}\\n{}", step.order, step.kind, step.function);
-        let _ = writeln!(out, "  s{} [label=\"{}\"];", step.id, label.replace('"', "\\\""));
+        let label = format!("[{}] {:?}\n{}", step.order, step.kind, step.function);
+        let _ = writeln!(out, "  s{} [label=\"{}\"];", step.id, escape_dot_label(&label));
     }
     for edge in &trace.edges {
         let style = match edge.kind {
@@ -95,6 +95,20 @@ pub fn to_dot(trace: &TraceResult) -> String {
     }
     out.push_str("}\n");
     out
+}
+
+fn escape_dot_label(label: &str) -> String {
+    let mut escaped = String::with_capacity(label.len());
+    for ch in label.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// Canonical pretty JSON.

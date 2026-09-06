@@ -172,6 +172,18 @@ pub fn lower_boolean_condition_expression(
             }
         }
     }
+    if let Some(call_span) = super::direct_call_callee_span(node, file, src, handler) {
+        return crate::ConditionExpressionFact::Truthy {
+            span,
+            operand: crate::ConditionOperandFact {
+                span,
+                direct_call_span: Some(call_span),
+                value_flow: Default::default(),
+                static_string: None,
+                static_value: None,
+            },
+        };
+    }
     crate::ConditionExpressionFact::Atom { span }
 }
 

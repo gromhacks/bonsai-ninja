@@ -1302,6 +1302,19 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             "sanitizer_guard.accepted_predicate_value requires a terminal-rejection proof",
         );
     }
+    if semantics
+        .sanitizer_guard
+        .as_ref()
+        .is_some_and(|guard| guard.predicate_falsey_result_is_null && !guard.require_terminal_rejection)
+    {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "sanitizer_guard.predicate_falsey_result_is_null requires a terminal-rejection proof",
+        );
+    }
     if let Some(guard) = semantics.configured_call_argument_guard.as_ref() {
         let invalid = guard.guarded_value_argument_indices.is_empty()
             || guard.required_fields.is_empty()

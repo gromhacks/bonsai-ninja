@@ -35,13 +35,17 @@
 //! Tests should never depend on debug output — the env variable is
 //! a developer convenience, not a public API.
 
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 /// Cached category set parsed from `BONSAI_DEBUG`. The
 /// [`is_enabled`] check resolves through this cell so the environment
 /// is read at most once per process — matters for hot per-call sites
 /// like the IDG transfer pass.
 static ENABLED: OnceLock<EnabledSet> = OnceLock::new();
+
+// Keep the ordinary compiler hot path lock-free. Only callers that explicitly
+// reset test configuration install this mutable override.
+static TEST_OVERRIDE: OnceLock<RwLock<EnabledSet>> = OnceLock::new();
 
 #[derive(Debug)]
 struct EnabledSet {
@@ -56,6 +60,10 @@ struct EnabledSet {
 impl EnabledSet {
     fn from_env() -> Self {
         let raw = std::env::var("BONSAI_DEBUG").unwrap_or_default();
+        Self::from_raw(&raw)
+    }
+
+    fn from_raw(raw: &str) -> Self {
         let mut all = false;
         let mut names: Vec<String> = Vec::new();
         for part in raw.split(',') {
@@ -85,30 +93,21 @@ impl EnabledSet {
 /// `BONSAI_DEBUG` environment variable.
 #[must_use]
 pub fn is_enabled(category: &str) -> bool {
+    if let Some(override_set) = TEST_OVERRIDE.get() {
+        return override_set
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(category);
+    }
     ENABLED.get_or_init(EnabledSet::from_env).contains(category)
 }
 
-/// Re-read `BONSAI_DEBUG` on the next [`is_enabled`] call. Tests
-/// that flip the env mid-run should call this to invalidate the
-/// process-wide cache; production never needs it.
+/// Re-read `BONSAI_DEBUG` and replace the process-wide test configuration.
+/// Tests that change the environment must isolate those changes from other
+/// readers (for example in a subprocess); production never needs this helper.
 pub fn reset_for_tests() {
-    // OnceLock has no public reset — rebuild a parallel cell. The
-    // production callers continue to read the cached value;
-    // tests only flip when they're the sole reader anyway.
-    let mut new_set = EnabledSet::from_env();
-    if let Some(existing) = ENABLED.get() {
-        // Best-effort: replace fields in place via unsafe? No —
-        // OnceLock forbids it. Instead, append the new categories
-        // so re-reads get the union (good enough for the test
-        // helper's documented use).
-        new_set.all = existing.all || new_set.all;
-        for name in &existing.names {
-            if !new_set.names.iter().any(|n| n == name) {
-                new_set.names.push(name.clone());
-            }
-        }
-    }
-    let _ = ENABLED.set(new_set);
+    let set = TEST_OVERRIDE.get_or_init(|| RwLock::new(EnabledSet::from_raw("")));
+    *set.write().unwrap_or_else(std::sync::PoisonError::into_inner) = EnabledSet::from_env();
 }
 
 /// Emit a categorised debug line to stderr when `category` is

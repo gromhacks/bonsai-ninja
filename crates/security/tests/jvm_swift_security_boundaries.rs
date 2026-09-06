@@ -127,6 +127,66 @@ class AssetReader {
 }
 
 #[test]
+fn java_guard_helpers_must_reject_in_their_own_control_flow() {
+    let report = persisted_report(&[(
+        "src/main/java/app/Redirects.java",
+        r#"
+package app;
+import jakarta.servlet.http.HttpServletResponse;
+class Redirects {
+    static String safe(String target) {
+        if (!target.startsWith("/") || target.startsWith("//")) { return "/"; }
+        return target;
+    }
+    static String conditional(String target) {
+        if (!target.startsWith("/") || target.startsWith("//")) { if (target.isEmpty()) return "/"; }
+        return target;
+    }
+    static String callback(String target) {
+        if (!target.startsWith("/") || target.startsWith("//")) {
+            java.util.function.Supplier<String> unused = () -> { return "/"; };
+        }
+        return target;
+    }
+    void safeRedirect(String next, HttpServletResponse response) throws Exception {
+        response.sendRedirect(safe(next));
+    }
+    void conditionalRedirect(String next, HttpServletResponse response) throws Exception {
+        response.sendRedirect(conditional(next));
+    }
+    void callbackRedirect(String next, HttpServletResponse response) throws Exception {
+        response.sendRedirect(callback(next));
+    }
+}
+"#,
+    )]);
+    let status = |function: &str| {
+        report
+            .findings
+            .iter()
+            .find(|finding| {
+                finding.finding.sink.rule_id == "java.open_redirect.send_redirect"
+                    && finding.finding.sink.enclosing_fn.as_deref() == Some(function)
+            })
+            .map(|finding| finding.finding.status)
+    };
+    assert_eq!(
+        status("safeRedirect"),
+        Some(FindingStatus::Sanitized),
+        "{:#?}",
+        report.findings
+    );
+    for function in ["conditionalRedirect", "callbackRedirect"] {
+        assert_eq!(
+            status(function),
+            Some(FindingStatus::Unsanitized),
+            "{function}: {:#?}",
+            report.findings
+        );
+    }
+}
+
+#[test]
 fn kotlin_route_value_wrappers_reach_shell_but_direct_argv_stays_data() {
     let report = persisted_report(&[(
         "src/main/kotlin/app/Routes.kt",
@@ -627,6 +687,71 @@ func executeDynamicUrl(_ path: String) throws {
         "a tainted executable URL constructor argument must reach the typed member write: {:#?}",
         report.findings
     );
+}
+
+#[test]
+fn kotlin_and_swift_interpolated_selections_keep_dynamic_input_tainted() {
+    let report = persisted_report(&[
+        (
+            "src/main/kotlin/app/Selections.kt",
+            r#"
+package app
+fun literalSelection(key: String) = when (key) {
+    "first" -> "status"
+    else -> "help"
+}
+fun interpolatedSelection(key: String) = when (key) {
+    "first" -> "help"
+    else -> "$key"
+}
+fun executeKotlinLiteral(input: String) { ProcessBuilder("sh", "-c", literalSelection(input)) }
+fun executeKotlinInterpolated(input: String) { ProcessBuilder("sh", "-c", interpolatedSelection(input)) }
+"#,
+        ),
+        (
+            "Sources/App/Selections.swift",
+            r##"
+import Foundation
+func interpolatedSelection(_ key: String) -> String {
+    return switch key {
+    case "first": "help"
+    default: "\(key)"
+    }
+}
+func rawInterpolatedSelection(_ key: String) -> String {
+    return switch key {
+    case "first": "help"
+    default: #"\#(key)"#
+    }
+}
+func executeSwiftInterpolated(_ input: String) { system(interpolatedSelection(input)) }
+func executeSwiftRawInterpolated(_ input: String) { system(rawInterpolatedSelection(input)) }
+"##,
+        ),
+    ]);
+    assert!(
+        !has_unsanitized(
+            &report,
+            "kotlin.cmdi.processbuilder_shell_command",
+            "executeKotlinLiteral"
+        ),
+        "a complete literal selection must remain clean: {:#?}",
+        report.findings
+    );
+    for (sink, function) in [
+        (
+            "kotlin.cmdi.processbuilder_shell_command",
+            "executeKotlinInterpolated",
+        ),
+        ("swift.cmdi.system_libc", "executeSwiftInterpolated"),
+        ("swift.cmdi.system_libc", "executeSwiftRawInterpolated"),
+    ] {
+        assert!(
+            has_unsanitized(&report, sink, function),
+            "{function}: interpolation is not a finite literal selection: {:#?}",
+            report.findings
+        );
+    }
 }
 
 #[test]

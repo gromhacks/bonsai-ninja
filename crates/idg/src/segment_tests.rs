@@ -14,6 +14,21 @@ fn empty_segment_has_zero_dimensions() {
 }
 
 #[test]
+fn default_segment_can_be_persisted_and_reopened() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("default.factstore");
+    let mut segment = IdgSegment::default();
+    let place = segment.intern_place(Place::Return);
+    segment.intern_node(FuncId::new(1), place);
+    segment.record_func(FuncId::new(1));
+    segment.write_to_path(&path, 7).unwrap();
+    let restored = IdgSegment::read_from_path(&path, 7)
+        .unwrap()
+        .expect("default must use the current format");
+    assert_eq!(restored.dimensions(), segment.dimensions());
+}
+
+#[test]
 fn intern_place_then_node_chains_correctly() {
     let mut seg = IdgSegment::new();
     let pid = seg.intern_place(Place::Return);

@@ -79,7 +79,7 @@ fn canonical_browse_row<T: serde::Serialize>(
         .map(str::to_string)
         .or_else(|| (line != 0).then(|| read_line(ws, file, line)));
     let enclosing_function = (line != 0)
-        .then(|| annotator.enclosing_function_name(file, line))
+        .then(|| annotator.enclosing_function_name_at(file, line, column))
         .flatten();
     let signature = fields
         .get("name")
@@ -106,7 +106,7 @@ fn canonical_browse_row<T: serde::Serialize>(
         });
     let summary_ids = if include_summaries && line != 0 {
         annotator
-            .labels_for(file, line)
+            .labels_at(file, line, column)
             .split_whitespace()
             .map(str::to_string)
             .collect()
@@ -133,41 +133,45 @@ struct BrowseUsedIn {
     callers_in: Vec<bonsai_sdk::ModuleEdgeGroup>,
 }
 
+#[derive(Default)]
+struct BrowseUses {
+    connections: Vec<BrowseUsedIn>,
+    incomplete_reasons: Vec<String>,
+}
+
+const SCOPED_CALL_EVIDENCE_UNAVAILABLE: &str = "cross-module caller evidence is unavailable or incomplete for this scoped view; run index <workspace> --semantic and retry";
+
 /// Exact incoming cross-module call sites for the callable identities
 /// represented by a browse page. A source row first resolves through the
 /// compiler's enclosing-function ranges; incoming edges are then joined by
-/// the target declaration name and declaration line. This keeps filtered
+/// the target's stable compiler identity. This keeps filtered
 /// browse pages from inheriting unrelated callers from the same file.
-fn browse_used_in_connections<T: BrowseRowLocation>(ws: &Workspace, rows: &[T]) -> Vec<BrowseUsedIn> {
+fn browse_used_in_connections<T: BrowseRowLocation>(ws: &Workspace, rows: &[T]) -> BrowseUses {
     let annotator = bonsai_sdk::SummaryAnnotator::new(ws);
-    let headers = ws.compiler_header_index();
-    let mut targets =
-        std::collections::BTreeMap::<bonsai_common::FileId, std::collections::BTreeSet<(String, u32)>>::new();
+    let mut targets = std::collections::BTreeMap::<
+        bonsai_common::FileId,
+        std::collections::BTreeSet<bonsai_common::FuncId>,
+    >::new();
     for row in rows {
         let Some(file) = bonsai_sdk::workspace_file_id(ws, row.row_file()) else {
             continue;
         };
-        let Some(func) = annotator.enclosing_function_id(row.row_file(), row.row_line()) else {
-            continue;
-        };
-        let Some(decl) = headers
-            .decls_in(file)
-            .iter()
-            .find(|decl| decl.symbol.raw() == func.raw())
-        else {
-            continue;
-        };
-        let (_, declaration_line, _) = bonsai_sdk::format_span(&decl.name_span, ws);
-        targets
-            .entry(file)
-            .or_default()
-            .insert((decl.name.clone(), declaration_line));
+        let functions = row.row_functions(&annotator);
+        if !functions.is_empty() {
+            targets.entry(file).or_default().extend(functions);
+        }
     }
     if targets.is_empty() {
-        return Vec::new();
+        return BrowseUses::default();
     }
     let file_ids = targets.keys().copied().collect::<Vec<_>>();
-    bonsai_sdk::file_connections(ws, &file_ids)
+    let facts = bonsai_sdk::file_connections(ws, &file_ids);
+    let mut incomplete_reasons = Vec::new();
+    if facts.iter().any(|facts| !facts.calls_complete) {
+        incomplete_reasons.push(SCOPED_CALL_EVIDENCE_UNAVAILABLE.to_string());
+        page_cache::mark_optional_evidence_unavailable();
+    }
+    let connections = facts
         .into_iter()
         .filter_map(|facts| {
             let wanted = targets.get(&facts.file_id)?;
@@ -175,11 +179,7 @@ fn browse_used_in_connections<T: BrowseRowLocation>(ws: &Workspace, rows: &[T]) 
                 .callers_in
                 .into_iter()
                 .filter_map(|mut group| {
-                    group.edges.retain(|edge| {
-                        wanted
-                            .iter()
-                            .any(|(name, line)| edge.callee == *name && edge.callee_line == *line)
-                    });
+                    group.edges.retain(|edge| wanted.contains(&edge.callee_func));
                     (!group.edges.is_empty()).then_some(group)
                 })
                 .collect::<Vec<_>>();
@@ -188,7 +188,11 @@ fn browse_used_in_connections<T: BrowseRowLocation>(ws: &Workspace, rows: &[T]) 
                 callers_in,
             })
         })
-        .collect()
+        .collect();
+    BrowseUses {
+        connections,
+        incomplete_reasons,
+    }
 }
 
 /// Render the incoming compiler-resolved cross-module uses for the current
@@ -198,13 +202,19 @@ fn browse_used_in_connections<T: BrowseRowLocation>(ws: &Workspace, rows: &[T]) 
 /// every browse schema. Empty sections are still rendered so every browse
 /// command has the same discoverable cross-module affordance.
 fn render_browse_used_in_section<T: BrowseRowLocation>(u: &Ui, ws: &Workspace, rows: &[T]) {
-    let connections = browse_used_in_connections(ws, rows);
+    let uses = browse_used_in_connections(ws, rows);
     cli_println!("{}", u.heading("used in (cross-module)"));
+    for reason in &uses.incomplete_reasons {
+        cli_println!("  {}", u.dim(reason));
+    }
+    let connections = uses.connections;
     if connections.is_empty() {
-        cli_println!(
-            "  {}",
-            u.dim("no compiler-resolved cross-module callers on this page")
-        );
+        if uses.incomplete_reasons.is_empty() {
+            cli_println!(
+                "  {}",
+                u.dim("no compiler-resolved cross-module callers on this page")
+            );
+        }
         return;
     }
     let mut table = u.table(&["target", "caller", "callee", "call site", "edge"]);
@@ -224,18 +234,6 @@ fn render_browse_used_in_section<T: BrowseRowLocation>(u: &Ui, ws: &Workspace, r
         }
     }
     cli_println!("{table}");
-}
-
-fn browse_used_in_json<T: BrowseRowLocation>(ws: &Workspace, rows: &[T]) -> Vec<serde_json::Value> {
-    browse_used_in_connections(ws, rows)
-        .into_iter()
-        .map(|facts| {
-            serde_json::json!({
-                "file": facts.file,
-                "callers_in": facts.callers_in,
-            })
-        })
-        .collect()
 }
 
 /// Apply the global `--contains` / `--not-contains` view to browse rows.
@@ -320,6 +318,27 @@ fn row_location_leaf<T: serde::Serialize>(row: &T, out: &mut String) {
 pub(crate) trait BrowseRowLocation {
     fn row_file(&self) -> &str;
     fn row_line(&self) -> u32;
+    fn row_column(&self) -> u32;
+    fn row_functions(&self, ann: &bonsai_sdk::SummaryAnnotator<'_>) -> Vec<bonsai_common::FuncId> {
+        ann.enclosing_function_id_at(self.row_file(), self.row_line(), self.row_column())
+            .into_iter()
+            .collect()
+    }
+}
+
+impl BrowseRowLocation for bonsai_sdk::ClassOut {
+    fn row_file(&self) -> &str {
+        &self.file
+    }
+    fn row_line(&self) -> u32 {
+        self.line
+    }
+    fn row_column(&self) -> u32 {
+        self.column
+    }
+    fn row_functions(&self, ann: &bonsai_sdk::SummaryAnnotator<'_>) -> Vec<bonsai_common::FuncId> {
+        ann.class_member_ids_at(&self.file, self.line, self.column)
+    }
 }
 
 macro_rules! browse_row_location {
@@ -332,6 +351,10 @@ macro_rules! browse_row_location {
             fn row_line(&self) -> u32 {
                 self.line
             }
+
+            fn row_column(&self) -> u32 {
+                self.column
+            }
         })*
     };
 }
@@ -342,7 +365,6 @@ browse_row_location!(
     bonsai_sdk::RefOut,
     bonsai_sdk::ImportOut,
     bonsai_sdk::EntryPointOut,
-    bonsai_sdk::ClassOut,
     bonsai_sdk::ArgOut,
     bonsai_sdk::StringOut,
     bonsai_sdk::VarOut,
@@ -433,6 +455,7 @@ where
         row_cost_bytes,
         |slice, info, _cfg| {
             let rendered = slice.iter().map(&project).collect::<Result<Vec<_>>>()?;
+            let uses = browse_used_in_connections(ws, slice);
             let result_complete = page_covers_entire_result(info);
             let wrapped = serde_json::json!({
                 "analysis_complete": analysis_incomplete_reasons.is_empty(),
@@ -444,7 +467,9 @@ where
                     paged_json_incomplete_reasons(command, info)
                 },
                 "rows": rendered,
-                "used_in": browse_used_in_json(ws, slice),
+                "used_in": uses.connections,
+                "used_in_complete": uses.incomplete_reasons.is_empty(),
+                "used_in_incomplete_reasons": uses.incomplete_reasons,
                 "page": page_info_to_json(info),
             });
             crate::output::emit_json_document(&wrapped)?;
@@ -758,7 +783,7 @@ pub(crate) fn cmd_defs(
                             Cell::new(u.dim(&callees_cell)),
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            let labels = ann.labels_for(&d.file, d.line);
+                            let labels = ann.labels_at(&d.file, d.line, d.column);
                             cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
@@ -1285,9 +1310,10 @@ fn location_flow_labels_cell_cost(
     flows: bool,
     file: &str,
     line: u32,
+    column: u32,
 ) -> u64 {
     if let Some(ann) = exact_ann {
-        flow_labels_cell_cost(&ann.labels_for(file, line))
+        flow_labels_cell_cost(&ann.labels_at(file, line, column))
     } else {
         flow_labels_estimated_cell_cost(flows)
     }
@@ -1326,22 +1352,7 @@ fn import_flow_labels(ann: &bonsai_sdk::SummaryAnnotator<'_>, import: &bonsai_sd
 }
 
 fn class_summary_labels(ann: &bonsai_sdk::SummaryAnnotator<'_>, class: &bonsai_sdk::ClassOut) -> String {
-    let mut union = std::collections::BTreeSet::new();
-    for method in &class.methods {
-        union.extend(
-            ann.labels_for_symbol(method)
-                .split_whitespace()
-                .map(str::to_string),
-        );
-    }
-    if union.is_empty() {
-        union.extend(
-            ann.labels_for_symbol(&class.name)
-                .split_whitespace()
-                .map(str::to_string),
-        );
-    }
-    union.into_iter().collect::<Vec<_>>().join(" ")
+    ann.labels_for_class_at(&class.file, class.line, class.column)
 }
 
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
@@ -1380,6 +1391,7 @@ pub(crate) fn cmd_calls(
                 flows,
                 &c.file,
                 c.line,
+                c.column,
             ))
     };
     let cached_rows = page_cache::read_rows_payload::<bonsai_sdk::CallOut>(root, "calls", filters_hash)?;
@@ -1434,6 +1446,7 @@ pub(crate) fn cmd_calls(
                 flows,
                 &c.file,
                 c.line,
+                c.column,
             ))
     };
     let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
@@ -1490,7 +1503,7 @@ pub(crate) fn cmd_calls(
                             code_cell,
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            let labels = ann.labels_for(&c.file, c.line);
+                            let labels = ann.labels_at(&c.file, c.line, c.column);
                             cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
@@ -1929,7 +1942,7 @@ pub(crate) fn cmd_imports(
                         // visually identical rows (same module, same span).
                         let symbol = import.original_name.clone().unwrap_or_else(|| "-".to_string());
                         let kind = import_kind_label(import.is_wildcard, import.original_name.as_deref());
-                        let loc = format!("{}:{}", short_file(&import.file), import.line);
+                        let loc = format!("{}:{}:{}", short_file(&import.file), import.line, import.column);
                         let ext = extension_for(&import.file);
                         let line_text = read_line(ws, &import.file, import.line);
                         let code_cell = Cell::new(u.snippet(&line_text, ext));
@@ -2021,6 +2034,7 @@ pub(crate) fn cmd_vars(
                 flows,
                 &v.file,
                 v.line,
+                v.column,
             ))
     };
     let cached_rows = page_cache::read_rows_payload::<bonsai_sdk::VarOut>(root, "vars", filters_hash)?;
@@ -2076,6 +2090,7 @@ pub(crate) fn cmd_vars(
                 flows,
                 &v.file,
                 v.line,
+                v.column,
             ))
     };
     let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
@@ -2129,7 +2144,7 @@ pub(crate) fn cmd_vars(
                             code_cell,
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            let labels = ann.labels_for(&v.file, v.line);
+                            let labels = ann.labels_at(&v.file, v.line, v.column);
                             cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
@@ -2197,6 +2212,7 @@ pub(crate) fn cmd_strings(
             flows,
             &s.file,
             s.line,
+            s.column,
         ))
     };
     let cached_rows = page_cache::read_rows_payload::<bonsai_sdk::StringOut>(root, "strings", filters_hash)?;
@@ -2258,6 +2274,7 @@ pub(crate) fn cmd_strings(
             flows,
             &s.file,
             s.line,
+            s.column,
         ))
     };
     let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
@@ -2304,7 +2321,7 @@ pub(crate) fn cmd_strings(
                         let preview = truncate(&s.text, 60);
                         let loc = format!("{}:{}:{}", short_file(&s.file), s.line, s.column);
                         let enclosing = enclosing_ann
-                            .enclosing_function_name(&s.file, s.line)
+                            .enclosing_function_name_at(&s.file, s.line, s.column)
                             .unwrap_or_else(|| "-".to_string());
                         let ext = extension_for(&s.file);
                         let line_text = read_line(ws, &s.file, s.line);
@@ -2317,7 +2334,7 @@ pub(crate) fn cmd_strings(
                             code_cell,
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            let labels = ann.labels_for(&s.file, s.line);
+                            let labels = ann.labels_at(&s.file, s.line, s.column);
                             cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
@@ -2442,7 +2459,7 @@ pub(crate) fn cmd_comments(
                         let preview = truncate(&c.text.replace('\n', " "), 100);
                         let loc = format!("{}:{}:{}", short_file(&c.file), c.line, c.column);
                         let enclosing = enclosing_ann
-                            .enclosing_function_name(&c.file, c.line)
+                            .enclosing_function_name_at(&c.file, c.line, c.column)
                             .unwrap_or_else(|| "-".to_string());
                         let cells = vec![
                             Cell::new(u.annotation(&c.kind)),
@@ -2523,6 +2540,7 @@ pub(crate) fn cmd_args(
             flows,
             &a.file,
             a.line,
+            a.column,
         ))
     };
     let cached_rows = page_cache::read_rows_payload::<bonsai_sdk::ArgOut>(root, "args", filters_hash)?;
@@ -2588,6 +2606,7 @@ pub(crate) fn cmd_args(
             flows,
             &a.file,
             a.line,
+            a.column,
         ))
     };
     let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
@@ -2646,7 +2665,7 @@ pub(crate) fn cmd_args(
                         let value = truncate(&a.value, 50);
                         let loc = format!("{}:{}:{}", short_file(&a.file), a.line, a.column);
                         let caller = enclosing_ann
-                            .enclosing_function_name(&a.file, a.line)
+                            .enclosing_function_name_at(&a.file, a.line, a.column)
                             .unwrap_or_else(|| "-".to_string());
                         let ext = extension_for(&a.file);
                         let line_text = read_line(ws, &a.file, a.line);
@@ -2660,7 +2679,7 @@ pub(crate) fn cmd_args(
                             code_cell,
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            let labels = ann.labels_for(&a.file, a.line);
+                            let labels = ann.labels_at(&a.file, a.line, a.column);
                             cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
@@ -2739,6 +2758,7 @@ pub(crate) fn cmd_operations(
             flows,
             &op.file,
             op.line,
+            op.column,
         ))
     };
     let cached_rows =
@@ -2808,6 +2828,7 @@ pub(crate) fn cmd_operations(
             flows,
             &op.file,
             op.line,
+            op.column,
         ))
     };
     let canonical_ann = bonsai_sdk::SummaryAnnotator::new(ws);
@@ -2883,7 +2904,7 @@ pub(crate) fn cmd_operations(
                             Cell::new(u.snippet(&line_text, ext)),
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            let labels = ann.labels_for(&op.file, op.line);
+                            let labels = ann.labels_at(&op.file, op.line, op.column);
                             cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
@@ -3041,7 +3062,7 @@ pub(crate) fn cmd_classes(
                     );
                     let mut t = u.table(&headers);
                     for c in &rows {
-                        let loc = format!("{}:{}", short_file(&c.file), c.line);
+                        let loc = format!("{}:{}:{}", short_file(&c.file), c.line, c.column);
                         let methods_cell = if c.methods.is_empty() {
                             u.dim("—")
                         } else {
@@ -3180,7 +3201,7 @@ pub(crate) fn cmd_refs(
                         let loc = format!("{}:{}:{}", short_file(&r.file), r.line, r.column);
                         let snip = truncate(r.snippet.trim(), 100);
                         let enclosing = enclosing_ann
-                            .enclosing_function_name(&r.file, r.line)
+                            .enclosing_function_name_at(&r.file, r.line, r.column)
                             .unwrap_or_else(|| "-".to_string());
                         let ext = extension_for(&r.file);
                         let code_cell = Cell::new(u.snippet(&snip, ext));
@@ -3192,7 +3213,7 @@ pub(crate) fn cmd_refs(
                             code_cell,
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            let labels = ann.labels_for(&r.file, r.line);
+                            let labels = ann.labels_at(&r.file, r.line, r.column);
                             cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
@@ -3352,7 +3373,7 @@ pub(crate) fn cmd_search(
                             Cell::new(u.path(&loc)),
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            let labels = ann.labels_for(&h.file, h.line);
+                            let labels = ann.labels_at(&h.file, h.line, h.column);
                             cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);

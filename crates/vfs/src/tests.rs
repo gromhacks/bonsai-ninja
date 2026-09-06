@@ -255,6 +255,72 @@ fn lazy_loader_errors_surface_and_leave_the_entry_lazy() {
 }
 
 #[test]
+fn snapshot_retries_when_a_lazy_write_replaces_an_in_flight_load() {
+    let vfs = Arc::new(Vfs::new());
+    let id = vfs.write_lazy("race.fixture", identity_for("old"));
+    let weak_vfs = Arc::downgrade(&vfs);
+    vfs.set_lazy_loader(Arc::new(move |path, identity| {
+        if *identity == identity_for("old") {
+            // The loader runs outside the registry lock. Reproduce a write
+            // occurring between capture and publication without timing races.
+            weak_vfs
+                .upgrade()
+                .unwrap()
+                .write_lazy(path, identity_for("replacement"));
+            Ok(Arc::from("old"))
+        } else {
+            assert_eq!(*identity, identity_for("replacement"));
+            Ok(Arc::from("replacement"))
+        }
+    }));
+
+    let snapshot = vfs.snapshot(id).expect("current snapshot");
+    assert_eq!(snapshot.text.as_ref(), "replacement");
+    assert_eq!(snapshot.version, 1);
+    assert_eq!(vfs.lazy_identity(id), None);
+}
+
+#[test]
+fn compiler_assigned_ids_cannot_reuse_a_tombstoned_file() {
+    for lazy in [false, true] {
+        let vfs = Vfs::new();
+        let file = vfs.write("removed.fixture", "old");
+        assert_eq!(vfs.remove(Path::new("removed.fixture")), Some(file));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if lazy {
+                vfs.write_lazy_with_id(file, "replacement.fixture", identity_for("new"));
+            } else {
+                vfs.write_with_id(file, "replacement.fixture", "new");
+            }
+        }));
+        assert!(
+            result.is_err(),
+            "reusing an old identity admits stale version-keyed compiler facts"
+        );
+        assert!(matches!(vfs.snapshot(file), Err(VfsError::UnknownFile(_))));
+        let fresh = vfs.write("replacement.fixture", "new");
+        assert_ne!(fresh, file);
+    }
+}
+
+#[test]
+fn failed_obsolete_load_does_not_hide_a_new_eager_snapshot() {
+    let vfs = Arc::new(Vfs::new());
+    let id = vfs.write_lazy("race.fixture", identity_for("old"));
+    let weak_vfs = Arc::downgrade(&vfs);
+    vfs.set_lazy_loader(Arc::new(move |path, _| {
+        weak_vfs.upgrade().unwrap().write(path, "replacement");
+        Err(std::io::Error::other("old source changed on disk"))
+    }));
+
+    let snapshot = vfs
+        .snapshot(id)
+        .expect("new eager snapshot supersedes obsolete error");
+    assert_eq!(snapshot.text.as_ref(), "replacement");
+    assert_eq!(snapshot.version, 1);
+}
+
+#[test]
 fn writes_edits_and_removal_clear_lazy_identity() {
     let vfs = Vfs::new();
     let id = vfs.write_lazy("/lazy/a.py", identity_for("abc\n"));

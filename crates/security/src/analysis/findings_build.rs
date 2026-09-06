@@ -271,6 +271,31 @@ pub(super) fn make_finding(
             }) {
                 continue;
             }
+            let guard_connected = sanitizer_guard_feeds_sink_arg(
+                &SanitizerGuardContext {
+                    ws: context.ws,
+                    call_graph: context.call_graph,
+                    sink_func: context.sink_func,
+                    sink_tainted_args: &context.sink_tainted_args,
+                },
+                pack,
+                hop_func,
+                sanitizer_rule,
+                sanitizer_match,
+                sanitizer_hits,
+                snk,
+            );
+            // Reaching a predicate is not proof that its result rejects bad
+            // input. Required control-flow evidence cannot be bypassed by an
+            // overlapping tainted call or a value-flow attachment below.
+            if sanitizer_rule
+                .and_then(|rule| rule.analysis_semantics.as_ref())
+                .and_then(|semantics| semantics.sanitizer_guard.as_ref())
+                .is_some_and(|guard| guard.require_terminal_rejection)
+                && !guard_connected
+            {
+                continue;
+            }
             let nested_in_tainted_sink_arg =
                 sanitizer_is_nested_in_tainted_sink_arg(
                     context.ws,
@@ -314,20 +339,7 @@ pub(super) fn make_finding(
                         skr,
                         &context.sink_tainted_args,
                     )
-                    || sanitizer_guard_feeds_sink_arg(
-                        &SanitizerGuardContext {
-                            ws: context.ws,
-                            call_graph: context.call_graph,
-                            sink_func: context.sink_func,
-                            sink_tainted_args: &context.sink_tainted_args,
-                        },
-                        pack,
-                        hop_func,
-                        sanitizer_rule,
-                        sanitizer_match,
-                        sanitizer_hits,
-                        snk,
-                    )
+                    || guard_connected
                     || xxe_factory_hardening_sanitizes_sink(
                         context.ws,
                         context.sink_func,

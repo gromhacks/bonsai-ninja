@@ -171,6 +171,115 @@ fn mark_implicit_receiver(mut decl: Decl, receiver: &str) -> Decl {
     decl
 }
 
+#[test]
+fn receiver_alias_lookup_preserves_the_complete_receiver_place() {
+    let caller = mark_implicit_receiver(decl(FileId::new(1), 0, "run", Vec::new()), "self");
+    let aliases = AHashMap::from_iter([
+        (
+            "self.service".to_string(),
+            AliasTarget::Type {
+                type_name: "LocalService".to_string(),
+            },
+        ),
+        (
+            "service".to_string(),
+            AliasTarget::Type {
+                type_name: "LocalService".to_string(),
+            },
+        ),
+        (
+            "self.inner.service".to_string(),
+            AliasTarget::Type {
+                type_name: "NestedService".to_string(),
+            },
+        ),
+    ]);
+    assert!(receiver_type_names_for_expr(&caller, &aliases, "other.service").is_empty());
+    assert_eq!(
+        receiver_type_names_for_expr(&caller, &aliases, "self.service"),
+        vec!["LocalService"]
+    );
+    assert_eq!(
+        receiver_type_names_for_expr(&caller, &aliases, "service"),
+        vec!["LocalService"]
+    );
+    assert_eq!(
+        receiver_type_names_for_expr(&caller, &aliases, "self.inner.service"),
+        vec!["NestedService"]
+    );
+}
+
+#[test]
+fn receiver_class_lookup_does_not_drop_an_unresolved_owner() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![decl_with(file, 0, "Service", DeclKind::Class, None, Vec::new())],
+    );
+    let module = ModulePath::default();
+    let ctx = ResolveContext::new(file, &module);
+    assert!(receiver_class_type_names_for_expr(&global, &ctx, "external.Service").is_empty());
+    assert_eq!(
+        receiver_class_type_names_for_expr(&global, &ctx, "Service"),
+        vec!["Service"]
+    );
+}
+
+#[test]
+fn initializer_type_keeps_qualified_identity_and_rejects_unknown_competitors() {
+    let file = FileId::new(1);
+    for unknown_first in [false, true] {
+        let mut service = decl_with(file, 0, "Service", DeclKind::Class, None, Vec::new());
+        service.qualified_name = Some("local.Service".to_string());
+        let mut owner = mark_implicit_receiver(
+            decl_with(file, 2, "initialize", DeclKind::Constructor, Some(1), Vec::new()),
+            "self",
+        );
+        let known = bonsai_lang_api::ReceiverFieldInitializer {
+            span: Span::new(file, 30, 40),
+            target: "self.service".to_string(),
+            call_name: "Service".to_string(),
+            call_kind: CallKind::Function,
+            call_receiver: None,
+            call_receiver_types: Vec::new(),
+        };
+        let unknown = bonsai_lang_api::ReceiverFieldInitializer {
+            call_name: "unresolved_factory".to_string(),
+            ..known.clone()
+        };
+        owner.receiver_field_initializers = if unknown_first {
+            vec![unknown, known.clone()]
+        } else {
+            vec![known.clone(), unknown]
+        };
+        let mut global = GlobalIndex::new();
+        insert_file(
+            &mut global,
+            file,
+            vec![
+                service,
+                decl_with(file, 1, "Owner", DeclKind::Class, None, Vec::new()),
+                owner,
+            ],
+        );
+        let capabilities = LanguageCapabilities {
+            bare_call_constructor_syntax: true,
+            ..LanguageCapabilities::unsupported()
+        };
+        let module = ModulePath::default();
+        let ctx = ResolveContext::new(file, &module);
+        assert_eq!(
+            resolved_initializer_constructor_type(&global, &ctx, &known, capabilities),
+            Some("local.Service".to_string())
+        );
+        assert!(
+            resolved_class_field_types(&global, file, &AHashMap::new(), &|_| None, capabilities).is_empty()
+        );
+    }
+}
+
 fn with_module_path(mut decl: Decl, segments: &[&str]) -> Decl {
     decl.module_path = ModulePath::from_segments(segments.iter().copied());
     decl
@@ -4486,6 +4595,113 @@ fn callable_argument_executes_only_where_the_bound_formal_is_invoked() {
         graph.callees_of(entry).all(|edge| edge.to != executor),
         "the passing caller must not directly execute the callback"
     );
+}
+
+#[test]
+fn repeated_callback_arguments_preserve_each_exact_argument_span() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let host = with_params(
+        decl(file, 1, "run", vec![call(file, "second")]),
+        &["first", "second"],
+    );
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl(
+                file,
+                0,
+                "entry",
+                vec![call_with_args(file, "run", &["executor", "executor"])],
+            ),
+            host,
+            decl(file, 2, "executor", Vec::new()),
+        ],
+    );
+    let graph = build_graph(&global, |_| Some("fixture"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let host = FuncId::new(global.find_by_name("run")[0].raw());
+    let target = FuncId::new(global.find_by_name("executor")[0].raw());
+    assert_eq!(
+        graph
+            .callable_arguments()
+            .filter(|arg| arg.caller == entry && arg.target == target)
+            .count(),
+        2
+    );
+    assert!(graph
+        .callees_of(host)
+        .any(|edge| edge.to == target && edge.kind == EdgeKind::Indirect));
+}
+
+#[test]
+fn named_callback_argument_binds_the_named_formal_not_its_position() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let host = with_params(
+        decl(file, 1, "run", vec![call(file, "callback")]),
+        &["unused", "callback"],
+    );
+    let mut site = call_with_args(file, "run", &["executor"]);
+    let FlowEvent::Call { args, .. } = &mut site else {
+        unreachable!()
+    };
+    args[0].name = Some("callback".into());
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl(file, 0, "entry", vec![site]),
+            host,
+            decl(file, 2, "executor", Vec::new()),
+        ],
+    );
+    let graph = build_graph(&global, |_| Some("fixture"));
+    let host = FuncId::new(global.find_by_name("run")[0].raw());
+    let target = FuncId::new(global.find_by_name("executor")[0].raw());
+    assert!(graph
+        .callees_of(host)
+        .any(|edge| edge.to == target && edge.kind == EdgeKind::Indirect));
+}
+
+#[test]
+fn method_callback_argument_skips_the_implicit_receiver_formal() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let mut host = with_params(
+        decl_with(
+            file,
+            1,
+            "run",
+            DeclKind::Method,
+            Some(3),
+            vec![call(file, "callback")],
+        ),
+        &["self", "callback"],
+    );
+    host.receiver_param_index = Some(0);
+    let mut site = method_call(file, "runner.run", "runner", &["Runner"]);
+    let FlowEvent::Call { args, .. } = &mut site else {
+        unreachable!()
+    };
+    *args = call_args(file, &["executor"]);
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl(file, 0, "entry", vec![site]),
+            host,
+            decl(file, 2, "executor", Vec::new()),
+            decl_with(file, 3, "Runner", DeclKind::Class, None, Vec::new()),
+        ],
+    );
+    let graph = build_graph(&global, |_| Some("fixture"));
+    let host = FuncId::new(global.find_by_name("run")[0].raw());
+    let target = FuncId::new(global.find_by_name("executor")[0].raw());
+    assert!(graph
+        .callees_of(host)
+        .any(|edge| edge.to == target && edge.kind == EdgeKind::Indirect));
 }
 
 #[test]

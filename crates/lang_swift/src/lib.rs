@@ -1537,29 +1537,11 @@ fn swift_switch_has_complete_literal_results(selection: Node<'_>, src: &[u8]) ->
         let [value] = values.as_slice() else {
             return false;
         };
-        if !swift_node_is_literal_value(*value) {
+        if HANDLER.expression_value_kind(*value, src) != Some(AssignValueKind::Literal) {
             return false;
         }
     }
     has_default
-}
-
-fn swift_node_is_literal_value(node: Node<'_>) -> bool {
-    matches!(
-        node.kind(),
-        "nil_literal"
-            | "boolean_literal"
-            | "integer_literal"
-            | "real_literal"
-            | "bin_literal"
-            | "hex_literal"
-            | "oct_literal"
-            | "true"
-            | "false"
-            | "line_string_literal"
-            | "multi_line_string_literal"
-            | "raw_string_literal"
-    )
 }
 
 fn swift_events_have_return_containing(events: &[FlowEvent], selection: Span) -> bool {

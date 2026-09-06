@@ -13,7 +13,10 @@ pub use value::{AbstractValue, BoolDomain, IntRange, Nullness};
 
 use bonsai_cfg::{Cfg, Terminator};
 use bonsai_common::{BasicBlockId, FuncId, Span, TraceStepId};
-use bonsai_lang_api::{assignment_trace_message, FlowEvent};
+use bonsai_lang_api::{
+    assignment_trace_message, assignment_value_fact_for_span, AssignmentValueFact, FlowEvent,
+    StaticScalarValue,
+};
 use serde::{Deserialize, Serialize};
 
 /// Per-trace budget. Bounds `run_entry` so unknown loops or recursion
@@ -148,7 +151,29 @@ fn push_branch_successors(
 /// successors onto a worklist; interprocedural expansion is the
 /// workspace-level `bonsai_workspace::cross_module` tracer's job.
 pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
+    run_entry_with_assignment_values(func, cfg, limits, &[])
+}
+
+/// Run with the file's sorted, adapter-lowered assignment facts. Only exact
+/// scalar facts and bare-name copies carry values; dependency names alone do
+/// not prove the value of a compound expression or a call result.
+pub fn run_entry_with_assignment_values(
+    func: FuncId,
+    cfg: &Cfg,
+    limits: TraceLimits,
+    assignment_values: &[AssignmentValueFact],
+) -> RawTrace {
     let mut trace = RawTrace::default();
+    for reason in &cfg.analysis_incomplete_reasons {
+        trace.mark_incomplete(reason.clone());
+    }
+    if !cfg.analysis_complete && trace.incomplete_reasons.is_empty() {
+        trace.mark_incomplete("cfg-incomplete");
+    }
+    if cfg.block(cfg.entry).is_none() {
+        trace.mark_incomplete("cfg-missing-entry");
+        return trace;
+    }
     let mut next_step: u32 = 0;
     let mut next_path: u32 = 1;
 
@@ -200,6 +225,7 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
         }
         *visit_count += 1;
         let Some(block) = cfg.block(block_id) else {
+            trace.mark_incomplete(format!("cfg-missing-block:{}", block_id.raw()));
             continue;
         };
         state.current_bb = block_id;
@@ -222,7 +248,7 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
         }
 
         for event in &block.events {
-            apply_event(&mut state, event);
+            apply_event(&mut state, event, assignment_values);
             let (kind, message) = classify_event(event);
             if !emit(
                 kind,
@@ -320,99 +346,33 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
     trace
 }
 
-fn apply_event(state: &mut ExecState, event: &FlowEvent) {
-    match event {
-        FlowEvent::Assign {
-            target,
-            source_name,
-            source_call,
-            source_call_args,
-            source_names,
-            ..
-        } => {
-            let value = assignment_value(
-                state,
-                source_name.as_deref(),
-                source_call.as_deref(),
-                source_call_args,
-                source_names,
-            );
-            state.locals.insert(target.clone(), value);
-        }
-        FlowEvent::Throw {
-            value_name: Some(name),
-            ..
-        }
-        | FlowEvent::Return {
-            value_name: Some(name),
-            ..
-        }
-        | FlowEvent::Await {
-            value_name: Some(name),
-            ..
-        } => {
-            let value = value_from_text(state, name);
-            state.locals.insert(name.clone(), value);
-        }
-        _ => {}
-    }
-}
-
-fn assignment_value(
-    state: &ExecState,
-    source_name: Option<&str>,
-    source_call: Option<&str>,
-    source_call_args: &[String],
-    source_names: &[String],
-) -> AbstractValue {
-    if let Some(name) = source_name {
-        return value_from_text(state, name);
-    }
-    if !source_names.is_empty() {
-        return join_values(source_names.iter().map(|name| value_from_text(state, name)));
-    }
-    if !source_call_args.is_empty() {
-        return join_values(source_call_args.iter().map(|arg| value_from_text(state, arg)));
-    }
-    if let Some(call) = source_call {
-        return AbstractValue::Unknown.join(value_from_text(state, call));
-    }
-    AbstractValue::Unknown
-}
-
-fn join_values(values: impl IntoIterator<Item = AbstractValue>) -> AbstractValue {
-    values
-        .into_iter()
-        .reduce(AbstractValue::join)
-        .unwrap_or(AbstractValue::Unknown)
-}
-
-fn value_from_text(state: &ExecState, raw: &str) -> AbstractValue {
-    let text = raw.trim();
-    if text.is_empty() {
-        return AbstractValue::Unknown;
-    }
-    if let Some(value) = state.locals.get(text) {
-        return value.clone();
-    }
-    match text {
-        "true" | "True" => return AbstractValue::ConstBool(true),
-        "false" | "False" => return AbstractValue::ConstBool(false),
-        "null" | "nil" | "None" => return AbstractValue::Null,
-        _ => {}
-    }
-    if let Ok(value) = text.parse::<i64>() {
-        return AbstractValue::ConstInt(value);
-    }
-    let bytes = text.as_bytes();
-    if bytes.len() >= 2 {
-        let first = bytes[0] as char;
-        let last = bytes[bytes.len() - 1] as char;
-        if matches!(first, '"' | '\'' | '`') && first == last {
-            return AbstractValue::ConstString(text[1..text.len() - 1].to_string());
-        }
-    }
-    AbstractValue::Unknown
+fn apply_event(state: &mut ExecState, event: &FlowEvent, assignment_values: &[AssignmentValueFact]) {
+    let FlowEvent::Assign {
+        span,
+        target,
+        source_name,
+        source_call,
+        ..
+    } = event
+    else {
+        return;
+    };
+    let scalar = assignment_value_fact_for_span(assignment_values, *span)
+        .filter(|fact| fact.target.as_deref() == Some(target.as_str()))
+        .and_then(|fact| fact.static_value.as_ref());
+    let value = match scalar {
+        Some(StaticScalarValue::Integer(value)) => AbstractValue::ConstInt(*value),
+        Some(StaticScalarValue::Boolean(value)) => AbstractValue::ConstBool(*value),
+        Some(StaticScalarValue::String(value)) => AbstractValue::ConstString(value.clone()),
+        Some(StaticScalarValue::Null) => AbstractValue::Null,
+        None if source_call.is_none() => source_name
+            .as_ref()
+            .and_then(|name| state.locals.get(name))
+            .cloned()
+            .unwrap_or_default(),
+        None => AbstractValue::Unknown,
+    };
+    state.locals.insert(target.clone(), value);
 }
 
 /// Map a [`FlowEvent`] variant onto the interpreter's step vocabulary.

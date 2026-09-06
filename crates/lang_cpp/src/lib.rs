@@ -1,4 +1,5 @@
 //! C++ language adapter.
+mod compiler_guards;
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_from_tree_with_handler, extract_imports_via,
@@ -8,12 +9,13 @@ use bonsai_lang_api::{
         named_child_call_args_with_handler, node_text, parse_with, span_of, walk_flow_events,
     },
     AdapterContext, AdapterError, AggregateLayout, ArgumentPassingMode, BranchConditionFact,
-    BranchConditionPolarity, CallArg, CallKind, CallTargetExtraction, CompilerGuardFact, ConditionEquality,
+    BranchConditionPolarity, CallArg, CallKind, CallTargetExtraction, ConditionEquality,
     ConditionExpressionFact, ConditionOperandFact, DeclIndex, DeclKind, FieldWrite, FlowEvent,
     GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
     ModulePath, StaticScalarValue, StringCompositionFact, StringCompositionPart, TypeAliasBinding,
     TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
+use compiler_guards::cpp_compound_predicate_call_guards;
 use std::sync::OnceLock;
 use tree_sitter::{Language, Node, Tree};
 
@@ -34,8 +36,8 @@ const CPP_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     type_field: "type",
 };
 
-/// Preserve provider-qualified parameter types alongside the generic short
-/// alias emitted by `collect_param_type_aliases`.
+/// Preserve provider-qualified parameter and local types alongside the generic
+/// short alias emitted by `collect_param_type_aliases`.
 ///
 /// Short aliases remain useful for ordinary C++ dispatch, but they cannot
 /// distinguish two unrelated libraries that both declare `Request`. This
@@ -52,6 +54,7 @@ fn collect_cpp_qualified_parameter_type_aliases(
             continue;
         };
         let mut pending = vec![declarator];
+        pending.extend(function.child_by_field_name("body"));
         let mut aliases = Vec::new();
         while let Some(node) = pending.pop() {
             if node.id() != function.id()
@@ -59,7 +62,7 @@ fn collect_cpp_qualified_parameter_type_aliases(
             {
                 continue;
             }
-            if node.kind() == "parameter_declaration" {
+            if matches!(node.kind(), "parameter_declaration" | "declaration") {
                 let (Some(type_node), Some(binding_node)) = (
                     node.child_by_field_name("type"),
                     node.child_by_field_name("declarator")
@@ -964,12 +967,29 @@ impl LanguageAdapter for CppAdapter {
                 cpp_static_scalar,
             );
         }
-        let private_function_names = parsed
+        let private_function_spans = parsed
             .as_ref()
-            .map(|(snapshot, tree)| collect_tu_private_function_names(tree, snapshot.text.as_bytes()))
+            .map(|(snapshot, tree)| collect_tu_private_function_spans(tree, file, snapshot.text.as_bytes()))
             .unwrap_or_default();
+        // Name-keyed template refinement is admissible only when that name
+        // denotes one declaration in this translation unit.
+        let mut function_name_counts = std::collections::HashMap::<&str, usize>::new();
+        for decl in &decl_index.defs {
+            if matches!(decl.kind, DeclKind::Function | DeclKind::Method) {
+                *function_name_counts.entry(&decl.name).or_default() += 1;
+            }
+        }
+        let private_function_names = decl_index
+            .defs
+            .iter()
+            .filter(|decl| {
+                private_function_spans.contains(&decl.span)
+                    && function_name_counts.get(decl.name.as_str()) == Some(&1)
+            })
+            .map(|decl| decl.name.clone())
+            .collect();
         for decl in &mut decl_index.defs {
-            if private_function_names.contains(&decl.name) {
+            if private_function_spans.contains(&decl.span) {
                 decl.visibility = Visibility::Private;
             }
         }
@@ -1108,9 +1128,10 @@ impl LanguageAdapter for CppAdapter {
                 if !is_class_like(decl.kind) {
                     continue;
                 }
-                if let Some(bases) = bases_by_span.iter().find_map(|(span, name, bases)| {
-                    (*span == decl.span || name == &decl.name).then_some(bases)
-                }) {
+                if let Some(bases) = bases_by_span
+                    .iter()
+                    .find_map(|(span, _, bases)| (*span == decl.span).then_some(bases))
+                {
                     decl.bases = bases.clone();
                 }
             }
@@ -1174,483 +1195,6 @@ impl LanguageAdapter for CppAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
-}
-
-const CPP_GUARD_TERMINAL_COMPOUND_STATIC_ALLOWLIST: &str = "terminal-predicate.compound-static-allowlist";
-
-#[derive(Clone)]
-struct CppCompoundPredicateSummary {
-    name: String,
-    input_parameter: String,
-    evidence: Vec<String>,
-}
-
-fn cpp_compound_predicate_call_guards(tree: &Tree, file: FileId, src: &[u8]) -> Vec<CompilerGuardFact> {
-    let collections = cpp_static_string_collections(tree, src);
-    let summaries = collect_kinds(tree, &["function_definition"])
-        .into_iter()
-        .filter_map(|function| cpp_compound_predicate_summary(function, src, &collections))
-        .collect::<Vec<_>>();
-    let mut facts = Vec::new();
-    for function in collect_kinds(tree, &["function_definition"]) {
-        let Some(body) = function.child_by_field_name("body") else {
-            continue;
-        };
-        let calls = cpp_descendants_of_kind(body, "call_expression");
-        for branch in cpp_descendants_of_kind(body, "if_statement") {
-            let (Some(condition), Some(consequence)) = (
-                branch.child_by_field_name("condition"),
-                branch.child_by_field_name("consequence"),
-            ) else {
-                continue;
-            };
-            if !cpp_statement_is_terminal(consequence) {
-                continue;
-            }
-            let Some(predicate_call) = cpp_negated_single_call(condition, src) else {
-                continue;
-            };
-            let Some(predicate_name) = predicate_call
-                .child_by_field_name("function")
-                .map(|node| node_text(&node, src).trim())
-            else {
-                continue;
-            };
-            let matching = summaries
-                .iter()
-                .filter(|summary| summary.name == predicate_name)
-                .collect::<Vec<_>>();
-            let [summary] = matching.as_slice() else {
-                continue;
-            };
-            let predicate_args = predicate_call
-                .child_by_field_name("arguments")
-                .map(cpp_direct_named_children)
-                .unwrap_or_default();
-            let Some(predicate_input_index) = predicate_args
-                .iter()
-                .position(|argument| node_text(argument, src).trim() == summary.input_parameter)
-                .or(Some(0))
-            else {
-                continue;
-            };
-            let Some(predicate_input) = predicate_args.get(predicate_input_index) else {
-                continue;
-            };
-            let predicate_input = node_text(predicate_input, src).trim();
-            for guarded_call in calls
-                .iter()
-                .copied()
-                .filter(|call| call.start_byte() > branch.end_byte())
-            {
-                let Some(callee) = guarded_call.child_by_field_name("function") else {
-                    continue;
-                };
-                let guarded_args = guarded_call
-                    .child_by_field_name("arguments")
-                    .map(cpp_direct_named_children)
-                    .unwrap_or_default();
-                let relations = guarded_args
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, argument)| {
-                        cpp_expression_is_place_projection(**argument, predicate_input, src)
-                    })
-                    .map(|(index, _)| {
-                        format!("guarded-argument:{index}=predicate-argument:{predicate_input_index}")
-                    })
-                    .collect::<Vec<_>>();
-                if relations.is_empty() {
-                    continue;
-                }
-                let mut evidence = summary.evidence.clone();
-                evidence.extend(relations);
-                evidence.extend(cpp_related_static_call_evidence(guarded_call, &calls, src));
-                evidence.sort();
-                evidence.dedup();
-                facts.push(CompilerGuardFact {
-                    function_span: span_of(file, &function),
-                    guarded_call_span: span_of(file, &callee),
-                    proof_span: span_of(file, &branch),
-                    capability: CPP_GUARD_TERMINAL_COMPOUND_STATIC_ALLOWLIST.to_string(),
-                    evidence,
-                });
-            }
-        }
-    }
-    facts.sort_by(|left, right| {
-        (
-            left.function_span.start,
-            left.guarded_call_span.start,
-            left.evidence.as_slice(),
-        )
-            .cmp(&(
-                right.function_span.start,
-                right.guarded_call_span.start,
-                right.evidence.as_slice(),
-            ))
-    });
-    facts.dedup();
-    facts
-}
-
-fn cpp_compound_predicate_summary(
-    function: Node<'_>,
-    src: &[u8],
-    collections: &std::collections::HashMap<String, Vec<String>>,
-) -> Option<CppCompoundPredicateSummary> {
-    let name = cpp_function_name(function, src)?;
-    let parameters = cpp_function_parameters(function, src);
-    if parameters.len() < 2 {
-        return None;
-    }
-    let input = parameters[0].clone();
-    let output = parameters[1].clone();
-    let body = function.child_by_field_name("body")?;
-    let direct = cpp_direct_named_children(body);
-    let final_return = direct.last().copied()?.filter_kind("return_statement")?;
-    let final_value = cpp_first_named_child(final_return)?;
-    let prefix = cpp_descendants_of_kind(body, "if_statement")
-        .into_iter()
-        .find_map(|branch| {
-            let consequence = branch.child_by_field_name("consequence")?;
-            if !cpp_return_has_boolean(consequence, false, src) {
-                return None;
-            }
-            let condition = branch.child_by_field_name("condition")?;
-            cpp_descendants_of_kind(condition, "call_expression")
-                .into_iter()
-                .find_map(|call| {
-                    let function = call.child_by_field_name("function")?;
-                    let (receiver, method) = cpp_field_call_parts(function, src)?;
-                    if receiver != input {
-                        return None;
-                    }
-                    let args = cpp_direct_named_children(call.child_by_field_name("arguments")?);
-                    let [literal, offset] = args.as_slice() else {
-                        return None;
-                    };
-                    let prefix = cpp_static_string(*literal, src)?;
-                    let offset = cpp_integer_literal(*offset, src)?;
-                    (offset == 0).then_some((method, prefix, branch))
-                })
-        })?;
-    let rest_binding = cpp_descendants_of_kind(body, "init_declarator")
-        .into_iter()
-        .find_map(|initializer| {
-            let binding = initializer
-                .child_by_field_name("declarator")
-                .and_then(first_identifier_descendant_cpp)?;
-            let value = initializer.child_by_field_name("value")?;
-            let call = (value.kind() == "call_expression").then_some(value)?;
-            let (receiver, method) = cpp_field_call_parts(call.child_by_field_name("function")?, src)?;
-            let args = cpp_direct_named_children(call.child_by_field_name("arguments")?);
-            let [offset] = args.as_slice() else {
-                return None;
-            };
-            (receiver == input && cpp_integer_literal(*offset, src) == u128::try_from(prefix.1.len()).ok())
-                .then(|| (node_text(&binding, src).trim().to_string(), method))
-        })?;
-    let token_assignment = cpp_descendants_of_kind(body, "assignment_expression")
-        .into_iter()
-        .find(|assignment| {
-            let Some(left) = assignment.child_by_field_name("left") else {
-                return false;
-            };
-            let Some(right) = assignment.child_by_field_name("right") else {
-                return false;
-            };
-            if node_text(&left, src).trim() != output || right.kind() != "call_expression" {
-                return false;
-            }
-            let Some((receiver, _)) = right
-                .child_by_field_name("function")
-                .and_then(|function| cpp_field_call_parts(function, src))
-            else {
-                return false;
-            };
-            receiver == rest_binding.0
-                && cpp_descendants_of_kind(right, "char_literal")
-                    .iter()
-                    .any(|literal| node_text(literal, src).trim() == "'/'")
-        })?;
-    let membership_call = cpp_descendants_of_kind(final_value, "call_expression")
-        .into_iter()
-        .find_map(|call| {
-            let (receiver, method) = cpp_field_call_parts(call.child_by_field_name("function")?, src)?;
-            if !collections.contains_key(&receiver) {
-                return None;
-            }
-            let args = cpp_direct_named_children(call.child_by_field_name("arguments")?);
-            let [subject] = args.as_slice() else {
-                return None;
-            };
-            (node_text(subject, src).trim() == output).then_some(method)
-        })?;
-    let mut evidence = vec![
-        "predicate-complete:true".to_string(),
-        "finite-static-string-membership:true".to_string(),
-        format!("prefix-call:{}", prefix.0),
-        format!("prefix-value:string:{}", prefix.1),
-        "prefix-position:number:0".to_string(),
-        format!("prefix-remainder-call:{}", rest_binding.1),
-        format!("membership-call:{membership_call}"),
-        "membership-token-boundary:true".to_string(),
-    ];
-    if token_assignment.start_byte() <= final_return.start_byte() {
-        evidence.push("membership-subject-derived-from-prefix:true".to_string());
-    }
-    Some(CppCompoundPredicateSummary {
-        name,
-        input_parameter: input,
-        evidence,
-    })
-}
-
-trait CppNodeKindExt {
-    fn filter_kind(self, kind: &str) -> Option<Self>
-    where
-        Self: Sized;
-}
-
-impl CppNodeKindExt for Node<'_> {
-    fn filter_kind(self, kind: &str) -> Option<Self> {
-        (self.kind() == kind).then_some(self)
-    }
-}
-
-fn cpp_function_name(function: Node<'_>, src: &[u8]) -> Option<String> {
-    let declarator = function.child_by_field_name("declarator")?;
-    let function_declarator = if declarator.kind() == "function_declarator" {
-        declarator
-    } else {
-        first_named_child_of_kind(&declarator, "function_declarator")?
-    };
-    let binding = first_identifier_descendant_cpp(function_declarator.child_by_field_name("declarator")?)?;
-    Some(node_text(&binding, src).trim().to_string())
-}
-
-fn cpp_function_parameters(function: Node<'_>, src: &[u8]) -> Vec<String> {
-    let Some(parameters) = function
-        .child_by_field_name("declarator")
-        .and_then(|declarator| first_named_child_of_kind(&declarator, "parameter_list"))
-    else {
-        return Vec::new();
-    };
-    cpp_direct_named_children(parameters)
-        .into_iter()
-        .filter(|node| node.kind() == "parameter_declaration")
-        .filter_map(|parameter| {
-            parameter
-                .child_by_field_name("declarator")
-                .and_then(first_identifier_descendant_cpp)
-                .map(|binding| node_text(&binding, src).trim().to_string())
-        })
-        .collect()
-}
-
-fn cpp_field_call_parts(function: Node<'_>, src: &[u8]) -> Option<(String, String)> {
-    if function.kind() != "field_expression" {
-        return None;
-    }
-    Some((
-        node_text(&function.child_by_field_name("argument")?, src)
-            .trim()
-            .to_string(),
-        node_text(&function.child_by_field_name("field")?, src)
-            .trim()
-            .to_string(),
-    ))
-}
-
-fn cpp_negated_single_call<'tree>(condition: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
-    let condition = cpp_unwrap_condition(condition);
-    let argument = condition.child_by_field_name("argument")?;
-    let operator = src
-        .get(condition.start_byte()..argument.start_byte())
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .map(str::trim);
-    (condition.kind() == "unary_expression" && operator == Some("!") && argument.kind() == "call_expression")
-        .then_some(argument)
-}
-
-fn cpp_unwrap_condition(mut node: Node<'_>) -> Node<'_> {
-    while matches!(node.kind(), "condition_clause" | "parenthesized_expression") {
-        let Some(inner) = node
-            .child_by_field_name("value")
-            .or_else(|| cpp_first_named_child(node))
-        else {
-            break;
-        };
-        node = inner;
-    }
-    node
-}
-
-fn cpp_return_has_boolean(statement: Node<'_>, expected: bool, src: &[u8]) -> bool {
-    let return_statement = if statement.kind() == "return_statement" {
-        Some(statement)
-    } else if statement.kind() == "compound_statement" {
-        cpp_direct_named_children(statement)
-            .into_iter()
-            .find(|node| node.kind() == "return_statement")
-    } else {
-        None
-    };
-    return_statement
-        .and_then(cpp_first_named_child)
-        .is_some_and(|value| node_text(&value, src).trim() == if expected { "true" } else { "false" })
-}
-
-fn cpp_statement_is_terminal(statement: Node<'_>) -> bool {
-    if statement.kind() == "return_statement" {
-        return true;
-    }
-    statement.kind() == "compound_statement"
-        && cpp_direct_named_children(statement)
-            .last()
-            .is_some_and(|last| cpp_statement_is_terminal(*last))
-}
-
-fn cpp_static_string_collections(tree: &Tree, src: &[u8]) -> std::collections::HashMap<String, Vec<String>> {
-    let mut collections = std::collections::HashMap::new();
-    for declaration in collect_kinds(tree, &["declaration"])
-        .into_iter()
-        .filter(|node| !cpp_has_ancestor_kind(*node, "function_definition"))
-    {
-        for initializer in cpp_descendants_of_kind(declaration, "init_declarator") {
-            let (Some(declarator), Some(value)) = (
-                initializer.child_by_field_name("declarator"),
-                initializer.child_by_field_name("value"),
-            ) else {
-                continue;
-            };
-            if value.kind() != "initializer_list" {
-                continue;
-            }
-            let Some(binding) = first_identifier_descendant_cpp(declarator) else {
-                continue;
-            };
-            let items = cpp_direct_named_children(value);
-            let values = items
-                .iter()
-                .copied()
-                .filter_map(|item| cpp_static_string(item, src))
-                .collect::<Vec<_>>();
-            if !values.is_empty() && values.len() == items.len() {
-                collections.insert(node_text(&binding, src).trim().to_string(), values);
-            }
-        }
-    }
-    collections
-}
-
-fn cpp_static_string(node: Node<'_>, src: &[u8]) -> Option<String> {
-    let raw = node_text(&node, src).trim();
-    let inner = raw.strip_prefix('"')?.strip_suffix('"')?;
-    (!inner.contains('\\')).then(|| inner.to_string())
-}
-
-fn cpp_integer_literal(node: Node<'_>, src: &[u8]) -> Option<u128> {
-    if node.kind() != "number_literal" {
-        return None;
-    }
-    node_text(&node, src)
-        .trim()
-        .trim_end_matches(['u', 'U', 'l', 'L'])
-        .parse()
-        .ok()
-}
-
-fn cpp_expression_is_place_projection(expression: Node<'_>, place: &str, src: &[u8]) -> bool {
-    if node_text(&expression, src).trim() == place {
-        return true;
-    }
-    if expression.kind() != "call_expression" {
-        return false;
-    }
-    let Some(function) = expression.child_by_field_name("function") else {
-        return false;
-    };
-    cpp_field_call_parts(function, src).is_some_and(|(receiver, _)| receiver == place)
-        && expression
-            .child_by_field_name("arguments")
-            .is_some_and(|arguments| cpp_direct_named_children(arguments).is_empty())
-}
-
-fn cpp_related_static_call_evidence(guarded_call: Node<'_>, calls: &[Node<'_>], src: &[u8]) -> Vec<String> {
-    let guarded_args = guarded_call
-        .child_by_field_name("arguments")
-        .map(cpp_direct_named_children)
-        .unwrap_or_default();
-    let Some(receiver) = guarded_args.first().map(|arg| node_text(arg, src).trim()) else {
-        return Vec::new();
-    };
-    let mut evidence = Vec::new();
-    for related in calls
-        .iter()
-        .copied()
-        .filter(|call| call.id() != guarded_call.id())
-    {
-        let Some(callee) = related.child_by_field_name("function") else {
-            continue;
-        };
-        let args = related
-            .child_by_field_name("arguments")
-            .map(cpp_direct_named_children)
-            .unwrap_or_default();
-        if args.first().map(|arg| node_text(arg, src).trim()) != Some(receiver) {
-            continue;
-        }
-        let name = node_text(&callee, src).trim();
-        evidence.push(format!("related-call:{name}:argument:0=guarded-argument:0"));
-        for (index, argument) in args.iter().copied().enumerate().skip(1) {
-            let value = match argument.kind() {
-                "number_literal" => cpp_integer_literal(argument, src).map(|value| format!("number:{value}")),
-                "identifier" => Some(format!("place:{}", node_text(&argument, src).trim())),
-                _ => None,
-            };
-            if let Some(value) = value {
-                evidence.push(format!("related-call:{name}:argument:{index}={value}"));
-            }
-        }
-    }
-    evidence
-}
-
-fn cpp_has_ancestor_kind(mut node: Node<'_>, kind: &str) -> bool {
-    while let Some(parent) = node.parent() {
-        if parent.kind() == kind {
-            return true;
-        }
-        node = parent;
-    }
-    false
-}
-
-fn cpp_descendants_of_kind<'tree>(root: Node<'tree>, kind: &str) -> Vec<Node<'tree>> {
-    let mut out = Vec::new();
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if node.id() != root.id() && node.kind() == kind {
-            out.push(node);
-        }
-        let mut cursor = node.walk();
-        let children = node.named_children(&mut cursor).collect::<Vec<_>>();
-        stack.extend(children.into_iter().rev());
-    }
-    out
-}
-
-fn cpp_direct_named_children<'tree>(node: Node<'tree>) -> Vec<Node<'tree>> {
-    let mut cursor = node.walk();
-    node.named_children(&mut cursor).collect()
-}
-
-fn cpp_first_named_child(node: Node<'_>) -> Option<Node<'_>> {
-    let mut cursor = node.walk();
-    let child = node.named_children(&mut cursor).next();
-    child
 }
 
 /// C++ `break` exits the nearest loop or switch. The shared structured HIR
@@ -1896,38 +1440,50 @@ fn lower_cpp_string_composition(node: Node<'_>, src: &[u8], out: &mut Vec<String
 /// nested namespace syntax (`namespace a::b`). Anonymous namespaces add no
 /// public path segment; their translation-unit privacy is handled separately.
 fn apply_cpp_namespace_semantic_identity(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
-    let namespaces_by_span = collect_kinds(tree, &["function_definition"])
-        .into_iter()
-        .map(|function| {
-            let mut ancestors = Vec::new();
-            let mut current = function.parent();
-            while let Some(node) = current {
-                if node.kind() == "namespace_definition" {
-                    ancestors.push(cpp_named_namespace_segments(&node, src));
-                }
-                current = node.parent();
-            }
-            ancestors.reverse();
-            (
-                span_of(file, &function),
-                ancestors.into_iter().flatten().collect::<Vec<_>>(),
-            )
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-
     for decl in &mut index.defs {
-        let Some(namespaces) = namespaces_by_span.get(&decl.span) else {
+        let Some(node) = bonsai_lang_api::kit::node_at_span(
+            tree.root_node(),
+            decl.span,
+            &[
+                "function_definition",
+                "class_specifier",
+                "struct_specifier",
+                "union_specifier",
+                "enum_specifier",
+                "declaration",
+                "field_declaration",
+                "lambda_expression",
+            ],
+        ) else {
             continue;
         };
+        debug_assert_eq!(decl.span.file, file);
+        let mut ancestors = Vec::new();
+        let mut current = node.parent();
+        while let Some(node) = current {
+            if node.kind() == "namespace_definition" {
+                ancestors.push(cpp_named_namespace_segments(&node, src));
+            }
+            current = node.parent();
+        }
+        ancestors.reverse();
+        let namespaces = ancestors.into_iter().flatten().collect::<Vec<_>>();
         if namespaces.is_empty() {
             continue;
         }
+        let old_prefix = format!("{}.", decl.module_path.segments.join("."));
+        let member_suffix = decl
+            .qualified_name
+            .as_deref()
+            .and_then(|name| name.strip_prefix(&old_prefix))
+            .unwrap_or(&decl.name)
+            .to_string();
         let mut segments = decl.module_path.segments.clone();
         segments.extend(namespaces.iter().cloned());
         decl.module_path = ModulePath {
             segments: segments.clone(),
         };
-        segments.push(decl.name.clone());
+        segments.push(member_suffix);
         decl.qualified_name = Some(segments.join("."));
     }
 }
@@ -2141,22 +1697,34 @@ fn collapse_cpp_same_type_copy_initializers(events: &mut Vec<FlowEvent>, aliases
         let Some(source) = value_flow.tuple_items[0].place.as_deref() else {
             return true;
         };
-        let declared_type = type_name.as_deref().or_else(|| {
-            aliases
-                .iter()
-                .find(|alias| alias.name == *target)
-                .map(|alias| alias.type_name.as_str())
-        });
-        let source_type = aliases
-            .iter()
-            .find(|alias| alias.name == source)
-            .map(|alias| alias.type_name.as_str());
+        let declared_type = if aliases.iter().any(|alias| alias.name == *target) {
+            cpp_unique_alias_type(aliases, target)
+        } else {
+            type_name.as_deref().map(bonsai_common::normalize_qualified_name)
+        };
+        let source_type = cpp_unique_alias_type(aliases, source);
         let (Some(declared_type), Some(source_type)) = (declared_type, source_type) else {
             return true;
         };
-        bonsai_lang_api::kit::canonical_simple_type_name(declared_type)
-            != bonsai_lang_api::kit::canonical_simple_type_name(source_type)
+        declared_type != source_type
     });
+}
+
+fn cpp_unique_alias_type(aliases: &[TypeAliasBinding], name: &str) -> Option<String> {
+    let types = aliases
+        .iter()
+        .filter(|alias| alias.name == name)
+        .map(|alias| bonsai_common::normalize_qualified_name(&alias.type_name))
+        .collect::<std::collections::HashSet<_>>();
+    let qualified = types.iter().filter(|ty| ty.contains('.')).collect::<Vec<_>>();
+    if let [exact] = qualified.as_slice() {
+        let tail = exact.rsplit('.').next()?;
+        return types
+            .iter()
+            .all(|ty| ty == *exact || ty == tail)
+            .then(|| (*exact).clone());
+    }
+    (types.len() == 1).then(|| types.into_iter().next()).flatten()
 }
 
 fn collect_cpp_constructor_initializer_events(
@@ -2386,7 +1954,7 @@ fn cpp_fields_by_parent_symbol(
         .filter_map(|decl| {
             fields_by_class
                 .iter()
-                .find(|(span, name, _)| *span == decl.span || *name == decl.name)
+                .find(|(span, _, _)| *span == decl.span)
                 .map(|(_, _, fields)| (decl.symbol, fields.iter().cloned().collect()))
         })
         .collect()
@@ -2397,10 +1965,14 @@ fn cpp_fields_by_parent_symbol(
 /// - Function definitions with a `static` storage class specifier.
 /// - Function definitions whose body lives inside an anonymous
 ///   `namespace { ... }` block (no namespace identifier).
-fn collect_tu_private_function_names(tree: &Tree, src: &[u8]) -> std::collections::HashSet<String> {
-    let mut private_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+fn collect_tu_private_function_spans(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashSet<Span> {
+    let mut private_names = std::collections::HashSet::new();
     let root = tree.root_node();
-    walk_for_tu_private(root, src, false, &mut private_names);
+    walk_for_tu_private(root, file, src, false, &mut private_names);
     private_names
 }
 
@@ -2503,18 +2075,17 @@ fn cpp_access_visibility(raw: &str, default_visibility: Visibility) -> Visibilit
 /// counts as TU-private even without a `static` specifier.
 fn walk_for_tu_private(
     root: Node<'_>,
+    file: FileId,
     src: &[u8],
     inside_anonymous_ns: bool,
-    private_names: &mut std::collections::HashSet<String>,
+    private_names: &mut std::collections::HashSet<Span>,
 ) {
     let mut stack = vec![(root, inside_anonymous_ns)];
     while let Some((node, inside_anonymous_ns)) = stack.pop() {
         if node.kind() == "function_definition"
             && (inside_anonymous_ns || function_has_static_specifier(&node, src))
         {
-            if let Some(name) = function_name(&node, src) {
-                private_names.insert(name);
-            }
+            private_names.insert(span_of(file, &node));
         }
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {

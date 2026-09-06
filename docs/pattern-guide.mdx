@@ -958,6 +958,63 @@ one-condition-broken negative test. See
 [Security Specification](security-spec.mdx#compiler-proven-guard-semantics)
 and [Adapter Contract](contributing/adapter-contract.mdx#value-shape-summary-contract).
 
+A complete guard proof must retain comparison polarity, lexical ownership,
+and the control-flow relation to the exact consumed value. A terminal rejection
+inside an optional branch does not guard later unconditional work; a write to
+the checked value invalidates the earlier proof. Collection evidence must name
+the resolved immutable binding and its values, not same-named constants in
+other classes or array keys. Related configuration arguments must come from
+one actual call at the required execution point, never a combination of
+different calls or a setting applied after consumption. Include negative tests
+for inverted predicates, shadowed bindings, intervening writes, conditional
+configuration, and later conflicting settings. Failure to prove a guard keeps
+the flow visible; it does not remove the flow from analysis.
+
+Terminal rejection requires compiler-proven control flow. A call whose name
+resembles an exit operation is not a return or throw: response methods and
+user-defined helpers can return normally. An unreachable throw after a loop
+transfer is not rejection either. The shared branch proof joins typed exit
+states on a heap worklist, without enumerating paths or imposing a depth cap.
+
+Predicate guards use `sanitizer_guard.require_terminal_rejection` and
+`accepted_predicate_value` (true by default, false for rejection predicates).
+The proof must select the exact matched call result: a call nested inside an
+unknown wrapper is not evidence of that result. Null and boolean comparisons
+remain distinct in the compiler IR. Only a rule modeling an API whose failure
+result is null and whose other results are all truthy may declare
+`predicate_falsey_result_is_null: true`; this permits a non-null comparison to
+prove success. The declaration requires terminal rejection and is not a
+general equivalence between non-null and truthy. Keep negative tests for
+inverted comparisons, alternate accepting branches, wrappers, and comparisons
+to false. Method spelling alone must not establish a result-domain contract.
+
+Ruby guard summaries require the complete direct parse/guard/consume sequence
+and a uniquely owned literal collection with no observed mutation or escape.
+An enclosing `unless` cannot negate a nested `if`; negation applies to the
+complete condition, including conjunctions and disjunctions. Calls to
+overridable methods such as `raise` are calls, not grammar-owned unconditional
+throws; a returning local implementation must preserve downstream flows.
+
+C finite-string membership evidence additionally records the exact length
+provider, declared length type, and boundary codepoints. The bundled URL rule
+requires `strlen`, `size_t`, and the slash/NUL alternatives; a same-shaped
+unknown function, narrowed length, or different delimiter is not equivalent.
+The collection must have immutable pointers as well as immutable bytes
+(`const char *const items[]`), and configuration evidence comes from one
+immediately following, unconditional call with no later conflicting setting.
+An upper byte-count bound alone does not prove a signed value nonnegative.
+Filtered-buffer evidence must check and copy the same element without an
+intervening mutation, not merely two elements of the same input buffer.
+
+C++ compound membership evidence records the input and collection types,
+token extraction and boundary operations, and the final argument projection.
+The bundled URL rule recognizes the `std::string` / `std::set<std::string>`
+model and its `c_str` projection. A same-named method on an unknown type or an
+arbitrary zero-argument projection does not receive that model's credit.
+The local summary currently requires unambiguous translation-unit declarations
+and a complete direct guard/assignment/return sequence; unresolved namespace,
+overload, conversion, or control-flow cases retain their findings.
+
 `character_constraint.required_mappings` is an exact rule-owned substitution
 inventory. Use it with `accepted_providers` when an adapter has lowered a
 configured runtime transformer; do not add that provider or its security

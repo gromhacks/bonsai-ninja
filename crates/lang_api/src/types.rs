@@ -3022,7 +3022,9 @@ pub enum ConditionEquality {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConditionOperandFact {
     pub span: Span,
-    /// Exact syntax span when the complete operand is one direct call result.
+    /// Canonical callee span (the sibling `FlowEvent::Call` identity) when the
+    /// complete operand is one direct call result. `span` retains the full
+    /// operand expression, including arguments and transparent wrappers.
     /// Adapters leave this absent for wrapped/arithmetic expressions so rule
     /// consumers never infer call-result equality from source text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3079,6 +3081,10 @@ pub enum ConditionExpressionFact {
     /// particular sink safe.
     TypeTest {
         span: Span,
+        /// Canonical call identity when this type test is implemented by a
+        /// direct predicate call, rather than a grammar-owned operator.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        predicate_call_span: Option<Span>,
         subject: ConditionOperandFact,
         type_name: String,
     },

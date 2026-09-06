@@ -15,6 +15,63 @@ fn db_with(source: &str) -> AnalyzerDb {
     db
 }
 
+#[test]
+fn field_receiver_types_stay_in_their_lexical_class() {
+    let db = db_with(
+        r#"
+class DangerousOwner { Dangerous worker; void unsafeCall() { worker.run(); } }
+class SafeOwner { Safe worker; void safeCall() { worker.run(); } }
+"#,
+    );
+    let global = db.global_index();
+    for (method, expected) in [("safeCall", "Safe"), ("unsafeCall", "Dangerous")] {
+        let decl = global
+            .all_files()
+            .find_map(|file| global.decls_in(file).iter().find(|decl| decl.name == method))
+            .expect(method);
+        let mut calls = Vec::new();
+        collect_calls(&decl.flow_events, &mut calls);
+        let (_, types) = calls
+            .iter()
+            .find(|(name, _)| name.rsplit('.').next() == Some("run"))
+            .expect("receiver call");
+        assert_eq!(
+            types,
+            &[expected],
+            "{method} must not borrow another class's field: {calls:?}"
+        );
+    }
+}
+
+#[test]
+fn explicit_field_and_shadowing_parameter_keep_separate_types() {
+    let db = db_with(
+        r#"
+class Owner {
+    Dangerous worker;
+    void inspect(Safe worker) {
+        worker.localCall();
+        this.worker.fieldCall();
+    }
+}
+"#,
+    );
+    let global = db.global_index();
+    let decl = global
+        .all_files()
+        .find_map(|file| global.decls_in(file).iter().find(|decl| decl.name == "inspect"))
+        .expect("inspect");
+    let mut calls = Vec::new();
+    collect_calls(&decl.flow_events, &mut calls);
+    for (method, expected) in [("localCall", "Safe"), ("fieldCall", "Dangerous")] {
+        let (_, types) = calls
+            .iter()
+            .find(|(name, _)| name.ends_with(method))
+            .expect(method);
+        assert_eq!(types, &[expected], "{method} must use its own binding: {calls:?}");
+    }
+}
+
 fn collect_calls(events: &[FlowEvent], out: &mut Vec<(String, Vec<String>)>) {
     for event in events {
         match event {

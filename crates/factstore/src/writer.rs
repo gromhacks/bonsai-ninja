@@ -87,6 +87,17 @@ use std::thread::JoinHandle;
 /// writers race for the same target path within a single process.
 static WRITER_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Own cleanup independently of the writer's fallible I/O and encoder paths.
+/// The worker creates this outside `run_writer_thread`, so its file handles
+/// have closed before cleanup, including during panic unwinding on Windows.
+struct TemporaryStorePath(PathBuf);
+
+impl Drop for TemporaryStorePath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Streaming writer for a fact-store file.
 ///
 /// Sharable as `&FactStoreWriter` from rayon workers — `add`,
@@ -495,7 +506,9 @@ impl FactStoreWriter {
         let cleanup_tmp_path = tmp_path.clone();
         let handle = std::thread::Builder::new()
             .name("factstore-writer".to_string())
+            .stack_size(bonsai_common::compiler_worker_stack_bytes())
             .spawn(move || {
+                let _cleanup = TemporaryStorePath(tmp_path.clone());
                 let outcome = run_writer_thread(WriterThreadInit {
                     file,
                     receiver,

@@ -519,8 +519,7 @@ impl LanguageAdapter for JavaAdapter {
         for decl in &mut index.defs {
             populate_java_exception_types(&mut decl.flow_events, &tree, src);
         }
-        let field_aliases = collect_java_type_aliases(tree.root_node(), src, &["field_declaration"]);
-        let method_aliases = collect_java_method_type_aliases(&syntax, file, src, &field_aliases);
+        let method_aliases = collect_java_method_type_aliases(&syntax, file, src);
         for decl in &mut index.defs {
             if let Some(aliases) = method_aliases
                 .iter()
@@ -735,7 +734,10 @@ fn java_guarded_value_constraints(
             continue;
         };
         let mut cursor = body.walk();
-        let statements = body.named_children(&mut cursor).collect::<Vec<_>>();
+        let statements = body
+            .named_children(&mut cursor)
+            .filter(|child| !HANDLER.comment_kinds.contains(&child.kind()))
+            .collect::<Vec<_>>();
         let [guard, final_return] = statements.as_slice() else {
             continue;
         };
@@ -752,8 +754,9 @@ fn java_guarded_value_constraints(
         ) else {
             continue;
         };
-        let fallback_returns = java_collect_kinds_below(consequence, &["return_statement"]);
-        let [fallback_return] = fallback_returns.as_slice() else {
+        let Some(fallback_return) = java_unwrap_single_statement_block(consequence)
+            .filter(|statement| statement.kind() == "return_statement")
+        else {
             continue;
         };
         let Some(fallback) = fallback_return
@@ -807,6 +810,24 @@ fn java_guarded_value_constraints(
     facts.sort_by_key(|fact| (fact.function_span.start, fact.guard_span.start));
     facts.dedup();
     facts
+}
+
+/// A nested return is not proof that its enclosing branch returns: it may
+/// belong to a callback or execute only on another conditional path. Unwrap
+/// only transparent blocks with one executable statement.
+fn java_unwrap_single_statement_block(mut node: Node<'_>) -> Option<Node<'_>> {
+    while node.kind() == "block" {
+        let mut cursor = node.walk();
+        let mut statements = node
+            .named_children(&mut cursor)
+            .filter(|child| !HANDLER.comment_kinds.contains(&child.kind()));
+        let statement = statements.next()?;
+        if statements.next().is_some() {
+            return None;
+        }
+        node = statement;
+    }
+    Some(node)
 }
 
 fn java_collect_kinds_below<'tree>(root: Node<'tree>, kinds: &[&str]) -> Vec<Node<'tree>> {
@@ -2222,6 +2243,7 @@ fn lower_java_condition_expression(node: Node<'_>, file: FileId, src: &[u8]) -> 
             if !type_name.is_empty() {
                 return ConditionExpressionFact::TypeTest {
                     span,
+                    predicate_call_span: None,
                     subject: java_condition_operand(subject, file, src),
                     type_name,
                 };
@@ -2255,7 +2277,7 @@ fn merge_java_condition_junction(
 fn java_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
     ConditionOperandFact {
         span: span_of(file, &node),
-        direct_call_span: (node.kind() == "method_invocation").then(|| span_of(file, &node)),
+        direct_call_span: bonsai_lang_api::kit::direct_call_callee_span(node, file, src, &HANDLER),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER),
         static_string: java_static_string_literal(node, src),
         static_value: java_static_scalar(node, src),
@@ -2607,19 +2629,26 @@ fn populate_java_array_argument_sequences(
 }
 
 /// Build per-method type-alias bindings (`Foo bar` → `bar : Foo`) by
-/// merging file-level field aliases with each method's local declarations.
+/// merging lexically enclosing field bindings with the method's own locals.
+/// An explicit `this.field` remains distinct from a same-spelled parameter.
 fn collect_java_method_type_aliases(
     syntax: &SyntaxKindIndex<'_>,
     file: FileId,
     src: &[u8],
-    field_aliases: &[TypeAliasBinding],
 ) -> Vec<(bonsai_common::Span, Vec<TypeAliasBinding>)> {
+    let mut fields_by_scope: std::collections::HashMap<usize, Vec<TypeAliasBinding>> =
+        std::collections::HashMap::new();
+    for field in syntax.collect(&["field_declaration"]) {
+        if let Some(scope) = java_enclosing_class_body(field) {
+            fields_by_scope
+                .entry(scope.id())
+                .or_default()
+                .extend(java_type_aliases_from_decl(field, src));
+        }
+    }
     let mut aliases_by_method = Vec::new();
     for method_node in syntax.collect(&["method_declaration", "constructor_declaration"]) {
-        // Start every method with the file's field aliases — fields are
-        // visible throughout the method body.
-        let mut method_aliases = field_aliases.to_vec();
-        method_aliases.extend(collect_java_type_aliases(
+        let mut method_aliases = collect_java_type_aliases(
             method_node,
             src,
             &[
@@ -2632,7 +2661,32 @@ fn collect_java_method_type_aliases(
                 // and the receiver-type SQLi rule resolves.
                 "resource",
             ],
-        ));
+        );
+        let mut shadowed = method_aliases
+            .iter()
+            .map(|alias| alias.name.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let nearest_class = java_enclosing_class_body(method_node);
+        let mut owner = method_node.parent();
+        while let Some(scope) = owner {
+            if let Some(fields) = fields_by_scope.get(&scope.id()) {
+                for field in fields {
+                    if !shadowed.contains(&field.name) {
+                        method_aliases.push(field.clone());
+                    }
+                    if nearest_class.is_some_and(|nearest| nearest.id() == scope.id()) {
+                        method_aliases.push(TypeAliasBinding {
+                            name: format!("this.{}", field.name),
+                            type_name: field.type_name.clone(),
+                        });
+                    }
+                }
+                // Retain all identities for the selected field before
+                // hiding same-spelled bindings from an outer class.
+                shadowed.extend(fields.iter().map(|field| field.name.clone()));
+            }
+            owner = scope.parent();
+        }
         let method_type_bounds = java_type_parameter_bounds(method_node, src);
         expand_java_type_parameter_aliases(&mut method_aliases, &method_type_bounds);
         dedup_type_aliases(&mut method_aliases);
@@ -3283,20 +3337,14 @@ fn collect_java_class_bases(
         if let Some(ifaces) = class_node.child_by_field_name("interfaces") {
             collect_java_base_names(ifaces, src, &mut bases);
         }
-        // `interface_declaration` carries `extends_interfaces`.
-        if let Some(extends) = class_node.child_by_field_name("extends_interfaces") {
+        // This is a named grammar child, not a field. `permits`, in
+        // contrast, lists possible children and never creates a base edge.
+        let mut cursor = class_node.walk();
+        for extends in class_node
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "extends_interfaces")
+        {
             collect_java_base_names(extends, src, &mut bases);
-        }
-        // `permits` clause from sealed classes. The matcher consults
-        // Decl.bases for hierarchy resolution (e.g. `kind: param` rules
-        // with `in_class:` constraints). For sealed types both
-        // directions of the relationship are useful: the parent
-        // declares which subtypes inherit, so emitting the permits
-        // members lets cross-file rules that key on the ancestor
-        // type still resolve through the sealed parent's permitted
-        // subclass list.
-        if let Some(permits) = class_node.child_by_field_name("permits") {
-            collect_java_base_names(permits, src, &mut bases);
         }
         if !bases.is_empty() {
             out.push((span_of(file, &class_node), bases));
@@ -3502,28 +3550,54 @@ fn flow_event_assigns_target(event: &FlowEvent, wanted: &str) -> bool {
     }
 }
 
-/// Pull every `type_identifier` / `scoped_type_identifier` /
-/// `generic_type` descendant of a Java parent-clause node and push
-/// the canonical short name into `out`. Skips internal punctuation
-/// nodes.
+/// Collect only direct declared supertypes, preserving source order and
+/// qualification. Generic arguments are contained types, not ancestors.
 fn collect_java_base_names(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "type_identifier" | "scoped_type_identifier" | "generic_type" => {
-                if let Some(name) = canonical_java_type_name(node_text(&n, src)) {
+                if let Some(name) = java_nominal_type_name(n, src) {
                     if !out.iter().any(|b| b == &name) {
                         out.push(name);
                     }
                 }
+                continue;
             }
-            _ => {}
+            "superclass" | "super_interfaces" | "extends_interfaces" | "type_list" => {}
+            _ => continue,
         }
         let mut cursor = n.walk();
-        for child in n.named_children(&mut cursor) {
-            stack.push(child);
+        let children = n.named_children(&mut cursor).collect::<Vec<_>>();
+        stack.extend(children.into_iter().rev());
+    }
+}
+
+/// Erase only type-argument subtrees, including arguments on an enclosing
+/// type (`Outer<T>.Inner<U>` is `Outer.Inner`, never just `Outer`).
+fn java_nominal_type_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        match current.kind() {
+            "type_identifier" => parts.push(node_text(&current, src).trim()),
+            "scoped_type_identifier" | "generic_type" => {
+                let mut cursor = current.walk();
+                let children = current
+                    .named_children(&mut cursor)
+                    .filter(|child| {
+                        matches!(
+                            child.kind(),
+                            "type_identifier" | "scoped_type_identifier" | "generic_type"
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                stack.extend(children.into_iter().rev());
+            }
+            _ => return None,
         }
     }
+    (!parts.is_empty() && parts.iter().all(|part| !part.is_empty())).then(|| parts.join("."))
 }
 
 /// Walk `decl.flow_events` recursively and populate

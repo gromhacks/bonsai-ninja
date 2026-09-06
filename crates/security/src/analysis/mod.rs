@@ -8103,6 +8103,7 @@ fn sanitizer_predicate_helper_guards_sink(
                 &fact.expression,
                 sanitizer.span,
                 guard.accepted_predicate_value.unwrap_or(true),
+                guard.predicate_falsey_result_is_null,
             )
     });
     if !predicate_is_required {
@@ -8169,6 +8170,7 @@ fn sanitizer_predicate_helper_guards_sink(
                 edge.span,
                 sink.span,
                 true,
+                false,
             )
             .is_some();
             bonsai_diagnostics::debug_log!(
@@ -8214,6 +8216,7 @@ fn terminal_type_guards_cover_sink_targets(
                     candidate.span,
                     sink.span,
                     guard.accepted_predicate_value.unwrap_or(true),
+                    guard.predicate_falsey_result_is_null,
                 ) else {
                     bonsai_diagnostics::debug_log!(
                         "security-taint",

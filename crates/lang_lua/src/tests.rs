@@ -60,32 +60,72 @@ fn predicate_expression(src: &str) -> ConditionExpressionFact {
 }
 
 #[test]
-fn call_not_equal_nil_lowers_to_exact_call_truthiness() {
+fn a_false_return_is_non_nil_but_not_truthy() {
+    let expression =
+        predicate_expression("local function present(value)\n  return supplied(value) ~= nil\nend\n");
+    assert!(
+        matches!(expression, ConditionExpressionFact::Equality {
+        relation: ConditionEquality::NotEqual, ref right, ..
+    } if right.static_value == Some(StaticScalarValue::Null)),
+        "false ~= nil is true; this cannot become call truthiness: {expression:#?}"
+    );
+}
+
+#[test]
+fn dynamic_subscript_identifiers_are_not_literal_field_names() {
+    let language = language_from_pack(PACK_NAME).expect("lua grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).unwrap();
+    let source = "local value = table[key]\n";
+    let tree = parser.parse(source, None).unwrap();
+    let key = collect_kinds(&tree, &["bracket_index_expression"])[0]
+        .child_by_field_name("field")
+        .unwrap();
+    assert_eq!(
+        lua_static_key(key, source.as_bytes()),
+        None,
+        "an identifier inside brackets is evaluated, not a literal string key"
+    );
+}
+
+#[test]
+fn call_not_equal_nil_preserves_exact_equality() {
     let src = r#"
 local function valid(value)
   return value:match("^[%w%.%-]+$") ~= nil
 end
 "#;
-    let ConditionExpressionFact::Truthy { operand, .. } = predicate_expression(src) else {
-        panic!("call ~= nil must lower to direct call truthiness");
+    let ConditionExpressionFact::Equality {
+        relation: ConditionEquality::NotEqual,
+        left,
+        right,
+        ..
+    } = predicate_expression(src)
+    else {
+        panic!("call ~= nil must retain equality independently of provider semantics");
     };
-    assert!(operand.direct_call_span.is_some());
+    assert!(left.direct_call_span.is_some());
+    assert_eq!(right.static_value, Some(StaticScalarValue::Null));
 }
 
 #[test]
-fn call_equal_nil_lowers_to_negated_exact_call_truthiness() {
+fn call_equal_nil_preserves_exact_equality() {
     let src = r#"
 local function valid(value)
   return value:find("%.%.") == nil
 end
 "#;
-    let ConditionExpressionFact::Not { operand, .. } = predicate_expression(src) else {
-        panic!("call == nil must lower to negated direct call truthiness");
+    let ConditionExpressionFact::Equality {
+        relation: ConditionEquality::Equal,
+        left,
+        right,
+        ..
+    } = predicate_expression(src)
+    else {
+        panic!("call == nil must distinguish nil from a false result");
     };
-    let ConditionExpressionFact::Truthy { operand, .. } = *operand else {
-        panic!("nil equality must negate the call truthiness atom");
-    };
-    assert!(operand.direct_call_span.is_some());
+    assert!(left.direct_call_span.is_some());
+    assert_eq!(right.static_value, Some(StaticScalarValue::Null));
 }
 
 #[test]

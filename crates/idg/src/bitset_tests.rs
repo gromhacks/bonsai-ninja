@@ -174,6 +174,31 @@ fn equal_bitsets_compare_equal() {
 }
 
 #[test]
+fn set_operations_reject_different_domains_even_when_word_counts_match() {
+    for operation in 0..5 {
+        let result = std::panic::catch_unwind(|| {
+            let mut a = NodeBitSet::zeros(1);
+            let b = NodeBitSet::from_seed(2, &[NodeId(1)]);
+            match operation {
+                0 => a.union_inplace(&b),
+                1 => a.intersect_inplace(&b),
+                2 => {
+                    let _ = a.intersect(&b);
+                }
+                3 => a.difference_inplace(&b),
+                _ => {
+                    let _ = a.difference(&b);
+                }
+            }
+        });
+        assert!(
+            result.is_err(),
+            "operation {operation} accepted incompatible domains"
+        );
+    }
+}
+
+#[test]
 fn closure_step_pattern_works_via_difference_and_union() {
     // Exercise the canonical closure-step kernel:
     // reached.union_inplace(frontier);

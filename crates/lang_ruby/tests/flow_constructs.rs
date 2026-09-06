@@ -67,6 +67,24 @@ fn ruby_decl_events(source: &str, name: &str) -> Vec<FlowEvent> {
 }
 
 #[test]
+fn a_returning_method_named_raise_is_not_a_syntactic_throw() {
+    let events = ruby_decl_events(
+        "def raise(value)\n  value\nend\ndef forward(value)\n  raise(value)\n  sink(value)\nend\n",
+        "forward",
+    );
+    assert!(events.iter().any(|event| matches!(event,
+        FlowEvent::Call { name, .. } if name == "raise")));
+    assert!(events.iter().any(|event| matches!(event,
+        FlowEvent::Call { name, .. } if name == "sink")));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, FlowEvent::Throw { .. })),
+        "a method spelling cannot prove an unconditional exception: {events:#?}"
+    );
+}
+
+#[test]
 fn unbound_identifier_receiver_is_a_zero_arg_call_result() {
     let events = ruby_decl_events(
         "def entry\n  value = read_input.to_s\n  local = 'ok'\n  local.to_s\nend\n",

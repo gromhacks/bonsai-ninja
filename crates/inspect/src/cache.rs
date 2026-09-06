@@ -21,13 +21,9 @@ pub struct BoundedCache<K, V> {
 impl<K: std::hash::Hash + Eq + Clone, V> BoundedCache<K, V> {
     #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
-        // Initial allocation is bounded so a tiny cache doesn't pay
-        // for a 65 K-slot hashmap up front, but is still big enough
-        // that hot caches don't reallocate from 64 → ... → 65 K as
-        // they fill on first use. 1024 is roughly two cache lines
-        // worth of entries on the largest CACHE_CAP and amortises
-        // the growth cost flat.
-        let initial = cap.clamp(64, 1024);
+        // Small/disabled caches do not reserve beyond their logical capacity.
+        // Larger caches grow from a bounded initial allocation as needed.
+        let initial = cap.min(1024);
         Self {
             map: ahash::AHashMap::with_capacity(initial),
             order: std::collections::VecDeque::with_capacity(initial),

@@ -6413,6 +6413,26 @@ pub fn extract_call_receiver_facts(
     facts
 }
 
+/// Canonical callee identity when the entire value is a direct call result.
+/// Uses the same adapter-owned syntax and transparent wrappers as call-event
+/// lowering; nested calls inside an opaque expression do not qualify.
+#[must_use]
+pub fn direct_call_callee_span(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<Span> {
+    if handler.call_ref_kinds.contains(&node.kind()) {
+        return parsed_call_target(&node, src, handler).map(|target| span_of(file, &target.node));
+    }
+    if let Some(FlowEvent::Call { span, .. }) = pseudo_call_event(node, file, src, handler) {
+        return Some(span);
+    }
+    let child = transparent_direct_call_child(&node, handler)?;
+    direct_call_callee_span(child, file, src, handler)
+}
+
 /// Collect nested call-argument value shapes from the same Tree-sitter nodes
 /// that produced the adapter-normalized [`FlowEvent::Call`] records.
 ///
@@ -6428,22 +6448,6 @@ pub fn extract_call_argument_value_facts(
     src: &[u8],
     handler: &GrammarHandler,
 ) -> Vec<crate::CallArgumentValueFact> {
-    fn direct_call_callee_span(
-        node: Node<'_>,
-        file: FileId,
-        src: &[u8],
-        handler: &GrammarHandler,
-    ) -> Option<Span> {
-        if handler.call_ref_kinds.contains(&node.kind()) {
-            return parsed_call_target(&node, src, handler).map(|target| span_of(file, &target.node));
-        }
-        if let Some(FlowEvent::Call { span, .. }) = pseudo_call_event(node, file, src, handler) {
-            return Some(span);
-        }
-        let child = transparent_direct_call_child(&node, handler)?;
-        direct_call_callee_span(child, file, src, handler)
-    }
-
     fn collect_requests(events: &[FlowEvent], out: &mut Vec<(Span, usize, Span)>) {
         for event in events {
             match event {
@@ -10630,7 +10634,13 @@ fn receiver_types_for_expr(
     // Only fall back to the bare tail when there is no member projection, OR
     // the projection base is an implicit receiver (`this.field`/`self.field`)
     // where the tail genuinely names a field the alias map can resolve.
-    let allow_bare_tail = !has_member_projection || base_is_implicit;
+    // A typed exact projection is stronger than an unrelated bare local.
+    // Adapters may still emit only bare field aliases, so retain that
+    // compatibility fallback only when no exact projection was supplied.
+    let has_exact_alias = aliases
+        .iter()
+        .any(|alias| normalize_receiver_type_expr(&alias.name) == normalized);
+    let allow_bare_tail = (!has_member_projection || base_is_implicit) && !has_exact_alias;
     let mut has_direct_alias = false;
     for alias in aliases {
         let normalized_alias = normalize_receiver_type_expr(&alias.name);

@@ -87,6 +87,9 @@ pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
     let stage = progress::ScopedSpinner::new("building file view");
     let out = project.browse().read_file(filters)?;
     stage.finish();
+    if !out.connections.calls_complete {
+        crate::page_cache::mark_optional_evidence_unavailable();
+    }
 
     // `read-file` is one connected compiler object. Secondary filters select
     // that parent object; they must never slice away unrelated source lines,
@@ -746,6 +749,13 @@ fn print_flow_entry_exit(f: &FlowEntryExit) {
 fn render_connections(out: &ReadFileOut) {
     let u = ui();
     let connections = &out.connections;
+    if !connections.calls_complete {
+        cli_println!();
+        cli_println!(
+            "{}",
+            u.dim("cross-module call evidence is incomplete; run index <workspace> --semantic and retry")
+        );
+    }
     if !connections.imports.is_empty() {
         cli_println!();
         cli_println!(

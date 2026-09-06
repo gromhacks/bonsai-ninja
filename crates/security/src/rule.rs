@@ -637,6 +637,12 @@ pub struct SanitizerGuardSemantics {
     /// that a true predicate is safe; rejection predicates declare `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_predicate_value: Option<bool>,
+    /// The modeled call returns null on failure and a truthy value on success;
+    /// it cannot return a different falsey value. This rule-owned result domain
+    /// permits exact null comparisons to prove predicate truth. It must never
+    /// be inferred from a method name or from a comparison alone.
+    #[serde(default)]
+    pub predicate_falsey_result_is_null: bool,
 }
 
 /// Rulepack-owned callable roles used by the structured path-containment

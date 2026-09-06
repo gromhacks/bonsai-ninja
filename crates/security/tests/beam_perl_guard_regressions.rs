@@ -90,6 +90,75 @@ end
 }
 
 #[test]
+fn lua_match_guard_preserves_null_polarity_and_rejects_unproven_alternatives() {
+    for (expression, expected) in [
+        ("value:match(\"^[%w%.%-]+$\") ~= nil", FindingStatus::Sanitized),
+        ("nil ~= value:match(\"^[%w%.%-]+$\")", FindingStatus::Sanitized),
+        (
+            "not (value:match(\"^[%w%.%-]+$\") == nil)",
+            FindingStatus::Sanitized,
+        ),
+        ("value:match(\"^[%w%.%-]+$\")", FindingStatus::Sanitized),
+        ("value:match(\"^[%w%.%-]+$\") == nil", FindingStatus::Unsanitized),
+        (
+            "value:match(\"^[%w%.%-]+$\") ~= nil or true",
+            FindingStatus::Unsanitized,
+        ),
+        (
+            "value:match(\"^[%w%.%-]+$\") ~= false",
+            FindingStatus::Unsanitized,
+        ),
+        ("accept(value:match(\"^[%w%.%-]+$\"))", FindingStatus::Unsanitized),
+        (
+            "accept(value:match(\"^[%w%.%-]+$\")) ~= nil",
+            FindingStatus::Unsanitized,
+        ),
+    ] {
+        let source = format!(
+            r#"local function accept(value) return true end
+local function valid(value) return {expression} end
+local function run()
+  local host = io.read()
+  if not valid(host) then return end
+  os.execute("ping -c 1 " .. host)
+end
+"#
+        );
+        let report = analyze("predicate.lua", &source);
+        assert_eq!(
+            sink_status(&report, "lua.cmdi.os_execute"),
+            expected,
+            "{expression}: {report:#?}"
+        );
+    }
+    for (condition, expected) in [
+        ("host:match(\"^[%w%.%-]+$\") == nil", FindingStatus::Sanitized),
+        (
+            "not (host:match(\"^[%w%.%-]+$\") ~= nil)",
+            FindingStatus::Sanitized,
+        ),
+        ("host:match(\"^[%w%.%-]+$\") ~= nil", FindingStatus::Unsanitized),
+    ] {
+        let report = analyze(
+            "direct.lua",
+            &format!(
+                r#"local function run()
+  local host = io.read()
+  if {condition} then return end
+  os.execute("ping -c 1 " .. host)
+end
+"#
+            ),
+        );
+        assert_eq!(
+            sink_status(&report, "lua.cmdi.os_execute"),
+            expected,
+            "{condition}: {report:#?}"
+        );
+    }
+}
+
+#[test]
 fn lua_finite_host_helper_credits_only_terminal_guard_and_disabled_redirects() {
     let source = |guard: &str, redirect: &str| {
         format!(
@@ -170,6 +239,57 @@ end
         FindingStatus::Unsanitized,
         "observing a declaration marker without rejecting it must preserve the finding: {observed:#?}"
     );
+}
+
+#[test]
+fn elixir_url_guards_require_current_module_values_and_unchanged_argument_bindings() {
+    for (attributes, body, expected) in [
+        (
+            "@trusted ~w(service.internal)",
+            "HTTPoison.get(target, [], follow_redirect: false)",
+            FindingStatus::Sanitized,
+        ),
+        (
+            "@trusted ~w(service.internal)\n  @trusted Config.load_hosts()",
+            "HTTPoison.get(target, [], follow_redirect: false)",
+            FindingStatus::Unsanitized,
+        ),
+        (
+            "@trusted Config.load_hosts()",
+            "HTTPoison.get(target, [], follow_redirect: false)",
+            FindingStatus::Unsanitized,
+        ),
+        (
+            "@trusted ~w(service.internal)",
+            "target = IO.gets(\"> \")\n        HTTPoison.get(target, [], follow_redirect: false)",
+            FindingStatus::Unsanitized,
+        ),
+    ] {
+        let source = format!(
+            r#"alias HTTPoison
+defmodule Unrelated do
+  @trusted ~w(other.internal)
+end
+defmodule Gateway do
+  {attributes}
+  def run do
+    target = IO.gets("> ")
+    case URI.parse(target) do
+      %URI{{scheme: "https", host: host}} when host in @trusted ->
+        {body}
+      _ -> ""
+    end
+  end
+end
+"#
+        );
+        let report = analyze("gateway.ex", &source);
+        assert_eq!(
+            sink_status(&report, "elixir.ssrf.httpoison_get"),
+            expected,
+            "{source}: {report:#?}"
+        );
+    }
 }
 
 #[test]

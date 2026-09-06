@@ -189,6 +189,44 @@ fn failed_streamed_entry_never_publishes_a_partial_store() {
 }
 
 #[test]
+fn panicking_encoder_cleans_temporary_store_and_preserves_previous_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("v.bin");
+    let original = FactStoreWriter::create(&target, 0, 0).unwrap();
+    original.add(1, 0, b"original").unwrap();
+    original.finish().unwrap();
+    let writer = FactStoreWriter::create(&target, 0, 0).unwrap();
+    assert!(writer
+        .add_streamed(2, 0, |_| panic!("injected encoder panic"))
+        .is_err());
+    drop(writer); // joins, so cleanup must be complete without a sleep
+    let reader = FactStoreReader::open(&target, 0, 0).unwrap();
+    assert_eq!(reader.get(1).unwrap().unwrap().payload, b"original");
+    let remaining = std::fs::read_dir(dir.path())
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(remaining.len(), 1, "orphan temporary store: {remaining:?}");
+}
+
+#[test]
+fn failed_publication_cleans_temporary_store_without_removing_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("v.bin");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("keep"), "untouched").unwrap();
+    let writer = FactStoreWriter::create(&target, 0, 0).unwrap();
+    writer.add(1, 0, b"new").unwrap();
+    assert!(writer.finish().is_err());
+    assert_eq!(std::fs::read_to_string(target.join("keep")).unwrap(), "untouched");
+    let remaining = std::fs::read_dir(dir.path())
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(remaining.len(), 1, "orphan temporary store: {remaining:?}");
+}
+
+#[test]
 fn finish_rejects_duplicate_keys_without_publishing_target() {
     let dir = tempfile::tempdir().expect("tempdir");
     let target = dir.path().join("v.bin");
@@ -243,11 +281,7 @@ fn drop_without_finish_cleans_up_tmp_file() {
         w.add(1, 0, b"abandoned").expect("add");
         // dropped here without finish — tmp should be cleaned
     }
-    // Give the writer thread a brief moment to handle the
-    // channel-closed signal and remove the tmp file. (The Drop
-    // impl joins, so this should already be synchronous, but the
-    // test doesn't fight the OS scheduler if it isn't.)
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Drop joins the writer; cleanup must be synchronous.
     let entries: Vec<_> = std::fs::read_dir(dir.path())
         .expect("readdir")
         .filter_map(|e| e.ok())

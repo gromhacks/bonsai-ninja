@@ -14,6 +14,10 @@
 use crate::node::NodeId;
 
 /// Compact bitset addressed by [`NodeId`].
+///
+/// Set operations require identical logical address spaces and panic if their
+/// lengths differ. Sharing the same rounded word count is not sufficient:
+/// combining different domains can otherwise introduce unaddressable bits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeBitSet {
     bits: Box<[u64]>,
@@ -101,7 +105,7 @@ impl NodeBitSet {
     /// the inner word-OR loop; on hot paths this is the closure
     /// step's per-frontier cost.
     pub fn union_inplace(&mut self, other: &Self) {
-        debug_assert_eq!(self.bits.len(), other.bits.len());
+        assert_eq!(self.len, other.len, "bitset domains must have identical lengths");
         for (a, b) in self.bits.iter_mut().zip(other.bits.iter()) {
             *a |= *b;
         }
@@ -109,7 +113,7 @@ impl NodeBitSet {
 
     /// In-place intersection: `self ∩= other`.
     pub fn intersect_inplace(&mut self, other: &Self) {
-        debug_assert_eq!(self.bits.len(), other.bits.len());
+        assert_eq!(self.len, other.len, "bitset domains must have identical lengths");
         for (a, b) in self.bits.iter_mut().zip(other.bits.iter()) {
             *a &= *b;
         }
@@ -119,7 +123,7 @@ impl NodeBitSet {
     /// source-to-sink reachability query.
     #[must_use]
     pub fn intersect(&self, other: &Self) -> Self {
-        debug_assert_eq!(self.bits.len(), other.bits.len());
+        assert_eq!(self.len, other.len, "bitset domains must have identical lengths");
         let bits: Box<[u64]> = self
             .bits
             .iter()
@@ -132,7 +136,7 @@ impl NodeBitSet {
     /// In-place difference: `self &= !other` (clears every bit set
     /// in `other`).
     pub fn difference_inplace(&mut self, other: &Self) {
-        debug_assert_eq!(self.bits.len(), other.bits.len());
+        assert_eq!(self.len, other.len, "bitset domains must have identical lengths");
         for (a, b) in self.bits.iter_mut().zip(other.bits.iter()) {
             *a &= !*b;
         }
@@ -141,7 +145,7 @@ impl NodeBitSet {
     /// Returns a new bitset = `self & !other`.
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
-        debug_assert_eq!(self.bits.len(), other.bits.len());
+        assert_eq!(self.len, other.len, "bitset domains must have identical lengths");
         let bits: Box<[u64]> = self
             .bits
             .iter()

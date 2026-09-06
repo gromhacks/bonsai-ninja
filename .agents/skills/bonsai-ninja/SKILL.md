@@ -70,6 +70,23 @@ explicitly before piping to `jq`. Use `--output-path <file>` for large
 artifacts when the command supports it. Use `--html-output <file>` for a human
 report rendered from the command's canonical JSON result; it never enables
 more analysis.
+Browse locations use one-based byte columns as well as lines. Keep the full
+locator when reopening a row: separate writes, references, or neighboring
+functions can share a line. Enclosing-function labels and cross-module
+`used in` evidence use the exact location, not the first name on that line.
+For `vars`, review the complete `source_names` list of a matching write;
+multiple RHS projections are not multiple writes or a proven taint path.
+Check `used_in_complete` separately from syntax `analysis_complete`. A cold
+file-scoped view can lack cross-module caller evidence; `index <workspace>
+--semantic` makes the full validated relation available without expanding
+the syntax query. An unavailable relation is not proof of no callers.
+Class summaries and uses refer to compiler-owned members of that exact type,
+not unrelated methods with the same short name.
+`read-file` reports call-evidence coverage as `connections.calls_complete`;
+source syntax coverage alone does not prove that every cross-file relation
+was available. Reopen after semantic prewarm when that relation is needed.
+When investigating cache discrepancies, compare a normal invocation with
+`--no-cache`: the selected source, declarations, and locations must agree.
 Full `diagnostics` performs one exact streaming compiler-object pass. Stable
 `show E:<id>` drilldown uses the persisted exact edge directory; neither
 command requires a duplicate whole-workspace lowering or edge scan.
@@ -82,6 +99,8 @@ command requires a duplicate whole-workspace lowering or edge scan.
    It changes rendering, not analysis accuracy.
 3. Check `analysis_complete` and `analysis_incomplete_reasons` before treating
    an empty result as proof that no path or finding exists.
+   For security overlays, check report-level completion even when there are
+   no findings. Intentional file filters and incomplete analysis are distinct.
 4. Preserve stable IDs (`S:`, `F:`, `G:`, `T:`, `E:`, `R:`, `N:`) and reopen
    them with `show` or the command that emitted them.
 5. Use `search` to find an anchor, then pivot to compiler facts. Text matches
@@ -187,6 +206,8 @@ There is no CLI backward slice. For "what influences this symbol?", combine
 sites; the SDK `slices` API remains available for programmatic slices.
 `read-file` is file-local by default;
 connected or security overlays are explicit options.
+Prefer an exact workspace-relative file path. An ambiguous suffix is not a
+unique file selector and must be narrowed instead of choosing the first match.
 
 ## Security review
 
@@ -216,11 +237,14 @@ Inspect the security model when a finding or gap needs explanation:
 
 Use `source-analysis` for “where can this input go?”, `sink-analysis` for
 “what compiler-proven value lineage feeds each dangerous endpoint?”, and
-`dependency-analysis` for “where is this flagged package imported, bound to a
-local name, called, or matched by a rule?” (`deps` is the one-row-per-package
-inventory behind it). Every selector on these commands filters the cached
-complete report; only file scope, `--exclude-tests`, `--inferred-sources`, and
-(for `sink-analysis`) the `--sink` rule set change the analysis itself.
+`dependency-analysis` for “which source-to-sink taint flows cross this flagged
+package, and where is it imported, bound, called, or matched by a rule?”
+(`deps` is the one-row-per-package inventory behind it). Dependency flows
+include source, sink, and exact propagation evidence, not merely package-name
+matches. Check each subcommand's help for selectors: profile, trust, and
+source/sink flags are not shared by every security command. Filters narrow
+the requested view or analysis scope; they never make the admitted facts
+less exact.
 Sink-analysis does not require a security source: `upstream_flows` is
 source-independent, while `security_source_flows` separately answers which
 selected security sources reach the endpoint.
@@ -234,6 +258,8 @@ selected security sources reach the endpoint.
   --context 8k --no-color --no-progress
 ./target/release/bonsai-ninja security <workspace> deps --severity high \
   --context 8k --no-color --no-progress
+./target/release/bonsai-ninja security <workspace> dependency-analysis \
+  --framework <package> --context 16k --no-color --no-progress
 ```
 
 Narrow and reopen findings:
@@ -254,6 +280,26 @@ For every reported issue, retain the finding, flow, and group IDs; exact
 source and sink locations; sanitizer status; completion status; and reviewed
 page/cursor coverage. A `TAINT TRANSFORM` preserves taint; only a `SANITIZER`
 step can support a sanitized classification.
+Use `taint-analysis --show-sanitized` when reviewing that classification.
+Check the exact guard's comparison polarity, binding ownership, and execution
+order; a similar-looking check or configuration after consumption is not a
+proof. A reassigned value or a same-named binding in another module or callback
+cannot borrow the original guard. A rejection must actually exit the guarded
+path; a conditional return or a return inside a callback is not sufficient.
+Do not infer rejection from a callee's name: a response method or an
+exit-named helper may return normally. Loop transfers do not make later
+unreachable returns or throws into guard evidence.
+Compound allowlist checks must require every predicate, and the checked object,
+allowlist, and security configuration must remain unchanged until consumption.
+For finite allowlists, inspect every selected
+output: a string containing runtime interpolation is not a literal constant.
+When changing guard support, retain a valid case and a one-condition-broken
+regression that still exposes the source-to-sink flow.
+For predicate guards, trace the exact call result through the complete boolean
+condition. An unknown wrapper does not preserve predicate truth, and non-null
+does not generally mean truthy. A stronger result-domain contract must come
+from the matched rule, not a shared method-name guess. Keep comparison and
+wrapper near-misses in the end-to-end security tests.
 
 Write SARIF with:
 
@@ -264,6 +310,11 @@ Write SARIF with:
 ```
 
 ## Debug disagreements
+
+For dependency inventory, check the evidence for each package individually.
+A generic manifest or lockfile filename is not proof that every provider on
+a multi-framework rule is installed. Use `security dependency-analysis` to
+inspect that package's usage sites and complete source-to-sink flows.
 
 Reproduce the smallest high-level mismatch, then descend only as far as
 needed:
@@ -290,6 +341,12 @@ needed:
 After a patch, rerun the smallest command that proves the fix before the
 broader test suite.
 
+For sanitizer disagreements, inspect the exact checked and consumed values,
+comparison direction, binding ownership, and intervening operations. A numeric
+upper bound does not establish nonnegativity, and filtering one array element
+does not constrain another. Verify provider/type/boundary evidence against the
+rule, then retain a safe case and a one-condition-broken unsafe case in tests.
+
 ## Index and cache only when useful
 
 Commands compute exact requested facts on demand. Prewarm when a workspace
@@ -313,6 +370,14 @@ will receive repeated queries:
 Do not use semantic prewarm for `tree`, `index`, or a single narrow syntax
 query. Analysis sidecars live in an OS cache keyed by the canonical workspace,
 not in the repository. `<workspace>/.bonsai/rules/` is only a rule overlay.
+Inspect `cache stats` before cleanup. `cache clear --legacy` removes only
+recognized inactive in-tree analysis files, preserving rules and unknown data;
+never replace it with recursive deletion of `.bonsai`. Ordinary `cache clear`
+requires a workspace-bound cache and refuses project roots or unknown entries.
+`cache clear --orphans` removes only attributed caches whose source root is
+confirmed missing; age or a missing manifest alone is not enough.
+Root-only SDK manifest publication binds the cache before writing; inspection
+and cleanup must never create a binding merely to permit deletion.
 Repeated default `index` runs validate the compiler generation root-only and
 do not reopen source bodies; a stale generation is rebuilt exactly.
 
@@ -337,9 +402,14 @@ with `--output-path` and let downstream code stream or index it. Do not request
 only.
 
 Native JSON documents identify themselves as `bonsai-native-export` plus a
-numeric `schema_version` (currently 12). Validate artifacts against
-`schemas/bonsai-native-export-v12.schema.json`; release archives include the
+numeric `schema_version` (currently 13). Validate artifacts against
+`schemas/bonsai-native-export-v13.schema.json`; release archives include the
 same Draft 2020-12 schema.
+Version 13 adds `predicate_call_span` to call-backed type-test conditions.
+This is the same canonical callee identity used by call events; the tested
+value and an outer wrapper's result are distinct evidence. Never infer a
+successful predicate merely because its call occurs inside a condition.
+Class rows also retain their exact byte column in `classes[].column`.
 
 ## Rulepack work
 
@@ -363,3 +433,15 @@ When modifying bonsai-ninja itself, keep syntax in language adapters,
 security/API/package meaning in rule data, and shared crates language-neutral.
 Do not add framework names or cross-language token inventories to shared
 analysis.
+Compiler-object reuse requires the current frontend ABI as well as exact
+source identity. Rebuild incompatible generations through the adapters;
+rewriting an old cache header is not a valid compiler migration.
+Keep a fresh release CLI for integration tests, and do not edit Rust files
+while Cargo builds or tests are running. Use the compact `cargo test
+--workspace` correctness profile; reserve release-mode tests for the named
+Elasticsearch performance gate. Use command-local `--no-progress` instead of
+exporting `NO_PROGRESS` into the Cargo test environment.
+Update the public API snapshot when crate-root exports change, and run
+`bash scripts/audit-public-api.sh --check`. This is only a root-declaration
+drift check: it does not replace SDK contract tests or verify nested public
+fields, methods, or resolved re-exports.

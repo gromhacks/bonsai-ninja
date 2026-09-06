@@ -12,7 +12,7 @@ fn source_span() -> SourceSpan {
     }
 }
 
-fn step(id: u64, kind: TraceStepKind) -> TraceStep {
+pub(super) fn step(id: u64, kind: TraceStepKind) -> TraceStep {
     TraceStep {
         id,
         path_id: 1,
@@ -28,6 +28,55 @@ fn step(id: u64, kind: TraceStepKind) -> TraceStep {
         state_after: None,
         notes: Vec::new(),
     }
+}
+
+#[test]
+fn trace_edges_preserve_each_path_when_steps_interleave() {
+    let first = step(0, TraceStepKind::EnterFunction);
+    let mut other = step(1, TraceStepKind::Assign);
+    other.path_id = 2;
+    let last = step(2, TraceStepKind::Assign);
+    let edges = trace_edges(&[first, other, last]);
+    assert_eq!(edges.len(), 1);
+    assert_eq!((edges[0].from_step, edges[0].to_step), (0, 2));
+}
+
+#[test]
+fn trace_edges_do_not_invent_dispatch_handlers_or_branch_verdicts() {
+    let next = step(1, TraceStepKind::Assign);
+    for kind in [
+        TraceStepKind::Call,
+        TraceStepKind::Return,
+        TraceStepKind::Throw,
+        TraceStepKind::BranchSplit,
+    ] {
+        assert_eq!(edge_kind(&step(0, kind), &next), TraceEdgeKind::Next, "{kind:?}");
+    }
+    assert_eq!(
+        edge_kind(
+            &step(0, TraceStepKind::Call),
+            &step(1, TraceStepKind::EnterFunction)
+        ),
+        TraceEdgeKind::CallEnter
+    );
+    assert_eq!(
+        edge_kind(&next, &step(2, TraceStepKind::Merge)),
+        TraceEdgeKind::Merge
+    );
+}
+
+#[test]
+fn trace_source_lines_and_coordinates_share_one_immutable_snapshot() {
+    let vfs = Vfs::new();
+    let file = vfs.write(std::path::Path::new("app.py"), "first\n  λ value\n");
+    let span = Span::new(file, 8, 10);
+    let mut cache = ahash::AHashMap::new();
+    let location = span_to_source(&span, &vfs, &mut cache);
+    assert_eq!((location.start_line, location.start_col), (2, 3));
+    vfs.write(std::path::Path::new("app.py"), "changed and no second line");
+    assert_eq!(span_line_text(&span, &vfs, &mut cache), "λ value");
+    let repeated = span_to_source(&span, &vfs, &mut cache);
+    assert_eq!((repeated.start_line, repeated.start_col), (2, 3));
 }
 
 #[test]

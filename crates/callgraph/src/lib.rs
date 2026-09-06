@@ -2328,17 +2328,28 @@ fn resolve_file_call_edges(
     let mut callback_invocations = Vec::new();
     let mut callback_bindings = Vec::new();
     let mut callback_forwards = Vec::new();
+    let mut hosts_by_site: AHashMap<(FuncId, Span), Vec<FuncId>> = AHashMap::new();
+    for edge in &local_cg.edges {
+        hosts_by_site
+            .entry((edge.from, edge.span))
+            .or_default()
+            .push(edge.to);
+    }
+    for hosts in hosts_by_site.values_mut() {
+        hosts.sort_unstable();
+        hosts.dedup();
+    }
+    let context = CallbackFormalFactsContext {
+        global,
+        hosts_by_site: &hosts_by_site,
+        callable_arguments: &callable_arguments,
+    };
     for decl in decls.iter().filter(|decl| {
         matches!(
             decl.kind,
             DeclKind::Function | DeclKind::Method | DeclKind::Constructor
         )
     }) {
-        let context = CallbackFormalFactsContext {
-            global,
-            graph: &local_cg,
-            callable_arguments: &callable_arguments,
-        };
         let mut output = CallbackFormalFactsOutput {
             invocations: &mut callback_invocations,
             bindings: &mut callback_bindings,
@@ -2404,17 +2415,14 @@ fn resolved_class_field_types(
                 continue;
             };
             let type_name = resolved_initializer_constructor_type(global, &ctx, initializer, capabilities);
-            let Some(type_name) = type_name else {
-                continue;
-            };
             candidates
                 .entry((parent, field.to_string()))
                 .and_modify(|known| {
-                    if known.as_ref() != Some(&type_name) {
+                    if *known != type_name {
                         *known = None;
                     }
                 })
-                .or_insert(Some(type_name));
+                .or_insert(type_name);
         }
     }
 
@@ -2476,7 +2484,13 @@ fn resolved_initializer_constructor_type(
     {
         return None;
     }
-    global.decl_of(first).map(|decl| decl.name.clone())
+    global
+        .decl_of(first)
+        .map(|decl| declared_type_identity(decl).to_string())
+}
+
+fn declared_type_identity(decl: &Decl) -> &str {
+    decl.qualified_name.as_deref().unwrap_or(&decl.name)
 }
 
 fn receiver_field_tail<'a>(decl: &Decl, target: &'a str) -> Option<&'a str> {
@@ -2790,7 +2804,7 @@ fn callback_formal_param_index(params: &[String], name: &str, receiver: Option<&
 
 struct CallbackFormalFactsContext<'a> {
     global: &'a GlobalIndex,
-    graph: &'a CallGraph,
+    hosts_by_site: &'a AHashMap<(FuncId, Span), Vec<FuncId>>,
     callable_arguments: &'a [CallGraphCallableArgument],
 }
 
@@ -2807,104 +2821,86 @@ fn collect_callback_formal_facts(
     output: &mut CallbackFormalFactsOutput<'_>,
 ) {
     let caller_id = FuncId::new(caller.symbol.raw());
-    for event in events {
-        match event {
-            FlowEvent::Call {
-                span,
-                name,
-                receiver,
-                args,
-                ..
-            } => {
-                if let Some(param_index) =
-                    callback_formal_param_index(&caller.params, name, receiver.as_deref())
-                {
-                    output.invocations.push(CallbackFormalInvocation {
-                        host: caller_id,
-                        param_index,
-                        span: *span,
-                    });
-                }
-                let hosts = context
-                    .graph
-                    .edges
-                    .iter()
-                    .filter(|edge| edge.from == caller_id && edge.span == *span)
-                    .map(|edge| edge.to)
-                    .collect::<AHashSet<_>>();
-                for host in hosts {
-                    let Some(host_decl) = context.global.decl_of(SymbolId::new(host.raw())) else {
+    bonsai_lang_api::for_each_flow_event(events, &mut |event| {
+        if let FlowEvent::Call {
+            span,
+            name,
+            receiver,
+            args,
+            ..
+        } = event
+        {
+            if let Some(param_index) = callback_formal_param_index(&caller.params, name, receiver.as_deref())
+            {
+                output.invocations.push(CallbackFormalInvocation {
+                    host: caller_id,
+                    param_index,
+                    span: *span,
+                });
+            }
+            for &host in context
+                .hosts_by_site
+                .get(&(caller_id, *span))
+                .into_iter()
+                .flatten()
+            {
+                let Some(host_decl) = context.global.decl_of(SymbolId::new(host.raw())) else {
+                    continue;
+                };
+                for (argument_index, argument) in args.iter().enumerate() {
+                    let parameter_index = argument
+                        .name
+                        .as_deref()
+                        .and_then(|name| {
+                            bonsai_lang_api::named_argument_parameter_index(
+                                name,
+                                host_decl.params.iter().map(String::as_str),
+                                host_decl.receiver_param_index,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            bonsai_lang_api::explicit_argument_parameter_index(
+                                argument_index,
+                                host_decl.receiver_param_index,
+                            )
+                        });
+                    let Ok(host_param_index) = u32::try_from(parameter_index) else {
                         continue;
                     };
-                    for (argument_index, argument) in args.iter().enumerate() {
-                        let Ok(host_param_index) = u32::try_from(argument_index) else {
-                            continue;
-                        };
-                        if argument_index >= host_decl.params.len() {
-                            continue;
-                        }
-                        for relation in context
-                            .callable_arguments
-                            .iter()
-                            .filter(|relation| relation.caller == caller_id && relation.span == argument.span)
-                        {
-                            output.bindings.push(CallbackFormalBinding {
-                                host,
-                                param_index: host_param_index,
-                                target: relation.target,
-                            });
-                        }
-                        let Some(place) = argument.place.as_deref() else {
-                            continue;
-                        };
-                        let Some(caller_param_index) =
-                            callback_formal_param_index(&caller.params, place, None)
-                        else {
-                            continue;
-                        };
-                        output.forwards.push(CallbackFormalForward {
-                            caller: caller_id,
-                            caller_param_index,
+                    if parameter_index >= host_decl.params.len() {
+                        continue;
+                    }
+                    let key = (caller_id, argument.span);
+                    let first = context
+                        .callable_arguments
+                        .partition_point(|relation| (relation.caller, relation.span) < key);
+                    for relation in context.callable_arguments[first..]
+                        .iter()
+                        .take_while(|relation| (relation.caller, relation.span) == key)
+                    {
+                        output.bindings.push(CallbackFormalBinding {
                             host,
-                            host_param_index,
+                            param_index: host_param_index,
+                            target: relation.target,
                         });
                     }
+                    let Some(place) = argument.place.as_deref() else {
+                        continue;
+                    };
+                    let Some(caller_param_index) = callback_formal_param_index(&caller.params, place, None)
+                    else {
+                        continue;
+                    };
+                    output.forwards.push(CallbackFormalForward {
+                        caller: caller_id,
+                        caller_param_index,
+                        host,
+                        host_param_index,
+                    });
                 }
             }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_callback_formal_facts(caller, then_events, context, output);
-                collect_callback_formal_facts(caller, else_events, context, output);
-            }
-            FlowEvent::Loop {
-                condition_events,
-                body,
-                update_events,
-                ..
-            } => {
-                collect_callback_formal_facts(caller, condition_events, context, output);
-                collect_callback_formal_facts(caller, body, context, output);
-                collect_callback_formal_facts(caller, update_events, context, output);
-            }
-            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_callback_formal_facts(caller, body, context, output);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_callback_formal_facts(caller, body, context, output);
-                collect_callback_formal_facts(caller, catch_events, context, output);
-                collect_callback_formal_facts(caller, finally_events, context, output);
-            }
-            _ => {}
         }
-    }
+    });
 }
 
 /// Counted admission on the process-wide Rayon scheduler. This bounds the
@@ -4366,7 +4362,7 @@ fn add_callback_arg_edges(
         if !func_language_matches(resolver.global, resolver.caller_language, language_for_file, to) {
             continue;
         }
-        if !seen.insert(to) {
+        if !seen.insert((arg.span, to)) {
             continue;
         }
         callable_arguments.push(CallGraphCallableArgument {
@@ -7187,12 +7183,18 @@ fn type_alias_for_receiver<'a>(decl: &'a Decl, receiver: &str) -> Option<&'a str
 
 fn receiver_alias_keys(decl: &Decl, receiver: &str) -> Vec<String> {
     let normalized = normalize_receiver_alias_text(receiver);
-    let tail = short_callee(&normalized).to_string();
-    let mut keys = vec![receiver.to_string(), normalized, tail.clone()];
+    let mut keys = vec![receiver.to_string(), normalized.clone()];
     for declared in &decl.implicit_receiver_names {
         let declared = normalize_receiver_alias_text(declared);
-        if !declared.is_empty() {
-            keys.push(format!("{declared}.{tail}"));
+        if declared.is_empty() {
+            continue;
+        }
+        // Only the adapter-declared implicit receiver can be elided. A
+        // different receiver (or a deeper field chain) is a different place.
+        if let Some(field) = normalized.strip_prefix(&format!("{declared}.")) {
+            keys.push(field.to_string());
+        } else if bonsai_common::qualified_name_owner(&normalized).is_none() {
+            keys.push(format!("{declared}.{normalized}"));
         }
     }
     keys.sort();
@@ -7223,9 +7225,8 @@ fn receiver_class_type_names_for_expr(
     receiver: &str,
 ) -> Vec<String> {
     let normalized = normalize_receiver_alias_text(receiver);
-    let tail = short_callee(&normalized);
     let mut out = Vec::new();
-    for candidate in [receiver.trim(), normalized.as_str(), tail] {
+    for candidate in [receiver.trim(), normalized.as_str()] {
         if candidate.is_empty() {
             continue;
         }

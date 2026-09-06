@@ -793,7 +793,7 @@ impl LanguageAdapter for KotlinAdapter {
             for decl in &mut idx.defs {
                 populate_kotlin_exception_types(&mut decl.flow_events, tree, src);
             }
-            let finite_selections = collect_kotlin_finite_literal_selections(&idx, tree, file);
+            let finite_selections = collect_kotlin_finite_literal_selections(&idx, tree, file, src);
             idx.finite_literal_selections.extend(finite_selections);
             bonsai_lang_api::kit::sort_dedup_finite_literal_selections(&mut idx.finite_literal_selections);
             idx.character_constraints
@@ -1094,7 +1094,7 @@ fn merge_kotlin_condition_junction(
 fn kotlin_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
     ConditionOperandFact {
         span: span_of(file, &node),
-        direct_call_span: (node.kind() == "call_expression").then(|| span_of(file, &node)),
+        direct_call_span: bonsai_lang_api::kit::direct_call_callee_span(node, file, src, &HANDLER),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER),
         static_string: kotlin_static_string_literal(node, src),
         static_value: kotlin_static_scalar(node, src),
@@ -1265,10 +1265,11 @@ fn collect_kotlin_finite_literal_selections(
     index: &DeclIndex,
     tree: &Tree,
     file: FileId,
+    src: &[u8],
 ) -> Vec<bonsai_lang_api::FiniteLiteralSelectionFact> {
     let mut facts = Vec::new();
     for selection in collect_kinds(tree, &["when_expression"]) {
-        if !kotlin_when_outputs_are_literals(selection) {
+        if !kotlin_when_outputs_are_literals(selection, src) {
             continue;
         }
         let selection_span = span_of(file, &selection);
@@ -1294,7 +1295,7 @@ fn collect_kotlin_finite_literal_selections(
     facts
 }
 
-fn kotlin_when_outputs_are_literals(selection: Node<'_>) -> bool {
+fn kotlin_when_outputs_are_literals(selection: Node<'_>, src: &[u8]) -> bool {
     let mut cursor = selection.walk();
     let entries = selection
         .named_children(&mut cursor)
@@ -1315,15 +1316,10 @@ fn kotlin_when_outputs_are_literals(selection: Node<'_>) -> bool {
             let [value] = values.as_slice() else {
                 return false;
             };
-            matches!(
-                value.kind(),
-                "string_literal"
-                    | "integer_literal"
-                    | "real_literal"
-                    | "boolean_literal"
-                    | "null_literal"
-                    | "character_literal"
-            )
+            // A string-shaped node may interpolate arbitrary runtime data.
+            // Reuse the canonical expression classifier, which inspects the
+            // complete grammar-owned value rather than just its outer kind.
+            HANDLER.expression_value_kind(*value, src) == Some(bonsai_lang_api::AssignValueKind::Literal)
         })
 }
 
@@ -3178,7 +3174,7 @@ fn is_class_like(kind: DeclKind) -> bool {
 }
 
 /// Walk Kotlin `class_declaration` / `object_declaration` nodes and collect
-/// bare base type names. Interfaces use `class_declaration` too.
+/// complete base type identities. Interfaces use `class_declaration` too.
 /// Kotlin grammar shape (verified via tree-sitter `to_sexp`):
 ///
 ///   `class Echo : WebSocketHandler(), Mixin { ... }` →
@@ -3188,8 +3184,8 @@ fn is_class_like(kind: DeclKind) -> bool {
 ///
 /// Each delegation_specifier wraps either a `constructor_invocation`
 /// (parent class with init args) or a bare `user_type` (interface).
-/// Both expose a `user_type` whose first `type_identifier` descendant
-/// is the bare base name.
+/// Both expose a `user_type`; retain its qualification so unrelated providers
+/// with the same short type name cannot supply each other's ancestry.
 fn collect_kotlin_class_bases(
     tree: &Tree,
     file: bonsai_common::FileId,
@@ -3225,7 +3221,7 @@ fn collect_kotlin_class_bases(
     bases_table
 }
 
-/// Resolve one `delegation_specifier` child to a bare base type name,
+/// Resolve one `delegation_specifier` child to its complete base type identity,
 /// dispatching on the three shapes Kotlin uses (super call, interface
 /// reference, `by`-delegation). Returns `None` for any node that
 /// isn't a delegation target.
@@ -3236,18 +3232,18 @@ fn kotlin_base_name_from(node: Node<'_>, src: &[u8]) -> Option<String> {
             let mut child_cursor = node.walk();
             for child in node.named_children(&mut child_cursor) {
                 if child.kind() == "user_type" {
-                    return canonical_short_type(node_text(&child, src));
+                    return canonical_declared_type(node_text(&child, src));
                 }
             }
             None
         }
-        "user_type" => canonical_short_type(node_text(&node, src)),
+        "user_type" => canonical_declared_type(node_text(&node, src)),
         "explicit_delegation" => {
             // `Foo by bar` — the type is the leading user_type.
             let mut child_cursor = node.walk();
             for child in node.named_children(&mut child_cursor) {
                 if child.kind() == "user_type" {
-                    return canonical_short_type(node_text(&child, src));
+                    return canonical_declared_type(node_text(&child, src));
                 }
             }
             None

@@ -1,7 +1,7 @@
 use super::{
-    default_export_cache_metadata_path, default_export_cache_path, export_cache_is_fresh_via_fd,
-    unique_default_export_tmp_path, workspace_source_fingerprint_from_disk, write_default_export_cache,
-    write_default_export_cache_with,
+    default_export_cache_metadata_path, default_export_cache_path, export_cache_snapshot_is_fresh,
+    open_export_cache_snapshot, unique_default_export_tmp_path, workspace_source_fingerprint_from_disk,
+    write_default_export_cache, write_default_export_cache_with,
 };
 use std::path::Path;
 
@@ -37,9 +37,36 @@ fn write_cache(root: &Path, rulepack_root: Option<&Path>) {
 }
 
 fn cache_is_fresh(root: &Path, rulepack_root: Option<&Path>) -> bool {
-    let cache = default_export_cache_path(root);
-    let file = std::fs::File::open(cache).expect("open export cache");
-    export_cache_is_fresh_via_fd(root, rulepack_root, false, &file).expect("freshness check")
+    let Some(snapshot) = open_export_cache_snapshot(root).expect("open export snapshot") else {
+        return false;
+    };
+    export_cache_snapshot_is_fresh(root, rulepack_root, false, &snapshot).expect("freshness check")
+}
+
+#[test]
+fn an_open_export_cannot_borrow_metadata_from_a_later_same_size_generation() {
+    let root = tempdir("export-generation-pair");
+    let source = root.join("app.py");
+    std::fs::write(&source, "before = 1\n").expect("initial source");
+    let cache = default_export_cache_path(&root);
+    let first = workspace_source_fingerprint_from_disk(&root).expect("first fingerprint");
+    write_default_export_cache(&cache, &root, None, first, r#"{"revision":1}"#).expect("first export");
+    let opened = open_export_cache_snapshot(&root)
+        .expect("open first export")
+        .expect("first snapshot");
+    std::fs::write(&source, "after = 2\n").expect("second source");
+    let second = workspace_source_fingerprint_from_disk(&root).expect("second fingerprint");
+    write_default_export_cache(&cache, &root, None, second, r#"{"revision":2}"#).expect("replace export");
+    assert_eq!(
+        opened.file.metadata().expect("first size").len(),
+        std::fs::metadata(&cache).expect("second size").len()
+    );
+    assert!(
+        !export_cache_snapshot_is_fresh(&root, None, false, &opened).expect("old reader freshness"),
+        "old bytes must not validate against the replacement's metadata"
+    );
+    assert!(cache_is_fresh(&root, None));
+    std::fs::remove_dir_all(root).expect("fixture cleanup");
 }
 
 #[test]
@@ -107,18 +134,48 @@ fn streaming_export_error_removes_its_temp_file() {
 fn export_cache_requires_metadata_sidecar() {
     let root = tempdir("export-missing-meta");
     std::fs::write(root.join("app.py"), "print('root')\n").expect("write source");
-    let cache = default_export_cache_path(&root);
-    std::fs::create_dir_all(cache.parent().expect("cache parent")).expect("create cache dir");
-    std::fs::write(&cache, "{}\n").expect("write raw cache");
-
-    let file = std::fs::File::open(&cache).expect("open raw cache");
+    write_cache(&root, None);
+    std::fs::remove_file(default_export_cache_metadata_path(&root)).expect("remove only metadata");
     assert!(
-        !export_cache_is_fresh_via_fd(&root, None, false, &file).expect("freshness check"),
+        !cache_is_fresh(&root, None),
         "cache without fingerprint metadata must not be replayed"
     );
     assert!(!default_export_cache_metadata_path(&root).exists());
 
     std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_busy_export_publisher_is_a_nonblocking_cache_miss() {
+    let root = tempdir("export-busy-publisher");
+    write_cache(&root, None);
+    let lock = super::lock_default_export_cache(&default_export_cache_path(&root)).expect("publisher lock");
+    assert!(open_export_cache_snapshot(&root).expect("busy reader").is_none());
+    drop(lock);
+    assert!(cache_is_fresh(&root, None));
+    std::fs::remove_dir_all(root).expect("fixture cleanup");
+}
+
+#[test]
+fn failed_payload_publication_cannot_leave_valid_old_metadata() {
+    let root = tempdir("export-failed-publication");
+    write_cache(&root, None);
+    let cache = default_export_cache_path(&root);
+    let metadata = super::read_export_cache_metadata(&root)
+        .expect("read metadata")
+        .expect("metadata");
+    let lock = super::lock_default_export_cache(&cache).expect("publisher lock");
+    let mut missing = super::PendingExportTemp::new(unique_default_export_tmp_path(&cache));
+    assert!(super::publish_default_export_cache(&lock, &cache, &root, &mut missing, &metadata).is_err());
+    assert!(!default_export_cache_metadata_path(&root).exists());
+    drop(lock);
+    assert!(!cache_is_fresh(&root, None));
+    write_cache(&root, None);
+    assert!(
+        cache_is_fresh(&root, None),
+        "a later complete publication recovers"
+    );
+    std::fs::remove_dir_all(root).expect("fixture cleanup");
 }
 
 #[test]

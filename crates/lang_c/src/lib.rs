@@ -427,7 +427,17 @@ fn c_guarded_value_filter_facts(
                 continue;
             };
             for predicate in predicates {
-                let Some(input_place) = predicate_subscript_input(predicate, src) else {
+                // This value proof covers one predicate followed immediately
+                // by its exact element copy. A descendant subscript inside an
+                // arbitrary transform, or byte order across a mutation, is not
+                // evidence that the checked value was the value copied.
+                if c_unwrap_parentheses(condition) != predicate {
+                    continue;
+                }
+                let Some(checked) = predicate_checked_subscript(predicate, src) else {
+                    continue;
+                };
+                let Some(input_place) = subscript_base_place(checked, src) else {
                     continue;
                 };
                 for write in descendant_nodes_of_kind(consequence, "assignment_expression") {
@@ -435,6 +445,10 @@ fn c_guarded_value_filter_facts(
                         continue;
                     };
                     if copied_input != input_place
+                        || c_single_statement_assignment(consequence) != Some(write)
+                        || !write
+                            .child_by_field_name("right")
+                            .is_some_and(|copied| c_same_pure_subscript(checked, copied, src))
                         || !output_is_zero_initialized(&initializers, &output_place, write.start_byte(), src)
                         || !output_has_only_filtered_or_zero_writes(&assignments, &output_place, write, src)
                         || !output_is_zero_terminated_after(
@@ -495,24 +509,79 @@ struct CCompoundPredicateSummary {
 /// operations form a security boundary for a particular sink.
 fn c_compound_predicate_call_guards(tree: &Tree, file: FileId, src: &[u8]) -> Vec<CompilerGuardFact> {
     let static_collections = c_static_string_collections(tree, src);
-    let summaries = collect_kinds(tree, &["function_definition"])
-        .into_iter()
-        .filter_map(|function| c_compound_predicate_summary(function, src, &static_collections))
+    if static_collections.is_empty() {
+        return Vec::new();
+    }
+    let functions = collect_kinds(tree, &["function_definition"]);
+    let mut defined_functions: std::collections::HashSet<String> = functions
+        .iter()
+        .filter_map(|function| c_function_name(*function, src))
+        .collect();
+    // Source-local values, typedefs and macros can replace otherwise external
+    // provider identities. Never grant a library model solely by spelling.
+    for declaration in collect_kinds(
+        tree,
+        &[
+            "declaration",
+            "type_definition",
+            "preproc_def",
+            "preproc_function_def",
+        ],
+    ) {
+        if c_has_ancestor_kind(declaration, "function_definition") {
+            continue;
+        }
+        let mut cursor = declaration.walk();
+        defined_functions.extend(
+            declaration
+                .children_by_field_name("declarator", &mut cursor)
+                .filter_map(c_declarator_binding)
+                .map(|binding| node_text(&binding, src).to_string()),
+        );
+        if let Some(name) = declaration.child_by_field_name("name") {
+            defined_functions.insert(node_text(&name, src).to_string());
+        }
+    }
+    let summaries = functions
+        .iter()
+        .copied()
+        .filter_map(|function| {
+            c_compound_predicate_summary(function, src, &static_collections, &defined_functions)
+        })
         .collect::<Vec<_>>();
+    if summaries.is_empty() {
+        return Vec::new();
+    }
     let mut facts = Vec::new();
-    for function in collect_kinds(tree, &["function_definition"]) {
+    for function in functions {
         let Some(body) = function.child_by_field_name("body") else {
             continue;
         };
         let calls = descendant_nodes_of_kind(body, "call_expression");
-        for branch in descendant_nodes_of_kind(body, "if_statement") {
+        if ["goto_statement", "labeled_statement"]
+            .iter()
+            .any(|kind| !descendant_nodes_of_kind(body, kind).is_empty())
+        {
+            continue;
+        }
+        // A direct guard must dominate its immediately following call. Byte
+        // order across optional branches or mutations is not a value proof.
+        let statements = c_statements(body);
+        for pair in statements.windows(2) {
+            let [branch, statement] = pair else { continue };
+            let branch = *branch;
+            if branch.kind() != "if_statement" || branch.child_by_field_name("alternative").is_some() {
+                continue;
+            }
             let (Some(condition), Some(consequence)) = (
                 branch.child_by_field_name("condition"),
                 branch.child_by_field_name("consequence"),
             ) else {
                 continue;
             };
-            if !c_statement_is_terminal(consequence) {
+            if !c_single_return(consequence).is_some_and(|ret| {
+                first_named_child(ret).is_none_or(|value| value.kind() == "number_literal")
+            }) {
                 continue;
             }
             let Some(predicate_call) = c_negated_single_call(condition, src) else {
@@ -531,6 +600,11 @@ fn c_compound_predicate_call_guards(tree: &Tree, file: FileId, src: &[u8]) -> Ve
             let [summary] = matching.as_slice() else {
                 continue;
             };
+            if c_visible_declaration(function, branch, predicate_name, src).is_some()
+                || c_visible_parameter(function, predicate_name, src).is_some()
+            {
+                continue;
+            }
             let predicate_args = predicate_call
                 .child_by_field_name("arguments")
                 .map(direct_named_children)
@@ -538,15 +612,19 @@ fn c_compound_predicate_call_guards(tree: &Tree, file: FileId, src: &[u8]) -> Ve
             let [predicate_input] = predicate_args.as_slice() else {
                 continue;
             };
+            if predicate_input.kind() != "identifier" {
+                continue;
+            }
             let predicate_input_text = node_text(predicate_input, src).trim();
-            for guarded_call in calls
-                .iter()
-                .copied()
-                .filter(|call| call.start_byte() > branch.end_byte())
-            {
+            if let Some(guarded_call) = c_statement_call(*statement) {
                 let Some(callee) = guarded_call.child_by_field_name("function") else {
                     continue;
                 };
+                if defined_functions.contains(node_text(&callee, src))
+                    || c_unshadowed_provider_name(function, guarded_call, src).is_none()
+                {
+                    continue;
+                }
                 let guarded_args = guarded_call
                     .child_by_field_name("arguments")
                     .map(direct_named_children)
@@ -557,12 +635,22 @@ fn c_compound_predicate_call_guards(tree: &Tree, file: FileId, src: &[u8]) -> Ve
                     .filter(|(_, argument)| node_text(argument, src).trim() == predicate_input_text)
                     .map(|(index, _)| format!("guarded-argument:{index}=predicate-argument:0"))
                     .collect::<Vec<_>>();
-                if guarded_relations.is_empty() {
+                if guarded_relations.is_empty()
+                    || guarded_args
+                        .iter()
+                        .any(|arg| c_static_scalar_evidence(*arg, src).is_none())
+                {
                     continue;
                 }
                 let mut evidence = summary.evidence.clone();
                 evidence.extend(guarded_relations);
-                evidence.extend(c_related_static_call_evidence(guarded_call, &calls, src));
+                evidence.extend(c_related_static_call_evidence(
+                    guarded_call,
+                    body,
+                    &calls,
+                    &defined_functions,
+                    src,
+                ));
                 evidence.sort();
                 evidence.dedup();
                 facts.push(CompilerGuardFact {
@@ -582,6 +670,7 @@ fn c_compound_predicate_summary(
     function: Node<'_>,
     src: &[u8],
     static_collections: &std::collections::HashMap<String, Vec<String>>,
+    defined_functions: &std::collections::HashSet<String>,
 ) -> Option<CCompoundPredicateSummary> {
     let name = c_function_name(function, src)?;
     let parameters = function
@@ -600,108 +689,150 @@ fn c_compound_predicate_summary(
         return None;
     };
     let body = function.child_by_field_name("body")?;
-    let returns = descendant_nodes_of_kind(body, "return_statement");
-    if returns.len() < 3
-        || returns.iter().any(|statement| {
-            first_named_child(*statement).is_none_or(|value| {
-                value.kind() != "number_literal" || !matches!(node_text(&value, src).trim(), "0" | "1")
-            })
-        })
+    if body.has_error() {
+        return None;
+    }
+    // This summary recognizes a complete, straight-line predicate skeleton.
+    // Additional exits, mutations, nested guards and unknown statements must
+    // be handled by a richer proof, never silently omitted from this one.
+    let statements = c_statements(body);
+    let [prefix_guard, token_declaration, membership_loop, final_return] = statements.as_slice() else {
+        return None;
+    };
+    if !c_return_has_literal(*final_return, "0", src)
+        || prefix_guard.kind() != "if_statement"
+        || prefix_guard.child_by_field_name("alternative").is_some()
+        || !c_return_has_literal(prefix_guard.child_by_field_name("consequence")?, "0", src)
     {
         return None;
     }
-    let final_return = direct_named_children(body).last().copied()?;
-    if final_return.kind() != "return_statement"
-        || first_named_child(final_return).is_none_or(|value| node_text(&value, src).trim() != "0")
+    let prefix_call = c_call_compared_to_zero(prefix_guard.child_by_field_name("condition")?, "!=", src)?;
+    let prefix_args = direct_named_children(prefix_call.child_by_field_name("arguments")?);
+    let [input, literal, length] = prefix_args.as_slice() else {
+        return None;
+    };
+    if input.kind() != "identifier" || node_text(input, src) != parameter {
+        return None;
+    }
+    let prefix = c_static_string(*literal, src)?;
+    let prefix_length = c_integer_literal(*length, src)?;
+    if u128::try_from(prefix.len()).ok()? != prefix_length {
+        return None;
+    }
+    let (token, token_value) = c_single_initializer(*token_declaration)?;
+    let token_value = c_unwrap_parentheses(token_value);
+    if token_value.kind() != "binary_expression"
+        || binary_operator_text(token_value, src) != Some("+")
+        || node_text(&token_value.child_by_field_name("left")?, src) != parameter
+        || c_integer_literal(token_value.child_by_field_name("right")?, src) != Some(prefix_length)
     {
         return None;
     }
-    let prefix = descendant_nodes_of_kind(body, "if_statement")
-        .into_iter()
-        .find_map(|branch| {
-            let consequence = branch.child_by_field_name("consequence")?;
-            if !c_return_has_literal(consequence, "0", src) {
-                return None;
-            }
-            let condition = branch.child_by_field_name("condition")?;
-            descendant_nodes_of_kind(condition, "call_expression")
-                .into_iter()
-                .find_map(|call| {
-                    let callee = call.child_by_field_name("function")?;
-                    let args = direct_named_children(call.child_by_field_name("arguments")?);
-                    let [input, literal, length] = args.as_slice() else {
-                        return None;
-                    };
-                    if node_text(input, src).trim() != parameter || literal.kind() != "string_literal" {
-                        return None;
-                    }
-                    let prefix = c_static_string(*literal, src)?;
-                    let length = c_integer_literal(*length, src)?;
-                    (u128::try_from(prefix.len()).ok()? == length)
-                        .then(|| (node_text(&callee, src).trim().to_string(), prefix, length, branch))
-                })
-        })?;
-    let mut host_bindings = descendant_nodes_of_kind(body, "assignment_expression");
-    host_bindings.extend(descendant_nodes_of_kind(body, "init_declarator"));
-    let host = host_bindings.into_iter().find_map(|assignment| {
-        let (left, right) = (
-            assignment
-                .child_by_field_name("left")
-                .or_else(|| assignment.child_by_field_name("declarator"))?,
-            assignment
-                .child_by_field_name("right")
-                .or_else(|| assignment.child_by_field_name("value"))?,
-        );
-        let left = c_declarator_binding(left)?;
-        if right.kind() != "binary_expression" || binary_operator_text(right, src) != Some("+") {
-            return None;
-        }
-        let (base, offset) = (
-            right.child_by_field_name("left")?,
-            right.child_by_field_name("right")?,
-        );
-        (node_text(&base, src).trim() == parameter && c_integer_literal(offset, src) == Some(prefix.2))
-            .then(|| node_text(&left, src).trim().to_string())
-    })?;
-    let membership = descendant_nodes_of_kind(body, "if_statement")
-        .into_iter()
-        .filter(|branch| {
-            branch
-                .child_by_field_name("consequence")
-                .is_some_and(|consequence| c_return_has_literal(consequence, "1", src))
-        })
-        .find_map(|branch| {
-            let condition = branch.child_by_field_name("condition")?;
-            let chars = descendant_nodes_of_kind(condition, "char_literal")
-                .into_iter()
-                .filter_map(|literal| c_static_char(literal, src))
-                .collect::<std::collections::BTreeSet<_>>();
-            if !chars.contains(&'/') || !chars.contains(&'\0') {
-                return None;
-            }
-            descendant_nodes_of_kind(condition, "call_expression")
-                .into_iter()
-                .find_map(|call| {
-                    let callee = call.child_by_field_name("function")?;
-                    let args = direct_named_children(call.child_by_field_name("arguments")?);
-                    if args.len() < 2 || node_text(&args[0], src).trim() != host {
-                        return None;
-                    }
-                    let collection = c_subscript_base_identifier(args[1], src)?;
-                    static_collections
-                        .contains_key(&collection)
-                        .then(|| (node_text(&callee, src).trim().to_string(), collection, branch))
-                })
-        })?;
+    if membership_loop.kind() != "for_statement" {
+        return None;
+    }
+    let (index, initial_index) = c_single_initializer(membership_loop.child_by_field_name("initializer")?)?;
+    if c_integer_literal(initial_index, src) != Some(0) {
+        return None;
+    }
+    let update = membership_loop.child_by_field_name("update")?;
+    if update.kind() != "update_expression"
+        || node_text(&update.child_by_field_name("argument")?, src) != node_text(&index, src)
+        || !direct_token_is(update, "++")
+    {
+        return None;
+    }
+    let collection_element = c_unwrap_parentheses(membership_loop.child_by_field_name("condition")?);
+    let (collection, collection_index) = c_pure_subscript_parts(collection_element)?;
+    let collection_name = node_text(&collection, src);
+    if node_text(&collection_index, src) != node_text(&index, src)
+        || !static_collections.contains_key(collection_name)
+        || c_visible_declaration(function, *membership_loop, collection_name, src).is_some()
+        || c_visible_parameter(function, collection_name, src).is_some()
+    {
+        return None;
+    }
+    let loop_body = c_statements(membership_loop.child_by_field_name("body")?);
+    let [length_declaration, membership_guard] = loop_body.as_slice() else {
+        return None;
+    };
+    let (length_binding, length_call) = c_single_initializer(*length_declaration)?;
+    let length_type = node_text(&length_declaration.child_by_field_name("type")?, src);
+    if defined_functions.contains(length_type)
+        || length_declaration
+            .child_by_field_name("declarator")?
+            .child_by_field_name("declarator")?
+            != length_binding
+    {
+        return None;
+    }
+    if length_call.kind() != "call_expression" {
+        return None;
+    }
+    let length_args = direct_named_children(length_call.child_by_field_name("arguments")?);
+    let [length_input] = length_args.as_slice() else {
+        return None;
+    };
+    if !c_same_pure_subscript(collection_element, *length_input, src)
+        || membership_guard.kind() != "if_statement"
+        || membership_guard.child_by_field_name("alternative").is_some()
+        || !c_return_has_literal(membership_guard.child_by_field_name("consequence")?, "1", src)
+    {
+        return None;
+    }
+    // Every local place must be distinct: a same-spelled loop variable or
+    // length declaration can shadow the input or token in the inner scope.
+    let places = [
+        parameter.as_str(),
+        node_text(&token, src),
+        node_text(&index, src),
+        node_text(&length_binding, src),
+        collection_name,
+    ];
+    if places.iter().collect::<std::collections::HashSet<_>>().len() != places.len() {
+        return None;
+    }
+    let condition = c_unwrap_parentheses(membership_guard.child_by_field_name("condition")?);
+    if binary_operator_text(condition, src) != Some("&&") {
+        return None;
+    }
+    let membership_call = c_call_compared_to_zero(condition.child_by_field_name("left")?, "==", src)?;
+    let membership_args = direct_named_children(membership_call.child_by_field_name("arguments")?);
+    let [member_token, member_element, member_length] = membership_args.as_slice() else {
+        return None;
+    };
+    if node_text(member_token, src) != node_text(&token, src)
+        || !c_same_pure_subscript(collection_element, *member_element, src)
+        || node_text(member_length, src) != node_text(&length_binding, src)
+    {
+        return None;
+    }
+    let boundaries = c_exact_boundary_alternatives(
+        condition.child_by_field_name("right")?,
+        token,
+        length_binding,
+        src,
+    )?;
+    let provider = |call| {
+        let name = c_unshadowed_provider_name(function, call, src)?;
+        (!defined_functions.contains(name)).then_some(name)
+    };
     let mut evidence = vec![
         "predicate-complete:true".to_string(),
         "finite-static-string-membership:true".to_string(),
-        format!("prefix-call:{}", prefix.0),
-        format!("prefix-value:string:{}", prefix.1),
-        format!("prefix-length:number:{}", prefix.2),
-        format!("membership-call:{}", membership.0),
+        format!("prefix-call:{}", provider(prefix_call)?),
+        format!("prefix-value:string:{prefix}"),
+        format!("prefix-length:number:{prefix_length}"),
+        format!("membership-call:{}", provider(membership_call)?),
+        format!("membership-length-call:{}", provider(length_call)?),
+        format!("membership-length-type:{length_type}"),
         "membership-token-boundary:true".to_string(),
     ];
+    evidence.extend(
+        boundaries
+            .into_iter()
+            .map(|value| format!("membership-boundary-codepoint:{}", u32::from(value))),
+    );
     evidence.sort();
     Some(CCompoundPredicateSummary { name, evidence })
 }
@@ -731,36 +862,146 @@ fn c_negated_single_call<'tree>(condition: Node<'tree>, src: &[u8]) -> Option<No
 }
 
 fn c_return_has_literal(statement: Node<'_>, literal: &str, src: &[u8]) -> bool {
-    let return_statement = if statement.kind() == "return_statement" {
-        Some(statement)
-    } else if statement.kind() == "compound_statement" {
-        direct_named_children(statement)
-            .into_iter()
-            .find(|node| node.kind() == "return_statement")
-    } else {
-        None
-    };
-    return_statement
+    c_single_return(statement)
         .and_then(first_named_child)
         .is_some_and(|value| node_text(&value, src).trim() == literal)
 }
 
+fn c_statements(node: Node<'_>) -> Vec<Node<'_>> {
+    direct_named_children(node)
+        .into_iter()
+        .filter(|child| child.kind() != "comment")
+        .collect()
+}
+
+fn c_single_return(mut node: Node<'_>) -> Option<Node<'_>> {
+    while node.kind() == "compound_statement" {
+        let statements = c_statements(node);
+        let [statement] = statements.as_slice() else {
+            return None;
+        };
+        node = *statement;
+    }
+    (node.kind() == "return_statement").then_some(node)
+}
+
+fn c_statement_call(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() != "expression_statement" {
+        return None;
+    }
+    let call = c_unwrap_parentheses(first_named_child(node)?);
+    (call.kind() == "call_expression").then_some(call)
+}
+
+fn c_single_initializer(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if node.kind() != "declaration" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let declarators = node
+        .children_by_field_name("declarator", &mut cursor)
+        .collect::<Vec<_>>();
+    let [initializer] = declarators.as_slice() else {
+        return None;
+    };
+    if initializer.kind() != "init_declarator" {
+        return None;
+    }
+    Some((
+        c_declarator_binding(initializer.child_by_field_name("declarator")?)?,
+        initializer.child_by_field_name("value")?,
+    ))
+}
+
+fn c_call_compared_to_zero<'tree>(node: Node<'tree>, operator: &str, src: &[u8]) -> Option<Node<'tree>> {
+    let node = c_unwrap_parentheses(node);
+    if node.kind() != "binary_expression" || binary_operator_text(node, src) != Some(operator) {
+        return None;
+    }
+    let left = c_unwrap_parentheses(node.child_by_field_name("left")?);
+    let right = c_unwrap_parentheses(node.child_by_field_name("right")?);
+    if left.kind() == "call_expression" && c_integer_literal(right, src) == Some(0) {
+        Some(left)
+    } else if right.kind() == "call_expression" && c_integer_literal(left, src) == Some(0) {
+        Some(right)
+    } else {
+        None
+    }
+}
+
+fn direct_token_is(node: Node<'_>, token: &str) -> bool {
+    let mut cursor = node.walk();
+    let found = node.children(&mut cursor).any(|child| child.kind() == token);
+    found
+}
+
+fn c_exact_boundary_alternatives(
+    node: Node<'_>,
+    token: Node<'_>,
+    length: Node<'_>,
+    src: &[u8],
+) -> Option<[char; 2]> {
+    let node = c_unwrap_parentheses(node);
+    if binary_operator_text(node, src) != Some("||") {
+        return None;
+    }
+    let boundary = |side| {
+        let comparison = c_unwrap_parentheses(node.child_by_field_name(side)?);
+        if binary_operator_text(comparison, src) != Some("==") {
+            return None;
+        }
+        let value = c_unwrap_parentheses(comparison.child_by_field_name("left")?);
+        let (base, index) = c_pure_subscript_parts(value)?;
+        if node_text(&base, src) != node_text(&token, src)
+            || node_text(&index, src) != node_text(&length, src)
+        {
+            return None;
+        }
+        c_static_char(comparison.child_by_field_name("right")?, src)
+    };
+    Some([boundary("left")?, boundary("right")?])
+}
+
+fn c_unshadowed_provider_name<'src>(
+    function: Node<'_>,
+    call: Node<'_>,
+    src: &'src [u8],
+) -> Option<&'src str> {
+    let callee = call.child_by_field_name("function")?;
+    if callee.kind() != "identifier" {
+        return None;
+    }
+    let name = node_text(&callee, src);
+    (c_visible_declaration(function, call, name, src).is_none()
+        && c_visible_parameter(function, name, src).is_none())
+    .then_some(name)
+}
+
 fn c_static_string(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() != "string_literal" {
+        return None;
+    }
     let raw = node_text(&node, src).trim();
     let inner = raw.strip_prefix('"')?.strip_suffix('"')?;
     (!inner.contains('\\')).then(|| inner.to_string())
 }
 
 fn c_static_char(node: Node<'_>, src: &[u8]) -> Option<char> {
-    match node_text(&node, src).trim() {
-        "'/'" => Some('/'),
-        "'\\0'" => Some('\0'),
-        _ => None,
+    if node.kind() != "char_literal" {
+        return None;
     }
+    let raw = node_text(&node, src).strip_prefix('\'')?.strip_suffix('\'')?;
+    if raw == "\\0" {
+        return Some('\0');
+    }
+    let mut chars = raw.chars();
+    let value = chars.next()?;
+    (value.is_ascii() && value != '\\' && chars.next().is_none()).then_some(value)
 }
 
 fn c_static_string_collections(tree: &Tree, src: &[u8]) -> std::collections::HashMap<String, Vec<String>> {
     let mut collections = std::collections::HashMap::new();
+    let mut ambiguous = std::collections::HashSet::new();
     for declaration in collect_kinds(tree, &["declaration"])
         .into_iter()
         .filter(|node| !c_has_ancestor_kind(*node, "function_definition"))
@@ -775,6 +1016,22 @@ fn c_static_string_collections(tree: &Tree, src: &[u8]) -> std::collections::Has
             if value.kind() != "initializer_list" {
                 continue;
             }
+            // `const char *items[]` makes bytes const, not the pointers.
+            // Both layers must be immutable for a finite static membership
+            // claim to remain valid after other functions have executed.
+            if declarator.kind() != "pointer_declarator"
+                || !c_statements(declarator)
+                    .iter()
+                    .any(|child| child.kind() == "type_qualifier" && node_text(child, src) == "const")
+                || !c_statements(declaration)
+                    .iter()
+                    .any(|child| child.kind() == "type_qualifier" && node_text(child, src) == "const")
+                || declarator
+                    .child_by_field_name("declarator")
+                    .is_none_or(|child| child.kind() != "array_declarator")
+            {
+                continue;
+            }
             let Some(binding) = c_declarator_binding(declarator) else {
                 continue;
             };
@@ -785,6 +1042,14 @@ fn c_static_string_collections(tree: &Tree, src: &[u8]) -> std::collections::Has
                 .filter_map(|item| c_static_string(item, src))
                 .collect::<Vec<_>>();
             if values.is_empty()
+                || values.len()
+                    != items
+                        .iter()
+                        .filter(|item| item.kind() == "string_literal")
+                        .count()
+                || items
+                    .last()
+                    .is_none_or(|item| item.kind() != "null" && node_text(item, src) != "NULL")
                 || items.iter().any(|item| {
                     item.kind() != "string_literal"
                         && !(item.kind() == "null" || node_text(item, src).trim() == "NULL")
@@ -792,9 +1057,13 @@ fn c_static_string_collections(tree: &Tree, src: &[u8]) -> std::collections::Has
             {
                 continue;
             }
-            collections.insert(node_text(&binding, src).trim().to_string(), values);
+            let name = node_text(&binding, src).trim().to_string();
+            if collections.insert(name.clone(), values).is_some() {
+                ambiguous.insert(name);
+            }
         }
     }
+    collections.retain(|name, _| !ambiguous.contains(name));
     collections
 }
 
@@ -808,16 +1077,13 @@ fn c_has_ancestor_kind(mut node: Node<'_>, kind: &str) -> bool {
     false
 }
 
-fn c_subscript_base_identifier(node: Node<'_>, src: &[u8]) -> Option<String> {
-    let node = c_unwrap_parentheses(node);
-    if node.kind() != "subscript_expression" {
-        return None;
-    }
-    let base = node.child_by_field_name("argument")?;
-    (base.kind() == "identifier").then(|| node_text(&base, src).trim().to_string())
-}
-
-fn c_related_static_call_evidence(guarded_call: Node<'_>, calls: &[Node<'_>], src: &[u8]) -> Vec<String> {
+fn c_related_static_call_evidence(
+    guarded_call: Node<'_>,
+    body: Node<'_>,
+    calls: &[Node<'_>],
+    defined_names: &std::collections::HashSet<String>,
+    src: &[u8],
+) -> Vec<String> {
     let guarded_args = guarded_call
         .child_by_field_name("arguments")
         .map(direct_named_children)
@@ -825,24 +1091,68 @@ fn c_related_static_call_evidence(guarded_call: Node<'_>, calls: &[Node<'_>], sr
     let Some(guarded_receiver) = guarded_args.first().map(|arg| node_text(arg, src).trim()) else {
         return Vec::new();
     };
+    let statements = c_statements(body);
+    let Some(position) = statements
+        .iter()
+        .position(|statement| c_statement_call(*statement) == Some(guarded_call))
+    else {
+        return Vec::new();
+    };
+    let Some(related) = statements.get(position + 1).copied().and_then(c_statement_call) else {
+        return Vec::new();
+    };
     let mut evidence = Vec::new();
-    for related in calls.iter().copied().filter(|call| call != &guarded_call) {
+    // Evidence belongs to ONE adjacent configuration call, not a union of
+    // argument values from unrelated calls before/after the guarded operation.
+    {
         let Some(callee) = related.child_by_field_name("function") else {
-            continue;
+            return evidence;
         };
         let args = related
             .child_by_field_name("arguments")
             .map(direct_named_children)
             .unwrap_or_default();
-        if args.first().map(|arg| node_text(arg, src).trim()) != Some(guarded_receiver) {
-            continue;
+        if guarded_args.first().is_none_or(|arg| arg.kind() != "identifier")
+            || args.len() != guarded_args.len()
+            || args.first().map(|arg| node_text(arg, src).trim()) != Some(guarded_receiver)
+            || guarded_call
+                .child_by_field_name("function")
+                .is_none_or(|guarded_callee| node_text(&guarded_callee, src) != node_text(&callee, src))
+            || calls.iter().any(|later| {
+                later.start_byte() > related.end_byte()
+                    && later
+                        .child_by_field_name("function")
+                        .is_some_and(|later_callee| node_text(&later_callee, src) == node_text(&callee, src))
+            })
+        {
+            return evidence;
         }
+        let Some(function) = body.parent() else {
+            return evidence;
+        };
+        if args.iter().skip(1).any(|arg| {
+            arg.kind() == "identifier" && {
+                let name = node_text(arg, src);
+                defined_names.contains(name)
+                    || c_visible_declaration(function, related, name, src).is_some()
+                    || c_visible_parameter(function, name, src).is_some()
+            }
+        }) {
+            return evidence;
+        }
+        let Some(values) = args
+            .iter()
+            .copied()
+            .skip(1)
+            .map(|arg| c_static_scalar_evidence(arg, src))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return evidence;
+        };
         let name = node_text(&callee, src).trim();
         evidence.push(format!("related-call:{name}:argument:0=guarded-argument:0"));
-        for (index, argument) in args.iter().copied().enumerate().skip(1) {
-            if let Some(value) = c_static_scalar_evidence(argument, src) {
-                evidence.push(format!("related-call:{name}:argument:{index}={value}"));
-            }
+        for (index, value) in values.into_iter().enumerate() {
+            evidence.push(format!("related-call:{name}:argument:{}={value}", index + 1));
         }
     }
     evidence
@@ -869,6 +1179,13 @@ fn c_numeric_upper_bound_call_guards(tree: &Tree, file: FileId, src: &[u8]) -> V
         let Some(body) = function.child_by_field_name("body") else {
             continue;
         };
+        if body.has_error()
+            || ["goto_statement", "labeled_statement"]
+                .iter()
+                .any(|kind| !descendant_nodes_of_kind(body, kind).is_empty())
+        {
+            continue;
+        }
         for call in descendant_nodes_of_kind(body, "call_expression") {
             let Some(callee) = call.child_by_field_name("function") else {
                 continue;
@@ -993,9 +1310,14 @@ fn c_enclosing_function_node(mut node: Node<'_>) -> Option<Node<'_>> {
 }
 
 fn c_visible_parameter<'tree>(function: Node<'tree>, name: &str, src: &[u8]) -> Option<Node<'tree>> {
-    let declarator = function.child_by_field_name("declarator")?;
-    let matches = collect_kinds_from_node(declarator, &["parameter_declaration"])
+    let mut declarator = function.child_by_field_name("declarator")?;
+    while declarator.kind() != "function_declarator" {
+        declarator = declarator.child_by_field_name("declarator")?;
+    }
+    let parameters = first_named_child_of_kind(&declarator, "parameter_list")?;
+    let matches = c_statements(parameters)
         .into_iter()
+        .filter(|parameter| parameter.kind() == "parameter_declaration")
         .filter(|parameter| c_declaration_binds(*parameter, name, src))
         .collect::<Vec<_>>();
     let [parameter] = matches.as_slice() else {
@@ -1114,10 +1436,19 @@ fn c_array_declarator_extent(declarator: Node<'_>, src: &[u8]) -> Option<(String
 
 fn c_declarator_binding(mut node: Node<'_>) -> Option<Node<'_>> {
     loop {
-        if matches!(node.kind(), "identifier" | "field_identifier" | "type_identifier") {
+        if matches!(
+            node.kind(),
+            "identifier" | "field_identifier" | "type_identifier" | "primitive_type"
+        ) {
             return Some(node);
         }
-        node = node.child_by_field_name("declarator")?;
+        node = if node.kind() == "parenthesized_declarator" {
+            let children = c_statements(node);
+            let [inner] = children.as_slice() else { return None };
+            *inner
+        } else {
+            node.child_by_field_name("declarator")?
+        };
     }
 }
 
@@ -1204,9 +1535,13 @@ fn c_visible_declaration<'tree>(
 }
 
 fn c_declaration_binds(declaration: Node<'_>, name: &str, src: &[u8]) -> bool {
-    direct_named_children(declaration).into_iter().any(|child| {
-        c_declarator_binding(child).is_some_and(|binding| node_text(&binding, src).trim() == name)
-    })
+    let mut cursor = declaration.walk();
+    let binds = declaration
+        .children_by_field_name("declarator", &mut cursor)
+        .any(|child| {
+            c_declarator_binding(child).is_some_and(|binding| node_text(&binding, src).trim() == name)
+        });
+    binds
 }
 
 fn c_node_contains_lexically(container: Node<'_>, node: Node<'_>) -> bool {
@@ -1249,6 +1584,46 @@ fn c_preceding_numeric_bound_proof(
     src: &[u8],
     file: FileId,
 ) -> Option<bonsai_common::Span> {
+    // An upper bound alone cannot discharge a signed negative byte count.
+    // Admit only a compiler-spelled unsigned scalar here; unresolved typedefs
+    // need type evidence, not a list of familiar library type names.
+    let declaration = c_visible_declaration(function, call, length_name, src)
+        .or_else(|| c_visible_parameter(function, length_name, src))?;
+    let ty = declaration.child_by_field_name("type")?;
+    if !node_text(&ty, src)
+        .split_whitespace()
+        .any(|word| word == "unsigned")
+    {
+        return None;
+    }
+    let mut cursor = declaration.walk();
+    let declarator = declaration
+        .children_by_field_name("declarator", &mut cursor)
+        .find(|node| {
+            c_declarator_binding(*node).is_some_and(|binding| node_text(&binding, src) == length_name)
+        })?;
+    let declarator = if declarator.kind() == "init_declarator" {
+        declarator.child_by_field_name("declarator")?
+    } else {
+        declarator
+    };
+    if declarator.kind() != "identifier" {
+        return None;
+    }
+    // Once the local address escapes, a later call may change the value
+    // without a syntactic assignment at this use site.
+    if descendant_nodes_of_kind(function, "pointer_expression")
+        .into_iter()
+        .any(|node| {
+            node.start_byte() < call.end_byte()
+                && node
+                    .child_by_field_name("argument")
+                    .is_some_and(|arg| node_text(&arg, src).trim() == length_name)
+                && node_text(&node, src).trim_start().starts_with('&')
+        })
+    {
+        return None;
+    }
     let compound = c_enclosing_compound(call, function)?;
     let call_statement = c_direct_child_containing(compound, call)?;
     direct_named_children(compound)
@@ -1257,6 +1632,9 @@ fn c_preceding_numeric_bound_proof(
         .filter(|statement| statement.end_byte() <= call_statement.start_byte())
         .rev()
         .find_map(|guard| {
+            if guard.child_by_field_name("alternative").is_some() {
+                return None;
+            }
             let condition = c_unwrap_parentheses(guard.child_by_field_name("condition")?);
             let (bound, accepts_safe_path) =
                 c_upper_bound_condition(condition, function, length_name, aggregates, src)?;
@@ -1268,7 +1646,10 @@ fn c_preceding_numeric_bound_proof(
                 c_exact_clamp_assignment(consequence, function, length_name, bound, aggregates, src)
                     || c_statement_is_terminal(consequence);
             if !establishes_bound
-                || c_place_assigned_between(function, length_name, guard.end_byte(), call.start_byte(), src)
+                // C does not guarantee sibling-argument evaluation order. A
+                // mutation or address escape inside this call can invalidate
+                // the bound just as an intervening statement does.
+                || c_place_assigned_between(function, length_name, guard.end_byte(), call.end_byte(), src)
             {
                 return None;
             }
@@ -1362,14 +1743,23 @@ fn c_place_assigned_between(
     before: usize,
     src: &[u8],
 ) -> bool {
-    descendant_nodes_of_kind(function, "assignment_expression")
+    let assigned = descendant_nodes_of_kind(function, "assignment_expression")
         .into_iter()
         .filter(|assignment| after <= assignment.start_byte() && assignment.end_byte() <= before)
         .any(|assignment| {
             assignment
                 .child_by_field_name("left")
                 .is_some_and(|left| left.kind() == "identifier" && node_text(&left, src).trim() == place)
-        })
+        });
+    assigned
+        || descendant_nodes_of_kind(function, "update_expression")
+            .into_iter()
+            .filter(|update| after <= update.start_byte() && update.end_byte() <= before)
+            .any(|update| {
+                update
+                    .child_by_field_name("argument")
+                    .is_some_and(|arg| arg.kind() == "identifier" && node_text(&arg, src).trim() == place)
+            })
 }
 
 fn c_enclosing_compound<'tree>(mut node: Node<'tree>, function: Node<'tree>) -> Option<Node<'tree>> {
@@ -1469,23 +1859,53 @@ fn first_named_child(node: Node<'_>) -> Option<Node<'_>> {
     child
 }
 
-fn predicate_subscript_input(predicate: Node<'_>, src: &[u8]) -> Option<String> {
+fn predicate_checked_subscript<'tree>(predicate: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
     let arguments = predicate.child_by_field_name("arguments")?;
-    let argument = first_named_child(arguments)?;
-    let subscripts = node_and_descendants_of_kind(argument, "subscript_expression");
-    let [subscript] = subscripts.as_slice() else {
+    let args = direct_named_children(arguments);
+    let [argument] = args.as_slice() else {
         return None;
     };
-    subscript_base_place(*subscript, src)
+    let mut value = c_unwrap_parentheses(*argument);
+    if value.kind() == "cast_expression" {
+        if !c_is_byte_type(value.child_by_field_name("type")?, src) {
+            return None;
+        }
+        value = c_unwrap_parentheses(value.child_by_field_name("value")?);
+    }
+    c_pure_subscript_parts(value).map(|_| value)
 }
 
-fn node_and_descendants_of_kind<'tree>(root: Node<'tree>, kind: &str) -> Vec<Node<'tree>> {
-    let mut matches = Vec::new();
-    if root.kind() == kind {
-        matches.push(root);
+fn c_pure_subscript_parts(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if node.kind() != "subscript_expression" {
+        return None;
     }
-    matches.extend(descendant_nodes_of_kind(root, kind));
-    matches
+    let base = c_unwrap_parentheses(node.child_by_field_name("argument")?);
+    let index = c_unwrap_parentheses(node.child_by_field_name("index")?);
+    (base.kind() == "identifier" && matches!(index.kind(), "identifier" | "number_literal"))
+        .then_some((base, index))
+}
+
+fn c_same_pure_subscript(checked: Node<'_>, copied: Node<'_>, src: &[u8]) -> bool {
+    let (Some((a_base, a_index)), Some((b_base, b_index))) =
+        (c_pure_subscript_parts(checked), c_pure_subscript_parts(copied))
+    else {
+        return false;
+    };
+    node_text(&a_base, src) == node_text(&b_base, src) && node_text(&a_index, src) == node_text(&b_index, src)
+}
+
+fn c_single_statement_assignment(mut node: Node<'_>) -> Option<Node<'_>> {
+    while matches!(node.kind(), "compound_statement" | "expression_statement") {
+        let children = direct_named_children(node)
+            .into_iter()
+            .filter(|child| child.kind() != "comment")
+            .collect::<Vec<_>>();
+        let [child] = children.as_slice() else {
+            return None;
+        };
+        node = *child;
+    }
+    (node.kind() == "assignment_expression").then_some(node)
 }
 
 fn filtered_element_copy(write: Node<'_>, src: &[u8]) -> Option<(String, String)> {

@@ -56,6 +56,10 @@ pub struct TreeSummary {
     /// "0 files" and assume the workspace is empty.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub total_files_scanned: usize,
+    /// Files intentionally excluded by the requested severity predicate,
+    /// counted separately from files lost to presentation limits.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub total_files_filtered: usize,
     pub total_dirs: usize,
     pub total_findings: usize,
     pub severity_counts: SeverityHistogram,
@@ -276,7 +280,11 @@ pub fn tree(
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut tree_root = DirBuilder::default();
-    let mut finding_incomplete_reasons: Vec<String> = Vec::new();
+    let mut finding_incomplete_reasons = report
+        .as_ref()
+        .map(super::taint_report_incomplete_reasons)
+        .unwrap_or_default();
+    let mut total_files_filtered = 0;
     let root_name = ws
         .db()
         .workspace_root()
@@ -308,6 +316,7 @@ pub fn tree(
 
         if let Some(min_sev) = filters.severity {
             if max_severity.is_none_or(|s| s < min_sev) {
+                total_files_filtered += 1;
                 continue;
             }
         }
@@ -329,9 +338,9 @@ pub fn tree(
 
         let most_severe_flow = file_findings
             .iter()
-            .filter(|f| f.severity.is_some())
+            .filter(|f| f.severity.is_some() && f.flow_ids().next().is_some())
             .max_by_key(|f| f.severity)
-            .map(|finding| build_most_severe_flow(finding, ws));
+            .and_then(|finding| build_most_severe_flow(finding, ws));
 
         let callers_in = cross_edges
             .into_callers
@@ -396,6 +405,7 @@ pub fn tree(
     // indexed.
     let mut summary = TreeSummary {
         total_files_scanned: files.len(),
+        total_files_filtered,
         ..TreeSummary::default()
     };
     let max_depth = filters.max_depth.unwrap_or(usize::MAX);
@@ -434,10 +444,14 @@ struct TreeTruncationTotals {
 
 fn tree_analysis_incomplete_reasons(roots: &[TreeNode], summary: &TreeSummary) -> Vec<String> {
     let mut reasons = Vec::new();
-    if summary.total_files_scanned > summary.total_files {
+    if summary
+        .total_files_scanned
+        .saturating_sub(summary.total_files_filtered)
+        > summary.total_files
+    {
         reasons.push(format!(
-            "tree-files-truncated:rendered_files={},scanned_files={}",
-            summary.total_files, summary.total_files_scanned
+            "tree-files-truncated:rendered_files={},scanned_files={},filtered_files={}",
+            summary.total_files, summary.total_files_scanned, summary.total_files_filtered
         ));
     }
 
@@ -524,17 +538,23 @@ fn build_cross_edges(graph: &bonsai_callgraph::ResolvedCallGraph, ws: &Workspace
         }
         let caller_loc = func_to_locator(edge.from, ws);
         let callee_loc = func_to_locator(edge.to, ws);
-        let call_site = Locator {
-            file: caller_loc.file.clone(),
-            line: caller_loc.line,
-            column: caller_loc.column,
-            ..Locator::default()
+        let mut call_site = Locator::from_span(edge.span, ws);
+        let edge_id = match (graph.node_name(edge.from), graph.node_name(edge.to)) {
+            (Some(caller), Some(callee)) => Some(bonsai_browse::compute_edge_id(
+                caller,
+                callee,
+                &call_site.file,
+                call_site.line,
+                call_site.column,
+            )),
+            _ => None,
         };
+        call_site.file = workspace_relative_path(ws, &call_site.file);
         let cross = CrossEdge {
             caller: caller_loc,
             callee: callee_loc,
             call_site,
-            edge_id: None,
+            edge_id,
             flow_id: None,
             finding_id: None,
             edge_kind: edge.kind,
@@ -561,19 +581,17 @@ fn func_to_locator(func: FuncId, ws: &Workspace) -> Locator {
     locator
 }
 
-fn build_most_severe_flow(f: &Finding, ws: &Workspace) -> MostSevereFlowSummary {
-    MostSevereFlowSummary {
-        flow_id: f
-            .representative_flow_id
-            .clone()
-            .unwrap_or_else(|| "F:0000000000000000".to_string()),
+fn build_most_severe_flow(f: &Finding, ws: &Workspace) -> Option<MostSevereFlowSummary> {
+    let route = f.flows().find(|flow| flow.flow_id.is_some())?;
+    Some(MostSevereFlowSummary {
+        flow_id: route.flow_id?.to_string(),
         finding_id: Some(f.finding_id.clone()),
         severity: f.severity.unwrap_or(Severity::Info),
-        enters_at: match_to_locator(&f.source, ws),
+        enters_at: match_to_locator(route.source, ws),
         exits_at: match_to_locator(&f.sink, ws),
-        chain_display: f.chain_display.clone(),
+        chain_display: route.chain_display.to_vec(),
         extends_beyond_workspace: false,
-    }
+    })
 }
 
 fn match_to_locator(m: &FindingMatch, ws: &Workspace) -> Locator {
@@ -633,7 +651,11 @@ impl DirBuilder {
         let mut dirs: Vec<(String, DirBuilder)> = self.dirs.into_iter().collect();
         dirs.sort_by(|a, b| a.0.cmp(&b.0));
         for (name, builder) in dirs {
-            let next_path = if path_prefix.is_empty() {
+            let next_path = if depth == 0 {
+                // The displayed root name is not part of workspace-relative
+                // locators. Keep the actual root at `.` and children relative.
+                String::new()
+            } else if path_prefix.is_empty() {
                 name.clone()
             } else {
                 format!("{path_prefix}/{name}")
@@ -645,7 +667,11 @@ impl DirBuilder {
             }
             summary.total_dirs += 1;
             let dir_locator = Locator {
-                file: next_path.clone(),
+                file: if next_path.is_empty() {
+                    ".".to_string()
+                } else {
+                    next_path.clone()
+                },
                 ..Locator::default()
             };
             let max_sev = hist.max();

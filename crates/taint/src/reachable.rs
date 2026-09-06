@@ -3384,7 +3384,7 @@ fn apply_call_result_passthrough_fixpoint(
             for configured_idx in candidate_indices {
                 let configured = &passthroughs[configured_idx];
                 let passthrough = configured.passthrough;
-                let exact_site = passthrough.resolved_call_sites.binary_search(&call_span).is_ok();
+                let exact_site = configured.resolved_call_sites.binary_search(&call_span).is_ok();
                 if (!passthrough.resolved_call_sites.is_empty() && !exact_site)
                     || (passthrough.resolved_call_sites.is_empty()
                         && !configured.callee.matches(&summary.name, &mut callee_name_cache))
@@ -3425,7 +3425,7 @@ fn apply_call_result_passthrough_fixpoint(
             for (call_span, summary) in &summaries.by_span {
                 for configured in &passthroughs {
                     let passthrough = configured.passthrough;
-                    let exact_site = passthrough.resolved_call_sites.binary_search(call_span).is_ok();
+                    let exact_site = configured.resolved_call_sites.binary_search(call_span).is_ok();
                     if (!passthrough.resolved_call_sites.is_empty() && !exact_site)
                         || (passthrough.resolved_call_sites.is_empty()
                             && !configured.callee.matches(&summary.name, &mut callee_name_cache))
@@ -3788,6 +3788,7 @@ fn call_result_passthrough_matches(call_name: &str, configured: &str) -> bool {
 
 struct CompiledCallResultPassthrough<'a> {
     passthrough: &'a crate::idg_api::CallResultPassthrough,
+    resolved_call_sites: std::borrow::Cow<'a, [bonsai_common::Span]>,
     callee: ConfiguredCalleeMatcher,
 }
 
@@ -3798,6 +3799,17 @@ fn compile_call_result_passthroughs(
         .iter()
         .map(|passthrough| CompiledCallResultPassthrough {
             passthrough,
+            // The public configuration does not require sorted spans. Keep
+            // canonical compiler input borrowed, sorting only a caller's
+            // noncanonical sites once before repeated exact membership tests.
+            resolved_call_sites: if passthrough.resolved_call_sites.is_sorted() {
+                std::borrow::Cow::Borrowed(&passthrough.resolved_call_sites)
+            } else {
+                let mut sites = passthrough.resolved_call_sites.clone();
+                sites.sort_unstable();
+                sites.dedup();
+                std::borrow::Cow::Owned(sites)
+            },
             callee: ConfiguredCalleeMatcher::new(&passthrough.callee),
         })
         .collect()
@@ -3811,7 +3823,6 @@ struct CompiledOutputArgFlow<'a> {
 enum ConfiguredCalleeMatcher {
     Regex {
         regex: Option<regex::Regex>,
-        terminal: Option<String>,
     },
     Name {
         normalised: String,
@@ -3846,7 +3857,6 @@ impl ConfiguredCalleeMatcher {
         if let Some(regex) = configured.trim().strip_prefix("regex:") {
             return Self::Regex {
                 regex: regex::Regex::new(regex).ok(),
-                terminal: regex_terminal_literal(regex),
             };
         }
         let normalised = normalise_passthrough_callee(configured);
@@ -3858,13 +3868,10 @@ impl ConfiguredCalleeMatcher {
 
     fn matches(&self, call_name: &str, cache: &mut CalleeNameCache) -> bool {
         match self {
-            Self::Regex {
-                regex: Some(regex),
-                terminal,
-            } => {
-                if !callee_terminal_prefilter_matches(call_name, terminal.as_deref()) {
-                    return false;
-                }
+            Self::Regex { regex: Some(regex) } => {
+                // The regex engine owns sound literal acceleration. Extracting
+                // a mandatory suffix from pattern text breaks classes, escapes,
+                // optional groups and case-insensitive expressions.
                 passthrough_compiled_regex_matches(regex, call_name, cache)
             }
             Self::Regex { regex: None, .. } => false,
@@ -3900,58 +3907,6 @@ fn callee_terminal_literal(normalised: &str) -> Option<String> {
         .rsplit('.')
         .find(|part| !part.is_empty())
         .map(str::to_string)
-}
-
-fn regex_terminal_literal(pattern: &str) -> Option<String> {
-    if has_unescaped_regex_alternation(pattern) {
-        return None;
-    }
-    let mut current = String::new();
-    let mut last = None;
-    let mut escaped = false;
-    for ch in pattern.chars() {
-        if escaped {
-            if ch.is_ascii_alphanumeric() || ch == '_' {
-                current.push(ch);
-            } else if !current.is_empty() {
-                last = Some(std::mem::take(&mut current));
-            }
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            current.push(ch);
-        } else if !current.is_empty() {
-            last = Some(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        last = Some(current);
-    }
-    last
-}
-
-fn has_unescaped_regex_alternation(pattern: &str) -> bool {
-    let mut escaped = false;
-    let mut in_class = false;
-    for ch in pattern.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' => escaped = true,
-            '[' if !in_class => in_class = true,
-            ']' if in_class => in_class = false,
-            '|' if !in_class => return true,
-            _ => {}
-        }
-    }
-    false
 }
 
 fn normalise_passthrough_callee(value: &str) -> String {
@@ -5082,11 +5037,7 @@ fn nested_call_return_matches_configured_passthrough(
         let call_matches = if configured.passthrough.resolved_call_sites.is_empty() {
             configured.callee.matches(callee_text, callee_name_cache)
         } else {
-            configured
-                .passthrough
-                .resolved_call_sites
-                .binary_search(&call_span)
-                .is_ok()
+            configured.resolved_call_sites.binary_search(&call_span).is_ok()
         };
         call_matches
             && (configured.passthrough.input_receiver

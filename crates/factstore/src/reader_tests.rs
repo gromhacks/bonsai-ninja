@@ -206,6 +206,31 @@ fn string_pool_view_is_accessible_through_reader() {
 }
 
 #[test]
+fn open_rejects_corrupt_string_pool_before_exposing_payloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pool.bin");
+    let writer = FactStoreWriter::create(&path, 0, 0).unwrap();
+    writer.intern("abc");
+    writer.add(1, 0, b"payload").unwrap();
+    writer.finish().unwrap();
+    let reader = FactStoreReader::open(&path, 0, 0).unwrap();
+    let offsets = reader.header().string_pool_offset + reader.header().string_pool_bytes_len;
+    drop(reader);
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.seek(SeekFrom::Start(offsets + 4)).unwrap();
+    file.write_all(&100_u32.to_le_bytes()).unwrap();
+    drop(file);
+    assert!(matches!(
+        FactStoreReader::open(&path, 0, 0),
+        Err(FactStoreError::BadStringPool(_))
+    ));
+    assert!(matches!(
+        FactStoreReader::open_relaxed(&path),
+        Err(FactStoreError::BadStringPool(_))
+    ));
+}
+
+#[test]
 fn binary_search_locates_first_and_last() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v.bin");

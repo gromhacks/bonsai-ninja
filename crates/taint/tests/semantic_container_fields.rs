@@ -431,6 +431,51 @@ def entry(cmd, user):
 }
 
 #[test]
+fn csharp_constructor_delegation_is_composed_without_a_hierarchy_depth_limit() {
+    let mut source = String::from(
+        r#"
+class Root {
+  public string stored;
+  public Root(string input) { this.stored = input; }
+  public void Observe() { Sink(this.stored); }
+}
+"#,
+    );
+    let mut parent = "Root".to_string();
+    for depth in 0..14 {
+        let name = format!("Level{depth}");
+        source.push_str(&format!(
+            "class {name} : {parent} {{ public {name}(string input) : base(input) {{ }} }}\n"
+        ));
+        parent = name;
+    }
+    source.push_str(
+        "class App { static void Entry(string input) { var box = new Level13(input); box.Observe(); } }\n",
+    );
+    let db = build_db(Arc::new(CSharpAdapter::new()), &[("App.cs", &source)]);
+    let entry = func_id_or_none(&db, "Entry").unwrap();
+    let result = interprocedural_taint(entry, &seed(&["input"]), &cfg(), &db);
+    assert!(sink_reached(&result, "Sink"), "{:?}", result.tainted_calls);
+}
+
+#[test]
+fn csharp_this_constructor_delegation_preserves_the_selected_field() {
+    let source = r#"
+class Box {
+  public string stored;
+  public Box(string input) : this(input, 0) { }
+  public Box(string value, int tag) { this.stored = value; }
+  public void Observe() { Sink(this.stored); }
+}
+class App { static void Entry(string input) { var box = new Box(input); box.Observe(); } }
+"#;
+    let db = build_db(Arc::new(CSharpAdapter::new()), &[("App.cs", source)]);
+    let entry = func_id_or_none(&db, "Entry").unwrap();
+    let result = interprocedural_taint(entry, &seed(&["input"]), &cfg(), &db);
+    assert!(sink_reached(&result, "Sink"), "{:?}", result.tainted_calls);
+}
+
+#[test]
 fn csharp_constructor_arguments_taint_only_fields_the_constructor_stores() {
     let src = r#"
 class Box {

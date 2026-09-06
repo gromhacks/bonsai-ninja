@@ -66,6 +66,26 @@ fn workspace_cache_persists_canonical_workspace_identity() {
 }
 
 #[test]
+fn root_only_manifest_publication_binds_its_cache_for_safe_cleanup() {
+    if std::env::var_os("BONSAI_WORKSPACE_DIR").is_some() {
+        return;
+    }
+    let root = tempdir("manifest-cache-binding");
+    std::fs::write(root.join("app.py"), "def run():\n    return 1\n").expect("source");
+    let cache = WorkspaceCache::new(&root);
+    let directory = cache.stats().expect("read-only stats").bonsai_dir;
+    assert!(!directory.exists(), "stats must not publish a binding");
+    cache.write_manifest().expect("publish root-only manifest");
+    assert_eq!(
+        bonsai_workspace::workspace_cache_root_binding(&directory).expect("read binding"),
+        Some(root.canonicalize().expect("canonical fixture root"))
+    );
+    cache.clear_all().expect("clear attributed cache");
+    assert!(!directory.exists());
+    std::fs::remove_dir_all(root).expect("fixture cleanup");
+}
+
+#[test]
 #[cfg(unix)]
 fn unchanged_git_snapshot_reuses_manifest_source_hashes() {
     let Some(root) = init_git_workspace("git-manifest-reuse", "def original():\n    return 1\n") else {
@@ -190,4 +210,85 @@ fn bonsai_cache_directories_are_never_compiler_inputs() {
     assert_eq!(fingerprints.len(), 1);
     assert!(fingerprints[0].path.ends_with("app.py"));
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn live_project_refreshes_committed_changes_with_a_clean_worktree() {
+    let Some(root) = init_git_workspace("live-clean-commit", "def original():\n    return 1\n") else {
+        return;
+    };
+    let project = Bonsai::new()
+        .with_persistent_semantic_cache(false)
+        .open_with_options(&root, WorkspaceOpenOptions::lazy_query())
+        .expect("open project");
+    assert!(project.change_oracle.lock().is_some());
+    assert!(
+        project.file_stamps.lock().is_empty(),
+        "exercise initially lazy stamps"
+    );
+    std::fs::write(root.join("app.py"), "def changed():\n    return 2\n").expect("rewrite source");
+    std::fs::write(root.join("extra.py"), "def extra():\n    return 3\n").expect("new source");
+    assert!(git(&root, &["add", "app.py", "extra.py"]));
+    assert!(git(
+        &root,
+        &[
+            "-c",
+            "user.name=Bonsai Test",
+            "-c",
+            "user.email=bonsai@example.invalid",
+            "commit",
+            "-qm",
+            "change sources"
+        ]
+    ));
+    let refreshed = project
+        .refresh_from_disk()
+        .expect("refresh clean committed files");
+    assert_eq!(refreshed.modified, 1);
+    assert_eq!(refreshed.added, 1);
+    let global = project.workspace.compiler_header_index();
+    assert!(global.find_by_name("original").is_empty());
+    assert_eq!(global.find_by_name("changed").len(), 1);
+    assert_eq!(global.find_by_name("extra").len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn live_project_falls_back_when_git_hides_tracked_source_changes() {
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        let Some(root) = init_git_workspace("live-hidden-change", "def original():\n    return 1\n") else {
+            return;
+        };
+        let project = Bonsai::new()
+            .with_persistent_semantic_cache(false)
+            .open_with_options(&root, WorkspaceOpenOptions::lazy_query())
+            .expect("open project");
+        assert!(git(&root, &["update-index", flag, "app.py"]));
+        std::fs::write(root.join("app.py"), "def changed():\n    return 2\n").expect("hidden change");
+        assert_eq!(project.refresh_from_disk().expect("fallback refresh").modified, 1);
+        assert!(project.change_oracle.lock().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn manifest_rehashes_sources_hidden_by_git_index_flags() {
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        let Some(root) = init_git_workspace("manifest-hidden-change", "def original():\n    return 1\n")
+        else {
+            return;
+        };
+        assert!(git(&root, &["update-index", flag, "app.py"]));
+        let cache = WorkspaceCache::new(&root);
+        let manifest = cache.manifest().expect("record hidden-index workspace");
+        let original = manifest.workspace_source_files[0].hash;
+        std::fs::write(root.join("app.py"), "def changed():\n    return 2\n").expect("hidden change");
+        let fingerprints = source_file_fingerprints_for_cache_validation(&root, Some(&manifest), false)
+            .expect("validate hidden-index sources");
+        assert_ne!(
+            fingerprints[0].hash, original,
+            "Git {flag} must not hide source changes from compiler caches"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

@@ -1,33 +1,51 @@
 use super::*;
 
 #[test]
-fn is_enabled_returns_false_when_env_unset() {
-    // The OnceLock caches per process — assertion holds only on
-    // the FIRST `is_enabled` call. Subsequent tests in this
-    // module will see the cached state.
-    std::env::remove_var("BONSAI_DEBUG");
-    // Read before any other test in this binary populates the
-    // OnceLock with a different env value.
-    if ENABLED.get().is_none() {
-        assert!(!is_enabled("nonexistent"));
+fn empty_config_disables_every_category() {
+    assert!(!EnabledSet::from_raw("").contains("nonexistent"));
+}
+
+#[test]
+fn reset_replaces_cached_configuration() {
+    const CHILD: &str = "BONSAI_DEBUG_RESET_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        assert!(!is_enabled("idg-query"));
+        std::env::set_var("BONSAI_DEBUG", "idg-query");
+        reset_for_tests();
+        assert!(is_enabled("idg-query"));
+        assert!(!is_enabled("workspace-open"));
+        std::env::set_var("BONSAI_DEBUG", " * ");
+        reset_for_tests();
+        assert!(is_enabled("workspace-open"));
+        std::env::remove_var("BONSAI_DEBUG");
+        reset_for_tests();
+        assert!(!is_enabled("idg-query"));
+        assert!(!is_enabled("workspace-open"));
+        return;
     }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "debug::tests::reset_replaces_cached_configuration",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env_remove("BONSAI_DEBUG")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "child failed: {output:?}");
 }
 
 #[test]
 fn parse_handles_wildcard() {
-    let set = EnabledSet {
-        all: true,
-        names: Vec::new(),
-    };
-    assert!(set.contains("anything"));
+    for raw in ["*", "all", " , all , "] {
+        assert!(EnabledSet::from_raw(raw).contains("anything"));
+    }
 }
 
 #[test]
 fn parse_matches_exact_name() {
-    let set = EnabledSet {
-        all: false,
-        names: vec!["idg-closure".to_string()],
-    };
+    let set = EnabledSet::from_raw(" , idg-closure , ");
     assert!(set.contains("idg-closure"));
     assert!(!set.contains("idg-resolve"));
 }

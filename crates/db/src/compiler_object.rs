@@ -482,7 +482,41 @@ use std::sync::{
 // v179: compact function linkage retains adapter-lowered simple assignment
 // aliases so cold reverse callback planning can discover exact consumers
 // without hydrating unrelated workspace bodies.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 179;
+// v180: declaration deduplication preserves variadic and owning-symbol facts;
+// reference scopes and immutable assignment owners follow the retained symbol.
+// TypeScript retains qualified type/base identities and class-owned readonly
+// facts; constructor parameter transfers require syntax, not decorator text.
+// v181: Python finite selections prove the complete RHS including defaults, reject
+// dynamic/mutable map values, and preserve exact docstring/regex constraints.
+// v182: PHP compound guards prove exact polarity, local ownership, finite
+// values, and straight-line configuration order before emitting evidence.
+// v183: C guard evidence requires exact checked values, comparison polarity,
+// nonnegative lengths, and uninterrupted control-flow/configuration order.
+// v184: C++ compound guards retain complete local control, exact parameter
+// slots, immutable collection types, and typed operation/projection evidence.
+// v185: C++ declaration ownership and privacy are exact-span facts; qualified
+// local types keep distinct aggregate construction separate from copy flow.
+// v186: Ruby guards retain their own branch polarity and lexical value proof;
+// overridable method names are not unconditional throws. Lua retains exact
+// nil comparisons and distinguishes dynamic subscripts from literal fields.
+// v187: condition operands use the canonical compiler callee span, preserving
+// exact predicate identity independently of full expression/wrapper spans.
+// v188: parallel Go index assignments retain every RHS value; only the
+// second result of a single comma-ok lookup is a non-value boolean.
+// v189: callable type predicates retain canonical callee identity separately
+// from grammar-owned runtime type operators.
+// v190: Dart flattened selector predicates preserve exact Boolean structure.
+// v191: exact Objective-C initializer signatures, parameter bindings, and dictionary values.
+// v192: C# catch bindings, IDG constructor delegation, and unescaped local configuration.
+// v193: Elixir module-owned finite guard values and exact callable scope/identity.
+// v194: Kotlin qualified bases; Kotlin/Swift selections reject dynamic strings.
+// v195: Java guarded-value fallback must return unconditionally in its own scope.
+// v196: Java direct ancestry and lexical field identities; exact projection typing.
+// v197: Perl compound guards require dominance, exact predicates, and stable state.
+// v198: reject generations admitted through the retired v11 IR relabeling path.
+// v199: JavaScript/TypeScript module identity strips one source extension only.
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 199;
+#[cfg(test)]
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 105;
@@ -917,8 +951,9 @@ fn append_prepared_compiler_object(
 }
 
 /// v11 stored every per-file import/syntax projection inside one monolithic
-/// metadata record. Retain only the decoder needed for an exact, one-time
-/// migration into v12's lazy per-file layout.
+/// metadata record. Keep this wire fixture only to prove it cannot bypass
+/// current frontend compilation, even when all source fingerprints match.
+#[cfg(test)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct LegacyCompilerObjectMetadataV11 {
     version: u32,
@@ -927,6 +962,7 @@ struct LegacyCompilerObjectMetadataV11 {
     files: Vec<LegacyCompilerObjectFileMetadataV11>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct LegacyCompilerObjectFileMetadataV11 {
     file: u32,
@@ -1608,19 +1644,21 @@ impl CompilerObjectStore {
 
 impl AnalyzerDb {
     /// Attach the immutable compiler-object generation for one file-local
-    /// query and return that file's stable full-workspace identity.
+    /// query only when its path and current full-workspace identity agree.
     ///
     /// The generation metadata is integrity-checked here. The selected
     /// object's path, language, content hash, and SHA-256 digest are checked
-    /// again when its payload is consumed, so an edited file safely falls
-    /// back to Tree-sitter while retaining its stable ordinal.
-    pub fn load_compiler_object_store_for_selected_path(
+    /// again when its payload is consumed. The caller derives `selected_file`
+    /// from the current source set; stale metadata must never choose the
+    /// identity of a source whose ordinal changed after an addition/removal.
+    pub fn load_compiler_object_store_for_selected_file(
         &self,
         workspace_root: &Path,
+        selected_file: FileId,
         selected_path: &Path,
-    ) -> std::io::Result<Option<FileId>> {
+    ) -> std::io::Result<bool> {
         if !self.inner.load_compiler_object_sidecar {
-            return Ok(None);
+            return Ok(false);
         }
         let store = CompilerObjectStore::open_reusable(workspace_root)?;
         if store.reader.len() != compiler_object_entry_count(store.metadata.files.len()) {
@@ -1635,19 +1673,18 @@ impl AnalyzerDb {
             .unwrap_or(selected_path)
             .to_string_lossy()
             .replace('\\', "/");
-        let file = store
+        let matches = store
             .metadata
             .files
             .iter()
-            .find(|metadata| metadata.path == relative)
-            .map(|metadata| FileId::new(metadata.file));
-        if file.is_some() {
+            .any(|metadata| metadata.path == relative && metadata.file == selected_file.raw());
+        if matches {
             *self.inner.compiler_object_store.write() = Some(Arc::new(store));
             self.inner
                 .compiler_object_store_requires_repair
                 .store(false, std::sync::atomic::Ordering::Release);
         }
-        Ok(file)
+        Ok(matches)
     }
 
     /// Attach a complete immutable compiler-object generation to a scoped
@@ -1886,9 +1923,12 @@ impl AnalyzerDb {
     pub fn span_map(&self, file: FileId) -> Option<Arc<bonsai_common::SpanMap>> {
         let version = self.inner.vfs.file_version(file).ok()?;
         if self.inner.vfs.lazy_identity(file).is_some() {
-            if let Some(map) = bonsai_common::cached_span_map_from_line_starts(file, version, || {
-                self.compiler_line_starts_uncached(file)
-            }) {
+            if let Some(map) = bonsai_common::cached_span_map_from_line_starts(
+                self.inner.vfs.instance_id(),
+                file,
+                version,
+                || self.compiler_line_starts_uncached(file),
+            ) {
                 return Some(map);
             }
         }
@@ -2846,269 +2886,20 @@ fn unlock_compiler_object_cleanup(lock_file: &File, target: &Path) {
     }
 }
 
-/// Migrate the last monolithic-header compiler-object generation into the
-/// current lazy per-file layout without reparsing source files.
+/// Compatibility hook for the retired v11 container migration.
 ///
-/// `fingerprints` must describe the complete current compiler input set.
-/// Missing/stale/corrupt legacy data returns an error and callers fall back to
-/// the canonical Tree-sitter rebuild. The destination is published atomically
-/// by `FactStoreWriter`; a failed migration cannot replace a valid generation.
+/// Source identity alone cannot prove that old adapter lowering matches the
+/// current frontend ABI. Always return `Ok(None)` so callers perform normal
+/// compiler ingestion; never rewrite old IR with a current generation header.
 pub fn migrate_legacy_compiler_object_sidecar_v11_with_source_fingerprints<I, P>(
-    workspace_root: &Path,
-    fingerprints: I,
+    _workspace_root: &Path,
+    _fingerprints: I,
 ) -> std::io::Result<Option<usize>>
 where
     I: IntoIterator<Item = (P, u64)>,
     P: AsRef<Path>,
 {
-    let destination = compiler_object_sidecar_path(workspace_root);
-    if destination.exists() {
-        return Ok(None);
-    }
-    let legacy_path = workspace_bonsai_dir(workspace_root).join(format!(
-        "compiler-objects.v{LEGACY_COMPILER_OBJECT_CACHE_VERSION}.factstore"
-    ));
-    if !legacy_path.exists() {
-        return Ok(None);
-    }
-    let reader = FactStoreReader::open_relaxed(&legacy_path).map_err(factstore_io)?;
-    if reader.header().table_id != COMPILER_OBJECT_TABLE_ID {
-        return Err(invalid_data("legacy compiler-object factstore table mismatch"));
-    }
-    let hit = reader
-        .get(METADATA_KEY)
-        .map_err(factstore_io)?
-        .ok_or_else(|| invalid_data("legacy compiler-object metadata is missing"))?;
-    if hit.body_hash != u64::from(LEGACY_COMPILER_OBJECT_CACHE_VERSION) {
-        return Err(invalid_data("legacy compiler-object metadata version mismatch"));
-    }
-    let legacy: LegacyCompilerObjectMetadataV11 = wire::decode(&hit.payload).map_err(invalid_wire)?;
-    if legacy.version != LEGACY_COMPILER_OBJECT_CACHE_VERSION
-        || legacy.semantic_fingerprint != legacy_compiler_frontend_semantic_fingerprint_v11()
-        || reader.header().pipeline_hash != legacy_metadata_pipeline_hash_v11(&legacy)
-        || reader.len() != legacy.files.len().saturating_add(1)
-    {
-        return Err(invalid_data("legacy compiler-object generation mismatch"));
-    }
-
-    let canonical_root = workspace_root
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_root.to_path_buf());
-    let mut current = fingerprints
-        .into_iter()
-        .map(|(path, hash)| {
-            let path = path.as_ref();
-            let relative = path
-                .strip_prefix(&canonical_root)
-                .or_else(|_| path.strip_prefix(workspace_root))
-                .unwrap_or(path);
-            (relative.to_string_lossy().replace('\\', "/"), hash)
-        })
-        .collect::<Vec<_>>();
-    current.sort();
-    let mut recorded = legacy
-        .files
-        .iter()
-        .map(|file| (file.path.clone(), file.source_hash))
-        .collect::<Vec<_>>();
-    recorded.sort();
-    if current != recorded {
-        return Err(invalid_data("legacy compiler-object source fingerprint mismatch"));
-    }
-
-    let legacy_generation_digest = legacy.generation_digest;
-    let file_count = legacy.files.len();
-    let mut prepared = PreparedFactStorePayload::create_near(&destination).map_err(factstore_io)?;
-    let mut prepared_entries = Vec::with_capacity(file_count.saturating_mul(5));
-    let mut files = Vec::with_capacity(file_count);
-    let mut previous_file = None;
-    let mut descriptors = Vec::with_capacity(file_count);
-    for legacy_file in legacy.files {
-        if previous_file.is_some_and(|previous| previous >= legacy_file.file)
-            || import_index_digest(legacy_file.imports.as_ref()) != legacy_file.imports_digest
-            || compiler_syntax_header_digest(legacy_file.syntax.as_ref()) != legacy_file.syntax_digest
-        {
-            return Err(invalid_data("legacy compiler-object metadata is not canonical"));
-        }
-        previous_file = Some(legacy_file.file);
-        let file = FileId::new(legacy_file.file);
-        let legacy_payload = reader
-            .get(legacy_object_key_v11(file))
-            .map_err(factstore_io)?
-            .ok_or_else(|| invalid_data("legacy compiler-object payload is missing"))?;
-        if legacy_payload.body_hash != legacy_object_body_hash_from_digest_v11(legacy_file.source_digest)
-            || digest_bytes(&legacy_payload.payload) != legacy_file.payload_digest
-            || u32::try_from(legacy_payload.payload.len()).ok() != Some(legacy_file.payload_len)
-        {
-            return Err(invalid_data("legacy compiler-object payload mismatch"));
-        }
-        let legacy_decoded = zstd::stream::decode_all(Cursor::new(&legacy_payload.payload))?;
-        let legacy_object: CompiledFileObject = wire::decode(&legacy_decoded).map_err(invalid_wire)?;
-        if legacy_object.file != file || legacy_object.source_digest != legacy_file.source_digest {
-            return Err(invalid_data("legacy compiler-object identity mismatch"));
-        }
-        let attribution = legacy_object
-            .declarations
-            .as_ref()
-            .map(CompilerAttribution::from_decl_index)
-            .unwrap_or_else(|| CompilerAttribution {
-                file,
-                functions: Vec::new(),
-            });
-        let browse = CompilerBrowseHeader::from_indexes(
-            legacy_object.declarations.as_ref(),
-            legacy_object.imports.as_ref(),
-        );
-        let (payload_offset, payload_len) = prepared.append(&legacy_payload.payload).map_err(factstore_io)?;
-        prepared_entries.push(PreparedFactStoreEntry {
-            key: object_key(file),
-            body_hash: object_body_hash_from_digest(legacy_file.source_digest),
-            payload_offset,
-            payload_len,
-        });
-
-        let header = CompilerObjectHeader {
-            imports: legacy_file.imports,
-            imports_digest: legacy_file.imports_digest,
-            syntax: legacy_file.syntax,
-            syntax_digest: legacy_file.syntax_digest,
-        };
-        let header_encoded = wire::encode_struct_map(&header).map_err(invalid_wire)?;
-        let header_compressed =
-            zstd::stream::encode_all(Cursor::new(header_encoded), COMPILER_OBJECT_COMPRESSION_LEVEL)?;
-        let header_payload_digest = digest_bytes(&header_compressed);
-        let header_payload_len = u32::try_from(header_compressed.len())
-            .map_err(|_| invalid_data("compiler-object header payload exceeds 4 GiB"))?;
-        let (header_payload_offset, persisted_header_len) =
-            prepared.append(&header_compressed).map_err(factstore_io)?;
-        debug_assert_eq!(header_payload_len, persisted_header_len);
-        prepared_entries.push(PreparedFactStoreEntry {
-            key: header_key(file),
-            body_hash: header_body_hash_from_digest(legacy_file.source_digest),
-            payload_offset: header_payload_offset,
-            payload_len: header_payload_len,
-        });
-        let attribution_compressed = encode_compiler_attribution_payload(&attribution)?;
-        let attribution_payload_digest = digest_bytes(&attribution_compressed);
-        let attribution_payload_len = u32::try_from(attribution_compressed.len())
-            .map_err(|_| invalid_data("compiler-object attribution payload exceeds 4 GiB"))?;
-        let (attribution_payload_offset, persisted_attribution_len) =
-            prepared.append(&attribution_compressed).map_err(factstore_io)?;
-        debug_assert_eq!(attribution_payload_len, persisted_attribution_len);
-        prepared_entries.push(PreparedFactStoreEntry {
-            key: attribution_key(file),
-            body_hash: attribution_body_hash_from_digest(legacy_file.source_digest),
-            payload_offset: attribution_payload_offset,
-            payload_len: attribution_payload_len,
-        });
-        let browse_encoded = wire::encode_struct_map(&browse).map_err(invalid_wire)?;
-        let browse_compressed =
-            zstd::stream::encode_all(Cursor::new(browse_encoded), COMPILER_OBJECT_COMPRESSION_LEVEL)?;
-        let browse_payload_digest = digest_bytes(&browse_compressed);
-        let browse_payload_len = u32::try_from(browse_compressed.len())
-            .map_err(|_| invalid_data("compiler-object browse payload exceeds 4 GiB"))?;
-        let (browse_payload_offset, persisted_browse_len) =
-            prepared.append(&browse_compressed).map_err(factstore_io)?;
-        debug_assert_eq!(browse_payload_len, persisted_browse_len);
-        prepared_entries.push(PreparedFactStoreEntry {
-            key: browse_key(file),
-            body_hash: browse_body_hash_from_digest(legacy_file.source_digest),
-            payload_offset: browse_payload_offset,
-            payload_len: browse_payload_len,
-        });
-        let declaration_compressed =
-            encode_compiler_declaration_payload(file, legacy_object.declarations.as_ref())?;
-        let declaration_payload_digest = digest_bytes(&declaration_compressed);
-        let declaration_payload_len = u32::try_from(declaration_compressed.len())
-            .map_err(|_| invalid_data("compiler-object declaration payload exceeds 4 GiB"))?;
-        let (declaration_payload_offset, persisted_declaration_len) =
-            prepared.append(&declaration_compressed).map_err(factstore_io)?;
-        debug_assert_eq!(declaration_payload_len, persisted_declaration_len);
-        prepared_entries.push(PreparedFactStoreEntry {
-            key: declaration_key(file),
-            body_hash: declaration_body_hash_from_digest(legacy_file.source_digest),
-            payload_offset: declaration_payload_offset,
-            payload_len: declaration_payload_len,
-        });
-        // A migrated object has no source text at hand: record an empty line
-        // table so readers derive lines from the text until a fresh compile.
-        let lines_compressed = encode_line_starts_payload(&[])?;
-        let lines_payload_digest = digest_bytes(&lines_compressed);
-        let lines_payload_len = u32::try_from(lines_compressed.len())
-            .map_err(|_| invalid_data("compiler-object line table exceeds 4 GiB"))?;
-        let (lines_payload_offset, persisted_lines_len) =
-            prepared.append(&lines_compressed).map_err(factstore_io)?;
-        debug_assert_eq!(lines_payload_len, persisted_lines_len);
-        prepared_entries.push(PreparedFactStoreEntry {
-            key: lines_key(file),
-            body_hash: lines_body_hash_from_digest(legacy_file.source_digest),
-            payload_offset: lines_payload_offset,
-            payload_len: lines_payload_len,
-        });
-        descriptors.push(SourceDescriptor {
-            file,
-            path: legacy_file.path.clone(),
-            language: legacy_file.language.clone(),
-            source_digest: legacy_file.source_digest,
-            source_hash: legacy_file.source_hash,
-            source_bytes: 0,
-            version: 0,
-        });
-        files.push(CompilerObjectFileMetadata {
-            file: legacy_file.file,
-            path: legacy_file.path,
-            language: legacy_file.language,
-            source_digest: legacy_file.source_digest,
-            source_hash: legacy_file.source_hash,
-            payload_digest: legacy_file.payload_digest,
-            payload_len: legacy_file.payload_len,
-            header_payload_digest,
-            header_payload_len,
-            attribution_payload_digest,
-            attribution_payload_len,
-            browse_payload_digest,
-            browse_payload_len,
-            declaration_payload_digest,
-            declaration_payload_len,
-            lines_payload_digest,
-            lines_payload_len,
-        });
-    }
-    if legacy_generation_digest_v11(&descriptors) != legacy_generation_digest {
-        return Err(invalid_data("legacy compiler-object generation digest mismatch"));
-    }
-    let metadata = CompilerObjectMetadata {
-        version: COMPILER_OBJECT_CACHE_VERSION,
-        semantic_fingerprint: compiler_frontend_semantic_fingerprint(),
-        generation_digest: generation_digest(&descriptors),
-        files,
-    };
-    let writer = FactStoreWriter::create_from_prepared(
-        &destination,
-        COMPILER_OBJECT_TABLE_ID,
-        metadata_pipeline_hash(&metadata),
-        prepared,
-        prepared_entries,
-    )
-    .map_err(factstore_io)?;
-    writer
-        .add_owned(
-            METADATA_KEY,
-            u64::from(COMPILER_OBJECT_CACHE_VERSION),
-            wire::encode_struct_map(&metadata).map_err(invalid_wire)?,
-        )
-        .map_err(factstore_io)?;
-    let entries = writer.finish().map_err(factstore_io)?;
-    if entries != compiler_object_entry_count(file_count) {
-        return Err(invalid_data("migrated compiler-object entry count mismatch"));
-    }
-    let migrated = CompilerObjectStore::open_reusable(workspace_root)?;
-    if migrated.metadata.files.len() != file_count
-        || migrated.reader.len() != compiler_object_entry_count(file_count)
-    {
-        return Err(invalid_data("migrated compiler-object generation mismatch"));
-    }
-    Ok(Some(file_count))
+    Ok(None)
 }
 
 /// Validate the compiler-object container and semantic ABI without opening a
@@ -3469,6 +3260,7 @@ fn generation_digest(descriptors: &[SourceDescriptor]) -> [u8; 32] {
     generation_digest_with_semantic_fingerprint(descriptors, compiler_frontend_semantic_fingerprint())
 }
 
+#[cfg(test)]
 fn legacy_generation_digest_v11(descriptors: &[SourceDescriptor]) -> [u8; 32] {
     generation_digest_with_semantic_fingerprint(
         descriptors,
@@ -3683,6 +3475,7 @@ fn compiler_frontend_semantic_fingerprint() -> u64 {
         ^ 0x434F_4D50_494C_4552
 }
 
+#[cfg(test)]
 fn legacy_compiler_frontend_semantic_fingerprint_v11() -> u64 {
     let policy = MATCHER_POLICY_FINGERPRINT;
     (policy as u64)
@@ -3700,6 +3493,7 @@ fn metadata_pipeline_hash(metadata: &CompilerObjectMetadata) -> u64 {
         ^ u64::from(metadata.version)
 }
 
+#[cfg(test)]
 fn legacy_metadata_pipeline_hash_v11(metadata: &LegacyCompilerObjectMetadataV11) -> u64 {
     u64::from_le_bytes(
         metadata.generation_digest[..8]
@@ -3713,6 +3507,7 @@ fn object_key(file: FileId) -> u64 {
     u64::from(file.raw()).saturating_mul(6).saturating_add(1)
 }
 
+#[cfg(test)]
 fn legacy_object_key_v11(file: FileId) -> u64 {
     u64::from(file.raw()).saturating_add(1)
 }
@@ -3752,6 +3547,7 @@ fn object_body_hash_from_digest(source_digest: [u8; 32]) -> u64 {
         ^ compiler_frontend_semantic_fingerprint()
 }
 
+#[cfg(test)]
 fn legacy_object_body_hash_from_digest_v11(source_digest: [u8; 32]) -> u64 {
     u64::from_le_bytes(source_digest[..8].try_into().expect("fixed SHA-256 prefix"))
         ^ legacy_compiler_frontend_semantic_fingerprint_v11()
@@ -4177,6 +3973,41 @@ mod tests {
     }
 
     #[test]
+    fn lazy_span_maps_are_isolated_across_workspace_instances() {
+        // Both databases allocate FileId(0), version 0 on this thread, but
+        // their compiler line tables describe different source layouts.
+        for text in ["a\nbb\n\nccc", "aaaaaaaaa", "a\nbb\n\nccc"] {
+            let root = tempfile::tempdir().expect("tempdir");
+            let source = root.path().join("input.fixture");
+            let vfs = Arc::new(Vfs::new());
+            let file = vfs.write(source.clone(), text);
+            let db = AnalyzerDb::new(vfs, Arc::new(LanguageRegistry::new()));
+            db.set_workspace_root(root.path().to_path_buf());
+            db.save_compiler_object_sidecar(root.path())
+                .expect("save objects");
+
+            let lazy_vfs = Arc::new(Vfs::new());
+            let lazy_file = lazy_vfs.write_lazy(
+                source.clone(),
+                bonsai_vfs::SourceIdentity {
+                    len: text.len() as u64,
+                    hash: fnv1a_bytes64(text.as_bytes()),
+                    digest: digest_bytes(text.as_bytes()),
+                },
+            );
+            assert_eq!(file, lazy_file);
+            let lazy_db = AnalyzerDb::new(Arc::clone(&lazy_vfs), Arc::new(LanguageRegistry::new()));
+            lazy_db.set_workspace_root(root.path().to_path_buf());
+            let expected = bonsai_common::SpanMap::new(text);
+            let actual = lazy_db.span_map(lazy_file).expect("persisted line table");
+            for byte in 0..=text.len() as u64 {
+                assert_eq!(actual.line_col(byte), expected.line_col(byte), "source {text:?}");
+            }
+            assert_eq!(lazy_vfs.lazy_source_counts(), (1, 0), "must remain lazy");
+        }
+    }
+
+    #[test]
     fn compiler_object_identity_is_workspace_relative() {
         let root = tempfile::tempdir().expect("tempdir");
         let source = root.path().join("src/input.fixture");
@@ -4511,7 +4342,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v11_generation_migrates_without_reparsing() {
+    fn legacy_v11_generation_cannot_be_relabelled_as_current_frontend_ir() {
         let root = tempfile::tempdir().expect("tempdir");
         let source = root.path().join("src/input.fixture");
         std::fs::create_dir_all(source.parent().expect("source parent")).expect("source directory");
@@ -4584,55 +4415,21 @@ mod tests {
                 root.path(),
                 [(&source, descriptor.source_hash)],
             )
-            .expect("migrate legacy generation"),
-            Some(1)
+            .expect("incompatible generation requires normal rebuild"),
+            None
         );
-        assert_eq!(
-            validate_compiler_object_sidecar_file_with_source_fingerprints(
-                root.path(),
-                [(&source, descriptor.source_hash)],
-            )
-            .expect("validate migrated generation"),
-            1
+        assert!(
+            !compiler_object_sidecar_path(root.path()).exists(),
+            "old IR must not become a current generation"
         );
-        let migrated = CompilerObjectStore::open_reusable(root.path()).expect("open migrated store");
-        assert_eq!(migrated.reader.len(), compiler_object_entry_count(1));
-        let replayed = migrated
-            .load(&descriptor)
-            .expect("load migrated object")
-            .expect("migrated object exists");
-        assert_eq!(replayed, object);
-        assert_eq!(
-            migrated.load_imports(&descriptor).expect("load migrated imports"),
-            imports
+        assert!(
+            legacy_path.is_file(),
+            "rebuild selection must not delete the old input"
         );
-        assert_eq!(
-            migrated.load_syntax(&descriptor).expect("load migrated syntax"),
-            syntax
-        );
-        assert_eq!(
-            migrated
-                .load_browse(&descriptor)
-                .expect("load migrated browse projection"),
-            Some(CompilerBrowseHeader::from_indexes(
-                object.declarations.as_ref(),
-                object.imports.as_ref(),
-            ))
-        );
-        assert_eq!(
-            migrated
-                .load_attribution(&descriptor)
-                .expect("load migrated attribution"),
-            Some(
-                object
-                    .declarations
-                    .as_ref()
-                    .map(CompilerAttribution::from_decl_index)
-                    .unwrap_or_else(|| CompilerAttribution {
-                        file,
-                        functions: Vec::new(),
-                    })
-            )
-        );
+        db.save_compiler_object_sidecar(root.path())
+            .expect("normal compiler rebuild");
+        let rebuilt = CompilerObjectStore::open_reusable(root.path()).expect("fresh generation");
+        assert_eq!(rebuilt.metadata.version, COMPILER_OBJECT_CACHE_VERSION);
+        assert_eq!(rebuilt.load(&descriptor).expect("fresh body"), Some(object));
     }
 }

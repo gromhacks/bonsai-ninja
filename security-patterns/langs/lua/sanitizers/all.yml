@@ -253,6 +253,7 @@
       use_receiver: true
       require_terminal_rejection: true
       accepted_predicate_value: true
+      predicate_falsey_result_is_null: true
   match_examples:
   - name: terminally required shell-safe alphabet
     code: |
@@ -297,6 +298,7 @@
       use_receiver: true
       require_terminal_rejection: true
       accepted_predicate_value: false
+      predicate_falsey_result_is_null: true
   match_examples:
   - name: parent-segment absence predicate
     code: |
@@ -330,6 +332,7 @@
       use_receiver: true
       require_terminal_rejection: true
       accepted_predicate_value: false
+      predicate_falsey_result_is_null: true
   match_examples:
   - name: terminal DOCTYPE rejection before XML parsing
     code: |

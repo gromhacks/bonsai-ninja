@@ -59,10 +59,7 @@ pub(crate) fn admitted_file_decl_index<'a>(
     file: bonsai_common::FileId,
     permits: &'a bonsai_common::SyntaxMemoryPermitPool,
 ) -> Option<AdmittedDeclIndex<'a>> {
-    let source_bytes = ws
-        .vfs()
-        .snapshot(file)
-        .map_or(0, |snapshot| snapshot.text.len() as u64);
+    let source_bytes = ws.vfs().text_len(file).unwrap_or(0);
     let permit = permits.acquire(source_bytes);
     let index = ws.db().decl_index_uncached(file)?;
     Some(AdmittedDeclIndex {

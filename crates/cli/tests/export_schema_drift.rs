@@ -113,7 +113,7 @@ fn export_test_cache_dir(workspace: &Path) -> PathBuf {
 fn export_schema() -> &'static jsonschema::Validator {
     static VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
     VALIDATOR.get_or_init(|| {
-        let path = repo_root().join("schemas/bonsai-native-export-v12.schema.json");
+        let path = repo_root().join("schemas/bonsai-native-export-v13.schema.json");
         let schema: Value = serde_json::from_slice(&std::fs::read(&path).expect("read export schema"))
             .expect("export schema is JSON");
         jsonschema::validator_for(&schema).expect("export schema compiles")
@@ -129,7 +129,7 @@ fn assert_matches_export_schema(label: &str, export: &Value) {
         .collect::<Vec<_>>();
     assert!(
         errors.is_empty(),
-        "[{label}] native export does not match schemas/bonsai-native-export-v12.schema.json:\n{}",
+        "[{label}] native export does not match schemas/bonsai-native-export-v13.schema.json:\n{}",
         errors.join("\n")
     );
 }
@@ -422,12 +422,12 @@ fn every_lang_micro_export_funcid_refs_resolve() {
 }
 
 #[test]
-fn committed_schema_is_strict_v12_and_accepts_materialized_propagations() {
-    let schema_path = repo_root().join("schemas/bonsai-native-export-v12.schema.json");
+fn committed_schema_is_strict_v13_and_accepts_materialized_propagations() {
+    let schema_path = repo_root().join("schemas/bonsai-native-export-v13.schema.json");
     let schema: Value = serde_json::from_slice(&std::fs::read(schema_path).expect("read export schema"))
         .expect("export schema is JSON");
     assert_eq!(schema["$schema"], "https://json-schema.org/draft/2020-12/schema");
-    assert_eq!(schema["properties"]["schema_version"]["const"], 12);
+    assert_eq!(schema["properties"]["schema_version"]["const"], 13);
     assert_eq!(schema["additionalProperties"], false);
 
     let export =
@@ -444,6 +444,29 @@ fn committed_schema_is_strict_v12_and_accepts_materialized_propagations() {
     let mut unknown_field = export;
     unknown_field["unexpected_schema_drift"] = Value::Bool(true);
     assert!(!export_schema().is_valid(&unknown_field));
+}
+
+#[test]
+fn predicate_identity_is_a_versioned_condition_field_not_an_unchecked_extension() {
+    let span = serde_json::json!({"file": 0, "start": 4, "end": 14});
+    let condition = serde_json::json!({
+        "kind": "type_test", "span": {"file": 0, "start": 4, "end": 26},
+        "subject": {"span": {"file": 0, "start": 15, "end": 20}},
+        "type_name": "str", "predicate_call_span": span
+    });
+    for version in [12, 13] {
+        let path = repo_root().join(format!("schemas/bonsai-native-export-v{version}.schema.json"));
+        let schema: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let condition_schema = serde_json::json!({
+            "$schema": schema["$schema"], "$defs": schema["$defs"],
+            "$ref": "#/$defs/conditionExpression"
+        });
+        let validator = jsonschema::validator_for(&condition_schema).unwrap();
+        assert_eq!(validator.is_valid(&condition), version == 13);
+        let mut invalid = condition.clone();
+        invalid["predicate_call_span"]["end"] = serde_json::json!(-1);
+        assert!(!validator.is_valid(&invalid));
+    }
 }
 
 #[test]

@@ -66,10 +66,7 @@ fn elixir_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTarget
     ) {
         return None;
     }
-    let full_text = node_text(&target, src)
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>();
+    let full_text = elixir_target_identity(target, src)?;
     let semantic_name_node = if target.kind() == "dot" {
         target.child_by_field_name("right").unwrap_or(target)
     } else {
@@ -79,6 +76,24 @@ fn elixir_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTarget
         node: semantic_name_node,
         full_text,
     })
+}
+
+fn elixir_target_identity(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut pending = vec![node];
+    let mut parts = Vec::new();
+    while let Some(node) = pending.pop() {
+        if node.kind() == "dot" {
+            pending.push(node.child_by_field_name("right")?);
+            pending.push(node.child_by_field_name("left")?);
+        } else {
+            let text = node_text(&node, src).trim();
+            if text.is_empty() {
+                return None;
+            }
+            parts.push(text);
+        }
+    }
+    Some(parts.join("."))
 }
 
 fn elixir_static_key(node: Node<'_>, src: &[u8]) -> Option<String> {
@@ -876,6 +891,19 @@ impl LanguageAdapter for ElixirAdapter {
                 &value_field_accesses,
             );
             let local_callable_invocations = collect_elixir_local_callable_invocations(&tree, src, file);
+            let mut invocations_by_owner = std::collections::HashMap::<Span, Vec<FlowEvent>>::new();
+            for invocation in local_callable_invocations {
+                let Some(node) = node_at_span(tree.root_node(), invocation.span(), &[]) else {
+                    continue;
+                };
+                let Some(owner) = elixir_enclosing_callable(node, src) else {
+                    continue;
+                };
+                invocations_by_owner
+                    .entry(span_of(file, &owner))
+                    .or_default()
+                    .push(invocation);
+            }
             decl_index
                 .refs
                 .extend(synthesize_elixir_value_field_reads(&tree, src, file));
@@ -903,7 +931,9 @@ impl LanguageAdapter for ElixirAdapter {
                     decl.params = elixir_clause_param_slots(&param_nodes, src);
                     augment_elixir_param_pattern_bindings(decl, &param_nodes, src);
                 }
-                inject_elixir_local_callable_invocations(decl, &local_callable_invocations);
+                if let Some(invocations) = invocations_by_owner.get(&decl.span) {
+                    inject_elixir_local_callable_invocations(decl, invocations);
+                }
                 bonsai_lang_api::kit::insert_flow_field_assignments(
                     &mut decl.flow_events,
                     &map_field_assigns,
@@ -1308,9 +1338,34 @@ fn lower_elixir_string_composition(
         && lower_elixir_string_composition(right, file, src, out)
 }
 
-fn elixir_static_word_attributes(tree: &Tree, src: &[u8]) -> std::collections::BTreeMap<String, Vec<String>> {
-    let mut candidates: std::collections::BTreeMap<String, Option<Vec<String>>> =
-        std::collections::BTreeMap::new();
+type ElixirWordAttributes = std::collections::BTreeMap<(usize, String), (usize, Vec<String>)>;
+
+fn elixir_enclosing_module<'tree>(mut node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
+    while let Some(parent) = node.parent() {
+        if parent.kind() == "call" && call_target_text(&parent, src).as_deref() == Some("defmodule") {
+            return Some(parent);
+        }
+        node = parent;
+    }
+    None
+}
+
+fn elixir_enclosing_callable<'tree>(mut node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
+    while let Some(parent) = node.parent() {
+        if parent.kind() == "anonymous_function" || extract_elixir_function_definition(parent, src).is_some()
+        {
+            return Some(parent);
+        }
+        node = parent;
+    }
+    None
+}
+
+/// Each attribute belongs to one module. Every definition participates in
+/// ambiguity checking, including dynamic or conditionally executed writes.
+/// Only an unconditional, uniquely defined string-word sigil is a proof.
+fn elixir_static_word_attributes(tree: &Tree, src: &[u8]) -> ElixirWordAttributes {
+    let mut candidates = std::collections::BTreeMap::new();
     for attribute in collect_kinds(tree, &["unary_operator"]) {
         if !direct_token(attribute, src, "@") {
             continue;
@@ -1329,47 +1384,24 @@ fn elixir_static_word_attributes(tree: &Tree, src: &[u8]) -> std::collections::B
         if name.is_empty() {
             continue;
         }
+        let Some(owner) = elixir_enclosing_module(attribute, src) else {
+            continue;
+        };
         let Some(arguments) = elixir_call_arguments(call) else {
             continue;
         };
         let mut argument_cursor = arguments.walk();
         let argument_nodes = arguments.named_children(&mut argument_cursor).collect::<Vec<_>>();
-        let [sigil] = argument_nodes.as_slice() else {
-            continue;
+        let direct = attribute.parent().is_some_and(|parent| {
+            parent.kind() == "do_block" && parent.parent().is_some_and(|parent| parent.id() == owner.id())
+        });
+        let words = match argument_nodes.as_slice() {
+            [sigil] if direct => elixir_static_string_words(*sigil, src),
+            _ => None,
         };
-        if sigil.kind() != "sigil" {
-            continue;
-        }
-        let mut sigil_cursor = sigil.walk();
-        let sigil_children = sigil.named_children(&mut sigil_cursor).collect::<Vec<_>>();
-        if sigil_children
-            .iter()
-            .any(|child| !matches!(child.kind(), "sigil_name" | "quoted_content"))
-        {
-            continue;
-        }
-        let Some(sigil_name) = sigil_children.iter().find(|child| child.kind() == "sigil_name") else {
-            continue;
-        };
-        if node_text(sigil_name, src).trim() != "w" {
-            continue;
-        }
-        let Some(content) = sigil_children
-            .iter()
-            .find(|child| child.kind() == "quoted_content")
-        else {
-            continue;
-        };
-        let words = node_text(content, src)
-            .split_whitespace()
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        if words.is_empty() {
-            continue;
-        }
-        match candidates.entry(name.to_string()) {
+        match candidates.entry((owner.id(), name.to_string())) {
             std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(Some(words));
+                entry.insert(words.map(|words| (attribute.end_byte(), words)));
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 entry.insert(None);
@@ -1380,6 +1412,33 @@ fn elixir_static_word_attributes(tree: &Tree, src: &[u8]) -> std::collections::B
         .into_iter()
         .filter_map(|(name, values)| values.map(|values| (name, values)))
         .collect()
+}
+
+fn elixir_static_string_words(sigil: Node<'_>, src: &[u8]) -> Option<Vec<String>> {
+    if sigil.kind() != "sigil" {
+        return None;
+    }
+    let mut cursor = sigil.walk();
+    let children = sigil.named_children(&mut cursor).collect::<Vec<_>>();
+    if children
+        .iter()
+        .any(|child| !matches!(child.kind(), "sigil_name" | "quoted_content"))
+    {
+        return None;
+    }
+    let name = children.iter().find(|child| child.kind() == "sigil_name")?;
+    if node_text(name, src) != "w" {
+        return None;
+    }
+    let content = children.iter().find(|child| child.kind() == "quoted_content")?;
+    let text = node_text(content, src);
+    // Escaped delimiters/whitespace need a decoded-value proof. Do not split
+    // their source spelling as if it were the runtime word sequence.
+    if text.contains('\\') {
+        return None;
+    }
+    let words = text.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+    (!words.is_empty()).then_some(words)
 }
 
 fn elixir_single_named_child(mut node: Node<'_>) -> Option<Node<'_>> {
@@ -1461,7 +1520,7 @@ fn compiler_guard_static_scalar(value: &StaticScalarValue) -> String {
 fn elixir_exact_membership_guard(
     guard: Node<'_>,
     src: &[u8],
-    static_attributes: &std::collections::BTreeMap<String, Vec<String>>,
+    static_attributes: &ElixirWordAttributes,
 ) -> Option<(String, String)> {
     if guard.kind() != "binary_operator" || !elixir_binary_operator_is(&guard, "in") {
         return None;
@@ -1479,15 +1538,17 @@ fn elixir_exact_membership_guard(
         return None;
     }
     let collection = node_text(&collection, src).trim().to_string();
+    let owner = elixir_enclosing_module(guard, src)?;
     static_attributes
-        .get(&collection)
-        .filter(|values| !values.is_empty() && values.iter().all(|value| !value.is_empty()))?;
+        .get(&(owner.id(), collection.clone()))
+        .filter(|(end, values)| *end <= guard.start_byte() && !values.is_empty())?;
     Some((subject, collection))
 }
 
 fn compiler_guard_call_arg_relation(
     guarded_args: &[bonsai_lang_api::CallArg],
     scrutinee_args: &[bonsai_lang_api::CallArg],
+    writes: &std::collections::BTreeMap<String, Vec<u64>>,
 ) -> Vec<String> {
     let mut evidence = Vec::new();
     for (guarded_index, guarded) in guarded_args.iter().enumerate() {
@@ -1500,7 +1561,12 @@ fn compiler_guard_call_arg_relation(
             continue;
         };
         for (scrutinee_index, scrutinee) in scrutinee_args.iter().enumerate() {
-            if scrutinee.place.as_deref().map(str::trim) == Some(guarded_place) {
+            let root = guarded_place.split('.').next().unwrap_or(guarded_place);
+            let rebound = writes.get(root).is_some_and(|sites| {
+                let after = sites.partition_point(|site| *site <= scrutinee.span.end);
+                sites.get(after).is_some_and(|site| *site < guarded.span.start)
+            });
+            if !rebound && scrutinee.place.as_deref().map(str::trim) == Some(guarded_place) {
                 evidence.push(format!(
                     "guarded-argument:{guarded_index}=scrutinee-argument:{scrutinee_index}"
                 ));
@@ -1517,7 +1583,35 @@ fn collect_elixir_guarded_case_arm_facts(
     defs: &[bonsai_lang_api::Decl],
     argument_values: &[bonsai_lang_api::CallArgumentValueFact],
 ) -> Vec<CompilerGuardFact> {
+    // Sigils are extensible macros. A local definition or an import that can
+    // replace the standard word sigil prevents a syntax-only value proof.
+    let imports = parse_imports(tree, src, file);
+    if defs.iter().any(|decl| decl.name == "sigil_w")
+        || imports.iter().any(|import| {
+            import.scope == ImportScope::Local
+                && (import.original_name.as_deref() == Some("sigil_w") || import.is_wildcard)
+        })
+    {
+        return Vec::new();
+    }
     let static_attributes = elixir_static_word_attributes(tree, src);
+    let mut writes = std::collections::BTreeMap::<String, Vec<u64>>::new();
+    for assignment in collect_kinds(tree, &["binary_operator"]) {
+        if !elixir_binary_operator_is(&assignment, "=") {
+            continue;
+        }
+        if let Some(pattern) = assignment.child_by_field_name("left") {
+            for target in binding_targets_from_pattern_node(&pattern, src, &HANDLER) {
+                writes
+                    .entry(target)
+                    .or_default()
+                    .push(u64::try_from(assignment.start_byte()).unwrap_or(u64::MAX));
+            }
+        }
+    }
+    for sites in writes.values_mut() {
+        sites.sort_unstable();
+    }
     let local_module_roots = defs
         .iter()
         .filter(|decl| decl.kind == bonsai_lang_api::DeclKind::Module)
@@ -1530,7 +1624,7 @@ fn collect_elixir_guarded_case_arm_facts(
                 .map(str::to_string)
         })
         .collect::<std::collections::BTreeSet<_>>();
-    let import_alias_roots = parse_imports(tree, src, file)
+    let import_alias_roots = imports
         .into_iter()
         .filter_map(|import| import.alias)
         .collect::<std::collections::BTreeSet<_>>();
@@ -1612,7 +1706,11 @@ fn collect_elixir_guarded_case_arm_facts(
                     format!("finite-string-membership-field:{membership_field}"),
                 ];
                 evidence.extend(static_fields.iter().cloned());
-                evidence.extend(compiler_guard_call_arg_relation(&guarded_args, &scrutinee_args));
+                evidence.extend(compiler_guard_call_arg_relation(
+                    &guarded_args,
+                    &scrutinee_args,
+                    &writes,
+                ));
                 if root_unshadowed {
                     evidence.push("scrutinee-root-unshadowed".to_string());
                 }
@@ -1659,6 +1757,12 @@ fn collect_kinds_from_node<'tree>(root: Node<'tree>, kinds: &[&str]) -> Vec<Node
     let mut out = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
+        // Nested callable/pattern bodies have independent bindings. The
+        // enclosing arm's name equality alone cannot prove their operands.
+        if node.id() != root.id() && matches!(node.kind(), "anonymous_function" | "do_block" | "stab_clause")
+        {
+            continue;
+        }
         if kinds.contains(&node.kind()) {
             out.push(node);
         }

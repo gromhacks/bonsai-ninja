@@ -4,7 +4,6 @@ use crate::common::{
     admitted_file_decl_index, file_path_matches_filter, format_span, make_name_filter,
     source_files_small_first, textual_relevance_key,
 };
-use crate::strings::enclosing_fn_for_index_line;
 use bonsai_workspace::Workspace;
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +58,9 @@ pub fn comments(ws: &Workspace, f: &CommentsFilters<'_>) -> Result<Vec<CommentOu
             let Some(idx) = admitted_file_decl_index(ws, file, &memory_permits) else {
                 return per_file.into_iter();
             };
+            let enclosing = f.in_fn.map(|_| {
+                bonsai_workspace::enclosing_index::EnclosingSpanIndex::from_callable_decls(&idx.defs)
+            });
             for comment in &idx.comments {
                 let kind = format!("{:?}", comment.kind).to_lowercase();
                 if f.kind.is_some_and(|k| !kind.contains(&k.to_lowercase())) {
@@ -72,13 +74,16 @@ pub fn comments(ws: &Workspace, f: &CommentsFilters<'_>) -> Result<Vec<CommentOu
                         continue;
                     }
                 }
-                let (path, line, column) = format_span(&comment.span, ws);
                 if let Some(needle) = f.in_fn {
-                    let enclosing = enclosing_fn_for_index_line(ws, file, &idx, line).unwrap_or_default();
-                    if !enclosing.contains(needle) {
+                    if !enclosing
+                        .as_ref()
+                        .and_then(|index| index.enclosing(comment.span.start))
+                        .is_some_and(|entry| entry.end >= comment.span.end && entry.name.contains(needle))
+                    {
                         continue;
                     }
                 }
+                let (path, line, column) = format_span(&comment.span, ws);
                 per_file.push(CommentOut {
                     text: comment.text.clone(),
                     kind,

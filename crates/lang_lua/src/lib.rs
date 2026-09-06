@@ -60,9 +60,6 @@ const PACK_NAME: &str = "lua";
 
 fn lua_static_key(node: Node<'_>, src: &[u8]) -> Option<String> {
     let raw = node_text(&node, src).trim();
-    if node.kind() == "identifier" {
-        return (!raw.is_empty()).then(|| raw.to_string());
-    }
     if node.kind() != "string" {
         return None;
     }
@@ -1442,16 +1439,6 @@ fn lower_lua_condition_expression(node: Node<'_>, file: FileId, src: &[u8]) -> C
                     return merge_lua_condition(span, left, right, file, src, false);
                 }
                 Some("==" | "~=") => {
-                    if let Some(call_truthiness) = lua_nil_call_truthiness_expression(
-                        span,
-                        left,
-                        right,
-                        operator == Some("~="),
-                        file,
-                        src,
-                    ) {
-                        return call_truthiness;
-                    }
                     return ConditionExpressionFact::Equality {
                         span,
                         relation: if operator == Some("==") {
@@ -1467,46 +1454,10 @@ fn lower_lua_condition_expression(node: Node<'_>, file: FileId, src: &[u8]) -> C
             }
         }
     }
-    if node.kind() == "function_call" {
-        return ConditionExpressionFact::Atom { span };
-    }
     ConditionExpressionFact::Truthy {
         span,
         operand: lua_condition_operand(node, file, src),
     }
-}
-
-/// In Lua, exactly `nil` and `false` are falsey. A parsed call compared with
-/// `nil` is therefore a direct truthiness predicate over that call result;
-/// lowering this runtime rule here keeps the shared guard evaluator language
-/// neutral and preserves the exact call span.
-fn lua_nil_call_truthiness_expression(
-    span: Span,
-    left: Node<'_>,
-    right: Node<'_>,
-    not_equal: bool,
-    file: FileId,
-    src: &[u8],
-) -> Option<ConditionExpressionFact> {
-    let call = if left.kind() == "function_call" && right.kind() == "nil" {
-        left
-    } else if right.kind() == "function_call" && left.kind() == "nil" {
-        right
-    } else {
-        return None;
-    };
-    let truthy = ConditionExpressionFact::Truthy {
-        span: span_of(file, &call),
-        operand: lua_condition_operand(call, file, src),
-    };
-    Some(if not_equal {
-        truthy
-    } else {
-        ConditionExpressionFact::Not {
-            span,
-            operand: Box::new(truthy),
-        }
-    })
 }
 
 fn merge_lua_condition(
@@ -1537,7 +1488,7 @@ fn merge_lua_condition(
 fn lua_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
     ConditionOperandFact {
         span: span_of(file, &node),
-        direct_call_span: (node.kind() == "function_call").then(|| span_of(file, &node)),
+        direct_call_span: bonsai_lang_api::kit::direct_call_callee_span(node, file, src, &HANDLER),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER),
         static_string: lua_static_string(node, src),
         static_value: lua_static_scalar(node, src),

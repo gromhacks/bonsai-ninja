@@ -386,15 +386,11 @@ fn candidate_in_caller_lexical_scope(
     }
     decl_file == ctx.caller_file
         || (!decl.module_path.is_empty() && decl.module_path.matches(ctx.caller_module))
-        || same_directory_unqualified_module_candidate(decl, decl_file, ctx)
+        || same_directory_unqualified_module_candidate(decl_file, ctx)
 }
 
-fn same_directory_unqualified_module_candidate(
-    decl: &bonsai_lang_api::Decl,
-    decl_file: FileId,
-    ctx: &ResolveContext<'_>,
-) -> bool {
-    if decl_file == ctx.caller_file {
+fn same_directory_unqualified_module_candidate(decl_file: FileId, ctx: &ResolveContext<'_>) -> bool {
+    if decl_file == ctx.caller_file || !ctx.same_directory_unqualified_calls {
         return false;
     }
     let Some(lookup) = ctx.file_path_lookup else {
@@ -406,11 +402,6 @@ fn same_directory_unqualified_module_candidate(
     let Some(caller_path) = lookup.path_for(ctx.caller_file) else {
         return false;
     };
-    if (!decl.module_path.is_empty() || !ctx.caller_module.is_empty())
-        && !ctx.same_directory_unqualified_calls
-    {
-        return false;
-    }
     file_parent_dir(&decl_path).is_some_and(|decl_dir| file_parent_dir(&caller_path) == Some(decl_dir))
 }
 
@@ -468,8 +459,11 @@ fn resolve_workspace_rooted_call(
         if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
             continue;
         }
-        if !module_target_matches_decl_module_path(mod_path, &decl.module_path)
-            && !alias_target_matches_file(ctx, mod_path, decl_file)
+        if !module_target_exactly_matches_decl_module_path_with_syntax(
+            mod_path,
+            &decl.module_path,
+            ctx.module_path_syntax,
+        ) && !alias_target_matches_file(ctx, mod_path, decl_file)
         {
             continue;
         }
@@ -491,6 +485,7 @@ pub fn strip_module_path_prefix(name: &str, syntax: ModulePathSyntax) -> &str {
         let Some(next) = syntax
             .repeatable_rooted_prefixes
             .iter()
+            .filter(|prefix| !prefix.is_empty())
             .find_map(|prefix| rest.strip_prefix(prefix))
         else {
             break;
@@ -504,6 +499,7 @@ pub fn strip_module_path_prefix(name: &str, syntax: ModulePathSyntax) -> &str {
     syntax
         .rooted_prefixes
         .iter()
+        .filter(|prefix| !prefix.is_empty())
         .find_map(|prefix| trimmed.strip_prefix(prefix))
         .unwrap_or(trimmed)
 }
@@ -1827,6 +1823,23 @@ fn peer_partial_class_matches(
     peer_sym: SymbolId,
     global: &GlobalIndex,
 ) -> bool {
+    // A leaf name and file/package are not a complete type identity: nested
+    // First.Inner and Second.Inner remain distinct even in the same file.
+    match (
+        class_decl.qualified_name.as_deref(),
+        peer_decl.qualified_name.as_deref(),
+    ) {
+        (Some(left), Some(right)) => {
+            if left != right
+                && bonsai_common::normalize_qualified_name(left)
+                    != bonsai_common::normalize_qualified_name(right)
+            {
+                return false;
+            }
+        }
+        _ if class_decl.parent != peer_decl.parent => return false,
+        _ => {}
+    }
     let Some(class_file) = global.declaring_file(class_sym) else {
         return false;
     };
@@ -2237,21 +2250,25 @@ pub fn resolve_class(
                 // target's module so an unrelated class with
                 // the same leaf identifier doesn't get stitched
                 // in as a spurious candidate.
+                let Some(target_module) = rewrite.target_module.as_deref() else {
+                    // A qualified Type alias has no module-import fallback.
+                    // Its exact rewrite missed; a same-named workspace tail
+                    // cannot turn an external type into a local one.
+                    continue;
+                };
                 let mut candidates: Vec<SymbolId> = collect(tail);
-                if let Some(target_module) = rewrite.target_module.as_deref() {
-                    candidates.retain(|sym| {
-                        global.decl_of(*sym).is_some_and(|decl| {
-                            let path_match = global
-                                .declaring_file(*sym)
-                                .is_some_and(|file| alias_target_matches_file(ctx, target_module, file));
-                            module_target_matches_decl_module_path_from_context(
-                                target_module,
-                                &decl.module_path,
-                                ctx,
-                            ) || path_match
-                        })
-                    });
-                }
+                candidates.retain(|sym| {
+                    global.decl_of(*sym).is_some_and(|decl| {
+                        let path_match = global
+                            .declaring_file(*sym)
+                            .is_some_and(|file| alias_target_matches_file(ctx, target_module, file));
+                        module_target_matches_decl_module_path_from_context(
+                            target_module,
+                            &decl.module_path,
+                            ctx,
+                        ) || path_match
+                    })
+                });
                 out.extend(candidates);
                 if !out.is_empty() {
                     dedup_symbols(&mut out);
@@ -2338,33 +2355,17 @@ fn declared_receiver_candidates_with_one_identity(
     global: &GlobalIndex,
     candidates: Vec<bonsai_common::SymbolId>,
 ) -> Vec<bonsai_common::SymbolId> {
-    let Some(first_identity) = candidates
-        .first()
-        .and_then(|symbol| global.decl_of(*symbol))
-        .map(declared_type_semantic_identity)
-    else {
+    let Some(first) = candidates.first().copied() else {
         return Vec::new();
     };
-    if candidates.iter().all(|symbol| {
-        global
-            .decl_of(*symbol)
-            .is_some_and(|decl| declared_type_semantic_identity(decl) == first_identity)
-    }) {
+    if candidates
+        .iter()
+        .all(|symbol| class_symbols_share_semantic_identity(global, first, *symbol))
+    {
         candidates
     } else {
         Vec::new()
     }
-}
-
-fn declared_type_semantic_identity(decl: &bonsai_lang_api::Decl) -> String {
-    decl.qualified_name.as_deref().map_or_else(
-        || {
-            let mut segments = decl.module_path.segments.clone();
-            segments.push(decl.name.clone());
-            segments.join(".")
-        },
-        bonsai_common::normalize_qualified_name,
-    )
 }
 
 fn relative_qualified_type_matches(

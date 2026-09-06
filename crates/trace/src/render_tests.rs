@@ -17,6 +17,22 @@ fn span() -> SourceSpan {
 }
 
 #[test]
+fn dot_renderer_quotes_source_backslashes_quotes_and_newlines() {
+    let mut step = crate::tests::step(0, TraceStepKind::Call);
+    step.function = "App\\Service\"quoted\"\nnext\rline\\".into();
+    let trace = TraceResult {
+        steps: vec![step],
+        ..TraceResult::default()
+    };
+    let rendered = super::to_dot(&trace);
+    assert!(
+        rendered.contains(r#"[1] Call\nApp\\Service\"quoted\"\nnext\rline\\"#),
+        "{rendered}"
+    );
+    assert_eq!(rendered.lines().count(), 5);
+}
+
+#[test]
 fn text_renderer_reports_unresolved_calls_as_incomplete_metadata() {
     let trace = TraceResult {
         trace_id: "trace-test".to_string(),

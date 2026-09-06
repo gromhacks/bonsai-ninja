@@ -522,15 +522,6 @@ fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Re
         stage.finish();
         return Ok(());
     }
-    if phase == SemanticWorkerPhase::Compiler {
-        let cache = bonsai_for_cli().cache(root);
-        if cache.migrate_legacy_compiler_object_sidecar()?.is_some() {
-            let stage = progress::ScopedSpinner::new(&label);
-            let _ = cache.write_manifest()?;
-            stage.finish();
-            return Ok(());
-        }
-    }
     // Semantic phases run only in dedicated subprocesses. Keep the complete
     // project alive until that subprocess exits and let the OS reclaim it as
     // one unit. Dropping a production-sized workspace here can spend minutes

@@ -1276,7 +1276,6 @@ impl LanguageAdapter for RubyAdapter {
                 // the exact contract this implements.
                 apply_ruby_scope_visibility(&mut idx, &tree, src, file);
                 for decl in &mut idx.defs {
-                    inject_ruby_raise_throw_events(&mut decl.flow_events);
                     inject_ruby_super_call_events(&mut decl.flow_events, &decl.name);
                     normalize_ruby_subshell_events(&mut decl.flow_events, src);
                     normalize_ruby_instance_variable_events(decl);
@@ -1365,7 +1364,6 @@ impl LanguageAdapter for RubyAdapter {
         let block_param_names = collect_ruby_block_param_names(&tree, src);
         let bare_identifier_calls = collect_ruby_bare_identifier_calls(&tree, file, src);
         for decl in &mut idx.defs {
-            inject_ruby_raise_throw_events(&mut decl.flow_events);
             normalize_ruby_subshell_events(&mut decl.flow_events, src);
             normalize_ruby_instance_variable_events(decl);
             if decl.name == bonsai_lang_api::MODULE_DECL_NAME {
@@ -1411,31 +1409,36 @@ fn populate_ruby_unless_condition_facts(
     file: FileId,
 ) {
     for fact in facts {
-        let Some(condition) = node_at_span(tree.root_node(), fact.condition_span, &[]) else {
+        let Some(branch) = node_at_span(tree.root_node(), fact.branch_span, &["unless", "unless_modifier"])
+            .filter(|node| {
+                matches!(node.kind(), "unless" | "unless_modifier") && span_of(file, node) == fact.branch_span
+            })
+        else {
             continue;
         };
-        let mut ancestor = condition.parent();
-        let mut is_unless = false;
-        while let Some(parent) = ancestor {
-            if matches!(parent.kind(), "unless" | "unless_modifier") {
-                is_unless = true;
-                break;
-            }
-            if matches!(parent.kind(), "method" | "singleton_method" | "class" | "module") {
-                break;
-            }
-            ancestor = parent.parent();
-        }
-        if !is_unless {
+        let Some(condition) = branch.child_by_field_name("condition") else {
+            continue;
+        };
+        if span_of(file, &condition) != fact.condition_span {
             continue;
         }
-        let atom = bonsai_lang_api::ConditionExpressionFact::Atom {
-            span: span_of(file, &condition),
+        let expression = fact
+            .expression
+            .take()
+            .unwrap_or(bonsai_lang_api::ConditionExpressionFact::Atom {
+                span: span_of(file, &condition),
+            });
+        fact.polarity = match fact.polarity {
+            bonsai_lang_api::BranchConditionPolarity::Positive => {
+                bonsai_lang_api::BranchConditionPolarity::Negated
+            }
+            bonsai_lang_api::BranchConditionPolarity::Negated => {
+                bonsai_lang_api::BranchConditionPolarity::Positive
+            }
         };
-        fact.polarity = bonsai_lang_api::BranchConditionPolarity::Negated;
         fact.expression = Some(bonsai_lang_api::ConditionExpressionFact::Not {
             span: fact.condition_span,
-            operand: Box::new(atom),
+            operand: Box::new(expression),
         });
     }
 }
@@ -1675,83 +1678,132 @@ const RUBY_GUARD_TERMINAL_COMPOUND_STATIC_ALLOWLIST: &str = "terminal-predicate.
 /// call/component/value identities; rule data alone assigns URL/security
 /// meaning to those syntax facts.
 fn ruby_compound_static_allowlist_guards(tree: &Tree, file: FileId, src: &[u8]) -> Vec<CompilerGuardFact> {
+    if tree.root_node().has_error() {
+        return Vec::new();
+    }
     let static_collections = ruby_frozen_static_string_collections(tree, src);
+    if static_collections.is_empty() {
+        return Vec::new();
+    }
+    let local_providers = collect_kinds(tree, &["class", "module", "assignment"])
+        .into_iter()
+        .filter_map(|node| {
+            node.child_by_field_name("name")
+                .or_else(|| node.child_by_field_name("left"))
+        })
+        .filter(|node| matches!(node.kind(), "constant" | "scope_resolution"))
+        .map(|node| {
+            node_text(&node, src)
+                .trim()
+                .trim_start_matches("::")
+                .split("::")
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let local_methods = collect_kinds(tree, &["method", "singleton_method"])
+        .into_iter()
+        .filter_map(|node| node.child_by_field_name("name"))
+        .map(|node| node_text(&node, src).to_string())
+        .collect::<std::collections::HashSet<_>>();
     let mut facts = Vec::new();
     for function in collect_kinds(tree, &["method", "singleton_method"]) {
         let Some(body) = function.child_by_field_name("body") else {
             continue;
         };
-        let calls = ruby_collect_kinds_below(body, &["call"]);
-        for branch in ruby_collect_kinds_below(body, &["unless_modifier"]) {
-            if branch
-                .child_by_field_name("body")
-                .is_none_or(|body| body.kind() != "return")
-            {
-                continue;
-            }
-            let Some(predicate) = branch.child_by_field_name("condition").and_then(|condition| {
-                ruby_compound_acceptance_predicate(condition, src, &static_collections)
-            }) else {
-                continue;
-            };
-            let Some(parser) = ruby_collect_kinds_below(body, &["assignment"])
-                .into_iter()
-                .filter(|assignment| assignment.end_byte() <= branch.start_byte())
-                .filter_map(|assignment| ruby_parser_assignment(assignment, src))
-                .filter(|assignment| assignment.output == predicate.parsed_place)
-                .max_by_key(|assignment| assignment.start)
-            else {
-                continue;
-            };
-            for guarded_call in calls
-                .iter()
-                .copied()
-                .filter(|call| call.start_byte() > branch.end_byte())
-            {
-                let guarded_args = ruby_direct_call_arguments(guarded_call);
-                let component_relations = guarded_args
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, argument)| {
-                        let (receiver, component, _) = ruby_accessor_call(*argument, src)?;
-                        (receiver == predicate.parsed_place && component == predicate.component)
-                            .then(|| format!("guarded-argument:{index}=predicate-component:{component}"))
-                    })
-                    .collect::<Vec<_>>();
-                if component_relations.is_empty() {
-                    continue;
+        // This local summary is deliberately straight-line. A descendant
+        // guard or parser does not dominate a later sibling, and a mutation
+        // between the guard and consumer invalidates the parsed value.
+        let mut cursor = body.walk();
+        let statements = body
+            .named_children(&mut cursor)
+            .filter(|node| node.kind() != "comment")
+            .collect::<Vec<_>>();
+        let [assignment, branch, guarded_call] = statements.as_slice() else {
+            continue;
+        };
+        if assignment.kind() != "assignment"
+            || branch.kind() != "unless_modifier"
+            || guarded_call.kind() != "call"
+        {
+            continue;
+        }
+        if branch
+            .child_by_field_name("body")
+            .is_none_or(|body| body.kind() != "return")
+        {
+            continue;
+        }
+        let Some(predicate) = branch.child_by_field_name("condition").and_then(|condition| {
+            ruby_compound_acceptance_predicate(
+                condition,
+                src,
+                &static_collections,
+                ruby_guard_lexical_owner(function),
+            )
+        }) else {
+            continue;
+        };
+        let Some(parser) = ruby_parser_assignment(*assignment, src)
+            .filter(|assignment| assignment.output == predicate.parsed_place)
+        else {
+            continue;
+        };
+        if local_providers.contains(parser.provider_root.as_str())
+            || [
+                &predicate.type_predicate_call,
+                &predicate.membership_call,
+                &predicate.component,
+                &predicate.freeze_call,
+            ]
+            .into_iter()
+            .any(|name| local_methods.contains(name))
+        {
+            continue;
+        }
+        let guarded_args = ruby_direct_call_arguments(*guarded_call);
+        let component_relations = guarded_args
+            .iter()
+            .enumerate()
+            .filter_map(|(index, argument)| {
+                let (receiver, component, _) = ruby_accessor_call(*argument, src)?;
+                (receiver == predicate.parsed_place && component == predicate.component)
+                    .then(|| format!("guarded-argument:{index}=predicate-component:{component}"))
+            })
+            .collect::<Vec<_>>();
+        if component_relations.is_empty() {
+            continue;
+        }
+        let Some(target) = ruby_call_target(*guarded_call, src) else {
+            continue;
+        };
+        let mut evidence = vec![
+            "predicate-complete:true".to_string(),
+            "finite-static-string-membership:true".to_string(),
+            format!("parser-call:{}", parser.call_name),
+            format!("type-predicate-call:{}", predicate.type_predicate_call),
+            format!("type-predicate-value:place:{}", predicate.type_value),
+            format!("membership-call:{}", predicate.membership_call),
+            format!("membership-component:{}", predicate.component),
+        ];
+        evidence.extend(component_relations);
+        for (index, argument) in guarded_args.iter().enumerate() {
+            if let Some((name, value)) = ruby_named_argument(*argument, src) {
+                if let Some(value) = ruby_compiler_evidence_operand(value, src) {
+                    evidence.push(format!("guarded-named-argument:{index}:{name}={value}"));
                 }
-                let Some(target) = ruby_call_target(guarded_call, src) else {
-                    continue;
-                };
-                let mut evidence = vec![
-                    "predicate-complete:true".to_string(),
-                    "finite-static-string-membership:true".to_string(),
-                    format!("parser-call:{}", parser.call_name),
-                    format!("type-predicate-call:{}", predicate.type_predicate_call),
-                    format!("type-predicate-value:place:{}", predicate.type_value),
-                    format!("membership-call:{}", predicate.membership_call),
-                    format!("membership-component:{}", predicate.component),
-                ];
-                evidence.extend(component_relations);
-                for (index, argument) in guarded_args.iter().enumerate() {
-                    if let Some((name, value)) = ruby_named_argument(*argument, src) {
-                        if let Some(value) = ruby_compiler_evidence_operand(value, src) {
-                            evidence.push(format!("guarded-named-argument:{index}:{name}={value}"));
-                        }
-                    }
-                }
-                evidence.sort();
-                evidence.dedup();
-                facts.push(CompilerGuardFact {
-                    function_span: span_of(file, &function),
-                    guarded_call_span: span_of(file, &target.node),
-                    proof_span: span_of(file, &branch),
-                    capability: RUBY_GUARD_TERMINAL_COMPOUND_STATIC_ALLOWLIST.to_string(),
-                    evidence,
-                });
             }
         }
+        evidence.sort();
+        evidence.dedup();
+        facts.push(CompilerGuardFact {
+            function_span: span_of(file, &function),
+            guarded_call_span: span_of(file, &target.node),
+            proof_span: span_of(file, branch),
+            capability: RUBY_GUARD_TERMINAL_COMPOUND_STATIC_ALLOWLIST.to_string(),
+            evidence,
+        });
     }
     facts.sort_by(|left, right| {
         (
@@ -1772,9 +1824,9 @@ fn ruby_compound_static_allowlist_guards(tree: &Tree, file: FileId, src: &[u8]) 
 }
 
 struct RubyParserAssignment {
-    start: usize,
     output: String,
     call_name: String,
+    provider_root: String,
 }
 
 struct RubyCompoundPredicate {
@@ -1783,31 +1835,49 @@ struct RubyCompoundPredicate {
     type_value: String,
     membership_call: String,
     component: String,
+    freeze_call: String,
 }
 
 fn ruby_parser_assignment(assignment: Node<'_>, src: &[u8]) -> Option<RubyParserAssignment> {
-    let output = ruby_exact_place(assignment.child_by_field_name("left")?, src)?;
+    let output_node = assignment.child_by_field_name("left")?;
+    if output_node.kind() != "identifier" {
+        return None;
+    }
+    let output = ruby_exact_place(output_node, src)?;
     let mut value = assignment.child_by_field_name("right")?;
     if value.kind() == "rescue_modifier" {
         value = value.child_by_field_name("body")?;
     }
     let target = ruby_call_target(value, src)?;
+    if value.child_by_field_name("block").is_some() {
+        return None;
+    }
+    let receiver = value.child_by_field_name("receiver")?;
+    if !matches!(receiver.kind(), "constant" | "scope_resolution") {
+        return None;
+    }
+    let provider_root = ruby_exact_place(receiver, src)?
+        .trim_start_matches("::")
+        .split("::")
+        .next()?
+        .to_string();
     let arguments = ruby_direct_call_arguments(value);
     let [argument] = arguments.as_slice() else {
         return None;
     };
     ruby_exact_place(*argument, src)?;
     Some(RubyParserAssignment {
-        start: assignment.start_byte(),
         output,
         call_name: target.full_text,
+        provider_root,
     })
 }
 
 fn ruby_compound_acceptance_predicate(
     condition: Node<'_>,
     src: &[u8],
-    static_collections: &std::collections::HashMap<String, Vec<String>>,
+    static_collections: &std::collections::HashMap<String, Option<RubyStaticStringCollection<'_>>>,
+    lexical_owner: usize,
 ) -> Option<RubyCompoundPredicate> {
     if condition.kind() != "binary" {
         return None;
@@ -1824,6 +1894,9 @@ fn ruby_compound_acceptance_predicate(
         return None;
     }
     let type_target = ruby_call_target(left, src)?;
+    if left.child_by_field_name("block").is_some() || right.child_by_field_name("block").is_some() {
+        return None;
+    }
     let parsed_place = left
         .child_by_field_name("receiver")
         .and_then(|receiver| ruby_exact_place(receiver, src))?;
@@ -1837,7 +1910,30 @@ fn ruby_compound_acceptance_predicate(
     let collection = right
         .child_by_field_name("receiver")
         .and_then(|receiver| ruby_exact_place(receiver, src))?;
-    if !static_collections.contains_key(&collection) {
+    let static_collection = static_collections.get(&collection)?.as_ref()?;
+    let membership_call = node_text(&membership_target.node, src).trim();
+    if static_collection.owner != lexical_owner
+        || !static_collection.references.iter().all(|reference| {
+            if reference.id() == static_collection.target_id {
+                return true;
+            }
+            if ruby_guard_lexical_owner(*reference) != lexical_owner
+                || reference.start_byte() < static_collection.definition_end
+            {
+                return false;
+            }
+            let Some(call) = reference.parent().filter(|parent| parent.kind() == "call") else {
+                return false;
+            };
+            call.child_by_field_name("receiver")
+                .is_some_and(|receiver| receiver.id() == reference.id())
+                && call
+                    .child_by_field_name("method")
+                    .is_some_and(|method| node_text(&method, src) == membership_call)
+                && call.child_by_field_name("block").is_none()
+                && ruby_direct_call_arguments(call).len() == 1
+        })
+    {
         return None;
     }
     let membership_args = ruby_direct_call_arguments(right);
@@ -1852,16 +1948,42 @@ fn ruby_compound_acceptance_predicate(
         parsed_place,
         type_predicate_call: node_text(&type_target.node, src).trim().to_string(),
         type_value,
-        membership_call: node_text(&membership_target.node, src).trim().to_string(),
+        membership_call: membership_call.to_string(),
         component,
+        freeze_call: static_collection.freeze_call.clone(),
     })
 }
 
-fn ruby_frozen_static_string_collections(
-    tree: &Tree,
+struct RubyStaticStringCollection<'tree> {
+    owner: usize,
+    target_id: usize,
+    definition_end: usize,
+    freeze_call: String,
+    references: Vec<Node<'tree>>,
+}
+
+fn ruby_guard_lexical_owner(mut node: Node<'_>) -> usize {
+    while let Some(parent) = node.parent() {
+        if matches!(parent.kind(), "class" | "module" | "program") {
+            return parent.id();
+        }
+        node = parent;
+    }
+    node.id()
+}
+
+fn ruby_frozen_static_string_collections<'tree>(
+    tree: &'tree Tree,
     src: &[u8],
-) -> std::collections::HashMap<String, Vec<String>> {
+) -> std::collections::HashMap<String, Option<RubyStaticStringCollection<'tree>>> {
     let mut collections = std::collections::HashMap::new();
+    let mut references = std::collections::HashMap::<String, Vec<Node<'_>>>::new();
+    for constant in collect_kinds(tree, &["constant"]) {
+        references
+            .entry(node_text(&constant, src).to_string())
+            .or_default()
+            .push(constant);
+    }
     for assignment in collect_kinds(tree, &["assignment"]) {
         let (Some(target), Some(value)) = (
             assignment.child_by_field_name("left"),
@@ -1881,10 +2003,24 @@ fn ruby_frozen_static_string_collections(
         if node_text(&method, src).trim() != "freeze" || array.kind() != "string_array" {
             continue;
         }
+        if !ruby_direct_call_arguments(value).is_empty() || value.child_by_field_name("block").is_some() {
+            continue;
+        }
+        let owner = ruby_guard_lexical_owner(assignment);
+        let Some(parent) = assignment.parent() else {
+            continue;
+        };
+        if parent.id() != owner && parent.parent().is_none_or(|scope| scope.id() != owner) {
+            continue;
+        }
         let mut values = Vec::new();
         let mut cursor = array.walk();
         let mut complete = true;
         for item in array.named_children(&mut cursor) {
+            if item.named_child_count() != 1 {
+                complete = false;
+                break;
+            }
             let Some(content) = item
                 .named_child(0)
                 .filter(|child| child.kind() == "string_content")
@@ -1900,7 +2036,18 @@ fn ruby_frozen_static_string_collections(
             values.push(value.to_string());
         }
         if complete && !values.is_empty() {
-            collections.insert(node_text(&target, src).trim().to_string(), values);
+            let name = node_text(&target, src).trim().to_string();
+            let collection = RubyStaticStringCollection {
+                owner,
+                target_id: target.id(),
+                definition_end: assignment.end_byte(),
+                freeze_call: node_text(&method, src).to_string(),
+                references: references.get(&name).cloned().unwrap_or_default(),
+            };
+            collections
+                .entry(name)
+                .and_modify(|current| *current = None)
+                .or_insert(Some(collection));
         }
     }
     collections
@@ -1949,21 +2096,6 @@ fn ruby_compiler_evidence_operand(node: Node<'_>, src: &[u8]) -> Option<String> 
         Some(StaticScalarValue::Integer(value)) => Some(format!("number:{value}")),
         None => ruby_exact_place(node, src).map(|value| format!("place:{value}")),
     }
-}
-
-fn ruby_collect_kinds_below<'tree>(node: Node<'tree>, kinds: &[&str]) -> Vec<Node<'tree>> {
-    let mut result = Vec::new();
-    let mut stack = vec![node];
-    while let Some(current) = stack.pop() {
-        if current.id() != node.id() && kinds.contains(&current.kind()) {
-            result.push(current);
-        }
-        let mut cursor = current.walk();
-        let mut children = current.named_children(&mut cursor).collect::<Vec<_>>();
-        children.reverse();
-        stack.extend(children);
-    }
-    result
 }
 
 /// Return the literal hash receiver of an exact `hash.freeze` expression.
@@ -2125,45 +2257,6 @@ fn remove_bound_ruby_bare_identifier_calls(
     retain(events, &locals, candidates);
 }
 
-fn inject_ruby_raise_throw_events(events: &mut Vec<FlowEvent>) {
-    for event in events.iter_mut() {
-        match event {
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                inject_ruby_raise_throw_events(then_events);
-                inject_ruby_raise_throw_events(else_events);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                inject_ruby_raise_throw_events(body);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                inject_ruby_raise_throw_events(body);
-                inject_ruby_raise_throw_events(catch_events);
-                inject_ruby_raise_throw_events(finally_events);
-            }
-            _ => {}
-        }
-    }
-
-    let mut rewritten = Vec::with_capacity(events.len());
-    for event in events.drain(..) {
-        let synthetic_throw = ruby_raise_throw_event(&event);
-        rewritten.push(event);
-        if let Some(throw_event) = synthetic_throw {
-            rewritten.push(throw_event);
-        }
-    }
-    *events = rewritten;
-}
-
 fn inject_ruby_super_call_events(events: &mut Vec<FlowEvent>, method_name: &str) {
     for event in events.iter_mut() {
         match event {
@@ -2221,43 +2314,6 @@ fn ruby_return_is_bare_super(event: &FlowEvent) -> bool {
         return false;
     };
     value_flow.place.as_deref() == Some("super") && value_flow.call_sites.is_empty()
-}
-
-fn ruby_raise_throw_event(event: &FlowEvent) -> Option<FlowEvent> {
-    let FlowEvent::Call { name, args, span, .. } = event else {
-        return None;
-    };
-    if name != "raise" {
-        return None;
-    }
-    // `raise ExceptionClass, message` (M17): arg0 is the exception
-    // class, so the thrown *value* is the message in arg1. Recognize
-    // the class form by a Capitalized constant or `Foo::Bar` scope.
-    let thrown_arg = match args.first() {
-        Some(first) if args.len() >= 2 && first.place.as_deref().is_some_and(ruby_is_exception_class) => {
-            args.get(1)
-        }
-        other => other,
-    };
-    // value_name is contractually a bare identifier (M18): take it
-    // only from `place`, leaving compound throws such as
-    // `StandardError.new(msg)` as None so the engine routes them
-    // through its conservative inter-procedural branch.
-    Some(FlowEvent::Throw {
-        span: *span,
-        value_name: thrown_arg.and_then(|arg| arg.place.clone()),
-        thrown_type: None,
-    })
-}
-
-/// True when an argument's text names a Ruby exception class -- a
-/// Capitalized constant (`ArgumentError`) or a scope-resolved constant
-/// (`Net::HTTPError`). Used to detect the two-argument
-/// `raise ExceptionClass, message` form (audit M17).
-fn ruby_is_exception_class(text: &str) -> bool {
-    let head = text.trim().rsplit("::").next().unwrap_or("").trim();
-    head.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-        && head.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn normalize_ruby_subshell_events(events: &mut [FlowEvent], src: &[u8]) {

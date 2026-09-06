@@ -1430,9 +1430,10 @@ fn plain_read_file_reuses_one_exact_compiler_body_without_semantic_graphs() {
     let workspace = read(&root.join("crates/workspace/src/lib.rs"));
     let scoped_open = function_body(&workspace, "open_query_matching_path_with_options_and_events");
     assert!(
-        scoped_open.contains("load_compiler_object_store_for_selected_path")
+        scoped_open.contains("load_compiler_object_store_for_selected_file")
+            && scoped_open.contains("walk_workspace_entries")
             && scoped_open.contains("write_with_id"),
-        "path-scoped queries must preserve the selected file's full-workspace FileId and reuse its compiler object"
+        "path-scoped queries must derive the current full-workspace FileId independently of optional compiler objects"
     );
 
     let architecture = read(&root.join("docs/contributing/architecture.mdx"));
@@ -2419,8 +2420,9 @@ fn grammar_variants_are_selected_by_the_owning_adapter() {
         "the TypeScript adapter must select its TSX grammar for every direct and cached parse"
     );
     assert!(
-        parser.contains("adapter.grammar_name_for_path(&path)")
-            && parser.contains("adapter.tree_sitter_language_for_path(&path)")
+        parser.contains("let path = snapshot.path.as_path()")
+            && parser.contains("adapter.grammar_name_for_path(path)")
+            && parser.contains("adapter.tree_sitter_language_for_path(path)")
             && parser.contains("grammar_name: &'static str"),
         "the parser cache must key and load the adapter-selected grammar variant"
     );
@@ -2809,8 +2811,8 @@ fn receiver_method_dispatch_narrows_by_type() {
         declared_receiver_resolver.contains("resolve_class(")
             && declared_receiver_resolver
                 .contains("declared_receiver_candidates_with_one_identity")
-            && identity_gate.contains("first_identity")
-            && identity_gate.contains("candidates.iter().all"),
+            && identity_gate.contains("class_symbols_share_semantic_identity(global, first, *symbol)")
+            && identity_gate.contains(".all("),
         "declared receiver resolution must try scoped resolve_class first and fail closed unless every fallback candidate shares one semantic identity"
     );
     // The fallback when caller_file is unavailable must NOT be a
@@ -3061,7 +3063,7 @@ fn compiler_has_one_precision_level() {
         "the compiler must keep one precision level; remove these reintroductions:\n{}",
         offenders.join("\n")
     );
-    let schema = read(&root.join("schemas/bonsai-native-export-v12.schema.json"));
+    let schema = read(&root.join("schemas/bonsai-native-export-v13.schema.json"));
     assert!(
         !schema.contains("precision"),
         "the native export schema must not carry per-edge precision labels"
@@ -4651,10 +4653,18 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
             && !taint_graph_body.contains("build_fingerprint_hash()"),
         "taint graph sidecar must bind matcher policy, IDG semantics, source content, dependency metadata, and rule/config fingerprint without whole-binary invalidation"
     );
-    let retrieval_pipeline_body = function_body(&retrieval, "pipeline_hash_for_source_fingerprints");
+    let retrieval_pipeline_body = format!(
+        "{} {}",
+        function_body(&retrieval, "pipeline_hash_for_source_fingerprints"),
+        function_body(&retrieval, "pipeline_hash_for_compiler_inputs"),
+    );
     let idg_pipeline_body = function_body(&workspace, "idg_pipeline_hash");
     assert!(
         retrieval_pipeline_body.contains("RETRIEVAL_SCHEMA_VERSION")
+            && retrieval_pipeline_body.contains("COMPILER_OBJECT_CACHE_VERSION")
+            && retrieval_pipeline_body.contains("MATCHER_POLICY_FINGERPRINT")
+            && retrieval_pipeline_body.contains("frontend_abi.to_le_bytes()")
+            && retrieval_pipeline_body.contains("semantic_policy.to_le_bytes()")
             && retrieval_pipeline_body.contains("source_fingerprints_content_fingerprint")
             && retrieval_pipeline_body.contains("dependency_metadata_fingerprint(root)")
             && !retrieval_pipeline_body.contains("build_fingerprint"),
@@ -6520,6 +6530,7 @@ fn critical_compiler_workers_share_the_stack_hardened_execution_contract() {
     let security_execution = read(&root.join("crates/security/src/analysis/execution.rs"));
     let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
     let security_matcher = read(&root.join("crates/security/src/matcher/mod.rs"));
+    let factstore_writer = read(&root.join("crates/factstore/src/writer.rs"));
 
     let stack_contract = function_body(&resources, "compiler_worker_stack_bytes");
     assert!(
@@ -6535,6 +6546,12 @@ fn critical_compiler_workers_share_the_stack_hardened_execution_contract() {
             && compiler_worklist.contains("compiler_worker_stack_bytes")
             && compiler_worklist.contains("bonsai-compiler-object-"),
         "compiler-object worklists must not use unnamed platform-default threads"
+    );
+
+    let persistence = function_body(&factstore_writer, "create_from_prepared");
+    assert!(
+        persistence.contains("compiler_worker_stack_bytes") && persistence.contains("factstore-writer"),
+        "streamed compiler serializers must share the compiler worker stack contract"
     );
 
     let idg_build = function_body(&idg_adapter, "build_with_file_info_and_options_scoped");

@@ -3378,6 +3378,10 @@ pub(crate) enum CacheAction {
                       callgraph, IDG, export, and compatibility files written \
                       by the engine.\n\
                       \n\
+                      Requires matching workspace-cache ownership. Refuses \
+                      project roots, ancestors, directory links, and unknown \
+                      top-level entries before a recursive clear.\n\
+                      \n\
                       In-process caches don't need clearing — they drop at \
                       process exit. Use `--no-cache` / `BONSAI_NO_CACHE=1` for \
                       one exact invocation that bypasses both memo caches and \
@@ -3392,7 +3396,7 @@ pub(crate) enum CacheAction {
                       # Remove cache entries whose workspace root no longer exists\n  \
                       $ bonsai-ninja cache clear --orphans\n  \
                       \n  \
-                      # Remove a legacy in-tree .bonsai directory\n  \
+                      # Remove legacy analysis files, preserving .bonsai/rules\n  \
                       $ bonsai-ninja cache clear --legacy ~/src/project")
     )]
     Clear {
@@ -3400,7 +3404,7 @@ pub(crate) enum CacheAction {
         /// Defaults to the current directory.
         workspace: Option<PathBuf>,
         /// Instead of one workspace, sweep the shared OS cache root and
-        /// remove every entry whose recorded workspace root no longer exists
+        /// remove entries whose attributed workspace root is confirmed missing
         /// (deleted clones, throwaway fixtures). Entries whose root still
         /// exists are never touched. The engine runs the same sweep at most
         /// once per day when a new workspace is first cached.
@@ -3412,10 +3416,10 @@ pub(crate) enum CacheAction {
         /// a dataflow recompute without touching unrelated sidecars.
         #[arg(long)]
         dataflow_only: bool,
-        /// Remove the legacy in-tree `<WORKSPACE>/.bonsai` directory left by
-        /// releases that cached inside the workspace. Acts only when that
-        /// directory is not the active cache directory; the external cache
-        /// is untouched. `cache stats` reports such a directory.
+        /// Remove recognized legacy analysis files in `<WORKSPACE>/.bonsai`.
+        /// Preserves current rule overlays, links, and unrecognized files;
+        /// removes the parent only when empty. Acts only when the directory
+        /// is not the active cache; the external cache is untouched.
         #[arg(long, default_value_t = false, conflicts_with_all = ["orphans", "dataflow_only"])]
         legacy: bool,
     },

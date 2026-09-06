@@ -673,9 +673,11 @@ fn matcher_policy_fingerprint_matches_current_semantics() {
     // Bumped 0x0039 → 0x003a when rule-declared external callable identity
     // began failing closed on compiler-proven lexical/workspace collisions
     // and semantic decorator configuration stopped becoming a text anchor.
+    // Bumped 0x003a → 0x003e for exact CFG cleanup/receiver/callback identity
+    // and removal of an unsound configured-regex transfer-site prefilter.
     assert_eq!(
         bonsai_security::MATCHER_POLICY_FINGERPRINT,
-        0x4d41_5443_4845_525f_504f_4c49_4359_003a_u128
+        0x4d41_5443_4845_525f_504f_4c49_4359_003e_u128
     );
 }
 

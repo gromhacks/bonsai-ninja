@@ -321,6 +321,29 @@ func entry(Input []Thing, item Thing) {
 }
 
 #[test]
+fn parallel_index_reads_preserve_each_rhs_value_provenance() {
+    let db = db_with(
+        "package main\nfunc entry(xs, ys []string, i, j int) { a, b := xs[i], ys[j]; sink(a); sink(b) }\n",
+    );
+    let global = db.global_index();
+    let decl = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "entry")
+        .unwrap();
+    let mut assignments = Vec::new();
+    collect_assigns(&decl.flow_events, &mut assignments);
+    for (target, owner) in [("a", "xs"), ("b", "ys")] {
+        let assignment = assignments.iter().find(|(name, _, _, _)| name == target).unwrap();
+        assert_eq!(
+            assignment.3,
+            [owner],
+            "{target} must retain its own stored value, not be mistaken for comma-ok: {assignments:?}"
+        );
+    }
+}
+
+#[test]
 fn dynamic_lookup_key_selects_but_does_not_taint_stored_value() {
     let db = db_with(
         r#"

@@ -267,12 +267,9 @@ pub struct FactIndex {
     by_kind: AHashMap<String, Vec<usize>>,
     by_file: AHashMap<String, Vec<usize>>,
     by_symbol: AHashMap<String, Vec<usize>>,
-    by_prefix: AHashMap<String, Vec<usize>>,
-    by_token: AHashMap<String, Vec<usize>>,
     by_trigram: AHashMap<String, Vec<usize>>,
     by_caller: AHashMap<String, Vec<usize>>,
     by_callee: AHashMap<String, Vec<usize>>,
-    by_source_sink: AHashMap<String, Vec<usize>>,
 }
 
 /// Query against a [`FactIndex`].
@@ -416,23 +413,11 @@ impl FactIndex {
                 .collect());
         }
         let lower = text.to_lowercase();
-        let mut sets = Vec::new();
-        if lower.len() >= 3 {
-            for tri in trigrams(&lower) {
-                if let Some(idxs) = self.by_trigram.get(&tri) {
-                    sets.push(idxs.iter().copied().collect::<AHashSet<_>>());
-                }
-            }
-        }
-        if sets.is_empty() {
-            let prefix_key = prefix_key(&lower);
-            if let Some(idxs) = self.by_prefix.get(&prefix_key) {
-                return Ok(idxs.clone());
-            }
-            let token = token_key(&lower);
-            if let Some(idxs) = self.by_token.get(&token) {
-                return Ok(idxs.clone());
-            }
+        let query_trigrams = trigrams(&lower);
+        if query_trigrams.is_empty() {
+            // A token/prefix lookup cannot prove a substring absent inside a
+            // longer token. Fewer than three Unicode scalar values have no
+            // trigram proof, so perform the exact candidate-text check.
             return Ok(self
                 .docs
                 .iter()
@@ -440,14 +425,19 @@ impl FactIndex {
                 .filter_map(|(idx, doc)| doc.normalized_search_text.contains(&lower).then_some(idx))
                 .collect());
         }
-        let mut iter = sets.into_iter();
-        let Some(mut acc) = iter.next() else {
-            return Ok(Vec::new());
-        };
-        for set in iter {
-            acc.retain(|idx| set.contains(idx));
+        let mut postings = Vec::new();
+        for tri in query_trigrams {
+            let Some(indices) = self.by_trigram.get(&tri) else {
+                return Ok(Vec::new());
+            };
+            postings.push(indices.as_slice());
         }
-        Ok(acc.into_iter().collect())
+        postings.sort_unstable_by_key(|indices| indices.len());
+        let mut candidates = postings[0].to_vec();
+        for indices in &postings[1..] {
+            candidates.retain(|idx| indices.binary_search(idx).is_ok());
+        }
+        Ok(candidates)
     }
 
     fn matches_filters(doc: &FactDoc, query: &RetrievalQuery<'_>) -> bool {
@@ -483,14 +473,9 @@ impl FactIndex {
             push_idx(&mut self.by_file, doc.file_path.clone(), idx);
             if let Some(symbol) = &doc.symbol_name {
                 push_idx(&mut self.by_symbol, symbol.to_lowercase(), idx);
-                push_idx(&mut self.by_prefix, prefix_key(symbol), idx);
             }
             for stable_id in &doc.stable_ids {
                 push_idx(&mut self.by_stable_id, stable_id.clone(), idx);
-            }
-            for token in tokens(&doc.normalized_search_text) {
-                push_idx(&mut self.by_token, token.clone(), idx);
-                push_idx(&mut self.by_prefix, prefix_key(&token), idx);
             }
             for tri in trigrams(&doc.normalized_search_text) {
                 push_idx(&mut self.by_trigram, tri, idx);
@@ -501,20 +486,14 @@ impl FactIndex {
                     push_idx(&mut self.by_callee, callee, idx);
                 }
             }
-            for key in source_sink_keys(doc) {
-                push_idx(&mut self.by_source_sink, key, idx);
-            }
         }
         dedup_map(&mut self.by_stable_id);
         dedup_map(&mut self.by_kind);
         dedup_map(&mut self.by_file);
         dedup_map(&mut self.by_symbol);
-        dedup_map(&mut self.by_prefix);
-        dedup_map(&mut self.by_token);
         dedup_map(&mut self.by_trigram);
         dedup_map(&mut self.by_caller);
         dedup_map(&mut self.by_callee);
-        dedup_map(&mut self.by_source_sink);
     }
 }
 
@@ -1650,9 +1629,16 @@ fn query_candidate_partitions(
     }
 
     let mut paths = BTreeSet::new();
+    let mut next_file = 0usize;
     for &key in &directory.page_keys {
         let page = decode_candidate_page(reader, key, directory)?;
         for candidate in page.entries {
+            if candidate.file as usize != next_file {
+                return Err(invalid_message(
+                    "retrieval candidate file coverage is not canonical",
+                ));
+            }
+            next_file += 1;
             let file = &directory.files[candidate.file as usize];
             // Fact-kind is deliberately not encoded into the candidate
             // filter. This can admit an extra file when different fact kinds
@@ -1667,6 +1653,9 @@ fn query_candidate_partitions(
             }
             paths.insert(file.clone());
         }
+    }
+    if next_file != directory.files.len() {
+        return Err(invalid_message("retrieval candidate file coverage is incomplete"));
     }
     let mut paths = paths.into_iter().collect::<Vec<_>>();
     if query.limit > 0 {
@@ -1821,7 +1810,12 @@ fn prune_obsolete_retrieval_sidecars(current_path: &Path) -> std::io::Result<()>
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with("retrieval.v") && name.ends_with(".factstore") {
+        let version = name
+            .strip_prefix("retrieval.v")
+            .and_then(|name| name.strip_suffix(".factstore"))
+            .filter(|version| !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|version| version.parse::<u32>().ok());
+        if version.is_some_and(|version| version < RETRIEVAL_SCHEMA_VERSION) {
             std::fs::remove_file(path)?;
         }
     }
@@ -1914,9 +1908,29 @@ where
     I: IntoIterator<Item = (P, u64)>,
     P: AsRef<Path>,
 {
+    pipeline_hash_for_compiler_inputs(
+        workspace_root,
+        fingerprints,
+        bonsai_workspace::COMPILER_OBJECT_CACHE_VERSION,
+        bonsai_common::MATCHER_POLICY_FINGERPRINT,
+    )
+}
+
+fn pipeline_hash_for_compiler_inputs<I, P>(
+    workspace_root: Option<&Path>,
+    fingerprints: I,
+    frontend_abi: u32,
+    semantic_policy: u128,
+) -> u64
+where
+    I: IntoIterator<Item = (P, u64)>,
+    P: AsRef<Path>,
+{
     let mut h = StableHasher::new();
     h.absorb(&PIPELINE_SALT.to_le_bytes());
     h.absorb(&RETRIEVAL_SCHEMA_VERSION.to_le_bytes());
+    h.absorb(&frontend_abi.to_le_bytes());
+    h.absorb(&semantic_policy.to_le_bytes());
     h.absorb(&source_fingerprints_content_fingerprint(fingerprints).to_le_bytes());
     if let Some(root) = workspace_root {
         h.absorb(&dependency_metadata_fingerprint(root).to_le_bytes());
@@ -2566,17 +2580,6 @@ fn trigram_hashes(value: &str) -> Vec<u64> {
         .collect()
 }
 
-fn prefix_key(value: &str) -> String {
-    value.to_lowercase().chars().take(3).collect()
-}
-
-fn token_key(value: &str) -> String {
-    tokens(value)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| value.to_lowercase())
-}
-
 fn relevance_key(doc: &FactDoc, query: &str) -> (u8, usize) {
     let query = query.to_lowercase();
     let name = doc
@@ -2616,17 +2619,6 @@ fn edge_terms(doc: &FactDoc) -> Option<(String, String)> {
         doc.enclosing_function.as_ref()?.to_lowercase(),
         doc.symbol_name.as_ref()?.to_lowercase(),
     ))
-}
-
-fn source_sink_keys(doc: &FactDoc) -> Vec<String> {
-    let mut keys = Vec::new();
-    if let Some(id) = doc.stable_ids.iter().find(|id| id.starts_with("S:")) {
-        keys.push(format!("source:{id}"));
-    }
-    if doc.kind == "finding" {
-        keys.push("finding".to_string());
-    }
-    keys
 }
 
 fn dedup_docs(mut docs: Vec<FactDoc>) -> Vec<FactDoc> {
@@ -2842,6 +2834,37 @@ mod tests {
         let symbols: Vec<&str> = hits.iter().filter_map(|doc| doc.symbol_name.as_deref()).collect();
 
         assert_eq!(symbols, vec!["test_marker"]);
+    }
+
+    #[test]
+    fn short_substring_queries_keep_matches_inside_longer_symbols() {
+        let index = FactIndex::from_docs(vec![
+            sample_doc("ab", "function", 1),
+            sample_doc("cabinet", "function", 2),
+            sample_doc("é", "function", 3),
+            sample_doc("café", "function", 4),
+        ]);
+        for text in ["a", "ab", "é", "caf", "bin", "missing"] {
+            let expected = index
+                .docs()
+                .iter()
+                .filter(|doc| doc.normalized_search_text.contains(text))
+                .map(|doc| doc.fact_id.as_str())
+                .collect::<BTreeSet<_>>();
+            let actual = index
+                .query(&RetrievalQuery {
+                    text,
+                    ..RetrievalQuery::default()
+                })
+                .expect("query")
+                .into_iter()
+                .map(|doc| doc.fact_id.as_str())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                actual, expected,
+                "candidate lookup must not omit the substring {text:?}"
+            );
+        }
     }
 
     #[test]
@@ -3528,6 +3551,26 @@ interface HttpServerTransport {
     }
 
     #[test]
+    fn retrieval_pipeline_includes_compiler_and_semantic_policy_versions() {
+        let inputs = [("app.py", 42)];
+        let abi = bonsai_workspace::COMPILER_OBJECT_CACHE_VERSION;
+        let policy = bonsai_common::MATCHER_POLICY_FINGERPRINT;
+        let current = pipeline_hash_for_source_fingerprints(None, inputs);
+        assert_eq!(
+            current,
+            pipeline_hash_for_compiler_inputs(None, inputs, abi, policy)
+        );
+        assert_ne!(
+            current,
+            pipeline_hash_for_compiler_inputs(None, inputs, abi - 1, policy)
+        );
+        assert_ne!(
+            current,
+            pipeline_hash_for_compiler_inputs(None, inputs, abi, policy - 1)
+        );
+    }
+
+    #[test]
     fn sidecar_rejects_pipeline_change() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("retrieval.factstore");
@@ -3626,8 +3669,14 @@ interface HttpServerTransport {
             RETRIEVAL_SCHEMA_VERSION.saturating_sub(1)
         ));
         let unrelated = dir.path().join("callgraph.v20.factstore");
+        let future = dir
+            .path()
+            .join(format!("retrieval.v{}.factstore", RETRIEVAL_SCHEMA_VERSION + 1));
+        let non_version = dir.path().join("retrieval.vnotes.factstore");
         std::fs::write(&old, b"old").expect("write old retrieval sidecar");
         std::fs::write(&unrelated, b"keep").expect("write unrelated sidecar");
+        std::fs::write(&future, b"keep").expect("write newer sidecar");
+        std::fs::write(&non_version, b"keep").expect("write unrelated name");
 
         let snapshot = FactSnapshot {
             schema_version: RETRIEVAL_SCHEMA_VERSION,
@@ -3639,6 +3688,55 @@ interface HttpServerTransport {
         assert!(current.exists());
         assert!(!old.exists());
         assert!(unrelated.exists());
+        assert!(
+            future.exists(),
+            "an older binary must not delete a newer binary's sidecar"
+        );
+        assert!(
+            non_version.exists(),
+            "cleanup must recognize a numeric schema version"
+        );
+    }
+
+    #[test]
+    fn candidate_query_rejects_missing_file_coverage() {
+        for files_in_pages in [vec![vec![1]], vec![vec![0]], vec![vec![0], vec![0, 1]]] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("partial.factstore");
+            let writer = FactStoreWriter::create(&path, RETRIEVAL_TABLE_ID, 101).expect("writer");
+            let mut keys = Vec::new();
+            for file_ids in files_in_pages {
+                let entries = file_ids
+                    .into_iter()
+                    .map(|file| {
+                        CandidateBloom::from_hashes(file, trigram_hashes("marker").into_iter().collect())
+                            .expect("bloom")
+                    })
+                    .collect();
+                write_candidate_page(&writer, &mut keys, CandidateBloomPage { entries }).expect("page");
+            }
+            writer.finish().expect("finish");
+            let reader = FactStoreReader::open(&path, RETRIEVAL_TABLE_ID, 101).expect("reader");
+            let directory = CandidateDirectory {
+                schema_version: RETRIEVAL_SCHEMA_VERSION,
+                pipeline_fingerprint: 101,
+                doc_count: 2,
+                files: vec!["a.py".to_string(), "b.py".to_string()],
+                page_keys: keys,
+            };
+            assert!(
+                query_candidate_partitions(
+                    &reader,
+                    &directory,
+                    &RetrievalQuery {
+                        text: "marker",
+                        ..RetrievalQuery::default()
+                    }
+                )
+                .is_err(),
+                "missing or duplicated candidate partitions must not silently omit files"
+            );
+        }
     }
 
     #[test]

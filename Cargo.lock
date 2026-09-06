@@ -359,6 +359,7 @@ name = "bonsai-ninja-factstore"
 version = "0.2.15"
 dependencies = [
  "ahash",
+ "bonsai-ninja-common",
  "crossbeam-channel",
  "lru",
  "parking_lot",

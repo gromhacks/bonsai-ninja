@@ -43,6 +43,7 @@ pub struct ClassOut {
     pub kind: String,
     pub file: String,
     pub line: u32,
+    pub column: u32,
     /// `methods.len()` cached on the row so JSON consumers can
     /// sort / filter without re-counting.
     pub method_count: usize,
@@ -75,6 +76,20 @@ pub fn classes(ws: &Workspace, f: &ClassesFilters<'_>) -> Result<Vec<ClassOut>, 
                 return per_file.into_iter();
             }
             let decls = global.decls_in(file);
+            let mut members_by_parent = ahash::AHashMap::<_, Vec<_>>::new();
+            for member in decls {
+                if matches!(
+                    member.kind,
+                    DeclKind::Method | DeclKind::Constructor | DeclKind::Function
+                ) {
+                    if let Some(parent) = member.parent {
+                        members_by_parent.entry(parent).or_default().push(member);
+                    }
+                }
+            }
+            for members in members_by_parent.values_mut() {
+                members.sort_by_key(|member| member.span);
+            }
             for class in decls {
                 if !matches!(
                     class.kind,
@@ -87,7 +102,7 @@ pub fn classes(ws: &Workspace, f: &ClassesFilters<'_>) -> Result<Vec<ClassOut>, 
                     continue;
                 }
                 let kind_str = format!("{:?}", class.kind).to_lowercase();
-                if f.kind.is_some_and(|k| !kind_str.contains(&k.to_lowercase())) {
+                if f.kind.is_some_and(|kind| !kind_str.eq_ignore_ascii_case(kind)) {
                     continue;
                 }
                 if !name_match(&class.name) {
@@ -96,35 +111,28 @@ pub fn classes(ws: &Workspace, f: &ClassesFilters<'_>) -> Result<Vec<ClassOut>, 
                 // Methods are callable decls whose adapter-emitted
                 // parent points at this class. Browse uses the same
                 // semantic ownership fact as callgraph/security.
-                let methods: Vec<String> = decls
-                    .iter()
-                    .filter(|member| {
-                        matches!(
-                            member.kind,
-                            DeclKind::Method | DeclKind::Constructor | DeclKind::Function
-                        )
-                    })
-                    .filter(|member| member.parent == Some(class.symbol))
-                    .map(|member| member.name.clone())
-                    .collect();
+                let members = members_by_parent
+                    .get(&class.symbol)
+                    .map_or(&[][..], Vec::as_slice);
                 if let Some(needle) = f.has_method {
-                    if !methods.iter().any(|m| m.contains(needle)) {
+                    if !members.iter().any(|member| member.name.contains(needle)) {
                         continue;
                     }
                 }
                 if let Some(min_count) = f.min_methods {
-                    if methods.len() < min_count {
+                    if members.len() < min_count {
                         continue;
                     }
                 }
-                let (path, line, _) = format_span(&class.name_span, ws);
+                let (path, line, column) = format_span(&class.name_span, ws);
                 per_file.push(ClassOut {
                     name: class.name.clone(),
                     kind: kind_str,
                     file: path,
                     line,
-                    method_count: methods.len(),
-                    methods,
+                    column,
+                    method_count: members.len(),
+                    methods: members.iter().map(|member| member.name.clone()).collect(),
                 });
             }
             per_file.into_iter()
@@ -142,6 +150,7 @@ pub fn classes(ws: &Workspace, f: &ClassesFilters<'_>) -> Result<Vec<ClassOut>, 
                     .then_with(|| a.name.cmp(&b.name))
                     .then_with(|| a.file.cmp(&b.file))
                     .then_with(|| a.line.cmp(&b.line))
+                    .then_with(|| a.column.cmp(&b.column))
             })
     });
     Ok(out)
@@ -158,4 +167,40 @@ fn class_relevance_key(row: &ClassOut, f: &ClassesFilters<'_>) -> ((u8, usize), 
         best_textual_relevance_key(row.methods.iter().map(String::as_str), Some(method), false)
     });
     (kind, name, method)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn class_kinds_are_exact_and_member_lists_follow_compiler_ownership() {
+        let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+        ws.vfs().write(
+            "types.js",
+            "class Alpha { first() {} second() {} } class Beta { third() {} }\n",
+        );
+        let rows = classes(
+            &ws,
+            &ClassesFilters {
+                kind: Some("CLASS"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "Alpha");
+        assert_eq!(rows[0].methods, ["first", "second"]);
+        assert_eq!(rows[1].methods, ["third"]);
+        assert!(rows[0].column < rows[1].column);
+        assert!(classes(
+            &ws,
+            &ClassesFilters {
+                kind: Some("ass"),
+                ..Default::default()
+            }
+        )
+        .unwrap()
+        .is_empty());
+    }
 }

@@ -162,6 +162,9 @@ fn dependency_inventory_does_not_project_one_package_signal_onto_siblings() {
 
     let mut rule = package_rule("log4j-core");
     rule.packages.push("commons-io".to_string());
+    rule.manifests.push("pom.xml".to_string());
+    rule.lockfiles.push("Cargo.lock".to_string());
+    std::fs::write(root.join("Cargo.lock"), "version = 3\n").expect("unrelated lockfile");
 
     let mut pack = pack_with_bundled_metadata();
     pack.packs.insert(
@@ -186,6 +189,43 @@ fn dependency_inventory_does_not_project_one_package_signal_onto_siblings() {
         "did not expect commons-io evidence from a log4j-core manifest, got {:?}",
         inventory.rows
     );
+    let row = inventory.rows.iter().find(|row| row.key == "log4j-core").unwrap();
+    assert!(row.signals.iter().any(|signal| signal == "manifests:pom.xml"));
+    assert!(row.signals.iter().all(|signal| signal != "lockfiles:Cargo.lock"));
+    assert_eq!(row.evidence_files, ["pom.xml"]);
+    std::fs::remove_dir_all(root).expect("fixture cleanup");
+}
+
+#[test]
+fn a_manifest_filename_without_package_evidence_never_establishes_a_dependency() {
+    let root = temp_root("bonsai-deps-unrelated-manifest");
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\ndependencies = [\"Flask>=3\"]\n",
+    )
+    .expect("manifest");
+    let ws = Workspace::new(std::sync::Arc::new(bonsai_lang_api::LanguageRegistry::new()));
+    let mut rule = python_package_rule("django");
+    rule.packages.push("pyramid".to_string());
+    rule.manifests.push("pyproject.toml".to_string());
+    let mut pack = pack_with_bundled_metadata();
+    pack.packs.insert(
+        "python".to_string(),
+        LanguagePack {
+            language: "python".to_string(),
+            sources: Vec::new(),
+            sinks: vec![rule],
+            sanitizers: Vec::new(),
+            typing: Vec::new(),
+        },
+    );
+    let inventory = build_inventory(&pack, &ws, &root);
+    assert!(
+        inventory.rows.is_empty(),
+        "unrelated packages: {:?}",
+        inventory.rows
+    );
+    std::fs::remove_dir_all(root).expect("fixture cleanup");
 }
 
 #[test]

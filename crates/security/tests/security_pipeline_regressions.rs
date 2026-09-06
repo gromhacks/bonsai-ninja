@@ -61,6 +61,187 @@ const ALL_LANGS: &[&str] = &[
     "typescript",
 ];
 
+#[test]
+fn ruby_returning_raise_method_does_not_erase_the_following_sink() {
+    let ws = workspace(&[(
+        "/app/returning_raise.rb",
+        "def raise(value)\n  value\nend\ndef entry\n  value = source()\n  raise(value)\n  sink(value)\nend\n",
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &rulepack("ruby", "source", "sink"),
+        TaintAnalysisOptions::default(),
+    )
+    .expect("Ruby returning method analysis");
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "returning raise must not lose the sink: {:#?}",
+        report.findings
+    );
+    assert_eq!(report.findings[0].finding.status, FindingStatus::Unsanitized);
+}
+
+#[test]
+fn python_finite_map_proofs_do_not_erase_dynamic_values() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    ws.vfs().write(
+        "lookup.py",
+        r#"
+def fallback_entry():
+    value = source()
+    choices = {"known": "literal"}
+    selected = choices.get("missing", value)
+    sink(selected)
+
+def expression_entry():
+    value = source()
+    choices = {"known": "literal"}
+    selected = choices.get("known") + value
+    sink(selected)
+
+def call_value_entry():
+    choices = {"known": source()}
+    selected = choices.get("known")
+    sink(selected)
+
+def constant_entry():
+    value = source()
+    choices = {"known": "literal"}
+    selected = choices.get(value, "fallback")
+    sink(selected)
+"#,
+    );
+    let report = run_taint_analysis(
+        &ws,
+        &rulepack("python", "source", "sink"),
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..Default::default()
+        },
+    )
+    .expect("finite-map boundary analysis");
+    for function in ["fallback_entry", "expression_entry", "call_value_entry"] {
+        let finding = report
+            .findings
+            .iter()
+            .find(|combined| combined.finding.sink.enclosing_fn.as_deref() == Some(function))
+            .unwrap_or_else(|| panic!("lost dynamic flow in {function}: {:#?}", report.findings));
+        assert_eq!(finding.finding.status, FindingStatus::Unsanitized, "{function}");
+        assert!(finding.finding.representative_flow_id.is_some());
+    }
+    assert!(
+        report
+            .findings
+            .iter()
+            .filter(|combined| combined.finding.sink.enclosing_fn.as_deref() == Some("constant_entry"))
+            .all(|combined| combined.finding.status == FindingStatus::Sanitized),
+        "exact constant selection should not report an unsafe flow"
+    );
+}
+
+#[test]
+fn php_compound_guard_never_hides_an_inverted_or_late_configuration_flow() {
+    let mut pack = constrained_call_sink_rulepack("php", "source", "configure");
+    let sink = &mut pack.packs.get_mut("php").unwrap().sinks[0];
+    sink.tag = Some("ssrf".to_string());
+    sink.constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(2),
+            kw: None,
+        },
+    }]);
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        compiler_guard: Some(bonsai_security::CompilerGuardSemantics {
+            capability: "terminal-predicate.compound-static-allowlist".to_string(),
+            required_evidence: [
+                "guarded-argument:2=predicate-argument:0",
+                "predicate-complete:true",
+                "finite-static-string-membership:true",
+                "parser-call:split_endpoint",
+                "scheme-component:protocol",
+                "scheme-value:string:secure",
+                "membership-call:member_of",
+                "membership-component:server",
+                "membership-argument:2=boolean:true",
+                "related-call:configure:argument:0=guarded-argument:0",
+                "related-call:configure:argument:1=place:REDIRECTS",
+                "related-call:configure:argument:2=boolean:false",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            forbidden_evidence: Vec::new(),
+            sanitizer_tag: "ssrf".to_string(),
+            category: "compound-guard-test".to_string(),
+        }),
+        ..Default::default()
+    });
+    let source = r#"<?php
+class Gateway {
+  private const APPROVED = ['api.example'];
+  public static function fetch(): void {
+    $input = source();
+    $parsed = split_endpoint($input);
+    if (($parsed['protocol'] ?? '') !== 'secure'
+        || !member_of($parsed['server'] ?? '', self::APPROVED, true)) { return; }
+    $handle = create_handle();
+    configure($handle, TARGET, $input);
+    configure($handle, REDIRECTS, false);
+    consume($handle);
+  }
+}
+"#;
+    for (label, source, expected) in [
+        ("safe", source.to_string(), FindingStatus::Sanitized),
+        (
+            "inverted",
+            source.replace("!==", "==="),
+            FindingStatus::Unsanitized,
+        ),
+        (
+            "late",
+            source.replace(
+                "configure($handle, REDIRECTS",
+                "consume($handle); configure($handle, REDIRECTS",
+            ),
+            FindingStatus::Unsanitized,
+        ),
+        (
+            "conditional",
+            source.replace(
+                "configure($handle, REDIRECTS",
+                "if ($enabled) configure($handle, REDIRECTS",
+            ),
+            FindingStatus::Unsanitized,
+        ),
+        (
+            "overwrite",
+            source.replace(
+                "configure($handle, TARGET",
+                "$input = source(); configure($handle, TARGET",
+            ),
+            FindingStatus::Unsanitized,
+        ),
+    ] {
+        let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+        ws.vfs().write("guard.php", Arc::<str>::from(source));
+        let report = run_taint_analysis(
+            &ws,
+            &pack,
+            TaintAnalysisOptions {
+                show_sanitized: true,
+                ..Default::default()
+            },
+        )
+        .expect("PHP guard analysis");
+        assert_eq!(report.findings.len(), 1, "{label}: {:#?}", report.findings);
+        let finding = &report.findings[0].finding;
+        assert_eq!(finding.status, expected, "{label}: {finding:#?}");
+        assert!(finding.representative_flow_id.is_some(), "{label}");
+    }
+}
+
 /// Fixture suites that together cover taint-carrying graph shapes:
 /// assignment chains, branch joins, callbacks, cross-file calls, receiver
 /// state, sanitizer precision, exception regions, clean twins, and the

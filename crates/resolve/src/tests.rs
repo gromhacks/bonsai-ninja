@@ -247,7 +247,9 @@ fn unqualified_callable_resolution_accepts_same_directory_cpp_globals() {
         2 => Some("src/executor.cpp".to_string()),
         _ => None,
     };
-    let ctx = ResolveContext::new(caller_file, &caller_module).with_file_path_lookup(&path_lookup);
+    let ctx = ResolveContext::new(caller_file, &caller_module)
+        .with_file_path_lookup(&path_lookup)
+        .with_same_directory_unqualified_calls(true);
     let hits = resolve_callable_with_context(&global, "execute", &ctx);
 
     assert_eq!(hits.len(), 1);
@@ -274,6 +276,100 @@ fn unqualified_callable_resolution_rejects_same_directory_python_file_modules() 
     let hits = resolve_callable_with_context(&global, "run_pipeline", &ctx);
 
     assert!(hits.is_empty());
+}
+
+#[test]
+fn empty_module_metadata_does_not_enable_undeclared_cross_file_linkage() {
+    let mut global = GlobalIndex::new();
+    let helper = FileId::new(2);
+    insert_one(
+        &mut global,
+        helper,
+        decl(helper, DeclKind::Function, "execute", &[], 10),
+    );
+    let module = ModulePath::default();
+    let paths = |file| Some(format!("src/{file}.unknown"));
+    let ctx = ResolveContext::new(FileId::new(1), &module).with_file_path_lookup(&paths);
+    assert!(resolve_callable_with_context(&global, "execute", &ctx).is_empty());
+}
+
+#[test]
+fn qualified_call_resolution_does_not_drop_an_unresolved_receiver_field() {
+    let mut global = GlobalIndex::new();
+    let helper = FileId::new(2);
+    insert_one(
+        &mut global,
+        helper,
+        decl(helper, DeclKind::Function, "execute", &["context"], 10),
+    );
+    let module = ModulePath::from_segments(["app"]);
+    let ctx = ResolveContext::new(FileId::new(1), &module);
+    assert!(resolve_callable_with_context(&global, "context.unrelated.execute", &ctx).is_empty());
+    assert_eq!(
+        resolve_callable_with_context(&global, "context.execute", &ctx).len(),
+        1
+    );
+}
+
+#[test]
+fn unresolved_qualified_type_alias_does_not_bind_an_unrelated_short_type() {
+    let mut global = GlobalIndex::new();
+    let helper = FileId::new(2);
+    insert_one(
+        &mut global,
+        helper,
+        decl(helper, DeclKind::Class, "Client", &["other"], 10),
+    );
+    let module = ModulePath::from_segments(["app"]);
+    let aliases = AHashMap::from_iter([(
+        "client".into(),
+        AliasTarget::Type {
+            type_name: "external.Client".into(),
+        },
+    )]);
+    let ctx = ResolveContext::new(FileId::new(1), &module).with_alias_map(&aliases);
+    assert!(resolve_class(&global, "client", &ctx).is_empty());
+}
+
+#[test]
+fn type_families_preserve_nested_qualified_identity() {
+    for same_file in [false, true] {
+        let mut global = GlobalIndex::new();
+        let file = FileId::new(1);
+        let other_file = if same_file { file } else { FileId::new(2) };
+        let mut left = decl(file, DeclKind::Class, "Inner", &["app"], 10);
+        left.qualified_name = Some("app.First.Inner".into());
+        let mut right = decl(other_file, DeclKind::Class, "Inner", &["app"], 30);
+        right.qualified_name = Some("app.Second.Inner".into());
+        if same_file {
+            right.symbol = SymbolId::new(1);
+            global.insert(DeclIndex {
+                file,
+                defs: vec![left, right],
+                ..DeclIndex::default()
+            });
+        } else {
+            insert_one(&mut global, file, left);
+            insert_one(&mut global, other_file, right);
+        }
+        let symbols = global.find_by_name("Inner");
+        assert_eq!(symbols.len(), 2);
+        assert!(!class_symbols_share_semantic_identity(
+            &global, symbols[0], symbols[1]
+        ));
+    }
+}
+
+#[test]
+fn declared_receiver_without_module_identity_does_not_merge_distinct_files() {
+    let mut global = GlobalIndex::new();
+    for raw in [1, 2] {
+        let file = FileId::new(raw);
+        insert_one(&mut global, file, decl(file, DeclKind::Class, "Client", &[], 10));
+    }
+    let module = ModulePath::from_segments(["caller"]);
+    let ctx = ResolveContext::new(FileId::new(99), &module);
+    assert!(resolve_declared_receiver_class(&global, "Client", &ctx).is_empty());
 }
 
 #[test]
@@ -517,6 +613,17 @@ fn module_target_matches_rust_root_prefixed_modules() {
         &module,
         syntax
     ));
+}
+
+#[test]
+fn empty_custom_module_prefixes_cannot_stall_normalization() {
+    let syntax = ModulePathSyntax {
+        rooted_prefixes: &["", "root::"],
+        repeatable_rooted_prefixes: &["", "up::"],
+    };
+    assert_eq!(strip_module_path_prefix("up::up::module", syntax), "module");
+    assert_eq!(strip_module_path_prefix("root::module", syntax), "module");
+    assert_eq!(strip_module_path_prefix("module", syntax), "module");
 }
 
 #[test]

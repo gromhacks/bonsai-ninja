@@ -446,7 +446,7 @@ The release workflow verifies:
 - SARIF 2.1.0 parsing and code-flow metadata;
 - HTML report generation from the canonical JSON result;
 - native JSON and graph export formats;
-- native JSON schema v12 validation across every language fixture and
+- native JSON schema v13 validation across every language fixture and
   materialized propagation mode;
 - stable IDs and page/cursor reopening;
 - the locked parser manifest contains every adapter grammar and all six native

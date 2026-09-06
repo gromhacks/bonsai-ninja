@@ -3374,6 +3374,7 @@ fn lower_ecmascript_condition_expression(
                     {
                         let type_test = ConditionExpressionFact::TypeTest {
                             span,
+                            predicate_call_span: None,
                             subject,
                             type_name,
                         };
@@ -3453,7 +3454,7 @@ fn merge_ecmascript_condition_junction(
 fn ecmascript_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
     ConditionOperandFact {
         span: span_of(file, &node),
-        direct_call_span: (node.kind() == "call_expression").then(|| span_of(file, &node)),
+        direct_call_span: bonsai_lang_api::kit::direct_call_callee_span(node, file, src, &HANDLER),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER),
         static_string: ecmascript_static_string_literal(node, src),
         static_value: ecmascript_static_scalar(node, src),
@@ -5191,8 +5192,8 @@ pub fn js_ts_module_segments(path: &std::path::Path) -> Vec<String> {
     if let Some(last_segment) = segments.last_mut() {
         // Strip exactly one source extension; `.tsx` is checked before `.ts`.
         for extension in [".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs"] {
-            if last_segment.ends_with(extension) {
-                *last_segment = last_segment.trim_end_matches(extension).to_string();
+            if let Some(stem) = last_segment.strip_suffix(extension) {
+                *last_segment = stem.to_string();
                 break;
             }
         }
@@ -5204,6 +5205,18 @@ pub fn js_ts_module_segments(path: &std::path::Path) -> Vec<String> {
 #[cfg(test)]
 mod syntax_tests {
     use super::{collect_kinds, export_statement_has_default_modifier, language_from_pack, PACK_NAME};
+
+    #[test]
+    fn module_identity_strips_only_one_source_extension() {
+        for extension in ["tsx", "ts", "jsx", "js", "mjs", "cjs"] {
+            let path = format!("src/value.{extension}.{extension}");
+            assert_eq!(
+                super::js_ts_module_segments(std::path::Path::new(&path)),
+                ["src".to_string(), format!("value.{extension}")],
+                "distinct filenames must not collapse to the same module identity"
+            );
+        }
+    }
 
     fn export_has_default_modifier(source: &str) -> bool {
         let language = language_from_pack(PACK_NAME).expect("javascript grammar");

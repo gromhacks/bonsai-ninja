@@ -33,6 +33,14 @@ fn lock_remembered_workspace_fingerprint(
 
 thread_local! {
     static CAPTURE: RefCell<Option<String>> = const { RefCell::new(None) };
+    static INCOMPLETE_OPTIONAL_EVIDENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// An optional projection can become available without a source edit (for
+/// example after semantic prewarm). Never freeze its absence in a rendered
+/// page whose ordinary freshness key contains only source/rule identities.
+pub(crate) fn mark_optional_evidence_unavailable() {
+    INCOMPLETE_OPTIONAL_EVIDENCE.set(true);
 }
 
 // Page boundaries and semantic command planning are part of the cached
@@ -46,7 +54,9 @@ thread_local! {
 // lineage rendering changed to retain exact multi-hop chains. The Git-based
 // build fingerprint is intentionally stable for an uncommitted worktree, so
 // semantic report changes must also advance this cache generation.
-const RENDER_CACHE_VERSION: u32 = 15;
+// Version 16 records unavailable scoped browse call evidence explicitly.
+// Version 17 coalesces assignment projections while retaining every RHS fact.
+const RENDER_CACHE_VERSION: u32 = 18;
 
 /// Stable structural ids are hashes of rendered chains, so the id alone
 /// cannot be inverted into the target declaration that made the query
@@ -832,7 +842,7 @@ fn save_pages_value(
     // and a security inventory that fits one page still costs a workspace
     // open before its keyed payload can be read. Replaying the rendered
     // page skips both.
-    if cache_disabled() || pages.is_empty() {
+    if cache_disabled() || pages.is_empty() || INCOMPLETE_OPTIONAL_EVIDENCE.get() {
         return Ok(());
     }
     let dir = cache_dir(workspace);

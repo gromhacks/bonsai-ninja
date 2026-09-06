@@ -11,6 +11,7 @@
 // `pub mod`. `cross_module` is internal — consumers go through the
 // `Workspace` facade.
 pub(crate) mod cache_fingerprint;
+pub use cache_fingerprint::{register_workspace_cache_root, workspace_cache_root_binding};
 pub mod callgraph_sidecar;
 pub mod class_index;
 pub(crate) mod cross_module;
@@ -1758,6 +1759,7 @@ impl Workspace {
                 "compiler-object sidecars require a complete workspace index",
             ));
         }
+        register_workspace_cache_root(root)?;
         self.inner.db.save_compiler_object_sidecar(root)
     }
 
@@ -1780,6 +1782,7 @@ impl Workspace {
                 "compiler-object sidecars require a complete workspace index",
             ));
         }
+        register_workspace_cache_root(root)?;
         self.inner
             .db
             .save_compiler_object_sidecar_with_progress(root, on_file)
@@ -1902,6 +1905,7 @@ impl Workspace {
                 "callgraph sidecars require a complete workspace index",
             ));
         }
+        register_workspace_cache_root(root)?;
         let path = callgraph_sidecar::callgraph_sidecar_path(root);
         let graph = self.cached_resolved_call_graph();
         if callgraph_sidecar::validate_callgraph_sidecar_for_db(&path, &self.inner.db).is_ok() {
@@ -2006,6 +2010,7 @@ impl Workspace {
                 "compiler linkage sidecars require a complete workspace index",
             ));
         }
+        register_workspace_cache_root(root)?;
         let path = linkage_sidecar::linkage_sidecar_path(root);
         if linkage_sidecar::validate_linkage_sidecar_for_db(&path, &self.inner.db).is_ok() {
             return Ok(());
@@ -5251,17 +5256,35 @@ impl Workspace {
             ws.inner.include_minified_sources,
         )?;
         on_event(WorkspaceOpenEvent::IngestFileRead);
-        let stable_file = ws
+        // File identity comes from the current compiler input set, not the
+        // availability or age of an optional compiler-object generation.
+        // Only directory metadata is walked; other source bodies stay cold.
+        let mut ordinal = 0usize;
+        for entry in walk_workspace_entries(&canonical_root)? {
+            if !entry.file_type().is_some_and(|kind| kind.is_file())
+                || !source_path_is_admitted(
+                    &ws.inner.registry,
+                    entry.path(),
+                    ws.inner.include_minified_sources,
+                )
+            {
+                continue;
+            }
+            if entry.path() == source.path {
+                break;
+            }
+            ordinal += 1;
+        }
+        // An explicitly requested ignored/out-of-root file has no persisted
+        // workspace identity. Its session-local slot follows the complete
+        // source set, so it cannot alias one of that set's file identities.
+        let file = FileId::new(u32::try_from(ordinal).expect("too many supported source files"));
+        let _ = ws
             .inner
             .db
-            .load_compiler_object_store_for_selected_path(&canonical_root, &source.path)
-            .ok()
-            .flatten();
+            .load_compiler_object_store_for_selected_file(&canonical_root, file, &source.path);
         let text = Arc::<str>::from(source.text);
-        let id = match stable_file {
-            Some(file) => ws.inner.vfs.write_with_id(file, source.path, text),
-            None => ws.inner.vfs.write(source.path, text),
-        };
+        let id = ws.inner.vfs.write_with_id(file, source.path, text);
         *ws.inner.reparse_counter.lock() += 1;
         on_event(WorkspaceOpenEvent::IngestFinished { files: 1 });
         on_event(WorkspaceOpenEvent::ParseStarted { files: 1 });

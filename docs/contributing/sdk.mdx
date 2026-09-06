@@ -55,6 +55,24 @@ sidecar when needed. Reduced-open projects from literal, path, or
 include/exclude filters keep auto-refresh disabled by default so later
 facade calls do not broaden the declared scope.
 
+Git-backed refreshes observe clean committed changes as well as dirty files.
+Changes to HEAD, the index, or ignore controls trigger full reconciliation;
+submodules and index flags that hide edits (`assume-unchanged` or
+`skip-worktree`) disable dirty-list acceleration. Read-only Git checks do not
+rewrite index metadata. Manifest validation applies the same hidden-index
+guard. The fallback changes scheduling only, not source scope.
+
+`read_file` prefers an exact workspace-relative path and rejects ambiguous
+suffixes. Related bodies are selected by their source location as well as
+name, so same-named methods do not substitute for each other. Line ranges are
+one-based and ascending. Cross-file tree links carry actual call-site locations
+and canonical edge IDs.
+
+Navigation retains scan-level incompleteness even when no findings are shown.
+Tree directory locators are workspace-relative (`.` for the root). Intentional
+severity filtering is counted separately from presentation truncation, and a
+finding without a real route ID does not produce a fabricated flow summary.
+
 ---
 
 ## API surface
@@ -401,7 +419,7 @@ let graphml = project.export().graphml()?;
 let cypher = project.export().cypher()?;
 ```
 
-Native JSON schema v12 emits workspace-relative code locations, typed
+Native JSON schema v13 emits workspace-relative code locations, typed
 loop-control targets, one top-level absolute `workspace_root`, and the code
 itself: `files[].source` is the full file text that every span indexes into,
 `decls[]` carry `start` / `end` byte spans, `callgraph[]` edges and taint
@@ -412,7 +430,7 @@ consumers should join locations to that root only at
 the filesystem boundary; storing or comparing location identities by absolute
 host path is unsupported. Explicit export-cache rebuilds validate the schema
 version before reuse. The complete machine-readable contract is
-[`schemas/bonsai-native-export-v12.schema.json`](../../schemas/bonsai-native-export-v12.schema.json).
+[`schemas/bonsai-native-export-v13.schema.json`](../../schemas/bonsai-native-export-v13.schema.json).
 
 ---
 
@@ -424,7 +442,7 @@ let stats = cache.stats()?;
 cache.clear_dataflow_only()?;
 cache.clear_all()?;
 if cache.legacy_in_tree_dir().is_some() {
-    // Some((path, bytes)) when a legacy `<root>/.bonsai` directory was removed.
+    // Some((parent, reclaimed_bytes)); rules and unknown files stay in place.
     let removed = cache.clear_legacy_in_tree()?;
 }
 
@@ -465,12 +483,29 @@ that file through its Tree-sitter adapter without admitting stale facts.
 taint/export readiness, per-sidecar freshness, and stale reasons. The
 validation path checks binary sidecar payloads as well as manifest
 fingerprints; raw `*_exists` fields only mean an artifact is present on disk.
-`CacheStats.legacy_in_tree_dir` / `legacy_in_tree_bytes` report a legacy
-in-tree `<root>/.bonsai` directory left by releases that cached inside the
-workspace (only when it is not the active cache directory);
-`WorkspaceCache::clear_legacy_in_tree()` removes it and is what CLI
-`cache clear --legacy` calls. The external cache is never touched by that
-call.
+`CacheStats.legacy_in_tree_dir` / `legacy_in_tree_bytes` report recognized
+legacy analysis files in the inactive `<root>/.bonsai` directory, excluding
+current rules and unknown project state. `WorkspaceCache::clear_legacy_in_tree()`
+removes only those files and removes the parent only when empty; CLI
+`cache clear --legacy` uses the same API. It never follows directory links or
+touches the active external cache.
+`clear_all()` validates the native workspace binding and refuses workspace
+roots, ancestors, directory links, or unrecognized top-level entries before
+removing anything. `clear_dataflow_only()` also validates ownership.
+The shared orphan sweep prefers the native binding and accepts a complete
+legacy manifest only when no binding exists. It deletes only confirmed missing
+workspaces; unreadable, corrupt, live, and unattributed entries remain intact.
+`bonsai_workspace::workspace_cache_root_binding()` exposes the same read-only,
+native-path identity decoder without creating or repairing artifacts.
+Root-only `WorkspaceCache::write_manifest()` publishes the locked native
+binding before its manifest; no source-backed `Project` is required.
+`bonsai_workspace::register_workspace_cache_root()` supplies the same binding
+publisher for direct sidecar writers. Stats and binding inspection remain
+read-only; cleanup never fabricates ownership to authorize deletion.
+Default export-cache reads capture payload and metadata from the same locked
+generation, then validate and stream that immutable snapshot. Concurrent
+publication returns a cache miss without blocking; an interrupted replacement
+cannot leave valid metadata attached to unrelated report bytes.
 Retrieval uses the candidate-only evidence contract described in
 [Architecture](architecture.mdx#query-browse-trace). CLI and SDK query paths
 can validate warmed
@@ -610,7 +645,18 @@ migration note; after 1.0 they require a major-version bump.
 
 The CLI is a thin renderer over this SDK; both surfaces evolve together.
 
+`VarOut.source_names` contains the sorted, unique RHS identifiers and call names
+from all compiler projections of one exact assignment. `source_name` remains
+the comma-separated display form. A `--source` selector keeps the complete
+matching write, not only its matching RHS fragment; two writes on one line
+remain distinct by byte column. These are syntax facts, not taint propagation
+claims about a callee's return value.
+
 ### 0.2 migration
+
+`WorkspaceCache::migrate_legacy_compiler_object_sidecar()` remains callable but
+returns `Ok(None)`. The historical v11 layout has an incompatible frontend ABI;
+use normal `index` / `index_semantic` to rebuild it from adapter-lowered source.
 
 Version 0.2 removes recursive materialization of concrete call-path
 combinations from navigation and export:

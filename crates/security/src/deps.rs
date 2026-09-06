@@ -6,17 +6,15 @@
 //! * An import fact emitted by the language adapter's indexer
 //!   (via `decl_index.refs` of kind `Import`, or the
 //!   `import_index` the workspace computes).
-//! * A manifest / lockfile declared under the workspace root whose
-//!   basename matches one of the rule's `manifests` / `lockfiles`
-//!   entries.
 //! * A dependency manifest under the workspace root whose content
 //!   names one of the rule's `packages` entries. This catches
 //!   first-party scans where the workspace itself is the flagged
 //!   package, so the package name appears in `pom.xml`,
 //!   `package.json`, `Cargo.toml`, etc. rather than in an import.
 //!
-//! Output rows unify the three signals so reviewers see WHAT is present
-//! and WHY the wrapper flagged it.
+//! Manifest/lockfile basenames may label already-proven package evidence;
+//! their existence alone never establishes a particular dependency. Output
+//! rows retain the package-specific signal and its evidence location.
 
 use crate::loader::Rulepack;
 use crate::rule::{Rule, Severity};
@@ -67,7 +65,6 @@ pub fn build_inventory(pack: &Rulepack, ws: &Workspace, root: &Path) -> Dependen
             let (signals, evidence) = rule_key_evidence(
                 rule,
                 &key,
-                &manifest_files,
                 &import_evidence_by_lang,
                 &manifest_package_evidence_by_lang,
             );
@@ -529,44 +526,18 @@ fn rule_signal_keys(rule: &Rule) -> Vec<String> {
 }
 
 /// Gather signal labels and evidence file paths showing where one
-/// dependency key is grounded — manifest filenames, lockfile filenames,
-/// adapter-visible imports, or package names mentioned in dependency
-/// manifests. Keeping this key-scoped prevents one matching package signal
+/// dependency key is grounded — adapter-visible imports or package names in
+/// dependency manifests. Keeping this key-scoped prevents one matching package signal
 /// from making every package/import listed on a broad multi-framework rule
 /// look present in the workspace.
 fn rule_key_evidence(
     rule: &Rule,
     key: &str,
-    manifest_files: &[String],
     import_evidence_by_lang: &AHashMap<String, AHashMap<String, String>>,
     manifest_package_evidence_by_lang: &AHashMap<String, AHashMap<String, String>>,
 ) -> (Vec<String>, Vec<String>) {
     let mut signals = Vec::new();
     let mut evidence = Vec::new();
-    // Manifest basename match: rule lists `pom.xml` / `Cargo.toml` / etc.
-    for manifest_name in &rule.manifests {
-        if let Some(path) = manifest_files.iter().find(|file_path| {
-            Path::new(file_path.as_str())
-                .file_name()
-                .and_then(|name| name.to_str())
-                == Some(manifest_name.as_str())
-        }) {
-            signals.push(format!("manifests:{manifest_name}"));
-            evidence.push(path.clone());
-        }
-    }
-    // Lockfile basename match: rule lists `Cargo.lock` / `pnpm-lock.yaml` / etc.
-    for lockfile_name in &rule.lockfiles {
-        if let Some(path) = manifest_files.iter().find(|file_path| {
-            Path::new(file_path.as_str())
-                .file_name()
-                .and_then(|name| name.to_str())
-                == Some(lockfile_name.as_str())
-        }) {
-            signals.push(format!("lockfiles:{lockfile_name}"));
-            evidence.push(path.clone());
-        }
-    }
     if let Some(lang_import_evidence) = import_evidence_by_lang.get(&rule.language) {
         // Both `imports:` / `modules:` and `packages:` go through the
         // shared `import_matches_package` predicate (see `pkg.rs`).
@@ -598,19 +569,30 @@ fn rule_key_evidence(
     // workspace (e.g. a Java project whose own `pom.xml` declares
     // `<artifactId>log4j-core</artifactId>`) without an import line
     // anywhere in the source tree.
-    if let Some(manifest_package_evidence) = manifest_package_evidence_by_lang.get(&rule.language) {
-        if rule.packages.iter().any(|needle| needle == key) {
-            if let Some(path) = manifest_package_evidence.get(key) {
-                signals.push(format!("packages:{key}"));
-                evidence.push(path.clone());
+    if let Some(path) = manifest_package_evidence_by_lang
+        .get(&rule.language)
+        .and_then(|packages| packages.get(key))
+    {
+        // Match a key, not merely a generic project-file name. The language
+        // mapping and package aliases were already applied during collection.
+        for (family, keys) in [
+            ("packages", &rule.packages),
+            ("frameworks", &rule.frameworks),
+            ("imports", &rule.imports),
+            ("modules", &rule.modules),
+        ] {
+            if keys.iter().any(|candidate| candidate == key) {
+                signals.push(format!("{family}:{key}"));
             }
         }
-        if rule.frameworks.iter().any(|needle| needle == key) {
-            if let Some(path) = manifest_package_evidence.get(key) {
-                signals.push(format!("frameworks:{key}"));
-                evidence.push(path.clone());
+        if let Some(basename) = Path::new(path).file_name().and_then(|name| name.to_str()) {
+            for (family, names) in [("manifests", &rule.manifests), ("lockfiles", &rule.lockfiles)] {
+                if names.iter().any(|name| name == basename) {
+                    signals.push(format!("{family}:{basename}"));
+                }
             }
         }
+        evidence.push(path.clone());
     }
     signals.sort();
     signals.dedup();

@@ -89,7 +89,7 @@ fn cache_stats(workspace: Option<std::path::PathBuf>, format: BrowseFormat) -> R
         print_kv(
             "legacy in-tree cache",
             &format!(
-                "{} ({} bytes; not used, remove with `cache clear --legacy`)",
+                "{} ({} legacy artifact bytes; not used, clear with `cache clear --legacy`)",
                 dir.display(),
                 stats.legacy_in_tree_bytes
             ),
@@ -323,7 +323,7 @@ fn cache_clear_legacy(workspace: Option<std::path::PathBuf>) -> Result<()> {
         .with_context(|| format!("removing {}", dir.display()))?;
     stage.finish();
     if let Some((dir, bytes)) = removed {
-        print_kv("removed", &dir.display().to_string());
+        print_kv("cleared legacy artifacts in", &dir.display().to_string());
         print_kv("freed", &format!("{bytes} bytes"));
     }
     Ok(())

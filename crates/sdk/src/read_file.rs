@@ -66,6 +66,9 @@ pub struct ReadFileOut {
 /// Cross-module wiring of one file.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ReadFileConnections {
+    /// Whether the call projection covers the validated workspace relation.
+    /// This is independent of the selected file's syntax coverage.
+    pub calls_complete: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub imports: Vec<bonsai_browse::ModuleImport>,
     /// Resolved calls from this file into other workspace files.
@@ -212,17 +215,41 @@ fn read_file_with_taint_options(
     taint_options: TaintAnalysisOptions,
 ) -> anyhow::Result<ReadFileOut> {
     let path = filters.path;
-    let file_id = ws
+    if let Some((first, last)) = filters.line_range {
+        anyhow::ensure!(
+            first > 0 && last >= first,
+            "line range must be one-based and ascending"
+        );
+    }
+    let requested = normalize_path_for_filter(path);
+    let workspace_root = ws.db().workspace_root();
+    let mut candidates = ws
         .vfs()
         .all_files()
         .into_iter()
-        .find(|fid| {
-            ws.vfs()
-                .path(*fid)
-                .ok()
-                .is_some_and(|p| file_path_matches_requested(ws, &p.display().to_string(), path))
+        .filter_map(|fid| {
+            let file_path = ws.vfs().path(fid).ok()?.display().to_string();
+            if !file_path_matches_requested(ws, &file_path, path) {
+                return None;
+            }
+            let normalized = normalize_path_for_filter(&file_path);
+            let exact = normalized == requested
+                || workspace_relative_filter_path(workspace_root.as_deref(), &normalized) == requested;
+            Some((fid, exact))
         })
-        .ok_or_else(|| anyhow::anyhow!("file not found in workspace: {path}"))?;
+        .collect::<Vec<_>>();
+    if candidates.iter().any(|(_, exact)| *exact) {
+        candidates.retain(|(_, exact)| *exact);
+    }
+    let file_id = match candidates.as_slice() {
+        [(fid, _)] => *fid,
+        [] => return Err(anyhow::anyhow!("file not found in workspace: {path}")),
+        _ => {
+            return Err(anyhow::anyhow!(
+                "ambiguous file selector: {path}; use a complete workspace-relative path"
+            ))
+        }
+    };
 
     let snapshot = ws
         .vfs()
@@ -265,7 +292,10 @@ fn read_file_with_taint_options(
     let mut marks: Vec<LineMark> = Vec::new();
     let mut flows_in_view: Vec<FlowEntryExit> = Vec::new();
     let mut findings_in_view: Vec<FindingDigest> = Vec::new();
-    let mut finding_incomplete_reasons: Vec<String> = Vec::new();
+    let mut finding_incomplete_reasons = report
+        .as_ref()
+        .map(super::taint_report_incomplete_reasons)
+        .unwrap_or_default();
 
     if let Some(rep) = report.as_ref() {
         for cf in &rep.findings {
@@ -418,7 +448,9 @@ fn read_file_with_taint_options(
         .iter()
         .filter_map(|d| {
             let start = span_map.line_col(d.span.start).line;
-            let end = span_map.line_col(d.span.end).line;
+            let end = span_map
+                .line_col(d.span.end.saturating_sub(1).max(d.span.start))
+                .line;
             // A line-ranged read is a projection of that range, not a hidden
             // full-file declaration inventory. Keep declarations that
             // intersect the requested source window and preserve their true
@@ -573,6 +605,7 @@ fn read_file_with_taint_options(
         }
         marks.sort_by_key(|mark| mark.line);
         connections = ReadFileConnections {
+            calls_complete: facts.calls_complete,
             imports: facts.imports,
             calls_out: facts.calls_out,
             callers_in: facts.callers_in,
@@ -895,11 +928,16 @@ fn read_decl_body(loc: &Locator, ws: &Workspace) -> Option<String> {
     let file_id = bonsai_browse::workspace_file_id(ws, &loc.file)?;
     let snap = ws.vfs().snapshot(file_id).ok()?;
     let local_decls = ws.exact_decl_index_shared(file_id)?;
+    let span_map = bonsai_common::cached_span_map_arc(file_id, snap.version, &snap.text);
     // Find decl by name + line.
     for decl in &local_decls.defs {
-        if loc.decl.as_deref() == Some(decl.name.as_str()) {
-            let start = decl.span.start as usize;
-            let end = (decl.span.end as usize).min(snap.text.len());
+        let position = span_map.line_col(decl.span.start);
+        if loc.decl.as_deref() == Some(decl.name.as_str())
+            && position.line == loc.line
+            && position.column == loc.column
+        {
+            let start = usize::try_from(decl.span.start).ok()?;
+            let end = usize::try_from(decl.span.end).ok()?.min(snap.text.len());
             // `start`/`end` are raw byte offsets and `end` is clamped to the
             // (possibly newer) snapshot length, so neither is guaranteed to
             // land on a UTF-8 char boundary. Use `get` rather than slicing to

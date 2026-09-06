@@ -18,11 +18,25 @@ fn rulepack() -> &'static Rulepack {
 }
 
 fn analyze(terminal_rejection: bool) -> TaintAnalysisReport {
-    let workspace = Workspace::new(bonsai_adapters::all_languages_registry());
+    analyze_with_wrapper(terminal_rejection, false)
+}
+
+fn analyze_with_wrapper(terminal_rejection: bool, wrapped: bool) -> TaintAnalysisReport {
     let guard_body = if terminal_rejection {
         "throw const FormatException('markup declarations are rejected');"
     } else {
         "print('markup declaration observed');"
+    };
+    analyze_guard(guard_body, wrapped)
+}
+
+fn analyze_guard(guard_body: &str, wrapped: bool) -> TaintAnalysisReport {
+    let workspace = Workspace::new(bonsai_adapters::all_languages_registry());
+    let predicate = "payload.contains('<!DOCTYPE') || payload.contains('<!ENTITY')";
+    let predicate = if wrapped {
+        format!("ignore({predicate})")
+    } else {
+        predicate.to_string()
     };
     workspace.vfs().write(
         "lib/parser.dart",
@@ -31,13 +45,18 @@ fn analyze(terminal_rejection: bool) -> TaintAnalysisReport {
 class ParserJob {{
   String payload = '';
   String run() {{
-    if (payload.contains('<!DOCTYPE') || payload.contains('<!ENTITY')) {{
+    if ({predicate}) {{
       {guard_body}
     }}
     final document = XmlDocument.parse(payload);
     return document.toString();
   }}
 }}
+bool ignore(bool value) => false;
+void abort() {{}}
+void sendStatus(int status) {{}}
+void exit(int status) {{}}
+void panic(String message) {{}}
 "#
         )),
     );
@@ -94,4 +113,22 @@ fn non_terminal_receiver_field_check_does_not_sanitize_the_sink() {
     let finding = xml_finding(&report);
     assert_eq!(finding.status, FindingStatus::Unsanitized, "{finding:#?}");
     assert!(finding.sanitizers_seen.is_empty(), "{finding:#?}");
+}
+
+#[test]
+fn predicate_inside_a_wrapper_does_not_prove_terminal_rejection() {
+    let report = analyze_with_wrapper(true, true);
+    let finding = xml_finding(&report);
+    assert_eq!(finding.status, FindingStatus::Unsanitized, "{finding:#?}");
+    assert!(finding.sanitizers_seen.is_empty(), "{finding:#?}");
+}
+
+#[test]
+fn returning_calls_with_exit_like_names_do_not_sanitize_the_sink() {
+    for call in ["abort();", "sendStatus(400);", "exit(1);", "panic('rejected');"] {
+        let report = analyze_guard(call, false);
+        let finding = xml_finding(&report);
+        assert_eq!(finding.status, FindingStatus::Unsanitized, "{call}: {finding:#?}");
+        assert!(finding.sanitizers_seen.is_empty(), "{call}: {finding:#?}");
+    }
 }

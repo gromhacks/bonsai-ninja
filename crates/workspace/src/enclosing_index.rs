@@ -117,6 +117,21 @@ impl EnclosingSpanIndex {
         self.entries.get(index).cloned()
     }
 
+    /// Find the innermost declaration containing the complete half-open
+    /// range. A zero-width range is a point query. Reusing the range-maximum
+    /// tree lets a range that crosses an inner declaration's end find its
+    /// outer owner without scanning every declaration.
+    #[must_use]
+    pub fn enclosing_range(&self, start: u64, end: u64) -> Option<EnclosingEntry> {
+        if end < start {
+            return None;
+        }
+        let last = end.saturating_sub(1).max(start);
+        let upper = self.entries.partition_point(|entry| entry.start <= start);
+        let index = self.rightmost_covering(1, 0, self.leaf_count, upper, last)?;
+        self.entries.get(index).cloned()
+    }
+
     fn rightmost_covering(
         &self,
         node: usize,

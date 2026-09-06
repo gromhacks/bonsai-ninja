@@ -1230,6 +1230,66 @@ fn call_result_passthrough_regex_alternatives_do_not_prefilter_to_last_branch() 
 }
 
 #[test]
+fn configured_regex_keeps_regex_engine_semantics() {
+    let mut rejected = Vec::new();
+    for (name, pattern) in [
+        ("recv42", r"regex:^recv\d+$"),
+        ("recvX", r"regex:^recv\w$"),
+        ("recv", r"regex:^recv(?:Buffer)?$"),
+        ("recv", r"regex:^recvv*$"),
+        ("recvB", r"regex:^recv[AB]$"),
+        ("RECV", r"regex:(?i)^recv$"),
+        ("recvλ", r"regex:^recv\p{Greek}$"),
+        ("recv!", r"regex:^recv\x21$"),
+    ] {
+        assert!(regex::Regex::new(pattern.strip_prefix("regex:").unwrap())
+            .unwrap()
+            .is_match(name));
+        if !call_result_passthrough_matches(name, pattern) {
+            rejected.push((name, pattern));
+        }
+    }
+    assert!(rejected.is_empty(), "unsound regex prefilter: {rejected:?}");
+    assert!(!call_result_passthrough_matches("recv", "regex:["));
+}
+
+#[test]
+fn exact_passthrough_sites_accept_unsorted_public_configuration() {
+    let site = Span::new(FileId::new(0), 30, 35);
+    let passthroughs = [crate::idg_api::CallResultPassthrough {
+        callee: "compiled-provider".to_string(),
+        receiver_type: None,
+        input_arg_indices: vec![0],
+        input_arg_start_index: None,
+        input_receiver: false,
+        resolved_call_sites: vec![
+            site,
+            Span::new(FileId::new(0), 10, 15),
+            Span::new(FileId::new(0), 20, 25),
+        ],
+    }];
+    let compiled = compile_call_result_passthroughs(&passthroughs);
+    assert!(nested_call_return_matches_configured_passthrough(
+        "exact-site-alias",
+        site,
+        1,
+        &compiled,
+        &mut CalleeNameCache::default(),
+    ));
+    assert!(!nested_call_return_matches_configured_passthrough(
+        "compiled-provider",
+        Span::new(FileId::new(0), 40, 45),
+        1,
+        &compiled,
+        &mut CalleeNameCache::default(),
+    ));
+    assert_eq!(
+        passthroughs[0].resolved_call_sites[0], site,
+        "do not mutate caller-owned configuration"
+    );
+}
+
+#[test]
 fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
     let db = empty_db();
     let global = db.global_index();

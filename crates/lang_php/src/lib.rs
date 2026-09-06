@@ -429,55 +429,75 @@ fn php_compound_static_allowlist_guards(tree: &Tree, file: FileId, src: &[u8]) -
         let Some(body) = function.child_by_field_name("body") else {
             continue;
         };
-        let calls = collect_kinds_below(
+        // This positive proof currently covers one straight-line basic block.
+        // Descendant byte order does not establish dominance, and an escaped
+        // reference or jump can invalidate otherwise local value reasoning.
+        if !collect_kinds_below(
             body,
             &[
-                "function_call_expression",
-                "member_call_expression",
-                "nullsafe_member_call_expression",
-                "scoped_call_expression",
+                "reference_assignment_expression",
+                "global_declaration",
+                "goto_statement",
+                "named_label_statement",
+                "unset_statement",
             ],
-        );
-        for branch in collect_kinds_below(body, &["if_statement"]) {
+        )
+        .is_empty()
+        {
+            continue;
+        }
+        let statements = php_named_children(body);
+        for (branch_index, branch) in statements
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, statement)| statement.kind() == "if_statement")
+        {
             let (Some(condition), Some(consequence)) = (
                 branch.child_by_field_name("condition"),
                 branch.child_by_field_name("body"),
             ) else {
                 continue;
             };
-            if !php_compound_statement_is_terminal(consequence) {
+            if !php_compound_statement_is_terminal(consequence)
+                || branch.child_by_field_name("alternative").is_some()
+            {
                 continue;
             }
             let Some(predicate) = php_compound_rejection_predicate(condition, src, &static_collections)
             else {
                 continue;
             };
-            let Some(parser_assignment) = collect_kinds_below(body, &["assignment_expression"])
-                .into_iter()
-                .filter(|assignment| assignment.end_byte() <= branch.start_byte())
-                .filter_map(|assignment| php_parser_assignment(assignment, src))
+            let Some(parser_assignment) = branch_index
+                .checked_sub(1)
+                .and_then(|previous| php_statement_expression(statements[previous]))
+                .filter(|assignment| assignment.kind() == "assignment_expression")
+                .and_then(|assignment| php_parser_assignment(assignment, src))
                 .filter(|assignment| assignment.output == predicate.parsed_place)
-                .max_by_key(|assignment| assignment.start)
             else {
                 continue;
             };
-            for guarded_call in calls
-                .iter()
-                .copied()
-                .filter(|call| call.start_byte() > branch.end_byte())
-            {
-                let guarded_args = php_direct_call_arguments(guarded_call);
+            for (call_index, statement) in statements.iter().copied().enumerate().skip(branch_index + 1) {
+                let Some(guarded_call) = php_statement_expression(statement) else {
+                    break;
+                };
+                if php_unrelated_local_initialization(guarded_call, &parser_assignment, src) {
+                    continue;
+                }
+                let Some(guarded_args) = php_direct_call_arguments(guarded_call) else {
+                    break;
+                };
                 let guarded_relations = guarded_args
                     .iter()
                     .enumerate()
                     .filter(|(_, argument)| {
-                        php_exact_composition_place(**argument, src).as_deref()
+                        php_local_variable(**argument, src).as_deref()
                             == Some(parser_assignment.input.as_str())
                     })
                     .map(|(index, _)| format!("guarded-argument:{index}=predicate-argument:0"))
                     .collect::<Vec<_>>();
                 if guarded_relations.is_empty() {
-                    continue;
+                    break;
                 }
                 let Some(target) = php_call_target(guarded_call, src) else {
                     continue;
@@ -493,15 +513,21 @@ fn php_compound_static_allowlist_guards(tree: &Tree, file: FileId, src: &[u8]) -
                 ];
                 evidence.extend(predicate.membership_extra_evidence.clone());
                 evidence.extend(guarded_relations);
-                for related in calls
-                    .iter()
-                    .copied()
-                    .filter(|call| call.start_byte() > branch.end_byte() && call.id() != guarded_call.id())
+                // Related configuration must be the next direct call, not a
+                // conditional/late call or a union of arguments from several
+                // invocations. A subsequent write or control split is outside
+                // this proof form and cannot retain configuration credit.
+                if let Some(related) =
+                    php_related_configuration(&statements[call_index + 1..], guarded_call, src)
                 {
                     let Some(related_target) = php_call_target(related, src) else {
                         continue;
                     };
-                    for (index, argument) in php_direct_call_arguments(related).iter().enumerate() {
+                    for (index, argument) in php_direct_call_arguments(related)
+                        .unwrap_or_default()
+                        .iter()
+                        .enumerate()
+                    {
                         if let Some((guarded_index, _)) =
                             guarded_args.iter().enumerate().find(|(_, guarded)| {
                                 let guarded = php_exact_composition_place(**guarded, src);
@@ -532,6 +558,9 @@ fn php_compound_static_allowlist_guards(tree: &Tree, file: FileId, src: &[u8]) -
                     capability: PHP_GUARD_TERMINAL_COMPOUND_STATIC_ALLOWLIST.to_string(),
                     evidence,
                 });
+                // Calls may mutate by-reference operands. Do not carry this
+                // syntax proof through an unmodeled invocation to later uses.
+                break;
             }
         }
     }
@@ -555,7 +584,6 @@ fn php_compound_static_allowlist_guards(tree: &Tree, file: FileId, src: &[u8]) -
 
 #[derive(Clone)]
 struct PhpParserAssignment {
-    start: usize,
     output: String,
     input: String,
     call_name: String,
@@ -572,17 +600,20 @@ struct PhpCompoundPredicate {
 }
 
 fn php_parser_assignment(assignment: Node<'_>, src: &[u8]) -> Option<PhpParserAssignment> {
-    let output = php_exact_composition_place(assignment.child_by_field_name("left")?, src)?;
+    let output = php_local_variable(assignment.child_by_field_name("left")?, src)?;
     let call = assignment.child_by_field_name("right")?;
     let target = php_call_target(call, src)?;
-    let arguments = php_direct_call_arguments(call);
+    let arguments = php_direct_call_arguments(call)?;
     let [argument] = arguments.as_slice() else {
         return None;
     };
+    let input = php_local_variable(*argument, src)?;
+    if input == output {
+        return None;
+    }
     Some(PhpParserAssignment {
-        start: assignment.start_byte(),
         output,
-        input: php_exact_composition_place(*argument, src)?,
+        input,
         call_name: target.full_text,
     })
 }
@@ -590,7 +621,7 @@ fn php_parser_assignment(assignment: Node<'_>, src: &[u8]) -> Option<PhpParserAs
 fn php_compound_rejection_predicate(
     mut condition: Node<'_>,
     src: &[u8],
-    static_collections: &std::collections::HashMap<String, Vec<String>>,
+    static_collections: &std::collections::HashMap<(usize, String), Vec<String>>,
 ) -> Option<PhpCompoundPredicate> {
     while condition.kind() == "parenthesized_expression" {
         condition = condition.named_child(0)?;
@@ -602,15 +633,19 @@ fn php_compound_rejection_predicate(
     if php_binary_operator(condition, left, right, src)? != "||" {
         return None;
     }
-    let scheme_projection = collect_kinds_below(left, &["subscript_expression"])
-        .into_iter()
-        .find_map(|subscript| php_projection_parts(subscript, src));
-    let (parsed_place, scheme_component) = scheme_projection?;
-    let scheme_value = collect_kinds_below(left, &["string", "encapsed_string"])
-        .into_iter()
-        .filter_map(|literal| php_static_subscript_key(literal, src))
-        .find(|value| !value.is_empty() && value != &scheme_component)?;
+    let comparison = php_unwrap_parentheses(left)?;
+    let compared = comparison.child_by_field_name("left")?;
+    let literal = comparison.child_by_field_name("right")?;
+    if php_binary_operator(comparison, compared, literal, src)? != "!==" {
+        return None;
+    }
+    let scheme_value = php_static_subscript_key(php_unwrap_parentheses(literal)?, src)?;
+    let (parsed_place, scheme_component, fallback) = php_guard_projection(compared, src)?;
+    if fallback.as_ref() == Some(&scheme_value) {
+        return None;
+    }
 
+    let right = php_unwrap_parentheses(right)?;
     if right.kind() != "unary_op_expression" {
         return None;
     }
@@ -629,20 +664,28 @@ fn php_compound_rejection_predicate(
         return None;
     }
     let membership_target = php_call_target(operand, src)?;
-    let membership_args = php_direct_call_arguments(operand);
+    let membership_args = php_direct_call_arguments(operand)?;
     if membership_args.len() < 2 {
         return None;
     }
-    let (membership_base, host_component) =
-        collect_kinds_below(membership_args[0], &["subscript_expression"])
-            .into_iter()
-            .find_map(|subscript| php_projection_parts(subscript, src))?;
+    let (membership_base, host_component, fallback) = php_guard_projection(membership_args[0], src)?;
     if membership_base != parsed_place {
         return None;
     }
-    let collection = php_exact_composition_place(membership_args[1], src)?;
-    let collection = collection.rsplit("::").next().unwrap_or(&collection);
-    if !static_collections.contains_key(collection) {
+    let collection = php_unwrap_parentheses(membership_args[1])?;
+    if collection.kind() != "class_constant_access_expression" {
+        return None;
+    }
+    let children = php_named_children(collection);
+    let [scope, name] = children.as_slice() else {
+        return None;
+    };
+    if scope.kind() != "relative_scope" || node_text(scope, src).trim() != "self" || name.kind() != "name" {
+        return None;
+    }
+    let owner = php_owning_class(collection)?;
+    let values = static_collections.get(&(owner.id(), node_text(name, src).to_string()))?;
+    if fallback.is_some_and(|fallback| values.contains(&fallback)) {
         return None;
     }
     let mut membership_extra_evidence = Vec::new();
@@ -661,9 +704,15 @@ fn php_compound_rejection_predicate(
     })
 }
 
-fn php_static_string_collections(tree: &Tree, src: &[u8]) -> std::collections::HashMap<String, Vec<String>> {
+fn php_static_string_collections(
+    tree: &Tree,
+    src: &[u8],
+) -> std::collections::HashMap<(usize, String), Vec<String>> {
     let mut collections = std::collections::HashMap::new();
     for element in collect_kinds(tree, &["const_element"]) {
+        let Some(owner) = php_owning_class(element) else {
+            continue;
+        };
         let Some(name) = element.named_child(0).filter(|node| node.kind() == "name") else {
             continue;
         };
@@ -677,8 +726,18 @@ fn php_static_string_collections(tree: &Tree, src: &[u8]) -> std::collections::H
         let mut values = Vec::new();
         let mut array_cursor = array.walk();
         let mut complete = true;
-        for item in array.named_children(&mut array_cursor) {
-            let Some(value_node) = item.named_child(0) else {
+        for item in array
+            .named_children(&mut array_cursor)
+            .filter(|node| node.kind() != "comment")
+        {
+            // A keyed element's last child is its value, not its key. Spreads
+            // and arbitrary expressions cannot prove a finite string set.
+            let children = php_named_children(item);
+            let Some(value_node) = children
+                .last()
+                .copied()
+                .filter(|_| item.kind() == "array_element_initializer")
+            else {
                 complete = false;
                 break;
             };
@@ -689,17 +748,29 @@ fn php_static_string_collections(tree: &Tree, src: &[u8]) -> std::collections::H
             values.push(value);
         }
         if complete && !values.is_empty() {
-            collections.insert(node_text(&name, src).trim().to_string(), values);
+            collections.insert((owner.id(), node_text(&name, src).trim().to_string()), values);
         }
     }
     collections
 }
 
-fn php_projection_parts(node: Node<'_>, src: &[u8]) -> Option<(String, String)> {
+fn php_guard_projection(node: Node<'_>, src: &[u8]) -> Option<(String, String, Option<String>)> {
+    let mut node = php_unwrap_parentheses(node)?;
+    let mut fallback = None;
+    if node.kind() == "binary_expression" {
+        let left = node.child_by_field_name("left")?;
+        let right = node.child_by_field_name("right")?;
+        if php_binary_operator(node, left, right, src)? != "??" {
+            return None;
+        }
+        fallback = Some(php_static_subscript_key(php_unwrap_parentheses(right)?, src)?);
+        node = php_unwrap_parentheses(left)?;
+    }
     let (base, key) = php_subscript_parts(node)?;
     Some((
-        php_exact_composition_place(base, src)?,
+        php_local_variable(base, src)?,
         php_static_subscript_key(key, src)?,
+        fallback,
     ))
 }
 
@@ -720,20 +791,128 @@ fn php_compound_statement_is_terminal(statement: Node<'_>) -> bool {
     ) && children.next().is_none()
 }
 
-fn php_direct_call_arguments(call: Node<'_>) -> Vec<Node<'_>> {
-    let Some(arguments) = call.child_by_field_name("arguments") else {
-        return Vec::new();
-    };
-    let mut cursor = arguments.walk();
-    arguments
-        .named_children(&mut cursor)
-        .filter_map(|argument| {
-            (argument.kind() == "argument")
-                .then(|| argument.named_child(0))
-                .flatten()
-                .or_else(|| (argument.kind() != "argument").then_some(argument))
+fn php_direct_call_arguments(call: Node<'_>) -> Option<Vec<Node<'_>>> {
+    let arguments = call.child_by_field_name("arguments")?;
+    php_named_children(arguments)
+        .into_iter()
+        .map(|argument| {
+            if argument.kind() != "argument" || argument.child_by_field_name("name").is_some() {
+                return None;
+            }
+            let children = php_named_children(argument);
+            let [value] = children.as_slice() else {
+                return None;
+            };
+            (value.kind() != "variadic_unpacking").then_some(*value)
         })
         .collect()
+}
+
+fn php_named_children(node: Node<'_>) -> Vec<Node<'_>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|child| child.kind() != "comment")
+        .collect()
+}
+
+fn php_unwrap_parentheses(mut node: Node<'_>) -> Option<Node<'_>> {
+    while node.kind() == "parenthesized_expression" {
+        let children = php_named_children(node);
+        let [child] = children.as_slice() else {
+            return None;
+        };
+        node = *child;
+    }
+    Some(node)
+}
+
+fn php_statement_expression(statement: Node<'_>) -> Option<Node<'_>> {
+    if statement.kind() != "expression_statement" {
+        return None;
+    }
+    let children = php_named_children(statement);
+    let [expression] = children.as_slice() else {
+        return None;
+    };
+    php_unwrap_parentheses(*expression)
+}
+
+fn php_local_variable(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let node = php_unwrap_parentheses(node)?;
+    (node.kind() == "variable_name").then(|| node_text(&node, src).to_string())
+}
+
+fn php_owning_class(mut node: Node<'_>) -> Option<Node<'_>> {
+    while let Some(parent) = node.parent() {
+        if matches!(parent.kind(), "class_declaration" | "enum_declaration") {
+            return Some(parent);
+        }
+        if matches!(parent.kind(), "trait_declaration" | "anonymous_class") {
+            return None;
+        }
+        node = parent;
+    }
+    None
+}
+
+fn php_unrelated_local_initialization(node: Node<'_>, proof: &PhpParserAssignment, src: &[u8]) -> bool {
+    if node.kind() != "assignment_expression" {
+        return false;
+    }
+    let Some(target) = node
+        .child_by_field_name("left")
+        .and_then(|left| php_local_variable(left, src))
+    else {
+        return false;
+    };
+    if target == proof.input || target == proof.output {
+        return false;
+    }
+    node.child_by_field_name("right").is_some_and(|right| {
+        php_static_scalar(right, src).is_some()
+            || php_direct_call_arguments(right).is_some_and(|args| args.is_empty())
+    })
+}
+
+fn php_related_configuration<'tree>(
+    statements: &[Node<'tree>],
+    guarded: Node<'tree>,
+    src: &[u8],
+) -> Option<Node<'tree>> {
+    let related = php_statement_expression(*statements.first()?)?;
+    let target = php_call_target(guarded, src)?;
+    if php_call_target(related, src)?.full_text != target.full_text {
+        return None;
+    }
+    let args = php_direct_call_arguments(related)?;
+    let guarded_args = php_direct_call_arguments(guarded)?;
+    if args.len() != guarded_args.len()
+        || args.is_empty()
+        || php_local_variable(args[0], src).is_none()
+        || php_local_variable(args[0], src) != php_local_variable(guarded_args[0], src)
+        || args.iter().skip(1).any(|arg| {
+            php_static_scalar(*arg, src).is_none() && !matches!(arg.kind(), "name" | "qualified_name")
+        })
+    {
+        return None;
+    }
+    for statement in statements.iter().copied().skip(1) {
+        if statement.kind() == "return_statement" && php_named_children(statement).is_empty() {
+            break;
+        }
+        let call = php_statement_expression(statement)?;
+        if php_call_target(call, src)?.full_text == target.full_text {
+            return None;
+        }
+        let args = php_direct_call_arguments(call)?;
+        if args
+            .iter()
+            .any(|arg| php_compiler_evidence_operand(*arg, src).is_none())
+        {
+            return None;
+        }
+    }
+    Some(related)
 }
 
 fn php_binary_operator<'a>(

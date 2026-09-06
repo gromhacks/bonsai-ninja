@@ -20,6 +20,20 @@ AUDIT_LOOP = Path(__file__).resolve().parents[2] / "scripts" / "audit-loop.sh"
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_audit_correctness_tests_preserve_the_release_artifact(self) -> None:
+        script = AUDIT_LOOP.read_text(encoding="utf-8")
+
+        self.assertNotIn("cargo test --release", script)
+        for package, target in (
+            ("bonsai-ninja-taint", "language_matrix"),
+            ("bonsai-ninja", "taint_engine_e2e"),
+        ):
+            self.assertIn(
+                f"env -u NO_PROGRESS cargo test -q --locked -p {package} --test {target}",
+                script,
+            )
+        self.assertNotIn("saved_release_binary", script)
+
     def test_audit_loop_bootstraps_a_remapped_release_binary(self) -> None:
         script = AUDIT_LOOP.read_text(encoding="utf-8")
 

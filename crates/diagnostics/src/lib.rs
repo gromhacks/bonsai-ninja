@@ -13,7 +13,7 @@ pub mod debug;
 
 /// Severity level for a [`Diagnostic`]. Ordered from least to most
 /// urgent; consumers typically filter via `>= Severity::Warning`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     /// Background hint.

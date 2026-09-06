@@ -72,7 +72,9 @@ impl<'a> CallEdgeResolver<'a> {
             let span = self.find_call_span_to_func(caller_id, callee_id);
             spans.push(span);
         }
-        spans.push(None);
+        if !chain.is_empty() {
+            spans.push(None);
+        }
         spans
     }
 
@@ -115,7 +117,13 @@ pub fn find_call_span_to_func_uncached(
 /// of this syntactic helper.
 #[must_use]
 pub fn find_call_span_by_name(events: &[FlowEvent], target: &str) -> Option<Span> {
-    for event in events {
+    let suffix = format!(".{target}");
+    let mut stack = vec![events.iter()];
+    while let Some(events) = stack.last_mut() {
+        let Some(event) = events.next() else {
+            stack.pop();
+            continue;
+        };
         match event {
             FlowEvent::Call {
                 name,
@@ -124,7 +132,7 @@ pub fn find_call_span_by_name(events: &[FlowEvent], target: &str) -> Option<Span
                 args,
                 ..
             } if name == target
-                || name.ends_with(&format!(".{target}"))
+                || name.ends_with(&suffix)
                 || (receiver.is_some()
                     && args
                         .iter()
@@ -137,12 +145,8 @@ pub fn find_call_span_by_name(events: &[FlowEvent], target: &str) -> Option<Span
                 else_events,
                 ..
             } => {
-                if let Some(s) = find_call_span_by_name(then_events, target) {
-                    return Some(s);
-                }
-                if let Some(s) = find_call_span_by_name(else_events, target) {
-                    return Some(s);
-                }
+                stack.push(else_events.iter());
+                stack.push(then_events.iter());
             }
             FlowEvent::Loop {
                 condition_events,
@@ -150,12 +154,9 @@ pub fn find_call_span_by_name(events: &[FlowEvent], target: &str) -> Option<Span
                 update_events,
                 ..
             } => {
-                if let Some(s) = find_call_span_by_name(condition_events, target)
-                    .or_else(|| find_call_span_by_name(body, target))
-                    .or_else(|| find_call_span_by_name(update_events, target))
-                {
-                    return Some(s);
-                }
+                stack.push(update_events.iter());
+                stack.push(body.iter());
+                stack.push(condition_events.iter());
             }
             FlowEvent::Try {
                 body,
@@ -163,23 +164,18 @@ pub fn find_call_span_by_name(events: &[FlowEvent], target: &str) -> Option<Span
                 finally_events,
                 ..
             } => {
-                if let Some(s) = find_call_span_by_name(body, target)
-                    .or_else(|| find_call_span_by_name(catch_events, target))
-                    .or_else(|| find_call_span_by_name(finally_events, target))
-                {
-                    return Some(s);
-                }
+                stack.push(finally_events.iter());
+                stack.push(catch_events.iter());
+                stack.push(body.iter());
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if let Some(s) = find_call_span_by_name(body, target) {
-                    return Some(s);
-                }
+                stack.push(body.iter());
             }
             FlowEvent::Assign {
                 source_call: Some(name),
                 span,
                 ..
-            } if name == target || name.ends_with(&format!(".{target}")) => {
+            } if name == target || name.ends_with(&suffix) => {
                 return Some(*span);
             }
             _ => {}

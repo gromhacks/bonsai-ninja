@@ -8,7 +8,7 @@ pub mod render;
 
 use bonsai_abstract_interp::{RawStep, RawTrace, StepKind, TraceLimits};
 use bonsai_common::{FuncId, Span, SpanMap};
-use bonsai_vfs::Vfs;
+use bonsai_vfs::{FileSnapshot, Vfs};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -309,7 +309,7 @@ impl std::fmt::Debug for FinalizeCtx<'_> {
 /// spans to file paths / line-columns via the VFS.
 pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
     let mut steps: Vec<TraceStep> = Vec::with_capacity(raw.steps.len());
-    let mut span_caches: ahash::AHashMap<bonsai_common::FileId, SpanMap> = ahash::AHashMap::new();
+    let mut span_caches = SourceCache::new();
     let mut analysis_incomplete_reasons = raw.incomplete_reasons.clone();
 
     for (idx, raw_step) in raw.steps.iter().enumerate() {
@@ -534,15 +534,15 @@ fn trace_step_callee_label(message: &str) -> Option<&str> {
 
 fn trace_edges(steps: &[TraceStep]) -> Vec<TraceEdge> {
     let mut edges = Vec::new();
-    for win in steps.windows(2) {
-        if win[0].path_id != win[1].path_id {
-            continue;
+    let mut previous: ahash::AHashMap<u64, &TraceStep> = ahash::AHashMap::new();
+    for step in steps {
+        if let Some(from) = previous.insert(step.path_id, step) {
+            edges.push(TraceEdge {
+                from_step: from.id,
+                to_step: step.id,
+                kind: edge_kind(from, step),
+            });
         }
-        edges.push(TraceEdge {
-            from_step: win[0].id,
-            to_step: win[1].id,
-            kind: edge_kind(&win[0], &win[1]),
-        });
     }
     edges
 }
@@ -609,16 +609,15 @@ fn map_step_kind(kind: StepKind) -> TraceStepKind {
     }
 }
 
-/// Classify the edge between two consecutive steps. Driven entirely
-/// by the source step's kind — the destination is only carried for
-/// future use.
-fn edge_kind(from: &TraceStep, _to: &TraceStep) -> TraceEdgeKind {
-    match from.kind {
-        TraceStepKind::BranchSplit => TraceEdgeKind::BranchTrue,
-        TraceStepKind::Call => TraceEdgeKind::CallEnter,
-        TraceStepKind::Return => TraceEdgeKind::ReturnToCaller,
-        TraceStepKind::Throw => TraceEdgeKind::ThrowToHandler,
-        TraceStepKind::Merge => TraceEdgeKind::Merge,
+/// Annotate only relationships proven by the two typed steps. A call may be
+/// unexpanded; a return may enter finally cleanup; a throw need not have a
+/// handler. Raw steps do not carry a branch verdict or call-frame identity,
+/// so neither is inferred from event kind or display text alone.
+fn edge_kind(from: &TraceStep, to: &TraceStep) -> TraceEdgeKind {
+    match (from.kind, to.kind) {
+        (TraceStepKind::Call, TraceStepKind::EnterFunction) => TraceEdgeKind::CallEnter,
+        (TraceStepKind::Throw, TraceStepKind::Catch) => TraceEdgeKind::ThrowToHandler,
+        (_, TraceStepKind::Merge) => TraceEdgeKind::Merge,
         _ => TraceEdgeKind::Next,
     }
 }
@@ -626,12 +625,8 @@ fn edge_kind(from: &TraceStep, _to: &TraceStep) -> TraceEdgeKind {
 /// Resolve a byte-range [`Span`] to a [`SourceSpan`] with line/col
 /// coordinates. The `cache` is per-finalize so each file's `SpanMap`
 /// is built once even when many steps share a file.
-fn span_to_source(
-    span: &Span,
-    vfs: &Vfs,
-    cache: &mut ahash::AHashMap<bonsai_common::FileId, SpanMap>,
-) -> SourceSpan {
-    let Ok(snapshot) = vfs.snapshot(span.file) else {
+fn span_to_source(span: &Span, vfs: &Vfs, cache: &mut SourceCache) -> SourceSpan {
+    let Some((snapshot, map)) = source_snapshot(span.file, vfs, cache) else {
         return SourceSpan {
             file: String::from("<unknown>"),
             start_line: 0,
@@ -642,9 +637,6 @@ fn span_to_source(
             end_byte: span.end,
         };
     };
-    let map = cache
-        .entry(span.file)
-        .or_insert_with(|| SpanMap::new(snapshot.text.as_ref()));
     let start = map.line_col(span.start);
     let end = map.line_col(span.end);
     SourceSpan {
@@ -660,26 +652,48 @@ fn span_to_source(
 
 /// Trimmed source text of the line a span starts on. Reuses the per-finalize
 /// `SpanMap` cache. Empty when the file can't be read.
-fn span_line_text(
-    span: &Span,
-    vfs: &Vfs,
-    cache: &mut ahash::AHashMap<bonsai_common::FileId, SpanMap>,
-) -> String {
-    let Ok(snapshot) = vfs.snapshot(span.file) else {
+fn span_line_text(span: &Span, vfs: &Vfs, cache: &mut SourceCache) -> String {
+    let Some((snapshot, _)) = source_snapshot(span.file, vfs, cache) else {
         return String::new();
     };
-    let map = cache
-        .entry(span.file)
-        .or_insert_with(|| SpanMap::new(snapshot.text.as_ref()));
-    let line = map.line_col(span.start).line;
-    snapshot
-        .text
+    let Ok(offset) = usize::try_from(span.start) else {
+        return String::new();
+    };
+    let bytes = snapshot.text.as_bytes();
+    if offset > bytes.len() {
+        return String::new();
+    }
+    // Search only within the selected line, not the complete prefix of the
+    // file for every trace step. Newline boundaries are UTF-8 boundaries even
+    // when a diagnostic span itself points into a multi-byte character.
+    let start = bytes[..offset]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |pos| pos + 1);
+    let end = bytes[offset..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(bytes.len(), |pos| offset + pos);
+    snapshot.text[start..end].trim().to_string()
+}
+
+/// Pin each file once so line tables, paths, and displayed text describe the
+/// same immutable source even if an SDK edit arrives during finalization.
+type SourceCache = ahash::AHashMap<bonsai_common::FileId, Option<(FileSnapshot, SpanMap)>>;
+
+fn source_snapshot<'a>(
+    file: bonsai_common::FileId,
+    vfs: &Vfs,
+    cache: &'a mut SourceCache,
+) -> Option<&'a (FileSnapshot, SpanMap)> {
+    cache
+        .entry(file)
+        .or_insert_with(|| {
+            let snapshot = vfs.snapshot(file).ok()?;
+            let map = SpanMap::new(&snapshot.text);
+            Some((snapshot, map))
+        })
         .as_ref()
-        .split('\n')
-        .nth(line.saturating_sub(1) as usize)
-        .unwrap_or("")
-        .trim()
-        .to_string()
 }
 
 #[cfg(test)]

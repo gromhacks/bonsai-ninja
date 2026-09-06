@@ -224,6 +224,7 @@ pub(super) fn terminal_rejection_predicate_guard_span(
     predicate_span: Span,
     sink_span: Span,
     accepted_predicate_value: bool,
+    predicate_falsey_result_is_null: bool,
 ) -> Option<Span> {
     if predicate_span.file != sink_span.file {
         return None;
@@ -238,11 +239,22 @@ pub(super) fn terminal_rejection_predicate_guard_span(
         let expression = branch_condition_fact_for_span(&file_index.branch_conditions, branch.span)?
             .expression
             .as_ref()?;
-        let proven = if accepted_predicate_value {
-            condition_false_implies_atom_true(expression, predicate_span)
-        } else {
-            condition_false_implies_atom_false(expression, predicate_span)
-        };
+        let proven = condition_truth_implies_predicate_value(
+            expression,
+            false,
+            predicate_span,
+            accepted_predicate_value,
+            predicate_falsey_result_is_null,
+        );
+        if !proven {
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "terminal_predicate_guard call={:?} accepted={} expression={:?}",
+                predicate_span,
+                accepted_predicate_value,
+                expression
+            );
+        }
         proven.then_some(branch.span)
     })
 }
@@ -963,6 +975,7 @@ fn collect_runtime_type_tests<'a>(
             span,
             subject,
             type_name,
+            ..
         } => out.push((*span, subject, type_name)),
         ConditionExpressionFact::Not { operand, .. } => {
             collect_runtime_type_tests(operand, out);
@@ -1119,85 +1132,28 @@ fn condition_true_implies_atom_true(expression: &ConditionExpressionFact, atom: 
     }
 }
 
-fn condition_false_implies_atom_false(expression: &ConditionExpressionFact, atom: Span) -> bool {
-    match expression {
-        ConditionExpressionFact::Atom { span } | ConditionExpressionFact::Truthy { span, .. } => {
-            span_contains(*span, atom)
-        }
-        ConditionExpressionFact::Not { operand, .. } => condition_true_implies_atom_false(operand, atom),
-        // A disjunction is false only when every operand is false.
-        ConditionExpressionFact::Any { operands, .. } => operands
-            .iter()
-            .any(|operand| condition_false_implies_atom_false(operand, atom)),
-        // A conjunction can be false through any operand, so every possible
-        // failing operand must establish the same atom value.
-        ConditionExpressionFact::All { operands, .. } => {
-            !operands.is_empty()
-                && operands
-                    .iter()
-                    .all(|operand| condition_false_implies_atom_false(operand, atom))
-        }
-        ConditionExpressionFact::Equality { .. }
-        | ConditionExpressionFact::TypeTest { .. }
-        | ConditionExpressionFact::Membership { .. } => false,
-    }
-}
-
-fn condition_true_implies_atom_false(expression: &ConditionExpressionFact, atom: Span) -> bool {
-    match expression {
-        ConditionExpressionFact::Not { operand, .. } => condition_false_implies_atom_false(operand, atom),
-        // Every conjunct is true. A conjunct that proves the atom false is
-        // therefore sufficient.
-        ConditionExpressionFact::All { operands, .. } => operands
-            .iter()
-            .any(|operand| condition_true_implies_atom_false(operand, atom)),
-        // Any disjunct may be the only true one, so all alternatives must
-        // prove the atom false.
-        ConditionExpressionFact::Any { operands, .. } => {
-            !operands.is_empty()
-                && operands
-                    .iter()
-                    .all(|operand| condition_true_implies_atom_false(operand, atom))
-        }
-        ConditionExpressionFact::Atom { .. }
-        | ConditionExpressionFact::Truthy { .. }
-        | ConditionExpressionFact::Equality { .. }
-        | ConditionExpressionFact::TypeTest { .. }
-        | ConditionExpressionFact::Membership { .. } => false,
-    }
-}
-
-/// Prove that selecting one branch forces an exact direct call result to one
-/// of the values declared by the rule. The frontend owns direct-call and
-/// equality syntax; this function only evaluates the typed boolean IR.
+/// Prove a finite allowed result set for a rule-selected direct call.
 fn condition_truth_implies_call_result_allowed(
     expression: &ConditionExpressionFact,
     truth: bool,
     call: Span,
     accepted: &[bonsai_lang_api::StaticScalarValue],
 ) -> bool {
+    let proves = |operand, truth| condition_truth_implies_call_result_allowed(operand, truth, call, accepted);
     match expression {
-        ConditionExpressionFact::Not { operand, .. } => {
-            condition_truth_implies_call_result_allowed(operand, !truth, call, accepted)
+        ConditionExpressionFact::Not { operand, .. } => proves(operand, !truth),
+        ConditionExpressionFact::All { operands, .. } if truth => {
+            operands.iter().any(|operand| proves(operand, true))
         }
-        ConditionExpressionFact::All { operands, .. } if truth => operands
-            .iter()
-            .any(|operand| condition_truth_implies_call_result_allowed(operand, true, call, accepted)),
         ConditionExpressionFact::All { operands, .. } => {
-            !operands.is_empty()
-                && operands.iter().all(|operand| {
-                    condition_truth_implies_call_result_allowed(operand, false, call, accepted)
-                })
+            !operands.is_empty() && operands.iter().all(|operand| proves(operand, false))
         }
         ConditionExpressionFact::Any { operands, .. } if truth => {
-            !operands.is_empty()
-                && operands
-                    .iter()
-                    .all(|operand| condition_truth_implies_call_result_allowed(operand, true, call, accepted))
+            !operands.is_empty() && operands.iter().all(|operand| proves(operand, true))
         }
-        ConditionExpressionFact::Any { operands, .. } => operands
-            .iter()
-            .any(|operand| condition_truth_implies_call_result_allowed(operand, false, call, accepted)),
+        ConditionExpressionFact::Any { operands, .. } => {
+            operands.iter().any(|operand| proves(operand, false))
+        }
         ConditionExpressionFact::Equality {
             relation,
             left,
@@ -1227,40 +1183,91 @@ fn condition_truth_implies_call_result_allowed(
     }
 }
 
+/// Prove one exact predicate's accepted value under a selected branch truth.
+/// The frontend owns expression shape and the rule owns the result domain.
+/// Merely containing the predicate (for example in an unknown wrapper call)
+/// never establishes its result.
+fn condition_truth_implies_predicate_value(
+    expression: &ConditionExpressionFact,
+    truth: bool,
+    call: Span,
+    accepted: bool,
+    falsey_is_null: bool,
+) -> bool {
+    let proves = |operand, truth| {
+        condition_truth_implies_predicate_value(operand, truth, call, accepted, falsey_is_null)
+    };
+    match expression {
+        ConditionExpressionFact::Not { operand, .. } => proves(operand, !truth),
+        ConditionExpressionFact::All { operands, .. } if truth => {
+            operands.iter().any(|operand| proves(operand, true))
+        }
+        ConditionExpressionFact::All { operands, .. } => {
+            !operands.is_empty() && operands.iter().all(|operand| proves(operand, false))
+        }
+        ConditionExpressionFact::Any { operands, .. } if truth => {
+            !operands.is_empty() && operands.iter().all(|operand| proves(operand, true))
+        }
+        ConditionExpressionFact::Any { operands, .. } => {
+            operands.iter().any(|operand| proves(operand, false))
+        }
+        ConditionExpressionFact::Equality {
+            relation,
+            left,
+            right,
+            ..
+        } => {
+            let equality_holds = match relation {
+                ConditionEquality::Equal => truth,
+                ConditionEquality::NotEqual => !truth,
+            };
+            let value = if condition_operand_is_exact_call_result(left, call) {
+                right.static_value.as_ref()
+            } else if condition_operand_is_exact_call_result(right, call) {
+                left.static_value.as_ref()
+            } else {
+                None
+            };
+            match value {
+                Some(bonsai_lang_api::StaticScalarValue::Boolean(value)) => {
+                    equality_holds && *value == accepted
+                }
+                Some(bonsai_lang_api::StaticScalarValue::Null) => {
+                    if falsey_is_null {
+                        equality_holds != accepted
+                    } else {
+                        equality_holds && !accepted
+                    }
+                }
+                _ => false,
+            }
+        }
+        ConditionExpressionFact::Atom { span } => *span == call && truth == accepted,
+        ConditionExpressionFact::TypeTest {
+            predicate_call_span, ..
+        } => *predicate_call_span == Some(call) && truth == accepted,
+        ConditionExpressionFact::Truthy { operand, .. } => {
+            condition_operand_is_exact_call_result(operand, call) && truth == accepted
+        }
+        ConditionExpressionFact::Membership { .. } => false,
+    }
+}
+
 /// Evaluate a compiler-lowered helper return without assigning meaning to the
-/// referenced call. The sanitizer rule supplies the accepted truth value;
-/// Lua-style falsey predicates may return either `false` or `nil`.
+/// referenced call. The sanitizer rule supplies the accepted truth value and
+/// any stronger result-domain contract; the adapter keeps null and booleans
+/// distinct in the compiler IR.
 pub(super) fn predicate_return_implies_call_value(
     expression: &ConditionExpressionFact,
     call: Span,
     accepted: bool,
+    falsey_is_null: bool,
 ) -> bool {
-    if accepted {
-        condition_true_implies_atom_true(expression, call)
-            || condition_truth_implies_call_result_allowed(
-                expression,
-                true,
-                call,
-                &[bonsai_lang_api::StaticScalarValue::Boolean(true)],
-            )
-    } else {
-        condition_true_implies_atom_false(expression, call)
-            || condition_truth_implies_call_result_allowed(
-                expression,
-                true,
-                call,
-                &[
-                    bonsai_lang_api::StaticScalarValue::Boolean(false),
-                    bonsai_lang_api::StaticScalarValue::Null,
-                ],
-            )
-    }
+    condition_truth_implies_predicate_value(expression, true, call, accepted, falsey_is_null)
 }
 
 fn condition_operand_is_exact_call_result(operand: &ConditionOperandFact, call: Span) -> bool {
-    operand
-        .direct_call_span
-        .is_some_and(|direct| spans_overlap(direct, call))
+    operand.direct_call_span.is_some_and(|direct| direct == call)
 }
 
 pub(super) fn path_containment_guard_sanitizer(
@@ -8148,11 +8155,17 @@ fn url_scheme_acceptance_is_exact(
             url_scheme_equality_matches(left, right, parsed, guard, calls)
                 || url_scheme_equality_matches(right, left, parsed, guard, calls)
         }
-        ConditionExpressionFact::Atom { span } => {
-            guard.comparison_predicate.as_ref().is_some_and(|predicate| {
-                url_scheme_predicate_matches(*span, parsed, guard, predicate, calls, file_index)
-            })
-        }
+        ConditionExpressionFact::Atom { span }
+        | ConditionExpressionFact::Truthy {
+            operand:
+                ConditionOperandFact {
+                    direct_call_span: Some(span),
+                    ..
+                },
+            ..
+        } => guard.comparison_predicate.as_ref().is_some_and(|predicate| {
+            url_scheme_predicate_matches(*span, parsed, guard, predicate, calls, file_index)
+        }),
         _ => false,
     })
 }
@@ -8188,11 +8201,17 @@ fn url_scheme_rejection_is_exact(
                 url_scheme_equality_matches(left, right, parsed, guard, calls)
                     || url_scheme_equality_matches(right, left, parsed, guard, calls)
             }
-            ConditionExpressionFact::Atom { span } => {
-                guard.comparison_predicate.as_ref().is_some_and(|predicate| {
-                    url_scheme_predicate_matches(*span, parsed, guard, predicate, calls, file_index)
-                })
-            }
+            ConditionExpressionFact::Atom { span }
+            | ConditionExpressionFact::Truthy {
+                operand:
+                    ConditionOperandFact {
+                        direct_call_span: Some(span),
+                        ..
+                    },
+                ..
+            } => guard.comparison_predicate.as_ref().is_some_and(|predicate| {
+                url_scheme_predicate_matches(*span, parsed, guard, predicate, calls, file_index)
+            }),
             _ => false,
         },
         _ => false,
@@ -8413,19 +8432,25 @@ fn url_rejected_host_collection(
                 .as_deref()
                 .and_then(clean_overwrite_target_key)
                 .map(UrlCollectionSource::Place),
-            ConditionExpressionFact::Atom { span } => {
-                guard.membership_predicate.as_ref().and_then(|predicate| {
-                    calls.iter().find_map(|call| {
-                        (span_contains(*span, call.span)
-                            && rule_target_matches_call(call.name, call.receiver_types, predicate)
-                            && call.args.iter().any(|argument| {
-                                url_call_argument_reads_component(argument, parsed, &guard.component, calls)
-                            }))
-                        .then(|| url_membership_collection_source(call, calls, file_index))
-                        .flatten()
-                    })
+            ConditionExpressionFact::Atom { span }
+            | ConditionExpressionFact::Truthy {
+                operand:
+                    ConditionOperandFact {
+                        direct_call_span: Some(span),
+                        ..
+                    },
+                ..
+            } => guard.membership_predicate.as_ref().and_then(|predicate| {
+                calls.iter().find_map(|call| {
+                    (span_contains(*span, call.span)
+                        && rule_target_matches_call(call.name, call.receiver_types, predicate)
+                        && call.args.iter().any(|argument| {
+                            url_call_argument_reads_component(argument, parsed, &guard.component, calls)
+                        }))
+                    .then(|| url_membership_collection_source(call, calls, file_index))
+                    .flatten()
                 })
-            }
+            }),
             _ => None,
         },
         _ => None,
@@ -8455,7 +8480,15 @@ fn url_accepted_host_collection(
             .as_deref()
             .and_then(clean_overwrite_target_key)
             .map(UrlCollectionSource::Place),
-        ConditionExpressionFact::Atom { span } => guard.membership_predicate.as_ref().and_then(|predicate| {
+        ConditionExpressionFact::Atom { span }
+        | ConditionExpressionFact::Truthy {
+            operand:
+                ConditionOperandFact {
+                    direct_call_span: Some(span),
+                    ..
+                },
+            ..
+        } => guard.membership_predicate.as_ref().and_then(|predicate| {
             calls.iter().find_map(|call| {
                 (span_contains(*span, call.span)
                     && rule_target_matches_call(call.name, call.receiver_types, predicate)
@@ -9573,31 +9606,67 @@ fn events_contain_target(events: &[FlowEvent], target: Span) -> bool {
 }
 
 fn branch_arm_abruptly_exits(events: &[FlowEvent]) -> bool {
-    for event in events {
-        match event {
-            FlowEvent::Return { .. } | FlowEvent::Throw { .. } => return true,
-            FlowEvent::Call { name, .. }
-                if matches!(
-                    clean_overwrite_callee_tail(name).as_str(),
-                    "abort" | "sendstatus" | "exit" | "panic"
-                ) =>
-            {
-                return true;
+    // A syntactic return/throw proves rejection; a callee's spelling does
+    // not. Fold the structured IR once, joining alternatives without path
+    // enumeration or native-stack recursion. Loop transfers must survive a
+    // join: an unreachable later throw cannot turn a break into rejection.
+    const FALLTHROUGH: u8 = 1;
+    const UNPROVEN_TRANSFER: u8 = 2;
+    enum Work<'a> {
+        Sequence(&'a [FlowEvent]),
+        JoinAlternatives,
+        ComposeSequence,
+    }
+    let mut work = vec![Work::Sequence(events)];
+    let mut results = Vec::<u8>::new();
+    while let Some(next) = work.pop() {
+        match next {
+            Work::Sequence(events) => {
+                let Some((event, rest)) = events.split_first() else {
+                    results.push(FALLTHROUGH);
+                    continue;
+                };
+                match event {
+                    FlowEvent::Return { .. } | FlowEvent::Throw { .. } => results.push(0),
+                    FlowEvent::Break { .. } | FlowEvent::Continue { .. } => {
+                        results.push(UNPROVEN_TRANSFER);
+                    }
+                    FlowEvent::Branch {
+                        then_events,
+                        else_events,
+                        ..
+                    } => {
+                        work.push(Work::ComposeSequence);
+                        work.push(Work::Sequence(rest));
+                        work.push(Work::JoinAlternatives);
+                        work.push(Work::Sequence(else_events));
+                        work.push(Work::Sequence(then_events));
+                    }
+                    // These regions need their own destination/handler proof.
+                    // Treating them as an ordinary statement could hide an
+                    // escaping loop transfer or cleanup that replaces a return.
+                    FlowEvent::Loop { .. }
+                    | FlowEvent::Try { .. }
+                    | FlowEvent::Using { .. }
+                    | FlowEvent::Defer { .. } => {
+                        results.push(FALLTHROUGH | UNPROVEN_TRANSFER);
+                    }
+                    _ => work.push(Work::Sequence(rest)),
+                }
             }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } if !else_events.is_empty()
-                && branch_arm_abruptly_exits(then_events)
-                && branch_arm_abruptly_exits(else_events) =>
-            {
-                return true;
+            Work::JoinAlternatives => {
+                let right = results.pop().expect("right branch exit state");
+                let left = results.pop().expect("left branch exit state");
+                results.push(left | right);
             }
-            _ => {}
+            Work::ComposeSequence => {
+                let tail = results.pop().expect("continuation exit state");
+                let head = results.pop().expect("preceding branch exit state");
+                results.push((head & !FALLTHROUGH) | if head & FALLTHROUGH != 0 { tail } else { 0 });
+            }
         }
     }
-    false
+    results == [0]
 }
 
 fn finding_for_guard_span(
@@ -9881,6 +9950,197 @@ mod structured_guard_tests {
     }
 
     #[test]
+    fn loop_control_does_not_make_an_unreachable_throw_a_terminal_guard() {
+        for control in [
+            FlowEvent::Break {
+                span: span(1, 2),
+                target: None,
+            },
+            FlowEvent::Continue {
+                span: span(1, 2),
+                target: None,
+            },
+        ] {
+            let throw = FlowEvent::Throw {
+                span: span(3, 4),
+                value_name: None,
+                thrown_type: None,
+            };
+            assert!(!branch_arm_abruptly_exits(&[control.clone(), throw.clone()]));
+            assert!(!branch_arm_abruptly_exits(&[
+                FlowEvent::Branch {
+                    span: span(0, 3),
+                    condition: Some("condition".to_string()),
+                    then_events: vec![control],
+                    else_events: Vec::new(),
+                },
+                throw,
+            ]));
+        }
+    }
+
+    #[test]
+    fn terminal_guard_joins_both_arms_and_their_fallthrough_continuation() {
+        let throw = || FlowEvent::Throw {
+            span: span(3, 4),
+            value_name: None,
+            thrown_type: None,
+        };
+        let branch = |then_events, else_events| FlowEvent::Branch {
+            span: span(0, 5),
+            condition: Some("condition".to_string()),
+            then_events,
+            else_events,
+        };
+        assert!(!branch_arm_abruptly_exits(&[]));
+        assert!(!branch_arm_abruptly_exits(&[branch(vec![throw()], vec![])]));
+        assert!(branch_arm_abruptly_exits(&[branch(vec![throw()], vec![throw()])]));
+        assert!(branch_arm_abruptly_exits(&[
+            branch(vec![throw()], vec![]),
+            throw()
+        ]));
+        assert!(branch_arm_abruptly_exits(&[
+            throw(),
+            FlowEvent::Break {
+                span: span(6, 7),
+                target: None,
+            }
+        ]));
+    }
+
+    #[test]
+    fn deeply_nested_terminal_guard_folds_on_the_heap() {
+        let throw = || FlowEvent::Throw {
+            span: span(3, 4),
+            value_name: None,
+            thrown_type: None,
+        };
+        let mut events = vec![throw()];
+        for _ in 0..10_000 {
+            events = vec![FlowEvent::Branch {
+                span: span(0, 5),
+                condition: Some("condition".to_string()),
+                then_events: events,
+                else_events: vec![throw()],
+            }];
+        }
+        let result = branch_arm_abruptly_exits(&events);
+        // Drop the synthetic nested Vec tree iteratively as well; this test
+        // checks the proof traversal, not Rust's recursive derived drop glue.
+        let mut pending = events;
+        while let Some(event) = pending.pop() {
+            if let FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } = event
+            {
+                pending.extend(then_events);
+                pending.extend(else_events);
+            }
+        }
+        assert!(result);
+    }
+
+    #[test]
+    fn null_comparison_requires_the_rule_owned_predicate_result_domain() {
+        let call = span(10, 20);
+        let operand = |span, direct_call_span, static_value| ConditionOperandFact {
+            span,
+            direct_call_span,
+            value_flow: Default::default(),
+            static_string: None,
+            static_value,
+        };
+        for relation in [ConditionEquality::Equal, ConditionEquality::NotEqual] {
+            for reversed in [false, true] {
+                let call_operand = operand(call, Some(call), None);
+                let null_operand =
+                    operand(span(24, 27), None, Some(bonsai_lang_api::StaticScalarValue::Null));
+                let (left, right) = if reversed {
+                    (null_operand, call_operand)
+                } else {
+                    (call_operand, null_operand)
+                };
+                let expression = ConditionExpressionFact::Equality {
+                    span: span(10, 27),
+                    relation,
+                    left,
+                    right,
+                };
+                for truth in [false, true] {
+                    let is_null = truth == (relation == ConditionEquality::Equal);
+                    for accepted in [false, true] {
+                        assert_eq!(
+                            condition_truth_implies_predicate_value(&expression, truth, call, accepted, true),
+                            is_null != accepted
+                        );
+                        assert_eq!(
+                            condition_truth_implies_predicate_value(
+                                &expression,
+                                truth,
+                                call,
+                                accepted,
+                                false
+                            ),
+                            is_null && !accepted
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn predicate_proof_never_uses_a_nested_call_as_the_complete_result() {
+        let call = span(10, 20);
+        let wrapper = span(5, 25);
+        for expression in [
+            ConditionExpressionFact::Atom { span: wrapper },
+            ConditionExpressionFact::Truthy {
+                span: wrapper,
+                operand: ConditionOperandFact {
+                    span: wrapper,
+                    direct_call_span: Some(wrapper),
+                    value_flow: Default::default(),
+                    static_string: None,
+                    static_value: None,
+                },
+            },
+            ConditionExpressionFact::Equality {
+                span: span(5, 30),
+                relation: ConditionEquality::NotEqual,
+                left: ConditionOperandFact {
+                    span: wrapper,
+                    direct_call_span: Some(wrapper),
+                    value_flow: Default::default(),
+                    static_string: None,
+                    static_value: None,
+                },
+                right: ConditionOperandFact {
+                    span: span(27, 30),
+                    direct_call_span: None,
+                    value_flow: Default::default(),
+                    static_string: None,
+                    static_value: Some(bonsai_lang_api::StaticScalarValue::Null),
+                },
+            },
+        ] {
+            for truth in [false, true] {
+                for accepted in [false, true] {
+                    assert!(!condition_truth_implies_predicate_value(
+                        &expression,
+                        truth,
+                        call,
+                        accepted,
+                        true
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn nested_aggregate_value_calls_are_part_of_the_compiler_value_projection() {
         let aggregate_call = span(20, 30);
         let tuple_call = span(40, 50);
@@ -9927,8 +10187,20 @@ mod structured_guard_tests {
                 ConditionExpressionFact::Atom { span: second },
             ],
         };
-        assert!(condition_false_implies_atom_false(&disjunction, first));
-        assert!(condition_false_implies_atom_false(&disjunction, second));
+        assert!(condition_truth_implies_predicate_value(
+            &disjunction,
+            false,
+            first,
+            false,
+            false
+        ));
+        assert!(condition_truth_implies_predicate_value(
+            &disjunction,
+            false,
+            second,
+            false,
+            false
+        ));
         assert!(!condition_false_implies_atom_true(&disjunction, first));
 
         let conjunction = ConditionExpressionFact::All {
@@ -9939,14 +10211,16 @@ mod structured_guard_tests {
             ],
         };
         assert!(
-            !condition_false_implies_atom_false(&conjunction, first),
+            !condition_truth_implies_predicate_value(&conjunction, false, first, false, false),
             "either conjunct may reject, so one atom's false value is not guaranteed"
         );
         let negated = ConditionExpressionFact::Not {
             span: span(5, 25),
             operand: Box::new(ConditionExpressionFact::Atom { span: first }),
         };
-        assert!(condition_true_implies_atom_false(&negated, first));
+        assert!(condition_truth_implies_predicate_value(
+            &negated, true, first, false, false
+        ));
     }
 
     #[test]

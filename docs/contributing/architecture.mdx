@@ -35,18 +35,20 @@ in one or two layers at a time, so this doc is organised the same way.
                               ▲
                        bonsai_lang_api
                               ▲
-                 bonsai_diagnostics  bonsai_vfs
+          bonsai_diagnostics  bonsai_vfs  bonsai_factstore
                               ▲
                         bonsai_common
                               ▲
-          bonsai_hash  bonsai_factstore  bonsai_rulepack
+                   bonsai_hash  bonsai_rulepack
 ```
 
 Rows group crates by maximum production dependency depth, not by runtime phase;
 for example, `bonsai_trace` is shared analysis used by `bonsai_db`, while
 `bonsai_adapters` is the registry over the individual language crates. The
-portable `scripts/audit-layering.sh` gate checks normal and build dependencies,
-ignores development-only edges, and rejects upward production edges.
+portable `scripts/audit-layering.sh` gate reads Cargo metadata to check normal,
+build, renamed, inherited, optional, and platform-specific dependencies. It
+ignores development-only edges, rejects upward production edges, and runs its
+Python regression tests before auditing the workspace.
 
 ## Foundation
 
@@ -60,10 +62,12 @@ are half-open byte ranges; line/column lookups go through a thread-local
 built from a persisted line-start table (`SpanMap::from_line_starts`,
 `cached_span_map_from_line_starts`), which is how `AnalyzerDb::span_map`
 renders locations for a lazily interned source without loading its text.
+The line-table cache includes the unique VFS instance as well as file ID and
+version; separate SDK projects cannot reuse one another's source coordinates.
 
 `crates/common::resources` also owns resource scheduling. Memory limits are
 detected from the host and the process's active nested Linux cgroup v1/v2
-memory controller, optionally lowered by
+memory controller and each of its visible ancestors, optionally lowered by
 `BONSAI_MEMORY_BUDGET_MB`. Continuous compiler worklists use each source
 unit's actual byte size after subtracting the process's measured resident set
 and a safety margin. The weighted scheduler charges a fixed per-unit frontend
@@ -80,6 +84,13 @@ pages, allocator arenas, stacks, and output buffers can make RSS exceed it.
 Under pressure the OS can reclaim those clean pages while Bonsai serializes,
 spills, or exactly recomputes compiler bodies. Resource accounting changes
 throughput and representation only.
+
+FactStore validates its immutable string table once when opening a generation;
+per-function hydration borrows that validated table without rescanning every
+workspace string. Streamed serializers use the same named compiler-thread
+stack reservation as lowering workers. Worker-owned temporary files are cleaned
+after failures and panic unwinding as well as ordinary cancellation, without
+removing the previously published generation.
 
 Entry-rooted semantic closures use a distinct resource profile. Their shared
 IDG relations are persisted, file-backed, and reclaimable, so live RSS is an
@@ -259,10 +270,31 @@ one semantic class identity. Ordinary functions, ambiguous identities, and
 external calls without a typing rule fail closed. This lets broad callgraph and
 IDG phases resolve cross-file receiver state after bodies have been evicted.
 
+An unresolved competing initializer invalidates an exact field-type claim.
+Resolved field types retain their qualified identity, and receiver alias
+lookup preserves the complete place: `other.service` cannot borrow the type of
+`self.service`. Callback relations retain each actual argument span, including
+repeated callbacks, and share named/implicit-receiver formal mapping with IDG.
+
+The TypeScript adapter preserves qualified type syntax in parameters, casts,
+and inheritance. Generic arguments and operands of computed-base expressions
+are not base classes. Parameter-property field transfers are independent of
+whether their type is known and use the lowered parameter identity; only CST
+modifiers declare properties, never decorator/comment text. Readonly literal
+facts carry their class owner, and writes in that class invalidate the constant
+claim regardless of textual declaration order.
+
 Type and receiver identities are exact, case-sensitive compiler facts.
 Identifier capitalization is never promoted into type evidence. A language
 adapter may use case only when its grammar defines case semantically (for
 example Go export visibility or Erlang variable syntax).
+Nested qualified owners distinguish same-named classes, including declarations
+in one file. Empty module metadata does not prove cross-file type identity or
+enable same-directory callable linkage; the latter requires an explicit
+adapter capability. An unresolved qualified type alias cannot fall back to an
+unrelated short type name. Raw qualified calls retain every receiver segment.
+Empty-base classes participate in ancestry ambiguity checks just like derived
+classes, so an unrelated same-named type cannot donate its base list.
 
 Ownership does not stop at file boundaries. An adapter records the enclosing
 type even when a language permits implementations to be split across files or
@@ -278,6 +310,10 @@ shape is also stored on `CallArgumentValueFact`. Clean-overwrite accepts only
 exact AST literal or adapter-decoded static-value facts. Missing carriers are
 `Unknown`, never an inferred literal, and rendered argument/return text or an
 ALL_CAPS identifier is never semantic evidence.
+Finite-result selections use that same classifier: Kotlin `when` and Swift
+`switch` results containing runtime string interpolation are not constants.
+The outer string node alone is insufficient proof. Qualified Kotlin base
+types retain their provider identity instead of collapsing to a short name.
 
 When a grammar uses the same CST node for constructors and ordinary calls,
 local declarations and explicit annotations remain adapter facts; external
@@ -291,6 +327,26 @@ gives exact workspace values and ordinary callables precedence over external
 typing, enforces the rule's imports, and fails closed on mixed or ambiguous
 identities. This replaces both capitalization and workspace-wide
 constructor-name inventories without loading unrelated bodies.
+
+Python finite-map clean-value proofs require immutable literal values, a
+complete lookup RHS, and an absent or proven constant fallback. Literal
+arguments do not prove an arbitrary factory's result is constant. A lookup
+nested inside another expression cannot erase that expression's dataflow.
+Regex-derived character constraints reject ranges crossing punctuation and
+top-level alternatives that escape the enclosing anchors; unsupported proofs
+remain ordinary dataflow, not sanitizer credit.
+Provider-bound regex proofs also require the exact positional call shape and
+the same lexical receiver binding. Additional flags, replacement limits,
+shadowed receivers, and multiple concatenated character classes cannot borrow
+the simpler operation's proof.
+Elixir finite word-attribute guards require a unique, preceding definition in
+the owning module. Repeated, conditional, dynamically defined, or custom-sigil
+values cannot supply a fixed allowlist. Guard-to-call argument relations also
+require unchanged bindings and cannot leak into a nested callback's scope.
+Java guarded-value summaries require the rejecting branch to return a static
+fallback unconditionally in that function. A return inside another conditional
+or callback does not establish that proof; transparent single-statement blocks
+and comments do not change it.
 
 Rulepack-only receiver typing is compiled before IDG construction through the
 same canonical matcher used for sink inventory. The result is exact
@@ -568,8 +624,10 @@ Commands request the lowest compiler product that can answer their contract:
   allocation. JSON pagination estimates serialized fields only and never reads
   text-only source-line previews.
 - `read-file` opens a one-file scoped workspace by default, preserves the
-  file's full-workspace ordinal, and decodes its validated compiler object
-  when present. Explicit flow, rulepack, or cross-file-body options select
+  file's full-workspace ordinal from the current metadata-only source walk,
+  and decodes its validated compiler object when present. An absent object
+  or outdated generation cannot renumber the file or select another file's
+  persisted headers. Explicit flow, rulepack, or cross-file-body options select
   workspace semantics; the default path never constructs a callgraph.
 - `inspect-graph` may first narrow a large complete workspace to candidate
   files from a fresh retrieval sidecar
@@ -784,6 +842,13 @@ fixed point's maximum spill page makes large-project latency proportional to
 allocator and file setup rather than compiler facts. Unit and architecture
 conformance tests pin the lazy boundary.
 
+Fixed-width relation sorters follow the same rule: an empty sorter owns no run
+buffer or temporary file, and a relation below its run threshold sorts and
+deduplicates in memory. Larger relations spill to bounded sorted runs and use
+the same positioned merge. Resident and spilled relations have identical
+range-query results, checkpoints, and persisted record bytes; the storage
+choice does not change the graph or its admitted facts.
+
 Large compiler phases transfer only their canonical result across a scoped
 worker-heap boundary. Transient maps, sort buffers, and CSR construction state
 are released before the next phase begins. This is allocation-lifetime
@@ -812,8 +877,8 @@ exponential. A `complete_chains` switch is intentionally absent, while schema
 compatibility fields report
 `mode=compressed_callgraph`, zero truncation, and explain that concrete path
 rows are represented by the graph.
-Since schema v7 (the current schema is v12,
-`schemas/bonsai-native-export-v12.schema.json`) code locations are serialized
+Since schema v7 (the current schema is v13,
+`schemas/bonsai-native-export-v13.schema.json`) code locations are serialized
 relative to the workspace root, with that absolute root carried once as
 metadata. The relative path is the stable compiler
 identity; absolute paths are reconstructed only when a consumer performs host
@@ -845,8 +910,12 @@ static-limit/incomplete metadata, normalized search text, content
 fingerprints, and pipeline fingerprints. Source files are first-class
 `kind=file` documents in the same sidecar, so file lookup is cached without
 turning filenames into evidence. It builds deterministic indexes for
-stable ids, kind, file, symbol/name, prefixes, lexical terms/trigrams,
-caller/callee edges, and source/sink/finding keys.
+stable ids, kind, file, symbol/name, lexical trigrams, and caller/callee edges.
+Substring queries shorter than three Unicode scalars scan candidate text;
+token-prefix membership cannot exclude matches inside longer identifiers.
+Longer queries intersect sorted trigram postings beginning with the smallest
+list, without allocating a hash set for every trigram. Unused token/prefix
+indexes are not built.
 
 Exact indexes decide candidates; canonical facts and semantic graph
 verification decide truth. Vector similarity is never evidence. Future vector
@@ -871,6 +940,13 @@ disk source fingerprints and use its candidate file/fact ids before opening a
 scoped workspace; stale or missing sidecars fall back to canonical syntax-backed
 collection. Use `index --semantic` or `cache rebuild` when you want to
 front-load that candidate index.
+
+Retrieval pipeline identity includes both the compiler-object frontend ABI and
+shared semantic-policy fingerprint, as well as source, dependency, and schema
+identities. Query-time Bloom page validation requires each file partition
+exactly once in canonical order; incomplete or duplicate coverage is an error,
+not an empty result. Migration cleanup recognizes numeric older schema
+versions only and leaves newer binaries' sidecars intact.
 
 **`crates/index`** is the cross-file declaration/reference index: it remaps
 each adapter's file-local `DeclIndex` symbols to workspace-unique
@@ -950,9 +1026,36 @@ events as `BranchConditionFact` compiler IR and are included in native export;
 semantic guard proofs consume that fact rather than branch rendering.
 Condition operands additionally carry adapter-decoded `StaticScalarValue`
 facts, including null and booleans, so control-dependent proofs never infer
-literal meaning from rendered condition text. Broad duplicate projections
+literal meaning from rendered condition text. Direct call operands and
+call-backed type tests carry their canonical callee span independently of the
+complete condition and tested value. Dart's flattened selector sequences
+preserve the parsed conjunction, disjunction, and negation structure; an
+opaque outer call does not inherit an inner predicate's result.
+
+Broad duplicate projections
 (such as a loop-binding assignment that shares the complete loop span) cannot
 terminate a control-path walk before the tighter structured sibling.
+
+Browse attribution uses half-open callable extents and one-based byte columns,
+so same-line siblings have distinct names, summary IDs, and cross-module
+uses. Line-only SDK lookups fail closed when sibling scopes are ambiguous.
+The annotator shares immutable per-file header ranges and invalidates its
+paths and symbol ordinals on VFS revisions; it never hydrates source merely
+to render a location when compiler line tables are available.
+Incoming browse edges join stable callable IDs, and class rows select members
+by their exact parent symbol. A scoped view without complete callgraph
+partitions reports optional `used_in` evidence as incomplete; rendered-page
+caching must not preserve that absence across an explicit semantic prewarm.
+Remote call-site coordinates use source fingerprints from the validated
+generation, never a guessed column or unchecked current disk contents.
+
+C# constructor initializer calls preserve their current-object receiver;
+ancestor and overload effects compose in the IDG. Adapters do not run a
+separate depth-limited constructor fixed point or borrow writes from another
+object created in the constructor body. C# configuration constants propagated
+from a local object initializer require an unescaped same-block read; writes,
+aliases, conditional definitions, and argument-evaluation mutations invalidate
+that optional static proof.
 
 `dump-resolution` audits the same layer without adding a second resolver:
 it compares adapter-emitted `FlowEvent::Call` sites with the canonical
@@ -981,8 +1084,11 @@ with a raw-source name guess.
 runtime. Its value lattice now carries constants, bounded integer ranges,
 boolean domains, string length ranges, nullness / nullable values, bounded
 literal sets, and simple path relations such as `idx < len` or `ptr !=
-null`. The trace runner uses the same lattice at CFG joins, so branch-local
-numeric facts widen into ranges instead of collapsing straight to unknown.
+null`. The diagnostic trace runner consumes sorted adapter-lowered
+`AssignmentValueFact.static_value` facts and exact bare-name copies; it never
+decodes source-language literals or assumes a call returns its arguments.
+At CFG joins, proven numeric facts widen into ranges; a binding missing on any
+incoming path becomes unknown. CFG incompleteness is preserved in the trace.
 Security, browse, and export consumers should sharpen results by consuming
 these shared facts rather than inventing command- or language-specific
 domains.
@@ -1063,10 +1169,32 @@ fingerprints, missing reasons, and a versioned source ledger. Each
 and, when the bytes are the text verbatim, its SHA-256 `text_digest`. A warm
 validation reuses the digest only when the stamp is unchanged; changed
 metadata always rehashes content. This turns an unchanged 30,000-file reopen
-into metadata validation without weakening exact source identity. A legacy
-in-tree `<workspace>/.bonsai` directory left by older releases is never read;
-`cache stats` reports it and `cache clear --legacy`
-(`WorkspaceCache::clear_legacy_in_tree`) removes it.
+into metadata validation without weakening exact source identity. Legacy
+in-tree analysis files are not reused. `cache stats` reports recognized
+inactive `<workspace>/.bonsai` artifacts; `cache clear --legacy`
+(`WorkspaceCache::clear_legacy_in_tree`) removes only those files, preserving
+rule overlays, links, configuration, and unknown data. Ordinary recursive
+cache clearing requires matching native ownership, rejects source roots and
+ancestors, and preflights unknown entries. Orphan pruning uses the same native
+workspace binding, with complete legacy manifests as a fallback; missing
+manifests or old timestamps never justify deletion. A shared lock serializes
+the daily sweep. Compiler-object generation cleanup belongs to the compiler
+writer, which checks older numeric versions and their writer locks; the SDK
+does not run a competing filename-based pruner.
+The old v11 container migration is retired: it cannot prove that its lowered
+IR matches the current adapter ABI. Incompatible generations take the normal
+compiler rebuild path, even when their source hashes still match. The public
+migration compatibility hook returns no migrated generation without decoding
+or rewriting the old object bodies.
+The native workspace binding takes precedence even when an explicitly selected
+external cache happens to be named `.bonsai`; its parent is not necessarily
+the inspected project.
+Reusable export readers capture an open immutable payload and its matching
+metadata under a short shared publisher lock. A busy publisher is a cache
+miss, not a blocking read; streaming proceeds after releasing the lock.
+Publishers invalidate previous metadata before replacing payload bytes, so
+an interrupted publication cannot make one generation borrow another's
+freshness proof. Ordinary one-shot exports still do not publish this cache.
 Commands still validate each sidecar's own header, payload index, and
 pipeline fingerprint before reuse; the manifest is for diagnostics, SDK
 consumers, and downstream tooling that need to understand what was produced.
@@ -1247,6 +1375,12 @@ browse data layer so CLI and SDK ordering cannot drift.
 
 **`crates/trace`** owns the stable text, JSON, and DOT trace schema behind
 the SDK `project.trace()` API; the CLI has no trace command.
+Finalization pins each file snapshot so displayed source and line coordinates
+cannot drift during an SDK edit, and retrieves each selected line without
+rescanning the file prefix. Edges connect consecutive steps within each path,
+even when paths interleave. Special edge labels require typed destination
+evidence: an unexpanded call is not a callee entry, and a branch split alone
+does not prove a true/false verdict. DOT labels escape source text.
 `crates/workspace` resolves adapter-emitted callable identities and drives the
 cross-module interpreter. A declared source/target query projects the
 resolved graph with an uncapped linear reverse/forward reachability pass

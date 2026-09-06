@@ -37,7 +37,9 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
 use bonsai_common::{FuncId, Span};
 use bonsai_factstore::{StrId, StringPoolBuilder};
-use bonsai_lang_api::{CallKind, CallReceiverRole};
+use bonsai_lang_api::{
+    explicit_argument_parameter_index as explicit_arg_param_index, CallKind, CallReceiverRole,
+};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::sync::{Arc, LazyLock};
@@ -5505,27 +5507,12 @@ fn receiver_projection_needed(receiver: &str, receiver_type: &str) -> bool {
         .is_none_or(|tail| tail != receiver_type)
 }
 
-fn explicit_arg_param_index(arg_idx: usize, receiver_param_index: Option<usize>) -> usize {
-    match receiver_param_index {
-        Some(receiver_idx) if arg_idx >= receiver_idx => arg_idx.saturating_add(1),
-        _ => arg_idx,
-    }
-}
-
 fn named_arg_param_index(
     arg_name: &str,
     endpoints: CalleeEndpointView<'_>,
     receiver_param_index: Option<usize>,
 ) -> Option<usize> {
-    let arg_name = arg_name.trim();
-    if arg_name.is_empty() {
-        return None;
-    }
-    endpoints
-        .param_names()
-        .enumerate()
-        .find(|(idx, param)| Some(*idx) != receiver_param_index && param.trim() == arg_name)
-        .map(|(idx, _)| idx)
+    bonsai_lang_api::named_argument_parameter_index(arg_name, endpoints.param_names(), receiver_param_index)
 }
 
 fn symbolic_pair_supported(

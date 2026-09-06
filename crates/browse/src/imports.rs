@@ -53,6 +53,7 @@ pub struct ImportOut {
     /// `true` for wildcard imports (`from x import *`).
     pub is_wildcard: bool,
     pub line: u32,
+    pub column: u32,
     /// Extra local bindings attached to this import statement. Used
     /// by the browse layer to aggregate flow-id labels across
     /// destructure shorthands — `const { a, b } = require("x")`
@@ -478,7 +479,7 @@ pub fn imports(ws: &Workspace, f: &ImportsFilters<'_>) -> Result<Vec<ImportOut>,
                 if f.wildcard && !imp.is_wildcard {
                     continue;
                 }
-                let (_, line, _) = format_span(&imp.span, ws);
+                let (_, line, column) = format_span(&imp.span, ws);
                 let mut local_bindings = local_by_span.get(&imp.span.start).cloned().unwrap_or_default();
                 // For whole-module imports without a named symbol
                 // (`import java.lang.String` / `import "os"` /
@@ -533,6 +534,7 @@ pub fn imports(ws: &Workspace, f: &ImportsFilters<'_>) -> Result<Vec<ImportOut>,
                     original_name: imp.original_name.clone(),
                     is_wildcard: imp.is_wildcard,
                     line,
+                    column,
                     local_bindings,
                 });
             }
@@ -556,6 +558,8 @@ pub fn imports(ws: &Workspace, f: &ImportsFilters<'_>) -> Result<Vec<ImportOut>,
                     .then_with(|| a.alias.cmp(&b.alias))
                     .then_with(|| a.file.cmp(&b.file))
                     .then_with(|| a.line.cmp(&b.line))
+                    .then_with(|| a.column.cmp(&b.column))
+                    .then_with(|| a.original_name.cmp(&b.original_name))
             })
     });
     Ok(out)

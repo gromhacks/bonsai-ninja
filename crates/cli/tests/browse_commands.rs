@@ -717,6 +717,78 @@ fn every_browse_command_has_a_cross_module_used_in_section() {
 }
 
 #[test]
+fn same_line_browse_rows_keep_their_own_enclosing_function_and_cross_module_uses() {
+    let workspace = tempdir_for_test("bonsai_browse_exact_columns");
+    std::fs::write(workspace.join("library.js"),
+        "export function alpha() { /* first comment */ return 'first'; } export function beta() { /* second comment */ return 'second'; }\n").unwrap();
+    std::fs::write(workspace.join("entry.js"),
+        "import { alpha, beta } from './library.js';\nexport function use_alpha() { return alpha(); }\nexport function use_beta() { return beta(); }\n").unwrap();
+    let root = workspace.to_str().unwrap();
+    // A filtered syntax view does not open unrelated caller bodies. Its
+    // optional graph projection must distinguish unavailable from empty,
+    // and must not cache that absence across explicit semantic prewarm.
+    let cold_args = [
+        "strings",
+        root,
+        "--file",
+        "library.js",
+        "--in-fn",
+        "beta",
+        "--no-progress",
+    ];
+    let mut cold_json_args = cold_args.to_vec();
+    cold_json_args.extend(["--format", "json"]);
+    let cold = run(&cold_json_args).expect("cold browse binary");
+    let cold_json: serde_json::Value = serde_json::from_str(&cold).unwrap();
+    assert_eq!(cold_json["used_in_complete"], false, "{cold}");
+    assert!(!cold_json["used_in_incomplete_reasons"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let cold_text = run(&cold_args).expect("cold browse text");
+    assert!(cold_text.contains("index <workspace> --semantic"), "{cold_text}");
+    run(&["index", root, "--semantic", "--no-progress"]).expect("semantic index");
+    for command in ["strings", "comments"] {
+        let args = [
+            command,
+            root,
+            "--file",
+            "library.js",
+            "--in-fn",
+            "beta",
+            "--no-progress",
+        ];
+        let mut json_args = args.to_vec();
+        json_args.extend(["--format", "json"]);
+        let json = run(&json_args).expect("browse binary");
+        let rows = parse_rows(&json);
+        assert_eq!(rows.len(), 1, "{command}: {json}");
+        assert_eq!(rows[0]["presentation"]["enclosing_function"], "beta");
+        let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(document["used_in_complete"], true, "{command}: {json}");
+        let uses = document["used_in"].to_string();
+        assert!(uses.contains("use_beta"), "{command}: {json}");
+        assert!(!uses.contains("use_alpha"), "{command}: {json}");
+        let edge = &document["used_in"][0]["callers_in"][0]["edges"][0];
+        let caller = "export function use_beta() { return beta(); }";
+        assert_eq!(edge["line"], 3, "{command}: {json}");
+        assert_eq!(
+            edge["column"],
+            caller.rfind("beta()").unwrap() + 1,
+            "{command}: {json}"
+        );
+        let text = run(&args).expect("browse text");
+        let uses = text
+            .split("used in (cross-module)")
+            .nth(1)
+            .expect("used-in section");
+        assert!(uses.contains("use_beta"), "{command}: {text}");
+        assert!(!uses.contains("use_alpha"), "{command}: {text}");
+    }
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn every_browse_json_page_has_a_compiler_used_in_projection() {
     let ws = ws_path();
     let ws = ws.to_str().unwrap();
@@ -2417,7 +2489,7 @@ fn cache_clear_help_labels_dataflow_only_correctly() {
 }
 
 #[test]
-fn cache_clear_legacy_removes_only_the_in_tree_directory() {
+fn cache_clear_legacy_preserves_rules_and_unrecognized_project_state() {
     if std::env::var_os("BONSAI_WORKSPACE_DIR").is_some() {
         return;
     }
@@ -2432,7 +2504,10 @@ fn cache_clear_legacy_removes_only_the_in_tree_directory() {
     let legacy = tmp.join(".bonsai");
     std::fs::create_dir_all(&legacy).unwrap();
     std::fs::write(tmp.join("main.py"), "def main():\n    return 1\n").unwrap();
-    std::fs::write(legacy.join("old.sidecar"), [0u8; 24]).unwrap();
+    std::fs::write(legacy.join("dataflow.v2.bin"), [0u8; 24]).unwrap();
+    std::fs::create_dir(legacy.join("rules")).unwrap();
+    std::fs::write(legacy.join("rules/custom.yml"), "# custom rules\n").unwrap();
+    std::fs::write(legacy.join("settings.json"), "{}\n").unwrap();
     let root = tmp.to_str().unwrap();
     let Some(stats) = run(&["cache", "stats", root, "--format", "json"]) else {
         let _ = std::fs::remove_dir_all(&tmp);
@@ -2454,10 +2529,21 @@ fn cache_clear_legacy_removes_only_the_in_tree_directory() {
     );
     let cleared = run(&["cache", "clear", root, "--legacy"]).unwrap();
     assert!(
-        cleared.contains("removed") && cleared.contains("24 bytes"),
+        cleared.contains("cleared legacy artifacts in") && cleared.contains("24 bytes"),
         "{cleared}"
     );
-    assert!(!legacy.exists(), "legacy directory must be gone");
+    assert!(
+        !legacy.join("dataflow.v2.bin").exists(),
+        "legacy sidecar must be gone"
+    );
+    assert_eq!(
+        std::fs::read_to_string(legacy.join("rules/custom.yml")).unwrap(),
+        "# custom rules\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(legacy.join("settings.json")).unwrap(),
+        "{}\n"
+    );
     assert!(tmp.join("main.py").exists(), "workspace sources are untouched");
     let again = run(&["cache", "clear", root, "--legacy"]).unwrap();
     assert!(again.contains("nothing to clear"), "{again}");
@@ -3066,6 +3152,59 @@ fn read_file_plain_json_uses_fast_file_local_view() {
         missing_or_empty_array("callers_in") && missing_or_empty_array("callees_out"),
         "plain read-file should stay file-local unless semantic body options are requested:\n{out}"
     );
+}
+
+#[test]
+fn read_file_reuses_linkage_when_compiler_object_payload_is_missing() {
+    let Some(binary) = bin_path() else { return };
+    let root = tempfile::tempdir().expect("fixture workspace");
+    let cache = tempfile::tempdir().expect("isolated fixture cache");
+    std::fs::create_dir(root.path().join("nested")).unwrap();
+    std::fs::write(
+        root.path().join("alpha.py"),
+        "from nested.beta import execute\ndef handle(value):\n    return execute(value)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("nested/beta.py"),
+        "def execute(value):\n    return value\n",
+    )
+    .unwrap();
+    let workspace = root.path().to_str().unwrap();
+    let run_json = |args: &[&str]| {
+        let output = Command::new(&binary)
+            .args(args)
+            .args(["--format", "json", "--no-color", "--no-progress"])
+            .env("BONSAI_WORKSPACE_DIR", cache.path())
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "{:?}: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("canonical JSON")
+    };
+    run_json(&["index", workspace, "--semantic"]);
+    let stats = run_json(&["cache", "stats", workspace]);
+    let object_path = Path::new(stats["compiler_object_sidecar"].as_str().unwrap())
+        .canonicalize()
+        .unwrap();
+    assert!(object_path.starts_with(cache.path().canonicalize().unwrap()));
+    // Remove only this test's derived compiler-object directory index. Keep
+    // linkage and callgraph sidecars to exercise independent cache products.
+    std::fs::remove_file(object_path).unwrap();
+    let report = run_json(&["read-file", workspace, "--file", "nested/beta.py"]);
+    assert_eq!(report["analysis_complete"], true, "{report}");
+    assert_eq!(report["connections"]["calls_complete"], true, "{report}");
+    assert_eq!(report["locator"]["file"], "nested/beta.py");
+    assert_eq!(report["line_decl_index"][0]["locator"]["decl"], "execute");
+    assert_eq!(
+        report["connections"]["callers_in"][0]["edges"][0]["caller"],
+        "handle"
+    );
+    assert_eq!(report["source"], "def execute(value):\n    return value");
 }
 
 #[test]
@@ -4858,12 +4997,15 @@ fn cache_clear_no_op_when_dir_absent() {
 #[test]
 fn cache_clear_removes_existing_dir() {
     let tmp = tempdir_for_test("bonsai_cache_clear_present");
+    bonsai_sdk::WorkspaceCache::new(&tmp)
+        .write_manifest()
+        .expect("bind fixture cache");
     let stats = bonsai_sdk::WorkspaceCache::new(&tmp)
         .stats()
         .expect("cache stats");
     let cache_dir = stats.bonsai_dir.clone();
-    std::fs::create_dir_all(cache_dir.join("subdir")).expect("mkdir cache");
-    std::fs::write(cache_dir.join("subdir/file.bin"), b"some bytes").expect("write file");
+    std::fs::create_dir_all(cache_dir.join("page-cache.v17")).expect("mkdir page cache");
+    std::fs::write(cache_dir.join("page-cache.v17/page.json"), b"some bytes").expect("write page");
     std::fs::write(&stats.callgraph_sidecar, b"callgraph bytes").expect("write callgraph");
     std::fs::write(&stats.idg_sidecar, b"idg bytes").expect("write idg");
     assert!(cache_dir.exists(), "fixture setup failed");

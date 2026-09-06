@@ -16,7 +16,11 @@
         - prefix-value:string:https://
         - prefix-length:number:8
         - membership-call:strncmp
+        - membership-length-call:strlen
+        - membership-length-type:size_t
         - membership-token-boundary:true
+        - membership-boundary-codepoint:0
+        - membership-boundary-codepoint:47
         - related-call:curl_easy_setopt:argument:0=guarded-argument:0
         - related-call:curl_easy_setopt:argument:1=place:CURLOPT_FOLLOWLOCATION
         - related-call:curl_easy_setopt:argument:2=number:0

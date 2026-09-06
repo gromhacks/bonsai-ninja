@@ -81,19 +81,21 @@ fn content_hash(bytes: &[u8]) -> u64 {
 mod tests;
 
 thread_local! {
-    static LINE_TABLE_SPAN_MAP_CACHE: RefCell<HashMap<(FileId, u64), Arc<SpanMap>>> =
+    static LINE_TABLE_SPAN_MAP_CACHE: RefCell<HashMap<(u64, FileId, u64), Arc<SpanMap>>> =
         RefCell::new(HashMap::new());
 }
 
 /// Span map built from a recorded line-start table instead of the text.
-/// `load` runs only on a miss for `(file, version)`; `None` means no table
-/// was recorded for this source.
+/// `load` runs only on a miss for `(workspace_instance, file, version)`;
+/// `None` means no table was recorded for this source. The instance must be
+/// unique across workspace lifetimes: file IDs and versions are local to a VFS.
 pub fn cached_span_map_from_line_starts(
+    workspace_instance: u64,
     file: FileId,
     version: u64,
     load: impl FnOnce() -> Option<Vec<u32>>,
 ) -> Option<Arc<SpanMap>> {
-    let key = (file, version);
+    let key = (workspace_instance, file, version);
     let hit = LINE_TABLE_SPAN_MAP_CACHE.with(|cache| cache.borrow().get(&key).cloned());
     if let Some(map) = hit {
         return Some(map);

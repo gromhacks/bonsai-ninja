@@ -353,6 +353,23 @@ fn cache_identity_includes_the_vfs_instance() {
 }
 
 #[test]
+fn immutable_snapshot_remains_parseable_after_live_file_removal() {
+    let cache = ParserCache::with_options(ParserOptions::with_parse_timeout(None));
+    let vfs = Vfs::new();
+    let file = vfs.write("removed.py", "def retained():\n    return 1\n");
+    let snapshot = vfs.snapshot(file).unwrap();
+    vfs.remove(&snapshot.path);
+    let parsed = cache
+        .parse_snapshot(&snapshot, &test_python_adapter(), &vfs)
+        .unwrap();
+    assert_eq!(parsed.source_text(), snapshot.text.as_ref());
+    assert_eq!(
+        first_node_text(&parsed.tree, parsed.source_text(), "identifier").as_deref(),
+        Some("retained")
+    );
+}
+
+#[test]
 fn same_language_worker_checkouts_are_not_globally_serialized() {
     use std::sync::{mpsc, Condvar, Mutex as StdMutex};
 

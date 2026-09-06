@@ -38,6 +38,14 @@ impl ExecState {
     /// the abstract state widened.
     pub fn merge_from(&mut self, other: &Self) -> bool {
         let mut changed = false;
+        // Missing bindings carry no value proof on that incoming path. A
+        // constant seen on only one predecessor must not survive the join.
+        for (name, existing) in &mut self.locals {
+            if !other.locals.contains_key(name) && *existing != AbstractValue::Unknown {
+                *existing = AbstractValue::Unknown;
+                changed = true;
+            }
+        }
         for (name, value) in &other.locals {
             match self.locals.get_mut(name) {
                 Some(existing) => {
@@ -48,7 +56,7 @@ impl ExecState {
                     }
                 }
                 None => {
-                    self.locals.insert(name.clone(), value.clone());
+                    self.locals.insert(name.clone(), AbstractValue::Unknown);
                     changed = true;
                 }
             }

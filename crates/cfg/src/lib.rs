@@ -142,10 +142,8 @@ pub enum Terminator {
     /// `[body_bb, after_bb]`.
     LoopHeader,
     /// Try-region fork. `successors` = `[try_body_bb, catch_bb]`.
-    /// Distinct from `Branch` so the abstract interpreter doesn't
-    /// charge try/catch forks against the user-facing
-    /// `max_branches` budget — an exception edge is structurally a
-    /// fork, but it isn't a conditional decision the user wrote.
+    /// Distinct from a source conditional, but still charged against the
+    /// bounded diagnostic interpreter's branch budget.
     TryFork,
     /// Function-level `Return`. Usually no successors; may point at
     /// synthetic `finally` cleanup blocks before reaching function exit.

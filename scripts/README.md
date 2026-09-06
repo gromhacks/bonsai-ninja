@@ -31,12 +31,20 @@ cannot silently accumulate here.
   release-workflow requirements.
 - `audit-hardcoded.sh` — enforces the adapter/rulepack ownership boundary for
   language and security knowledge.
-- `audit-layering.sh` — validates the workspace crate dependency DAG.
+- `audit-layering.sh` — validates the workspace crate dependency DAG through
+  Cargo metadata (including renamed, inherited, build, and platform-specific
+  dependencies). Uses Python 3; `python3 scripts/tests/test_audit_layering.py` runs
+  its regression checks without building crates.
+- `audit-layering.py` — implements the dependency-tier checks using canonical
+  Cargo package identities, including workspace-inherited and renamed edges.
 - `audit-loop.sh` — runs the combined rulepack, fixture, sanitizer, taint-engine,
   CLI, and release-binary health loop. If the release binary is missing it
-  bootstraps through `build-release.sh`; release-only tests preserve the
-  remapped distributable instead of replacing it with a local build.
-- `audit-public-api.sh` — compares the public Rust API surface with its checked-in snapshot.
+  bootstraps through `build-release.sh`. Correctness tests use the compact
+  test profile and invoke the release CLI without replacing the distributable.
+- `audit-public-api.sh` — compares crate-root public declaration lines with the
+  checked-in snapshot. This lightweight check does not resolve re-exports or
+  validate nested types, fields, or method signatures; keep the SDK contract
+  tests and normal compilation as separate requirements.
 - `audit-release-metadata.py` — validates public Cargo package and repository metadata.
 - `audit-release-binary.py` — rejects distributable binaries that retain the
   builder's checkout, home, or Cargo source path.

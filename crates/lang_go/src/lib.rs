@@ -1200,7 +1200,7 @@ fn merge_go_condition_junction(
 fn go_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
     ConditionOperandFact {
         span: span_of(file, &node),
-        direct_call_span: (node.kind() == "call_expression").then(|| span_of(file, &node)),
+        direct_call_span: bonsai_lang_api::kit::direct_call_callee_span(node, file, src, &HANDLER),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER),
         static_string: go_static_string_literal(node, src),
         static_value: go_static_scalar(node, src),
@@ -3929,7 +3929,7 @@ fn go_initializer_assignment_events(init: Node<'_>, file: FileId, src: &[u8]) ->
                 // `value, ok := table[key]`: only the selected value inherits
                 // the table's stored-value provenance. `ok` is a membership
                 // boolean and neither result inherits the selector key.
-                let source_names = if idx == 0 {
+                let source_names = if rhs_values.len() == targets.len() || idx == 0 {
                     go_expression_flow_source_names(&flow)
                 } else {
                     Vec::new()

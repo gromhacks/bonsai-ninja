@@ -17,6 +17,7 @@ name = "bonsai_factstore"
 path = "src/lib.rs"
 
 [dependencies]
+bonsai_common = { workspace = true }
 ahash.workspace = true
 crossbeam-channel.workspace = true
 lru.workspace = true

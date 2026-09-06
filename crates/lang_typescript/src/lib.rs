@@ -3,13 +3,12 @@ mod parse_recovery;
 
 use bonsai_common::FileId;
 use bonsai_lang_api::{
-    collect_modifier_visibility, collect_param_type_aliases, decl_index_from_tree_with_handler,
-    extract_imports_via,
+    collect_modifier_visibility, decl_index_from_tree_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
     AdapterContext, AdapterError, CallTargetExtraction, DeclIndex, DeclKind, FieldWrite, GrammarHandler,
     ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModifierVocabulary, ParseRecoveryEdit, SourceFileRepresentation, SyntaxTree, TypeAliasBinding,
-    TypeAliasVocabulary, Vfs, Visibility, EMPTY_HANDLER,
+    ModifierVocabulary, ParseRecoveryEdit, SourceFileRepresentation, SyntaxTree, TypeAliasBinding, Vfs,
+    Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::Node;
 
@@ -89,12 +88,15 @@ fn typescript_expression_value_kind(
     }
 }
 
-const TYPESCRIPT_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
-    fn_kinds: &["function_declaration", "method_definition", "method_signature"],
-    param_kinds: &["required_parameter", "optional_parameter"],
-    name_field: "pattern",
-    type_field: "type",
-};
+const TYPESCRIPT_FUNCTION_KINDS: &[&str] = &[
+    "function_declaration",
+    "method_definition",
+    "method_signature",
+    "function_expression",
+    "arrow_function",
+    "generator_function_declaration",
+    "generator_function",
+];
 
 const TYPESCRIPT_VOCAB: ModifierVocabulary = ModifierVocabulary {
     decl_kinds: &[
@@ -561,7 +563,7 @@ impl LanguageAdapter for TypeScriptAdapter {
             // Visibility from `public/protected/private` keywords, and parameter type aliases.
             let visibility_by_span =
                 collect_modifier_visibility(tree.root_node(), file, src, &TYPESCRIPT_VOCAB);
-            let type_aliases_by_span = collect_param_type_aliases(tree, file, src, &TYPESCRIPT_TYPE_ALIASES);
+            let type_aliases_by_span = collect_typescript_parameter_aliases(tree, file, src);
             // WS2 cast typing: `const c = make() as Foo` / `const c = <Foo>make()`.
             // The cast type lives only on the initializer (the declared-type /
             // return-type paths don't see it), so capture it as a local type
@@ -577,18 +579,34 @@ impl LanguageAdapter for TypeScriptAdapter {
                     decl.visibility = vis;
                 }
                 if let Some(aliases) = type_aliases_by_span.get(&decl.span) {
-                    decl.type_aliases = aliases.clone();
+                    decl.type_aliases
+                        .retain(|alias| !decl.params.contains(&alias.name));
+                    decl.type_aliases.extend(aliases.iter().cloned());
                 }
                 if let Some(cast_aliases) = cast_aliases_by_span.get(&decl.span) {
                     decl.type_aliases.extend(cast_aliases.iter().cloned());
                 }
                 if let Some(parameter_properties) = parameter_properties_by_span.get(&decl.span) {
-                    for (alias, field_write) in parameter_properties {
-                        if !decl.type_aliases.contains(alias) {
-                            decl.type_aliases.push(alias.clone());
+                    for property in parameter_properties {
+                        if let Some(alias) = &property.alias {
+                            if !decl.type_aliases.contains(alias) {
+                                decl.type_aliases.push(alias.clone());
+                            }
                         }
-                        if !decl.receiver_field_writes.contains(field_write) {
-                            decl.receiver_field_writes.push(field_write.clone());
+                        let positions = decl
+                            .params
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(position, name)| {
+                                (name == &property.parameter_name).then_some(position)
+                            })
+                            .collect::<Vec<_>>();
+                        if let [position] = positions.as_slice() {
+                            let mut write = property.field_write.clone();
+                            write.source_param_indices = vec![*position];
+                            if !decl.receiver_field_writes.contains(&write) {
+                                decl.receiver_field_writes.push(write);
+                            }
                         }
                     }
                 }
@@ -608,10 +626,7 @@ impl LanguageAdapter for TypeScriptAdapter {
                 if !is_class_like(decl.kind) {
                     continue;
                 }
-                if let Some(bases) = bases_by_span
-                    .iter()
-                    .find_map(|(span, bases)| (*span == decl.span).then_some(bases))
-                {
+                if let Some(bases) = bases_by_span.get(&decl.span) {
                     decl.bases = bases.clone();
                 }
             }
@@ -648,6 +663,25 @@ fn populate_typescript_readonly_instance_literals(
     file: FileId,
     src: &[u8],
 ) {
+    let owners = index
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| (decl.span, decl.symbol))
+        .collect::<std::collections::HashMap<_, _>>();
+    let writes = index
+        .assignment_values
+        .iter()
+        .filter_map(|fact| {
+            let target = fact.target.as_deref()?.strip_prefix("this.")?;
+            let node = tree.root_node().descendant_for_byte_range(
+                usize::try_from(fact.assignment_span.start).ok()?,
+                usize::try_from(fact.assignment_span.end).ok()?,
+            )?;
+            let owner = typescript_owning_class(node)?;
+            Some((span_of(file, &owner), target.to_string()))
+        })
+        .collect::<std::collections::HashSet<_>>();
     for field in collect_kinds(tree, &["public_field_definition"]) {
         let has_modifier = |wanted: &str| {
             let mut cursor = field.walk();
@@ -671,10 +705,17 @@ fn populate_typescript_readonly_instance_literals(
         let name = node_text(&name_node, src).trim();
         let canonical = format!("this.{name}");
         let field_span = span_of(file, &field);
-        if index.assignment_values.iter().any(|fact| {
-            fact.assignment_span.start > field_span.start
-                && fact.target.as_deref() == Some(canonical.as_str())
-        }) {
+        let Some(owner) = typescript_owning_class(field) else {
+            continue;
+        };
+        let owner_span = span_of(file, &owner);
+        let Some(owner_symbol) = owners.get(&owner_span).copied() else {
+            continue;
+        };
+        // Field initialization runs before the constructor body regardless
+        // of declaration order. Any write in this class prevents treating
+        // this initializer as immutable cross-method state.
+        if writes.contains(&(owner_span, name.to_string())) {
             continue;
         }
         index
@@ -683,7 +724,7 @@ fn populate_typescript_readonly_instance_literals(
                 assignment_span: field_span,
                 target: Some(canonical),
                 target_is_immutable: true,
-                target_owner: None,
+                target_owner: Some(owner_symbol),
                 target_span: Some(span_of(file, &name_node)),
                 value_span: span_of(file, &value),
                 call_sites: Vec::new(),
@@ -711,6 +752,57 @@ fn populate_typescript_readonly_instance_literals(
         )
     });
     index.assignment_values.dedup();
+}
+
+fn typescript_owning_class(mut node: Node<'_>) -> Option<Node<'_>> {
+    loop {
+        if matches!(
+            node.kind(),
+            "class" | "class_declaration" | "abstract_class_declaration"
+        ) {
+            return Some(node);
+        }
+        node = node.parent()?;
+    }
+}
+
+fn collect_typescript_parameter_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<bonsai_common::Span, Vec<TypeAliasBinding>> {
+    let mut out = std::collections::HashMap::new();
+    for function in collect_kinds(tree, TYPESCRIPT_FUNCTION_KINDS) {
+        let Some(parameters) = function.child_by_field_name("parameters") else {
+            continue;
+        };
+        let mut cursor = parameters.walk();
+        let mut aliases = Vec::new();
+        for parameter in parameters.named_children(&mut cursor) {
+            if !matches!(parameter.kind(), "required_parameter" | "optional_parameter") {
+                continue;
+            }
+            let (Some(pattern), Some(ty)) = (
+                parameter.child_by_field_name("pattern"),
+                parameter.child_by_field_name("type"),
+            ) else {
+                continue;
+            };
+            if pattern.kind() != "identifier" {
+                continue;
+            }
+            if let Some(type_name) = typescript_type_name_leaf(ty, src) {
+                aliases.push(TypeAliasBinding {
+                    name: node_text(&pattern, src).to_string(),
+                    type_name,
+                });
+            }
+        }
+        // Keep empty entries too: a compound/unknown type must not leave an
+        // earlier shortened alias behind as purported receiver proof.
+        out.insert(span_of(file, &function), aliases);
+    }
+    out
 }
 
 /// Combine ES-module imports, CommonJS `require(...)` calls, and the
@@ -785,21 +877,14 @@ fn collect_typescript_cast_aliases(
     file: FileId,
     src: &[u8],
 ) -> std::collections::HashMap<bonsai_common::Span, Vec<TypeAliasBinding>> {
-    const FN_KINDS: &[&str] = &[
-        "function_declaration",
-        "function_expression",
-        "method_definition",
-        "arrow_function",
-        "generator_function_declaration",
-    ];
     let mut out = std::collections::HashMap::new();
-    for fn_node in collect_kinds(tree, FN_KINDS) {
+    for fn_node in collect_kinds(tree, TYPESCRIPT_FUNCTION_KINDS) {
         let mut aliases: Vec<TypeAliasBinding> = Vec::new();
         let mut work = vec![fn_node];
         while let Some(node) = work.pop() {
             // A nested function owns its own locals — let its own
             // iteration scope them rather than leaking into the parent.
-            if node != fn_node && FN_KINDS.contains(&node.kind()) {
+            if node != fn_node && TYPESCRIPT_FUNCTION_KINDS.contains(&node.kind()) {
                 continue;
             }
             if node.kind() == "variable_declarator" {
@@ -854,34 +939,19 @@ fn extend_ts_aliases_from_cast(declarator: Node<'_>, src: &[u8], aliases: &mut V
 /// trailing child; for `<Foo>x` it is the leading child. Generic casts
 /// (`as Foo<T>`) surface a `generic_type` whose `name` is the base type.
 fn ts_cast_type_name(cast: Node<'_>, src: &[u8]) -> Option<String> {
-    let mut cursor = cast.walk();
-    for child in cast.named_children(&mut cursor) {
-        match child.kind() {
-            "type_identifier" => return Some(node_text(&child, src).trim().to_string()),
-            "generic_type" => {
-                if let Some(name) = child.child_by_field_name("name") {
-                    return Some(node_text(&name, src).trim().to_string());
-                }
-            }
-            // `<Foo>x` (type_assertion) nests the type under `type_arguments`.
-            "type_arguments" => {
-                let mut inner = child.walk();
-                for ty in child.named_children(&mut inner) {
-                    match ty.kind() {
-                        "type_identifier" => return Some(node_text(&ty, src).trim().to_string()),
-                        "generic_type" => {
-                            if let Some(name) = ty.child_by_field_name("name") {
-                                return Some(node_text(&name, src).trim().to_string());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    let ty = match cast.kind() {
+        "as_expression" => cast.named_child(u32::try_from(cast.named_child_count().checked_sub(1)?).ok()?)?,
+        "type_assertion" => first_named_child_of_kind(&cast, "type_arguments")?,
+        _ => return None,
+    };
+    typescript_type_name_leaf(ty, src)
+}
+
+#[derive(PartialEq)]
+struct TypeScriptParameterProperty {
+    alias: Option<TypeAliasBinding>,
+    field_write: FieldWrite,
+    parameter_name: String,
 }
 
 /// TypeScript parameter properties are the syntax-level equivalent of:
@@ -899,7 +969,7 @@ fn collect_typescript_parameter_properties(
     tree: &Tree,
     file: FileId,
     src: &[u8],
-) -> std::collections::HashMap<bonsai_common::Span, Vec<(TypeAliasBinding, FieldWrite)>> {
+) -> std::collections::HashMap<bonsai_common::Span, Vec<TypeScriptParameterProperty>> {
     let mut out = std::collections::HashMap::new();
     for ctor in collect_kinds(tree, &["method_definition"]) {
         if !typescript_method_name_is(&ctor, src, "constructor") {
@@ -912,26 +982,19 @@ fn collect_typescript_parameter_properties(
             continue;
         };
 
-        let mut bindings: Vec<(TypeAliasBinding, FieldWrite)> = Vec::new();
-        let mut param_index = 0usize;
+        let mut bindings = Vec::new();
         let mut cursor = params_node.walk();
         for param in params_node.named_children(&mut cursor) {
             if !matches!(param.kind(), "required_parameter" | "optional_parameter") {
                 continue;
             }
-            let current_index = param_index;
-            param_index += 1;
-
-            if !typescript_parameter_property_declares_field(&param, src) {
+            if !typescript_parameter_property_declares_field(&param) {
                 continue;
             }
             let Some(name) = typescript_parameter_property_name(&param, src) else {
                 continue;
             };
-            let Some(type_name) = typescript_parameter_property_type(&param, src) else {
-                continue;
-            };
-            if name.is_empty() || name == type_name {
+            if name.is_empty() {
                 continue;
             }
             // A parameter property is a TypeScript syntax-level declaration
@@ -939,16 +1002,20 @@ fn collect_typescript_parameter_properties(
             // shared class-field propagation does not need to invent a
             // synthetic assignment event to prove the type.
             let receiver_field = format!("this.{name}");
-            let alias = TypeAliasBinding {
+            let alias = typescript_parameter_property_type(&param, src).map(|type_name| TypeAliasBinding {
                 name: receiver_field.clone(),
                 type_name,
-            };
+            });
             let field_write = FieldWrite {
                 span: span_of(file, &param),
                 target: receiver_field,
-                source_param_indices: vec![current_index],
+                source_param_indices: Vec::new(),
             };
-            let entry = (alias, field_write);
+            let entry = TypeScriptParameterProperty {
+                alias,
+                field_write,
+                parameter_name: name,
+            };
             if !bindings.contains(&entry) {
                 bindings.push(entry);
             }
@@ -966,51 +1033,24 @@ fn typescript_method_name_is(node: &Node<'_>, src: &[u8], expected: &str) -> boo
         .unwrap_or(false)
 }
 
-fn typescript_parameter_property_declares_field(param: &Node<'_>, src: &[u8]) -> bool {
+fn typescript_parameter_property_declares_field(param: &Node<'_>) -> bool {
     let mut cursor = param.walk();
-    for child in param.named_children(&mut cursor) {
-        let kind = child.kind();
-        if matches!(kind, "accessibility_modifier" | "readonly_modifier") || kind.contains("readonly") {
-            return true;
-        }
-    }
-    let Some(pattern) = param.child_by_field_name("pattern") else {
-        return false;
-    };
-    if pattern.start_byte() <= param.start_byte() || pattern.start_byte() > src.len() {
-        return false;
-    }
-    let prefix = std::str::from_utf8(&src[param.start_byte()..pattern.start_byte()]).unwrap_or_default();
-    prefix
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-        .any(|token| matches!(token, "public" | "private" | "protected" | "readonly"))
+    // `readonly` is an anonymous keyword; accessibility is a named CST
+    // modifier. Text inside a decorator or comment declares neither.
+    let declares_field = param
+        .children(&mut cursor)
+        .any(|child| matches!(child.kind(), "accessibility_modifier" | "readonly"));
+    declares_field
 }
 
 fn typescript_parameter_property_name(param: &Node<'_>, src: &[u8]) -> Option<String> {
     let pattern = param.child_by_field_name("pattern")?;
-    typescript_identifier_leaf(pattern, src)
+    (pattern.kind() == "identifier").then(|| node_text(&pattern, src).to_string())
 }
 
 fn typescript_parameter_property_type(param: &Node<'_>, src: &[u8]) -> Option<String> {
     let type_node = param.child_by_field_name("type")?;
     typescript_type_name_leaf(type_node, src)
-}
-
-fn typescript_identifier_leaf(node: Node<'_>, src: &[u8]) -> Option<String> {
-    if matches!(
-        node.kind(),
-        "identifier" | "shorthand_property_identifier_pattern" | "private_property_identifier"
-    ) {
-        let name = node_text(&node, src).trim().trim_start_matches('#').to_string();
-        return (!name.is_empty()).then_some(name);
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if let Some(name) = typescript_identifier_leaf(child, src) {
-            return Some(name);
-        }
-    }
-    None
 }
 
 fn typescript_type_name_leaf(node: Node<'_>, src: &[u8]) -> Option<String> {
@@ -1023,24 +1063,24 @@ fn typescript_type_name_leaf(node: Node<'_>, src: &[u8]) -> Option<String> {
                 return canonical_ts_type_name(node_text(&name, src));
             }
         }
-        _ => {}
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if let Some(type_name) = typescript_type_name_leaf(child, src) {
-            return Some(type_name);
+        "type_annotation" | "type_arguments" | "parenthesized_type" => {
+            let mut cursor = node.walk();
+            let mut children = node
+                .named_children(&mut cursor)
+                .filter(|child| child.kind() != "comment");
+            let child = children.next()?;
+            if children.next().is_none() {
+                return typescript_type_name_leaf(child, src);
+            }
         }
+        _ => {}
     }
     None
 }
 
 fn canonical_ts_type_name(raw: &str) -> Option<String> {
     let raw = raw.trim().trim_start_matches(':').trim();
-    let name = canonical_ts_base_name(raw)?;
-    name.chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
-        .then_some(name)
+    canonical_ts_base_name(raw)
 }
 
 /// Walk TS class / interface / abstract-class declarations and
@@ -1058,8 +1098,8 @@ fn collect_typescript_class_bases(
     tree: &Tree,
     file: FileId,
     src: &[u8],
-) -> Vec<(bonsai_common::Span, Vec<String>)> {
-    let mut bases_by_class = Vec::new();
+) -> std::collections::HashMap<bonsai_common::Span, Vec<String>> {
+    let mut bases_by_class = std::collections::HashMap::new();
     let class_kinds = &[
         "class_declaration",
         "abstract_class_declaration",
@@ -1083,7 +1123,7 @@ fn collect_typescript_class_bases(
             }
         }
         if !bases.is_empty() {
-            bases_by_class.push((span_of(file, &class_node), bases));
+            bases_by_class.insert(span_of(file, &class_node), bases);
         }
     }
     bases_by_class
@@ -1097,7 +1137,12 @@ fn collect_ts_heritage_names(node: Node<'_>, src: &[u8], collected_bases: &mut V
     while let Some(current) = stack.pop() {
         match current.kind() {
             // Wrapper kinds — descend; the actual identifier is one or more levels down.
-            "extends_clause" | "implements_clause" | "extends_type_clause" | "class_heritage" => {
+            "extends_clause" => {
+                if let Some(value) = current.child_by_field_name("value") {
+                    stack.push(value);
+                }
+            }
+            "implements_clause" | "extends_type_clause" | "class_heritage" => {
                 let mut cursor = current.walk();
                 for child in current.named_children(&mut cursor) {
                     stack.push(child);
@@ -1135,39 +1180,29 @@ fn collect_ts_heritage_names(node: Node<'_>, src: &[u8], collected_bases: &mut V
                     }
                 }
             }
-            "nested_type_identifier" | "nested_identifier" => {
-                // `Foo.Bar` — `canonical_ts_base_name` keeps only the right-most segment.
+            "nested_type_identifier" | "nested_identifier" | "member_expression" => {
+                // Keep the complete owner-qualified type identity.
                 if let Some(name) = canonical_ts_base_name(node_text(&current, src)) {
                     if !collected_bases.iter().any(|b| b == &name) {
                         collected_bases.push(name);
                     }
                 }
             }
-            _ => {
-                // Unknown wrapper — keep descending; we'd rather over-walk than miss a base.
-                let mut cursor = current.walk();
-                for child in current.named_children(&mut cursor) {
-                    stack.push(child);
-                }
-            }
+            // In particular, operands of `mixin(Base)` are not its returned
+            // constructor. Only declared type syntax supplies a base here.
+            _ => {}
         }
     }
 }
 
-/// Reduce a heritage type expression to a bare class/interface name:
-/// strips generics (`Foo<T>` -> `Foo`) and nested-type prefixes
-/// (`mod.Foo` -> `Foo`). Returns `None` if nothing usable remains.
+/// Preserve the identity of a grammar-proven class/interface name while
+/// omitting generic arguments. Namespace qualifiers are never discarded.
 fn canonical_ts_base_name(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    // Drop generic argument list before any path split — `mod.Foo<T>` should yield `Foo`.
+    // `mod.Foo<T>` denotes the qualified base `mod.Foo`, not the type argument.
     let without_generics = trimmed.split('<').next().unwrap_or(trimmed).trim();
-    let bare = without_generics
-        .rsplit('.')
-        .next()
-        .unwrap_or(without_generics)
-        .trim();
-    if bare.is_empty() {
+    if without_generics.is_empty() {
         return None;
     }
-    Some(bare.to_string())
+    Some(without_generics.to_string())
 }

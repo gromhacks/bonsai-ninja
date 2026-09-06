@@ -3,9 +3,13 @@
 This directory contains immutable machine-readable contracts for versioned
 bonsai-ninja exports.
 
-- `bonsai-native-export-v12.schema.json` — current Draft 2020-12 schema for
+- `bonsai-native-export-v13.schema.json` — current Draft 2020-12 schema for
   `bonsai-ninja export --format json` documents whose `schema` is
-  `bonsai-native-export` and whose `schema_version` is `12`. v12 carries the
+  `bonsai-native-export` and whose `schema_version` is `13`. v13 adds exact
+  `predicate_call_span` evidence to call-backed type-test conditions, keeping
+  the tested value separate from the predicate's canonical callee identity.
+  Class rows also retain their exact one-based byte column.
+- `bonsai-native-export-v12.schema.json` — historical contract. v12 carries the
   code, not only its coordinates: `files[].source` (full file text, the
   index space of every span), `decls[].start` / `end` byte spans,
   `callgraph[].call_text`, `taint_graph.functions[].end_line`, and

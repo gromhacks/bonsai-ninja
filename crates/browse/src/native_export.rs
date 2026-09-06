@@ -985,7 +985,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     let mut map = serializer.serialize_map(None)?;
 
     map.serialize_entry("schema", "bonsai-native-export")?;
-    map.serialize_entry("schema_version", &12_u32)?;
+    map.serialize_entry("schema_version", &13_u32)?;
     map.serialize_entry("engine_version", env!("CARGO_PKG_VERSION"))?;
     map.serialize_entry("workspace_root", &root.display().to_string())?;
     map.serialize_entry("generated_at_unix_ms", &generated_at_unix_ms())?;
@@ -1160,7 +1160,7 @@ fn build_export_structural_metadata(
                 DeclKind::Method | DeclKind::Constructor => method_count += 1,
                 _ => {}
             }
-            let (_, line, _) = spans.format(d.name_span);
+            let (_, line, column) = spans.format(d.name_span);
             count_call_sites_for_export(&d.flow_events, &mut call_site_count);
             if matches!(
                 d.kind,
@@ -1183,6 +1183,7 @@ fn build_export_structural_metadata(
                     kind: format!("{:?}", d.kind).to_lowercase(),
                     file: path.clone(),
                     line,
+                    column,
                     method_count: methods.len(),
                     methods,
                 });

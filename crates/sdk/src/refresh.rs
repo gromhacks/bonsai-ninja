@@ -25,6 +25,9 @@ pub(crate) struct GitChangeOracle {
     previous_dirty: AHashSet<PathBuf>,
     retry_paths: AHashSet<PathBuf>,
     ignore_control_stamps: Vec<(PathBuf, Option<DiskFileStamp>)>,
+    head_commit: String,
+    index_path: PathBuf,
+    index_stamp: Option<DiskFileStamp>,
 }
 
 pub(crate) struct GitChanges {
@@ -49,7 +52,15 @@ impl GitChangeOracle {
         if !workspace_root.starts_with(&repository_root) {
             return None;
         }
-        let ignore_control_paths = git_ignore_control_paths(&workspace_root);
+        if repository_root.join(".gitmodules").exists() {
+            return None;
+        }
+        let head_commit = super::git_output_text(&workspace_root, &["rev-parse", "--verify", "HEAD"])?;
+        let index_path = git_reported_path(&workspace_root, &["rev-parse", "--git-path", "index"])?;
+        let index_stamp = disk_file_stamp(&index_path).ok()?;
+        ensure_observable_index(&workspace_root).ok()?;
+        let ignore_control_paths =
+            super::git_ignore_control_paths_for_snapshot(&workspace_root, &repository_root);
         let mut ignore_control_stamps = Vec::with_capacity(ignore_control_paths.len());
         for path in ignore_control_paths {
             ignore_control_stamps.push((path.clone(), disk_file_stamp(&path).ok()?));
@@ -60,13 +71,29 @@ impl GitChangeOracle {
             previous_dirty: AHashSet::new(),
             retry_paths: AHashSet::new(),
             ignore_control_stamps,
+            head_commit,
+            index_path,
+            index_stamp,
         };
         oracle.previous_dirty = oracle.read_current_dirty().ok()?;
         Some(oracle)
     }
 
     pub(crate) fn candidates(&mut self) -> std::io::Result<GitChanges> {
-        let mut reconcile_workspace = false;
+        if self.repository_root.join(".gitmodules").exists() {
+            return Err(std::io::Error::other(
+                "submodules require complete source reconciliation",
+            ));
+        }
+        let head_commit = super::git_output_text(&self.workspace_root, &["rev-parse", "--verify", "HEAD"])
+            .ok_or_else(|| std::io::Error::other("Git HEAD unavailable"))?;
+        let index_stamp = disk_file_stamp(&self.index_path)?;
+        let mut reconcile_workspace = self.head_commit != head_commit || self.index_stamp != index_stamp;
+        if self.index_stamp != index_stamp {
+            ensure_observable_index(&self.workspace_root)?;
+        }
+        self.head_commit = head_commit;
+        self.index_stamp = index_stamp;
         for (path, observed) in &mut self.ignore_control_stamps {
             let current = disk_file_stamp(path)?;
             if *observed != current {
@@ -104,7 +131,7 @@ impl GitChangeOracle {
     }
 
     fn refresh_ignore_control_stamps(&mut self) -> std::io::Result<()> {
-        let paths = git_ignore_control_paths(&self.workspace_root);
+        let paths = super::git_ignore_control_paths_for_snapshot(&self.workspace_root, &self.repository_root);
         let mut stamps = Vec::with_capacity(paths.len());
         for path in paths {
             stamps.push((path.clone(), disk_file_stamp(&path)?));
@@ -115,6 +142,7 @@ impl GitChangeOracle {
 
     fn read_current_dirty(&self) -> std::io::Result<AHashSet<PathBuf>> {
         let output = Command::new("git")
+            .env("GIT_OPTIONAL_LOCKS", "0")
             .arg("-C")
             .arg(&self.workspace_root)
             .args([
@@ -168,22 +196,27 @@ impl GitChangeOracle {
     }
 }
 
-fn git_ignore_control_paths(workspace_root: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for git_path in ["info/exclude", "config", "config.worktree"] {
-        if let Some(path) = git_reported_path(workspace_root, &["rev-parse", "--git-path", git_path]) {
-            paths.push(path);
-        }
+pub(super) fn ensure_observable_index(workspace_root: &Path) -> std::io::Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(["ls-files", "-v", "-z", "--", "."])
+        .output()?;
+    if !output.status.success()
+        || output.stdout.split(|byte| *byte == 0).any(|record| {
+            // Lowercase status means assume-unchanged; S means skip-worktree.
+            // Git status deliberately hides edits to these paths, so its dirty
+            // list cannot be an exhaustive compiler-input change oracle.
+            record
+                .first()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || *byte == b'S')
+        })
+    {
+        return Err(std::io::Error::other(
+            "Git index cannot prove complete source change coverage",
+        ));
     }
-    if let Some(path) = git_reported_path(
-        workspace_root,
-        &["config", "--path", "--get", "core.excludesFile"],
-    ) {
-        paths.push(path);
-    }
-    paths.sort();
-    paths.dedup();
-    paths
+    Ok(())
 }
 
 fn git_reported_path(workspace_root: &Path, args: &[&str]) -> Option<PathBuf> {

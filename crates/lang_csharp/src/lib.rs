@@ -771,7 +771,6 @@ impl LanguageAdapter for CSharpAdapter {
         for decl in &mut idx.defs {
             enrich_csharp_receiver_field_writes(decl);
         }
-        propagate_csharp_base_constructor_field_writes(&mut idx);
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
@@ -792,14 +791,15 @@ impl LanguageAdapter for CSharpAdapter {
 
 #[derive(Clone)]
 struct CSharpAggregateAssignment {
-    scope: Option<Span>,
     assignment_span: Span,
-    target: String,
+    block: Option<Span>,
+    next_use: Option<u64>,
     fields: Option<Vec<StaticAggregateFieldValue>>,
 }
 
-/// Carry exact object-initializer fields through one latest preceding local
-/// assignment into call-argument facts. This is compiler structure only:
+/// Carry fields from a fresh local initializer to its first use in the same
+/// block. Mutations, aliases, escapes, and conditional definitions do not
+/// provide exact configuration. This is compiler structure only:
 /// framework/API identities and the security meaning of fields stay in rule
 /// data. Same-spelled locals in another callable are never considered, and a
 /// later non-aggregate/dynamic assignment clears the earlier proof.
@@ -810,23 +810,55 @@ fn populate_csharp_assigned_aggregate_arguments(
     src: &[u8],
 ) {
     let root = tree.root_node();
-    let assignments: Vec<_> = index
-        .assignment_values
-        .iter()
-        .filter_map(|fact| {
-            let target = fact.target.as_ref()?;
-            if !is_csharp_local_identifier(target) {
-                return None;
-            }
-            let value = csharp_node_for_exact_span(root, fact.value_span)?;
-            Some(CSharpAggregateAssignment {
-                scope: csharp_callable_scope(value, file),
+    let mut identifiers = std::collections::HashMap::<&str, Vec<u64>>::new();
+    for node in collect_kinds(tree, &["identifier"]) {
+        identifiers
+            .entry(node_text(&node, src))
+            .or_default()
+            .push(node.start_byte() as u64);
+    }
+    for offsets in identifiers.values_mut() {
+        offsets.sort_unstable();
+    }
+    let mut assignments = std::collections::HashMap::<
+        Option<Span>,
+        std::collections::HashMap<&str, Vec<CSharpAggregateAssignment>>,
+    >::new();
+    for (scope, target, assignment) in index.assignment_values.iter().filter_map(|fact| {
+        let target = fact.target.as_ref()?;
+        if !is_csharp_local_identifier(target) {
+            return None;
+        }
+        let value = csharp_node_for_exact_span(root, fact.value_span)?;
+        let offsets = identifiers.get(target.as_str());
+        let next_use = offsets.and_then(|offsets| {
+            offsets
+                .get(offsets.partition_point(|offset| *offset < fact.assignment_span.end))
+                .copied()
+        });
+        Some((
+            csharp_callable_scope(value, file),
+            target.as_str(),
+            CSharpAggregateAssignment {
                 assignment_span: fact.assignment_span,
-                target: target.clone(),
+                block: csharp_direct_local_initializer_block(value).map(|block| span_of(file, &block)),
+                next_use,
                 fields: csharp_object_initializer_fields(value, src),
-            })
-        })
-        .collect();
+            },
+        ))
+    }) {
+        assignments
+            .entry(scope)
+            .or_default()
+            .entry(target)
+            .or_default()
+            .push(assignment);
+    }
+    for scopes in assignments.values_mut() {
+        for values in scopes.values_mut() {
+            values.sort_by_key(|value| value.assignment_span.end);
+        }
+    }
 
     for argument in &mut index.call_argument_values {
         let Some(place) = argument
@@ -840,19 +872,96 @@ fn populate_csharp_assigned_aggregate_arguments(
         let Some(argument_node) = csharp_node_for_exact_span(root, argument.argument_span) else {
             continue;
         };
-        let scope = csharp_callable_scope(argument_node, file);
-        let Some(latest) = assignments
-            .iter()
-            .filter(|assignment| {
-                assignment.scope == scope
-                    && assignment.target == place
-                    && assignment.assignment_span.end <= argument.argument_span.start
+        if !csharp_argument_is_local_read(argument_node, place, src) {
+            continue;
+        }
+        let mut call = argument_node;
+        while !HANDLER.call_kinds.contains(&call.kind()) {
+            let Some(parent) = call.parent() else {
+                break;
+            };
+            call = parent;
+        }
+        // C# evaluates every argument before entering the callee. A later
+        // argument may mutate/escape this same object after its earlier
+        // argument expression has been evaluated.
+        if !HANDLER.call_kinds.contains(&call.kind())
+            || identifiers.get(place).is_some_and(|offsets| {
+                offsets
+                    .get(offsets.partition_point(|offset| *offset < argument.argument_span.end))
+                    .is_some_and(|offset| *offset < call.end_byte() as u64)
             })
-            .max_by_key(|assignment| (assignment.assignment_span.start, assignment.assignment_span.end))
-        else {
+        {
+            continue;
+        }
+        let scope = csharp_callable_scope(argument_node, file);
+        let Some(values) = assignments.get(&scope).and_then(|values| values.get(place)) else {
             continue;
         };
+        let count = values
+            .partition_point(|assignment| assignment.assignment_span.end <= argument.argument_span.start);
+        let Some(latest) = count.checked_sub(1).and_then(|at| values.get(at)) else {
+            continue;
+        };
+        let block = csharp_enclosing_block(argument_node).map(|block| span_of(file, &block));
+        if latest.block.is_none()
+            || latest.block != block
+            || latest
+                .next_use
+                .is_some_and(|offset| offset < argument.argument_span.start)
+        {
+            continue;
+        }
         argument.exact_static_aggregate_fields = latest.fields.clone().unwrap_or_default();
+    }
+}
+
+fn csharp_argument_is_local_read(mut node: Node<'_>, place: &str, src: &[u8]) -> bool {
+    if node.kind() == "argument" {
+        let mut cursor = node.walk();
+        if node
+            .children(&mut cursor)
+            .any(|child| matches!(child.kind(), "ref" | "out"))
+        {
+            return false;
+        }
+        let mut cursor = node.walk();
+        let Some(value) = node.named_children(&mut cursor).last() else {
+            return false;
+        };
+        node = value;
+    }
+    while node.kind() == "parenthesized_expression" && node.named_child_count() == 1 {
+        let Some(value) = node.named_child(0) else {
+            return false;
+        };
+        node = value;
+    }
+    node.kind() == "identifier" && node_text(&node, src) == place
+}
+
+fn csharp_direct_local_initializer_block(value: Node<'_>) -> Option<Node<'_>> {
+    let declarator = value
+        .parent()
+        .filter(|node| node.kind() == "variable_declarator")?;
+    let declaration = declarator
+        .parent()
+        .filter(|node| node.kind() == "variable_declaration")?;
+    let statement = declaration
+        .parent()
+        .filter(|node| node.kind() == "local_declaration_statement")?;
+    statement.parent().filter(|node| node.kind() == "block")
+}
+
+fn csharp_enclosing_block(mut node: Node<'_>) -> Option<Node<'_>> {
+    loop {
+        if node.kind() == "block" {
+            return Some(node);
+        }
+        if HANDLER.fn_kinds.contains(&node.kind()) || HANDLER.lambda_kinds.contains(&node.kind()) {
+            return None;
+        }
+        node = node.parent()?;
     }
 }
 
@@ -1341,7 +1450,10 @@ fn synthesize_csharp_constructor_initializer_calls(
                     initializer_call = Some(FlowEvent::Call {
                         span,
                         name: callee,
-                        receiver: None,
+                        // Both `this(...)` and `base(...)` initialize the
+                        // current object. The shared resolved IDG composes
+                        // their exact field effects, including overloads.
+                        receiver: Some("this".to_string()),
                         receiver_types: Vec::new(),
                         call_kind: CallKind::Constructor,
                         args,
@@ -1678,120 +1790,6 @@ fn enrich_csharp_receiver_field_writes(decl: &mut bonsai_lang_api::Decl) {
     );
     decl.receiver_field_writes.extend(writes);
     dedup_csharp_receiver_field_writes(&mut decl.receiver_field_writes);
-}
-
-fn propagate_csharp_base_constructor_field_writes(index: &mut DeclIndex) {
-    for _ in 0..8 {
-        let snapshot = index.defs.clone();
-        let mut changed = false;
-        for decl in index
-            .defs
-            .iter_mut()
-            .filter(|decl| matches!(decl.kind, DeclKind::Constructor))
-        {
-            let mut inherited = csharp_inherited_constructor_field_writes(decl, &snapshot);
-            if inherited.is_empty() {
-                continue;
-            }
-            let before = decl.receiver_field_writes.len();
-            decl.receiver_field_writes.append(&mut inherited);
-            dedup_csharp_receiver_field_writes(&mut decl.receiver_field_writes);
-            changed |= decl.receiver_field_writes.len() != before;
-        }
-        if !changed {
-            break;
-        }
-    }
-}
-
-fn csharp_inherited_constructor_field_writes(
-    decl: &bonsai_lang_api::Decl,
-    snapshot: &[bonsai_lang_api::Decl],
-) -> Vec<FieldWrite> {
-    let mut out = Vec::new();
-    collect_csharp_inherited_constructor_field_writes(&decl.flow_events, decl, snapshot, &mut out);
-    dedup_csharp_receiver_field_writes(&mut out);
-    out
-}
-
-fn collect_csharp_inherited_constructor_field_writes(
-    events: &[FlowEvent],
-    decl: &bonsai_lang_api::Decl,
-    snapshot: &[bonsai_lang_api::Decl],
-    out: &mut Vec<FieldWrite>,
-) {
-    for event in events {
-        match event {
-            FlowEvent::Call {
-                name,
-                call_kind,
-                args,
-                ..
-            } if *call_kind == CallKind::Constructor => {
-                let Some(callee) = snapshot.iter().find(|candidate| {
-                    matches!(candidate.kind, DeclKind::Constructor) && candidate.name == *name
-                }) else {
-                    continue;
-                };
-                for write in &callee.receiver_field_writes {
-                    let mut mapped_sources = Vec::new();
-                    for source_param in &write.source_param_indices {
-                        let Some(arg) = args.get(*source_param) else {
-                            continue;
-                        };
-                        let current_param = arg
-                            .place
-                            .as_deref()
-                            .and_then(|place| csharp_param_index_for_bare_arg(decl, place))
-                            .or_else(|| {
-                                arg.source_names
-                                    .iter()
-                                    .find_map(|source| csharp_param_index_for_bare_arg(decl, source))
-                            });
-                        if let Some(current_param) = current_param {
-                            if !mapped_sources.contains(&current_param) {
-                                mapped_sources.push(current_param);
-                            }
-                        }
-                    }
-                    if !mapped_sources.is_empty() {
-                        out.push(FieldWrite {
-                            span: write.span,
-                            target: write.target.clone(),
-                            source_param_indices: mapped_sources,
-                        });
-                    }
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_csharp_inherited_constructor_field_writes(then_events, decl, snapshot, out);
-                collect_csharp_inherited_constructor_field_writes(else_events, decl, snapshot, out);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_csharp_inherited_constructor_field_writes(body, decl, snapshot, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_csharp_inherited_constructor_field_writes(body, decl, snapshot, out);
-                collect_csharp_inherited_constructor_field_writes(catch_events, decl, snapshot, out);
-                collect_csharp_inherited_constructor_field_writes(finally_events, decl, snapshot, out);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn csharp_param_index_for_bare_arg(decl: &bonsai_lang_api::Decl, arg: &str) -> Option<usize> {
-    let bare = csharp_bare_identifier(arg)?;
-    decl.params.iter().position(|param| param == bare)
 }
 
 fn dedup_csharp_receiver_field_writes(writes: &mut Vec<FieldWrite>) {
@@ -2395,9 +2393,7 @@ fn populate_csharp_exception_types(
                     // type identifier (or qualified type) on C#'s
                     // `catch (T name)` shape. Fix in the adapter where
                     // we have the structural context.
-                    if let Some(name) = collect_csharp_catch_param_name(node, src) {
-                        *catch_param = Some(name);
-                    }
+                    *catch_param = collect_csharp_catch_param_name(node, src);
                     for arm in catch_arms {
                         if let Some(clause) =
                             bonsai_lang_api::kit::node_at_span(tree.root_node(), arm.span, &["catch_clause"])
@@ -2485,17 +2481,6 @@ fn csharp_catch_clause_param_name(clause: tree_sitter::Node<'_>, src: &[u8]) -> 
         // field is the exception type.
         if let Some(name_node) = sub.child_by_field_name("name") {
             return Some(node_text(&name_node, src).trim().to_string());
-        }
-        // Fallback: rightmost named identifier after the type.
-        let mut pcur = sub.walk();
-        let mut last_ident: Option<tree_sitter::Node<'_>> = None;
-        for n in sub.named_children(&mut pcur) {
-            if n.kind() == "identifier" {
-                last_ident = Some(n);
-            }
-        }
-        if let Some(n) = last_ident {
-            return Some(node_text(&n, src).trim().to_string());
         }
     }
     None

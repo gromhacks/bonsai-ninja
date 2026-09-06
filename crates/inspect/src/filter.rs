@@ -138,6 +138,27 @@ pub fn name_token_match(haystack: &str, needle: &str) -> bool {
         return true;
     }
     let needle_lower = needle.to_lowercase();
+    if !haystack.is_ascii() {
+        // Keep token boundaries in the original identifier: lowercasing
+        // removes camel-case humps and may expand a scalar (İ -> i + dot).
+        // Build the normalized text once and map each original boundary to
+        // its normalized byte offset, never into the middle of UTF-8.
+        let lowered = haystack.to_lowercase();
+        let mut previous: Option<char> = None;
+        let mut lower_offset = 0;
+        for current in haystack.chars() {
+            let boundary = previous.is_none_or(|previous| {
+                !previous.is_alphanumeric()
+                    || ((previous.is_lowercase() || previous.is_numeric()) && current.is_uppercase())
+            });
+            if boundary && lowered[lower_offset..].starts_with(&needle_lower) {
+                return true;
+            }
+            lower_offset += current.to_lowercase().map(char::len_utf8).sum::<usize>();
+            previous = Some(current);
+        }
+        return false;
+    }
     let haystack_bytes = haystack.as_bytes();
     let haystack_len = haystack_bytes.len();
     let needle_len = needle_lower.len();

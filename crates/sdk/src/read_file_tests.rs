@@ -74,6 +74,64 @@ fn zero_max_inlined_bodies_means_unbounded() {
 }
 
 #[test]
+fn related_body_lookup_uses_location_when_methods_share_a_name() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    ws.vfs().write("app.py", "class First:\n    def run(self):\n        return 1\n\nclass Second:\n    def run(self):\n        return 2\n");
+    let global = ws.compiler_header_index();
+    let second = global
+        .find_by_name("run")
+        .iter()
+        .filter_map(|symbol| global.decl_of(*symbol))
+        .max_by_key(|decl| decl.span.start)
+        .expect("second method");
+    let locator = Locator::from_span(second.span, &ws);
+    let body = read_decl_body(&locator, &ws).expect("related method body");
+    assert!(
+        body.contains("return 2"),
+        "must hydrate the method at the given line: {body}"
+    );
+    assert!(!body.contains("return 1"));
+}
+
+#[test]
+fn read_file_rejects_ambiguous_suffix_and_prefers_exact_workspace_path() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    ws.vfs().write("one/app.py", "first = 1\n");
+    ws.vfs().write("two/app.py", "second = 2\n");
+    let filters = ReadFileFilters {
+        path: "app.py",
+        ..Default::default()
+    };
+    assert!(
+        read_file(&ws, None, &filters).is_err(),
+        "ambiguous suffix needs a qualified file selector"
+    );
+    ws.vfs().write("app.py", "exact = 3\n");
+    assert_eq!(
+        read_file(&ws, None, &filters).expect("exact file").source,
+        "exact = 3"
+    );
+}
+
+#[test]
+fn read_file_rejects_invalid_sdk_line_ranges() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    ws.vfs().write("app.py", "value = 1\n");
+    for range in [(0, 1), (2, 1)] {
+        assert!(read_file(
+            &ws,
+            None,
+            &ReadFileFilters {
+                path: "app.py",
+                line_range: Some(range),
+                ..Default::default()
+            }
+        )
+        .is_err());
+    }
+}
+
+#[test]
 fn read_file_from_to_filters_match_source_and_sink_sides() {
     let finding = combined();
 

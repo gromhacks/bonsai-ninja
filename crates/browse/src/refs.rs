@@ -427,28 +427,19 @@ fn refine_span_to_name(ws: &Workspace, span: bonsai_common::Span, name: &str) ->
     let Ok(snapshot) = ws.vfs().snapshot(span.file) else {
         return span;
     };
-    let bytes = snapshot.text.as_bytes();
-    if bytes.is_empty() {
+    let (Ok(start), Ok(end)) = (usize::try_from(span.start), usize::try_from(span.end)) else {
         return span;
-    }
-    let span_start = (span.start as usize).min(bytes.len());
-    let span_end = (span.end as usize).min(bytes.len()).max(span_start);
-    let line_start = bytes[..span_start]
-        .iter()
-        .rposition(|b| *b == b'\n')
-        .map_or(0, |idx| idx + 1);
-    let line_end = bytes[span_end..]
-        .iter()
-        .position(|b| *b == b'\n')
-        .map_or(bytes.len(), |idx| span_end + idx);
-    let line = &snapshot.text[line_start..line_end];
-    let Some(offset) = find_token_offset(line, name) else {
+    };
+    let Some(expression) = snapshot.text.get(start..end) else {
+        return span;
+    };
+    let Some(offset) = find_token_offset(expression, name) else {
         return span;
     };
     bonsai_common::Span {
         file: span.file,
-        start: (line_start + offset) as u64,
-        end: (line_start + offset + name.len()) as u64,
+        start: (start + offset) as u64,
+        end: (start + offset + name.len()) as u64,
     }
 }
 
@@ -462,11 +453,11 @@ fn find_token_offset(line: &str, name: &str) -> Option<usize> {
             return Some(offset);
         }
     }
-    line.find(name)
+    None
 }
 
 fn is_ident_char(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphanumeric()
+    ch == '_' || ch.is_alphanumeric()
 }
 
 fn walk_flow_source_reads(events: &[FlowEvent], visit: &mut impl FnMut(&str, bonsai_common::Span)) {
@@ -603,7 +594,7 @@ pub fn read_matched_line(
     let span_end = (span.end as usize).min(bytes.len()).max(span_start);
     let (mut cursor, _) = line_bounds(bytes, span_start);
     let mut line_no = u32::try_from(bytes[..cursor].split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
-    while cursor < span_end.max(cursor + 1) && cursor < bytes.len() {
+    while cursor < span_end && cursor < bytes.len() {
         let (start, end) = line_bounds(bytes, cursor);
         let raw = String::from_utf8_lossy(&bytes[start..end]);
         if matches(&raw) {
@@ -646,6 +637,45 @@ fn bounded_line(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matched_line_never_searches_beyond_its_exact_span() {
+        let workspace = Workspace::new(bonsai_adapters::all_languages_registry());
+        let file = workspace.vfs().write("app.py", "# first\n# second\n# target\n");
+        let selected = bonsai_common::Span::new(file, 0, 17);
+        assert!(read_matched_line(&workspace, &selected, &|line| line.contains("target")).is_none());
+        let (_, line, column) =
+            read_matched_line(&workspace, &selected, &|line| line.contains("second")).unwrap();
+        assert_eq!((line, column), (2, 1));
+    }
+
+    #[test]
+    fn repeated_argument_reads_keep_both_exact_columns() {
+        let workspace = Workspace::new(bonsai_adapters::all_languages_registry());
+        workspace
+            .vfs()
+            .write("app.py", "def entry(value):\n    consume(value, value)\n");
+        let rows = refs(
+            &workspace,
+            "value",
+            &RefsFilters {
+                kind: Some("read"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut columns = rows
+            .iter()
+            .filter(|row| row.line == 2)
+            .map(|row| row.column)
+            .collect::<Vec<_>>();
+        columns.sort_unstable();
+        assert_eq!(
+            columns,
+            [13, 20],
+            "distinct compiler argument spans must not collapse: {rows:?}"
+        );
+    }
 
     #[test]
     fn qualified_symbol_query_preserves_receiver_identity() {

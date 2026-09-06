@@ -20,6 +20,8 @@ use tree_sitter::{Language, Node, Tree};
 pub const LANG_ID: LanguageId = LanguageId::new("dart");
 const PACK_NAME: &str = "dart";
 
+mod conditions;
+
 fn dart_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
     if node.kind() == "string_literal" {
         return dart_exact_static_string(node, src).map(StaticScalarValue::String);
@@ -1554,6 +1556,7 @@ impl LanguageAdapter for DartAdapter {
             },
         );
         if let Some((snapshot, tree)) = parsed.as_ref() {
+            conditions::refine_branch_conditions(&mut decl_index, tree, file, snapshot.text.as_bytes());
             rewrite_dart_named_constructor_declarations(
                 &mut decl_index,
                 tree,

@@ -52,8 +52,14 @@ pub fn chain_to_names(
     workspace: &bonsai_workspace::Workspace,
     chain: &[bonsai_common::FuncId],
 ) -> Vec<String> {
+    let global = workspace.compiler_header_index();
     chain
         .iter()
-        .map(|&func_id| func_display_name(workspace, func_id))
+        .map(|func_id| {
+            global
+                .decl_of(bonsai_common::SymbolId::new(func_id.raw()))
+                .map(|decl| decl.name.clone())
+                .unwrap_or_else(|| "<unknown>".to_string())
+        })
         .collect()
 }

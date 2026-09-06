@@ -156,6 +156,21 @@ class CratesIoRetryDelayTests(unittest.TestCase):
 
 
 class PublicationPreflightTests(unittest.TestCase):
+    def test_publish_rejects_dirty_checkout_before_preflight_or_upload(self) -> None:
+        with (
+            mock.patch.object(
+                publish_crates, "run", return_value=mock.Mock(stdout=" M src/lib.rs\n")
+            ),
+            mock.patch.object(publish_crates, "assert_registry_credentials") as credentials,
+            mock.patch.object(publish_crates, "preflight_package_sources") as preflight,
+            mock.patch.object(publish_crates, "publish_crate") as upload,
+        ):
+            with self.assertRaisesRegex(ValueError, "clean Git checkout"):
+                publish_crates.publish(["bonsai-ninja"], "0.2.15", resume=False)
+        credentials.assert_not_called()
+        preflight.assert_not_called()
+        upload.assert_not_called()
+
     def test_publish_preflights_every_source_payload_before_first_upload(self) -> None:
         order = ["bonsai-ninja-a", "bonsai-ninja-b"]
         with (
@@ -235,7 +250,19 @@ class PublicationPreflightTests(unittest.TestCase):
         data = publish_crates.metadata()
         packages, version = publish_crates.publishable_packages(data)
         order = publish_crates.publication_order(packages)
-        with redirect_stdout(io.StringIO()):
+        real_run = publish_crates.run
+
+        def list_working_tree_sources(*args: str, **kwargs: object) -> object:
+            # Exercise Cargo's real source inventory on the current edits.
+            # This is a read-only test seam, never a production publish option.
+            self.assertEqual(args[:2], ("cargo", "package"))
+            self.assertIn("--list", args)
+            return real_run(*args, "--allow-dirty", **kwargs)
+
+        with (
+            mock.patch.object(publish_crates, "run", side_effect=list_working_tree_sources),
+            redirect_stdout(io.StringIO()),
+        ):
             publish_crates.preflight_package_sources(order, version)
         self.assertEqual(len(order), 45)
         self.assertEqual(order[-1], "bonsai-ninja")

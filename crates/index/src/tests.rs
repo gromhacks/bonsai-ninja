@@ -1,4 +1,23 @@
 use super::*;
+
+#[test]
+fn persisted_headers_reject_invalid_symbol_before_allocating_a_dense_table() {
+    let file = FileId::new(0);
+    let headers = vec![DeclIndex {
+        file,
+        defs: vec![decl(file, SymbolId::INVALID.raw(), "invalid")],
+        ..DeclIndex::default()
+    }];
+    assert!(GlobalIndex::from_persisted_header_files(headers, ReceiverAncestry::default()).is_err());
+    assert!(GlobalIndex::from_persisted_header_files(
+        vec![DeclIndex {
+            file: FileId::INVALID,
+            ..DeclIndex::default()
+        }],
+        ReceiverAncestry::default(),
+    )
+    .is_err());
+}
 use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::Visibility;
 
@@ -93,6 +112,69 @@ fn remove_file_drops_only_its_reference_backlinks() {
 }
 
 #[test]
+fn reference_scopes_follow_global_remapping_and_declaration_deduplication() {
+    let mut global = GlobalIndex::new();
+    let first = FileId::new(1);
+    global.insert_preprocessed(DeclIndex {
+        file: first,
+        defs: vec![decl(first, 0, "unrelated"), decl(first, 1, "another")],
+        ..DeclIndex::default()
+    });
+    let file = FileId::new(2);
+    global.insert_preprocessed(DeclIndex {
+        file,
+        defs: vec![decl(file, 0, "owner"), decl(file, 1, "owner")],
+        refs: vec![Ref {
+            span: Span::new(file, 0, 1),
+            name: "owner".into(),
+            kind: bonsai_lang_api::RefKind::Read,
+            scope: Some(SymbolId::new(1)),
+            resolved: Some(SymbolId::new(1)),
+        }],
+        ..DeclIndex::default()
+    });
+    let owner = global.find_by_name("owner")[0];
+    let reference = &global.file_index(file).unwrap().refs[0];
+    assert_eq!(reference.scope, Some(owner));
+    assert_eq!(reference.resolved, Some(owner));
+}
+
+#[test]
+fn receiver_ancestry_does_not_assign_bases_from_an_unrelated_same_named_class() {
+    let mut global = GlobalIndex::new();
+    for (raw_file, qualified, bases) in [
+        (1, "one.Child", vec!["Base".to_string()]),
+        (2, "two.Child", vec![]),
+    ] {
+        let file = FileId::new(raw_file);
+        let mut class = decl(file, 0, "Child");
+        class.kind = DeclKind::Class;
+        class.qualified_name = Some(qualified.into());
+        class.bases = bases;
+        global.insert_header_preprocessed(DeclIndex {
+            file,
+            defs: vec![class],
+            ..DeclIndex::default()
+        });
+    }
+    global.finalize_semantic_facts();
+    let ancestry = global.receiver_ancestry();
+    let mut types = Vec::new();
+    push_type_and_bases(&mut types, "two.Child", &ancestry.by_type, &mut AHashSet::new());
+    assert!(
+        types.is_empty(),
+        "unrelated class acquired inherited bases: {types:?}"
+    );
+    push_type_and_bases(&mut types, "Child", &ancestry.by_type, &mut AHashSet::new());
+    assert!(
+        types.is_empty(),
+        "ambiguous short type acquired inherited bases: {types:?}"
+    );
+    push_type_and_bases(&mut types, "one.Child", &ancestry.by_type, &mut AHashSet::new());
+    assert_eq!(types, ["Base"]);
+}
+
+#[test]
 fn insert_dedupes_identical_adapter_declarations() {
     let file = FileId::new(11);
     let mut index = GlobalIndex::new();
@@ -138,6 +220,7 @@ fn insert_merges_duplicate_declaration_facts() {
     duplicate.implicit_receiver_names.push("this".to_string());
     duplicate.receiver_state_sources.push("self.value".to_string());
     duplicate.return_type = Some("String".to_string());
+    duplicate.is_variadic = true;
 
     let mut index = GlobalIndex::new();
     index.insert(DeclIndex {
@@ -163,6 +246,7 @@ fn insert_merges_duplicate_declaration_facts() {
     assert_eq!(decl.implicit_receiver_names, vec!["this".to_string()]);
     assert_eq!(decl.receiver_state_sources, vec!["self.value".to_string()]);
     assert_eq!(decl.return_type.as_deref(), Some("String"));
+    assert!(decl.is_variadic);
 }
 
 #[test]
@@ -239,18 +323,23 @@ fn compiler_headers_tolerate_recovered_outer_declaration_trivia() {
 }
 
 #[test]
-fn streamed_assignment_owners_rebind_to_stable_symbols() {
+fn streamed_assignment_owners_rebind_to_stable_symbols_after_deduplication() {
     let file = FileId::new(24);
     let local_owner = SymbolId::new(7);
+    let duplicate_owner = SymbolId::new(8);
     let global_owner = SymbolId::new(41);
     let span = Span::new(file, 10, 24);
     let mut index = DeclIndex {
         file,
+        defs: vec![
+            decl(file, local_owner.raw(), "Owner"),
+            decl(file, duplicate_owner.raw(), "Owner"),
+        ],
         assignment_values: vec![bonsai_lang_api::AssignmentValueFact {
             assignment_span: span,
             target: Some("this.client".to_string()),
             target_is_immutable: true,
-            target_owner: Some(local_owner),
+            target_owner: Some(duplicate_owner),
             target_span: Some(Span::new(file, 10, 21)),
             value_span: Span::new(file, 24, 30),
             call_sites: Vec::new(),
@@ -270,6 +359,8 @@ fn streamed_assignment_owners_rebind_to_stable_symbols() {
     };
     let local_to_global = AHashMap::from([(local_owner, global_owner)]);
 
+    dedup_decl_index_defs(&mut index);
+    assert_eq!(index.assignment_values[0].target_owner, Some(local_owner));
     remap_decl_index_symbols(&mut index, &local_to_global);
 
     assert_eq!(index.assignment_values[0].target_owner, Some(global_owner));

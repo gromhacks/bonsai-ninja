@@ -1,6 +1,180 @@
 use bonsai_conformance::run_language_suite;
 use std::sync::Arc;
 
+fn review_index(source: &str) -> bonsai_lang_api::DeclIndex {
+    let ws = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new())],
+        &[("review.ts", source)],
+    );
+    let file = ws.vfs().all_files()[0];
+    ws.db()
+        .decl_index(file)
+        .expect("TypeScript compiler index")
+        .as_ref()
+        .clone()
+}
+
+#[test]
+fn qualified_base_names_preserve_namespace_and_exclude_generic_arguments() {
+    let index = review_index("class Derived extends pkg.Base<Argument> {}\n");
+    let derived = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Derived")
+        .expect("class");
+    assert_eq!(derived.bases, ["pkg.Base"]);
+}
+
+#[test]
+fn computed_base_expression_does_not_turn_operands_into_base_classes() {
+    let index = review_index("class Derived extends mixin(Base) {}\n");
+    let derived = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Derived")
+        .expect("class");
+    assert!(
+        derived.bases.is_empty(),
+        "only the computed result is a base, not the call or its arguments: {:?}",
+        derived.bases
+    );
+}
+
+#[test]
+fn qualified_casts_and_parameter_properties_keep_complete_type_identity() {
+    let index = review_index("class Owner { constructor(public service: pkg.Service) {} }\nfunction use(input: unknown) { const value = input as pkg.Service; const asserted = <pkg.Service>input; }\n");
+    let constructor = index
+        .defs
+        .iter()
+        .find(|decl| decl.kind == bonsai_lang_api::DeclKind::Constructor)
+        .expect("constructor");
+    assert!(
+        constructor
+            .type_aliases
+            .iter()
+            .any(|alias| alias.name == "this.service" && alias.type_name == "pkg.Service"),
+        "{:?}",
+        constructor.type_aliases
+    );
+    let function = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "use")
+        .expect("function");
+    for binding in ["value", "asserted"] {
+        assert!(
+            function
+                .type_aliases
+                .iter()
+                .any(|alias| alias.name == binding && alias.type_name == "pkg.Service"),
+            "{binding}: {:?}",
+            function.type_aliases
+        );
+    }
+}
+
+#[test]
+fn parameter_property_transfer_does_not_require_an_unambiguous_type() {
+    let index = review_index("class Owner { constructor(public value: Service | Other, public untyped, public Service: Service) {} }\n");
+    let constructor = index
+        .defs
+        .iter()
+        .find(|decl| decl.kind == bonsai_lang_api::DeclKind::Constructor)
+        .expect("constructor");
+    assert!(
+        !constructor
+            .type_aliases
+            .iter()
+            .any(|alias| alias.name == "this.value"),
+        "a union cannot be collapsed to its first member"
+    );
+    for (parameter, field) in [(0, "this.value"), (1, "this.untyped"), (2, "this.Service")] {
+        assert!(
+            constructor
+                .receiver_field_writes
+                .iter()
+                .any(|write| write.target == field && write.source_param_indices == [parameter]),
+            "{field}: {:?}",
+            constructor.receiver_field_writes
+        );
+    }
+}
+
+#[test]
+fn readonly_literals_are_owned_by_their_declaring_class() {
+    let index =
+        review_index("class First { readonly BASE = 'one'; }\nclass Second { readonly BASE = 'two'; }\n");
+    for class in index
+        .defs
+        .iter()
+        .filter(|decl| decl.kind == bonsai_lang_api::DeclKind::Class)
+    {
+        assert!(
+            index
+                .assignment_values
+                .iter()
+                .any(|fact| fact.target.as_deref() == Some("this.BASE")
+                    && fact.target_owner == Some(class.symbol)),
+            "{} must own its immutable field fact",
+            class.name
+        );
+    }
+}
+
+#[test]
+fn constructor_writes_override_readonly_initializers_independently_of_text_order() {
+    let index = review_index(
+        "class Owner { constructor(input: string) { this.BASE = input; } readonly BASE = 'initial'; }\n",
+    );
+    assert!(
+        !index
+            .assignment_values
+            .iter()
+            .any(|fact| fact.target.as_deref() == Some("this.BASE")
+                && fact.target_is_immutable
+                && fact.static_value.is_some()),
+        "field initialization precedes the constructor body, regardless of declaration order"
+    );
+}
+
+#[test]
+fn decorator_arguments_do_not_declare_constructor_parameter_properties() {
+    let index = review_index("class Owner { constructor(@marker('readonly') value: Service) {} }\n");
+    let constructor = index
+        .defs
+        .iter()
+        .find(|decl| decl.kind == bonsai_lang_api::DeclKind::Constructor)
+        .expect("constructor");
+    assert!(
+        constructor.receiver_field_writes.is_empty(),
+        "decorator text is not a property modifier: {:?}",
+        constructor.receiver_field_writes
+    );
+    assert!(!constructor
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "this.value"));
+}
+
+#[test]
+fn parameter_property_transfer_uses_the_lowered_parameter_identity() {
+    let index = review_index("class Owner { constructor({left, right}: Pair, public value: Service) {} }\n");
+    let constructor = index
+        .defs
+        .iter()
+        .find(|decl| decl.kind == bonsai_lang_api::DeclKind::Constructor)
+        .expect("constructor");
+    let value = constructor
+        .params
+        .iter()
+        .position(|name| name == "value")
+        .expect("value parameter");
+    assert!(constructor
+        .receiver_field_writes
+        .iter()
+        .any(|write| write.target == "this.value" && write.source_param_indices == [value]));
+}
+
 #[test]
 fn conformance_traced() {
     let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =

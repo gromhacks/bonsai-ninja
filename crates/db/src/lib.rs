@@ -8,7 +8,7 @@
 //! public API of this crate).
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_abstract_interp::{run_entry, RawTrace, TraceLimits};
+use bonsai_abstract_interp::{run_entry_with_assignment_values, RawTrace, TraceLimits};
 use bonsai_cfg::{build_cfg_from_flow_in_span, Cfg};
 use bonsai_common::{FileId, FuncId, SymbolId};
 use bonsai_diagnostics::{Diagnostic, DiagnosticSink};
@@ -1009,7 +1009,12 @@ impl AnalyzerDb {
     /// and for adapters that just want raw CFG-level traces.
     pub fn trace_function(&self, func: FuncId, limits: TraceLimits) -> TraceResult {
         let cfg = self.cfg(func);
-        let raw: RawTrace = run_entry(func, &cfg, limits);
+        let global = self.global_index();
+        let assignments = global
+            .declaring_file(SymbolId::new(func.raw()))
+            .and_then(|file| global.file_index(file))
+            .map_or(&[][..], |index| index.assignment_values.as_slice());
+        let raw: RawTrace = run_entry_with_assignment_values(func, &cfg, limits, assignments);
         let name_of: &dyn Fn(FuncId) -> Option<String> = &|_| None;
         let module_of: &dyn Fn(FuncId) -> Option<String> = &|_| None;
         finalize(

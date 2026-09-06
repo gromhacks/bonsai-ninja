@@ -301,6 +301,57 @@ fn single_file_local_id_maps_to_its_persisted_header_partition() {
 }
 
 #[test]
+fn single_file_query_keeps_workspace_identity_without_compiler_objects() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::write(root.path().join("alpha.py"), "def alpha():\n    return 1\n").unwrap();
+    std::fs::write(root.path().join("beta.py"), "def beta():\n    return 2\n").unwrap();
+    let complete = Workspace::index(root.path(), python_registry()).unwrap();
+    complete.save_compiler_linkage_sidecar(root.path()).unwrap();
+    let scoped = Workspace::open_query_matching_path_with_options(
+        root.path(),
+        python_registry(),
+        Path::new("beta.py"),
+        WorkspaceOpenOptions {
+            load_compiler_object_sidecar: false,
+            ..WorkspaceOpenOptions::parse_only()
+        },
+    )
+    .unwrap();
+    let file = scoped.vfs().all_files()[0];
+    let body = scoped.exact_decl_index_shared(file).expect("exact selected body");
+    assert_eq!(
+        file,
+        FileId::new(1),
+        "cold objects must not renumber a file with persisted headers"
+    );
+    assert!(body.defs.iter().any(|decl| decl.name == "beta"));
+    assert!(body.defs.iter().all(|decl| decl.name != "alpha"));
+    assert_eq!(scoped.stats().files, 1, "unselected bodies stay unopened");
+}
+
+#[test]
+fn single_file_query_does_not_borrow_an_outdated_generation_ordinal() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::write(root.path().join("beta.py"), "def beta():\n    return 2\n").unwrap();
+    let first = Workspace::index(root.path(), python_registry()).unwrap();
+    first.save_compiler_object_sidecar(root.path()).unwrap();
+    std::fs::write(root.path().join("alpha.py"), "def alpha():\n    return 1\n").unwrap();
+    let scoped =
+        Workspace::open_query_matching_path(root.path(), python_registry(), Path::new("beta.py")).unwrap();
+    assert_eq!(
+        scoped.vfs().all_files(),
+        [FileId::new(1)],
+        "source additions change the canonical ordinal even if beta's bytes did not change"
+    );
+    assert!(scoped
+        .exact_decl_index_shared(FileId::new(1))
+        .unwrap()
+        .defs
+        .iter()
+        .any(|decl| decl.name == "beta"));
+}
+
+#[test]
 fn single_file_query_resolves_a_unique_workspace_path_filter() {
     let root = tempfile::tempdir().expect("workspace tempdir");
     std::fs::create_dir_all(root.path().join("src")).expect("create source dir");

@@ -91,6 +91,100 @@ fn source_ordered(operands: &[ConditionExpressionFact]) -> bool {
 }
 
 #[test]
+fn condition_call_operands_use_canonical_callee_identity_not_enclosing_call_spans() {
+    let fixtures = [
+        Fixture {
+            language: "go",
+            path: "condition.go",
+            source:
+                "package condition\nfunc check(value string) { if predicate(value) == true { taken() } }\n",
+        },
+        Fixture {
+            language: "java",
+            path: "Condition.java",
+            source:
+                "class Condition { void check(String value) { if (predicate(value) == true) taken(); } }\n",
+        },
+        Fixture {
+            language: "javascript",
+            path: "condition.js",
+            source: "function check(value) { if (predicate(value) === true) taken(); }\n",
+        },
+        Fixture {
+            language: "typescript",
+            path: "condition.ts",
+            source: "function check(value: string) { if (predicate(value) === true) taken(); }\n",
+        },
+        Fixture {
+            language: "kotlin",
+            path: "condition.kt",
+            source: "fun check(value: String) { if (predicate(value) == true) taken() }\n",
+        },
+        Fixture {
+            language: "lua",
+            path: "condition.lua",
+            source: "local function check(value) if predicate(value) == true then taken() end end\n",
+        },
+        Fixture {
+            language: "python",
+            path: "condition.py",
+            source: "def check(value):\n    if predicate(value) == True:\n        taken()\n",
+        },
+        Fixture {
+            language: "perl",
+            path: "condition.pl",
+            source: "sub check { my ($value) = @_; if (predicate($value) == 1) { taken(); } }\n",
+        },
+    ];
+    for fixture in &fixtures {
+        for wrapped in [false, true] {
+            let source = if wrapped {
+                fixture
+                    .source
+                    .replace("predicate(value)", "wrap(predicate(value))")
+                    .replace("predicate($value)", "wrap(predicate($value))")
+            } else {
+                fixture.source.to_string()
+            };
+            let workspace = bonsai_testkit::workspace_with(
+                vec![adapter_for(fixture.language)],
+                &[(fixture.path, source.as_str())],
+            );
+            assert!(workspace.diagnostics().is_empty(), "{}", fixture.language);
+            let file = workspace.vfs().all_files()[0];
+            let index = workspace.db().decl_index(file).unwrap();
+            let expression = index
+                .branch_conditions
+                .first()
+                .and_then(|fact| fact.expression.as_ref())
+                .unwrap();
+            let ConditionExpressionFact::Equality { left, .. } = expression else {
+                panic!("{}: {expression:#?}", fixture.language);
+            };
+            let mut expected = Vec::new();
+            for decl in &index.defs {
+                bonsai_lang_api::for_each_flow_event(&decl.flow_events, &mut |event| {
+                    if let bonsai_lang_api::FlowEvent::Call { span, name, .. } = event {
+                        if name == if wrapped { "wrap" } else { "predicate" } {
+                            expected.push(*span);
+                        }
+                    }
+                });
+            }
+            expected.sort_by_key(|span| (span.start, span.end));
+            expected.dedup();
+            assert_eq!(expected.len(), 1, "{}: {expected:?}", fixture.language);
+            assert_eq!(
+                left.direct_call_span,
+                Some(expected[0]),
+                "{} wrapped={wrapped}: {expression:#?}",
+                fixture.language
+            );
+        }
+    }
+}
+
+#[test]
 fn every_language_lowers_boolean_evaluator_semantics_to_typed_ir() {
     assert_registry_exhaustive();
     let mut failures = BTreeMap::new();

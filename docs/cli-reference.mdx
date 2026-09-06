@@ -232,6 +232,12 @@ bonsai-ninja security ./src pack --audit --rules-dir ./security-patterns
 | `sink-analysis` | None | Map source-independent compiler value lineage into every selected taint-relevant sink. |
 | `pack` | None | Audit (`--audit`), list, tree (`--tree`), or validate (`--validate`) the rulepack. |
 
+Dependency rows require package-specific import or manifest-content evidence.
+A generic manifest or lockfile filename alone does not establish a package;
+a rule covering several frameworks cannot make its other providers appear
+installed. `dependency-analysis` retains the complete taint flows for the
+packages whose evidence survives that check.
+
 `pack --validate` checks rule schema, metadata, and `match_examples`. Add
 `--taint-replay` to also replay each taint-dependent rule's positive
 example through live taint analysis and report any whose own example no
@@ -626,7 +632,7 @@ omits adapter-classified minified JavaScript/TypeScript; add global
 `--minified-js` to include bundle internals. This selection changes source
 scope, never graph depth, fixed-point work, or path completeness within that
 scope.
-Native JSON schema v12 carries the code with its graph: `files[].source` is
+Native JSON schema v13 carries the code with its graph: `files[].source` is
 the full file text and every `span`, `line`, `start`, and `end` in the
 document indexes into it; `decls[]` carry their byte span; `callgraph[]` edges
 carry the exact `call_text`; `taint_graph.functions[]` carry `end_line`; and
@@ -638,7 +644,7 @@ workspace-relative; the top-level `workspace_root` is the sole absolute
 anchor, so artifacts stay portable between hosts and no machine-specific
 prefix leaks into graph identities or agent prompts. Its machine-readable
 Draft 2020-12 contract is
-[`schemas/bonsai-native-export-v12.schema.json`](../schemas/bonsai-native-export-v12.schema.json).
+[`schemas/bonsai-native-export-v13.schema.json`](../schemas/bonsai-native-export-v13.schema.json).
 A one-shot cache miss streams directly to the selected output; use
 `cache rebuild <workspace> --export` only when repeated exports justify a
 persisted copy.
@@ -771,10 +777,10 @@ bonsai-ninja cache rebuild ./src
 | `stats [WORKSPACE]` | current directory | Print cache configuration plus validated freshness/readiness for `manifest.json`, compiler objects, retrieval, dataflow, value-flow, flow-id, callgraph, linkage, IDG, taint-graph, and export sidecars. |
 | `stats --format <FORMAT>` | text | `text` or `json`; every other value is rejected. |
 | `stats --output-path <PATH>` | stdout | Write the selected `stats --format` output to a file. |
-| `clear [WORKSPACE]` | current directory | Remove persisted analysis sidecars from the workspace's external cache. |
+| `clear [WORKSPACE]` | current directory | Remove the workspace-bound external cache. Refuses workspace roots, ancestors, directory links, mismatched ownership, and unrecognized top-level entries before deleting anything. |
 | `--dataflow-only` | false | For `clear`, remove only `dataflow.v3.factstore` and the compatibility `dataflow.v2.bin`. |
-| `--orphans` | false | For `clear`, sweep the shared OS cache root instead of one workspace: remove every entry whose recorded workspace root no longer exists (deleted clones, throwaway fixtures) and every entry that never published a manifest and is older than one day. Entries whose root exists are never touched. The engine runs the same sweep at most once per day when a workspace is cached for the first time. |
-| `--legacy` | false | For `clear`, remove the legacy in-tree `<WORKSPACE>/.bonsai` directory left by releases that cached inside the workspace. Acts only when that directory is not the active cache directory; the external cache is untouched. `cache stats` reports such a directory (text and JSON) and never removes it implicitly. |
+| `--orphans` | false | For `clear`, sweep the shared OS cache root instead of one workspace. Remove only entries whose native workspace binding (or complete legacy manifest) identifies a confirmed missing source root. Live, inaccessible, corrupt, and unattributed entries are kept regardless of age; a missing manifest alone is not an orphan. The same sweep runs under a cross-process lock at most once per day when a workspace is first cached. |
+| `--legacy` | false | For `clear`, remove recognized versioned analysis files in the inactive `<WORKSPACE>/.bonsai` directory. Preserve `.bonsai/rules`, configuration, links, and unknown files/directories; remove the parent only when empty. The active cache is untouched. `cache stats` reports only recognized legacy artifact bytes and never removes them implicitly. |
 | `rebuild [WORKSPACE]` | current directory | Remove persisted analysis sidecars and rebuild reusable structural artifacts: compiler objects, callgraph, linkage, streamed IDG, and retrieval factstore. It does not run the optional full-workspace compatibility dataflow prewarm. |
 | `rebuild --export` | false | Also warm the default export JSON cache. |
 
@@ -844,7 +850,7 @@ bonsai-ninja search ./src --query "request.args"
 | `entrypoints` | Callable declarations with no resolved semantic in-workspace callers. | `--kind`, `--file`, `--name`, `--regex` |
 | `calls` | Syntactic call sites with caller, callee, location, and adapter-emitted call kind. | `--callee`, `--file`, `--caller`, `--call-kind`, `--regex` |
 | `imports` | Imports, uses, includes, aliases, and wildcard imports. | `--file`, `--module`, `--alias`, `--wildcard`, `--regex` |
-| `vars` | Assignment targets and simple RHS source names. | `--name`, `--file`, `--in-fn`, `--source`, `--regex` |
+| `vars` | One row per exact assignment target, with every RHS identifier/call projection. | `--name`, `--file`, `--in-fn`, `--source`, `--regex` |
 | `strings` | String literals classified as `sql`, `url`, `shell`, `regex`, `path`, or `generic`. | `--category`, `--contains`, `--file`, `--in-fn`, `--min-len`, `--regex` |
 | `comments` | Comments classified as `todo`, `fixme`, `security`, `doc`, `disabled_code`, or `generic`. | `--kind`, `--contains`, `--file`, `--in-fn`, `--min-len`, `--regex` |
 | `args` | Call-site arguments by callee, position, keyword, and value text. | `--callee`, `--value`, `--position`, `--keyword`, `--file`, `--in-fn`, `--regex` |
@@ -880,9 +886,15 @@ Every browse command also renders a `used in (cross-module)` text section for
 callable rows on the current page. It lists only incoming callgraph edges
 resolved by the compiler, joined to the exact target declaration (not merely
 the target file), including the stable `E:` edge id and call-site location; an
-empty section explicitly reports that no cross-module callers were proven.
+empty complete section explicitly reports that no cross-module callers were proven.
 Native JSON carries the same page-scoped projection as top-level `used_in[]`
-entries shaped as `{file, callers_in[]}`. Paging changes only which page's
+entries shaped as `{file, callers_in[]}`, with separate `used_in_complete`
+and `used_in_incomplete_reasons` fields. Cold file-scoped syntax views may
+lack full caller evidence: text and JSON report that state and recommend
+`index <workspace> --semantic`. Such absence is not cached across prewarm.
+Class rows join the exact type's direct callable members, including constructors;
+same-named methods in unrelated types are not part of that class's evidence.
+Paging changes only which page's
 files are projected; it never turns this into name matching or path
 enumeration.
 

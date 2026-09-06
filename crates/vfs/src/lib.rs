@@ -10,7 +10,7 @@
 //! The VFS is single-writer, multi-reader; updates go through [`Vfs::write`]
 //! which holds an exclusive lock, while reads can proceed concurrently.
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use bonsai_common::{FileId, BONSAI_CASE_PROBE_PREFIX};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -121,6 +121,10 @@ struct Inner {
     /// Basenames narrow a suffix query without scanning every source file.
     by_basename: AHashMap<PathBuf, Vec<FileId>>,
     files: Vec<Option<FileSnapshot>>,
+    /// Distinguish never-assigned sparse slots from retired compiler IDs.
+    /// Versions are scoped to a live file, so reusing an old slot would alias
+    /// caches even if its new path happened to match the deleted file.
+    retired_files: AHashSet<FileId>,
     /// Identity of entries whose text is still on disk; `None` once loaded.
     lazy: Vec<Option<SourceIdentity>>,
     loader: Option<LazyLoader>,
@@ -224,7 +228,7 @@ impl Vfs {
     ///
     /// # Panics
     ///
-    /// Panics if `file_id` is occupied by another path, or if `path` was
+    /// Panics if `file_id` is retired or occupied by another path, or if `path` was
     /// already interned at another id. Both are compiler orchestration
     /// invariant violations.
     pub fn write_with_id(
@@ -257,6 +261,10 @@ impl Vfs {
         }
 
         let index = file_id.raw() as usize;
+        assert!(
+            !inner.retired_files.contains(&file_id),
+            "compiler file id was retired"
+        );
         if inner.files.len() <= index {
             inner.files.resize_with(index + 1, || None);
             inner.edits_since.resize_with(index + 1, Vec::new);
@@ -286,6 +294,7 @@ impl Vfs {
         let lookup_key = canonical_path_key(path);
         let mut inner = self.inner.write();
         let id = inner.by_path.remove(&lookup_key)?;
+        inner.retired_files.insert(id);
         let idx = id.raw() as usize;
         let basename = inner
             .files
@@ -362,39 +371,51 @@ impl Vfs {
     /// (typically a stale id after `remove_file` / VFS reset).
     pub fn snapshot(&self, file: FileId) -> Result<FileSnapshot, VfsError> {
         let idx = file.raw() as usize;
-        let (snapshot, pending) = {
-            let inner = self.inner.read();
-            let snapshot = inner
-                .files
-                .get(idx)
-                .and_then(Option::as_ref)
-                .cloned()
-                .ok_or(VfsError::UnknownFile(file))?;
-            let pending = inner.lazy.get(idx).copied().flatten().map(|identity| {
-                (
-                    identity,
-                    inner.loader.as_ref().map(|loader| Arc::clone(&loader.0)),
-                )
-            });
-            (snapshot, pending)
-        };
-        let Some((identity, loader)) = pending else {
-            return Ok(snapshot);
-        };
-        let loader = loader.ok_or_else(|| VfsError::MissingLazyLoader(snapshot.path.as_ref().clone()))?;
-        // Read outside the table lock: other files stay readable and
-        // parallel first uses load concurrently.
-        let text = loader(&snapshot.path, &identity).map_err(|error| VfsError::LazyLoad {
-            path: snapshot.path.as_ref().clone(),
-            error: error.to_string(),
-        })?;
-        let mut inner = self.inner.write();
-        let Inner { files, lazy, .. } = &mut *inner;
-        let Some(entry) = files.get_mut(idx).and_then(Option::as_mut) else {
-            return Err(VfsError::UnknownFile(file));
-        };
-        if entry.version == snapshot.version && lazy[idx].is_some() {
-            entry.text = text;
+        loop {
+            let (snapshot, pending) = {
+                let inner = self.inner.read();
+                let snapshot = inner
+                    .files
+                    .get(idx)
+                    .and_then(Option::as_ref)
+                    .cloned()
+                    .ok_or(VfsError::UnknownFile(file))?;
+                let pending = inner.lazy.get(idx).copied().flatten().map(|identity| {
+                    (
+                        identity,
+                        inner.loader.as_ref().map(|loader| Arc::clone(&loader.0)),
+                    )
+                });
+                (snapshot, pending)
+            };
+            let Some((identity, loader)) = pending else {
+                return Ok(snapshot);
+            };
+            let loader = loader.ok_or_else(|| VfsError::MissingLazyLoader(snapshot.path.as_ref().clone()))?;
+            // Read outside the table lock: other files stay readable and
+            // parallel first uses load concurrently.
+            let loaded_text = loader(&snapshot.path, &identity);
+            let mut inner = self.inner.write();
+            let Inner { files, lazy, .. } = &mut *inner;
+            let Some(entry) = files.get_mut(idx).and_then(Option::as_mut) else {
+                return Err(VfsError::UnknownFile(file));
+            };
+            // A peer may have loaded or eagerly replaced the source while this
+            // loader ran. Even an obsolete load error must yield to that snapshot.
+            if lazy[idx].is_none() {
+                return Ok(entry.clone());
+            }
+            if entry.version != snapshot.version || entry.path != snapshot.path || lazy[idx] != Some(identity)
+            {
+                // A newer lazy entry still contains a placeholder, not source.
+                // Retry its exact identity rather than publishing stale bytes or
+                // returning the placeholder as an empty successfully loaded file.
+                continue;
+            }
+            entry.text = loaded_text.map_err(|error| VfsError::LazyLoad {
+                path: snapshot.path.as_ref().clone(),
+                error: error.to_string(),
+            })?;
             lazy[idx] = None;
             let loaded = self.lazy_loaded.fetch_add(1, Ordering::Relaxed) + 1;
             if loaded <= LAZY_TRACE_LOADS && lazy_trace_enabled() {
@@ -404,10 +425,8 @@ impl Vfs {
                     std::backtrace::Backtrace::force_capture()
                 );
             }
+            return Ok(entry.clone());
         }
-        // A concurrent load or write already replaced the text; return the
-        // current entry so every caller observes one coherent snapshot.
-        Ok(entry.clone())
     }
 
     /// Intern `path` by identity, leaving the text on disk until first use.
@@ -480,6 +499,10 @@ impl Vfs {
             return file_id;
         }
         let index = file_id.raw() as usize;
+        assert!(
+            !inner.retired_files.contains(&file_id),
+            "compiler file id was retired"
+        );
         if inner.files.len() <= index {
             inner.files.resize_with(index + 1, || None);
             inner.edits_since.resize_with(index + 1, Vec::new);

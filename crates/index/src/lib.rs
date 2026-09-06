@@ -329,6 +329,9 @@ impl GlobalIndex {
             .flat_map(|index| index.defs.iter())
             .map(|decl| decl.symbol.raw())
             .max();
+        if max_symbol == Some(SymbolId::INVALID.raw()) {
+            return Err("persisted declaration has an invalid symbol id".to_string());
+        }
         let mut out = Self {
             finalized_bases_by_type: ancestry.by_type,
             ..Self::default()
@@ -342,6 +345,9 @@ impl GlobalIndex {
         }
         for index in files {
             let file = index.file;
+            if !file.is_valid() {
+                return Err("persisted header has an invalid file id".to_string());
+            }
             if out.by_file.contains_key(&file) {
                 return Err(format!("duplicate persisted header file {}", file.raw()));
             }
@@ -792,8 +798,7 @@ impl GlobalIndex {
             if !matches!(
                 decl.kind,
                 DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
-            ) || decl.bases.is_empty()
-            {
+            ) {
                 continue;
             }
             let mut bases = decl.bases.clone();
@@ -1190,11 +1195,25 @@ pub fn dedup_decl_index_defs(index: &mut DeclIndex) {
             }
         }
         for reference in &mut index.refs {
+            if let Some(scope) = reference
+                .scope
+                .and_then(|scope| local_aliases.get(&scope).copied())
+            {
+                reference.scope = Some(scope);
+            }
             if let Some(resolved) = reference
                 .resolved
                 .and_then(|resolved| local_aliases.get(&resolved).copied())
             {
                 reference.resolved = Some(resolved);
+            }
+        }
+        for assignment in &mut index.assignment_values {
+            if let Some(owner) = assignment
+                .target_owner
+                .and_then(|owner| local_aliases.get(&owner).copied())
+            {
+                assignment.target_owner = Some(owner);
             }
         }
     }
@@ -1209,6 +1228,9 @@ fn remap_decl_index_symbols(index: &mut DeclIndex, local_to_global: &AHashMap<Sy
         }
     }
     for reference in &mut index.refs {
+        if let Some(scope) = reference.scope {
+            reference.scope = local_to_global.get(&scope).copied();
+        }
         if let Some(resolved) = reference.resolved {
             reference.resolved = local_to_global.get(&resolved).copied();
         }
@@ -1548,6 +1570,7 @@ fn merge_duplicate_decl(into: &mut Decl, mut duplicate: Decl) {
     }
     extend_unique(&mut into.flow_events, duplicate.flow_events);
     into.has_implicit_returns |= duplicate.has_implicit_returns;
+    into.is_variadic |= duplicate.is_variadic;
 
     let duplicate_params = duplicate.params;
     let params_match = !duplicate_params.is_empty() && into.params == duplicate_params;

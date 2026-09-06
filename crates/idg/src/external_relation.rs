@@ -49,7 +49,7 @@ struct RunEntry {
 }
 
 pub(crate) struct ExternalSorter<R> {
-    file: File,
+    file: Option<File>,
     write_offset: u64,
     runs: Vec<RunEntry>,
     rows: Vec<R>,
@@ -60,10 +60,10 @@ impl<R: ExternalRecord> ExternalSorter<R> {
     pub(crate) fn new(max_rows: usize) -> Self {
         let max_rows = max_rows.max(1);
         Self {
-            file: tempfile::tempfile().expect("create exact compiler relation run spool"),
+            file: None,
             write_offset: 0,
             runs: Vec::new(),
-            rows: Vec::with_capacity(max_rows),
+            rows: Vec::new(),
             max_rows,
         }
     }
@@ -76,13 +76,21 @@ impl<R: ExternalRecord> ExternalSorter<R> {
     }
 
     pub(crate) fn finish(mut self) -> SortedExternalRelation<R> {
+        if self.runs.is_empty() {
+            self.rows.sort_unstable();
+            self.rows.dedup();
+            return SortedExternalRelation::resident(self.rows);
+        }
         self.flush();
         let mut output = BufWriter::new(tempfile::tempfile().expect("create sorted exact compiler relation"));
         let mut checkpoints = Vec::new();
         let mut count = 0_u64;
         let mut previous = None;
         let mut payload = Vec::with_capacity(R::BYTES);
-        for row in RunMerger::<R>::new(&self.file, &self.runs) {
+        for row in RunMerger::<R>::new(
+            self.file.as_ref().expect("flushed relation has a spool"),
+            &self.runs,
+        ) {
             if previous == Some(row) {
                 continue;
             }
@@ -124,11 +132,12 @@ impl<R: ExternalRecord> ExternalSorter<R> {
             row.encode(&mut payload);
         }
         debug_assert_eq!(payload.len(), self.rows.len() * R::BYTES);
-        self.file
-            .seek(SeekFrom::Start(self.write_offset))
+        let file = self
+            .file
+            .get_or_insert_with(|| tempfile::tempfile().expect("create exact compiler relation run spool"));
+        file.seek(SeekFrom::Start(self.write_offset))
             .expect("seek exact compiler relation run spool");
-        self.file
-            .write_all(&payload)
+        file.write_all(&payload)
             .expect("write exact compiler relation run spool");
         self.runs.push(RunEntry {
             offset: self.write_offset,
@@ -143,12 +152,13 @@ impl<R: ExternalRecord> ExternalSorter<R> {
 }
 
 pub(crate) struct SortedExternalRelation<R> {
-    storage: ExternalRelationStorage,
+    storage: ExternalRelationStorage<R>,
     len: u64,
     checkpoints: Box<[R]>,
 }
 
-enum ExternalRelationStorage {
+enum ExternalRelationStorage<R> {
+    Resident(Box<[R]>),
     File(File),
     Persisted(QueryAcceleratorBlobReader),
 }
@@ -161,7 +171,16 @@ pub(crate) struct PersistedExternalRelation {
 
 impl<R: ExternalRecord> SortedExternalRelation<R> {
     pub(crate) fn empty() -> Self {
-        ExternalSorter::new(1).finish()
+        Self::resident(Vec::new())
+    }
+
+    fn resident(rows: Vec<R>) -> Self {
+        let checkpoints = rows.iter().step_by(INDEX_STRIDE as usize).copied().collect();
+        Self {
+            len: rows.len() as u64,
+            storage: ExternalRelationStorage::Resident(rows.into_boxed_slice()),
+            checkpoints,
+        }
     }
 
     pub(crate) fn len(&self) -> u64 {
@@ -221,7 +240,27 @@ impl<R: ExternalRecord> SortedExternalRelation<R> {
     }
 
     fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> std::io::Result<()> {
+        if output.is_empty() {
+            return Ok(());
+        }
         match &self.storage {
+            ExternalRelationStorage::Resident(rows) => {
+                // Persistence uses the same fixed-width wire bytes regardless
+                // of whether this exact relation ever needed to spill.
+                let start = usize::try_from(offset / R::BYTES as u64)
+                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+                let skip = (offset % R::BYTES as u64) as usize;
+                let count = skip.saturating_add(output.len()).div_ceil(R::BYTES);
+                let selected = rows
+                    .get(start..start.saturating_add(count))
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof))?;
+                let mut bytes = Vec::with_capacity(count.saturating_mul(R::BYTES));
+                for row in selected {
+                    row.encode(&mut bytes);
+                }
+                output.copy_from_slice(&bytes[skip..skip + output.len()]);
+                Ok(())
+            }
             ExternalRelationStorage::File(file) => read_exact_at(file, offset, output),
             ExternalRelationStorage::Persisted(blob) => blob
                 .read_exact_at(offset, output)
@@ -230,6 +269,9 @@ impl<R: ExternalRecord> SortedExternalRelation<R> {
     }
 
     pub(crate) fn lower_bound(&self, row: R) -> u64 {
+        if let ExternalRelationStorage::Resident(rows) = &self.storage {
+            return rows.partition_point(|candidate| *candidate < row) as u64;
+        }
         if self.len == 0 {
             return 0;
         }
@@ -262,6 +304,15 @@ impl<R: ExternalRecord> SortedExternalRelation<R> {
     }
 
     pub(crate) fn visit_range(&self, mut start: u64, end: u64, mut visit: impl FnMut(R)) {
+        if start >= end {
+            return;
+        }
+        if let ExternalRelationStorage::Resident(rows) = &self.storage {
+            for &row in &rows[start as usize..end as usize] {
+                visit(row);
+            }
+            return;
+        }
         let mut payload = vec![0_u8; READ_ROWS * R::BYTES];
         while start < end {
             let rows =
@@ -277,6 +328,17 @@ impl<R: ExternalRecord> SortedExternalRelation<R> {
     }
 
     pub(crate) fn visit_while(&self, mut start: u64, mut visit: impl FnMut(R) -> bool) {
+        if start >= self.len {
+            return;
+        }
+        if let ExternalRelationStorage::Resident(rows) = &self.storage {
+            for &row in &rows[start as usize..] {
+                if !visit(row) {
+                    break;
+                }
+            }
+            return;
+        }
         let mut payload = vec![0_u8; READ_ROWS * R::BYTES];
         while start < self.len {
             let rows = usize::try_from((self.len - start).min(READ_ROWS as u64))
@@ -371,7 +433,10 @@ impl<R: ExternalRecord> Iterator for RunMerger<'_, R> {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_page_rows, ExternalRecord, ExternalSorter, MAXIMUM_MERGE_BUFFER_BYTES};
+    use super::{
+        merge_page_rows, ExternalRecord, ExternalRelationStorage, ExternalSorter, SortedExternalRelation,
+        MAXIMUM_MERGE_BUFFER_BYTES,
+    };
 
     #[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
     struct Word(u32);
@@ -413,5 +478,69 @@ mod tests {
             runs * rows * Word::BYTES
                 <= usize::try_from(MAXIMUM_MERGE_BUFFER_BYTES).expect("merge budget fits usize")
         );
+    }
+
+    #[test]
+    fn empty_and_small_relations_do_not_allocate_run_buffers_or_files() {
+        let mut sorter = ExternalSorter::new(131_072);
+        assert!(sorter.file.is_none());
+        assert_eq!(sorter.rows.capacity(), 0);
+        sorter.push(Word(8));
+        sorter.push(Word(3));
+        sorter.push(Word(8));
+        assert!(sorter.file.is_none());
+        assert!(sorter.rows.capacity() < sorter.max_rows);
+        let relation = sorter.finish();
+        assert!(matches!(relation.storage, ExternalRelationStorage::Resident(_)));
+        assert_eq!(relation.len(), 2);
+        assert_eq!(relation.lower_bound(Word(4)), 1);
+        let empty = SortedExternalRelation::<Word>::empty();
+        assert!(matches!(empty.storage, ExternalRelationStorage::Resident(_)));
+        assert_eq!(empty.len(), 0);
+        assert_eq!(empty.lower_bound(Word(4)), 0);
+        empty.visit_range(0, 0, |_| panic!("empty relation"));
+        empty.visit_while(0, |_| panic!("empty relation"));
+    }
+
+    #[test]
+    fn resident_and_spilled_relations_have_identical_queries_and_wire_bytes() {
+        use std::io::{Read, Seek};
+        let make = |limit| {
+            let mut sorter = ExternalSorter::new(limit);
+            for value in (0..700).rev() {
+                sorter.push(Word(value * 2));
+                sorter.push(Word(value * 2));
+            }
+            sorter.finish()
+        };
+        let resident = make(2_000);
+        let spilled = make(100);
+        for value in 0..1_402 {
+            assert_eq!(
+                resident.lower_bound(Word(value)),
+                spilled.lower_bound(Word(value)),
+                "{value}"
+            );
+        }
+        let collect = |relation: &SortedExternalRelation<Word>| {
+            let mut rows = Vec::new();
+            relation.visit_range(250, 520, |row| rows.push(row));
+            rows
+        };
+        assert_eq!(collect(&resident), collect(&spilled));
+        let encode = |relation: &SortedExternalRelation<Word>| {
+            let mut file = relation.snapshot_file().unwrap().try_clone().unwrap();
+            file.rewind().unwrap();
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).unwrap();
+            bytes
+        };
+        assert_eq!(encode(&resident), encode(&spilled));
+        let a = resident.persisted_metadata();
+        let b = spilled.persisted_metadata();
+        assert_eq!((a.len, a.checkpoints), (b.len, b.checkpoints));
+        let mut unaligned = [0; 7];
+        resident.read_exact_at(3, &mut unaligned).unwrap();
+        assert_eq!(&unaligned, &encode(&spilled)[3..10]);
     }
 }

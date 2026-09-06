@@ -6,6 +6,7 @@
 
 pub mod capabilities;
 pub mod kit;
+mod parameter_binding;
 mod parse_recovery;
 pub mod registry;
 mod storage;
@@ -37,6 +38,7 @@ pub use kit::{
     ProjectedPatternBindingSite, SyntaxSpecialForm, TypeAliasVocabulary, EMPTY_HANDLER, MODULE_DECL_NAME,
     WILDCARD_IMPORT_ALIAS_PREFIX,
 };
+pub use parameter_binding::{explicit_argument_parameter_index, named_argument_parameter_index};
 pub use parse_recovery::{
     branch_free_conditional_recovery_edits, c_family_declaration_macro_recovery_edits,
     c_family_preprocessor_context_fingerprint, syntax_damage_score, ConditionalDirectiveSyntax,

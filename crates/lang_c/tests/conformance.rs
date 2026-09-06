@@ -496,7 +496,7 @@ fn c_adapter_numeric_bound_fails_closed_for_observation_overwrite_and_small_dest
 #[test]
 fn c_adapter_compound_predicate_guard_requires_complete_static_membership_and_configuration() {
     let safe = c_index(
-        r#"static const char *TRUSTED[] = {"api.example", "hooks.example", NULL};
+        r#"static const char *const TRUSTED[] = {"api.example", "hooks.example", NULL};
 static int accepted(const char *value) {
   if (strncmp(value, "https://", 8) != 0) return 0;
   const char *token = value + 8;
@@ -531,6 +531,9 @@ void fetch(void *client, const char *value) {
         "prefix-value:string:https://",
         "membership-call:strncmp",
         "membership-token-boundary:true",
+        "membership-length-call:text_len",
+        "membership-boundary-codepoint:0",
+        "membership-boundary-codepoint:47",
         "related-call:curl_easy_setopt:argument:0=guarded-argument:0",
         "related-call:curl_easy_setopt:argument:1=place:CURLOPT_FOLLOWLOCATION",
         "related-call:curl_easy_setopt:argument:2=number:0",
@@ -551,7 +554,7 @@ void fetch(void *client, const char *value) {
   configure(client, URL_OPTION, value);
 }
 "#,
-        r#"static const char *TRUSTED[] = {"api.example", dynamic_host(), NULL};
+        r#"static const char *const TRUSTED[] = {"api.example", dynamic_host(), NULL};
 static int accepted(const char *value) {
   if (prefix_cmp(value, "https://", 8) != 0) return 0;
   const char *token = value + 8;
@@ -663,6 +666,165 @@ fn c_adapter_rejects_additional_unguarded_dynamic_write() {
         }"#,
     );
     assert!(index.guarded_value_filters.is_empty());
+}
+
+#[test]
+fn guarded_buffer_filter_requires_the_same_checked_element_at_the_write() {
+    let source = r#"void filter(const char *input) {
+        char output[64] = {0}; int j = 0;
+        for (int i = 0; input[i]; i++) {
+            if (predicate((unsigned char)input[i])) output[j++] = input[i];
+        }
+        output[j] = 0; consume(output);
+    }"#;
+    assert_eq!(c_index(source).guarded_value_filters.len(), 1);
+    let mut incorrectly_proven = Vec::new();
+    for (label, before, after) in [
+        (
+            "different index",
+            "output[j++] = input[i]",
+            "output[j++] = input[0]",
+        ),
+        (
+            "effectful checked index",
+            "predicate((unsigned char)input[i])",
+            "predicate((unsigned char)input[i++])",
+        ),
+        (
+            "transformed predicate input",
+            "predicate((unsigned char)input[i])",
+            "predicate(transform(input[i]))",
+        ),
+        (
+            "write after mutation",
+            "output[j++] = input[i];",
+            "{ i++; output[j++] = input[i]; }",
+        ),
+    ] {
+        if !c_index(&source.replace(before, after))
+            .guarded_value_filters
+            .is_empty()
+        {
+            incorrectly_proven.push(label);
+        }
+    }
+    assert!(
+        incorrectly_proven.is_empty(),
+        "unproven element filters: {incorrectly_proven:?}"
+    );
+}
+
+#[test]
+fn numeric_guard_does_not_ignore_negative_lengths_or_mutation() {
+    let mut incorrectly_proven = Vec::new();
+    for (label, source) in [
+        ("negative signed length", "void f(char *input, int n) { char output[64]; if (n > 64) n = 64; copy_bytes(output, input, n); }"),
+        ("increment after clamp", "void f(char *input, unsigned long n) { char output[64]; if (n > sizeof(output)) n = sizeof(output); n++; copy_bytes(output, input, n); }"),
+        ("else overwrite", "void f(char *input, unsigned long n) { char output[64]; if (n > sizeof(output)) n = sizeof(output); else n = 128; copy_bytes(output, input, n); }"),
+        ("write through reference", "void f(char *input, unsigned long n) { char output[64]; if (n > sizeof(output)) n = sizeof(output); mutate(&n); copy_bytes(output, input, n); }"),
+        ("guard bypass", "void f(char *input, unsigned long n) { char output[64]; goto copying; if (n > sizeof(output)) return; copying: copy_bytes(output, input, n); }"),
+        ("mutation in another argument", "void f(char *input, unsigned long n) { char output[64]; if (n > sizeof(output)) n = sizeof(output); copy_bytes(output, (n++, input), n); }"),
+        ("escaped address in another argument", "void f(char *input, unsigned long n) { char output[64]; if (n > sizeof(output)) n = sizeof(output); copy_bytes(output, mutate(&n), n); }"),
+    ] {
+        if c_index(source).compiler_guards.iter().any(|guard| guard.capability == "call-argument.numeric-upper-bound") {
+            incorrectly_proven.push(label);
+        }
+    }
+    assert!(
+        incorrectly_proven.is_empty(),
+        "unproven numeric bounds: {incorrectly_proven:?}"
+    );
+}
+
+#[test]
+fn compound_predicate_requires_rejection_and_membership_polarity() {
+    let source = r#"static const char *const TRUSTED[] = {"api.example", "hooks.example", NULL};
+static int accepted(const char *value) {
+  if (strncmp(value, "https://", 8) != 0) return 0;
+  const char *token = value + 8;
+  for (int i = 0; TRUSTED[i]; i++) {
+    size_t n = text_len(TRUSTED[i]);
+    if (strncmp(token, TRUSTED[i], n) == 0 &&
+        (token[n] == '/' || token[n] == '\0')) return 1;
+  }
+  return 0;
+}
+void fetch(void *client, const char *value) {
+  if (!accepted(value)) return;
+  configure(client, URL_OPTION, value);
+  configure(client, REDIRECT_OPTION, 0L);
+}
+"#;
+    assert!(c_index(source)
+        .compiler_guards
+        .iter()
+        .any(|guard| guard.capability == "terminal-predicate.compound-static-allowlist"));
+    let mut incorrectly_proven = Vec::new();
+    for (label, before, after) in [
+        ("inverted prefix", "8) != 0", "8) == 0"),
+        ("inverted membership", "n) == 0", "n) != 0"),
+        ("unrelated boundary index", "token[n]", "token[0]"),
+        ("inverted boundary", "token[n] == '/'", "token[n] != '/'"),
+        ("mutable collection", "*const TRUSTED", "*TRUSTED"),
+        (
+            "shadowed length typedef",
+            "static int accepted",
+            "typedef unsigned char size_t; static int accepted",
+        ),
+        ("unchecked length", "text_len(TRUSTED[i])", "0"),
+        (
+            "different measured member",
+            "text_len(TRUSTED[i])",
+            "text_len(TRUSTED[0])",
+        ),
+        (
+            "shadowed collection",
+            "const char *token",
+            "const char **TRUSTED = source(); const char *token",
+        ),
+        (
+            "shadowed predicate",
+            "void fetch(void *client,",
+            "void fetch(int (*accepted)(const char *), void *client,",
+        ),
+        (
+            "shadowed provider",
+            "static int accepted",
+            "static int strncmp(const char *a, const char *b, int n) { return 0; } static int accepted",
+        ),
+        (
+            "mutating reject arm",
+            "return 0;\n  const",
+            "{ mutate(value); return 0; }\n  const",
+        ),
+        (
+            "extra accepting exit",
+            "const char *token",
+            "if (bypass) return 1; const char *token",
+        ),
+        (
+            "conditional outer guard",
+            "if (!accepted(value))",
+            "if (enabled) if (!accepted(value))",
+        ),
+        (
+            "mutated guarded input",
+            "configure(client, URL_OPTION",
+            "value = source(); configure(client, URL_OPTION",
+        ),
+    ] {
+        if c_index(&source.replace(before, after))
+            .compiler_guards
+            .iter()
+            .any(|guard| guard.capability == "terminal-predicate.compound-static-allowlist")
+        {
+            incorrectly_proven.push(label);
+        }
+    }
+    assert!(
+        incorrectly_proven.is_empty(),
+        "unproven compound predicates: {incorrectly_proven:?}"
+    );
 }
 
 struct ExactTreeProvider(std::sync::Arc<tree_sitter::Tree>);

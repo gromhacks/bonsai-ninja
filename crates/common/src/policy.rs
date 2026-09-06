@@ -15,6 +15,21 @@
 /// per `docs/contributing/design-patterns.mdx::Semantic Resolution Always`),
 /// or when IDG/taint propagation semantics change enough to affect
 /// source-to-sink reachability.
+// v63: terminal guard rejection consumes typed exits, never callee spellings;
+// loop transfers cannot be erased by unreachable later return/throw events.
+// v62: required terminal guard proofs cannot be bypassed by tainted-call
+// overlap or a value-flow attachment to an outer predicate-discarding call.
+// v61: terminal predicate guards join exact call results, never nested calls;
+// null comparisons use an explicit rule-owned result-domain contract.
+// v60: configured regex passthroughs retain regex-engine semantics without an
+// unsound source-text literal prefilter that suppressed valid transfer sites.
+// Exact public transfer-site lists are normalized once before binary lookup.
+// v59: CFG break/continue cleanup unwinds only finally scopes exited by the
+// exact compiler-selected loop destination; classes without bases participate
+// in receiver-ancestry collision checks rather than inheriting unrelated bases.
+// Qualified type/call identities no longer fall back to unrelated leaf names;
+// callback argument relations preserve every span and bind named/receiver
+// formals through the same typed mapping as IDG stitching.
 // v58: rule-declared imported/runtime-global callable identities fail closed
 // on compiler-proven lexical/workspace collisions, and semantic decorator
 // configuration no longer becomes a lossy raw-source anchor.
@@ -28,5 +43,5 @@
 // v54: typed receiver evidence is authoritative for receiver-constrained
 // rules, and qualified/import candidates use structural compiler names rather
 // than a shared source-separator vocabulary.
-pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_003a_u128;
+pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_003f_u128;
 const _: () = assert!(MATCHER_POLICY_FINGERPRINT != 0);

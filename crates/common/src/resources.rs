@@ -806,15 +806,18 @@ fn linux_cgroup_memory_limit_bytes() -> Option<u64> {
 fn linux_cgroup_limit_paths(cgroup: &str) -> Vec<std::path::PathBuf> {
     use std::path::{Component, Path, PathBuf};
 
-    fn nested_limit_path(root: &Path, cgroup_path: &str, file: &str) -> PathBuf {
+    fn add_hierarchy_limits(paths: &mut Vec<PathBuf>, root: &Path, cgroup_path: &str, file: &str) {
         let mut path = root.to_path_buf();
+        paths.push(path.join(file));
         for component in Path::new(cgroup_path).components() {
             if let Component::Normal(component) = component {
                 path.push(component);
+                // Limits are hierarchical: an unlimited leaf still shares
+                // every ancestor's budget. Include intermediate parents, not
+                // just the leaf and controller root.
+                paths.push(path.join(file));
             }
         }
-        path.push(file);
-        path
     }
 
     let v2_root = Path::new("/sys/fs/cgroup");
@@ -832,9 +835,9 @@ fn linux_cgroup_limit_paths(cgroup: &str) -> Vec<std::path::PathBuf> {
             continue;
         };
         if controllers.is_empty() {
-            paths.push(nested_limit_path(v2_root, cgroup_path, "memory.max"));
+            add_hierarchy_limits(&mut paths, v2_root, cgroup_path, "memory.max");
         } else if controllers.split(',').any(|controller| controller == "memory") {
-            paths.push(nested_limit_path(v1_root, cgroup_path, "memory.limit_in_bytes"));
+            add_hierarchy_limits(&mut paths, v1_root, cgroup_path, "memory.limit_in_bytes");
         }
     }
     paths.sort();
@@ -1234,7 +1237,9 @@ mod tests {
             "0::/kubepods.slice/pod-1\n7:cpu,memory:/docker/container-2\n8:cpu:/ignored\n",
         );
         assert!(paths.contains(&"/sys/fs/cgroup/kubepods.slice/pod-1/memory.max".into()));
+        assert!(paths.contains(&"/sys/fs/cgroup/kubepods.slice/memory.max".into()));
         assert!(paths.contains(&"/sys/fs/cgroup/memory/docker/container-2/memory.limit_in_bytes".into()));
+        assert!(paths.contains(&"/sys/fs/cgroup/memory/docker/memory.limit_in_bytes".into()));
         assert!(!paths
             .iter()
             .any(|path| path.to_string_lossy().contains("ignored")));

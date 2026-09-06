@@ -151,6 +151,7 @@ impl<'a> ChainCache<'a> {
         self.taint_facts_r.lock().clear();
         self.callees_r.lock().clear();
         self.enclosing.lock().clear();
+        self.enclosing_spans.lock().clear();
     }
 
     /// Lazy-built workspace-wide resolved call graph. Walks every
@@ -386,8 +387,7 @@ impl<'a> ChainCache<'a> {
             return hit.clone();
         }
         let computed = index
-            .enclosing(span.start)
-            .filter(|entry| entry.end >= span.end)
+            .enclosing_range(span.start, span.end)
             .map(|entry| (FuncId::new(entry.symbol.raw()), entry.name));
         self.enclosing.lock().insert(key, computed.clone());
         computed
@@ -422,6 +422,9 @@ fn funcs_reachable_in_chain(cache: &ChainCache<'_>, extended_chain: &[FuncId]) -
 /// Public so the CLI's hit-discovery walk and any other consumer
 /// reach the same enclosing-function policy.
 pub fn find_enclosing_func(decls: &[&bonsai_lang_api::Decl], span: Span) -> Option<(FuncId, String)> {
+    if span.end < span.start {
+        return None;
+    }
     let mut best: Option<&bonsai_lang_api::Decl> = None;
     for decl in decls {
         if !matches!(
@@ -435,7 +438,7 @@ pub fn find_enclosing_func(decls: &[&bonsai_lang_api::Decl], span: Span) -> Opti
         if decl.span.file != span.file {
             continue;
         }
-        if decl.span.start <= span.start && span.end <= decl.span.end {
+        if decl.span.start <= span.start && span.start < decl.span.end && span.end <= decl.span.end {
             // Keep the smallest containing decl so nested functions
             // pick the inner span instead of the outer.
             best = match best {

@@ -242,11 +242,11 @@ impl FactStoreReader {
     /// repeatedly. The view borrows from the resident bookkeeping
     /// buffers so its lifetime is tied to the reader.
     pub fn string_pool(&self) -> FactStoreResult<StringPoolView<'_>> {
-        StringPoolView::new(
+        Ok(StringPoolView::from_validated_sections(
             &self.string_pool_bytes,
             &self.string_pool_offsets,
             self.header.string_count as u32,
-        )
+        ))
     }
 
     /// Look up the entry for `key`. Returns `None` if no entry has
@@ -476,15 +476,26 @@ type StringPoolBuffers = (Box<[u8]>, Box<[u8]>);
 /// Pull the string pool's bytes + offsets sections off disk into
 /// resident heap copies. Returns `(bytes, offsets)`.
 fn load_string_pool(file: &File, header: &Header) -> FactStoreResult<StringPoolBuffers> {
-    let bytes_len = header.string_pool_bytes_len as usize;
+    let count = u32::try_from(header.string_count)
+        .map_err(|_| FactStoreError::BadStringPool("string count exceeds StrId range"))?;
+    let bytes_len = u32::try_from(header.string_pool_bytes_len)
+        .map_err(|_| FactStoreError::BadStringPool("string bytes exceed offset range"))?
+        as usize;
     let mut bytes = vec![0u8; bytes_len];
     if !bytes.is_empty() {
         read_exact_at(file, header.string_pool_offset, &mut bytes)?;
     }
-    let offsets_len = (header.string_count as usize + 1) * 4;
+    let offsets_len = (count as usize)
+        .checked_add(1)
+        .and_then(|count| count.checked_mul(4))
+        .ok_or(FactStoreError::BadStringPool("offsets length overflow"))?;
     let mut offsets = vec![0u8; offsets_len];
     let offsets_offset = header.string_pool_offset + header.string_pool_bytes_len;
     read_exact_at(file, offsets_offset, &mut offsets)?;
+    // Validate once, before any payload is exposed. Each value-flow hydrate
+    // borrows this same immutable pool; rescanning all workspace strings on
+    // every function lookup makes warm hydration quadratic in workspace size.
+    StringPoolView::new(&bytes, &offsets, count)?;
     Ok((bytes.into_boxed_slice(), offsets.into_boxed_slice()))
 }
 

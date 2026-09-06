@@ -5,7 +5,23 @@ use bonsai_taint::KindedTokens;
 use std::sync::Arc;
 
 #[test]
-fn precision_filter_matches_semantic_classes_only() {}
+fn name_matching_preserves_unicode_case_and_identifier_boundaries() {
+    for (haystack, needle, expected) in [
+        ("Éclair.run", "écl", true),
+        ("éclair.run", "ÉCL", true),
+        ("éclair", "clair", false),
+        ("éRun", "run", true),
+        ("Δοκιμή.run", "δοκ", true),
+        ("İsim", "i\u{307}s", true),
+        ("调用.run", "run", true),
+    ] {
+        assert_eq!(
+            super::name_token_match(haystack, needle),
+            expected,
+            "{haystack} / {needle}"
+        );
+    }
+}
 
 fn empty_tokens() -> Arc<KindedTokens> {
     Arc::new(KindedTokens::default())

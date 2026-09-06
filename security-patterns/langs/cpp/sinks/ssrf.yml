@@ -12,11 +12,17 @@
       - guarded-argument:2=predicate-argument:0
       - predicate-complete:true
       - finite-static-string-membership:true
+      - predicate-input-type:std::string
+      - membership-collection-type:std::set<std::string>
       - prefix-call:rfind
       - prefix-value:string:https://
       - prefix-position:number:0
       - prefix-remainder-call:substr
       - membership-call:count
+      - membership-token-call:substr
+      - membership-boundary-call:find
+      - membership-boundary-codepoint:47
+      - guarded-argument:2:projection:c_str
       - membership-token-boundary:true
       - membership-subject-derived-from-prefix:true
       - related-call:curl_easy_setopt:argument:0=guarded-argument:0

@@ -57,6 +57,11 @@ pub struct ModuleImport {
 /// One resolved cross-file call edge.
 #[derive(Clone, Debug, Serialize)]
 pub struct ModuleEdge {
+    /// Compiler identities for exact in-process joins; source names are display only.
+    #[serde(skip)]
+    pub caller_func: FuncId,
+    #[serde(skip)]
+    pub callee_func: FuncId,
     pub edge_id: String,
     pub caller: String,
     /// Line of the caller's declaration in its file.
@@ -88,6 +93,8 @@ pub struct FileConnections {
     pub calls_out: Vec<ModuleEdgeGroup>,
     /// Resolved calls from other workspace files into this file.
     pub callers_in: Vec<ModuleEdgeGroup>,
+    /// False when a scoped session has no complete, validated callgraph evidence.
+    pub calls_complete: bool,
     #[serde(skip)]
     pub file_id: FileId,
 }
@@ -285,7 +292,8 @@ fn decl_kind_label(kind: DeclKind) -> String {
 struct WorkspacePaths {
     root: Option<std::path::PathBuf>,
     by_file: AHashMap<FileId, String>,
-    line_cache: std::cell::RefCell<AHashMap<FileId, Option<Vec<u64>>>>,
+    hashes: AHashMap<FileId, u64>,
+    line_cache: std::cell::RefCell<AHashMap<FileId, Option<bonsai_common::SpanMap>>>,
 }
 
 impl WorkspacePaths {
@@ -297,14 +305,17 @@ impl WorkspacePaths {
                 by_file.insert(file, path.to_string_lossy().into_owned());
             }
         }
+        let mut hashes = AHashMap::new();
         if let Some(inputs) = ws.complete_source_inputs() {
-            for (raw, path, _) in inputs.iter() {
+            for (raw, path, hash) in inputs.iter() {
                 by_file.entry(FileId::new(*raw)).or_insert_with(|| path.clone());
+                hashes.insert(FileId::new(*raw), *hash);
             }
         }
         Self {
             root,
             by_file,
+            hashes,
             line_cache: std::cell::RefCell::new(AHashMap::new()),
         }
     }
@@ -316,38 +327,31 @@ impl WorkspacePaths {
         )
     }
 
-    /// 1-based line of a byte offset. Files resident in the VFS use the
-    /// cached span map; other files are read from disk once.
+    /// 1-based location from compiler line tables, or an exact fingerprint-
+    /// checked source read for a file outside this session. A changed remote
+    /// file is unavailable, never a new source location attached to an old edge.
     fn line_of(&self, ws: &Workspace, file: FileId, offset: u64) -> u32 {
-        if let Ok(snapshot) = ws.vfs().snapshot(file) {
-            let map = bonsai_common::cached_span_map_arc(file, snapshot.version, &snapshot.text);
-            return map.line_col(offset).line;
+        self.line_col(ws, file, offset).map_or(0, |at| at.line)
+    }
+
+    fn line_col(&self, ws: &Workspace, file: FileId, offset: u64) -> Option<bonsai_common::LineCol> {
+        if let Some(map) = ws.db().span_map(file) {
+            return Some(map.line_col(offset));
         }
         let mut cache = self.line_cache.borrow_mut();
-        let starts = cache.entry(file).or_insert_with(|| {
+        let map = cache.entry(file).or_insert_with(|| {
             let path = self.by_file.get(&file)?;
             let absolute = self
                 .root
                 .as_deref()
                 .map_or_else(|| std::path::PathBuf::from(path), |root| root.join(path));
-            let text = std::fs::read(if absolute.is_file() {
-                &absolute
-            } else {
-                std::path::Path::new(path)
-            })
-            .ok()?;
-            let mut starts = vec![0_u64];
-            for (index, byte) in text.iter().enumerate() {
-                if *byte == b'\n' {
-                    starts.push(index as u64 + 1);
-                }
+            let text = std::fs::read(absolute).ok()?;
+            if self.hashes.get(&file).copied() != Some(bonsai_hash::fnv1a_bytes64(&text)) {
+                return None;
             }
-            Some(starts)
+            Some(bonsai_common::SpanMap::new(std::str::from_utf8(&text).ok()?))
         });
-        match starts {
-            Some(starts) => (starts.partition_point(|start| *start <= offset)) as u32,
-            None => 0,
-        }
+        map.as_ref().map(|map| map.line_col(offset))
     }
 }
 
@@ -412,6 +416,9 @@ pub fn file_connections(ws: &Workspace, files: &[FileId]) -> Vec<FileConnections
         visited_partitions = matches!(visited, Some(Ok(())));
         if !visited_partitions {
             edges.clear();
+            endpoints.name.clear();
+            endpoints.file.clear();
+            endpoints.name_span.clear();
         }
     }
     // A few files (a single `read-file`, or a scoped session): the persisted
@@ -419,9 +426,11 @@ pub fn file_connections(ws: &Workspace, files: &[FileId]) -> Vec<FileConnections
     // and the other endpoints' nodes resolve one at a time from the same
     // sidecar. This never needs the other files' source text or headers.
     let mut partitions_used = false;
+    let mut missing_partitions = false;
     if !visited_partitions {
         for file in &requested {
             let Some(Ok((nodes, outgoing, incoming))) = ws.persisted_callgraph_file_edges(*file) else {
+                missing_partitions = true;
                 continue;
             };
             partitions_used = true;
@@ -450,7 +459,12 @@ pub fn file_connections(ws: &Workspace, files: &[FileId]) -> Vec<FileConnections
             });
         }
     }
-    if !visited_partitions && !partitions_used {
+    let mut calls_complete = visited_partitions || (partitions_used && !missing_partitions);
+    if !calls_complete && ws.is_complete_workspace_index() {
+        edges.clear();
+        endpoints.name.clear();
+        endpoints.file.clear();
+        endpoints.name_span.clear();
         let funcs: Vec<FuncId> = requested
             .iter()
             .flat_map(|file| headers.decls_in(*file).iter())
@@ -471,6 +485,7 @@ pub fn file_connections(ws: &Workspace, files: &[FileId]) -> Vec<FileConnections
             endpoints.note(node);
         }
         edges.extend(graph.inner().edges.iter().cloned());
+        calls_complete = true;
     }
     let mut calls_out: AHashMap<FileId, AHashMap<FileId, Vec<ModuleEdge>>> = AHashMap::new();
     let mut callers_in: AHashMap<FileId, AHashMap<FileId, Vec<ModuleEdge>>> = AHashMap::new();
@@ -478,6 +493,7 @@ pub fn file_connections(ws: &Workspace, files: &[FileId]) -> Vec<FileConnections
         let (Some(&caller_file), Some(&callee_file)) =
             (endpoints.file.get(&edge.from), endpoints.file.get(&edge.to))
         else {
+            calls_complete = false;
             continue;
         };
         if caller_file == callee_file
@@ -488,20 +504,15 @@ pub fn file_connections(ws: &Workspace, files: &[FileId]) -> Vec<FileConnections
         let (Some(caller_name), Some(callee_name)) =
             (endpoints.name.get(&edge.from), endpoints.name.get(&edge.to))
         else {
+            calls_complete = false;
             continue;
         };
         let call_file = paths.display(edge.span.file);
-        let line = paths.line_of(ws, edge.span.file, edge.span.start);
-        let column = ws
-            .vfs()
-            .snapshot(edge.span.file)
-            .ok()
-            .map(|snapshot| {
-                bonsai_common::cached_span_map_arc(edge.span.file, snapshot.version, &snapshot.text)
-                    .line_col(edge.span.start)
-                    .column
-            })
-            .unwrap_or(1);
+        let Some(at) = paths.line_col(ws, edge.span.file, edge.span.start) else {
+            calls_complete = false;
+            continue;
+        };
+        let (line, column) = (at.line, at.column);
         let caller_line = endpoints
             .name_span
             .get(&edge.from)
@@ -510,7 +521,13 @@ pub fn file_connections(ws: &Workspace, files: &[FileId]) -> Vec<FileConnections
             .name_span
             .get(&edge.to)
             .map_or(0, |span| paths.line_of(ws, span.file, span.start));
+        if caller_line == 0 || callee_line == 0 {
+            calls_complete = false;
+            continue;
+        }
         let make = || ModuleEdge {
+            caller_func: edge.from,
+            callee_func: edge.to,
             edge_id: compute_edge_id(caller_name, callee_name, &call_file, line, column),
             caller: caller_name.clone(),
             caller_line,
@@ -663,6 +680,7 @@ pub fn file_connections(ws: &Workspace, files: &[FileId]) -> Vec<FileConnections
             imports,
             calls_out: group(calls_out.remove(&file)),
             callers_in: group(callers_in.remove(&file)),
+            calls_complete,
             file_id: file,
         });
     }
@@ -672,6 +690,28 @@ pub fn file_connections(ws: &Workspace, files: &[FileId]) -> Vec<FileConnections
 #[cfg(test)]
 mod tests {
     use super::{module_segments, path_segments, qualified_head};
+
+    #[test]
+    fn remote_locations_preserve_byte_columns_and_reject_changed_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = "// header\n  β(); target();\n";
+        std::fs::write(dir.path().join("caller.js"), source).unwrap();
+        let file = bonsai_common::FileId::new(0);
+        let ws = bonsai_workspace::Workspace::new(bonsai_adapters::all_languages_registry());
+        let paths = || super::WorkspacePaths {
+            root: Some(dir.path().to_path_buf()),
+            by_file: [(file, "caller.js".to_string())].into_iter().collect(),
+            hashes: [(file, bonsai_hash::fnv1a_bytes64(source.as_bytes()))]
+                .into_iter()
+                .collect(),
+            line_cache: Default::default(),
+        };
+        let offset = source.find("target").unwrap() as u64;
+        let at = paths().line_col(&ws, file, offset).unwrap();
+        assert_eq!((at.line, at.column), (2, 9));
+        std::fs::write(dir.path().join("caller.js"), "target();\n").unwrap();
+        assert!(paths().line_col(&ws, file, offset).is_none());
+    }
 
     #[test]
     fn module_segments_normalize_every_separator_style() {

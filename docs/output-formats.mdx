@@ -184,19 +184,23 @@ in-memory JSON document.
 
 ### Native JSON schema
 
-The committed Draft 2020-12 schema for native export v12 is
-[`schemas/bonsai-native-export-v12.schema.json`](../schemas/bonsai-native-export-v12.schema.json).
+The committed Draft 2020-12 schema for native export v13 is
+[`schemas/bonsai-native-export-v13.schema.json`](../schemas/bonsai-native-export-v13.schema.json).
 It defines the top-level document, compiler file tables, normalized flow-event
 variants, callgraph rows, completeness fields, and IDG/taint projections. The
 release archive includes this file under `schemas/`.
 
-`schema: "bonsai-native-export"` and `schema_version: 12` select this contract.
-v12 carries the code with the graph: `files[].source` is the full file text
+`schema: "bonsai-native-export"` and `schema_version: 13` select this contract.
+v13 carries the code with the graph: `files[].source` is the full file text
 (every span, line, `start`, and `end` in the document indexes into it),
 `decls[]` carry byte spans, `callgraph[]` edges and every taint propagation
 record carry the exact `call_text`, and `taint_graph.functions[]` carry
 `end_line`, so call stacks replay with their source lines from the document
 alone.
+Version 13 additionally preserves `classes[].column` and records
+`predicate_call_span` on call-backed type-test
+conditions. Consumers can join that exact callee identity to call events
+without confusing the predicate, its argument, and the enclosing expression.
 Schema versions are immutable: an incompatible wire-format change requires a
 new schema file and a version increment. CI validates default exports for all
 supported language fixtures plus a materialized `--full-propagations` export
@@ -205,7 +209,7 @@ against the committed schema, and rejects unknown top-level fields.
 ```bash
 bonsai-ninja export ./src --format json --output-path bonsai-export.json
 # Validate bonsai-export.json with any Draft 2020-12 JSON Schema validator
-# against schemas/bonsai-native-export-v12.schema.json.
+# against schemas/bonsai-native-export-v13.schema.json.
 ```
 
 Treat a whole-repository native export as a bulk artifact, not as model prompt

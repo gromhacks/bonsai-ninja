@@ -283,17 +283,19 @@ fn rust_match_arm_binding_assigns() {
 }
 
 #[test]
-fn java_sealed_class_permits_in_bases() {
-    // sealed parent → permits subtypes should populate Decl.bases for
-    // the parent class.
+fn java_sealed_class_retains_only_actual_ancestry() {
+    // A permits clause constrains possible children. Only each child's
+    // extends clause contributes an inheritance edge.
     let src = "sealed class Shape permits Circle, Square {}\nfinal class Circle extends Shape {}\nfinal class Square extends Shape {}\n";
     let w = ws(java_adapter(), "Shape.java", src);
     let parent = decl(&w, "Shape").expect("Shape decl");
-    let bases: Vec<&String> = parent.bases.iter().collect();
     assert!(
-        bases.iter().any(|b| b.as_str() == "Circle") && bases.iter().any(|b| b.as_str() == "Square"),
-        "sealed class permits clause must populate Decl.bases; got {bases:?}"
+        parent.bases.is_empty(),
+        "a sealed parent does not inherit from its children"
     );
+    for name in ["Circle", "Square"] {
+        assert_eq!(decl(&w, name).expect(name).bases, ["Shape"]);
+    }
 }
 
 #[test]

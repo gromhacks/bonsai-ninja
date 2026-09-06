@@ -16,6 +16,39 @@ fn validate(root: &Path) -> bonsai_security::PackValidationReport {
 }
 
 #[test]
+fn predicate_result_domain_requires_a_terminal_rejection_proof() {
+    let tmp = TempDir::new("predicate-result-domain");
+    write(
+        &tmp.path().join("langs/lua/sanitizers/predicate.yml"),
+        r#"- id: lua.test.predicate_domain
+  enabled: true
+  language: lua
+  tag: validation
+  match:
+    kind: call
+    callee: { name: validate }
+  analysis_semantics:
+    sanitizer_guard:
+      all_arguments: true
+      predicate_falsey_result_is_null: true
+  match_examples:
+  - code: 'local function run(value) return validate(value) end'
+  description: An invalid predicate model without a terminal rejection proof.
+"#,
+    );
+    let report = validate(tmp.path());
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "invalid-analysis-semantics"
+                && issue.message.contains("predicate_falsey_result_is_null")),
+        "{:#?}",
+        report.issues
+    );
+}
+
+#[test]
 fn expect_no_match_reports_unexpected_owner_match() {
     let tmp = TempDir::new("negative-unexpected");
     write(

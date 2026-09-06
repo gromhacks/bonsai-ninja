@@ -45,7 +45,9 @@ use std::{
 const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v14.json";
 const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v14.meta.json";
 const DEFAULT_EXPORT_CACHE_METADATA_VERSION: u32 = 1;
-const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v17";
+// v18 publishes payload/metadata as a locked pair and invalidates old metadata
+// before payload replacement, so interrupted writes cannot mix generations.
+const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v18";
 const CACHE_MANIFEST_FILE: &str = "manifest.json";
 // v6 records an exact Git/HEAD/worktree source-state snapshot. Fresh CLI
 // processes can therefore reuse the manifest's complete compiler input table
@@ -57,6 +59,15 @@ static EXPORT_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub mod read_file;
 mod refresh;
 pub mod tree;
+
+/// Preserve scan-level gaps even when a navigation view selects no findings.
+fn taint_report_incomplete_reasons(report: &TaintAnalysisReport) -> Vec<String> {
+    let mut reasons = report.analysis_incomplete_reasons.clone();
+    if !report.analysis_complete && reasons.is_empty() {
+        reasons.push("taint-analysis-incomplete".to_string());
+    }
+    reasons
+}
 
 use refresh::{disk_file_stamp, DiskFileStamp, GitChangeOracle};
 
@@ -1522,6 +1533,7 @@ impl Project {
                 if previous_stamps.get(path) == Some(stamp) {
                     None
                 } else if previous_stamps.get(path).is_none()
+                    && !full_reconciliation
                     && previous_fingerprints.contains_key(path)
                     && !candidate_paths.contains(path)
                 {
@@ -1800,10 +1812,11 @@ pub struct CacheStats {
     pub export_sidecar_exists: bool,
     pub export_sidecar_bytes: u64,
     pub validation: CacheValidationReport,
-    /// Legacy in-tree `<root>/.bonsai` directory left by releases that cached
-    /// inside the workspace, when present and not the active cache directory.
+    /// Inactive in-tree directory containing recognized legacy analysis files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_in_tree_dir: Option<PathBuf>,
+    /// Bytes in recognized legacy files only; excludes rule overlays and other
+    /// project state retained by `clear_legacy_in_tree`.
     #[serde(default)]
     pub legacy_in_tree_bytes: u64,
 }
@@ -1879,39 +1892,39 @@ pub struct OrphanedCachePrune {
     pub root: Option<PathBuf>,
     /// Entries examined.
     pub scanned: usize,
-    /// Entries removed because their recorded workspace root no longer
-    /// exists, or because they never published a manifest and are older
-    /// than one day.
+    /// Entries removed because their attributed workspace root is missing.
     pub removed: usize,
     /// Bytes reclaimed by the removed entries.
     pub freed_bytes: u64,
-    /// Entries kept because their manifest could not be read as one of ours
-    /// (not touched: the engine never deletes what it cannot attribute).
+    /// Entries kept because ownership or workspace absence could not be proved.
     pub unattributed: usize,
 }
 
 const ORPHAN_PRUNE_STAMP: &str = ".orphan-prune-stamp";
 const ORPHAN_PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-const MANIFESTLESS_ENTRY_GRACE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Remove workspace cache entries under the shared cache root whose
-/// recorded workspace root no longer exists on disk. Entries that never
-/// published a manifest are removed once they are older than one day
-/// (an ingest that was interrupted before publication). Entries whose
-/// manifest cannot be attributed are left alone. Entries whose root exists
-/// are never touched, whatever their age.
+/// recorded workspace root is confirmed missing. Prefer the native workspace
+/// binding; old unbound entries require a complete attributable manifest.
+/// Unknown, corrupt, inaccessible, and live entries are retained regardless
+/// of age. A missing manifest alone is never evidence of an orphan.
 pub fn prune_orphaned_workspace_caches() -> std::io::Result<OrphanedCachePrune> {
-    let mut report = OrphanedCachePrune::default();
     let Some(root) = bonsai_common::names::default_workspaces_cache_root() else {
-        return Ok(report);
+        return Ok(OrphanedCachePrune::default());
     };
-    report.root = Some(root.clone());
-    let entries = match fs::read_dir(&root) {
+    prune_orphaned_workspace_caches_in(&root)
+}
+
+fn prune_orphaned_workspace_caches_in(root: &Path) -> io::Result<OrphanedCachePrune> {
+    let mut report = OrphanedCachePrune {
+        root: Some(root.to_path_buf()),
+        ..OrphanedCachePrune::default()
+    };
+    let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(report),
         Err(error) => return Err(error),
     };
-    let now = std::time::SystemTime::now();
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
@@ -1919,19 +1932,24 @@ pub fn prune_orphaned_workspace_caches() -> std::io::Result<OrphanedCachePrune> 
             continue;
         }
         report.scanned = report.scanned.saturating_add(1);
-        let manifest_path = path.join(CACHE_MANIFEST_FILE);
-        let orphaned = match manifest_workspace_root_head(&manifest_path) {
-            Ok(Some(workspace_root)) => !workspace_root.exists(),
+        let ownership =
+            bonsai_workspace::workspace_cache_root_binding(&path).and_then(|binding| match binding {
+                Some(root) => Ok(Some(root)),
+                None => manifest_workspace_root_head(&path.join(CACHE_MANIFEST_FILE)),
+            });
+        let orphaned = match ownership {
+            Ok(Some(workspace_root)) => match fs::metadata(&workspace_root) {
+                Ok(_) => false,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+                Err(_) => {
+                    report.unattributed = report.unattributed.saturating_add(1);
+                    false
+                }
+            },
             Ok(None) => {
                 report.unattributed = report.unattributed.saturating_add(1);
                 false
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => entry
-                .metadata()
-                .and_then(|meta| meta.modified())
-                .ok()
-                .and_then(|modified| now.duration_since(modified).ok())
-                .is_some_and(|age| age >= MANIFESTLESS_ENTRY_GRACE),
             Err(_) => {
                 report.unattributed = report.unattributed.saturating_add(1);
                 false
@@ -1966,6 +1984,21 @@ pub fn prune_orphaned_workspace_caches_if_due() -> std::io::Result<Option<Orphan
         return Ok(None);
     };
     let stamp = root.join(ORPHAN_PRUNE_STAMP);
+    fs::create_dir_all(&root)?;
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".orphan-prune.lock"))?;
+    match lock
+        .try_lock_exclusive()
+        .map_err(bonsai_common::normalize_advisory_lock_error)
+    {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+        Err(error) => return Err(error),
+    }
     let due = match fs::metadata(&stamp).and_then(|meta| meta.modified()) {
         Ok(modified) => std::time::SystemTime::now()
             .duration_since(modified)
@@ -1977,60 +2010,40 @@ pub fn prune_orphaned_workspace_caches_if_due() -> std::io::Result<Option<Orphan
     if !due {
         return Ok(None);
     }
-    // Stamp first so concurrent processes do not all sweep; a sweep that
-    // fails midway simply retries after the interval.
-    fs::create_dir_all(&root)?;
-    fs::write(&stamp, b"")?;
-    prune_orphaned_workspace_caches().map(Some)
+    // The lock covers the due check, publication, and sweep. A failed sweep
+    // retries after the interval; no other process runs the same daily sweep.
+    write_atomic_bytes(&stamp, b"")?;
+    prune_orphaned_workspace_caches_in(&root).map(Some)
 }
 
-/// Extract `workspace_root` from a manifest without decoding the whole
-/// document: the key is written near the top and manifests for large
-/// workspaces carry a multi-megabyte source-file table after it.
+/// Read legacy ownership without materializing its source-file table. Serde
+/// skips unknown values but validates the complete top-level JSON document;
+/// substrings, duplicate identities, and truncated documents are not proof.
 fn manifest_workspace_root_head(manifest_path: &Path) -> std::io::Result<Option<PathBuf>> {
-    use std::io::Read as _;
-    let mut file = fs::File::open(manifest_path)?;
-    let mut head = vec![0u8; 16 * 1024];
-    let mut filled = 0usize;
-    while filled < head.len() {
-        let read = file.read(&mut head[filled..])?;
-        if read == 0 {
-            break;
-        }
-        filled += read;
+    #[derive(Deserialize)]
+    struct Identity {
+        schema_version: u32,
+        workspace_root: PathBuf,
+        cache_dir: PathBuf,
     }
-    head.truncate(filled);
-    let text = String::from_utf8_lossy(&head);
-    let Some(key_at) = text.find("\"workspace_root\"") else {
-        return Ok(None);
-    };
-    let rest = &text[key_at + "\"workspace_root\"".len()..];
-    let Some(colon) = rest.find(':') else {
-        return Ok(None);
-    };
-    let value = rest[colon + 1..].trim_start();
-    if !value.starts_with('"') {
+    if !fs::symlink_metadata(manifest_path)?.is_file() {
         return Ok(None);
     }
-    // Find the closing quote of the JSON string literal, honouring escapes.
-    let bytes = value.as_bytes();
-    let mut end = None;
-    let mut index = 1usize;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' => index += 2,
-            b'"' => {
-                end = Some(index);
-                break;
-            }
-            _ => index += 1,
-        }
-    }
-    let Some(end) = end else {
+    let reader = io::BufReader::new(fs::File::open(manifest_path)?);
+    let Ok(identity) = serde_json::from_reader::<_, Identity>(reader) else {
         return Ok(None);
     };
-    let literal = &value[..=end];
-    Ok(serde_json::from_str::<String>(literal).ok().map(PathBuf::from))
+    Ok((identity.schema_version > 0
+        && identity.schema_version <= CACHE_MANIFEST_SCHEMA_VERSION
+        && identity.workspace_root.is_absolute()
+        && identity.cache_dir.is_absolute()
+        && identity
+            .cache_dir
+            .canonicalize()
+            .ok()
+            .zip(manifest_path.parent().and_then(|dir| dir.canonicalize().ok()))
+            .is_some_and(|(recorded, actual)| recorded == actual))
+    .then_some(identity.workspace_root))
 }
 
 fn directory_bytes(path: &Path) -> u64 {
@@ -2287,7 +2300,9 @@ impl WorkspaceCache {
         let export_sidecar = default_export_cache_path(&self.root);
         let total_bytes = dir_size(&bonsai_dir)?;
         let legacy_in_tree_dir = legacy_in_tree_cache_dir(&self.root, &bonsai_dir);
-        let legacy_in_tree_bytes = legacy_in_tree_dir.as_deref().map_or(Ok(0), dir_size)?;
+        let legacy_in_tree_bytes = legacy_in_tree_dir.as_deref().map_or(Ok(0), |dir| {
+            legacy_cache_artifacts(dir).map(|files| files.iter().map(|(_, bytes)| bytes).sum())
+        })?;
         let manifest_bytes = file_size(&manifest);
         let dataflow_sidecar_bytes = file_size(&dataflow_sidecar);
         let dataflow_factstore_sidecar_bytes = file_size(&dataflow_factstore_sidecar);
@@ -2380,6 +2395,7 @@ impl WorkspaceCache {
     }
 
     pub fn write_manifest(&self) -> Result<CacheManifest> {
+        bonsai_workspace::register_workspace_cache_root(&self.root)?;
         let manifest = self.manifest()?;
         let mut bytes = serde_json::to_vec_pretty(&manifest)?;
         bytes.push(b'\n');
@@ -2396,28 +2412,15 @@ impl WorkspaceCache {
         Ok(manifest)
     }
 
-    /// Upgrade the v11 monolithic compiler-object header generation to the
-    /// current lazy per-file format without reparsing sources.
-    ///
-    /// Returns `Ok(None)` when no migration is applicable. Exact current
-    /// source fingerprints are validated before publication; any mismatch
-    /// leaves the legacy generation untouched so the normal Tree-sitter
-    /// compiler worker can rebuild it.
+    /// Compatibility hook for retired v11 migration. Always returns `Ok(None)`:
+    /// old frontend IR must be rebuilt, not relabeled as a current generation.
     pub fn migrate_legacy_compiler_object_sidecar(&self) -> Result<Option<usize>> {
-        let manifest_hint = self.read_manifest()?;
-        let fingerprints = source_file_fingerprints_for_cache_validation(
-            &self.root,
-            manifest_hint.as_ref(),
-            self.include_minified_sources,
-        )?;
-        let migrated = bonsai_workspace::migrate_legacy_compiler_object_sidecar_v11_with_source_fingerprints(
-            &self.root,
-            fingerprints.iter().map(|file| (file.path.as_path(), file.hash)),
-        )?;
-        if migrated.is_some() {
-            prune_obsolete_compiler_object_sidecars(&self.root);
-        }
-        Ok(migrated)
+        Ok(
+            bonsai_workspace::migrate_legacy_compiler_object_sidecar_v11_with_source_fingerprints(
+                &self.root,
+                std::iter::empty::<(PathBuf, u64)>(),
+            )?,
+        )
     }
 
     fn manifest_from_stats(&self, stats: &CacheStats) -> Result<CacheManifest> {
@@ -2479,27 +2482,44 @@ impl WorkspaceCache {
         legacy_in_tree_cache_dir(&self.root, &workspace_bonsai_dir(&self.root))
     }
 
-    /// Remove the legacy in-tree cache directory. Returns the removed path
-    /// and its size, or `None` when there was nothing to remove. The active
-    /// external cache is never touched.
+    /// Remove recognized legacy in-tree analysis files. Returns their parent
+    /// path and reclaimed bytes, or `None` when there was nothing to remove.
+    /// Current rule overlays and unrecognized files/directories are preserved;
+    /// the parent directory is removed only when empty. The active cache is
+    /// never touched.
     pub fn clear_legacy_in_tree(&self) -> std::io::Result<Option<(PathBuf, u64)>> {
         let Some(dir) = self.legacy_in_tree_dir() else {
             return Ok(None);
         };
-        let bytes = dir_size(&dir)?;
-        fs::remove_dir_all(&dir)?;
+        let mut bytes = 0_u64;
+        for (path, size) in legacy_cache_artifacts(&dir)? {
+            match fs::remove_file(&path) {
+                Ok(()) => bytes = bytes.saturating_add(size),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        match fs::remove_dir(&dir) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::NotFound
+                ) => {}
+            Err(error) => return Err(error),
+        }
         Ok(Some((dir, bytes)))
     }
 
     pub fn clear_all(&self) -> std::io::Result<()> {
         let dir = workspace_bonsai_dir(&self.root);
-        if dir.exists() {
-            fs::remove_dir_all(dir)?;
-        }
-        Ok(())
+        clear_workspace_cache_directory(&self.root, &dir)
     }
 
     pub fn clear_dataflow(&self) -> std::io::Result<()> {
+        if !validate_workspace_cache_clear(&self.root, &workspace_bonsai_dir(&self.root))? {
+            return Ok(());
+        }
         let refresh_manifest = self.manifest_path().exists();
         let sidecars = [
             bonsai_workspace::dataflow::DataFlowCache::sidecar_path(&self.root),
@@ -2536,39 +2556,30 @@ impl WorkspaceCache {
     }
 
     pub fn default_export_cache_is_fresh(&self) -> Result<bool> {
-        let cache = self.default_export_cache_path();
-        let Ok(file) = fs::File::open(&cache) else {
+        let Some(snapshot) = open_export_cache_snapshot(&self.root)? else {
             return Ok(false);
         };
-        export_cache_is_fresh_via_fd(
+        export_cache_snapshot_is_fresh(
             &self.root,
             self.rulepack_root.as_deref(),
             self.include_minified_sources,
-            &file,
+            &snapshot,
         )
     }
 
     pub fn stream_default_export_cache_if_fresh<W: Write + ?Sized>(&self, writer: &mut W) -> Result<bool> {
-        let cache = self.default_export_cache_path();
-        // Open the cache file FIRST, then validate freshness from
-        // the open fd's metadata. A separate `fs::metadata` + later
-        // `File::open` would let a concurrent writer swap the file
-        // between the check and the read; using the same fd makes
-        // the check race-free.
-        let mut input = match fs::File::open(&cache) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(err) => return Err(err.into()),
+        let Some(mut snapshot) = open_export_cache_snapshot(&self.root)? else {
+            return Ok(false);
         };
-        if !export_cache_is_fresh_via_fd(
+        if !export_cache_snapshot_is_fresh(
             &self.root,
             self.rulepack_root.as_deref(),
             self.include_minified_sources,
-            &input,
+            &snapshot,
         )? {
             return Ok(false);
         }
-        io::copy(&mut input, writer)?;
+        io::copy(&mut snapshot.file, writer)?;
         writer.flush()?;
         Ok(true)
     }
@@ -2600,11 +2611,7 @@ impl Cache<'_> {
     }
 
     pub fn write_manifest(&self) -> Result<CacheManifest> {
-        let manifest = self.manifest()?;
-        let mut bytes = serde_json::to_vec_pretty(&manifest)?;
-        bytes.push(b'\n');
-        write_atomic_bytes(&self.workspace_cache().manifest_path(), &bytes)?;
-        Ok(manifest)
+        self.workspace_cache().write_manifest()
     }
 
     pub fn clear_all(&self) -> std::io::Result<()> {
@@ -3638,16 +3645,18 @@ fn export_sidecar_validation(
             reason: Some("sidecar has not been produced for this workspace".to_string()),
         };
     }
-    let file = match fs::File::open(&stats.export_sidecar) {
-        Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+    let snapshot = match open_export_cache_snapshot(root) {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
             return CacheSidecarValidation {
                 name: "export_default".to_string(),
                 path: stats.export_sidecar.clone(),
-                status: CacheFreshnessStatus::Missing,
-                exists: false,
-                bytes: 0,
-                reason: Some("sidecar disappeared during validation".to_string()),
+                status: CacheFreshnessStatus::Unvalidated,
+                exists: stats.export_sidecar_exists,
+                bytes: stats.export_sidecar_bytes,
+                reason: Some(
+                    "export generation is being replaced or lacks valid paired metadata".to_string(),
+                ),
             }
         }
         Err(err) => {
@@ -3661,7 +3670,7 @@ fn export_sidecar_validation(
             }
         }
     };
-    match export_cache_is_fresh_via_fd(root, rulepack_root, include_minified_sources, &file) {
+    match export_cache_snapshot_is_fresh(root, rulepack_root, include_minified_sources, &snapshot) {
         Ok(true) => CacheSidecarValidation {
             name: "export_default".to_string(),
             path: stats.export_sidecar.clone(),
@@ -3790,15 +3799,73 @@ fn file_size(path: &Path) -> u64 {
     fs::metadata(path).map_or(0, |meta| meta.len())
 }
 
-/// Recursive size of every file under `path`. Tolerates entries that
-/// vanish mid-walk (concurrent cleaner, log rotation) by skipping
-/// `NotFound` errors instead of failing the whole stat.
-/// `<root>/.bonsai` from releases that cached inside the workspace. Only a
-/// directory that is not the active cache directory qualifies, so a
-/// `BONSAI_WORKSPACE_DIR` pinned to that path is never reported as legacy.
+fn validate_workspace_cache_clear(root: &Path, directory: &Path) -> io::Result<bool> {
+    let reject = |reason: &str| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("refusing to clear {}: {reason}", directory.display()),
+        )
+    };
+    let metadata = match fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir() {
+        return Err(reject("cache path is not a regular directory"));
+    }
+    let canonical_dir = directory.canonicalize()?;
+    let canonical_root = root.canonicalize()?;
+    if canonical_root.starts_with(&canonical_dir) {
+        return Err(reject("cache path contains the workspace"));
+    }
+    // A cache-path writability probe can leave a genuinely empty directory.
+    if fs::read_dir(directory)?.next().is_none() {
+        return Ok(true);
+    }
+    if bonsai_workspace::workspace_cache_root_binding(directory)? != Some(canonical_root) {
+        return Err(reject("cache is not bound to this workspace"));
+    }
+    Ok(true)
+}
+
+fn clear_workspace_cache_directory(root: &Path, directory: &Path) -> io::Result<()> {
+    if !validate_workspace_cache_clear(root, directory)? {
+        return Ok(());
+    }
+    // An explicitly pinned cache may coexist with project settings. Refuse a
+    // recursive clear if any top-level entry is outside the cache namespaces.
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let kind = entry.file_type()?;
+        let known = name.to_str().is_some_and(|name| {
+            (kind.is_file()
+                && (matches!(
+                    name,
+                    ".workspace-root.v1" | ".workspace-root.lock" | CACHE_MANIFEST_FILE
+                ) || analysis_cache_file_parts(name).is_some()))
+                || (kind.is_dir() && name.strip_prefix("page-cache.v").is_some_and(decimal_version))
+        });
+        if !known {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing to remove unrecognized cache entry {}; preserve or relocate it before clearing",
+                    entry.path().display()
+                ),
+            ));
+        }
+    }
+    fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+/// An inactive in-tree directory with identifiable legacy analysis files.
+/// `.bonsai/rules` and arbitrary project state do not make a directory legacy.
 fn legacy_in_tree_cache_dir(root: &Path, active: &Path) -> Option<PathBuf> {
     let candidate = root.join(".bonsai");
-    if !candidate.is_dir() {
+    if !fs::symlink_metadata(&candidate).ok()?.is_dir() {
         return None;
     }
     let same = candidate == active
@@ -3807,9 +3874,59 @@ fn legacy_in_tree_cache_dir(root: &Path, active: &Path) -> Option<PathBuf> {
             .ok()
             .zip(active.canonicalize().ok())
             .is_some_and(|(candidate, active)| candidate == active);
-    (!same).then_some(candidate)
+    (!same && !legacy_cache_artifacts(&candidate).ok()?.is_empty()).then_some(candidate)
 }
 
+/// Attribute only reserved, versioned analysis filenames. Never recurse into
+/// directories or follow links: current `.bonsai/rules`, configuration, and
+/// unknown historical layouts require explicit user handling.
+fn legacy_cache_artifacts(directory: &Path) -> io::Result<Vec<(PathBuf, u64)>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let attributed = analysis_cache_file_parts(name)
+            .is_some_and(|(_, suffix)| matches!(suffix, "factstore" | "bin" | "json" | "meta.json"));
+        if attributed {
+            files.push((entry.path(), entry.metadata()?.len()));
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(files)
+}
+
+fn decimal_version(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn analysis_cache_file_parts(name: &str) -> Option<(&str, &str)> {
+    [
+        "compiler-objects",
+        "callgraph",
+        "linkage",
+        "idg",
+        "retrieval",
+        "dataflow",
+        "value_flow",
+        "flow_ids",
+        "taint_graph",
+        "export.default",
+    ]
+    .iter()
+    .find_map(|family| {
+        let rest = name.strip_prefix(family)?.strip_prefix(".v")?;
+        let (version, suffix) = rest.split_once('.')?;
+        (decimal_version(version) && !suffix.is_empty()).then_some((version, suffix))
+    })
+}
+
+/// Recursive cache size, tolerating entries removed during the walk.
 fn dir_size(path: &Path) -> std::io::Result<u64> {
     if !path.exists() {
         return Ok(0);
@@ -3975,6 +4092,41 @@ struct ExportCacheMetadata {
     rulepack: Option<ExportCacheContentFingerprint>,
 }
 
+/// Immutable export bytes and their own metadata, captured together while no
+/// publisher can replace either. Holding only a payload fd is insufficient:
+/// a newer same-size export can otherwise lend it fresh metadata.
+struct ExportCacheSnapshot {
+    file: fs::File,
+    saved: ExportCacheMetadata,
+}
+
+fn open_export_cache_snapshot(root: &Path) -> Result<Option<ExportCacheSnapshot>> {
+    let cache = default_export_cache_path(root);
+    let lock = match fs::File::open(default_export_lock_path(&cache)) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    match fs2::FileExt::try_lock_shared(&lock).map_err(bonsai_common::normalize_advisory_lock_error) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let file = match fs::File::open(&cache) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let Ok(Some(saved)) = read_export_cache_metadata(root) else {
+        return Ok(None);
+    };
+    // Atomic replacement cannot change this open payload or the captured
+    // metadata. Release the lock now; multi-gigabyte readers need not block
+    // subsequent writers, and a busy writer is merely a cache miss.
+    drop(lock);
+    Ok(Some(ExportCacheSnapshot { file, saved }))
+}
+
 fn write_default_export_cache(
     cache: &Path,
     root: &Path,
@@ -3985,7 +4137,7 @@ fn write_default_export_cache(
     if let Some(parent) = cache.parent() {
         fs::create_dir_all(parent)?;
     }
-    let _lock = lock_default_export_cache(cache)?;
+    let lock = lock_default_export_cache(cache)?;
     cleanup_default_export_temp_files(&default_export_cache_metadata_path(root))?;
     let cache_bytes = out
         .len()
@@ -4004,13 +4156,7 @@ fn write_default_export_cache(
         writer.flush()?;
         writer.get_ref().sync_all()?;
     }
-    fs::rename(&tmp.path, cache)?;
-    tmp.commit();
-    let mut metadata_bytes = serde_json::to_vec_pretty(&metadata)?;
-    metadata_bytes.push(b'\n');
-    write_atomic_bytes(&default_export_cache_metadata_path(root), &metadata_bytes)?;
-    sync_parent_dir(cache);
-    Ok(())
+    publish_default_export_cache(&lock, cache, root, &mut tmp, &metadata)
 }
 
 fn write_default_export_cache_with<F>(
@@ -4026,7 +4172,7 @@ where
     if let Some(parent) = cache.parent() {
         fs::create_dir_all(parent)?;
     }
-    let _lock = lock_default_export_cache(cache)?;
+    let lock = lock_default_export_cache(cache)?;
     cleanup_default_export_temp_files(&default_export_cache_metadata_path(root))?;
     let mut tmp = PendingExportTemp::new(unique_default_export_tmp_path(cache));
     {
@@ -4042,11 +4188,29 @@ where
     }
     let cache_bytes = fs::metadata(&tmp.path)?.len();
     let metadata = build_export_cache_metadata(root, rulepack_root, workspace_sources, cache_bytes)?;
+    publish_default_export_cache(&lock, cache, root, &mut tmp, &metadata)
+}
+
+fn publish_default_export_cache(
+    _lock: &ExportCacheWriteLock,
+    cache: &Path,
+    root: &Path,
+    tmp: &mut PendingExportTemp,
+    metadata: &ExportCacheMetadata,
+) -> Result<()> {
+    let mut metadata_bytes = serde_json::to_vec_pretty(metadata)?;
+    metadata_bytes.push(b'\n');
+    let metadata_path = default_export_cache_metadata_path(root);
+    // An interrupted replacement must leave a cache miss, never a new payload
+    // accompanied by the previous generation's valid metadata.
+    match fs::remove_file(&metadata_path) {
+        Ok(()) => sync_parent_dir(&metadata_path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     fs::rename(&tmp.path, cache)?;
     tmp.commit();
-    let mut metadata_bytes = serde_json::to_vec_pretty(&metadata)?;
-    metadata_bytes.push(b'\n');
-    write_atomic_bytes(&default_export_cache_metadata_path(root), &metadata_bytes)?;
+    write_atomic_bytes(&metadata_path, &metadata_bytes)?;
     sync_parent_dir(cache);
     Ok(())
 }
@@ -4061,29 +4225,26 @@ fn sync_parent_dir(path: &Path) {
     }
 }
 
-/// Validate the freshness of an already-opened export cache file. The
-/// export bytes are trusted only when the adjacent metadata sidecar
+/// Validate one paired export snapshot. Its bytes are trusted only when its
+/// captured metadata (never a subsequently replaced adjacent sidecar)
 /// matches the current source content, dependency metadata, rulepack
 /// content, matcher policy, and cache pipeline version.
-fn export_cache_is_fresh_via_fd(
+fn export_cache_snapshot_is_fresh(
     root: &Path,
     rulepack_root: Option<&Path>,
     include_minified_sources: bool,
-    cache: &fs::File,
+    snapshot: &ExportCacheSnapshot,
 ) -> Result<bool> {
-    let Ok(cache_metadata) = cache.metadata() else {
+    let Ok(cache_metadata) = snapshot.file.metadata() else {
         return Ok(false);
     };
     if !cache_metadata.is_file() || cache_metadata.len() == 0 {
         return Ok(false);
     }
-    let Ok(Some(saved)) = read_export_cache_metadata(root) else {
-        return Ok(false);
-    };
     let workspace_sources =
         workspace_source_fingerprint_from_disk_with_minified(root, include_minified_sources)?;
     let expected = build_export_cache_metadata(root, rulepack_root, workspace_sources, cache_metadata.len())?;
-    if saved != expected {
+    if snapshot.saved != expected {
         return Ok(false);
     }
     Ok(!current_exe_is_newer_than_cache(&cache_metadata))
@@ -4342,9 +4503,13 @@ fn git_source_state_snapshot(
     if repository_root.join(".gitmodules").exists() {
         return None;
     }
+    // A clean porcelain result is not proof of unchanged source when Git
+    // deliberately hides edits to tracked paths. Share the live-project guard.
+    refresh::ensure_observable_index(&workspace_root).ok()?;
     let head_commit = git_output_text(&workspace_root, &["rev-parse", "--verify", "HEAD"])?;
     let registry = bonsai_adapters::all_languages_registry();
     let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(&workspace_root)
         .args([
@@ -4487,6 +4652,8 @@ fn git_ignore_control_paths_for_snapshot(workspace_root: &Path, repository_root:
         } else {
             workspace_root.join(path)
         });
+    } else if let Some(config) = std::env::var_os("XDG_CONFIG_HOME").filter(|path| !path.is_empty()) {
+        paths.push(PathBuf::from(config).join("git/ignore"));
     } else if let Some(home) = std::env::var_os("HOME") {
         paths.push(PathBuf::from(home).join(".config/git/ignore"));
     }
@@ -4494,7 +4661,7 @@ fn git_ignore_control_paths_for_snapshot(workspace_root: &Path, repository_root:
     // controls above a scoped workspace. Record their contents directly
     // because a Git pathspec rooted at the workspace will not report them.
     for ancestor in workspace_root.ancestors() {
-        for name in [".ignore", ".bonsaiignore"] {
+        for name in [".gitignore", ".ignore", ".bonsaiignore"] {
             paths.push(ancestor.join(name));
         }
         if ancestor == repository_root {
@@ -4583,28 +4750,6 @@ fn source_stamp_identity_matches(left: &SourceFileStamp, right: &SourceFileStamp
         && left.change_nanoseconds == right.change_nanoseconds
         && left.device == right.device
         && left.inode == right.inode
-}
-
-fn prune_obsolete_compiler_object_sidecars(root: &Path) {
-    let directory = workspace_bonsai_dir(root);
-    let current = bonsai_workspace::compiler_object_sidecar_path(root);
-    let Ok(entries) = fs::read_dir(&directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path == current || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if name.starts_with("compiler-objects.v")
-            && (name.ends_with(".factstore") || name.ends_with(".factstore.lock"))
-        {
-            let _ = fs::remove_file(path);
-        }
-    }
 }
 
 fn manifest_source_files(

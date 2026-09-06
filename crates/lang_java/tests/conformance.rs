@@ -1241,6 +1241,21 @@ fn guarded_value_helper_preserves_predicate_polarity_without_api_meaning() {
             "return target;",
             false,
         ),
+        (
+            r#"!target.startsWith("/") || target.startsWith("//")"#,
+            r#"if (target.isEmpty()) return "/";"#,
+            false,
+        ),
+        (
+            r#"!target.startsWith("/") || target.startsWith("//")"#,
+            r#"java.util.function.Supplier<String> fallback = () -> { return "/"; };"#,
+            false,
+        ),
+        (
+            r#"!target.startsWith("/") || target.startsWith("//")"#,
+            r#"{ /* exact nested block */ return "/"; }"#,
+            true,
+        ),
     ] {
         let source = format!(
             "class Redirect {{ static String sameSite(String target) {{ if ({condition}) {{ {fallback} }} return target; }} }}"

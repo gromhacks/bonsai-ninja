@@ -12,6 +12,91 @@ fn index(source: &str) -> bonsai_lang_api::DeclIndex {
 }
 
 #[test]
+fn finite_map_selection_preserves_dynamic_fallback_and_surrounding_expression() {
+    for expression in [
+        "choices.get(key, dynamic)",
+        "choices.get(key) + dynamic",
+        "transform(choices.get(key), dynamic)",
+        "choices.get(*dynamic)",
+        "choices.get(key, default=dynamic)",
+    ] {
+        let source = format!("def choose(key, dynamic):\n    choices = {{'known': 'literal'}}\n    selected = {expression}\n    return selected\n");
+        let lowered = index(&source);
+        assert!(
+            lowered.finite_literal_selections.is_empty(),
+            "the complete assigned value is not proven finite for {expression}: {:?}",
+            lowered.finite_literal_selections
+        );
+    }
+}
+
+#[test]
+fn finite_map_values_require_immutable_literal_evidence() {
+    for value in [
+        "read_input()",
+        "Factory('literal')",
+        "[]",
+        "{}",
+        "('literal', [])",
+    ] {
+        let source = format!("def choose(key):\n    choices = {{'known': {value}}}\n    selected = choices.get(key)\n    return selected\n");
+        let lowered = index(&source);
+        assert!(
+            lowered.finite_literal_selections.is_empty(),
+            "call results and mutable nested state are not proven clean constants: {value}"
+        );
+    }
+}
+
+#[test]
+fn finite_map_selection_keeps_exact_constant_fallbacks() {
+    for expression in [
+        "choices.get(key)",
+        "choices.get(key, 'fallback')",
+        "(choices.get(key, choices['known']))",
+    ] {
+        let source = format!("def choose(key):\n    choices = {{'known': 'literal'}}\n    selected = {expression}\n    return selected\n");
+        assert_eq!(index(&source).finite_literal_selections.len(), 1, "{expression}");
+    }
+}
+
+#[test]
+fn regex_guard_rejects_separator_ranges_and_unanchored_alternatives() {
+    for pattern in ["^[A-z]+$", "^[.-z]+$", "^safe|name$", "^[a-z]+|[0-9]+$"] {
+        let source = format!("import re\n_ALLOWED = re.compile(r'{pattern}')\ndef load(name):\n    if not _ALLOWED.match(name):\n        return None\n    return open(name)\n");
+        assert!(
+            index(&source).character_constraints.is_empty(),
+            "{pattern} does not exclude path separators from the whole input"
+        );
+    }
+}
+
+#[test]
+fn regex_proofs_require_complete_unshadowed_calls() {
+    for source in [
+        "import re\n_ALLOWED = re.compile(r'^[a-z]+$', re.MULTILINE)\ndef load(name):\n    if not _ALLOWED.match(name):\n        return None\n    return open(name)\n",
+        "import re\n_ALLOWED = re.compile(r'^[a-z]+$', flags=re.MULTILINE)\ndef load(name):\n    if not _ALLOWED.match(name):\n        return None\n    return open(name)\n",
+        "import re\n_ALLOWED = re.compile(r'^[a-z]+$')\ndef load(name, _ALLOWED):\n    if not _ALLOWED.match(name):\n        return None\n    return open(name)\n",
+        "import re\n_UNSAFE = re.compile(r'[ab]')\ndef clean(value):\n    return _UNSAFE.sub('_', value, count=1)\n",
+        "import re\n_UNSAFE = re.compile(r'[ab]')\ndef clean(value, _UNSAFE):\n    return _UNSAFE.sub('_', value)\n",
+        "import re\ndef other():\n    _UNSAFE = re.compile(r'[ab]')\ndef clean(value):\n    return _UNSAFE.sub('_', value)\n",
+    ] {
+        assert!(index(source).character_constraints.is_empty(), "call options and lexical receiver identity cannot be discarded: {source}");
+    }
+}
+
+#[test]
+fn regex_substitution_requires_one_complete_character_class() {
+    for pattern in ["[a][b]", "[a]|[b]", "[a]+[b]", "[[]]"] {
+        let source = format!("import re\n_UNSAFE = re.compile(r'{pattern}')\ndef clean(value):\n    return _UNSAFE.sub('_', value)\n");
+        assert!(
+            index(&source).character_constraints.is_empty(),
+            "{pattern} does not remove every occurrence of each constituent character"
+        );
+    }
+}
+
+#[test]
 fn comprehension_allowlist_lowers_to_exact_alphabet() {
     let index = index(
         r#"
@@ -572,7 +657,7 @@ def inverted(target):
 }
 
 #[test]
-fn finite_constructor_map_selection_is_a_clean_assignment_fact() {
+fn constructor_map_selection_is_not_a_clean_literal_fact() {
     use bonsai_lang_api::LanguageAdapter;
     use std::sync::Arc;
 
@@ -591,14 +676,10 @@ def choose(name):
     );
     let file = ws.db().vfs().all_files()[0];
     let index = ws.db().decl_index(file).expect("Python declaration index");
-    let [fact] = index.finite_literal_selections.as_slice() else {
-        panic!(
-            "expected one finite selection: {:#?}",
-            index.finite_literal_selections
-        );
-    };
-    assert_eq!(fact.target.as_deref(), Some("selected"));
-    assert!(fact.assignment_span.is_some());
+    assert!(
+        index.finite_literal_selections.is_empty(),
+        "an unresolved constructor may read dynamic input; literal arguments do not prove a clean result"
+    );
 }
 
 #[test]

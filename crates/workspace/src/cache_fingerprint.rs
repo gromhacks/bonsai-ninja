@@ -90,7 +90,7 @@ pub(crate) fn dependency_metadata_fingerprint_for_sidecar(sidecar: &Path) -> u64
 /// sidecar is read or written so every cache family shares the same freshness
 /// root. A lock prevents an explicit absolute `BONSAI_WORKSPACE_DIR` from
 /// being raced between two different workspaces.
-pub(crate) fn register_workspace_cache_root(workspace_root: &Path) -> std::io::Result<PathBuf> {
+pub fn register_workspace_cache_root(workspace_root: &Path) -> std::io::Result<PathBuf> {
     let root = canonical_workspace_root(workspace_root);
     let cache_dir = workspace_bonsai_dir(&root);
     std::fs::create_dir_all(&cache_dir)
@@ -159,10 +159,36 @@ pub(crate) fn register_workspace_cache_root(workspace_root: &Path) -> std::io::R
 
 fn workspace_root_for_sidecar(sidecar: &Path) -> Option<PathBuf> {
     let parent = sidecar.parent()?;
-    if parent.file_name().and_then(|name| name.to_str()) == Some(".bonsai") {
-        return parent.parent().map(canonical_workspace_root);
+    match workspace_cache_root_binding(parent) {
+        Ok(Some(root)) => Some(root),
+        Ok(None) if parent.file_name().and_then(|name| name.to_str()) == Some(".bonsai") => {
+            parent.parent().map(canonical_workspace_root)
+        }
+        _ => None,
     }
-    decode_workspace_root(&std::fs::read(parent.join(WORKSPACE_ROOT_MARKER)).ok()?)
+}
+
+/// Read the canonical native-path workspace identity recorded in a cache.
+/// Missing bindings return `None`; malformed bindings and I/O failures are
+/// errors. This read-only API neither creates nor repairs cache artifacts.
+pub fn workspace_cache_root_binding(cache_dir: &Path) -> io::Result<Option<PathBuf>> {
+    let marker = cache_dir.join(WORKSPACE_ROOT_MARKER);
+    let metadata = match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "workspace binding is not a regular file",
+        ));
+    }
+    let bytes = std::fs::read(marker)?;
+    decode_workspace_root(&bytes)
+        .filter(|root| root.is_absolute())
+        .map(Some)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid workspace cache binding"))
 }
 
 fn canonical_workspace_root(root: &Path) -> PathBuf {

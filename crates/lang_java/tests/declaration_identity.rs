@@ -152,6 +152,7 @@ class Factory {
         return new Local().build();
     }
 }
+
 "#,
     );
 
@@ -172,4 +173,47 @@ class Factory {
         Some("org.example.Local"),
         "a method-local type is not a member named Factory.Local"
     );
+}
+
+#[test]
+fn bases_preserve_direct_qualified_types_and_source_order() {
+    let index = declaration_index(
+        r#"
+class Child extends owners.Outer<String>.Base<Integer>
+    implements first.Service<types.Payload>, second.Marker {}
+interface Combined extends first.Service<types.Payload>, second.Marker {}
+record Item(String value) implements first.Service<types.Payload>, second.Marker {}
+"#,
+    );
+    for (name, expected) in [
+        (
+            "Child",
+            vec!["owners.Outer.Base", "first.Service", "second.Marker"],
+        ),
+        ("Combined", vec!["first.Service", "second.Marker"]),
+        ("Item", vec!["first.Service", "second.Marker"]),
+    ] {
+        let declaration = index.defs.iter().find(|decl| decl.name == name).expect(name);
+        assert_eq!(
+            declaration.bases, expected,
+            "only direct supertype identities belong in {name}'s ancestry"
+        );
+    }
+}
+
+#[test]
+fn sealed_permissions_are_not_reverse_inheritance() {
+    let index = declaration_index("sealed class Root permits Child {}\nfinal class Child extends Root {}\n");
+    let root = index.defs.iter().find(|decl| decl.name == "Root").expect("Root");
+    let child = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Child")
+        .expect("Child");
+    assert!(
+        root.bases.is_empty(),
+        "permitted children are not Root's bases: {:?}",
+        root.bases
+    );
+    assert_eq!(child.bases, ["Root"]);
 }

@@ -140,6 +140,71 @@ fn enclosing_cache_hit_is_stable() {
 }
 
 #[test]
+fn reset_discards_enclosing_declarations_after_an_edit() {
+    let ws = ws_with_python("def before():\n    return 1\n");
+    let mut cache = ChainCache::new(&ws);
+    let file = ws.vfs().all_files()[0];
+    let before = ws.db().global_index();
+    let old_decls = before.decls_in(file).iter().collect::<Vec<_>>();
+    let old_span = old_decls
+        .iter()
+        .find(|decl| decl.name == "before")
+        .expect("before")
+        .name_span;
+    assert_eq!(
+        cache.enclosing(file, &old_decls, old_span).as_deref(),
+        Some("before")
+    );
+    ws.vfs().write(
+        "fixture.py".to_string(),
+        Arc::<str>::from("def after_():\n    return 2\n"),
+    );
+    ws.db().invalidate_file(file);
+    cache.reset();
+    let after = ws.db().global_index();
+    let new_decls = after.decls_in(file).iter().collect::<Vec<_>>();
+    let new_span = new_decls
+        .iter()
+        .find(|decl| decl.name == "after_")
+        .expect("after_")
+        .name_span;
+    assert_eq!(
+        cache.enclosing(file, &new_decls, new_span).as_deref(),
+        Some("after_")
+    );
+}
+
+#[test]
+fn enclosing_range_query_falls_back_to_the_containing_outer_callable() {
+    let ws = ws_with_python("def outer():\n    def inner():\n        return 1\n    return 2\n");
+    let file = ws.vfs().all_files()[0];
+    let global = ws.db().global_index();
+    let decls = global.decls_in(file).iter().collect::<Vec<_>>();
+    let outer = decls.iter().find(|decl| decl.name == "outer").expect("outer");
+    let inner = decls.iter().find(|decl| decl.name == "inner").expect("inner");
+    let cached = ChainCache::new(&ws);
+    let uncached = ChainCache::without_cache(&ws);
+    for span in [inner.span, Span::new(file, inner.span.start, outer.span.end)] {
+        assert_eq!(
+            cached.enclosing_func(file, &decls, span),
+            uncached.enclosing_func(file, &decls, span)
+        );
+    }
+    assert_eq!(
+        cached
+            .enclosing(file, &decls, Span::new(file, inner.span.start, outer.span.end))
+            .as_deref(),
+        Some("outer")
+    );
+}
+
+#[test]
+fn empty_call_chain_has_no_source_span_rows() {
+    let ws = ws_with_python(FIXTURE);
+    assert!(CallEdgeResolver::new(&ws).call_spans_for_chain(&[]).is_empty());
+}
+
+#[test]
 fn enclosing_cache_stores_positive_and_negative_results() {
     let ws = ws_with_python(FIXTURE);
     let cache = ChainCache::new(&ws);

@@ -60,6 +60,9 @@ pub fn strings(ws: &Workspace, f: &StringsFilters<'_>) -> Result<Vec<StringOut>,
             let Some(idx) = admitted_file_decl_index(ws, file, &memory_permits) else {
                 return per_file.into_iter();
             };
+            let enclosing = f.in_fn.map(|_| {
+                bonsai_workspace::enclosing_index::EnclosingSpanIndex::from_callable_decls(&idx.defs)
+            });
             for s in &idx.strings {
                 let cat = format!("{:?}", s.category).to_lowercase();
                 if f.category.is_some_and(|c| !cat.contains(&c.to_lowercase())) {
@@ -75,13 +78,16 @@ pub fn strings(ws: &Workspace, f: &StringsFilters<'_>) -> Result<Vec<StringOut>,
                         continue;
                     }
                 }
-                let (path, line, col) = format_span(&s.span, ws);
                 if let Some(needle) = f.in_fn {
-                    let enclosing = enclosing_fn_for_index_line(ws, file, &idx, line).unwrap_or_default();
-                    if !enclosing.contains(needle) {
+                    if !enclosing
+                        .as_ref()
+                        .and_then(|index| index.enclosing(s.span.start))
+                        .is_some_and(|entry| entry.end >= s.span.end && entry.name.contains(needle))
+                    {
                         continue;
                     }
                 }
+                let (path, line, col) = format_span(&s.span, ws);
                 per_file.push(StringOut {
                     text: s.text.clone(),
                     category: cat,
@@ -123,16 +129,6 @@ fn string_relevance_key(row: &StringOut, f: &StringsFilters<'_>) -> ((u8, usize)
     (category, text)
 }
 
-/// Cache-aware shortcut over the workspace's snapshot + span-map
-/// machinery. Returns `None` when the file isn't in the VFS.
-fn cached_span_map(
-    ws: &Workspace,
-    file: bonsai_common::FileId,
-) -> Option<std::sync::Arc<bonsai_common::SpanMap>> {
-    let snap = ws.vfs().snapshot(file).ok()?;
-    Some(bonsai_common::cached_span_map_arc(file, snap.version, &snap.text))
-}
-
 /// Find the enclosing function/method name for a given path + line.
 /// Public so the CLI's renderer can surface the same information
 /// alongside table rows without re-implementing the logic.
@@ -141,33 +137,35 @@ pub fn enclosing_fn_for_file_line(ws: &Workspace, file_path: &str, line: u32) ->
     crate::summary_labels::SummaryAnnotator::new(ws).enclosing_function_name(file_path, line)
 }
 
-pub(crate) fn enclosing_fn_for_index_line(
-    ws: &Workspace,
-    file: bonsai_common::FileId,
-    index: &bonsai_lang_api::DeclIndex,
-    line: u32,
-) -> Option<String> {
-    use bonsai_lang_api::DeclKind;
-    let span_map = cached_span_map(ws, file)?;
-    // Track the narrowest enclosing decl so a nested function /
-    // method beats its containing module-level wrapper.
-    let mut best: Option<(&bonsai_lang_api::Decl, u32)> = None;
-    for d in &index.defs {
-        if !matches!(
-            d.kind,
-            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-        ) {
-            continue;
-        }
-        let body = d.body_span.unwrap_or(d.span);
-        let start_line = span_map.line_col(body.start).line;
-        let end_line = span_map.line_col(body.end.saturating_sub(1)).line;
-        if start_line <= line && line <= end_line {
-            let width = end_line.saturating_sub(start_line);
-            if best.is_none_or(|(_, best_width)| width < best_width) {
-                best = Some((d, width));
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_line_functions_keep_their_own_string_and_comment_inventory() {
+        let workspace = Workspace::new(bonsai_adapters::all_languages_registry());
+        workspace.vfs().write("app.js", "function alpha() { /* first */ return \"first\"; } function beta() { /* second */ return \"second\"; }\n");
+        for (function, text) in [("alpha", "first"), ("beta", "second")] {
+            let rows = strings(
+                &workspace,
+                &StringsFilters {
+                    in_fn: Some(function),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(rows.len(), 1, "{function}: {rows:?}");
+            assert!(rows[0].text.contains(text), "{function}: {rows:?}");
+            let comments = crate::comments::comments(
+                &workspace,
+                &crate::comments::CommentsFilters {
+                    in_fn: Some(function),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(comments.len(), 1, "{function}: {comments:?}");
+            assert!(comments[0].text.contains(text), "{function}: {comments:?}");
         }
     }
-    best.map(|(d, _)| d.name.clone())
 }

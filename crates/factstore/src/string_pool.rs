@@ -243,6 +243,16 @@ pub struct StringPoolView<'mmap> {
 }
 
 impl<'mmap> StringPoolView<'mmap> {
+    /// Borrow immutable sections already checked by `new` at reader open.
+    /// Kept crate-private so public callers cannot bypass validation.
+    pub(crate) fn from_validated_sections(bytes: &'mmap [u8], offsets: &'mmap [u8], count: u32) -> Self {
+        Self {
+            bytes,
+            offsets,
+            count,
+        }
+    }
+
     /// Construct a view over `bytes_section` + `offsets_section`,
     /// validating that every offset is in range and forms a
     /// non-decreasing sequence terminated by a sentinel = bytes_len.

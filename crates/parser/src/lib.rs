@@ -218,8 +218,8 @@ impl ParserCache {
         vfs: &Vfs,
     ) -> Result<Arc<ParsedFile>, ParseError> {
         let file = snapshot.file_id;
-        let path = vfs.path(file)?;
-        let grammar_name = adapter.grammar_name_for_path(&path);
+        let path = snapshot.path.as_path();
+        let grammar_name = adapter.grammar_name_for_path(path);
         let context_fingerprint = adapter.parse_context_fingerprint(snapshot, vfs);
         let context_revision = vfs.revision();
         let key = (vfs.instance_id(), file, adapter.language_id(), grammar_name);
@@ -229,7 +229,7 @@ impl ParserCache {
             }
         }
 
-        let language = adapter.tree_sitter_language_for_path(&path)?;
+        let language = adapter.tree_sitter_language_for_path(path)?;
         let mut parser = self.checkout_parser(grammar_name);
         // Re-check after checkout. A peer may have finished this exact
         // snapshot between the initial cache read and parser lookup.
@@ -296,7 +296,7 @@ impl ParserCache {
                     let preserves_clean_nodes = candidate_timed_out.is_none()
                         && recovery_preserves_clean_compiler_nodes(
                             adapter.as_ref(),
-                            &path,
+                            path,
                             &tree,
                             &candidate,
                             &edits,

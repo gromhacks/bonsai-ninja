@@ -52,7 +52,7 @@ pub const IDG_SEGMENT_VERSION: u32 = 5;
 /// file's function) are stitched at the workspace level — the
 /// segment only carries the local nodes' interned dictionaries
 /// because cross-file edges' `to` node is in a different segment.
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdgSegment {
     /// Format version recorded in the payload (independent of the
     /// factstore header version) so callers can fail-closed if the
@@ -81,6 +81,12 @@ pub struct IdgSegment {
     /// a known name (e.g. seed-name → `Place::Read{name}` lookup).
     #[serde(default)]
     pub strings: bonsai_factstore::StringPoolBuilder,
+}
+
+impl Default for IdgSegment {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IdgSegment {
