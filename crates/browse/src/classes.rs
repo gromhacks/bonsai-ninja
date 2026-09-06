@@ -2,8 +2,8 @@
 //!
 //! Returns every type declaration the adapter recognises as a
 //! class-like construct: `class`, `struct`, `trait`, `interface`,
-//! `enum`. Each row carries the methods declared inside the
-//! type's span so callers can answer "which classes implement
+//! `enum`. Each row carries the type's directly owned methods
+//! so callers can answer "which classes implement
 //! `serialize`?" without a separate query.
 
 use crate::common::{
@@ -47,8 +47,8 @@ pub struct ClassOut {
     /// `methods.len()` cached on the row so JSON consumers can
     /// sort / filter without re-counting.
     pub method_count: usize,
-    /// Names of every method, constructor, or function declared
-    /// inside the type's span. Order is source-position-stable.
+    /// Names of every directly owned method, constructor, or function.
+    /// Order is source-position-stable; nested types own their own methods.
     pub methods: Vec<String>,
 }
 

@@ -30,6 +30,8 @@
 //! green.
 
 use std::path::PathBuf;
+#[path = "support/analysis_coverage.rs"]
+mod analysis_coverage;
 use std::process::Command;
 use std::{
     collections::hash_map::DefaultHasher,
@@ -153,19 +155,12 @@ fn rows_of(v: &serde_json::Value) -> Vec<serde_json::Value> {
 }
 
 fn assert_security_analysis_complete(v: &serde_json::Value, lang: &str, command: &str) {
-    assert_eq!(
-        v.get("analysis_complete").and_then(serde_json::Value::as_bool),
-        Some(true),
-        "[{lang}] {command} returned an incomplete compiler snapshot: {:?}",
-        v.get("analysis_incomplete_reasons")
-    );
-    assert!(
-        v.get("analysis_incomplete_reasons")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(Vec::is_empty),
-        "[{lang}] complete {command} retained incomplete reasons: {:?}",
-        v.get("analysis_incomplete_reasons")
-    );
+    let expected = if command.contains("language_gauntlet") {
+        analysis_coverage::gauntlet_manifest_reasons(lang)
+    } else {
+        Vec::new()
+    };
+    analysis_coverage::assert_exact_coverage(v, &expected, &format!("[{lang}] {command}"));
 }
 
 /// Workspace path for a language contract fixture. The public example is the
@@ -3003,11 +2998,11 @@ visible_construct!(construct_functools_reduce_visible, "reduce");
 // finding whose chain_display visits the expected chain of hops
 // from the Flask handler all the way down to os.system.
 
-/// Every expected hop that should appear in `chain_display` for a
-/// full-chain finding from `handle_request` through the async
-/// pipeline down to `CommandRunner.execute`.
-const FULL_CHAIN_HOPS: &[&str] = &[
+/// Union of value-processing functions. Sibling calls and returning helpers
+/// belong in the exported graph, not all in one simultaneously active stack.
+const GAUNTLET_FLOW_FUNCTIONS: &[&str] = &[
     "handle_request",
+    "run_pipeline",
     "orchestrate",
     "stream_batch",
     "batch_expand",
@@ -3038,7 +3033,16 @@ fn language_gauntlet_full_source_to_sink_chain_exists() {
     let rows = rows_of(&parsed);
     assert!(!rows.is_empty(), "language_gauntlet: 0 findings (taint broken)");
 
-    // At least one finding's chain must visit every hop.
+    // Pin the actual invocation stack to the sink. A fractional count over
+    // sibling helpers could pass even after losing the entry, bridge, or sink.
+    let expected = [
+        "handle_request",
+        "run_pipeline",
+        "orchestrate",
+        "persist",
+        "perform",
+        "execute",
+    ];
     let any_full_chain = rows.iter().any(|r| {
         let chain = r
             .get("chain_display")
@@ -3049,45 +3053,12 @@ fn language_gauntlet_full_source_to_sink_chain_exists() {
             .iter()
             .filter_map(|n| n.as_str().map(String::from))
             .collect();
-        FULL_CHAIN_HOPS
-            .iter()
-            .all(|hop| chain_names.iter().any(|n| n.contains(hop)))
+        chain_names.iter().map(String::as_str).eq(expected)
     });
-    // This is the gold-standard test: one chain must visit every
-    // hop. Accept a warning-only state when the engine's chain
-    // enumeration heuristics exclude some hop (e.g. because it's
-    // async) — but fail hard if the finding set is empty.
-    if !any_full_chain {
-        // Looser assertion: we need at least SOME finding whose
-        // chain visits at least 5 of the 9 hops. Saves this test
-        // from flaking on async-resolution edge cases while still
-        // catching a regression where the chain collapses down to
-        // just source + sink.
-        let max_coverage = rows
-            .iter()
-            .map(|r| {
-                let chain = r
-                    .get("chain_display")
-                    .and_then(|c| c.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                let chain_names: Vec<String> = chain
-                    .iter()
-                    .filter_map(|n| n.as_str().map(String::from))
-                    .collect();
-                FULL_CHAIN_HOPS
-                    .iter()
-                    .filter(|hop| chain_names.iter().any(|n| n.contains(**hop)))
-                    .count()
-            })
-            .max()
-            .unwrap_or(0);
-        assert!(
-            max_coverage >= 5,
-            "language_gauntlet: best chain covers only {max_coverage}/9 hops — \
-             construct propagation regressed"
-        );
-    }
+    assert!(
+        any_full_chain,
+        "language_gauntlet lost the exact source-to-sink stack {expected:?}: {out}"
+    );
 }
 
 #[test]
@@ -3177,7 +3148,7 @@ fn language_gauntlet_dump_taint_threads_every_cross_function_hop() {
         ("stream_batch", "batch_expand", Some("parts"), "parts"),
         ("stream_batch", "normalize", Some("expanded"), "item"),
         ("orchestrate", "validate_payload", Some("chunk"), "payload"),
-        ("orchestrate", "persist", Some("repo"), "receiver"),
+        ("orchestrate", "persist", Some("repo"), "self"),
         ("persist", "perform", None, "cmd"),
         ("perform", "execute", Some("cmd"), "cmd"),
     ] {
@@ -3186,6 +3157,21 @@ fn language_gauntlet_dump_taint_threads_every_cross_function_hop() {
             "language_gauntlet dump-taint missing tainted arg {caller}->{callee} value={value:?} param={param}; edge args: {edge_args:?}"
         );
     }
+    assert!(
+        records.iter().any(|rec| {
+            rec["caller_name"] == "orchestrate"
+                && rec["callee_name"] == "persist"
+                && rec["relation"] == "argument"
+                && rec["tainted_args"].as_array().is_some_and(|args| {
+                    args.iter().any(|arg| {
+                        arg["value_text"] == "repo"
+                            && arg["param_name"] == "self"
+                            && arg["index"].as_u64() == Some(usize::MAX as u64)
+                    })
+                })
+        }),
+        "receiver evidence must retain its exact formal name and distinct slot: {out}"
+    );
     let has_execute = records.iter().any(|rec| {
         rec.get("callee_name").and_then(|v| v.as_str()) == Some("execute")
             && rec
@@ -3240,7 +3226,7 @@ fn language_gauntlet_export_every_hop_surfaces_in_function_list() {
         .iter()
         .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
         .collect();
-    for hop in FULL_CHAIN_HOPS {
+    for hop in GAUNTLET_FLOW_FUNCTIONS {
         assert!(
             names.iter().any(|n| n == hop),
             "language_gauntlet export missing hop `{hop}` in functions map"
@@ -3317,7 +3303,7 @@ fn language_gauntlet_reachable_facts_cover_every_hop_tokens() {
         .iter()
         .filter_map(|f| f.get("function").and_then(|n| n.as_str()))
         .collect();
-    for hop in FULL_CHAIN_HOPS {
+    for hop in GAUNTLET_FLOW_FUNCTIONS {
         assert!(
             names_with_facts.iter().any(|n| n == hop),
             "language_gauntlet export.reachable_facts missing `{hop}`"

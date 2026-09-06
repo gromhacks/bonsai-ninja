@@ -479,6 +479,9 @@ fn visible_child_count(path: &Path, build: &FastTreeBuild) -> Result<usize> {
 }
 
 fn fast_tree_should_skip(path: &Path, build: &FastTreeBuild) -> bool {
+    if crate::output::is_pending_output_path(path) {
+        return true;
+    }
     if is_bonsai_case_probe_path(path) {
         return true;
     }

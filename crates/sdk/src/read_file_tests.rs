@@ -43,6 +43,7 @@ fn combined() -> CombinedFindingWithChain {
                 "run_admin_command".to_string(),
             ],
             taint_path: vec![TaintPropagationStep {
+                storage_transfer: None,
                 caller: "handle_request".to_string(),
                 callee: "run_admin_command".to_string(),
                 file: "app.py".to_string(),
@@ -168,6 +169,7 @@ fn read_file_filters_match_alternate_flow_sources_and_chains() {
         flow_id: Some("F:2".to_string()),
         chain_display: vec!["json_handler".to_string(), "run_admin_command".to_string()],
         taint_path: vec![TaintPropagationStep {
+            storage_transfer: None,
             caller: "json_handler".to_string(),
             callee: "run_admin_command".to_string(),
             file: "app.py".to_string(),

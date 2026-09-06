@@ -3,7 +3,13 @@
 This directory contains immutable machine-readable contracts for versioned
 bonsai-ninja exports.
 
-- `bonsai-native-export-v13.schema.json` — current Draft 2020-12 schema for
+- `bonsai-native-export-v14.schema.json` — current Draft 2020-12 schema for
+  native JSON. v14 adds exact function IDs to return summaries and materialized
+  propagation entries, exact class IDs to field summaries, and propagation
+  endpoint IDs, relation kinds, and source files. Return propagation is not
+  a reverse call. These identities distinguish same-named declarations on
+  the same source line.
+- `bonsai-native-export-v13.schema.json` — historical Draft 2020-12 schema for
   `bonsai-ninja export --format json` documents whose `schema` is
   `bonsai-native-export` and whose `schema_version` is `13`. v13 adds exact
   `predicate_call_span` evidence to call-backed type-test conditions, keeping

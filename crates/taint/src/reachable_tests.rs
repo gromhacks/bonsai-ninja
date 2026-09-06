@@ -101,8 +101,10 @@ fn sentinel_argument_uses_ast_receiver_but_return_does_not() {
 
     edge.relation = bonsai_idg::CrossCallRelation::Capture;
     let captured_receiver = tainted_args_for_cross_call_edge(&edge, None, Some(&summary));
-    assert_eq!(captured_receiver[0].value_text, "repo");
-    assert_eq!(captured_receiver[0].param_name, SYNTHETIC_RECEIVER_PARAM_NAME);
+    assert!(
+        captured_receiver.is_empty(),
+        "a capture without its formal binding must not invent a receiver value"
+    );
 
     edge.relation = bonsai_idg::CrossCallRelation::Return;
     assert!(tainted_args_for_cross_call_edge(&edge, None, Some(&summary)).is_empty());

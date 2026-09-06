@@ -45,9 +45,11 @@ use std::{
 const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v14.json";
 const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v14.meta.json";
 const DEFAULT_EXPORT_CACHE_METADATA_VERSION: u32 = 1;
-// v18 publishes payload/metadata as a locked pair and invalidates old metadata
-// before payload replacement, so interrupted writes cannot mix generations.
-const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v18";
+// v19 carries native schema v14's exact function identities and propagation
+// relations. Payload and metadata retain the locked atomic publication protocol.
+// v20 corrects idempotent field-copy transfer in CFG-local export projections.
+// v21 retains coexisting value/field evidence and clears overwritten object fields.
+const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v21";
 const CACHE_MANIFEST_FILE: &str = "manifest.json";
 // v6 records an exact Git/HEAD/worktree source-state snapshot. Fresh CLI
 // processes can therefore reuse the manifest's complete compiler input table

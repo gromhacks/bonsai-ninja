@@ -68,7 +68,32 @@ fn i_14_objc() {
 
 #[test]
 fn i_14_ruby() {
-    run_positive_cell("I_14", LangFixture { lang: "ruby", adapter: Arc::new(bonsai_lang_ruby::RubyAdapter::new()), files: &[("a.rb", "def entry(args)\n  begin\n    raise StandardError.new(args)\n  rescue StandardError => e\n    copy = e\n    sink(copy)\n  end\nend\n")], entry: "entry", seed: &["args"], sink: "sink" });
+    // Ruby's raise is a runtime call, not throw syntax. Supply the exact
+    // compiler call span just as the rulepack model does in production;
+    // the rule-free engine must not guess exception semantics from its name.
+    let db = crate::helpers::build_db(
+        Arc::new(bonsai_lang_ruby::RubyAdapter::new()),
+        &[("a.rb", "def entry(args)\n  begin\n    raise StandardError.new(args)\n  rescue StandardError => e\n    copy = e\n    sink(copy)\n  end\nend\n")],
+    );
+    let entry = crate::helpers::func_id_or_none(&db, "entry").expect("entry");
+    let global = db.global_index();
+    let decl = global
+        .decl_of(bonsai_common::SymbolId::new(entry.raw()))
+        .expect("entry IR");
+    let mut config = crate::helpers::cfg();
+    bonsai_lang_api::kit::for_each_flow_event(&decl.flow_events, &mut |event| {
+        if let bonsai_lang_api::FlowEvent::Call { name, span, .. } = event {
+            if name == "raise" {
+                config.throwing_call_sites.push(*span);
+            }
+        }
+    });
+    assert_eq!(config.throwing_call_sites.len(), 1);
+    let result = bonsai_taint::interprocedural_taint(entry, &crate::helpers::seed(&["args"]), &config, &db);
+    assert!(
+        crate::helpers::sink_received_arg_text(&result, "sink", "copy"),
+        "{result:?}"
+    );
 }
 
 #[test]

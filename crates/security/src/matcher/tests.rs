@@ -1746,8 +1746,12 @@ fn ruby_template_package_facts_include_manifest_evidence() {
             .join("security-patterns"),
     )
     .expect("load bundled rulepack");
-    let _snapshot =
-        crate::deps::begin_workspace_dependency_package_snapshot(&root, ws.vfs().instance_id(), &pack);
+    let _snapshot = crate::deps::begin_workspace_dependency_package_snapshot(
+        &root,
+        ws.vfs().instance_id(),
+        &pack,
+        Some(&ws),
+    );
     let packages =
         file_package_set_with_workspace_context_and_retention(&ws, file, true, FactRetention::Transient);
     assert!(
@@ -1796,8 +1800,12 @@ fn adapter_owned_source_package_facts_include_language_scoped_manifest_evidence(
             .join("security-patterns"),
     )
     .expect("load bundled rulepack");
-    let _snapshot =
-        crate::deps::begin_workspace_dependency_package_snapshot(&root, ws.vfs().instance_id(), &pack);
+    let _snapshot = crate::deps::begin_workspace_dependency_package_snapshot(
+        &root,
+        ws.vfs().instance_id(),
+        &pack,
+        Some(&ws),
+    );
     let ruby_packages =
         file_package_set_with_workspace_context_and_retention(&ws, ruby_file, true, FactRetention::Transient);
     assert!(

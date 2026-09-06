@@ -41,7 +41,7 @@ mod syntax_highlight;
 mod theme;
 mod ui;
 
-use args::{CacheAction, Cli, Cmd, SecurityAction};
+use args::{CacheAction, Cli, Cmd, ExportFormat, SecurityAction};
 use commands::{
     cmd_args, cmd_cache, cmd_calls, cmd_classes, cmd_comments, cmd_defs, cmd_diagnostics, cmd_dump_ast,
     cmd_dump_callgraph, cmd_dump_cfg, cmd_dump_edges, cmd_dump_hir, cmd_dump_resolution, cmd_dump_resolve,
@@ -186,7 +186,7 @@ macro_rules! cli_println {
     () => {{
         if $crate::page_cache::write("\n") {
         } else {
-            $crate::progress::finish_all_for_output();
+            $crate::output::begin_report();
             if !$crate::output::write_line("") {
                 use std::io::Write as _;
                 let mut h = std::io::stdout().lock();
@@ -200,7 +200,7 @@ macro_rules! cli_println {
         let s: String = std::fmt::format(std::format_args!($($arg)*));
         if $crate::page_cache::write(&format!("{s}\n")) {
         } else {
-            $crate::progress::finish_all_for_output();
+            $crate::output::begin_report();
             if !$crate::output::write_line(&s) {
                 let mut h = std::io::stdout().lock();
                 let _ = h.write_all(s.as_bytes());
@@ -220,7 +220,7 @@ macro_rules! cli_print {
         let s: String = std::fmt::format(std::format_args!($($arg)*));
         if $crate::page_cache::write(&s) {
         } else {
-            $crate::progress::finish_all_for_output();
+            $crate::output::begin_report();
             if !$crate::output::write_str(&s) {
                 let mut h = std::io::stdout().lock();
                 let _ = h.write_all(s.as_bytes());
@@ -424,13 +424,28 @@ fn real_main() -> Result<()> {
     if html_output.is_some() {
         force_json_format(&mut cli.command)?;
     }
+    if matches!(
+        &cli.command,
+        Cmd::Export {
+            full_propagations: true,
+            format,
+            ..
+        } if *format != ExportFormat::Json
+    ) {
+        let error = clap::Error::raw(
+            clap::error::ErrorKind::ArgumentConflict,
+            "--full-propagations requires --format json; graph formats contain structural edges, local flow facts, and return summaries only",
+        );
+        std::process::exit(help_theme::render_themed_clap_error(&error));
+    }
     let output_path = html_output.as_ref().or(command_output_path.as_ref());
     let html_context = html_output
         .as_ref()
         .map(|_| html::HtmlDocumentContext::from_argv());
-    output::init(
+    let _output_guard = output::init(
         output_path.map(std::path::PathBuf::as_path),
         html_context.as_ref(),
+        !matches!(&cli.command, Cmd::Index { watch: true, .. }),
     )?;
     if let Some(workspace) = command_workspace_for_page_cache(&cli.command) {
         if page_cache::replay_if_hit(workspace)? {
@@ -1189,9 +1204,8 @@ fn real_main() -> Result<()> {
             rules_dir: rules_dir.as_deref(),
         }),
     };
-    let output_result = output::finish();
     result?;
-    output_result?;
+    output::finish()?;
     Ok(())
 }
 

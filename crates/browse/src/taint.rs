@@ -62,6 +62,7 @@ pub struct TaintReport {
 #[derive(Serialize, serde::Deserialize, Clone, Debug)]
 pub struct TaintRecord {
     pub taint_id: String,
+    pub relation: String,
     pub caller_name: String,
     pub caller_file: String,
     pub caller_line: u32,
@@ -598,7 +599,7 @@ pub(crate) fn build_taint_record_from_cross_call(
     let caller_decl = global.decl_of(bonsai_common::SymbolId::new(ce.caller.raw()))?;
     let callee_decl = global.decl_of(bonsai_common::SymbolId::new(ce.callee.raw()))?;
     let (caller_file, caller_line, _) = format_span(&caller_decl.name_span, ws);
-    let (callee_file, callee_line, _) = format_span(&callee_decl.name_span, ws);
+    let (callee_file, callee_line, callee_column) = format_span(&callee_decl.name_span, ws);
     let (call_file, call_line, call_column) = format_span(&ce.call_span, ws);
 
     let exact_caller = ws.exact_decl(bonsai_common::SymbolId::new(ce.caller.raw()));
@@ -607,16 +608,14 @@ pub(crate) fn build_taint_record_from_cross_call(
     if tainted_args.is_empty() {
         return None;
     }
-    let id_args: Vec<String> = tainted_args
+    let mut id_args: Vec<String> = tainted_args
         .iter()
-        .map(|arg| {
-            if arg.param_name.is_empty() {
-                arg.value_text.clone()
-            } else {
-                arg.param_name.clone()
-            }
-        })
+        .map(|arg| format!("{}\0{}\0{}", arg.index, arg.param_name, arg.value_text))
         .collect();
+    id_args.push(format!(
+        "{:?}\0{callee_file}:{callee_line}:{callee_column}",
+        ce.relation
+    ));
 
     let taint_id = compute_taint_id(
         &caller_decl.name,
@@ -631,6 +630,15 @@ pub(crate) fn build_taint_record_from_cross_call(
 
     Some(TaintRecord {
         taint_id,
+        relation: match ce.relation {
+            bonsai_idg::CrossCallRelation::Argument => "argument",
+            bonsai_idg::CrossCallRelation::Callback => "callback",
+            bonsai_idg::CrossCallRelation::Capture => "capture",
+            bonsai_idg::CrossCallRelation::Return => "return",
+            bonsai_idg::CrossCallRelation::FieldState => "field_state",
+            bonsai_idg::CrossCallRelation::SharedStateCall => "shared_state_call",
+        }
+        .to_owned(),
         caller_name: caller_decl.name.clone(),
         caller_file,
         caller_line,
@@ -667,199 +675,64 @@ fn tainted_args_from_cross_call(
     caller_decl: &bonsai_lang_api::Decl,
     callee_decl: &bonsai_lang_api::Decl,
 ) -> Option<Vec<TaintedArgRecord>> {
-    if ce.arg_idx == u32::MAX {
-        if matches!(
-            ce.relation,
-            bonsai_idg::CrossCallRelation::Argument | bonsai_idg::CrossCallRelation::Capture
-        ) {
-            if let Some((receiver, arg_count)) = caller_call_receiver_and_arg_count(caller_decl, ce.call_span)
-                .filter(|(receiver, _)| !receiver.trim().is_empty())
-            {
-                let (index, param_name) = if arg_count == 0 {
-                    (usize::MAX, "receiver".to_string())
-                } else if ce.param_idx != u32::MAX {
-                    (
-                        ce.param_idx as usize,
-                        callee_decl
-                            .params
-                            .get(ce.param_idx as usize)
-                            .cloned()
-                            .unwrap_or_default(),
-                    )
-                } else {
-                    return Some(Vec::new());
-                };
-                return Some(vec![TaintedArgRecord {
-                    index,
-                    value_text: receiver,
-                    param_name,
-                }]);
-            }
-        }
-        if matches!(
-            ce.relation,
-            bonsai_idg::CrossCallRelation::Callback | bonsai_idg::CrossCallRelation::Capture
-        ) && ce.param_idx != u32::MAX
-        {
-            let param_name = callee_decl
-                .params
-                .get(ce.param_idx as usize)
-                .cloned()
-                .unwrap_or_default();
-            return Some(vec![TaintedArgRecord {
+    let param_name = callee_decl
+        .params
+        .get(ce.param_idx as usize)
+        .cloned()
+        .unwrap_or_default();
+    if matches!(
+        ce.relation,
+        bonsai_idg::CrossCallRelation::Callback | bonsai_idg::CrossCallRelation::Capture
+    ) {
+        return Some(if ce.param_idx == u32::MAX || param_name.is_empty() {
+            Vec::new()
+        } else {
+            vec![TaintedArgRecord {
                 index: ce.param_idx as usize,
                 value_text: param_name.clone(),
                 param_name,
-            }]);
-        }
+            }]
+        });
+    }
+    if ce.relation != bonsai_idg::CrossCallRelation::Argument {
         return Some(Vec::new());
     }
-    let value_text = caller_arg_value_text(caller_decl, ce.call_span, ce.arg_idx).unwrap_or_default();
-    let param_name = if ce.param_idx == u32::MAX {
-        String::new()
+    let mut found = None;
+    bonsai_lang_api::kit::for_each_flow_event(&caller_decl.flow_events, &mut |event| {
+        if let FlowEvent::Call {
+            span, receiver, args, ..
+        } = event
+        {
+            if *span == ce.call_span {
+                found = Some((receiver, args));
+            }
+        }
+    });
+    let (receiver, args) = found?;
+    let index = if ce.arg_idx != u32::MAX {
+        Some(ce.arg_idx as usize)
+    } else if callee_decl.receiver_param_index == Some(ce.param_idx as usize) || args.is_empty() {
+        Some(usize::MAX)
+    } else if ce.param_idx != u32::MAX {
+        bonsai_lang_api::argument_index_for_parameter(
+            ce.param_idx as usize,
+            args.iter().map(|arg| arg.name.as_deref()),
+            &callee_decl.params,
+            callee_decl.receiver_param_index,
+        )
     } else {
-        callee_decl
-            .params
-            .get(ce.param_idx as usize)
-            .cloned()
-            .unwrap_or_default()
+        None
+    }?;
+    let value_text = if index == usize::MAX {
+        receiver.clone()?
+    } else {
+        args.get(index)?.value_text.clone()
     };
     Some(vec![TaintedArgRecord {
-        index: ce.arg_idx as usize,
+        index,
         value_text,
         param_name,
     }])
-}
-
-/// Look up the textual form of the `arg_idx`-th argument of the
-/// `Call` event whose span is `call_span` inside `caller`. Returns
-/// `None` when the caller isn't in the index, isn't callable, or no
-/// Call event matches the span / index.
-fn caller_arg_value_text(
-    caller_decl: &bonsai_lang_api::Decl,
-    call_span: bonsai_common::Span,
-    arg_idx: u32,
-) -> Option<String> {
-    fn find_call_arg<'a>(
-        events: &'a [FlowEvent],
-        target_span: bonsai_common::Span,
-        idx: usize,
-    ) -> Option<&'a bonsai_lang_api::CallArg> {
-        for event in events {
-            match event {
-                FlowEvent::Call { span, args, .. } if *span == target_span => {
-                    return args.get(idx);
-                }
-                FlowEvent::Branch {
-                    then_events,
-                    else_events,
-                    ..
-                } => {
-                    if let Some(found) = find_call_arg(then_events, target_span, idx) {
-                        return Some(found);
-                    }
-                    if let Some(found) = find_call_arg(else_events, target_span, idx) {
-                        return Some(found);
-                    }
-                }
-                FlowEvent::Try {
-                    body,
-                    catch_events,
-                    finally_events,
-                    ..
-                } => {
-                    if let Some(found) = find_call_arg(body, target_span, idx) {
-                        return Some(found);
-                    }
-                    if let Some(found) = find_call_arg(catch_events, target_span, idx) {
-                        return Some(found);
-                    }
-                    if let Some(found) = find_call_arg(finally_events, target_span, idx) {
-                        return Some(found);
-                    }
-                }
-                FlowEvent::Loop {
-                    condition_events,
-                    body,
-                    update_events,
-                    ..
-                } => {
-                    if let Some(found) = find_call_arg(condition_events, target_span, idx)
-                        .or_else(|| find_call_arg(body, target_span, idx))
-                        .or_else(|| find_call_arg(update_events, target_span, idx))
-                    {
-                        return Some(found);
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-    let arg = find_call_arg(&caller_decl.flow_events, call_span, arg_idx as usize)?;
-    Some(arg.value_text.clone())
-}
-
-fn caller_call_receiver_and_arg_count(
-    caller_decl: &bonsai_lang_api::Decl,
-    call_span: bonsai_common::Span,
-) -> Option<(String, usize)> {
-    fn find_call_receiver(events: &[FlowEvent], target_span: bonsai_common::Span) -> Option<(&str, usize)> {
-        for event in events {
-            match event {
-                FlowEvent::Call {
-                    span, receiver, args, ..
-                } if *span == target_span => {
-                    return receiver.as_deref().map(|receiver| (receiver, args.len()));
-                }
-                FlowEvent::Branch {
-                    then_events,
-                    else_events,
-                    ..
-                } => {
-                    if let Some(found) = find_call_receiver(then_events, target_span) {
-                        return Some(found);
-                    }
-                    if let Some(found) = find_call_receiver(else_events, target_span) {
-                        return Some(found);
-                    }
-                }
-                FlowEvent::Try {
-                    body,
-                    catch_events,
-                    finally_events,
-                    ..
-                } => {
-                    if let Some(found) = find_call_receiver(body, target_span) {
-                        return Some(found);
-                    }
-                    if let Some(found) = find_call_receiver(catch_events, target_span) {
-                        return Some(found);
-                    }
-                    if let Some(found) = find_call_receiver(finally_events, target_span) {
-                        return Some(found);
-                    }
-                }
-                FlowEvent::Loop {
-                    condition_events,
-                    body,
-                    update_events,
-                    ..
-                } => {
-                    if let Some(found) = find_call_receiver(condition_events, target_span)
-                        .or_else(|| find_call_receiver(body, target_span))
-                        .or_else(|| find_call_receiver(update_events, target_span))
-                    {
-                        return Some(found);
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-    find_call_receiver(&caller_decl.flow_events, call_span)
-        .map(|(receiver, arg_count)| (receiver.to_string(), arg_count))
 }
 
 fn caller_call_name(

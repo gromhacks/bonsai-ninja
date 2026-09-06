@@ -39,6 +39,7 @@ tree-sitter = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
+roxmltree = { workspace = true }
 bonsai_adapters = { package = "bonsai-ninja-adapters", path = "../adapters" }
 bonsai_lang_python = { package = "bonsai-ninja-lang-python", path = "../lang_python" }
 tempfile = { workspace = true }

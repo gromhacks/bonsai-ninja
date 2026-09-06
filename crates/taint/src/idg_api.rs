@@ -25,6 +25,8 @@ pub use summary::{
 
 #[derive(Clone, Debug)]
 pub struct InterTaintConfig {
+    /// Exact runtime exception calls, compiled from complete rule matches.
+    pub throwing_call_sites: Vec<Span>,
     /// Declarative transfer-time shapes honored by the compiler IDG.
     pub clean_output_overwrites: Vec<CleanOutputOverwrite>,
     pub clean_receiver_overwrites: Vec<CleanReceiverOverwrite>,
@@ -40,6 +42,7 @@ pub struct InterTaintConfig {
 impl Default for InterTaintConfig {
     fn default() -> Self {
         Self {
+            throwing_call_sites: Vec::new(),
             clean_output_overwrites: Vec::new(),
             clean_receiver_overwrites: Vec::new(),
             source_output_args: Vec::new(),

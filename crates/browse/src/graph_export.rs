@@ -9,7 +9,7 @@
 use crate::common::format_span;
 use crate::imports::{imports, ImportsFilters};
 use bonsai_common::FuncId;
-use bonsai_lang_api::{DeclKind, FlowEvent};
+use bonsai_lang_api::{DeclKind, ExpressionFlow, FlowEvent};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 use serde_json::{Number, Value};
@@ -120,7 +120,11 @@ impl GraphProjection {
 pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjection {
     let mut graph = GraphProjection::default();
     let db = ws.db();
-    let workspace_id = "workspace".to_string();
+    let canonical_root = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    let namespace = canonical_root.to_string_lossy();
+    let workspace_id = stable_graph_id("workspace", &namespace);
 
     graph.node(
         workspace_id.clone(),
@@ -134,24 +138,21 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
         ],
     );
 
-    let idg = db
-        .idg_service()
-        .unwrap_or_else(|| ws.build_and_seed_idg_service());
-    // The IDG owns the canonical declaration/type header generation. Build it
-    // before borrowing those headers so the workspace can consume and release
-    // the larger resolver-linkage table at the compiler phase boundary.
-    let global = idg.global_linkage_index();
+    // Keep compiler phases separate, as native export does: project linkage
+    // and local bodies before retaining the exact IDG for return summaries.
+    ws.release_idg_service_cache();
+    let global = ws.compiler_header_index();
     let mut file_ids: BTreeMap<String, String> = BTreeMap::new();
     for file in global.all_files() {
-        let path = ws
-            .vfs()
-            .path(file)
-            .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string());
+        let path = ws.vfs().path(file).map_or_else(
+            |_| "<unknown>".to_string(),
+            |path| crate::workspace_relative_path(ws, &path.display().to_string()),
+        );
         let language = db
             .adapter_for(file)
             .map(|a| a.language_id().as_str().to_string())
             .unwrap_or_default();
-        let file_id = stable_graph_id("file", &path);
+        let file_id = stable_graph_id("file", &format!("{namespace}\0{path}"));
         file_ids.insert(path.clone(), file_id.clone());
         graph.node(
             file_id.clone(),
@@ -168,7 +169,7 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
         let Some(file_id) = file_ids.get(&import.file) else {
             continue;
         };
-        let module_id = stable_graph_id("module", &import.module);
+        let module_id = stable_graph_id("module", &format!("{namespace}\0{}", import.module));
         graph.node(
             module_id.clone(),
             "Module",
@@ -183,19 +184,29 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
                 ("original_name", opt_string(import.original_name.as_deref())),
                 ("wildcard", Value::Bool(import.is_wildcard)),
                 ("line", number(import.line)),
+                ("column", number(import.column)),
                 ("local_bindings", strings_value(&import.local_bindings)),
             ],
         );
     }
 
     let mut func_ids: BTreeMap<u32, String> = BTreeMap::new();
+    let mut param_counts = BTreeMap::new();
     for file in global.all_files() {
+        let members = crate::common::callable_members_by_parent(global.decls_in(file));
         for decl in global.decls_in(file) {
             match decl.kind {
                 DeclKind::Function | DeclKind::Method | DeclKind::Constructor => {
-                    let (path, line, _) = format_span(&decl.name_span, ws);
-                    let func_id = format!("func_{}", decl.symbol.raw());
+                    let (path, line, column) = format_span(&decl.name_span, ws);
+                    let func_id = stable_graph_id(
+                        "func",
+                        &format!(
+                            "{namespace}\0{path}\0{}\0{}\0{}\0{:?}",
+                            decl.name, decl.name_span.start, decl.name_span.end, decl.kind
+                        ),
+                    );
                     func_ids.insert(decl.symbol.raw(), func_id.clone());
+                    param_counts.insert(decl.symbol.raw(), decl.params.len());
                     graph.node(
                         func_id.clone(),
                         "Function",
@@ -205,6 +216,7 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
                             ("qualified_name", opt_string(decl.qualified_name.as_deref())),
                             ("file", Value::String(path.clone())),
                             ("line", number(line)),
+                            ("column", number(column)),
                             ("kind", Value::String(format!("{:?}", decl.kind).to_lowercase())),
                             ("params", strings_value(&decl.params)),
                         ],
@@ -218,11 +230,19 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
                 | DeclKind::Trait
                 | DeclKind::Interface
                 | DeclKind::Enum => {
-                    let (path, line, _) = format_span(&decl.name_span, ws);
-                    let methods = methods_inside_decl(global.decls_in(file), decl);
+                    let (path, line, column) = format_span(&decl.name_span, ws);
+                    let methods: Vec<_> = members
+                        .get(&decl.symbol)
+                        .into_iter()
+                        .flatten()
+                        .map(|member| member.name.clone())
+                        .collect();
                     let class_id = stable_graph_id(
                         "class",
-                        &format!("{path}\0{}\0{line}\0{:?}", decl.name, decl.kind),
+                        &format!(
+                            "{namespace}\0{path}\0{}\0{line}\0{column}\0{:?}",
+                            decl.name, decl.kind
+                        ),
                     );
                     graph.node(
                         class_id.clone(),
@@ -232,6 +252,8 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
                             ("kind", Value::String(format!("{:?}", decl.kind).to_lowercase())),
                             ("file", Value::String(path.clone())),
                             ("line", number(line)),
+                            ("column", number(column)),
+                            ("symbol_id", number(decl.symbol.raw())),
                             ("method_count", number_usize(methods.len())),
                             ("methods", strings_value(&methods)),
                         ],
@@ -271,8 +293,9 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
         );
     }
 
-    let summary_funcs: Vec<FuncId> = func_ids.keys().copied().map(FuncId::new).collect();
-    let return_taint_by_func = idg.return_taint_param_indices_for_funcs(&summary_funcs);
+    drop(resolved);
+    ws.release_resolved_call_graph_cache();
+    drop(global);
 
     for file in ws.vfs().all_files() {
         let Some(index) = ws.exact_decl_index_shared(file) else {
@@ -297,7 +320,7 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
             collect_structural_graph_facts(&decl.flow_events, &mut facts);
             for (kind, tokens) in facts {
                 for token in tokens {
-                    let token_id = stable_graph_id("token", &format!("{kind}\0{token}"));
+                    let token_id = stable_graph_id("token", &format!("{namespace}\0{kind}\0{token}"));
                     graph.node(
                         token_id.clone(),
                         "Token",
@@ -314,34 +337,42 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
                     );
                 }
             }
-
-            let summary_func = FuncId::new(decl.symbol.raw());
-            let returns_taint_of = return_taint_by_func
-                .get(&summary_func)
-                .into_iter()
-                .flatten()
-                .copied()
-                .take_while(|idx| (*idx as usize) < decl.params.len());
-            for param_index in returns_taint_of {
-                let param_index = param_index as usize;
-                let param_id = stable_graph_id("param", &format!("{func_id}\0{param_index}"));
-                graph.node(
-                    param_id.clone(),
-                    "Parameter",
-                    [
-                        ("function_id", Value::String(func_id.clone())),
-                        ("param_index", number_usize(param_index)),
-                    ],
-                );
-                graph.edge(
-                    func_id.clone(),
-                    param_id,
-                    "RETURNS_TAINT_OF",
-                    [("param_index", number_usize(param_index))],
-                );
-            }
         }
     }
+
+    ws.release_exact_body_cache();
+    ws.release_compiler_linkage_cache();
+    ws.release_compiler_header_cache();
+    let idg = ws.build_and_seed_idg_service();
+    let summary_funcs: Vec<FuncId> = func_ids.keys().copied().map(FuncId::new).collect();
+    let return_taint_by_func = idg.return_taint_param_indices_for_funcs(&summary_funcs);
+    for (symbol, func_id) in &func_ids {
+        let returns_taint_of = return_taint_by_func
+            .get(&FuncId::new(*symbol))
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|idx| (*idx as usize) < param_counts[symbol]);
+        for param_index in returns_taint_of {
+            let param_id = stable_graph_id("param", &format!("{func_id}\0{param_index}"));
+            graph.node(
+                param_id.clone(),
+                "Parameter",
+                [
+                    ("function_id", Value::String(func_id.clone())),
+                    ("param_index", number(param_index)),
+                ],
+            );
+            graph.edge(
+                func_id.clone(),
+                param_id,
+                "RETURNS_TAINT_OF",
+                [("param_index", number(param_index))],
+            );
+        }
+    }
+    drop(idg);
+    ws.release_idg_service_cache();
 
     graph.node(
         workspace_id,
@@ -367,6 +398,7 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
             .then(a.label.cmp(&b.label))
             .then(a.id.cmp(&b.id))
     });
+    graph.edges.dedup_by(|a, b| a.id == b.id);
     graph
 }
 
@@ -382,111 +414,161 @@ fn collect_structural_graph_facts(
     events: &[FlowEvent],
     facts: &mut BTreeMap<&'static str, BTreeSet<String>>,
 ) {
-    for event in events {
-        match event {
-            FlowEvent::Call {
-                name, receiver, args, ..
-            } => {
-                insert_graph_fact(facts, "call", name);
-                if let Some(receiver) = receiver {
-                    insert_graph_fact(facts, "read", receiver);
-                }
-                for arg in args {
-                    insert_graph_fact(facts, "arg", &arg.value_text);
-                    if let Some(place) = arg.place.as_deref() {
-                        insert_graph_fact(facts, "read", place);
+    let mut pending = vec![events];
+    while let Some(events) = pending.pop() {
+        for event in events {
+            match event {
+                FlowEvent::Call {
+                    name, receiver, args, ..
+                } => {
+                    insert_graph_fact(facts, "call", name);
+                    if let Some(receiver) = receiver {
+                        insert_graph_fact(facts, "read", receiver);
+                    }
+                    for arg in args {
+                        insert_graph_fact(facts, "arg", &arg.value_text);
+                        if let Some(place) = arg.place.as_deref() {
+                            insert_graph_fact(facts, "read", place);
+                        }
+                        for name in &arg.source_names {
+                            insert_graph_fact(facts, "read", name);
+                        }
                     }
                 }
+                FlowEvent::Assign {
+                    target,
+                    source_name,
+                    source_names,
+                    source_call,
+                    source_call_args,
+                    ..
+                } => {
+                    insert_graph_fact(facts, "write", target);
+                    if let Some(source_name) = source_name {
+                        insert_graph_fact(facts, "read", source_name);
+                    }
+                    for source_name in source_names {
+                        insert_graph_fact(facts, "read", source_name);
+                    }
+                    if let Some(source_call) = source_call {
+                        insert_graph_fact(facts, "call", source_call);
+                    }
+                    for arg in source_call_args {
+                        insert_graph_fact(facts, "arg", arg);
+                    }
+                }
+                FlowEvent::AggregateAssign {
+                    target, value_flow, ..
+                } => {
+                    insert_graph_fact(facts, "write", target);
+                    collect_expression_graph_reads(value_flow, facts);
+                }
+                FlowEvent::Return {
+                    value_text,
+                    value_name,
+                    value_flow,
+                    ..
+                } => {
+                    collect_expression_graph_reads(value_flow, facts);
+                    if let Some(value_name) = value_name {
+                        insert_graph_fact(facts, "read", value_name);
+                    }
+                    if let Some(value_text) = value_text {
+                        insert_graph_fact(facts, "arg", value_text);
+                    }
+                }
+                FlowEvent::Throw { value_name, .. } => {
+                    if let Some(value_name) = value_name {
+                        insert_graph_fact(facts, "read", value_name);
+                    }
+                }
+                FlowEvent::Yield {
+                    value_text,
+                    value_flow,
+                    ..
+                } => {
+                    collect_expression_graph_reads(value_flow, facts);
+                    if let Some(value_text) = value_text {
+                        insert_graph_fact(facts, "arg", value_text);
+                    }
+                }
+                FlowEvent::Await {
+                    value_name: value_text,
+                    ..
+                } => {
+                    if let Some(value_text) = value_text {
+                        insert_graph_fact(facts, "read", value_text);
+                    }
+                }
+                FlowEvent::Branch {
+                    condition,
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    if let Some(condition) = condition {
+                        insert_graph_fact(facts, "arg", condition);
+                    }
+                    pending.extend([then_events.as_slice(), else_events.as_slice()]);
+                }
+                FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    pending.extend([
+                        condition_events.as_slice(),
+                        body.as_slice(),
+                        update_events.as_slice(),
+                    ]);
+                }
+                FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                    pending.push(body);
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    catch_param,
+                    catch_arms,
+                    ..
+                } => {
+                    if let Some(catch_param) = catch_param {
+                        insert_graph_fact(facts, "write", catch_param);
+                    }
+                    for arm in catch_arms {
+                        if let Some(param) = &arm.parameter {
+                            insert_graph_fact(facts, "write", param);
+                        }
+                    }
+                    pending.extend([
+                        body.as_slice(),
+                        catch_events.as_slice(),
+                        finally_events.as_slice(),
+                    ]);
+                }
+                _ => {}
             }
-            FlowEvent::Assign {
-                target,
-                source_name,
-                source_names,
-                source_call,
-                source_call_args,
-                ..
-            } => {
-                insert_graph_fact(facts, "write", target);
-                if let Some(source_name) = source_name {
-                    insert_graph_fact(facts, "read", source_name);
-                }
-                for source_name in source_names {
-                    insert_graph_fact(facts, "read", source_name);
-                }
-                if let Some(source_call) = source_call {
-                    insert_graph_fact(facts, "call", source_call);
-                }
-                for arg in source_call_args {
-                    insert_graph_fact(facts, "arg", arg);
-                }
-            }
-            FlowEvent::Return {
-                value_text,
-                value_name,
-                ..
-            } => {
-                if let Some(value_name) = value_name {
-                    insert_graph_fact(facts, "read", value_name);
-                }
-                if let Some(value_text) = value_text {
-                    insert_graph_fact(facts, "arg", value_text);
-                }
-            }
-            FlowEvent::Throw { value_name, .. } => {
-                if let Some(value_name) = value_name {
-                    insert_graph_fact(facts, "read", value_name);
-                }
-            }
-            FlowEvent::Yield { value_text, .. }
-            | FlowEvent::Await {
-                value_name: value_text,
-                ..
-            } => {
-                if let Some(value_text) = value_text {
-                    insert_graph_fact(facts, "read", value_text);
-                }
-            }
-            FlowEvent::Branch {
-                condition,
-                then_events,
-                else_events,
-                ..
-            } => {
-                if let Some(condition) = condition {
-                    insert_graph_fact(facts, "arg", condition);
-                }
-                collect_structural_graph_facts(then_events, facts);
-                collect_structural_graph_facts(else_events, facts);
-            }
-            FlowEvent::Loop {
-                condition_events,
-                body,
-                update_events,
-                ..
-            } => {
-                collect_structural_graph_facts(condition_events, facts);
-                collect_structural_graph_facts(body, facts);
-                collect_structural_graph_facts(update_events, facts);
-            }
-            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_structural_graph_facts(body, facts);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                catch_param,
-                ..
-            } => {
-                if let Some(catch_param) = catch_param {
-                    insert_graph_fact(facts, "write", catch_param);
-                }
-                collect_structural_graph_facts(body, facts);
-                collect_structural_graph_facts(catch_events, facts);
-                collect_structural_graph_facts(finally_events, facts);
-            }
-            _ => {}
         }
+    }
+}
+
+fn collect_expression_graph_reads(
+    value: &ExpressionFlow,
+    facts: &mut BTreeMap<&'static str, BTreeSet<String>>,
+) {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        if let Some(place) = &value.place {
+            insert_graph_fact(facts, "read", place);
+        }
+        for name in &value.source_names {
+            insert_graph_fact(facts, "read", name);
+        }
+        pending.extend(value.aggregate_fields.iter().map(|field| &field.value));
+        pending.extend(&value.tuple_items);
+        pending.extend(&value.spreads);
     }
 }
 
@@ -499,7 +581,7 @@ pub fn render_graph_export(
     let graph = graph_projection(ws, workspace_root);
     match format {
         GraphExportFormat::Networkx => render_networkx_json(&graph, workspace_root),
-        GraphExportFormat::Graphml => Ok(render_graphml(&graph)),
+        GraphExportFormat::Graphml => render_graphml(&graph),
         GraphExportFormat::Cypher => Ok(render_cypher(&graph)),
     }
 }
@@ -556,9 +638,8 @@ pub fn render_networkx_json(graph: &GraphProjection, workspace_root: &Path) -> s
     serde_json::to_string(&out)
 }
 
-/// Render GraphML.
-#[must_use]
-pub fn render_graphml(graph: &GraphProjection) -> String {
+/// Render lossless XML 1.0 GraphML, rejecting characters XML cannot represent.
+pub fn render_graphml(graph: &GraphProjection) -> serde_json::Result<String> {
     let mut node_keys: BTreeSet<String> = BTreeSet::from(["label".to_string(), "labels".to_string()]);
     let mut edge_keys: BTreeSet<String> = BTreeSet::from(["label".to_string()]);
     for node in graph.nodes.values() {
@@ -575,26 +656,26 @@ pub fn render_graphml(graph: &GraphProjection) -> String {
         let _ = writeln!(
             out,
             r#"  <key id="n_{}" for="node" attr.name="{}" attr.type="string"/>"#,
-            xml_attr(key),
-            xml_attr(key)
+            xml_attr(key)?,
+            xml_attr(key)?
         );
     }
     for key in &edge_keys {
         let _ = writeln!(
             out,
             r#"  <key id="e_{}" for="edge" attr.name="{}" attr.type="string"/>"#,
-            xml_attr(key),
-            xml_attr(key)
+            xml_attr(key)?,
+            xml_attr(key)?
         );
     }
     let _ = writeln!(out, r#"  <graph id="bonsai" edgedefault="directed">"#);
     for node in graph.nodes.values() {
-        let _ = writeln!(out, r#"    <node id="{}">"#, xml_attr(&node.id));
+        let _ = writeln!(out, r#"    <node id="{}">"#, xml_attr(&node.id)?);
         let labels: Vec<String> = node.labels.iter().cloned().collect();
-        write_graphml_data(&mut out, "n_label", labels.first().map_or("", String::as_str));
-        write_graphml_data(&mut out, "n_labels", &labels.join(","));
+        write_graphml_data(&mut out, "n_label", labels.first().map_or("", String::as_str))?;
+        write_graphml_data(&mut out, "n_labels", &labels.join(","))?;
         for (key, value) in &node.properties {
-            write_graphml_data(&mut out, &format!("n_{key}"), &graph_value_string(value));
+            write_graphml_data(&mut out, &format!("n_{key}"), &graph_value_string(value))?;
         }
         let _ = writeln!(out, "    </node>");
     }
@@ -602,19 +683,19 @@ pub fn render_graphml(graph: &GraphProjection) -> String {
         let _ = writeln!(
             out,
             r#"    <edge id="{}" source="{}" target="{}">"#,
-            xml_attr(&edge.id),
-            xml_attr(&edge.source),
-            xml_attr(&edge.target)
+            xml_attr(&edge.id)?,
+            xml_attr(&edge.source)?,
+            xml_attr(&edge.target)?
         );
-        write_graphml_data(&mut out, "e_label", &edge.label);
+        write_graphml_data(&mut out, "e_label", &edge.label)?;
         for (key, value) in &edge.properties {
-            write_graphml_data(&mut out, &format!("e_{key}"), &graph_value_string(value));
+            write_graphml_data(&mut out, &format!("e_{key}"), &graph_value_string(value))?;
         }
         let _ = writeln!(out, "    </edge>");
     }
     let _ = writeln!(out, "  </graph>");
     let _ = writeln!(out, "</graphml>");
-    out
+    Ok(out)
 }
 
 /// Render Cypher statements for Neo4j-compatible import.
@@ -658,27 +739,6 @@ pub fn render_cypher(graph: &GraphProjection) -> String {
         );
     }
     out
-}
-
-/// Collect the names of every callable decl whose span sits
-/// inside `container`'s span — used to attach a `methods` list to
-/// each class node.
-fn methods_inside_decl(decls: &[bonsai_lang_api::Decl], container: &bonsai_lang_api::Decl) -> Vec<String> {
-    decls
-        .iter()
-        .filter(|decl| {
-            matches!(
-                decl.kind,
-                DeclKind::Method | DeclKind::Constructor | DeclKind::Function
-            )
-        })
-        .filter(|decl| {
-            container.span.file == decl.span.file
-                && container.span.start <= decl.span.start
-                && decl.span.end <= container.span.end
-        })
-        .map(|decl| decl.name.clone())
-        .collect()
 }
 
 /// Build a stable graph id of the form `<prefix>_<16-hex>` over
@@ -727,26 +787,39 @@ fn graph_value_string(value: &Value) -> String {
     }
 }
 
-fn write_graphml_data(out: &mut String, key: &str, value: &str) {
+fn write_graphml_data(out: &mut String, key: &str, value: &str) -> serde_json::Result<()> {
     let _ = writeln!(
         out,
         r#"      <data key="{}">{}</data>"#,
-        xml_attr(key),
-        xml_text(value)
+        xml_attr(key)?,
+        xml_text(value)?
     );
+    Ok(())
 }
 
-fn xml_attr(value: &str) -> String {
+fn xml_attr(value: &str) -> serde_json::Result<String> {
     xml_text(value)
 }
 
-fn xml_text(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+fn xml_text(value: &str) -> serde_json::Result<String> {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            // XML normalizes literal CR and attribute whitespace. References
+            // preserve the exact original character in both text and attributes.
+            '\r' => out.push_str("&#13;"),
+            '\n' => out.push_str("&#10;"),
+            '\t' => out.push_str("&#9;"),
+            '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}' => out.push(ch),
+            _ => return Err(<serde_json::Error as serde::ser::Error>::custom(format!("GraphML cannot represent U+{:04X} in XML 1.0; use native JSON or NetworkX JSON to preserve this value", u32::from(ch)))),
+        }
+    }
+    Ok(out)
 }
 
 /// Cypher label: uppercase ASCII alphanumerics + underscore.
@@ -777,10 +850,11 @@ fn cypher_map(properties: &BTreeMap<String, Value>) -> String {
 }
 
 fn cypher_property_key(key: &str) -> String {
-    let valid = key
-        .chars()
-        .enumerate()
-        .all(|(idx, ch)| ch == '_' || (ch.is_ascii_alphanumeric() && (idx > 0 || !ch.is_ascii_digit())));
+    let valid = !key.is_empty()
+        && key
+            .chars()
+            .enumerate()
+            .all(|(idx, ch)| ch == '_' || (ch.is_ascii_alphanumeric() && (idx > 0 || !ch.is_ascii_digit())));
     if valid {
         key.to_string()
     } else {
@@ -793,7 +867,15 @@ fn cypher_value(value: &Value) -> String {
         Value::Null => "null".to_string(),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
-        Value::String(value) => format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'")),
+        Value::String(value) => format!(
+            "'{}'",
+            value
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t")
+        ),
         Value::Array(values) => format!(
             "[{}]",
             values.iter().map(cypher_value).collect::<Vec<_>>().join(", ")

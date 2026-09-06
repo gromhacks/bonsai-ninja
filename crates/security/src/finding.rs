@@ -136,6 +136,11 @@ pub struct TaintedArgInfo {
 /// every argument the taint engine propagated across that edge.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct TaintPropagationStep {
+    /// A projected storage write/read relation, not a resolved call. The
+    /// location identifies the exact destination read; no positional
+    /// argument claim is made for this kind of step.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub storage_transfer: Option<String>,
     pub caller: String,
     pub callee: String,
     pub file: String,

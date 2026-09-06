@@ -7,7 +7,7 @@
 //! so normal CI remains portable.
 
 use std::collections::BTreeSet;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -75,6 +75,45 @@ fn large_repo_gate_required() -> bool {
     std::env::var("BONSAI_REQUIRE_ELASTICSEARCH_GATE")
         .ok()
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+}
+
+/// The compiler/IDG must finish without gaps. Dependency coverage is a
+/// separate known limitation: this corpus uses three unmodeled Gradle file
+/// formats, whose contents must not be promoted from raw tokens to packages.
+/// Pin those exact warnings and reject every other incompleteness reason.
+fn assert_elasticsearch_security_coverage(value: &serde_json::Value) {
+    let expected = BTreeSet::from([
+        "dependency-manifest:unsupported:java:build.gradle",
+        "dependency-manifest:unsupported:java:settings.gradle",
+        "dependency-manifest:unsupported:java:gradle.properties",
+    ]);
+    let reasons = value["analysis_incomplete_reasons"]
+        .as_array()
+        .expect("coverage reasons");
+    let mut reported = BTreeSet::new();
+    for reason in reasons {
+        let reason = reason.as_str().expect("coverage reason string");
+        let (kind, count) = reason
+            .rsplit_once(":files=")
+            .unwrap_or_else(|| panic!("unexpected compiler/manifest gap: {reason}"));
+        assert!(
+            expected.contains(kind),
+            "unexpected compiler/manifest gap: {reason}"
+        );
+        assert!(
+            count.parse::<usize>().is_ok_and(|count| count > 0),
+            "invalid manifest count: {reason}"
+        );
+        assert!(reported.insert(kind), "duplicate coverage reason: {reason}");
+    }
+    assert_eq!(
+        reported, expected,
+        "Gradle dependency coverage must not be silently claimed complete: {value}"
+    );
+    assert_eq!(
+        value["analysis_complete"], false,
+        "known manifest gaps must remain visible: {value}"
+    );
 }
 
 fn release_binary_is_fresh(binary: &Path, root: &Path) -> std::io::Result<bool> {
@@ -980,7 +1019,7 @@ fn elasticsearch_source_analysis_and_rulepack_audit_do_not_regress() {
     );
     let source: serde_json::Value =
         serde_json::from_str(&source_out).expect("Elasticsearch source-analysis JSON");
-    assert_eq!(source["analysis_complete"], true, "{source}");
+    assert_elasticsearch_security_coverage(&source);
     assert!(
         source["summary"]["source_flow_count"]
             .as_u64()
@@ -1045,8 +1084,8 @@ fn elasticsearch_native_export_streams_the_complete_graph_without_regressing() {
         "streamed export must keep stdout empty: {stdout}"
     );
 
-    // The document is several GiB. Validate its streaming envelope without
-    // materializing it again in the test process and doubling peak memory.
+    // The document is several GiB. Check its envelope and parse every byte
+    // without materializing it again and doubling the test's peak memory.
     let mut file = std::fs::File::open(&output).expect("open native export");
     let len = file.metadata().expect("native export metadata").len();
     assert!(
@@ -1082,8 +1121,30 @@ fn elasticsearch_native_export_streams_the_complete_graph_without_regressing() {
         tail.contains("\"propagations_mode\":\"compiled_idg\""),
         "export tail lost exact compiled-IDG contract: {tail}"
     );
-    drop(file);
+    file.rewind().expect("rewind native export");
+    validate_streamed_json(BufReader::with_capacity(1024 * 1024, file))
+        .expect("entire native export must be valid JSON, not merely its prefix and tail");
     let _ = std::fs::remove_file(output);
+}
+
+fn validate_streamed_json(reader: impl Read) -> serde_json::Result<()> {
+    let mut decoder = serde_json::Deserializer::from_reader(reader);
+    let _: serde::de::IgnoredAny = serde::Deserialize::deserialize(&mut decoder)?;
+    decoder.end()
+}
+
+#[test]
+fn streaming_export_validation_rejects_malformed_middle_and_trailing_documents() {
+    assert!(
+        validate_streamed_json(br#"{"rows":[{"text":"escaped\ntext"}],"complete":true}"#.as_slice()).is_ok()
+    );
+    for invalid in [
+        br#"{"rows":[{"broken":tru}],"complete":true}"#.as_slice(),
+        br#"{"rows":[],"complete":true} {}"#.as_slice(),
+        br#"{"rows":[],"complete":true"#.as_slice(),
+    ] {
+        assert!(validate_streamed_json(invalid).is_err());
+    }
 }
 
 #[test]
@@ -1132,19 +1193,7 @@ fn elasticsearch_production_taint_analysis_does_not_regress() {
         parsed.get("total_findings").and_then(|v| v.as_u64()).is_some(),
         "taint summary missing total_findings: {parsed}"
     );
-    assert_eq!(
-        parsed.get("analysis_complete").and_then(|value| value.as_bool()),
-        Some(true),
-        "production taint summary must report exact completed analysis: {parsed}"
-    );
-    assert_eq!(
-        parsed
-            .get("analysis_incomplete_reasons")
-            .and_then(|value| value.as_array())
-            .map(Vec::len),
-        Some(0),
-        "production taint summary must not hide incomplete compiler work: {parsed}"
-    );
+    assert_elasticsearch_security_coverage(&parsed);
     for field in ["source_rule_count", "sink_rule_count", "sanitizer_rule_count"] {
         assert!(
             parsed
@@ -1282,21 +1331,7 @@ fn elasticsearch_fresh_cache_taint_planning_does_not_regress() {
     let written = std::fs::read_to_string(&output).expect("read cold taint summary output");
     let parsed: serde_json::Value = serde_json::from_str(&written)
         .unwrap_or_else(|error| panic!("valid cold taint summary JSON ({error}):\n{written}"));
-    assert_eq!(
-        parsed
-            .get("analysis_complete")
-            .and_then(serde_json::Value::as_bool),
-        Some(true),
-        "fresh-cache taint summary must report exact completed analysis: {parsed}"
-    );
-    assert_eq!(
-        parsed
-            .get("analysis_incomplete_reasons")
-            .and_then(serde_json::Value::as_array)
-            .map(Vec::len),
-        Some(0),
-        "fresh-cache taint summary must not hide unchecked compiler work: {parsed}"
-    );
+    assert_elasticsearch_security_coverage(&parsed);
     let _ = std::fs::remove_file(output);
     let _ = std::fs::remove_dir_all(cache);
 }

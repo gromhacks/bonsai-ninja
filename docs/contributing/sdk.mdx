@@ -419,7 +419,7 @@ let graphml = project.export().graphml()?;
 let cypher = project.export().cypher()?;
 ```
 
-Native JSON schema v13 emits workspace-relative code locations, typed
+Native JSON schema v14 emits workspace-relative code locations, typed
 loop-control targets, one top-level absolute `workspace_root`, and the code
 itself: `files[].source` is the full file text that every span indexes into,
 `decls[]` carry `start` / `end` byte spans, `callgraph[]` edges and taint
@@ -430,7 +430,7 @@ consumers should join locations to that root only at
 the filesystem boundary; storing or comparing location identities by absolute
 host path is unsupported. Explicit export-cache rebuilds validate the schema
 version before reuse. The complete machine-readable contract is
-[`schemas/bonsai-native-export-v13.schema.json`](../../schemas/bonsai-native-export-v13.schema.json).
+[`schemas/bonsai-native-export-v14.schema.json`](../../schemas/bonsai-native-export-v14.schema.json).
 
 ---
 

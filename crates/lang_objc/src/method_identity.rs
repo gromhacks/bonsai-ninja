@@ -1,6 +1,6 @@
 //! Objective-C method-family identity from the method signature and attributes.
 //! C functions with similar names are unrelated. See Clang's ARC method-family
-//! contract: https://clang.llvm.org/docs/AutomaticReferenceCounting.html#method-families
+//! contract: <https://clang.llvm.org/docs/AutomaticReferenceCounting.html#method-families>
 
 use bonsai_lang_api::{kit::node_text, DeclIndex, DeclKind};
 use tree_sitter::{Node, Tree};

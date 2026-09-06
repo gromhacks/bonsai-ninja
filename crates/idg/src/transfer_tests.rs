@@ -3772,6 +3772,7 @@ fn configured_clean_output_overwrite_commits_fresh_output_writer() {
         source_output_args: Vec::new(),
         source_callback_args: Vec::new(),
         callback_invocations: Vec::new(),
+        throwing_call_sites: Vec::new(),
         call_result_passthroughs: Vec::new(),
         output_arg_flows: Vec::new(),
         receiver_state_propagations: Vec::new(),
@@ -4933,6 +4934,69 @@ fn throw_with_value_name_records_throw_site_and_emits_edge() {
     assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraThrow), 1);
     assert_eq!(out.throw_sites.len(), 1);
     assert!(out.throw_sites[0].thrown_type.is_some());
+}
+
+#[test]
+fn exact_throwing_call_sites_transfer_arguments_and_stop_only_that_continuation() {
+    let call = |site| FlowEvent::Call {
+        span: site,
+        name: "arbitrary_runtime_operation".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: ["left", "right"]
+            .into_iter()
+            .map(|name| CallArg {
+                span: site,
+                passing_mode: Default::default(),
+                name: None,
+                value_text: name.to_string(),
+                place: Some(name.to_string()),
+                source_names: vec![name.to_string()],
+            })
+            .collect(),
+    };
+    let site = span(10, 20);
+    let mut decl = empty_decl(1, "f");
+    decl.flow_events = vec![FlowEvent::Try {
+        span: span(0, 90),
+        body: vec![call(site), call(span(30, 40))],
+        catch_events: vec![call(span(50, 60))],
+        finally_events: Vec::new(),
+        catch_param: Some("error".to_string()),
+        catch_types: Vec::new(),
+        catch_arms: Vec::new(),
+    }];
+    let options = TransferOptions {
+        throwing_call_sites: vec![site],
+        ..Default::default()
+    };
+    let out = transfer_function_for_with_options(&decl, &options);
+    assert_eq!(out.throw_sites.len(), 1);
+    assert_eq!(
+        count_edges_of(&out, IdgEdgeKind::IntraThrow),
+        3,
+        "both arguments plus the handler edge"
+    );
+    assert_eq!(
+        out.call_sites.len(),
+        2,
+        "only the matched site terminates; the handler's same-name call returns"
+    );
+    let ordinary = transfer_function_for(&decl);
+    assert!(
+        ordinary.throw_sites.is_empty(),
+        "callee spelling alone is not throw evidence"
+    );
+    let duplicate = TransferOptions {
+        throwing_call_sites: vec![site, site],
+        ..Default::default()
+    };
+    assert_eq!(options.semantic_fingerprint(), duplicate.semantic_fingerprint());
+    assert_ne!(
+        options.semantic_fingerprint(),
+        TransferOptions::default().semantic_fingerprint()
+    );
 }
 
 #[test]

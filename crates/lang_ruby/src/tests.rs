@@ -86,6 +86,41 @@ fn frozen_literal_constant_is_an_immutable_static_value() {
 }
 
 #[test]
+fn unparenthesized_single_arguments_keep_exact_scalar_and_aggregate_values() {
+    let source = "take 'plain'\ntake ['item']\ntake({'key' => 'value'})\n";
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&language_from_pack(PACK_NAME).unwrap())
+        .unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    let file = FileId::new(0);
+    let mut index = decl_index_from_tree_with_handler(file, source.as_bytes(), &tree, &HANDLER);
+    populate_ruby_static_value_facts(&mut index, &tree, file, source.as_bytes());
+    let facts = &index.call_argument_values;
+    assert!(
+        facts
+            .iter()
+            .any(|fact| fact.static_value == Some(StaticScalarValue::String("plain".into()))),
+        "{facts:?}"
+    );
+    assert!(
+        facts
+            .iter()
+            .any(|fact| fact.exact_static_sequence_values.as_deref()
+                == Some(&[Some(StaticScalarValue::String("item".into()))][..])),
+        "{facts:?}"
+    );
+    assert!(
+        facts
+            .iter()
+            .any(|fact| fact.exact_static_aggregate_fields.iter().any(
+                |field| field.path == ["key"] && field.value == StaticScalarValue::String("value".into())
+            )),
+        "{facts:?}"
+    );
+}
+
+#[test]
 fn unless_modifier_marks_the_compiler_condition_as_negated() {
     let src = "def safe(path, root)\n  raise ArgumentError unless path.start_with?(root)\nend\n";
     let language = language_from_pack(PACK_NAME).expect("ruby grammar");

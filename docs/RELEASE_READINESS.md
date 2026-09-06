@@ -6,7 +6,7 @@ not duplicate dated performance history.
 
 ## Status
 
-The v0.2.15 candidate incorporates the expanded compiler, adapter, rulepack,
+The post-v0.2.15 working candidate incorporates the expanded compiler, adapter, rulepack,
 CLI, cache, scheduling, and publication checks described below. Local status
 is determined from a fresh run of the listed commands; historical measurements
 are retained only where they document a reproducible scale baseline. A tag is
@@ -17,22 +17,63 @@ audits all pass from the same committed tree.
 The tag workflow remains authoritative for cross-platform packaging, parser
 delivery, signed provenance, checksums, and crates.io publication. Its hosted
 runner thresholds are calibrated from completed exact runs and never turn a
-timeout, work cap, or incomplete analysis into a pass.
+timeout, work cap, or unexpected compiler gap into a pass. Coverage assertions
+also pin known unsupported dependency formats: those reports must retain
+`analysis_complete: false` and their explicit reasons, not claim a complete
+negative dependency result.
 
-The validated product contains:
+The product contains:
 
 - 20 registered Tree-sitter language adapters;
 - one adapter-lowered compiler IR and one production sparse IDG taint engine;
-- 6,478 bundled rules, of which 6,478 are enabled;
-- 11,875 enabled rule examples;
+- 6,479 bundled rules, of which 6,479 are enabled;
+- 11,878 enabled rule examples;
 - native CLI, Rust SDK, SARIF 2.1.0, JSON, HTML, and graph-export surfaces.
+
+## Local candidate verification — 2026-09-06
+
+The current candidate passed the compact workspace suite with **8,294 tests,
+0 failures, and 0 ignored tests** across 370 test/doc-test targets. Strict
+workspace/all-target Clippy and private-item rustdoc also passed. The ordinary
+suite includes the 20-language native-schema and CLI/SDK parity checks.
+
+The separate optimized Elasticsearch target passed all 12 tests in 927.07
+seconds under the 3 GiB scheduling budget, with unchanged reference-host SLOs:
+
+| Operation | Completed time | SLO |
+|---|---:|---:|
+| Fresh-cache structural index | 54.39 s | 100 s |
+| Warm structural index | 3.53 s | 12 s |
+| Fresh-cache production taint | 119.99 s | 170 s |
+| Default inspect | 46.89 s | 60 s |
+| Full native export | 228.28 s | 300 s |
+| Warm production taint | 85.27 s | 135 s |
+| Dependency analysis | 45.38 s | 135 s |
+| Selected-sink upstream analysis | 77.66 s | 120 s |
+| Source analysis | 4.17 s | 35 s |
+
+This run reused an already-valid semantic generation; its 5.52-second
+validation is not a cold semantic build measurement. Native export validation
+parsed the entire multi-gigabyte document, not just its envelope. Retained
+regressions cover CFG-local field-copy convergence, repeated/self-copy,
+coexisting value/field evidence, and removal of overwritten fields. These
+changes introduce no analysis cap. Known Gradle dependency-frontend gaps remain
+explicit, as described below.
+
+Documentation/help audits, all three skill copies, the public API snapshot,
+and the shared production-duplication audit passed. These are local candidate
+results, not a claim that a tag, cross-platform archive, or registry release
+has been published. The remaining historical tables are comparison baselines.
 
 ## Correctness and architecture gates
 
-The release gate consists of these checks. A release claim is made only from
-the current committed tree after every row passes:
+The release gate consists of these checks. The results below are the
+previously recorded release baseline, not a live certification of later
+working-tree changes. A new release claim requires rerunning every applicable
+gate on the same committed tree. Use `security . pack --validate` for current
+rule and example counts.
 
-| Gate | Result |
+| Gate | Previously recorded result |
 |---|---|
 | Release all-target compile | Passed |
 | Strict Clippy (`-D warnings`) | Passed |
@@ -77,11 +118,11 @@ The rulepack replay command was:
 
 | Rulepack measure | Result |
 |---|---:|
-| Rules | 6,478 |
-| Enabled rules | 6,478 |
+| Rules | 6,479 |
+| Enabled rules | 6,479 |
 | Disabled rules | 0 |
-| Examples | 11,875 |
-| Enabled examples | 11,875 |
+| Examples | 11,878 |
+| Enabled examples | 11,878 |
 | Errors | 0 |
 | Warnings | 0 |
 
@@ -113,9 +154,10 @@ Release conformance enforces these product contracts:
 - Dynamic calls without sufficient static evidence remain unresolved and make
   the affected scope explicit; the resolver does not guess an edge.
 
-## Self-analysis
+## Historical self-analysis baseline
 
-A cold production-profile security scan of this repository completed with:
+The previously recorded cold production-profile security scan of this
+repository completed with:
 
 | Measure | Result |
 |---|---:|
@@ -180,8 +222,8 @@ after the gate.
 ## Large-workspace scale gate
 
 The required release test uses the sibling 30,055-source Elasticsearch
-checkout pinned by the release workflow at `e9741368da0`. On August 31, the
-current release candidate passed all 11 large-repository tests in 1,131.62
+checkout pinned by the release workflow at `e9741368da0`. The August 31
+baseline passed all 11 large-repository tests in 1,131.62
 seconds under the 3 GiB scheduler. This duration includes the complete native
 export as well as every interactive and security surface. An empty
 current-schema semantic generation took 425.55 seconds and a fresh process
@@ -199,6 +241,12 @@ generation in 999.71 seconds. Its independently tested runner-class threshold
 is therefore 1,200 seconds (about 20% headroom); the product/reference threshold
 remains 600 seconds. The release invocation uses one test thread so unrelated
 large-repository cases cannot distort one another's latency measurements.
+Elasticsearch's Java Gradle build, settings, and properties files currently
+lack a dependency frontend. Security gates require the three explicit
+`dependency-manifest:unsupported:java:` warning kinds with positive file
+counts and reject every other incompleteness reason. This checks completed
+compiler/IDG work without misrepresenting dependency coverage; it does not
+relax any latency threshold or allow capped analysis.
 For memory context, the prior instrumented
 August 20 empty-cache semantic run recorded 3,788,292,096 bytes maximum RSS
 and zero swaps; its fresh-process reopen used 99,287,040 bytes maximum RSS.
@@ -256,7 +304,7 @@ measure the complete analysis, not a trust-scoped subset. Re-measured
 | Complete embedded rulepack audit | 28.95 s | 70 s |
 | Exact native export | 251.31 s | 300 s |
 
-The interactive rows above are the observed final gate values and may reuse a
+The interactive rows above are the recorded baseline gate values and may reuse a
 validated rendered-page entry from an earlier exact run. Separate runs with an
 empty rendered-page cache measured default inspect at 10.46 seconds and
 the same query with expanded taint flows at 28.99 seconds with byte-identical output. Semantic
@@ -308,9 +356,9 @@ back to its CST. Root-only warm generation validation reduced default `index`
 from 8.41 to 4.05 seconds and maximum RSS from roughly 690 MB to 77,070,336
 bytes; it still rebuilds on any source-ledger mismatch.
 
-The current release gate subsequently measured the same exact structural work
+That release gate subsequently measured the same exact structural work
 at 50.51 seconds cold and 4.29 seconds warm. The earlier figures above remain
-the instrumented CPU/RSS run; the current figures are the release SLO run.
+the instrumented CPU/RSS run; the later figures are the release SLO run.
 
 The cold semantic row is a deliberate one-time whole-workspace build, not a
 normal command startup cost. It rebuilt exact compiler objects, linkage,
@@ -320,7 +368,7 @@ was explicitly cleared. The validated cache directory was 7,114,762,932 bytes
 callgraph, 1,505,969,092 bytes of linkage, 224,742,044 bytes of retrieval, and
 4,161,426,830 bytes of IDG, plus the manifest. Ordinary commands compute exact
 requested facts on demand; users only pay this full prewarm when they
-explicitly run `index --semantic`. A fresh process in the current gate reused
+explicitly run `index --semantic`. A fresh process in that gate reused
 the completed semantic generation in 2.42 seconds.
 
 Two scale defects were fixed during the August 30 command-completeness pass.
@@ -446,7 +494,7 @@ The release workflow verifies:
 - SARIF 2.1.0 parsing and code-flow metadata;
 - HTML report generation from the canonical JSON result;
 - native JSON and graph export formats;
-- native JSON schema v13 validation across every language fixture and
+- native JSON schema v14 validation across every language fixture and
   materialized propagation mode;
 - stable IDs and page/cursor reopening;
 - the locked parser manifest contains every adapter grammar and all six native

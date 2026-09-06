@@ -22,35 +22,70 @@ const COLOR_COUNTED_SPINNER_TEMPLATE: &str = "  {spinner:.cyan} {msg} · {pos} c
 /// [`progress_bar`] call reads it.
 static NO_PROGRESS: OnceLock<bool> = OnceLock::new();
 static NO_COLOR_PROGRESS: OnceLock<bool> = OnceLock::new();
-static ACTIVE_PROGRESS: OnceLock<Mutex<Vec<ProgressBar>>> = OnceLock::new();
+static ACTIVE_PROGRESS: OnceLock<Mutex<ProgressRegistry>> = OnceLock::new();
 
-fn active_progress() -> &'static Mutex<Vec<ProgressBar>> {
-    ACTIVE_PROGRESS.get_or_init(|| Mutex::new(Vec::new()))
+#[derive(Default)]
+struct ProgressRegistry {
+    bars: Vec<ProgressBar>,
+    output_depth: usize,
+}
+
+impl ProgressRegistry {
+    fn track(&mut self, bar: &ProgressBar) {
+        self.bars.retain(|active| !active.is_finished());
+        if self.output_depth == 0 {
+            self.bars.push(bar.clone());
+        } else {
+            bar.finish_and_clear();
+        }
+    }
+
+    fn finish_all(&mut self) {
+        for bar in self.bars.drain(..) {
+            bar.finish_and_clear();
+        }
+    }
+}
+
+fn active_progress() -> &'static Mutex<ProgressRegistry> {
+    ACTIVE_PROGRESS.get_or_init(|| Mutex::new(ProgressRegistry::default()))
 }
 
 fn track(bar: &ProgressBar) {
     active_progress()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push(bar.clone());
+        .track(bar);
 }
 
-/// Clear every live progress bar before writing user-visible command output.
-///
-/// Progress bars write to stderr while command reports write to stdout (or an
-/// output file). Those streams are independent, so leaving a ticking bar
-/// alive while a report is emitted lets a redraw land in the middle of source
-/// code or a table. Every bar created by this module is registered here; the
-/// output boundary drains and clears the registry before the first visible
-/// byte is written. Later `finish_and_clear` calls remain harmless.
-pub(crate) fn finish_all_for_output() {
-    let bars = std::mem::take(
-        &mut *active_progress()
+/// Keep progress quiet for the complete lifetime of a terminal output stream.
+/// Clearing once is insufficient: streaming export starts new compiler phases
+/// after its first output bytes. File and pipe sinks do not need this guard.
+pub(crate) struct OutputProgressGuard<'a> {
+    registry: &'a Mutex<ProgressRegistry>,
+}
+
+impl OutputProgressGuard<'static> {
+    pub(crate) fn new() -> Self {
+        Self::for_registry(active_progress())
+    }
+}
+
+impl<'a> OutputProgressGuard<'a> {
+    fn for_registry(registry: &'a Mutex<ProgressRegistry>) -> Self {
+        let mut state = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.output_depth += 1;
+        state.finish_all();
+        Self { registry }
+    }
+}
+
+impl Drop for OutputProgressGuard<'_> {
+    fn drop(&mut self) {
+        self.registry
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    );
-    for bar in bars {
-        bar.finish_and_clear();
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .output_depth -= 1;
     }
 }
 
@@ -70,13 +105,15 @@ pub(crate) fn set_no_color(disabled: bool) {
 /// detection) that it should not draw progress bars.
 #[must_use]
 pub(crate) fn is_disabled() -> bool {
-    if *NO_PROGRESS.get().unwrap_or(&false) {
+    if active_progress()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .output_depth
+        > 0
+    {
         return true;
     }
-    if std::env::var("NO_PROGRESS").is_ok() {
-        return true;
-    }
-    !std::io::stderr().is_terminal()
+    !is_footer_enabled()
 }
 
 #[must_use]
@@ -106,7 +143,8 @@ pub(crate) fn debug_category_enabled(category: &str) -> bool {
 /// interactive terminals get the footer for free.
 #[must_use]
 pub(crate) fn is_footer_enabled() -> bool {
-    !is_disabled()
+    // A report suppresses cursor redraws, not its final output summary.
+    !is_explicitly_disabled() && std::io::stderr().is_terminal()
 }
 
 /// Build a progress bar for a known total. Returns
@@ -315,10 +353,41 @@ mod tests {
 
     #[test]
     fn output_boundary_finishes_every_registered_bar() {
+        let registry = Mutex::new(ProgressRegistry::default());
         let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::hidden());
-        track(&bar);
+        registry.lock().unwrap().track(&bar);
         assert!(!bar.is_finished());
-        finish_all_for_output();
+        let _guard = OutputProgressGuard::for_registry(&registry);
         assert!(bar.is_finished());
+    }
+
+    #[test]
+    fn streaming_output_suppresses_existing_and_new_phases_until_last_guard_drops() {
+        let registry = Mutex::new(ProgressRegistry::default());
+        let bar = ProgressBar::hidden();
+        registry.lock().unwrap().track(&bar);
+        let outer = OutputProgressGuard::for_registry(&registry);
+        assert!(bar.is_finished());
+        let inner = OutputProgressGuard::for_registry(&registry);
+        drop(outer);
+        let next = ProgressBar::hidden();
+        registry.lock().unwrap().track(&next);
+        assert!(next.is_finished());
+        drop(inner);
+        let resumed = ProgressBar::hidden();
+        registry.lock().unwrap().track(&resumed);
+        assert!(!resumed.is_finished());
+        assert_eq!(registry.lock().unwrap().bars.len(), 1);
+    }
+
+    #[test]
+    fn completed_progress_phases_do_not_accumulate_in_the_registry() {
+        let mut registry = ProgressRegistry::default();
+        for _ in 0..1_000 {
+            let phase = ProgressBar::hidden();
+            registry.track(&phase);
+            assert_eq!(registry.bars.len(), 1);
+            phase.finish_and_clear();
+        }
     }
 }

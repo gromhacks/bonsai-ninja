@@ -748,9 +748,19 @@ fn last_identifier_descendant_by_position<'tree>(
         {
             latest_by_position = Some(current);
         }
-        let mut cursor = current.walk();
-        for child in current.named_children(&mut cursor) {
-            work_stack.push(child);
+        for index in 0..current.child_count() {
+            let Ok(index) = u32::try_from(index) else {
+                continue;
+            };
+            // A type annotation is never a binding. In particular, a typed
+            // splat wraps its identifier while its annotation follows it;
+            // choosing the last identifier in both subtrees selects the type.
+            if current.field_name_for_child(index) == Some("type") {
+                continue;
+            }
+            if let Some(child) = current.child(index).filter(Node::is_named) {
+                work_stack.push(child);
+            }
         }
     }
     latest_by_position

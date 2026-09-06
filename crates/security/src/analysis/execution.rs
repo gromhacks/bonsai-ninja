@@ -301,6 +301,9 @@ where
     fingerprint_options.symbolic_field_languages = symbolic_field_languages(request.ws, request.files);
     fingerprint_options.call_result_passthroughs =
         idg_call_result_passthrough_specs(&request.config.call_result_passthroughs);
+    fingerprint_options
+        .throwing_call_sites
+        .clone_from(&request.config.throwing_call_sites);
     fingerprint_options.symbolic_field_forwarding = !fingerprint_options.symbolic_field_languages.is_empty();
     let taint_graph_fingerprint = taint_cache::scoped_config_fingerprint(
         request.pack,
@@ -330,6 +333,7 @@ where
                 output_arg_flows: &request.config.output_arg_flows,
                 call_result_passthroughs: &request.config.call_result_passthroughs,
                 callback_invocations: &request.config.callback_invocations,
+                throwing_call_sites: &request.config.throwing_call_sites,
                 receiver_state_propagations: &request.config.receiver_state_propagations,
                 clean_receiver_overwrites: &request.config.clean_receiver_overwrites,
                 source_output_args: &request.config.source_output_args,
@@ -897,6 +901,7 @@ where
         &mut on_file_done,
     );
     let config = InterTaintConfig {
+        throwing_call_sites: compiled_transfers.throwing_call_sites,
         clean_output_overwrites: clean_output_overwrites_from_rulepack_for_languages(pack, &languages),
         clean_receiver_overwrites: clean_receiver_overwrites_from_rulepack_for_languages(
             ws,

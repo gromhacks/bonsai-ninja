@@ -528,6 +528,8 @@ fn workspace_analysis_incomplete_reasons(
         .into_iter()
         .collect();
 
+    reasons.extend(crate::deps::workspace_dependency_incomplete_reasons(ws));
+
     if let Some(resolution) = resolution {
         let unresolved_workspace_calls = resolution.unresolved_workspace_sites.len();
         if unresolved_workspace_calls > 0 {
@@ -957,7 +959,12 @@ fn begin_dependency_package_snapshot(
     pack: &Rulepack,
 ) -> Option<crate::deps::WorkspaceDependencyPackageSnapshot> {
     ws.db().workspace_root().map(|root| {
-        crate::deps::begin_workspace_dependency_package_snapshot(&root, ws.db().vfs().instance_id(), pack)
+        crate::deps::begin_workspace_dependency_package_snapshot(
+            &root,
+            ws.db().vfs().instance_id(),
+            pack,
+            Some(ws),
+        )
     })
 }
 
@@ -1589,6 +1596,7 @@ fn endpoint_only_sink_flow(
         )
     };
     let terminal = TaintPropagationStep {
+        storage_transfer: None,
         caller: chain_names
             .last()
             .cloned()
@@ -1807,6 +1815,7 @@ fn compile_sink_upstream_flows(
         transfer_started.elapsed().as_secs_f64()
     );
     let graph_config = InterTaintConfig {
+        throwing_call_sites: compiled_transfers.throwing_call_sites,
         clean_output_overwrites: clean_output_overwrites_from_rulepack_for_languages(
             pack,
             &transfer_languages,
@@ -1849,6 +1858,7 @@ fn compile_sink_upstream_flows(
                 output_arg_flows: &graph_config.output_arg_flows,
                 call_result_passthroughs: &graph_config.call_result_passthroughs,
                 callback_invocations: &graph_config.callback_invocations,
+                throwing_call_sites: &graph_config.throwing_call_sites,
                 receiver_state_propagations: &graph_config.receiver_state_propagations,
                 clean_receiver_overwrites: &graph_config.clean_receiver_overwrites,
                 source_output_args: &graph_config.source_output_args,
@@ -2511,6 +2521,7 @@ where
             output_arg_flows: &context.graph_config.output_arg_flows,
             call_result_passthroughs: &context.graph_config.call_result_passthroughs,
             callback_invocations: &context.graph_config.callback_invocations,
+            throwing_call_sites: &context.graph_config.throwing_call_sites,
             receiver_state_propagations: &context.graph_config.receiver_state_propagations,
             clean_receiver_overwrites: &context.graph_config.clean_receiver_overwrites,
             source_output_args: &context.graph_config.source_output_args,
@@ -2973,6 +2984,7 @@ where
     );
     on_progress(AnalysisProgress::PhaseFinished);
     let source_graph_config = InterTaintConfig {
+        throwing_call_sites: compiled_transfers.throwing_call_sites,
         clean_output_overwrites: clean_output_overwrites_from_rulepack_for_languages(
             pack,
             &transfer_languages,
@@ -3013,6 +3025,9 @@ where
     );
     source_idg_transfer_options.call_result_passthroughs =
         idg_call_result_passthrough_specs(&source_graph_config.call_result_passthroughs);
+    source_idg_transfer_options
+        .throwing_call_sites
+        .clone_from(&source_graph_config.throwing_call_sites);
     let (mut source_groups, source_function_count) =
         schedule_source_graph_groups(ws, pack, global.as_ref(), &source_hits);
     on_progress(AnalysisProgress::Note {
@@ -4617,6 +4632,7 @@ fn propagation_step_for_edge(
     let caller = path_display_name(global, names, record.caller);
     let callee = path_display_name(global, names, record.callee);
     TaintPropagationStep {
+        storage_transfer: None,
         caller,
         callee,
         file,
@@ -4660,6 +4676,7 @@ fn propagation_step_for_terminal_call(
     }
     let caller = path_display_name(global, names, call.caller);
     TaintPropagationStep {
+        storage_transfer: None,
         caller: if caller == call.name {
             func_display_name_with_site(ws, global, call.caller)
         } else {
@@ -4801,7 +4818,11 @@ fn terminal_taint_step_should_align_to_sink(step: &TaintPropagationStep, sink: &
 }
 
 fn same_taint_report_site(left: &TaintPropagationStep, right: &TaintPropagationStep) -> bool {
-    left.file == right.file && left.line == right.line && (left.line != 0 || left.column == right.column)
+    left.storage_transfer == right.storage_transfer
+        && (left.storage_transfer.is_none() || left.column == right.column)
+        && left.file == right.file
+        && left.line == right.line
+        && (left.line != 0 || left.column == right.column)
 }
 
 fn merge_taint_report_step(previous: &mut TaintPropagationStep, next: TaintPropagationStep) {
@@ -5862,6 +5883,7 @@ fn extend_implicit_context_findings(
 
             let mut taint_path = producer_flow.finding.taint_path.clone();
             taint_path.push(TaintPropagationStep {
+                storage_transfer: None,
                 caller: consumer_sink
                     .enclosing_fn
                     .clone()
@@ -9004,6 +9026,9 @@ fn taint_path_identity_tokens(chain_names: &[String], taint_path: &[TaintPropaga
             "{}\0{}\0{}:{}:{}",
             step.caller, step.callee, step.file, step.line, step.column
         ));
+        if let Some(storage) = &step.storage_transfer {
+            tokens.push(format!("storage\0{storage}"));
+        }
         for arg in &step.tainted_args {
             tokens.push(format!(
                 "arg:{}\0{}\0{}",
@@ -9149,6 +9174,7 @@ fn idg_transfer_options_from_rulepack_shapes(
     receiver_state_propagations: &[ReceiverStatePropagation],
 ) -> bonsai_idg::TransferOptions {
     bonsai_idg::TransferOptions {
+        throwing_call_sites: Vec::new(),
         clean_output_overwrites: overwrites
             .iter()
             .map(|shape| bonsai_idg::CleanOutputOverwriteSpec {
@@ -9299,12 +9325,14 @@ pub fn seed_idg_service_for_rulepack(ws: &Workspace, pack: &Rulepack) -> Arc<bon
     );
     options.call_result_passthroughs =
         idg_call_result_passthrough_specs(&compiled_transfers.call_result_passthroughs);
+    options.throwing_call_sites = compiled_transfers.throwing_call_sites;
     options.symbolic_field_languages = ws.db().complete_field_place_languages();
     options.symbolic_field_forwarding = !options.symbolic_field_languages.is_empty();
     ws.build_and_seed_idg_service_with_transfer_options(&options)
 }
 
 struct ScopedIdgSeedRequest<'a> {
+    throwing_call_sites: &'a [Span],
     ws: &'a Workspace,
     pack: &'a Rulepack,
     languages: &'a AHashSet<String>,
@@ -9328,6 +9356,7 @@ where
     P: Fn(bonsai_workspace::IdgPersistenceProgress),
 {
     let ScopedIdgSeedRequest {
+        throwing_call_sites,
         ws,
         pack,
         languages,
@@ -9353,6 +9382,7 @@ where
         receiver_state_propagations,
     );
     options.call_result_passthroughs = idg_call_result_passthrough_specs(call_result_passthroughs);
+    options.throwing_call_sites = throwing_call_sites.to_vec();
     options.symbolic_field_languages = symbolic_field_languages(ws, included_files);
     options.symbolic_field_forwarding = !options.symbolic_field_languages.is_empty();
     bonsai_diagnostics::debug_log!(
@@ -9745,6 +9775,7 @@ fn receiver_state_propagations_from_rulepack(pack: &Rulepack) -> Vec<ReceiverSta
 }
 
 struct CompiledTransferSites {
+    throwing_call_sites: Vec<Span>,
     call_result_passthroughs: Vec<CallResultPassthrough>,
     callback_invocations: Vec<CallbackInvocation>,
     output_arg_flows: Vec<OutputArgFlow>,
@@ -9778,7 +9809,8 @@ where
                 && (matches!(rule.kind, RuleKind::Typing | RuleKind::Sanitizer)
                     || rule_has_taint_predicate(rule))
                 && rule.taint_semantics.as_ref().is_some_and(|semantics| {
-                    semantics.taint_receiver_from_args
+                    semantics.throws
+                        || semantics.taint_receiver_from_args
                         || !semantics.output_arg_flows.is_empty()
                         || !semantics.call_result_passthrough_args.is_empty()
                         || semantics.call_result_passthrough_args_from.is_some()
@@ -9789,6 +9821,7 @@ where
         .collect();
     if rules.is_empty() {
         return CompiledTransferSites {
+            throwing_call_sites: Vec::new(),
             call_result_passthroughs: Vec::new(),
             callback_invocations: Vec::new(),
             output_arg_flows: Vec::new(),
@@ -9870,7 +9903,22 @@ where
     }
     let mut callback_invocations = callback_invocations_from_rules(rules.iter().copied(), &sites_by_rule);
     enrich_callback_invocation_hosts(ws, &caller_by_site, &mut callback_invocations);
+    let mut throwing_call_sites: Vec<_> = rules
+        .iter()
+        .filter(|rule| rule.kind == RuleKind::Typing && rule.match_spec.kind == MatchKind::Call)
+        .filter(|rule| {
+            rule.taint_semantics
+                .as_ref()
+                .is_some_and(|semantics| semantics.throws)
+        })
+        .filter_map(|rule| sites_by_rule.get(&rule.id))
+        .flatten()
+        .copied()
+        .collect();
+    throwing_call_sites.sort_unstable();
+    throwing_call_sites.dedup();
     CompiledTransferSites {
+        throwing_call_sites,
         call_result_passthroughs: call_result_passthroughs_from_rules(rules.iter().copied(), &sites_by_rule),
         callback_invocations,
         output_arg_flows: output_arg_flows_from_rules(rules.iter().copied(), &sites_by_rule),

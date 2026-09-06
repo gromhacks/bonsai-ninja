@@ -30,9 +30,9 @@
 //! Standard forward dataflow:
 //!
 //! - Initial state: `entry_in = sources`, every other block's `in = {}`.
-//! - For each block in the worklist: `in = ⋃ predecessors.out`.
+//! - For each block in the worklist: `in = ⋃ predecessors.out`, plus sources at entry.
 //! - `out = transfer(events, in)` — apply each event's effect in order.
-//! - If `out` changed: push every successor back onto the worklist.
+//! - On first visit or if `out` changed: schedule every successor.
 //!
 //! Monotonic per-event transfer operations are:
 //! - `Assign { target, source = tainted id }` → add `target`.
@@ -123,30 +123,28 @@ pub fn intraprocedural_taint(cfg: &Cfg, config: &TaintConfig) -> IntraTaintResul
     let mut worklist: Vec<BasicBlockId> = vec![cfg.entry];
     let mut enqueued: AHashSet<BasicBlockId> = AHashSet::new();
     enqueued.insert(cfg.entry);
+    let mut visited = AHashSet::new();
 
     let mut iterations: u32 = 0;
     while let Some(block_id) = worklist.pop() {
         enqueued.remove(&block_id);
         iterations = iterations.saturating_add(1);
 
-        let new_in = if block_id == cfg.entry {
-            // Entry block's `in` always equals the sources. Joining
-            // from predecessors here would dilute the seed if any
-            // back-edge reaches the entry (shouldn't happen for
-            // well-formed CFGs but is cheap to guard against).
+        let mut new_in = if block_id == cfg.entry {
+            // Preserve the initial seed even when a backedge reaches entry.
+            // Unioning predecessor outputs adds loop-carried facts; it never
+            // removes a seed or makes the fixed point less conservative.
             config.sources.clone()
         } else {
-            // Forward-dataflow join: union every predecessor's `out`.
-            let mut joined = TokenSet::default();
-            if let Some(preds) = predecessors.get(&block_id) {
-                for pred in preds {
-                    if let Some(pred_out) = block_out.get(pred) {
-                        joined.extend(pred_out.iter().cloned());
-                    }
+            TokenSet::default()
+        };
+        if let Some(preds) = predecessors.get(&block_id) {
+            for pred in preds {
+                if let Some(pred_out) = block_out.get(pred) {
+                    new_in.extend(pred_out.iter().cloned());
                 }
             }
-            joined
-        };
+        }
 
         let Some(block) = cfg.block(block_id) else {
             continue;
@@ -156,8 +154,9 @@ pub fn intraprocedural_taint(cfg: &Cfg, config: &TaintConfig) -> IntraTaintResul
 
         block_in.insert(block_id, new_in);
 
-        // Successors only need re-visiting when this block's exit state changed.
-        let changed = block_out.get(&block_id).is_none_or(|prev| prev != &new_out);
+        // A first empty output still makes its successors reachable.
+        let changed =
+            visited.insert(block_id) || block_out.get(&block_id).is_none_or(|prev| prev != &new_out);
         block_out.insert(block_id, new_out);
 
         if changed {
@@ -192,12 +191,9 @@ fn build_predecessor_map(cfg: &Cfg) -> AHashMap<BasicBlockId, Vec<BasicBlockId>>
 }
 
 /// Emit a warning when the CFG entry block has incoming edges. The
-/// dataflow contract says entry's `in` is always the configured
-/// sources; if the CFG builder produced a back-edge or fallthrough
-/// targeting entry, joining predecessor outputs would dilute that
-/// seed. We surface the situation as a diagnostic rather than
-/// silently changing semantics — the analysis itself stays
-/// conservative (entry's seed is preserved).
+/// synthetic entry normally has no incoming edges. Preserve configured
+/// sources and join incoming states to remain conservative even if a custom
+/// CFG contains an entry backedge, while diagnosing the unusual shape.
 fn entry_predecessor_diagnostics(
     cfg: &Cfg,
     predecessors: &AHashMap<BasicBlockId, Vec<BasicBlockId>>,
@@ -212,7 +208,7 @@ fn entry_predecessor_diagnostics(
         span,
         Severity::Warning,
         format!(
-            "CFG entry block has {} predecessor edge(s); intraprocedural taint keeps entry seeds and ignores predecessor output",
+            "CFG entry block has {} predecessor edge(s); intraprocedural taint keeps entry seeds and joins predecessor output",
             preds.len()
         ),
     )
@@ -222,7 +218,7 @@ fn entry_predecessor_diagnostics(
         .push("entry predecessors indicate an adapter or CFG-builder invariant drift".to_string());
     diagnostic
         .notes
-        .push("propagation remains conservative by keeping the configured entry seed set".to_string());
+        .push("propagation preserves both configured seeds and incoming loop-carried facts".to_string());
     vec![diagnostic]
 }
 
@@ -251,6 +247,12 @@ fn transfer_events(events: &[FlowEvent], state: &mut TokenSet, _config: &TaintCo
                     continue;
                 }
                 if let Some(callee) = source_call.as_deref() {
+                    // With no operand evidence, preserve an already-tainted
+                    // destination consistently, even if the callee also
+                    // becomes tainted on a later fixed-point iteration.
+                    if source_names.is_empty() && state.contains(target) {
+                        continue;
+                    }
                     // Self-contained intra-pass heuristic for
                     // return-taint: if ANY positional arg at the call
                     // site is already tainted, assume the return
@@ -259,16 +261,12 @@ fn transfer_events(events: &[FlowEvent], state: &mut TokenSet, _config: &TaintCo
                     // summary-driven version in the interprocedural
                     // pass narrows this for cross-function precision.
                     if state.contains(callee) || text_is_tainted(callee, state) {
-                        insert_target_taint(state, target);
-                        if rhs_has_descendant_shape(source_names) {
-                            insert_descendant_target_taint(state, target);
-                        }
-                        continue;
-                    }
-                    // No tainted operand at the call site, but the target
-                    // is already tainted and the adapter gave us no extra
-                    // RHS evidence — leave state alone rather than clearing.
-                    if source_names.is_empty() && state.contains(target) {
+                        apply_tainted_assignment(
+                            state,
+                            target,
+                            source_name.as_deref(),
+                            rhs_has_descendant_shape(source_names),
+                        );
                         continue;
                     }
                 }
@@ -287,15 +285,19 @@ fn transfer_events(events: &[FlowEvent], state: &mut TokenSet, _config: &TaintCo
                             && strict_operand_is_tainted(name, state)
                     });
                     if any_tainted {
-                        insert_target_taint(state, target);
-                        if rhs_has_descendant_shape(source_names) {
-                            insert_descendant_target_taint(state, target);
-                        }
+                        apply_tainted_assignment(
+                            state,
+                            target,
+                            source_name.as_deref(),
+                            rhs_has_descendant_shape(source_names),
+                        );
                         continue;
                     }
                 }
                 match source_name.as_deref() {
-                    Some(src) if strict_operand_is_tainted(src, state) => insert_target_taint(state, target),
+                    Some(src) if strict_operand_is_tainted(src, state) => {
+                        apply_tainted_assignment(state, target, Some(src), false);
+                    }
                     Some(src) if copy_mapped_descendant_taint(state, target, src) => {}
                     Some(_) | None => {
                         // Semantic overwrite: assigning a value with
@@ -305,12 +307,30 @@ fn transfer_events(events: &[FlowEvent], state: &mut TokenSet, _config: &TaintCo
                         // directly; preserving here incorrectly
                         // reports `x = tainted; x = "constant";
                         // sink(x)`.
-                        state.remove(target);
+                        remove_target_and_descendant_taint(state, target);
                     }
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// RHS taint is evaluated before this overwrite. Whole-value and exact field
+/// evidence coexist: discovering a tainted carrier must not erase an already
+/// proven field copy or retain unrelated fields from the old destination.
+fn apply_tainted_assignment(
+    state: &mut TokenSet,
+    target: &str,
+    source_name: Option<&str>,
+    descendant_shape: bool,
+) {
+    if !source_name.is_some_and(|source| copy_mapped_descendant_taint(state, target, source)) {
+        remove_target_and_descendant_taint(state, target);
+    }
+    insert_target_taint(state, target);
+    if descendant_shape {
+        insert_descendant_target_taint(state, target);
     }
 }
 
@@ -407,14 +427,16 @@ fn copy_mapped_descendant_taint(state: &mut TokenSet, target: &str, actual_text:
     {
         return false;
     }
-    let mut changed = false;
+    // Capture the RHS before killing the target, including for `value =
+    // value`. A copied field is evidence even when it is already present:
+    // returning "set changed" here makes a loop alternate between retaining
+    // and killing the same fact instead of reaching its fixed point.
+    let mut mapped = TokenSet::default();
     let wildcard = format!("{actual}.*");
-    for seed in state.clone() {
-        let seed = normalise_qualified_text(&seed);
+    for seed in state.iter() {
+        let seed = normalise_target_text(seed);
         if seed == wildcard {
-            let before = state.len();
-            insert_descendant_target_taint(state, &target);
-            changed |= state.len() != before;
+            insert_descendant_target_taint(&mut mapped, &target);
             continue;
         }
         let Some(tail) = seed.strip_prefix(actual.as_str()) else {
@@ -423,11 +445,16 @@ fn copy_mapped_descendant_taint(state: &mut TokenSet, target: &str, actual_text:
         if !tail.starts_with('.') {
             continue;
         }
-        let before = state.len();
-        insert_target_taint(state, &format!("{target}{tail}"));
-        changed |= state.len() != before;
+        insert_target_taint(&mut mapped, &format!("{target}{tail}"));
     }
-    changed
+    if mapped.is_empty() {
+        return false;
+    }
+    // An assignment replaces the previous object projection. Unrelated
+    // target fields cannot survive merely because the new RHS is tainted.
+    remove_target_and_descendant_taint(state, &target);
+    state.extend(mapped);
+    true
 }
 
 fn remove_target_and_descendant_taint(state: &mut TokenSet, target: &str) {
@@ -435,12 +462,10 @@ fn remove_target_and_descendant_taint(state: &mut TokenSet, target: &str) {
     if target.is_empty() {
         return;
     }
-    state.remove(&target);
-    state.remove(&format!("{target}.*"));
     let prefix = format!("{target}.");
     state.retain(|seed| {
-        let normalised = normalise_qualified_text(seed);
-        !seed.starts_with(&prefix) && !normalised.starts_with(&prefix)
+        let normalised = normalise_target_text(seed);
+        normalised != target && !normalised.starts_with(&prefix)
     });
 }
 

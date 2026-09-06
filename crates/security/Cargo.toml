@@ -34,6 +34,8 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+toml = { workspace = true }
+roxmltree = { workspace = true }
 ahash = { workspace = true }
 aho-corasick = { workspace = true }
 regex = { workspace = true }

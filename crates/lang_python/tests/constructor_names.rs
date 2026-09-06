@@ -61,6 +61,21 @@ class Repo:
 }
 
 #[test]
+fn typed_splat_parameters_keep_binding_names_and_positions() {
+    let db = python_db(
+        "def forward(first: Value, *args: tuple[Value, ...], key: Value = None, **kwargs: Any):\n    consume(first, *args, key=key, **kwargs)\n",
+    );
+    let global = db.global_index();
+    let decl = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "forward")
+        .expect("forward declaration");
+    assert_eq!(decl.params, ["first", "args", "key", "kwargs"]);
+    assert_eq!(decl.param_annotations.len(), decl.params.len());
+}
+
+#[test]
 fn python_class_functions_are_methods_with_receiver_params() {
     let db = python_db(
         r#"

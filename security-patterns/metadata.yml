@@ -361,6 +361,17 @@ test_path_patterns:
 languages:
   ruby:
     dependency_manifest_patterns: [Gemfile, Gemfile.lock, "*.gemspec"]
+    dependency_manifest_layouts:
+      - files: [Gemfile]
+        format: code
+        adapter: ruby
+        calls:
+          - callee: {name: gem, binding_origin: runtime-global}
+            arguments: [{index: 0}]
+      - files: [Gemfile.lock]
+        format: lines
+        packages:
+          - {path: [], capture: '^    ([A-Za-z0-9_.-]+) \([^\r\n]+\)\s*$'}
     package_matching:
       package_separators: [".", "::", "/"]
 
@@ -376,6 +387,43 @@ languages:
       - deno.json
       - deno.jsonc
       - deno.lock
+    dependency_manifest_layouts:
+      - files: [package.json]
+        format: json
+        packages:
+          - {path: [name]}
+          - {path: [dependencies], keys: true}
+          - {path: [devDependencies], keys: true}
+          - {path: [optionalDependencies], keys: true}
+          - {path: [peerDependencies], keys: true}
+          - {path: [bundledDependencies, '*']}
+          - {path: [bundleDependencies, '*']}
+          - {path: [dependencies, '*'], capture: '^npm:((?:@[^/]+/)?[^@]+)@'}
+      - files: [package-lock.json]
+        format: json
+        packages:
+          - {path: [name]}
+          - {path: [dependencies], keys: true, nested: dependencies}
+          - {path: [packages], keys: true, capture: '(?:^|/)node_modules/((?:@[^/]+/)?[^/]+)$'}
+          - {path: [packages, '*', name]}
+      - files: [pnpm-lock.yaml]
+        format: yaml
+        packages:
+          - {path: [packages], keys: true, capture: '^/?((?:@[^/]+/)?[^/@()]+)(?:@|/)'}
+      - files: [pnpm-workspace.yaml]
+        format: yaml
+        packages: []
+      - files: [deno.json]
+        format: json
+        packages:
+          - {path: [name]}
+          - {path: [imports, '*'], capture: '^(?:npm|jsr):((?:@[^/]+/)?[^@]+)@'}
+      - files: [deno.lock]
+        format: json
+        packages:
+          - {path: [npm], keys: true, capture: '^((?:@[^/]+/)?[^@]+)@'}
+          - {path: [jsr], keys: true, capture: '^((?:@[^/]+/)?[^@]+)@'}
+          - {path: [packages, npm], keys: true, capture: '^((?:@[^/]+/)?[^@]+)@'}
     package_matching:
       strip_import_prefixes: ["node:"]
       package_separators: ["/", "."]
@@ -396,6 +444,11 @@ languages:
 
   go:
     dependency_manifest_patterns: [go.mod, go.sum, go.work, go.work.sum]
+    dependency_manifest_layouts:
+      - files: [go.sum, go.work.sum]
+        format: lines
+        packages:
+          - {path: [], capture: '^([^\s]+) v[^\s]+ h1:[A-Za-z0-9+/=]+\s*$'}
     package_matching:
       package_separators: ["/", "."]
       call_qualifier_from_package_tail:
@@ -425,12 +478,47 @@ languages:
 
   rust:
     dependency_manifest_patterns: [Cargo.toml, Cargo.lock]
+    dependency_manifest_layouts:
+      - files: [Cargo.toml]
+        format: toml
+        packages:
+          - {path: [package, name]}
+          - {path: [dependencies], keys: true}
+          - {path: [dev-dependencies], keys: true}
+          - {path: [build-dependencies], keys: true}
+          - {path: [dependencies, '*', package]}
+          - {path: [dev-dependencies, '*', package]}
+          - {path: [build-dependencies, '*', package]}
+          - {path: [target, '*', dependencies], keys: true}
+          - {path: [target, '*', dev-dependencies], keys: true}
+          - {path: [target, '*', build-dependencies], keys: true}
+          - {path: [target, '*', dependencies, '*', package]}
+          - {path: [target, '*', dev-dependencies, '*', package]}
+          - {path: [target, '*', build-dependencies, '*', package]}
+          - {path: [workspace, dependencies], keys: true}
+          - {path: [workspace, dependencies, '*', package]}
+      - files: [Cargo.lock]
+        format: toml
+        packages:
+          - {path: [package, '*', name]}
     normalize_hyphen_to_underscore: true
     package_matching:
       package_separators: ["::", "/"]
 
   php:
     dependency_manifest_patterns: [composer.json, composer.lock]
+    dependency_manifest_layouts:
+      - files: [composer.json]
+        format: json
+        packages:
+          - {path: [name]}
+          - {path: [require], keys: true}
+          - {path: [require-dev], keys: true}
+      - files: [composer.lock]
+        format: json
+        packages:
+          - {path: [packages, '*', name]}
+          - {path: [packages-dev, '*', name]}
     package_matching:
       package_separators: ["\\", "/", "::", "->"]
 
@@ -443,6 +531,45 @@ languages:
       - Pipfile.lock
       - poetry.lock
       - uv.lock
+    dependency_manifest_layouts:
+      - files: ['requirements*.txt']
+        format: lines
+        packages:
+          - {path: [], capture: '^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\[[A-Za-z0-9_.,-]+\])?\s*(?:(?:===|==|~=|!=|<=|>=|<|>)[^\s;#]+)?\s*(?:;[^#]*)?(?:#.*)?$'}
+      - files: [setup.py]
+        format: code
+        adapter: python
+        calls:
+          - callee: {attribute: [setuptools, setup], binding_origin: imported}
+            arguments:
+              - {keyword: name}
+              - {keyword: install_requires, sequence: true, capture: '^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)'}
+              - {keyword: setup_requires, sequence: true, capture: '^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)'}
+      - files: [pyproject.toml]
+        format: toml
+        packages:
+          - {path: [project, name]}
+          - {path: [project, dependencies, '*'], capture: '^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)'}
+          - {path: [project, optional-dependencies, '*', '*'], capture: '^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)'}
+          - {path: [dependency-groups, '*', '*'], capture: '^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)'}
+          - {path: [tool, poetry, name]}
+          - {path: [tool, poetry, dependencies], keys: true}
+          - {path: [tool, poetry, dev-dependencies], keys: true}
+          - {path: [tool, poetry, group, '*', dependencies], keys: true}
+      - files: [Pipfile]
+        format: toml
+        packages:
+          - {path: [packages], keys: true}
+          - {path: [dev-packages], keys: true}
+      - files: [Pipfile.lock]
+        format: json
+        packages:
+          - {path: [default], keys: true}
+          - {path: [develop], keys: true}
+      - files: [poetry.lock, uv.lock]
+        format: toml
+        packages:
+          - {path: [package, '*', name]}
     normalize_hyphen_to_underscore: true
     package_aliases:
       argon2-cffi: [argon2]
@@ -504,6 +631,21 @@ languages:
       - settings.gradle.kts
       - gradle.lockfile
       - gradle.properties
+    dependency_manifest_layouts: &jvm_manifest_layouts
+      - files: [gradle.lockfile]
+        format: lines
+        packages:
+          - {path: [], capture: '^([^:\s]+):[^:\s]+:[^=\s]+=.*$'}
+          - {path: [], capture: '^[^:\s]+:([^:\s]+):[^=\s]+=.*$'}
+      - files: [pom.xml]
+        format: xml
+        packages:
+          - {path: [project, groupId]}
+          - {path: [project, artifactId]}
+          - {path: [project, dependencies, dependency, groupId]}
+          - {path: [project, dependencies, dependency, artifactId]}
+          - {path: [project, profiles, profile, dependencies, dependency, groupId]}
+          - {path: [project, profiles, profile, dependencies, dependency, artifactId]}
     package_matching:
       package_separators: ["."]
   kotlin: *jvm_ecosystem
@@ -518,6 +660,7 @@ languages:
       - gradle.properties
       - build.sbt
       - "*.sbt"
+    dependency_manifest_layouts: *jvm_manifest_layouts
     package_matching:
       package_separators: ["."]
 
@@ -529,6 +672,12 @@ languages:
       - Cartfile.resolved
       - Podfile
       - Podfile.lock
+    dependency_manifest_layouts:
+      - files: [Package.resolved]
+        format: json
+        packages:
+          - {path: [pins, '*', identity]}
+          - {path: [object, pins, '*', package]}
     package_matching:
       package_separators: [".", "/"]
   objc:
@@ -547,6 +696,12 @@ languages:
       - "*.slnx"
       - "*.props"
       - "*.targets"
+    dependency_manifest_layouts:
+      - files: [packages.config, '*.csproj', '*.fsproj', '*.vbproj', '*.props', '*.targets', '*.slnx']
+        format: xml
+        packages:
+          - {path: [packages, package, '@id']}
+          - {path: [Project, ItemGroup, PackageReference, '@Include']}
     package_matching:
       package_separators: [".", "/"]
 
@@ -557,6 +712,15 @@ languages:
       - vcpkg.json
       - conanfile.py
       - conanfile.txt
+    dependency_manifest_layouts: &native_manifest_layouts
+      - files: [vcpkg.json]
+        format: json
+        packages:
+          - {path: [name]}
+          - {path: [dependencies, '*']}
+          - {path: [dependencies, '*', name]}
+          - {path: [features, '*', dependencies, '*']}
+          - {path: [features, '*', dependencies, '*', name]}
     package_matching: &native_header_packages
       strip_import_suffixes: [".h", ".hpp", ".hxx"]
       package_separators: ["/"]
@@ -568,10 +732,22 @@ languages:
       - vcpkg.json
       - conanfile.py
       - conanfile.txt
+    dependency_manifest_layouts: *native_manifest_layouts
     package_matching: *native_header_packages
 
   dart:
     dependency_manifest_patterns: [pubspec.yaml, pubspec.lock]
+    dependency_manifest_layouts:
+      - files: [pubspec.yaml]
+        format: yaml
+        packages:
+          - {path: [name]}
+          - {path: [dependencies], keys: true}
+          - {path: [dev_dependencies], keys: true}
+      - files: [pubspec.lock]
+        format: yaml
+        packages:
+          - {path: [packages], keys: true}
     package_matching:
       package_separators: [".", "/"]
 
@@ -582,5 +758,17 @@ languages:
 
   perl:
     dependency_manifest_patterns: [cpanfile, cpanfile.snapshot, META.json, META.yml, Makefile.PL, Build.PL]
+    dependency_manifest_layouts:
+      - files: [META.json]
+        format: json
+        packages: &perl_manifest_packages
+          - {path: [name]}
+          - {path: [prereqs, '*', '*'], keys: true}
+          - {path: [requires], keys: true}
+          - {path: [build_requires], keys: true}
+          - {path: [configure_requires], keys: true}
+      - files: [META.yml]
+        format: yaml
+        packages: *perl_manifest_packages
     package_matching:
       package_separators: ["::", "->", "/"]

@@ -161,6 +161,7 @@ pub(super) struct FindingBuildContext<'a> {
     /// callback identities, and positional forwarding roles; provider/API
     /// meaning remains in rule data.
     pub(super) callback_invocations: &'a [bonsai_taint::CallbackInvocation],
+    pub(super) throwing_call_sites: &'a [Span],
     /// Spans of every call site the engine recorded as carrying
     /// tainted argument flow on this source's graph. A sanitizer
     /// only credits the finding when its match span overlaps one
@@ -451,6 +452,7 @@ pub(super) fn make_finding(
         call_graph: context.call_graph,
         static_provenance_call_graph: context.static_provenance_call_graph,
         callback_invocations: context.callback_invocations,
+        throwing_call_sites: context.throwing_call_sites,
     };
     if let Some(path_guard) = path_consumer_containment_guard_sanitizer(
         &path_consumer_context,

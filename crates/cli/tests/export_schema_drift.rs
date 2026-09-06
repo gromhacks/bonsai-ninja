@@ -113,7 +113,7 @@ fn export_test_cache_dir(workspace: &Path) -> PathBuf {
 fn export_schema() -> &'static jsonschema::Validator {
     static VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
     VALIDATOR.get_or_init(|| {
-        let path = repo_root().join("schemas/bonsai-native-export-v13.schema.json");
+        let path = repo_root().join("schemas/bonsai-native-export-v14.schema.json");
         let schema: Value = serde_json::from_slice(&std::fs::read(&path).expect("read export schema"))
             .expect("export schema is JSON");
         jsonschema::validator_for(&schema).expect("export schema compiles")
@@ -129,7 +129,7 @@ fn assert_matches_export_schema(label: &str, export: &Value) {
         .collect::<Vec<_>>();
     assert!(
         errors.is_empty(),
-        "[{label}] native export does not match schemas/bonsai-native-export-v13.schema.json:\n{}",
+        "[{label}] native export does not match schemas/bonsai-native-export-v14.schema.json:\n{}",
         errors.join("\n")
     );
 }
@@ -185,11 +185,31 @@ fn collect_referenced_func_ids(taint_graph: &Value) -> Vec<(&'static str, u64)> 
         ("assign_chains", "assign_chains.func_id"),
         ("intra_taint", "intra_taint.func_id"),
         ("flow_id_labels", "flow_id_labels.func_id"),
+        ("function_summaries", "function_summaries.func_id"),
     ] {
         if let Some(arr) = taint_graph.get(section).and_then(Value::as_array) {
             for entry in arr {
                 if let Some(v) = entry.get("func_id") {
                     push(&mut refs, label, v);
+                }
+            }
+        }
+    }
+    if let Some(entries) = taint_graph.get("propagations").and_then(Value::as_array) {
+        for entry in entries {
+            push(&mut refs, "propagations.entry_func_id", &entry["entry_func_id"]);
+            if let Some(records) = entry["records"].as_array() {
+                for record in records {
+                    push(
+                        &mut refs,
+                        "propagations.records.from_func_id",
+                        &record["from_func_id"],
+                    );
+                    push(
+                        &mut refs,
+                        "propagations.records.to_func_id",
+                        &record["to_func_id"],
+                    );
                 }
             }
         }
@@ -282,7 +302,19 @@ fn assert_flow_graph_names_are_workspace_functions(lang: &str, export: &Value) {
         .get("flow_graph")
         .and_then(Value::as_array)
         .unwrap_or_else(|| panic!("[{lang}] export missing flow_graph"));
+    let known_ids: BTreeSet<_> = taint_graph["functions"]
+        .as_array()
+        .expect("functions")
+        .iter()
+        .map(|function| function["func_id"].as_u64().expect("func_id"))
+        .collect();
     for row in rows {
+        assert!(known_ids.contains(&row["func_id"].as_u64().expect("flow_graph.func_id")));
+        for field in ["caller_func_ids", "outgoing_func_ids"] {
+            for id in row[field].as_array().expect("function ID array") {
+                assert!(known_ids.contains(&id.as_u64().expect("function ID")));
+            }
+        }
         for field in ["callers", "outgoing"] {
             if let Some(names) = row.get(field).and_then(Value::as_array) {
                 for name in names {
@@ -422,12 +454,12 @@ fn every_lang_micro_export_funcid_refs_resolve() {
 }
 
 #[test]
-fn committed_schema_is_strict_v13_and_accepts_materialized_propagations() {
-    let schema_path = repo_root().join("schemas/bonsai-native-export-v13.schema.json");
+fn committed_schema_is_strict_v14_and_accepts_materialized_propagations() {
+    let schema_path = repo_root().join("schemas/bonsai-native-export-v14.schema.json");
     let schema: Value = serde_json::from_slice(&std::fs::read(schema_path).expect("read export schema"))
         .expect("export schema is JSON");
     assert_eq!(schema["$schema"], "https://json-schema.org/draft/2020-12/schema");
-    assert_eq!(schema["properties"]["schema_version"]["const"], 13);
+    assert_eq!(schema["properties"]["schema_version"]["const"], 14);
     assert_eq!(schema["additionalProperties"], false);
 
     let export =
@@ -454,7 +486,7 @@ fn predicate_identity_is_a_versioned_condition_field_not_an_unchecked_extension(
         "subject": {"span": {"file": 0, "start": 15, "end": 20}},
         "type_name": "str", "predicate_call_span": span
     });
-    for version in [12, 13] {
+    for version in [12, 13, 14] {
         let path = repo_root().join(format!("schemas/bonsai-native-export-v{version}.schema.json"));
         let schema: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let condition_schema = serde_json::json!({
@@ -462,7 +494,7 @@ fn predicate_identity_is_a_versioned_condition_field_not_an_unchecked_extension(
             "$ref": "#/$defs/conditionExpression"
         });
         let validator = jsonschema::validator_for(&condition_schema).unwrap();
-        assert_eq!(validator.is_valid(&condition), version == 13);
+        assert_eq!(validator.is_valid(&condition), version >= 13);
         let mut invalid = condition.clone();
         invalid["predicate_call_span"]["end"] = serde_json::json!(-1);
         assert!(!validator.is_valid(&invalid));

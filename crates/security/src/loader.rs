@@ -193,6 +193,167 @@ pub struct PackageTailBindingSemantics {
     pub call_separators: Vec<String>,
 }
 
+/// Data-document grammar for a dependency manifest. Package-manager names and
+/// package-bearing field paths belong to the rulepack, not shared analysis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DependencyManifestFormat {
+    Json,
+    Yaml,
+    Toml,
+    Xml,
+    /// A data file with one complete record per line (not source code).
+    Lines,
+    /// Adapter-lowered calls and exact static argument values.
+    Code,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DependencyManifestLayout {
+    pub files: Vec<String>,
+    pub format: DependencyManifestFormat,
+    #[serde(default)]
+    pub packages: Vec<DependencyPackageSelector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<DependencyManifestCall>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DependencyManifestCall {
+    pub callee: crate::rule::RuleTarget,
+    #[serde(default)]
+    pub arguments: Vec<DependencyManifestArgument>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DependencyManifestArgument {
+    #[serde(default)]
+    pub index: Option<usize>,
+    #[serde(default)]
+    pub keyword: Option<String>,
+    #[serde(default)]
+    pub sequence: bool,
+    #[serde(default)]
+    pub capture: Option<String>,
+}
+
+impl DependencyManifestLayout {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.files.is_empty(), "manifest layout requires filenames");
+        anyhow::ensure!(
+            self.files.iter().all(|file| !file.trim().is_empty()
+                && !file.contains(['/', '\\'])
+                && file.matches('*').count() <= 1),
+            "manifest filenames must be basenames with at most one wildcard"
+        );
+        if self.format == DependencyManifestFormat::Code {
+            anyhow::ensure!(
+                self.adapter
+                    .as_ref()
+                    .is_some_and(|adapter| !adapter.trim().is_empty())
+                    && !self.calls.is_empty()
+                    && self.packages.is_empty(),
+                "code manifest requires an adapter and call models, not document paths"
+            );
+        } else {
+            anyhow::ensure!(
+                self.adapter.is_none() && self.calls.is_empty(),
+                "only code manifests accept adapters/call models"
+            );
+        }
+        for selector in &self.packages {
+            anyhow::ensure!(
+                selector.path.iter().all(|part| !part.is_empty()),
+                "manifest path contains an empty component"
+            );
+            anyhow::ensure!(
+                selector
+                    .nested
+                    .as_ref()
+                    .is_none_or(|nested| selector.keys && !nested.is_empty()),
+                "nested projection requires object keys and a nonempty field"
+            );
+            if self.format == DependencyManifestFormat::Xml {
+                anyhow::ensure!(
+                    !selector.keys && selector.nested.is_none(),
+                    "XML selectors use element/attribute values, not object keys"
+                );
+            }
+            if self.format == DependencyManifestFormat::Lines {
+                anyhow::ensure!(
+                    selector.path.is_empty()
+                        && !selector.keys
+                        && selector.nested.is_none()
+                        && selector.capture.is_some(),
+                    "line-record selectors require only an anchored capture"
+                );
+                let capture = selector.capture.as_deref().unwrap_or_default();
+                anyhow::ensure!(
+                    capture.starts_with('^') && capture.ends_with('$'),
+                    "line-record capture must match the complete line"
+                );
+            }
+            validate_manifest_capture(selector.capture.as_deref())?;
+        }
+        for call in &self.calls {
+            anyhow::ensure!(
+                call.callee.name.is_some() || call.callee.attribute.is_some() || call.callee.regex.is_some(),
+                "dependency call requires an exact target"
+            );
+            if let Some(regex) = &call.callee.regex {
+                regex::Regex::new(regex)?;
+            }
+            anyhow::ensure!(
+                !call.arguments.is_empty(),
+                "dependency call requires package arguments"
+            );
+            for argument in &call.arguments {
+                anyhow::ensure!(
+                    argument.index.is_some() != argument.keyword.is_some()
+                        && argument.keyword.as_ref().is_none_or(|name| !name.is_empty()),
+                    "dependency argument requires exactly one index or keyword"
+                );
+                validate_manifest_capture(argument.capture.as_deref())?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_manifest_capture(capture: Option<&str>) -> anyhow::Result<()> {
+    if let Some(capture) = capture {
+        anyhow::ensure!(
+            regex::Regex::new(capture)?.captures_len() >= 2,
+            "dependency capture must contain group 1"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DependencyPackageSelector {
+    /// Exact document path. `*` selects array items or map children; XML
+    /// components select child elements and a final `@name` selects an attribute.
+    pub path: Vec<String>,
+    /// Select object keys instead of string values at this path.
+    #[serde(default)]
+    pub keys: bool,
+    /// Optional capture group 1 extracting a package name from a declared
+    /// dependency specification (never from unrelated prose or comments).
+    #[serde(default)]
+    pub capture: Option<String>,
+    /// Follow this same dependency-map key beneath each selected map entry.
+    /// This describes nested lockfile records without searching arbitrary fields.
+    #[serde(default)]
+    pub nested: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguageRuleMetadata {
@@ -204,6 +365,8 @@ pub struct LanguageRuleMetadata {
     /// files (for example `requirements*.txt` or `*.csproj`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_manifest_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_manifest_layouts: Vec<DependencyManifestLayout>,
     #[serde(default)]
     pub normalize_hyphen_to_underscore: bool,
     /// Manifest distribution name -> adapter-visible import/package aliases.
@@ -230,6 +393,9 @@ impl LanguageRuleMetadata {
         }
         if !incoming.dependency_manifest_patterns.is_empty() {
             self.dependency_manifest_patterns = incoming.dependency_manifest_patterns;
+        }
+        if !incoming.dependency_manifest_layouts.is_empty() {
+            self.dependency_manifest_layouts = incoming.dependency_manifest_layouts;
         }
         if incoming.normalize_hyphen_to_underscore {
             self.normalize_hyphen_to_underscore = true;

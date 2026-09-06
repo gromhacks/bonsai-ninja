@@ -101,6 +101,9 @@ pub(crate) const TEMPORARY_CALL_ARGUMENT_BASE_PREFIX: &str = "__bonsai_call_argu
 /// default.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransferOptions {
+    /// Exact matcher-approved calls that always throw. Arguments flow into
+    /// the exception endpoint; no callee name is interpreted by the IDG.
+    pub throwing_call_sites: Vec<Span>,
     /// Configured output-argument overwrite shapes.
     pub clean_output_overwrites: Vec<CleanOutputOverwriteSpec>,
     /// Matcher-approved calls whose receiver is replaced by clean state.
@@ -159,6 +162,7 @@ pub struct TransferOptions {
 impl Default for TransferOptions {
     fn default() -> Self {
         Self {
+            throwing_call_sites: Vec::new(),
             clean_output_overwrites: Vec::new(),
             clean_receiver_overwrites: Vec::new(),
             source_output_args: Vec::new(),
@@ -208,7 +212,8 @@ impl TransferOptions {
     /// True when no optional transfer behavior is configured.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.clean_output_overwrites.is_empty()
+        self.throwing_call_sites.is_empty()
+            && self.clean_output_overwrites.is_empty()
             && self.clean_receiver_overwrites.is_empty()
             && self.source_output_args.is_empty()
             && self.source_callback_args.is_empty()
@@ -231,6 +236,8 @@ impl TransferOptions {
     /// building a graph from configured transfer shapes.
     #[must_use]
     pub fn canonicalized(mut self) -> Self {
+        self.throwing_call_sites.sort_unstable();
+        self.throwing_call_sites.dedup();
         self.clean_output_overwrites.sort_by(|a, b| {
             (&a.callee, a.output_arg_index, a.value_start_arg_index).cmp(&(
                 &b.callee,
@@ -418,7 +425,11 @@ impl TransferOptions {
 
         let options = self.clone().canonicalized();
         let mut hasher = StableHasher::new();
-        absorb_str(&mut hasher, "bonsai-idg-transfer-options-v16");
+        absorb_str(&mut hasher, "bonsai-idg-transfer-options-v17");
+        absorb_u64(&mut hasher, options.throwing_call_sites.len() as u64);
+        for span in &options.throwing_call_sites {
+            absorb_span(&mut hasher, *span);
+        }
         absorb_u64(&mut hasher, u64::from(options.include_diagnostic_field_flows));
         absorb_u64(
             &mut hasher,
@@ -760,6 +771,7 @@ pub struct ReceiverStatePropagationSpec {
 /// options remain the canonical, hashable representation.
 #[derive(Debug)]
 pub(crate) struct CompiledTransferMatchers {
+    throwing_call_sites: ahash::AHashSet<Span>,
     call_result_passthroughs: ConfiguredNameIndex,
     resolved_call_result_passthroughs: ResolvedCallSiteIndex,
     source_output_args: ResolvedCallSiteIndex,
@@ -776,6 +788,7 @@ pub(crate) struct CompiledTransferMatchers {
 impl CompiledTransferMatchers {
     pub(crate) fn new(options: &TransferOptions) -> Self {
         Self {
+            throwing_call_sites: options.throwing_call_sites.iter().copied().collect(),
             call_result_passthroughs: ConfiguredNameIndex::new(
                 options
                     .call_result_passthroughs
@@ -3315,6 +3328,33 @@ fn walk_event(
                 args,
                 ctx,
             );
+            if ctx.matchers.throwing_call_sites.contains(span) {
+                walk_throw(*span, None, None, ctx);
+                let site = ctx
+                    .out
+                    .throw_sites
+                    .last()
+                    .cloned()
+                    .expect("modeled throw endpoint");
+                for index in 0..args.len() {
+                    let argument = ctx.intern_node(Place::CallArg {
+                        site: CallSiteId(*span),
+                        idx: u32::try_from(index).expect("compiler call argument index"),
+                    });
+                    ctx.emit(IdgEdge {
+                        from: argument,
+                        to: site.throw_node,
+                        meta: crate::edge::EdgeMeta {
+                            kind: IdgEdgeKind::IntraThrow,
+                            call_kind: bonsai_callgraph::EdgeKind::Direct,
+                            via_span: *span,
+                        },
+                    });
+                }
+                let mut exits = FlowExits::default();
+                exits.add_throw(site, ctx.last_writer.clone());
+                return exits;
+            }
             FlowExits::fallthrough(ctx.last_writer.clone())
         }
         FlowEvent::Return { span, value_flow, .. } => {

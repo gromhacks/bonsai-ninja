@@ -37,6 +37,7 @@ pub(super) struct PathConsumerGuardContext<'a> {
     pub(super) call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
     pub(super) static_provenance_call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
     pub(super) callback_invocations: &'a [bonsai_taint::CallbackInvocation],
+    pub(super) throwing_call_sites: &'a [Span],
 }
 
 pub(super) fn source_sink_pair_is_low_signal(
@@ -1352,6 +1353,7 @@ pub(super) fn path_consumer_containment_guard_sanitizer(
         call_graph,
         static_provenance_call_graph,
         callback_invocations,
+        throwing_call_sites,
     } = context;
     let semantics = sink_rule.analysis_semantics.as_ref()?;
     if semantics.guard_profile != Some(GuardProfile::PathConsumerContainment) {
@@ -1368,6 +1370,7 @@ pub(super) fn path_consumer_containment_guard_sanitizer(
         guard.sink_path_arg_index,
         guard,
         None,
+        throwing_call_sites,
     )
     .or_else(|| {
         path_consumer_helper_guard_span(
@@ -1379,6 +1382,7 @@ pub(super) fn path_consumer_containment_guard_sanitizer(
             &decl,
             sink.span,
             guard,
+            throwing_call_sites,
         )
     })
     .or_else(|| {
@@ -1393,6 +1397,7 @@ pub(super) fn path_consumer_containment_guard_sanitizer(
                 guard.sink_path_arg_index,
                 guard,
                 Some(&decl.name),
+                throwing_call_sites,
             )
         });
         guarded
@@ -1407,6 +1412,7 @@ pub(super) fn path_consumer_containment_guard_sanitizer(
             sink_func,
             &decl,
             guard,
+            throwing_call_sites,
         )
     })?;
     finding_for_guard_span_in_workspace(
@@ -1429,6 +1435,7 @@ fn path_consumer_callback_guard_span(
     callback: FuncId,
     callback_decl: &bonsai_lang_api::Decl,
     guard: &crate::rule::PathConsumerContainmentGuardSemantics,
+    throwing_call_sites: &[Span],
 ) -> Option<Span> {
     for invocation in invocations {
         let Some(outer_arg) = invocation
@@ -1462,6 +1469,7 @@ fn path_consumer_callback_guard_span(
                 outer_arg,
                 guard,
                 None,
+                throwing_call_sites,
             ) {
                 return Some(span);
             }
@@ -1500,6 +1508,7 @@ fn path_consumer_helper_guard_span(
     sink_decl: &bonsai_lang_api::Decl,
     sink_span: Span,
     guard: &crate::rule::PathConsumerContainmentGuardSemantics,
+    throwing_call_sites: &[Span],
 ) -> Option<Span> {
     let sink_index = ws.exact_decl_index_shared(sink_span.file)?;
     let mut sink_calls = Vec::new();
@@ -1567,6 +1576,7 @@ fn path_consumer_helper_guard_span(
             &helper,
             guard,
             &mut AHashSet::new(),
+            throwing_call_sites,
         ) {
             return Some(span);
         }
@@ -1584,13 +1594,19 @@ fn path_guarded_helper_return_span(
     helper: &bonsai_lang_api::Decl,
     guard: &crate::rule::PathConsumerContainmentGuardSemantics,
     visited: &mut AHashSet<FuncId>,
+    throwing_call_sites: &[Span],
 ) -> Option<Span> {
     if !visited.insert(helper_func) {
         return None;
     }
-    if let Some(span) =
-        path_guarded_helper_direct_return_span(ws, global, static_provenance_call_graph, helper, guard)
-    {
+    if let Some(span) = path_guarded_helper_direct_return_span(
+        ws,
+        global,
+        static_provenance_call_graph,
+        helper,
+        guard,
+        throwing_call_sites,
+    ) {
         return Some(span);
     }
     let file_index = ws.exact_decl_index_shared(helper.span.file)?;
@@ -1635,6 +1651,7 @@ fn path_guarded_helper_return_span(
         &target_decl,
         guard,
         visited,
+        throwing_call_sites,
     )
 }
 
@@ -1644,6 +1661,7 @@ fn path_guarded_helper_direct_return_span(
     static_provenance_call_graph: &bonsai_callgraph::ResolvedCallGraph,
     helper: &bonsai_lang_api::Decl,
     guard: &crate::rule::PathConsumerContainmentGuardSemantics,
+    throwing_call_sites: &[Span],
 ) -> Option<Span> {
     let path_constructor = guard.path_constructor.as_ref()?;
     let file_index = ws.exact_decl_index_shared(helper.span.file)?;
@@ -1717,7 +1735,7 @@ fn path_guarded_helper_direct_return_span(
     let mut branches = Vec::new();
     collect_completed_branches_on_path(&helper.flow_events, *return_span, &mut branches);
     let guarded = branches.into_iter().rev().find_map(|branch| {
-        (branch_arm_abruptly_exits(branch.then_events)
+        (branch_arm_abruptly_exits_with_throwing_sites(branch.then_events, throwing_call_sites)
             && path_containment_guard_condition(
                 &helper.flow_events,
                 &file_index,
@@ -3958,6 +3976,7 @@ fn path_consumer_guard_span(
     path_arg_index: usize,
     guard: &crate::rule::PathConsumerContainmentGuardSemantics,
     expected_callee: Option<&str>,
+    throwing_call_sites: &[Span],
 ) -> Option<Span> {
     let file_index = ws.exact_decl_index_shared(consumer_span.file)?;
     let mut calls = Vec::new();
@@ -4229,7 +4248,7 @@ fn path_consumer_guard_span(
         .into_iter()
         .rev()
         .find(|branch| {
-            branch_arm_abruptly_exits(branch.then_events)
+            branch_arm_abruptly_exits_with_throwing_sites(branch.then_events, throwing_call_sites)
                 && path_containment_guard_condition(
                     &decl.flow_events,
                     &file_index,
@@ -9606,6 +9625,10 @@ fn events_contain_target(events: &[FlowEvent], target: Span) -> bool {
 }
 
 fn branch_arm_abruptly_exits(events: &[FlowEvent]) -> bool {
+    branch_arm_abruptly_exits_with_throwing_sites(events, &[])
+}
+
+fn branch_arm_abruptly_exits_with_throwing_sites(events: &[FlowEvent], throwing_call_sites: &[Span]) -> bool {
     // A syntactic return/throw proves rejection; a callee's spelling does
     // not. Fold the structured IR once, joining alternatives without path
     // enumeration or native-stack recursion. Loop transfers must survive a
@@ -9628,6 +9651,9 @@ fn branch_arm_abruptly_exits(events: &[FlowEvent]) -> bool {
                 };
                 match event {
                     FlowEvent::Return { .. } | FlowEvent::Throw { .. } => results.push(0),
+                    FlowEvent::Call { span, .. } if throwing_call_sites.binary_search(span).is_ok() => {
+                        results.push(0);
+                    }
                     FlowEvent::Break { .. } | FlowEvent::Continue { .. } => {
                         results.push(UNPROVEN_TRANSFER);
                     }
@@ -10362,6 +10388,7 @@ def upload(blob):
                 0,
                 &guard,
                 None,
+                &[],
             )
             .is_some(),
             "typed branch facts: {:#?}",
@@ -10455,6 +10482,7 @@ class AssetReader {
                     0,
                     &guard,
                     None,
+                    &[],
                 )
                 .is_some(),
                 expected,
@@ -10552,6 +10580,7 @@ async function wrongDirection(name) {
                     0,
                     &guard,
                     None,
+                    &[],
                 )
                 .is_some(),
                 expected,
@@ -10650,6 +10679,7 @@ class Store {{
                     0,
                     &guard,
                     None,
+                    &[],
                 )
                 .is_some(),
                 expected,
@@ -10735,6 +10765,7 @@ String readValue(String input, String other) {{
                     0,
                     &guard,
                     None,
+                    &[],
                 )
                 .is_some(),
                 expected,
@@ -10831,6 +10862,7 @@ void readValue(id input, id other, id runtimeBoundary) {{
                     0,
                     &guard,
                     None,
+                    &[],
                 )
                 .is_some(),
                 expected,

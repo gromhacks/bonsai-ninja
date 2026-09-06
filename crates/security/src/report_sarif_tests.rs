@@ -362,6 +362,7 @@ fn sarif_emits_alternate_routes_as_codeflows_on_one_result() {
         flow_id: Some("F:alternate".to_string()),
         chain_display: vec!["json_handler".to_string(), "run_admin_command".to_string()],
         taint_path: vec![TaintPropagationStep {
+            storage_transfer: None,
             caller: "json_handler".to_string(),
             callee: "run_admin_command".to_string(),
             file: "api.py".to_string(),
@@ -395,6 +396,7 @@ fn sarif_codeflows_includes_sanitizer_hops_in_path_order() {
     let mut f = sample_finding();
     f.taint_path = vec![
         TaintPropagationStep {
+            storage_transfer: None,
             caller: "handle_request".to_string(),
             callee: "normalize".to_string(),
             file: "app.py".to_string(),
@@ -403,6 +405,7 @@ fn sarif_codeflows_includes_sanitizer_hops_in_path_order() {
             tainted_args: Vec::new(),
         },
         TaintPropagationStep {
+            storage_transfer: None,
             caller: "normalize".to_string(),
             callee: "run_admin_command".to_string(),
             file: "lib.py".to_string(),
@@ -411,6 +414,7 @@ fn sarif_codeflows_includes_sanitizer_hops_in_path_order() {
             tainted_args: Vec::new(),
         },
         TaintPropagationStep {
+            storage_transfer: None,
             caller: "run_admin_command".to_string(),
             callee: "os.system".to_string(),
             file: "auth.py".to_string(),
@@ -460,6 +464,7 @@ fn sarif_pattern_findings_skip_codeflows() {
 fn sarif_codeflows_include_concrete_taint_path_hops() {
     let mut f = sample_finding();
     f.taint_path = vec![TaintPropagationStep {
+        storage_transfer: None,
         caller: "handle_request".to_string(),
         callee: "run_admin_command".to_string(),
         file: "app.py".to_string(),
@@ -503,6 +508,7 @@ fn sarif_codeflows_collapse_adjacent_same_line_locations() {
     f.sink.column = 27;
     f.taint_path = vec![
         TaintPropagationStep {
+            storage_transfer: None,
             caller: "handle_request".to_string(),
             callee: "normalize".to_string(),
             file: "app.py".to_string(),
@@ -511,6 +517,7 @@ fn sarif_codeflows_collapse_adjacent_same_line_locations() {
             tainted_args: Vec::new(),
         },
         TaintPropagationStep {
+            storage_transfer: None,
             caller: "normalize".to_string(),
             callee: "os.system".to_string(),
             file: "app.py".to_string(),

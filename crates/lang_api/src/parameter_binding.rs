@@ -29,6 +29,25 @@ pub fn named_argument_parameter_index<'a>(
         .map(|(index, _)| index)
 }
 
+/// Recover an explicit actual slot from its exact formal index. This uses
+/// the same named/positional binding contract as IDG stitching, including
+/// positional labels that are not represented in the formal inventory.
+pub fn argument_index_for_parameter<'a>(
+    parameter: usize,
+    arguments: impl IntoIterator<Item = Option<&'a str>>,
+    parameters: &[String],
+    receiver: Option<usize>,
+) -> Option<usize> {
+    arguments.into_iter().enumerate().find_map(|(index, name)| {
+        let formal = name
+            .and_then(|name| {
+                named_argument_parameter_index(name, parameters.iter().map(String::as_str), receiver)
+            })
+            .unwrap_or_else(|| explicit_argument_parameter_index(index, receiver));
+        (formal == parameter).then_some(index)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,5 +72,15 @@ mod tests {
         assert_eq!(named_argument_parameter_index("self", params, Some(0)), None);
         assert_eq!(named_argument_parameter_index("Callback", params, Some(0)), None);
         assert_eq!(named_argument_parameter_index("", params, None), None);
+    }
+
+    #[test]
+    fn reverse_binding_distinguishes_receiver_and_reordered_named_arguments() {
+        let params = ["self", "first", "last"].map(str::to_owned);
+        let args = [Some("last"), Some("first")];
+        assert_eq!(argument_index_for_parameter(0, args, &params, Some(0)), None);
+        assert_eq!(argument_index_for_parameter(1, args, &params, Some(0)), Some(1));
+        assert_eq!(argument_index_for_parameter(2, args, &params, Some(0)), Some(0));
+        assert_eq!(argument_index_for_parameter(1, [None], &params, Some(0)), Some(0));
     }
 }

@@ -6707,53 +6707,17 @@ pub fn populate_call_argument_static_values(
     handler: &GrammarHandler,
     decode: fn(Node<'_>, &[u8]) -> Option<crate::StaticScalarValue>,
 ) {
-    fn collect_requests(events: &[FlowEvent], out: &mut Vec<(Span, usize, Span)>) {
-        for event in events {
-            match event {
-                FlowEvent::Call { span, args, .. } => out.extend(
+    let mut requests = Vec::new();
+    for decl in &index.defs {
+        for_each_flow_event(&decl.flow_events, &mut |event| {
+            if let FlowEvent::Call { span, args, .. } = event {
+                requests.extend(
                     args.iter()
                         .enumerate()
                         .map(|(index, argument)| (*span, index, argument.span)),
-                ),
-                FlowEvent::Branch {
-                    then_events,
-                    else_events,
-                    ..
-                } => {
-                    collect_requests(then_events, out);
-                    collect_requests(else_events, out);
-                }
-                FlowEvent::Loop {
-                    condition_events,
-                    body,
-                    update_events,
-                    ..
-                } => {
-                    collect_requests(condition_events, out);
-                    collect_requests(body, out);
-                    collect_requests(update_events, out);
-                }
-                FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                    collect_requests(body, out);
-                }
-                FlowEvent::Try {
-                    body,
-                    catch_events,
-                    finally_events,
-                    ..
-                } => {
-                    collect_requests(body, out);
-                    collect_requests(catch_events, out);
-                    collect_requests(finally_events, out);
-                }
-                _ => {}
+                );
             }
-        }
-    }
-
-    let mut requests = Vec::new();
-    for decl in &index.defs {
-        collect_requests(&decl.flow_events, &mut requests);
+        });
     }
     requests.sort_by_key(|(call, argument_index, argument)| {
         (
@@ -6767,26 +6731,32 @@ pub fn populate_call_argument_static_values(
     });
     requests.dedup();
 
-    let mut argument_nodes = std::collections::HashMap::new();
-    let mut stack = vec![tree.root_node()];
-    while let Some(node) = stack.pop() {
-        if node.is_named() {
-            let span = span_of(file, &node);
-            // Argument wrappers and their sole value child may occupy the
-            // same byte range. Preserve the first (outermost) node reached
-            // by the root-first walk so aggregate/container structure is not
-            // replaced by a same-span leaf before exact value decoding.
-            argument_nodes.entry((span.start, span.end)).or_insert(node);
-        }
-        let mut cursor = node.walk();
-        stack.extend(node.named_children(&mut cursor));
+    // A single unparenthesized argument may share its range with the whole
+    // argument-list container. Prefer adapter-declared value/wrapper nodes,
+    // not that non-value list. Keep aggregate and callback wrappers intact.
+    let expected_kinds: Vec<_> = handler
+        .argument_wrapper_kinds
+        .iter()
+        .chain(handler.transparent_expression_wrapper_kinds)
+        .chain(handler.literal_value_kinds)
+        .chain(handler.string_literal_kinds)
+        .chain(handler.named_aggregate_kinds)
+        .chain(handler.positional_aggregate_kinds)
+        .chain(handler.lambda_kinds)
+        .copied()
+        .collect();
+    let mut fact_positions = std::collections::HashMap::new();
+    for (position, fact) in index.call_argument_values.iter().enumerate() {
+        fact_positions
+            .entry((fact.call_span, fact.argument_index))
+            .or_insert(position);
     }
 
     for (call_span, argument_index, argument_span) in requests {
-        let Some(argument_node) = argument_nodes.get(&(argument_span.start, argument_span.end)) else {
+        let Some(argument_node) = node_at_span(tree.root_node(), argument_span, &expected_kinds) else {
             continue;
         };
-        let value_node = argument_value_node(*argument_node, src, handler);
+        let value_node = argument_value_node(argument_node, src, handler);
         let static_value = decode(value_node, src);
         let inline_callback_static_return =
             exact_inline_callback_static_return(value_node, src, handler, decode);
@@ -6802,16 +6772,14 @@ pub fn populate_call_argument_static_values(
         {
             continue;
         }
-        if let Some(fact) = index
-            .call_argument_values
-            .iter_mut()
-            .find(|fact| fact.call_span == call_span && fact.argument_index == argument_index)
-        {
+        if let Some(position) = fact_positions.get(&(call_span, argument_index)) {
+            let fact = &mut index.call_argument_values[*position];
             fact.static_value = static_value;
             fact.inline_callback_static_return = inline_callback_static_return;
             fact.exact_static_aggregate_fields = exact_static_aggregate_fields;
             fact.exact_static_sequence_values = exact_static_sequence_values;
         } else {
+            fact_positions.insert((call_span, argument_index), index.call_argument_values.len());
             index.call_argument_values.push(crate::CallArgumentValueFact {
                 call_span,
                 argument_index,

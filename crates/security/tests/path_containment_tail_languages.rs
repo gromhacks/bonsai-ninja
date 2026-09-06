@@ -181,6 +181,29 @@ end
 }
 
 #[test]
+fn ruby_returning_raise_override_cannot_prove_path_rejection() {
+    let report = analyze(
+        "store.rb",
+        r##"
+class Store
+  ROOT = "/srv/assets".freeze
+  def self.raise(error); error; end
+  def self.read(name)
+    root = File.expand_path(ROOT)
+    path = File.expand_path(File.join(root, name))
+    raise ArgumentError unless path.start_with?("#{root}/")
+    File.binread(path)
+  end
+end
+"##,
+    );
+    assert_eq!(
+        status(&report, "ruby.path.file_binread", "read"),
+        FindingStatus::Unsanitized
+    );
+}
+
+#[test]
 fn php_composed_path_proof_requires_static_root_boundary_and_rejection() {
     let report = analyze(
         "AssetStore.php",

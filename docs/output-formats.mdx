@@ -9,6 +9,13 @@ Commands with a `--format` flag can write the selected payload to a file
 with `--output-path <PATH>`. This replaces shell redirection for JSON,
 SARIF, DOT, GraphML, Cypher, and text output; progress and diagnostics
 still use stderr.
+One-shot file reports are published atomically after successful rendering. A
+returned command error preserves an existing destination and discards its
+temporary report. Forced process termination can leave an unpublished
+`.bonsai-output-*` temporary file beside the destination; it does not replace
+the previous report. Existing symlinks to files retain their target semantics; explicit
+watch output and device sinks remain streaming. A completed negative
+`dump-resolve` result still writes its report before exiting with status 2.
 
 Use the global `--html-output <PATH>` option for a self-contained HTML report
 rendered from the command's canonical JSON result. The command runs in its
@@ -161,8 +168,18 @@ handle_request -> update_user -> run_admin_command
 `call_file`, `call_line`, and `call_column`, and its id hashes those
 coordinates, so a caller that invokes the same callee from several sites
 exports several distinct edges (GraphML ids stay unique and Cypher `MERGE`
-does not collapse them). Node and edge counts agree across the three formats
-and with `dump-edges --format json`.
+does not collapse them). Node and edge counts agree across the three formats;
+the resolved `CALLS` relation agrees with `dump-edges --format json`.
+GraphML preserves whitespace using XML character references. Characters that
+[XML 1.0 cannot represent](https://www.w3.org/TR/xml/#charsets) cause an explicit
+serialization error; use native JSON or NetworkX JSON to preserve such values.
+The SDK `render_graphml` returns a serialization result rather than silently
+rewriting invalid characters.
+Graph IDs are namespaced by the canonical workspace root, so importing two
+projects into one database does not merge unrelated declarations. Function
+node IDs use declaration locations, while `func_id` remains a compiler ID
+within that export snapshot. Moving a checkout changes its graph namespace.
+Cypher uses `MERGE`: it does not delete obsolete rows from earlier snapshots.
 
 Native `export` preserves exhaustive semantics in an exact compressed form
 when a derived path family could be quadratic. Add
@@ -184,13 +201,13 @@ in-memory JSON document.
 
 ### Native JSON schema
 
-The committed Draft 2020-12 schema for native export v13 is
-[`schemas/bonsai-native-export-v13.schema.json`](../schemas/bonsai-native-export-v13.schema.json).
+The committed Draft 2020-12 schema for native export v14 is
+[`schemas/bonsai-native-export-v14.schema.json`](../schemas/bonsai-native-export-v14.schema.json).
 It defines the top-level document, compiler file tables, normalized flow-event
 variants, callgraph rows, completeness fields, and IDG/taint projections. The
 release archive includes this file under `schemas/`.
 
-`schema: "bonsai-native-export"` and `schema_version: 13` select this contract.
+`schema: "bonsai-native-export"` and `schema_version: 14` select this contract.
 v13 carries the code with the graph: `files[].source` is the full file text
 (every span, line, `start`, and `end` in the document indexes into it),
 `decls[]` carry byte spans, `callgraph[]` edges and every taint propagation
@@ -201,6 +218,23 @@ Version 13 additionally preserves `classes[].column` and records
 `predicate_call_span` on call-backed type-test
 conditions. Consumers can join that exact callee identity to call events
 without confusing the predicate, its argument, and the enclosing expression.
+Version 14 adds `function_summaries[].func_id`, `class_fields[].symbol_id`,
+`propagations[].entry_func_id`, and each propagation record's `from_func_id`,
+`to_func_id`, `relation`, and `call_file` under `taint_graph`. Join IDs rather
+than short names or line numbers. Propagation direction follows dataflow:
+`return` goes from the invoked function back to its caller. The legacy
+`caller` / `callee` display strings label those dataflow endpoints, not a
+second invocation. Empty propagation closures report zero analyzed pairs.
+`flow_graph[]` also retains `func_id`, `caller_func_ids`, and
+`outgoing_func_ids`; its name arrays are display summaries, not unique
+identities. Graph database formats expose structural edges, local facts, and
+return summaries. They reject `--full-propagations`; use native JSON to
+materialize interprocedural propagation records.
+The separate `intra_taint` rows (`backend: "cfg_local"`) are per-parameter,
+function-local CFG projections, not security findings. Their local call-RHS
+transfer is conservative; use the canonical IDG relations for interprocedural
+proofs. Field copies preserve already-present evidence, replace overwritten
+target fields, and converge through loops without an iteration cap.
 Schema versions are immutable: an incompatible wire-format change requires a
 new schema file and a version increment. CI validates default exports for all
 supported language fixtures plus a materialized `--full-propagations` export
@@ -209,7 +243,7 @@ against the committed schema, and rejects unknown top-level fields.
 ```bash
 bonsai-ninja export ./src --format json --output-path bonsai-export.json
 # Validate bonsai-export.json with any Draft 2020-12 JSON Schema validator
-# against schemas/bonsai-native-export-v13.schema.json.
+# against schemas/bonsai-native-export-v14.schema.json.
 ```
 
 Treat a whole-repository native export as a bulk artifact, not as model prompt
@@ -309,6 +343,19 @@ sarif` is rejected so callers do not confuse exploration rows with security
 findings. Sink-analysis JSON returns one sink per row with exact
 source-independent compiler routes under `upstream_flows` and selected
 source-to-sink security proofs under `security_source_flows`.
+An upstream step with `storage_transfer` represents a projected storage
+write/read link, not a compiler-resolved invocation. Its location identifies
+the destination read, its `tainted_args` is empty, and text labels it
+`STORAGE`. Do not reinterpret that step as a call stack edge.
+An empty argument list renders `no argument attribution`, not a taint claim;
+constant-only sink lineage is not a vulnerability or a security-source proof.
+
+`dump-taint` records expose their compiler `relation` (`argument`, `callback`,
+or `capture`) independently of dispatch `edge_kind`. Argument indexes name
+actual call slots, not formal parameter positions; implicit receivers use
+the receiver sentinel and render as `receiver`. Callback/capture indexes
+identify formal bindings and render as `param[n]`. Native export also retains
+return and shared-state relations with explicit dataflow endpoint IDs.
 
 ```json
 {

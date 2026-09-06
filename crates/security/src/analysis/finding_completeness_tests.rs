@@ -1,5 +1,54 @@
 use super::*;
 
+#[test]
+fn sink_lineage_composes_receiver_and_named_argument_bindings_without_sibling_overtaint() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("worker.py"),
+        "import os\nclass Worker:\n    def consume(self, ignored, cmd):\n        os.system(cmd)\n",
+    )
+    .unwrap();
+    std::fs::write(root.path().join("app.py"), "from worker import Worker\ndef entry(value):\n    worker = Worker()\n    worker.consume(cmd=value, ignored='safe')\ndef decoy(value):\n    worker = Worker()\n    worker.consume(ignored=value, cmd='safe')\n").unwrap();
+    let ws = Workspace::index(root.path(), bonsai_adapters::all_languages_registry()).unwrap();
+    let pack = crate::load_rulepack(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../security-patterns"),
+    )
+    .unwrap();
+    let report = run_sink_analysis(
+        &ws,
+        &pack,
+        SinkAnalysisOptions {
+            sink: Some("python.cmdi.os_system".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(report.analysis_complete, "{report:#?}");
+    let flows = report
+        .candidates
+        .iter()
+        .flat_map(|candidate| &candidate.upstream_flows)
+        .collect::<Vec<_>>();
+    assert!(
+        flows.iter().any(|flow| flow.chain_names == ["entry", "consume"]),
+        "{flows:#?}"
+    );
+    assert!(
+        flows.iter().all(|flow| flow.origin_function != "decoy"),
+        "clean named sink argument must not inherit taint from its sibling: {flows:#?}"
+    );
+    assert!(
+        flows
+            .iter()
+            .flat_map(|flow| &flow.taint_path)
+            .any(|step| step
+                .tainted_args
+                .iter()
+                .any(|arg| arg.index == 0 && arg.param_name == "cmd" && arg.value_text == "value")),
+        "{flows:#?}"
+    );
+}
+
 fn span(file: u32, start: u64, end: u64) -> Span {
     Span::new(bonsai_common::FileId::new(file), start, end)
 }

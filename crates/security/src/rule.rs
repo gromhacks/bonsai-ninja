@@ -443,6 +443,12 @@ pub struct FiniteLiteralMapSelectorSemantics {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaintSemantics {
+    /// Typing rules only: this exact runtime call always raises an exception.
+    /// Its explicit arguments contribute to the exception value. The complete
+    /// matcher proves the call identity; neither adapters nor IDG interpret
+    /// the callee spelling as a control-flow instruction.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub throws: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean_output_overwrite: Option<CleanOutputOverwriteSemantics>,
     /// Sanitizer rules only: the matched call mutates its receiver into a

@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
+mod manifests;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DependencyRow {
     pub language: String,
@@ -44,9 +46,11 @@ pub struct DependencyRow {
     pub tags: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DependencyInventory {
     pub rows: Vec<DependencyRow>,
+    pub analysis_complete: bool,
+    pub analysis_incomplete_reasons: Vec<String>,
 }
 
 /// Build the inventory. Scans the workspace root for manifest / lockfile
@@ -54,7 +58,9 @@ pub struct DependencyInventory {
 pub fn build_inventory(pack: &Rulepack, ws: &Workspace, root: &Path) -> DependencyInventory {
     let manifest_files = scan_manifest_files(root, pack);
     let import_evidence_by_lang = collect_workspace_import_evidence(ws, pack);
-    let manifest_package_evidence_by_lang = collect_manifest_package_evidence(pack, &manifest_files);
+    let mut analysis_incomplete_reasons = Vec::new();
+    let manifest_package_evidence_by_lang =
+        collect_manifest_package_evidence(pack, ws, root, &manifest_files, &mut analysis_incomplete_reasons);
 
     let mut by_key: AHashMap<(String, String), DependencyRow> = AHashMap::new();
     for rule in pack.all_rules() {
@@ -111,7 +117,13 @@ pub fn build_inventory(pack: &Rulepack, ws: &Workspace, root: &Path) -> Dependen
 
     let mut rows: Vec<DependencyRow> = by_key.into_values().collect();
     rows.sort_by(|a, b| (a.language.as_str(), a.key.as_str()).cmp(&(b.language.as_str(), b.key.as_str())));
-    DependencyInventory { rows }
+    analysis_incomplete_reasons.sort();
+    analysis_incomplete_reasons.dedup();
+    DependencyInventory {
+        rows,
+        analysis_complete: analysis_incomplete_reasons.is_empty(),
+        analysis_incomplete_reasons,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -124,6 +136,7 @@ pub(crate) struct WorkspaceDependencyPackages {
 pub(crate) struct WorkspaceDependencyPackageContext {
     fingerprint: u64,
     by_language: AHashMap<String, Arc<AHashSet<String>>>,
+    incomplete_reasons: Vec<String>,
 }
 
 static WORKSPACE_DEPENDENCY_PACKAGE_SCAN_LOCKS: std::sync::LazyLock<
@@ -206,9 +219,14 @@ pub(crate) fn begin_workspace_dependency_package_snapshot(
     root: &Path,
     workspace_id: u64,
     pack: &Rulepack,
+    ws: Option<&Workspace>,
 ) -> WorkspaceDependencyPackageSnapshot {
     let root_key = workspace_dependency_root_key(root);
-    let context = Arc::new(build_workspace_dependency_package_context(root, &pack.metadata));
+    let context = Arc::new(build_workspace_dependency_package_context(
+        root,
+        &pack.metadata,
+        ws,
+    ));
     let mut active = ACTIVE_WORKSPACE_DEPENDENCY_PACKAGES.write();
     active.retain(|_, roots| {
         roots.retain(|_, context| context.strong_count() != 0);
@@ -234,6 +252,7 @@ pub(crate) fn workspace_dependency_package_context_for_scan(
         Arc::new(WorkspaceDependencyPackageContext {
             fingerprint: 0,
             by_language: AHashMap::new(),
+            incomplete_reasons: Vec::new(),
         })
     })
 }
@@ -276,16 +295,59 @@ fn workspace_dependency_root_key(root: &Path) -> String {
 fn build_workspace_dependency_package_context(
     root: &Path,
     metadata: &crate::loader::RulepackMetadata,
+    ws: Option<&Workspace>,
 ) -> WorkspaceDependencyPackageContext {
     let mut by_language: AHashMap<String, AHashSet<String>> = AHashMap::new();
+    let mut incomplete_reasons = Vec::new();
+    let mut unsupported = std::collections::BTreeMap::new();
+    let active_languages = ws.map(|ws| {
+        ws.vfs()
+            .all_files()
+            .into_iter()
+            .filter_map(|file| {
+                ws.db()
+                    .adapter_for(file)
+                    .map(|adapter| adapter.language_id().as_str().to_string())
+            })
+            .collect::<AHashSet<_>>()
+    });
     let mut fingerprint_parts = dependency_metadata_fingerprint_parts(metadata);
-    let _ = walk_rulepack_dependency_files(root, metadata, |path, rel| {
-        let bytes = std::fs::read(path)?;
+    let walked = walk_rulepack_dependency_files(root, metadata, |path, rel| {
+        let languages = dependency_manifest_languages(path, metadata)
+            .into_iter()
+            .filter(|language| {
+                active_languages
+                    .as_ref()
+                    .is_none_or(|active| active.contains(*language))
+            })
+            .collect::<Vec<_>>();
+        if languages.is_empty() {
+            return Ok(());
+        }
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                incomplete_reasons.push(format!("dependency-manifest:{rel}:read:{error}"));
+                return Ok(());
+            }
+        };
         fingerprint_parts.push(format!("{rel}:{}", bonsai_hash::fnv1a_bytes64(&bytes)));
-        let text = String::from_utf8_lossy(&bytes);
-        let packages = dependency_manifest_package_tokens(&text);
-        if !packages.is_empty() {
-            for language in dependency_manifest_languages(path, metadata) {
+        let text = match std::str::from_utf8(&bytes) {
+            Ok(text) => text,
+            Err(error) => {
+                incomplete_reasons.push(format!("dependency-manifest:{rel}:encoding:{error}"));
+                return Ok(());
+            }
+        };
+        for language in languages {
+            let packages = match dependency_manifest_packages(path, text, language, metadata, ws) {
+                Ok(packages) => packages,
+                Err(error) => {
+                    record_manifest_error(rel, language, &error, &mut incomplete_reasons, &mut unsupported);
+                    continue;
+                }
+            };
+            if !packages.is_empty() {
                 let packages = dependency_manifest_packages_for_language(&packages, language, metadata);
                 by_language
                     .entry(language.to_string())
@@ -295,6 +357,31 @@ fn build_workspace_dependency_package_context(
         }
         Ok(())
     });
+    if let Err(error) = walked {
+        incomplete_reasons.push(format!("dependency-manifest-walk:{error}"));
+    }
+    incomplete_reasons.extend(
+        unsupported
+            .into_iter()
+            .map(|(kind, count)| format!("{kind}:files={count}")),
+    );
+    incomplete_reasons.sort();
+    incomplete_reasons.dedup();
+    // Code-manifest import identity can change without editing the manifest
+    // itself (for example a local provider is created beside it). Include
+    // the exact projection and its coverage, not only the manifest bytes.
+    for (language, packages) in &by_language {
+        fingerprint_parts.extend(
+            packages
+                .iter()
+                .map(|package| format!("package:{language}:{package}")),
+        );
+    }
+    fingerprint_parts.extend(
+        incomplete_reasons
+            .iter()
+            .map(|reason| format!("coverage:{reason}")),
+    );
     fingerprint_parts.sort();
     let fingerprint = bonsai_hash::fnv1a_names64(&fingerprint_parts);
     let by_language = by_language
@@ -304,19 +391,56 @@ fn build_workspace_dependency_package_context(
     WorkspaceDependencyPackageContext {
         fingerprint,
         by_language,
+        incomplete_reasons,
     }
+}
+
+fn record_manifest_error(
+    path: &str,
+    language: &str,
+    error: &anyhow::Error,
+    reasons: &mut Vec<String>,
+    unsupported: &mut std::collections::BTreeMap<String, usize>,
+) {
+    if error.is::<manifests::UnsupportedManifest>() {
+        let basename = Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(path);
+        *unsupported
+            .entry(format!("dependency-manifest:unsupported:{language}:{basename}"))
+            .or_default() += 1;
+    } else {
+        reasons.push(format!("dependency-manifest:{path}:{language}:{error}"));
+    }
+}
+
+pub(crate) fn workspace_dependency_incomplete_reasons(ws: &Workspace) -> Vec<String> {
+    ws.db()
+        .workspace_root()
+        .map(|root| {
+            workspace_dependency_package_context_for_scan(&root, ws.vfs().instance_id())
+                .incomplete_reasons
+                .clone()
+        })
+        .unwrap_or_default()
 }
 
 fn dependency_metadata_fingerprint_parts(metadata: &crate::loader::RulepackMetadata) -> Vec<String> {
     let mut languages = metadata.languages.iter().collect::<Vec<_>>();
     languages.sort_by_key(|(language, _)| language.as_str());
-    let mut parts = Vec::new();
+    let mut parts = vec!["dependency-manifest-reader-v3".to_string()];
     for (language, values) in languages {
         let mut patterns = values.dependency_manifest_patterns.clone();
         patterns.sort();
         for pattern in patterns {
             parts.push(format!("metadata:{language}:manifest:{pattern}"));
         }
+        parts.push(format!(
+            "metadata:{language}:layouts:{}",
+            serde_json::to_string(&values.dependency_manifest_layouts)
+                .expect("manifest layout serialization")
+        ));
         parts.push(format!(
             "metadata:{language}:hyphen:{}",
             values.normalize_hyphen_to_underscore
@@ -456,19 +580,19 @@ fn dependency_manifest_pattern_matches(pattern: &str, basename: &str) -> bool {
     basename.starts_with(&pattern[..star]) && basename.ends_with(&pattern[star + 1..])
 }
 
-fn dependency_manifest_package_tokens(text: &str) -> AHashSet<String> {
-    let mut out = AHashSet::new();
-    let mut token = String::new();
-    for ch in text.chars() {
-        if dependency_package_token_char(ch) {
-            token.push(ch);
-            continue;
-        }
-        insert_dependency_package_token(&mut out, &token);
-        token.clear();
-    }
-    insert_dependency_package_token(&mut out, &token);
-    out
+fn dependency_manifest_packages(
+    path: &Path,
+    text: &str,
+    language: &str,
+    metadata: &crate::loader::RulepackMetadata,
+    ws: Option<&Workspace>,
+) -> anyhow::Result<AHashSet<String>> {
+    let layouts = metadata
+        .languages
+        .get(language)
+        .map(|values| values.dependency_manifest_layouts.as_slice())
+        .unwrap_or_default();
+    manifests::packages(path, text, layouts, ws)
 }
 
 fn dependency_package_token_char(ch: char) -> bool {
@@ -476,8 +600,7 @@ fn dependency_package_token_char(ch: char) -> bool {
 }
 
 fn insert_dependency_package_token(out: &mut AHashSet<String>, token: &str) {
-    let token = token.trim_matches(|ch: char| matches!(ch, '.' | '/' | ':' | '+' | '-' | '_'));
-    if token.len() < 2 || !token.chars().any(|ch| ch.is_ascii_alphabetic()) {
+    if token.is_empty() || !token.chars().all(dependency_package_token_char) {
         return;
     }
     out.insert(token.to_string());
@@ -631,10 +754,14 @@ fn is_dependency_manifest_basename(basename: &str, metadata: &crate::loader::Rul
 
 fn collect_manifest_package_evidence(
     pack: &Rulepack,
+    ws: &Workspace,
+    root: &Path,
     manifest_files: &[String],
+    incomplete_reasons: &mut Vec<String>,
 ) -> AHashMap<String, AHashMap<String, String>> {
     let target_keys_by_lang = dependency_target_keys_by_language(pack);
     let mut evidence_by_language: AHashMap<String, AHashMap<String, String>> = AHashMap::new();
+    let mut unsupported = std::collections::BTreeMap::new();
     for path in manifest_files {
         if !is_dependency_manifest_file(path, &pack.metadata) {
             continue;
@@ -645,24 +772,36 @@ fn collect_manifest_package_evidence(
         }
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                tracing::debug!(path, "manifest disappeared while scanning dependency inventory");
-                continue;
-            }
             Err(error) => {
-                tracing::warn!(
-                    path,
-                    error_kind = ?error.kind(),
-                    error = %error,
-                    "failed to read manifest while scanning dependency inventory"
-                );
+                incomplete_reasons.push(format!(
+                    "dependency-manifest:{}:read:{error}",
+                    workspace_relative_filter_path(Some(root), path)
+                ));
                 continue;
             }
         };
-        let packages = dependency_manifest_package_tokens(&text);
         for language in languages {
             let Some(target_keys) = target_keys_by_lang.get(language) else {
                 continue;
+            };
+            let packages = match dependency_manifest_packages(
+                Path::new(path),
+                &text,
+                language,
+                &pack.metadata,
+                Some(ws),
+            ) {
+                Ok(packages) => packages,
+                Err(error) => {
+                    record_manifest_error(
+                        &workspace_relative_filter_path(Some(root), path),
+                        language,
+                        &error,
+                        incomplete_reasons,
+                        &mut unsupported,
+                    );
+                    continue;
+                }
             };
             let language_packages =
                 dependency_manifest_packages_for_language(&packages, language, &pack.metadata);
@@ -677,6 +816,11 @@ fn collect_manifest_package_evidence(
             }
         }
     }
+    incomplete_reasons.extend(
+        unsupported
+            .into_iter()
+            .map(|(kind, count)| format!("{kind}:files={count}")),
+    );
     evidence_by_language
 }
 

@@ -248,6 +248,14 @@ less exact.
 Sink-analysis does not require a security source: `upstream_flows` is
 source-independent, while `security_source_flows` separately answers which
 selected security sources reach the endpoint.
+Constant-only sink lineage is not a vulnerability. Empty argument attribution
+must not be read as proof of taint; check the separate security-source proofs.
+An upstream `taint_path` step with `storage_transfer` is a projected storage
+write/read relation, not a resolved invocation. Text labels it `STORAGE`;
+its location is the destination read and it makes no positional argument
+claim. Do not turn it into a call-stack edge. `dump-taint` keeps compiler
+`relation` separate from dispatch `edge_kind`; actual argument positions,
+formal callback/capture bindings, and implicit receivers are distinct.
 
 ```shell
 ./target/release/bonsai-ninja security <workspace> sources --trust remote \
@@ -315,9 +323,27 @@ For dependency inventory, check the evidence for each package individually.
 A generic manifest or lockfile filename is not proof that every provider on
 a multi-framework rule is installed. Use `security dependency-analysis` to
 inspect that package's usage sites and complete source-to-sink flows.
+Manifest descriptions/comments are not package evidence. Check
+`analysis_incomplete_reasons` for `dependency-manifest:` warnings: unsupported
+formats, parse failures, and dynamic declaration values do not become guessed
+package facts. An empty dependency table with a coverage warning is not a
+complete negative result; compiler import evidence remains independent.
+Code-manifest coverage is deliberately narrower than source-language
+coverage: unmodeled build formats (including Go module directives, Gradle
+scripts, Podfiles, and Swift package scripts) report this limitation. Do not
+silence it or infer installed packages from comments or arbitrary tokens.
+Code manifests importing local modules also report partial coverage until
+their cross-module execution is modeled; a local provider must not be mistaken
+for an external dependency manager, even when excluded from the source scope.
 
 Reproduce the smallest high-level mismatch, then descend only as far as
 needed:
+
+Use `dump-resolution` to audit missing edges. Its declaration tables are
+grouped by file, with a legend for calls (`total/resolved/external/unresolved`),
+edges (`direct/virtual/indirect`), and gaps (`dynamic/macro/receiver`). Coverage
+excludes known external calls from the workspace-resolution denominator;
+read the complete notes, not just the percentage.
 
 ```shell
 ./target/release/bonsai-ninja dump-ast <workspace> \
@@ -385,6 +411,11 @@ do not reopen source bodies; a stale generation is rebuilt exactly.
 
 Use native JSON when downstream tooling needs the complete graph:
 
+One-shot report files publish only after successful rendering; a failed
+export preserves an existing report. GraphML rejects characters XML cannot
+represent instead of changing source values—use native or NetworkX JSON in
+that case.
+
 ```shell
 ./target/release/bonsai-ninja export <workspace> --format json \
   --output-path bonsai-export.json --no-color --no-progress
@@ -402,9 +433,22 @@ with `--output-path` and let downstream code stream or index it. Do not request
 only.
 
 Native JSON documents identify themselves as `bonsai-native-export` plus a
-numeric `schema_version` (currently 13). Validate artifacts against
-`schemas/bonsai-native-export-v13.schema.json`; release archives include the
+numeric `schema_version` (currently 14). Validate artifacts against
+`schemas/bonsai-native-export-v14.schema.json`; release archives include the
 same Draft 2020-12 schema.
+Version 14 retains exact IDs in function summaries, class-field summaries,
+materialized propagation records, and `flow_graph` adjacency (`func_id`,
+`caller_func_ids`, `outgoing_func_ids`). Join those IDs to compiler declarations;
+names and source lines can collide. Interpret each propagation's `relation`
+and `from_func_id` / `to_func_id`: a `return` flows back to the caller and
+does not prove a reverse invocation. `call_file` identifies its call site.
+`--full-propagations` requires native JSON; graph database formats contain
+structural edges, local facts, and return summaries only.
+`intra_taint` rows with `backend: "cfg_local"` are per-parameter local CFG
+projections, not source-to-sink security findings; local call-RHS transfer is
+conservative. Use canonical IDG relations for interprocedural proofs. Repeated
+field copies must converge without an iteration cap and clean overwrites must
+remove the target's old fields.
 Version 13 adds `predicate_call_span` to call-backed type-test conditions.
 This is the same canonical callee identity used by call events; the tested
 value and an outer wrapper's result are distinct evidence. Never infer a

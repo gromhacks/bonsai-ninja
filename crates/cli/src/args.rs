@@ -652,19 +652,19 @@ pub(crate) enum Cmd {
         output: OutputPathArg,
     },
 
-    /// Dump the callgraph (functions + reachable counts).
+    /// Dump the callgraph (functions + direct caller/callee counts).
     #[command(
         display_order = 32,
-        long_about = themed_subcommand_long_about("Emit every function with its inbound caller count and \
-                      outbound reachable-callee count, sorted \
-                      hottest-first. The fastest way to find the hubs \
+        long_about = themed_subcommand_long_about("Emit every function with its unique direct caller and \
+                      callee counts, sorted by most callers, then most \
+                      callees. Use this view to find the hubs \
                       of a codebase — high-fanin functions are the \
                       chokepoints reviewers should audit first; \
                       high-fanout functions are dispatch / orchestration \
                       layers. `--format json` emits one row per function \
                       so downstream tools can post-process."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Hub functions sorted by reachable-callee count\n  \
+                      # Hub functions sorted by direct caller count\n  \
                       $ bonsai-ninja dump-callgraph ./src\n  \
                       \n  \
                       # Top 10 hubs as JSON\n  \
@@ -703,8 +703,9 @@ pub(crate) enum Cmd {
                       \n\
                       Every edge carries a stable `edge_id` (`E:` + 8 hex) \
                       — a FNV-1a content hash over (caller, callee, call \
-                      site) that survives renames / cache state / render \
-                      mode. `--edge E:xxxxxxxx` re-renders just that one \
+                      site), stable across cache state and render mode for \
+                      unchanged compiler facts. Edits can change IDs. \
+                      `--edge E:xxxxxxxx` re-renders just that one \
                       edge; scripts can cite an id across runs."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Semantic edges, full detail\n  \
@@ -1383,10 +1384,13 @@ pub(crate) enum Cmd {
     #[command(
         display_order = 23,
         long_about = themed_subcommand_long_about("Every assignment captured from a function's flow. Columns: \
-                      `var`, enclosing `fn`, `source` (bare-identifier \
-                      RHS when the adapter could extract one — `None` \
-                      for compound expressions), location, syntax- \
+                      `var`, enclosing `fn`, `source` (compiler-extracted \
+                      RHS identifiers and call names, including compound \
+                      expressions), location, syntax- \
                       highlighted source-line snippet.\n\
+                      \n\
+                      These are assignment syntax facts, not proof that \
+                      every operand flows through a callee to the result.\n\
                       \n\
                       The companion to `calls`: where `calls` lists \
                       call sites, `vars` lists binding sites. Use \
@@ -1415,7 +1419,7 @@ pub(crate) enum Cmd {
         /// Only assignments inside a function whose name contains this substring.
         #[arg(long = "in-fn")]
         in_fn: Option<String>,
-        /// Only assignments whose RHS is a bare identifier matching this substring.
+        /// Only assignments with an RHS identifier or call name matching this substring.
         #[arg(long)]
         source: Option<String>,
         /// Interpret `--name` as a regex.
@@ -2179,11 +2183,12 @@ pub(crate) enum Cmd {
         /// Materialize exhaustive interprocedural propagation records.
         /// The default keeps the same exact relation in compiled IDG form
         /// because concrete rows can be much larger than the structural graph.
+        /// Only supported by the native `--format json` export.
         #[arg(long)]
         full_propagations: bool,
         /// Output shape. `json` is the full native export; `networkx`,
-        /// `graphml`, and `cypher` project the same taint graph into
-        /// graph-database-friendly node/edge formats.
+        /// `graphml`, and `cypher` project structural edges, local flow facts,
+        /// and return summaries, not exhaustive interprocedural taint records.
         #[arg(long, value_enum, default_value_t = ExportFormat::Json)]
         format: ExportFormat,
         #[command(flatten)]

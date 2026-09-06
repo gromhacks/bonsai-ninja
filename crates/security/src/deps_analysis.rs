@@ -85,7 +85,7 @@ pub fn dependency_analysis(
 ) -> Result<DependencyAnalysisReport> {
     let inventory = dependency_inventory(ws, pack, root, options.inventory.clone());
     if inventory.rows.is_empty() {
-        let analysis_incomplete_reasons = Vec::new();
+        let analysis_incomplete_reasons = inventory.analysis_incomplete_reasons;
         return Ok(DependencyAnalysisReport {
             candidates: Vec::new(),
             analysis_complete: analysis_incomplete_reasons.is_empty(),
@@ -126,7 +126,7 @@ pub fn dependency_analysis_with_matches(
 ) -> Result<DependencyAnalysisReport> {
     let inventory = dependency_inventory(ws, pack, root, options.inventory);
     if inventory.rows.is_empty() {
-        let analysis_incomplete_reasons = Vec::new();
+        let analysis_incomplete_reasons = inventory.analysis_incomplete_reasons;
         return Ok(DependencyAnalysisReport {
             candidates: Vec::new(),
             analysis_complete: analysis_incomplete_reasons.is_empty(),
@@ -156,7 +156,7 @@ fn dependency_analysis_with_inventory(
         }
     }
 
-    let mut incomplete_reasons = Vec::new();
+    let mut incomplete_reasons = inventory.analysis_incomplete_reasons;
     let usages = collect_import_usage_for_rows(ws, pack, &inventory.rows, &mut incomplete_reasons);
     let mut candidates = Vec::with_capacity(inventory.rows.len());
     for (row, usage) in inventory.rows.into_iter().zip(usages) {

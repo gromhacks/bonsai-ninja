@@ -758,7 +758,7 @@ fn render_diagnostics_text(value: &serde_json::Value) {
         u.name(if languages.is_empty() { "-" } else { &languages }),
         u.label("diagnostics"),
         u.name(&diagnostics.to_string()),
-        u.label("files"),
+        u.label("files with diagnostics"),
         u.name(&files.to_string())
     );
     if let Some(capabilities) = value["adapter_capabilities"].as_array() {

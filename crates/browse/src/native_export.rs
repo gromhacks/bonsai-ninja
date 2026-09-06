@@ -176,6 +176,7 @@ struct ExportFlowIdLabels {
 
 #[derive(Serialize)]
 struct ExportFunctionSummary {
+    func_id: u32,
     function: String,
     file: String,
     line: u32,
@@ -207,6 +208,7 @@ struct ExportAliasEntry {
 
 #[derive(Serialize)]
 struct ExportClassFields {
+    symbol_id: u32,
     class: String,
     file: String,
     line: u32,
@@ -229,6 +231,7 @@ struct ExportEntryPoint {
 
 #[derive(Serialize)]
 struct ExportTaintPropagationsRef<'a> {
+    entry_func_id: u32,
     entry: &'a str,
     entry_file: &'a str,
     entry_line: u32,
@@ -238,6 +241,12 @@ struct ExportTaintPropagationsRef<'a> {
 
 #[derive(Clone, Serialize)]
 struct ExportTaintRecord {
+    /// Exact endpoints in IDG propagation direction. A return flows from
+    /// the invoked function back to its caller, not a reverse invocation.
+    from_func_id: u32,
+    to_func_id: u32,
+    relation: &'static str,
+    call_file: String,
     /// Call-site column and exact source text (the line is `call_line`).
     call_column: u32,
     call_text: String,
@@ -274,10 +283,45 @@ struct ExportFlowChain {
 /// indicating whether it's a workspace entry point (no callers).
 #[derive(Serialize)]
 struct ExportFlowNode<'a> {
+    func_id: u32,
     function: &'a str,
+    caller_func_ids: Vec<u32>,
+    outgoing_func_ids: Vec<u32>,
     callers: Vec<&'a str>,
     outgoing: Vec<&'a str>,
     entry_point: bool,
+}
+
+fn export_flow_node(
+    global: &bonsai_index::GlobalIndex,
+    func: FuncId,
+    callers: impl Iterator<Item = FuncId>,
+    outgoing: impl Iterator<Item = FuncId>,
+) -> ExportFlowNode<'_> {
+    let mut caller_func_ids = callers.map(FuncId::raw).collect::<Vec<_>>();
+    caller_func_ids.sort_unstable();
+    caller_func_ids.dedup();
+    let mut outgoing_func_ids = outgoing.map(FuncId::raw).collect::<Vec<_>>();
+    outgoing_func_ids.sort_unstable();
+    outgoing_func_ids.dedup();
+    let names = |ids: &[u32]| {
+        let mut names = ids
+            .iter()
+            .map(|id| linkage_func_display_name(global, FuncId::new(*id)))
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        names
+    };
+    ExportFlowNode {
+        func_id: func.raw(),
+        function: linkage_func_display_name(global, func),
+        entry_point: caller_func_ids.is_empty(),
+        callers: names(&caller_func_ids),
+        outgoing: names(&outgoing_func_ids),
+        caller_func_ids,
+        outgoing_func_ids,
+    }
 }
 
 #[derive(Serialize)]
@@ -985,7 +1029,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     let mut map = serializer.serialize_map(None)?;
 
     map.serialize_entry("schema", "bonsai-native-export")?;
-    map.serialize_entry("schema_version", &13_u32)?;
+    map.serialize_entry("schema_version", &14_u32)?;
     map.serialize_entry("engine_version", env!("CARGO_PKG_VERSION"))?;
     map.serialize_entry("workspace_root", &root.display().to_string())?;
     map.serialize_entry("generated_at_unix_ms", &generated_at_unix_ms())?;
@@ -1153,6 +1197,8 @@ fn build_export_structural_metadata(
             continue;
         };
 
+        let members = crate::common::callable_members_by_parent(&idx.defs);
+        let mut call_sites = ahash::AHashSet::default();
         for d in &idx.defs {
             decl_count += 1;
             match d.kind {
@@ -1161,21 +1207,15 @@ fn build_export_structural_metadata(
                 _ => {}
             }
             let (_, line, column) = spans.format(d.name_span);
-            count_call_sites_for_export(&d.flow_events, &mut call_site_count);
+            collect_call_sites_for_export(&d.flow_events, &mut call_sites);
             if matches!(
                 d.kind,
                 DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
             ) {
-                let methods: Vec<String> = idx
-                    .defs
-                    .iter()
-                    .filter(|m| {
-                        matches!(
-                            m.kind,
-                            DeclKind::Method | DeclKind::Constructor | DeclKind::Function
-                        )
-                    })
-                    .filter(|m| m.parent == Some(d.symbol))
+                let methods: Vec<String> = members
+                    .get(&d.symbol)
+                    .into_iter()
+                    .flatten()
                     .map(|m| m.name.clone())
                     .collect();
                 classes.push(ClassOut {
@@ -1190,6 +1230,7 @@ fn build_export_structural_metadata(
             }
         }
 
+        call_site_count += call_sites.len();
         let imports_vec = export_import_specs(ws, file);
         import_count += imports_vec.iter().filter(|imp| !imp.scope.is_local()).count();
         for string in &idx.strings {
@@ -1551,33 +1592,21 @@ impl Serialize for ExportFlowGraphStreaming<'_> {
                         .cmp(linkage_func_display_name(self.global, *right))
                         .then_with(|| left.raw().cmp(&right.raw()))
                 });
-                let mut callers_by_func = ahash::AHashMap::<FuncId, Vec<&str>>::new();
+                let mut callers_by_func = ahash::AHashMap::<FuncId, Vec<FuncId>>::new();
                 for edge in incoming_edges {
-                    callers_by_func
-                        .entry(edge.to)
-                        .or_default()
-                        .push(linkage_func_display_name(self.global, edge.from));
+                    callers_by_func.entry(edge.to).or_default().push(edge.from);
                 }
-                let mut outgoing_by_func = ahash::AHashMap::<FuncId, Vec<&str>>::new();
+                let mut outgoing_by_func = ahash::AHashMap::<FuncId, Vec<FuncId>>::new();
                 for edge in outgoing_edges {
-                    outgoing_by_func
-                        .entry(edge.from)
-                        .or_default()
-                        .push(linkage_func_display_name(self.global, edge.to));
+                    outgoing_by_func.entry(edge.from).or_default().push(edge.to);
                 }
                 for func in funcs {
-                    let mut callers = callers_by_func.remove(&func).unwrap_or_default();
-                    callers.sort_unstable();
-                    callers.dedup();
-                    let mut outgoing = outgoing_by_func.remove(&func).unwrap_or_default();
-                    outgoing.sort_unstable();
-                    outgoing.dedup();
-                    if let Err(error) = sequence.serialize_element(&ExportFlowNode {
-                        entry_point: callers.is_empty(),
-                        function: linkage_func_display_name(self.global, func),
-                        callers,
-                        outgoing,
-                    }) {
+                    if let Err(error) = sequence.serialize_element(&export_flow_node(
+                        self.global,
+                        func,
+                        callers_by_func.remove(&func).unwrap_or_default().into_iter(),
+                        outgoing_by_func.remove(&func).unwrap_or_default().into_iter(),
+                    )) {
                         serialization_error = Some(error);
                         break;
                     }
@@ -1592,39 +1621,27 @@ impl Serialize for ExportFlowGraphStreaming<'_> {
             Some(Err(error)) => return Err(<S::Error as serde::ser::Error>::custom(error)),
             None => {
                 let graph = self.ws.cached_resolved_call_graph();
-                let mut funcs = self
-                    .global
-                    .all_files()
-                    .flat_map(|file| {
-                        self.global
-                            .functions_in(file)
-                            .map(|decl| FuncId::new(decl.symbol.raw()))
-                    })
-                    .collect::<Vec<_>>();
-                funcs.sort_by(|left, right| {
-                    linkage_func_display_name(self.global, *left)
-                        .cmp(linkage_func_display_name(self.global, *right))
-                        .then_with(|| left.raw().cmp(&right.raw()))
-                });
-                for func in funcs {
-                    let mut callers = graph
-                        .callers_of(func)
-                        .map(|edge| linkage_func_display_name(self.global, edge.from))
+                // Use the same file/name/id order as persisted partitions.
+                // Cache warmth must not reorder an otherwise identical export.
+                for file in self.global.all_files() {
+                    let mut funcs = self
+                        .global
+                        .functions_in(file)
+                        .map(|decl| FuncId::new(decl.symbol.raw()))
                         .collect::<Vec<_>>();
-                    callers.sort_unstable();
-                    callers.dedup();
-                    let mut outgoing = graph
-                        .callees_of(func)
-                        .map(|edge| linkage_func_display_name(self.global, edge.to))
-                        .collect::<Vec<_>>();
-                    outgoing.sort_unstable();
-                    outgoing.dedup();
-                    sequence.serialize_element(&ExportFlowNode {
-                        entry_point: callers.is_empty(),
-                        function: linkage_func_display_name(self.global, func),
-                        callers,
-                        outgoing,
-                    })?;
+                    funcs.sort_by(|left, right| {
+                        linkage_func_display_name(self.global, *left)
+                            .cmp(linkage_func_display_name(self.global, *right))
+                            .then_with(|| left.raw().cmp(&right.raw()))
+                    });
+                    for func in funcs {
+                        sequence.serialize_element(&export_flow_node(
+                            self.global,
+                            func,
+                            graph.callers_of(func).map(|edge| edge.from),
+                            graph.callees_of(func).map(|edge| edge.to),
+                        ))?;
+                    }
                 }
             }
         }
@@ -2122,6 +2139,7 @@ fn export_function_summaries(
                 return None;
             }
             Some(ExportFunctionSummary {
+                func_id: f.func_id,
                 function: f.name.clone(),
                 file: f.file.clone(),
                 line: f.line,
@@ -2129,7 +2147,7 @@ fn export_function_summaries(
             })
         })
         .collect();
-    function_summaries.sort_by(|a, b| a.function.cmp(&b.function));
+    function_summaries.sort_by(|a, b| a.function.cmp(&b.function).then(a.func_id.cmp(&b.func_id)));
     export_phase_log(format_args!(
         "taint.function_summaries: {:.3}s count={}",
         phase_started.elapsed().as_secs_f64(),
@@ -2476,6 +2494,7 @@ fn export_class_fields(ws: &Workspace, spans: &ExportSpanCache) -> Vec<ExportCla
             let mut fields: Vec<String> = tainted.into_iter().collect();
             fields.sort();
             class_fields.push(ExportClassFields {
+                symbol_id: class.symbol.raw(),
                 class: class.name.clone(),
                 file: path,
                 line,
@@ -2483,7 +2502,7 @@ fn export_class_fields(ws: &Workspace, spans: &ExportSpanCache) -> Vec<ExportCla
             });
         }
     }
-    class_fields.sort_by(|a, b| a.class.cmp(&b.class));
+    class_fields.sort_by(|a, b| a.class.cmp(&b.class).then(a.symbol_id.cmp(&b.symbol_id)));
     export_phase_log(format_args!(
         "taint.class_fields: {:.3}s count={}",
         phase_started.elapsed().as_secs_f64(),
@@ -2531,6 +2550,7 @@ fn propagation_omitted_reason(config: NativeExportConfig) -> Option<String> {
 struct ExportFuncRender {
     name: String,
     params: Vec<String>,
+    receiver_param_index: Option<usize>,
 }
 
 #[derive(Default)]
@@ -2541,7 +2561,13 @@ struct ExportTaintRecordRenderCache {
     call_arg_texts: ahash::AHashMap<FuncId, Option<CallArgTextBySite>>,
 }
 
-type CallArgTextBySite = ahash::AHashMap<(Span, u32), String>;
+#[derive(Default)]
+struct ExportCallValues {
+    receiver: Option<String>,
+    args: Vec<(Option<String>, String)>,
+}
+
+type CallArgTextBySite = ahash::AHashMap<Span, ExportCallValues>;
 
 fn export_taint_propagation_row_ref<'a>(
     ws: &Workspace,
@@ -2571,13 +2597,14 @@ fn export_taint_propagation_row_ref<'a>(
     sort_cross_call_edges_for_export(&mut cross_calls);
     let unique_pairs: ahash::AHashSet<(bonsai_common::FuncId, bonsai_common::FuncId)> =
         cross_calls.iter().map(|ce| (ce.caller, ce.callee)).collect();
-    let pairs_analyzed = std::cmp::max(1, unique_pairs.len());
+    let pairs_analyzed = unique_pairs.len();
     cross_calls.retain(|ce| ensure_cached_export_taint_record(render_cache, ce, global, spans, ws));
     let records: Vec<&ExportTaintRecord> = cross_calls
         .iter()
         .filter_map(|ce| render_cache.records.get(ce).and_then(Option::as_ref))
         .collect();
     ExportTaintPropagationsRef {
+        entry_func_id: ep.func_id,
         entry: &ep.function,
         entry_file: &ep.file,
         entry_line: ep.line,
@@ -2593,9 +2620,11 @@ fn sort_cross_call_edges_for_export(cross_calls: &mut [CrossCallEdge]) {
             ce.callee.raw(),
             ce.call_span.file.raw(),
             ce.call_span.start,
+            ce.call_span.end,
             export_edge_kind_rank(ce.call_kind),
             ce.arg_idx,
             ce.param_idx,
+            ce.relation,
         )
     });
 }
@@ -2634,35 +2663,43 @@ fn export_taint_record_from_cross_call(
         .get(edge.param_idx as usize)
         .cloned()
         .unwrap_or_default();
-    let tainted_args = if edge.arg_idx != u32::MAX {
-        vec![ExportTaintedArg {
-            index: edge.arg_idx as usize,
-            value_text: cached_export_call_arg_text(cache, ws, edge.caller, edge.call_span, edge.arg_idx)
-                .unwrap_or_default(),
-            param_name,
-        }]
+    let tainted_args = if edge.relation == bonsai_idg::CrossCallRelation::Argument {
+        cached_export_call_values(cache, ws, edge.caller, edge.call_span)
+            .and_then(|call| {
+                let index = if edge.arg_idx != u32::MAX {
+                    Some(edge.arg_idx as usize)
+                } else if callee.receiver_param_index == Some(edge.param_idx as usize) || call.args.is_empty()
+                {
+                    Some(usize::MAX)
+                } else if edge.param_idx != u32::MAX {
+                    bonsai_lang_api::argument_index_for_parameter(
+                        edge.param_idx as usize,
+                        call.args.iter().map(|(name, _)| name.as_deref()),
+                        &callee.params,
+                        callee.receiver_param_index,
+                    )
+                } else {
+                    None
+                }?;
+                let value_text = if index == usize::MAX {
+                    call.receiver.clone()?
+                } else {
+                    call.args.get(index)?.1.clone()
+                };
+                Some(ExportTaintedArg {
+                    index,
+                    value_text,
+                    param_name: param_name.clone(),
+                })
+            })
+            .into_iter()
+            .collect()
     } else if matches!(
         edge.relation,
-        bonsai_idg::CrossCallRelation::Argument | bonsai_idg::CrossCallRelation::Capture
-    ) {
-        if let Some(receiver) = cached_export_call_arg_text(cache, ws, edge.caller, edge.call_span, u32::MAX)
-            .filter(|receiver| !receiver.trim().is_empty())
-        {
-            vec![ExportTaintedArg {
-                index: usize::MAX,
-                value_text: receiver,
-                param_name,
-            }]
-        } else if edge.relation == bonsai_idg::CrossCallRelation::Capture && edge.param_idx != u32::MAX {
-            vec![ExportTaintedArg {
-                index: edge.param_idx as usize,
-                value_text: param_name.clone(),
-                param_name,
-            }]
-        } else {
-            Vec::new()
-        }
-    } else if edge.relation == bonsai_idg::CrossCallRelation::Callback && edge.param_idx != u32::MAX {
+        bonsai_idg::CrossCallRelation::Capture | bonsai_idg::CrossCallRelation::Callback
+    ) && edge.param_idx != u32::MAX
+        && !param_name.is_empty()
+    {
         vec![ExportTaintedArg {
             index: edge.param_idx as usize,
             value_text: param_name.clone(),
@@ -2674,6 +2711,17 @@ fn export_taint_record_from_cross_call(
 
     let (_, call_column) = spans.line_col(edge.call_span);
     Some(ExportTaintRecord {
+        from_func_id: edge.caller.raw(),
+        to_func_id: edge.callee.raw(),
+        relation: match edge.relation {
+            bonsai_idg::CrossCallRelation::Argument => "argument",
+            bonsai_idg::CrossCallRelation::Callback => "callback",
+            bonsai_idg::CrossCallRelation::Capture => "capture",
+            bonsai_idg::CrossCallRelation::Return => "return",
+            bonsai_idg::CrossCallRelation::FieldState => "field_state",
+            bonsai_idg::CrossCallRelation::SharedStateCall => "shared_state_call",
+        },
+        call_file: spans.path(edge.call_span.file).to_string(),
         call_column,
         call_text: spans.line_text(edge.call_span),
         caller: caller.name,
@@ -2695,6 +2743,7 @@ fn cached_export_func_render(
             .map(|decl| ExportFuncRender {
                 name: decl.name.clone(),
                 params: decl.params.clone(),
+                receiver_param_index: decl.receiver_param_index,
             });
         cache.funcs.insert(func, rendered);
     }
@@ -2714,13 +2763,12 @@ fn cached_export_call_line(
     line
 }
 
-fn cached_export_call_arg_text(
-    cache: &mut ExportTaintRecordRenderCache,
+fn cached_export_call_values<'a>(
+    cache: &'a mut ExportTaintRecordRenderCache,
     ws: &Workspace,
     caller: FuncId,
     call_span: Span,
-    arg_idx: u32,
-) -> Option<String> {
+) -> Option<&'a ExportCallValues> {
     if !cache.call_arg_texts.contains_key(&caller) {
         let rendered = export_call_arg_texts_for_func(ws, caller);
         cache.call_arg_texts.insert(caller, rendered);
@@ -2729,70 +2777,34 @@ fn cached_export_call_arg_text(
         .call_arg_texts
         .get(&caller)
         .and_then(Option::as_ref)
-        .and_then(|arg_texts| arg_texts.get(&(call_span, arg_idx)).cloned())
+        .and_then(|sites| sites.get(&call_span))
 }
 
-fn export_call_arg_texts_for_func(
-    ws: &Workspace,
-    func: FuncId,
-) -> Option<ahash::AHashMap<(Span, u32), String>> {
+fn export_call_arg_texts_for_func(ws: &Workspace, func: FuncId) -> Option<CallArgTextBySite> {
     let decl = ws.exact_decl(SymbolId::new(func.raw()))?;
-    let mut arg_texts = ahash::AHashMap::default();
-    collect_export_call_arg_texts(&decl.flow_events, &mut arg_texts);
-    Some(arg_texts)
+    let mut sites = ahash::AHashMap::default();
+    collect_export_call_arg_texts(&decl.flow_events, &mut sites);
+    Some(sites)
 }
 
-fn collect_export_call_arg_texts(events: &[FlowEvent], out: &mut ahash::AHashMap<(Span, u32), String>) {
-    for event in events {
-        match event {
-            FlowEvent::Call {
-                span, receiver, args, ..
-            } => {
-                if let Some(receiver) = receiver
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|receiver| !receiver.is_empty())
-                {
-                    out.insert((*span, u32::MAX), receiver.to_string());
-                }
-                for (idx, arg) in args.iter().enumerate() {
-                    let Ok(idx) = u32::try_from(idx) else {
-                        continue;
-                    };
-                    out.insert((*span, idx), arg.value_text.clone());
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_export_call_arg_texts(then_events, out);
-                collect_export_call_arg_texts(else_events, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_export_call_arg_texts(body, out);
-                collect_export_call_arg_texts(catch_events, out);
-                collect_export_call_arg_texts(finally_events, out);
-            }
-            FlowEvent::Loop {
-                condition_events,
-                body,
-                update_events,
-                ..
-            } => {
-                collect_export_call_arg_texts(condition_events, out);
-                collect_export_call_arg_texts(body, out);
-                collect_export_call_arg_texts(update_events, out);
-            }
-            _ => {}
+fn collect_export_call_arg_texts(events: &[FlowEvent], out: &mut CallArgTextBySite) {
+    bonsai_lang_api::kit::for_each_flow_event(events, &mut |event| {
+        if let FlowEvent::Call {
+            span, receiver, args, ..
+        } = event
+        {
+            out.insert(
+                *span,
+                ExportCallValues {
+                    receiver: receiver.clone(),
+                    args: args
+                        .iter()
+                        .map(|argument| (argument.name.clone(), argument.value_text.clone()))
+                        .collect(),
+                },
+            );
         }
-    }
+    });
 }
 
 fn export_edge_kind_label(kind: bonsai_callgraph::EdgeKind) -> &'static str {
@@ -2937,8 +2949,9 @@ fn infer_entry_points_for_export(ws: &Workspace, spans: &ExportSpanCache) -> Vec
             };
             let mut sorted: Vec<&String> = fields.iter().collect();
             sorted.sort();
+            let reads = flow_read_places(&decl.flow_events);
             for field_name in sorted {
-                if !flow_reads_token(&decl.flow_events, field_name) {
+                if !reads.contains(field_name.as_str()) {
                     continue;
                 }
                 let (file_path, line, _) = spans.format(decl.name_span);
@@ -2979,94 +2992,52 @@ fn is_generated_callable_name(name: &str) -> bool {
     name.starts_with('<') && name.ends_with('>')
 }
 
-fn flow_reads_token(events: &[FlowEvent], token: &str) -> bool {
-    for event in events {
-        match event {
-            FlowEvent::Call { receiver, args, .. } => {
-                if receiver.as_deref() == Some(token)
-                    || args
-                        .iter()
-                        .any(|arg| arg.place.as_deref() == Some(token) || arg.value_text.trim() == token)
-                {
-                    return true;
-                }
+fn flow_read_places(events: &[FlowEvent]) -> ahash::AHashSet<&str> {
+    let mut reads = ahash::AHashSet::default();
+    bonsai_lang_api::for_each_flow_event(events, &mut |event| match event {
+        FlowEvent::Call { receiver, args, .. } => {
+            reads.extend(receiver.as_deref());
+            for arg in args {
+                reads.extend(arg.place.as_deref());
+                reads.extend(arg.source_names.iter().map(String::as_str));
             }
-            FlowEvent::Assign {
-                source_name,
-                source_names,
-                source_call_args,
-                ..
-            } => {
-                if source_name.as_deref() == Some(token)
-                    || source_names.iter().any(|name| name == token)
-                    || source_call_args.iter().any(|arg| arg.trim() == token)
-                {
-                    return true;
-                }
-            }
-            FlowEvent::Return {
-                value_text,
-                value_name,
-                ..
-            } => {
-                if value_text.as_deref() == Some(token) || value_name.as_deref() == Some(token) {
-                    return true;
-                }
-            }
-            FlowEvent::Throw { value_name, .. } => {
-                if value_name.as_deref() == Some(token) {
-                    return true;
-                }
-            }
-            FlowEvent::Yield { value_text, .. } => {
-                if value_text.as_deref() == Some(token) {
-                    return true;
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                if flow_reads_token(then_events, token) || flow_reads_token(else_events, token) {
-                    return true;
-                }
-            }
-            FlowEvent::Loop {
-                condition_events,
-                body,
-                update_events,
-                ..
-            } => {
-                if flow_reads_token(condition_events, token)
-                    || flow_reads_token(body, token)
-                    || flow_reads_token(update_events, token)
-                {
-                    return true;
-                }
-            }
-            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if flow_reads_token(body, token) {
-                    return true;
-                }
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                if flow_reads_token(body, token)
-                    || flow_reads_token(catch_events, token)
-                    || flow_reads_token(finally_events, token)
-                {
-                    return true;
-                }
-            }
-            _ => {}
         }
+        FlowEvent::Assign {
+            source_name,
+            source_names,
+            ..
+        } => {
+            reads.extend(source_name.as_deref());
+            reads.extend(source_names.iter().map(String::as_str));
+        }
+        FlowEvent::Return {
+            value_name,
+            value_flow,
+            ..
+        } => {
+            reads.extend(value_name.as_deref());
+            collect_expression_read_places(value_flow, &mut reads);
+        }
+        FlowEvent::Throw { value_name, .. } | FlowEvent::Await { value_name, .. } => {
+            reads.extend(value_name.as_deref());
+        }
+        FlowEvent::Yield { value_flow, .. } | FlowEvent::AggregateAssign { value_flow, .. } => {
+            collect_expression_read_places(value_flow, &mut reads);
+        }
+        _ => {}
+    });
+    reads
+}
+
+fn collect_expression_read_places<'a>(flow: &'a ExpressionFlow, reads: &mut ahash::AHashSet<&'a str>) {
+    let mut pending = vec![flow];
+    while let Some(flow) = pending.pop() {
+        reads.extend(flow.place.as_deref());
+        reads.extend(flow.source_names.iter().map(String::as_str));
+        pending.extend(flow.aggregate_fields.iter().map(|field| &field.value));
+        pending.extend(&flow.tuple_items);
+        pending.extend(&flow.spreads);
     }
-    false
 }
 
 fn collect_class_field_taints_for_entries(
@@ -3115,46 +3086,51 @@ fn detect_framework_decorator(
     !decl_decorator_names(ws, file, index, decl_span, decl_name_span).is_empty()
 }
 
-fn count_call_sites_for_export(events: &[bonsai_lang_api::FlowEvent], call_site_count: &mut usize) {
-    for e in events {
-        match e {
-            bonsai_lang_api::FlowEvent::Call { .. }
-            | bonsai_lang_api::FlowEvent::Assign {
-                source_call: Some(_), ..
-            } => *call_site_count += 1,
-            bonsai_lang_api::FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                count_call_sites_for_export(then_events, call_site_count);
-                count_call_sites_for_export(else_events, call_site_count);
+fn collect_call_sites_for_export(events: &[FlowEvent], call_sites: &mut ahash::AHashSet<Span>) {
+    let mut pending = vec![events];
+    while let Some(events) = pending.pop() {
+        for e in events {
+            match e {
+                FlowEvent::Call { span, .. } => {
+                    call_sites.insert(*span);
+                }
+                bonsai_lang_api::FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    pending.extend([then_events.as_slice(), else_events.as_slice()]);
+                }
+                bonsai_lang_api::FlowEvent::Loop {
+                    condition_events,
+                    body,
+                    update_events,
+                    ..
+                } => {
+                    pending.extend([
+                        condition_events.as_slice(),
+                        body.as_slice(),
+                        update_events.as_slice(),
+                    ]);
+                }
+                bonsai_lang_api::FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    pending.extend([
+                        body.as_slice(),
+                        catch_events.as_slice(),
+                        finally_events.as_slice(),
+                    ]);
+                }
+                bonsai_lang_api::FlowEvent::Defer { body, .. }
+                | bonsai_lang_api::FlowEvent::Using { body, .. } => {
+                    pending.push(body);
+                }
+                _ => {}
             }
-            bonsai_lang_api::FlowEvent::Loop {
-                condition_events,
-                body,
-                update_events,
-                ..
-            } => {
-                count_call_sites_for_export(condition_events, call_site_count);
-                count_call_sites_for_export(body, call_site_count);
-                count_call_sites_for_export(update_events, call_site_count);
-            }
-            bonsai_lang_api::FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                count_call_sites_for_export(body, call_site_count);
-                count_call_sites_for_export(catch_events, call_site_count);
-                count_call_sites_for_export(finally_events, call_site_count);
-            }
-            bonsai_lang_api::FlowEvent::Defer { body, .. }
-            | bonsai_lang_api::FlowEvent::Using { body, .. } => {
-                count_call_sites_for_export(body, call_site_count);
-            }
-            _ => {}
         }
     }
 }

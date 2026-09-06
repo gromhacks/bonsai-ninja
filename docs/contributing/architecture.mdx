@@ -877,8 +877,14 @@ exponential. A `complete_chains` switch is intentionally absent, while schema
 compatibility fields report
 `mode=compressed_callgraph`, zero truncation, and explain that concrete path
 rows are represented by the graph.
-Since schema v7 (the current schema is v13,
-`schemas/bonsai-native-export-v13.schema.json`) code locations are serialized
+Its separate CFG-local parameter projections must also reach a fixed point.
+Copying descendant taint reports whether the RHS carries a field, not whether
+inserting that field changed a set. Capture the RHS before overwriting the
+target so repeated copies remain stable, self-copies retain their facts, and
+old target fields do not survive replacement. These local projections are not
+a second interprocedural engine or a security finding.
+Since schema v7 (the current schema is v14,
+`schemas/bonsai-native-export-v14.schema.json`) code locations are serialized
 relative to the workspace root, with that absolute root carried once as
 metadata. The relative path is the stable compiler
 identity; absolute paths are reconstructed only when a consumer performs host
@@ -1306,7 +1312,7 @@ sink-relevant compiler/IDG scope, and validates candidate value origins
 forward against exact sink nodes. Lineage is composed from function-local
 summaries (`crates/security/src/analysis/sink_lineage.rs`): every admitted
 function is analysed once per entering value — one IDG closure confined to
-that function per parameter, one per storage read another summary writes
+that function per parameter, one per exact storage-read node another summary writes
 tainted, and one over all places of an entry point (an admitted function no
 admitted function calls, or a member of a call cycle no entry point reaches).
 Callee returns compose through the IDG's contextual return summaries inside
@@ -1315,6 +1321,14 @@ graph of `(function, entering value)` nodes joined by tainted call arguments
 and tainted storage writes; a route is a path from an entry point to a sink
 hit, and one route survives per sink endpoint and direct feeder. Work is
 proportional to functions × entering values, never to entry points × sinks.
+Summary composition uses an immutable scoped IDG boundary directory prepared
+before workers start. Its exact argument/formal indexes preserve receiver and
+named-argument bindings; callgraph adjacency alone is not a binding proof.
+Separate reads of the same storage name remain separate entering values.
+Origin witnesses propagate through the compiled summary graph once, so a
+dead-end or cyclic predecessor cannot hide another rooted route. Projected
+heap steps retain `storage_transfer` evidence and never become synthetic
+direct-call records or positional arguments.
 A sink no entry point feeds is traced inside its own function, to its own
 sink nodes only. Source-to-sink security proofs are a
 separate demand-driven matcher enrichment under the same endpoint; the

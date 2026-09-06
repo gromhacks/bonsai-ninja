@@ -2102,8 +2102,9 @@ fn class_constructor_lookup_preserves_ambiguity() {
     );
 }
 
-/// Drift guard for T-5 in docs/contributing/review-checklist.mdx::§4: `TaintedArg.index` must be
-/// the call-site argument slot, NOT the callee parameter index.
+/// Ordinary argument records use call-site slots, not formal positions.
+/// Callback/capture relations retain formal bindings, and receivers have a
+/// distinct sentinel; they must not be mistaken for ordinary arguments.
 ///
 /// The two diverge when the callee declares an implicit-receiver
 /// parameter (Rust/Python `self`): a method call `obj.f(x, y)` has
@@ -2111,21 +2112,36 @@ fn class_constructor_lookup_preserves_ambiguity() {
 /// `self, x, y` so its parameter slots for `x` and `y` are 1 and 2.
 /// Reviewers and rule authors expect "argument 0 is tainted" relative
 /// to source position — this regression test pins that semantics by
-/// inspecting the inter-procedural pass directly.
+/// exercising the shared binding contract and retaining its three consumers.
 #[test]
 fn tainted_args_index_is_call_site_position() {
     let root = repo_root();
-    let text = read(&root.join("crates/taint/src/reachable.rs"));
-    let body = function_body(&text, "tainted_args_for_cross_call_edge");
-    let call_site_branch = body
-        .split_once("`TaintedArg.index` is the call-site argument slot")
-        .map(|(_, branch)| branch)
-        .expect("the IDG conversion must document the call-site argument-slot contract");
-    assert!(
-        call_site_branch.contains("index: edge.arg_idx as usize")
-            && !call_site_branch.contains("index: edge.param_idx as usize"),
-        "TaintedArg.index must use the IDG call-site arg index, not the callee param index"
-    );
+    for consumer in [
+        "crates/taint/src/reachable.rs",
+        "crates/browse/src/taint.rs",
+        "crates/browse/src/native_export.rs",
+    ] {
+        assert!(
+            read(&root.join(consumer)).contains("argument_index_for_parameter"),
+            "{consumer} must share the compiler argument binding contract"
+        );
+    }
+    let params = ["self", "x", "y"].map(str::to_owned);
+    for (args, expected) in [
+        ([None, None], [Some(0), Some(1)]),
+        ([Some("y"), Some("x")], [Some(1), Some(0)]),
+    ] {
+        assert_eq!(
+            bonsai_lang_api::argument_index_for_parameter(0, args, &params, Some(0)),
+            None
+        );
+        for (formal, actual) in [(1, expected[0]), (2, expected[1])] {
+            assert_eq!(
+                bonsai_lang_api::argument_index_for_parameter(formal, args, &params, Some(0)),
+                actual
+            );
+        }
+    }
 }
 
 /// Drift guard for Phase F (docs/contributing/review-checklist.mdx::§4 T-1/T-6): adapters must
@@ -3063,7 +3079,7 @@ fn compiler_has_one_precision_level() {
         "the compiler must keep one precision level; remove these reintroductions:\n{}",
         offenders.join("\n")
     );
-    let schema = read(&root.join("schemas/bonsai-native-export-v13.schema.json"));
+    let schema = read(&root.join("schemas/bonsai-native-export-v14.schema.json"));
     assert!(
         !schema.contains("precision"),
         "the native export schema must not carry per-edge precision labels"
@@ -5487,7 +5503,9 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
             && broad_match.contains("workspace_dependency_package_context_for_scan(")
             && !dependencies.contains("refresh_workspace_dependency_package_context")
             && function_body(&dependencies, "begin_workspace_dependency_package_snapshot")
-                .contains("build_workspace_dependency_package_context(root, &pack.metadata)"),
+                .split_whitespace()
+                .collect::<String>()
+                .contains("build_workspace_dependency_package_context(root,&pack.metadata,ws,)"),
         "broad matcher phases must reuse the analysis-owned immutable, rulepack-derived dependency snapshot"
     );
     for forbidden in [
@@ -5740,9 +5758,12 @@ fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
     );
     let browse_summary_labels = read(&repo_root().join("crates/browse/src/summary_labels.rs"));
     let enclosing_name = function_body(&browse_summary_labels, "enclosing_function_name");
+    let enclosing_name_at = function_body(&browse_summary_labels, "enclosing_function_name_at");
     assert!(
-        enclosing_name.contains("enclosing_range")
-            && !enclosing_name.contains("decl_index_uncached"),
+        enclosing_name.contains("enclosing_function_name_at")
+            && enclosing_name_at.contains("enclosing_range")
+            && !enclosing_name.contains("decl_index_uncached")
+            && !enclosing_name_at.contains("decl_index_uncached"),
         "browse table enclosing-function labels must reuse cached compiler header ranges instead of decoding a body per row"
     );
     let cli_browse = read(&repo_root().join("crates/cli/src/commands/browse.rs"));

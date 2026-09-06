@@ -72,6 +72,10 @@ pub fn is_dependency_metadata_file(name: &str) -> bool {
             | "build.gradle.kts"
             | "composer.json"
             | "composer.lock"
+            | "conanfile.py"
+            | "conanfile.txt"
+            | "cpanfile"
+            | "cpanfile.snapshot"
             | "deno.json"
             | "deno.jsonc"
             | "deno.lock"
@@ -81,6 +85,11 @@ pub fn is_dependency_metadata_file(name: &str) -> bool {
             | "go.work.sum"
             | "gradle.lockfile"
             | "gradle.properties"
+            | "META.json"
+            | "META.yml"
+            | "Makefile.PL"
+            | "Build.PL"
+            | "meson.build"
             | "mix.exs"
             | "mix.lock"
             | "package-lock.json"
@@ -92,14 +101,18 @@ pub fn is_dependency_metadata_file(name: &str) -> bool {
             | "poetry.lock"
             | "project.clj"
             | "pyproject.toml"
+            | "pubspec.yaml"
+            | "pubspec.lock"
             | "rebar.config"
             | "rebar.lock"
             | "requirements.txt"
             | "settings.gradle"
             | "settings.gradle.kts"
+            | "setup.py"
             | "stack.yaml"
             | "stack.yaml.lock"
             | "uv.lock"
+            | "vcpkg.json"
             | "yarn.lock"
     ) {
         return true;
@@ -115,6 +128,8 @@ pub fn is_dependency_metadata_file(name: &str) -> bool {
         || extension_is(ext, "props")
         || extension_is(ext, "targets")
         || extension_is(ext, "gemspec")
+        || extension_is(ext, "rockspec")
+        || extension_is(ext, "sbt")
         || extension_is(ext, "cabal")
 }
 

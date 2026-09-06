@@ -1396,6 +1396,7 @@ fn finding_with_flow_for_grouping(
     let source = finding_match_for_grouping("python.flask.request_args_get", source_line, "request.args.get");
     let sink = sink_match_for_grouping();
     let taint_path = vec![TaintPropagationStep {
+        storage_transfer: None,
         caller: "handle".to_string(),
         callee: "run".to_string(),
         file: "app.py".to_string(),

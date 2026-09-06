@@ -515,7 +515,9 @@ use std::sync::{
 // v197: Perl compound guards require dominance, exact predicates, and stable state.
 // v198: reject generations admitted through the retired v11 IR relabeling path.
 // v199: JavaScript/TypeScript module identity strips one source extension only.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 199;
+// v200: exact static values for same-span unparenthesized call arguments.
+// v201: typed splat parameter bindings exclude their annotation subtree.
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 201;
 #[cfg(test)]
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 

@@ -23,8 +23,8 @@ pub struct VarsFilters<'a> {
     pub file: Option<&'a str>,
     /// `--in-fn X` — substring over the enclosing function's name.
     pub in_fn: Option<&'a str>,
-    /// `--source X` — substring over the RHS identifier captured
-    /// during flow extraction.
+    /// `--source X` — substring over RHS identifiers and call names
+    /// captured during flow extraction, including compound expressions.
     pub source: Option<&'a str>,
     /// Treat `name` as a regex instead of a substring.
     pub regex: bool,

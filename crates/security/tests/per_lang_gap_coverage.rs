@@ -1264,15 +1264,31 @@ g8_test!(g8_ts_throw, "g8-ts", "typescript", "app.ts",
 g8_test!(g8_php_throw, "g8-php", "php", "app.php",
     "<?php\nfunction handle($token) { try { throw new Exception($token); } catch (Exception $e) { sink($e->getMessage()); } }\nfunction sink($s) {}\n",
     "php.sink", "sink");
-g8_test!(
-    g8_ruby_throw,
-    "g8-rb",
-    "ruby",
-    "app.rb",
-    "def handle(token)\n  begin\n    raise token\n  rescue => e\n    sink(e)\n  end\nend\ndef sink(s); end\n",
-    "rb.sink",
-    "sink"
-);
+#[test]
+fn g8_ruby_throw() {
+    let tmp = fresh_tmp("g8-rb");
+    let rules = write_sink_rule(&tmp, "ruby", "rb.sink", "sink");
+    let typing = rules.join("langs/ruby/typing");
+    fs::create_dir_all(&typing).expect("typing directory");
+    fs::write(
+        typing.join("exceptions.yml"),
+        include_str!("../../../security-patterns/langs/ruby/typing/exceptions.yml"),
+    )
+    .expect("runtime exception model");
+    write_fixture(&tmp, "app.rb",
+        "def handle(token)\n  begin\n    raise token\n  rescue => e\n    sink(e)\n  end\nend\ndef sink(s); end\n");
+    assert!(
+        flows_count(&tmp, &rules) >= 1,
+        "exact runtime call must carry its argument into rescue"
+    );
+    write_fixture(&tmp, "app.rb",
+        "def raise(value); value; end\ndef handle(token)\n  raise token\n  sink(token)\nend\ndef sink(s); end\n");
+    assert!(
+        flows_count(&tmp, &rules) >= 1,
+        "a returning override must not erase the reachable sink"
+    );
+    cleanup(&tmp);
+}
 g8_test!(g8_java_throw, "g8-java", "java", "App.java",
     "class App { void handle(String token) throws Exception { try { throw new RuntimeException(token); } catch (Exception e) { sink(e.getMessage()); } } void sink(String s) {} }\n",
     "java.sink", "sink");

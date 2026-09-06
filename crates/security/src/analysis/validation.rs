@@ -723,6 +723,17 @@ fn validate_rulepack_metadata(pack: &Rulepack, issues: &mut Vec<PackValidationIs
         );
     }
     for (language, metadata) in &pack.metadata.languages {
+        for layout in &metadata.dependency_manifest_layouts {
+            if let Err(error) = layout.validate() {
+                push_validation_issue(
+                    issues,
+                    "error",
+                    "invalid-dependency-manifest-layout",
+                    None,
+                    &format!("metadata language `{language}`: {error}"),
+                );
+            }
+        }
         let package = &metadata.package_matching;
         let contains_empty = package
             .strip_import_prefixes
@@ -2666,6 +2677,15 @@ fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) 
             "invalid-taint-semantics",
             Some(rule),
             "taint_semantics.call_result_passthrough_receiver is only valid on sanitizer or typing rules",
+        );
+    }
+    if semantics.throws && (rule.kind != RuleKind::Typing || rule.match_spec.kind != MatchKind::Call) {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-taint-semantics",
+            Some(rule),
+            "taint_semantics.throws requires a typing rule with match.kind: call",
         );
     }
     if let Some(callback) = &semantics.callback_invocation {

@@ -146,7 +146,8 @@ pub(crate) fn idg_service_for_inter_config(
     db: &AnalyzerDb,
     config: &crate::idg_api::InterTaintConfig,
 ) -> Arc<IdgQueryService> {
-    if config.clean_output_overwrites.is_empty()
+    if config.throwing_call_sites.is_empty()
+        && config.clean_output_overwrites.is_empty()
         && config.clean_receiver_overwrites.is_empty()
         && config.source_output_args.is_empty()
         && config.source_callback_args.is_empty()
@@ -160,6 +161,7 @@ pub(crate) fn idg_service_for_inter_config(
     let compiler_options =
         bonsai_idg::TransferOptions::compiler_semantics(db.complete_field_place_languages());
     let transfer_options = bonsai_idg::TransferOptions {
+        throwing_call_sites: config.throwing_call_sites.clone(),
         clean_output_overwrites: config
             .clean_output_overwrites
             .iter()

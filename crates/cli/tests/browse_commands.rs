@@ -1303,6 +1303,111 @@ fn export_full_propagations_materializes_exact_records() {
 }
 
 #[test]
+fn export_rejects_full_propagations_for_graph_formats_without_touching_output() {
+    let Some(bin) = bin_path() else { return };
+    let dir = tempfile::tempdir().expect("output directory");
+    let report = dir.path().join("existing.report");
+    std::fs::write(&report, "keep existing report").expect("write sentinel");
+    for format in ["networkx", "graphml", "cypher"] {
+        let output = Command::new(&bin)
+            .arg("export")
+            .arg(ws_path())
+            .args(["--format", format, "--full-propagations", "--output-path"])
+            .arg(&report)
+            .args(["--no-progress", "--no-color"])
+            .output()
+            .expect("run invalid export combination");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("--full-propagations requires --format json")
+        );
+        assert_eq!(std::fs::read_to_string(&report).unwrap(), "keep existing report");
+    }
+}
+
+#[test]
+fn failed_commands_preserve_existing_reports_and_remove_temporary_outputs() {
+    let Some(bin) = bin_path() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing-workspace");
+    let report = dir.path().join("report.json");
+    for command in ["export", "defs", "read-file"] {
+        std::fs::write(&report, "existing report").unwrap();
+        let output = Command::new(&bin)
+            .arg(command)
+            .arg(&missing)
+            .args(["--no-progress", "--no-color", "--output-path"])
+            .arg(&report)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{command}");
+        assert_eq!(
+            std::fs::read_to_string(&report).unwrap(),
+            "existing report",
+            "{command}"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "temporary report leaked after {command}"
+        );
+    }
+}
+
+#[test]
+fn completed_unresolved_dump_publishes_its_json_despite_nonzero_status() {
+    let Some(bin) = bin_path() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let report = dir.path().join("negative.json");
+    let output = Command::new(&bin)
+        .arg("dump-resolve")
+        .arg(ws_path())
+        .args([
+            "--name",
+            "missing_symbol_unlikely_to_exist",
+            "--format",
+            "json",
+            "--no-progress",
+            "--no-color",
+            "--output-path",
+        ])
+        .arg(&report)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert_eq!(json["outcome"], "unresolved");
+}
+
+#[test]
+fn tree_does_not_display_its_own_unpublished_report() {
+    let Some(bin) = bin_path() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.py"), "value = 1\n").unwrap();
+    let report = dir.path().join("tree.json");
+    let output = Command::new(&bin)
+        .arg("tree")
+        .arg(dir.path())
+        .args(["--format", "json", "--no-progress", "--no-color", "--output-path"])
+        .arg(&report)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = std::fs::read_to_string(report).unwrap();
+    assert!(
+        !json.contains(".bonsai-output-"),
+        "temporary report leaked into tree: {json}"
+    );
+    assert!(json.contains("app.py"));
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+}
+
+#[test]
 fn export_default_keeps_exact_propagation_language_in_compiler_form() {
     let ws = ws_path();
     let Some(out) = run(&["export", ws.to_str().unwrap()]) else {
@@ -3242,6 +3347,54 @@ fn dump_resolution_text_pages_the_nested_declaration_table() {
         !out.contains("rendered output exceeded --context budget"),
         "resolution coverage should price its nested declaration rows before rendering:\n{out}"
     );
+}
+
+#[test]
+fn dump_resolution_compact_tables_retain_every_declaration_counter() {
+    let ws = ws_path();
+    let Some(out) = run(&["dump-resolution", ws.to_str().unwrap(), "--all"]) else {
+        return;
+    };
+    let json = run(&[
+        "dump-resolution",
+        ws.to_str().unwrap(),
+        "--all",
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(out.contains("total/resolved/external/unresolved"), "{out}");
+    assert!(out.contains("dynamic/macro/receiver"), "{out}");
+    for file in document["rows"].as_array().unwrap() {
+        assert!(out.contains(file["file"].as_str().unwrap()), "{out}");
+        for decl in file["decls"].as_array().into_iter().flatten() {
+            let calls = format!(
+                "{}/{}/{}/{}",
+                decl["call_sites"],
+                decl["resolved_call_sites"],
+                decl["external_call_sites"],
+                decl["unresolved_call_sites"]
+            );
+            let edges = format!(
+                "{}/{}/{}",
+                decl["direct_edges"], decl["virtual_edges"], decl["indirect_edges"]
+            );
+            let gaps = format!(
+                "{}/{}/{}",
+                decl["dynamic_call_sites"], decl["macro_call_sites"], decl["receiver_type_gaps"]
+            );
+            assert!(
+                out.lines()
+                    .any(|line| line.contains(decl["name"].as_str().unwrap())
+                        && line.contains(decl["kind"].as_str().unwrap())
+                        && line.contains(&calls)
+                        && line.contains(&edges)
+                        && line.contains(&gaps)),
+                "declaration counters must stay together on one readable row: {decl}\n{out}"
+            );
+        }
+    }
 }
 
 #[test]

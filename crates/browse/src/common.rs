@@ -26,6 +26,28 @@ pub type Span = bonsai_common::Span;
 /// readable.
 pub type NameFilter = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// Direct callable members keyed by exact compiler ownership, in source order.
+/// Nested classes and local functions never become members of an outer type.
+pub(crate) fn callable_members_by_parent(
+    decls: &[bonsai_lang_api::Decl],
+) -> std::collections::BTreeMap<bonsai_common::SymbolId, Vec<&bonsai_lang_api::Decl>> {
+    let mut members = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for decl in decls {
+        if matches!(
+            decl.kind,
+            DeclKind::Method | DeclKind::Constructor | DeclKind::Function
+        ) {
+            if let Some(parent) = decl.parent {
+                members.entry(parent).or_default().push(decl);
+            }
+        }
+    }
+    for group in members.values_mut() {
+        group.sort_by_key(|decl| decl.span);
+    }
+    members
+}
+
 /// Stream one exact file-local compiler object after applying a workspace-
 /// relative path filter. Filtering happens before body allocation.
 pub(crate) struct AdmittedDeclIndex<'a> {

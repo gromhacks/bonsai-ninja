@@ -43,5 +43,9 @@
 // v54: typed receiver evidence is authoritative for receiver-constrained
 // rules, and qualified/import candidates use structural compiler names rather
 // than a shared source-separator vocabulary.
-pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_003f_u128;
+// v64: dependency evidence comes from parsed manifest fields or exact
+// compiler declaration arguments; arbitrary manifest text is not proof.
+// v65: code manifests retain workspace-local import ambiguity, and package
+// context fingerprints include the exact projection and coverage state.
+pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_0041_u128;
 const _: () = assert!(MATCHER_POLICY_FINGERPRINT != 0);

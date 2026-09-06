@@ -148,6 +148,25 @@ pub struct IdgClosureEvidence {
     pub cross_calls: Vec<CrossCallEdge>,
 }
 
+/// Immutable call-boundary directory for one query's compiler function scope.
+/// Hold this snapshot across local summary workers: their narrower queries
+/// may replace the service's optional cache without rebuilding this directory.
+#[derive(Clone)]
+pub struct IdgCrossCallLookup {
+    rows: Arc<CrossCallsByFrom>,
+}
+
+impl IdgCrossCallLookup {
+    /// Exact stitched boundaries leaving these reached nodes. Node identities
+    /// must come from the same IDG snapshot used to construct this lookup.
+    pub fn edges_for_reachable_nodes<'a>(
+        &'a self,
+        nodes: &'a [WsNodeId],
+    ) -> impl Iterator<Item = &'a CrossCallEdge> + 'a {
+        nodes.iter().filter_map(|node| self.rows.get(node)).flatten()
+    }
+}
+
 /// Run one ownership-transferring compiler phase on a scoped allocator heap.
 /// Large summary/CSR builders return only their canonical result; when the
 /// thread exits, transient hash tables and endpoint buffers cannot remain in
@@ -7100,6 +7119,15 @@ impl IdgQueryService {
     /// Cross-call edges whose endpoints both lie inside `closure`.
     pub fn cross_call_edges_in_reachable_nodes(&self, closure: &[WsNodeId]) -> Vec<CrossCallEdge> {
         self.cross_call_edges_in_reachable_nodes_filtered(closure, None)
+    }
+
+    /// Prepare shared exact argument/formal boundary facts before scheduling
+    /// a group of function-local compiler queries.
+    pub fn cross_call_lookup_for_funcs(&self, funcs: &AHashSet<FuncId>) -> IdgCrossCallLookup {
+        let unified = self.ensure_unified();
+        IdgCrossCallLookup {
+            rows: self.ensure_scoped_cross_calls_by_from(&unified, funcs),
+        }
     }
 
     /// Same as [`Self::cross_call_edges_in_reachable_nodes`],

@@ -4561,154 +4561,78 @@ fn tainted_args_for_cross_call_edge(
     callee_decl: Option<&bonsai_lang_api::Decl>,
     call_summary: Option<&CallEventSummary>,
 ) -> Vec<crate::idg_api::TaintedArg> {
-    if edge.arg_idx == u32::MAX {
-        if edge.relation == bonsai_idg::CrossCallRelation::Argument
-            && edge.param_idx != u32::MAX
-            && call_summary.is_some_and(|summary| !summary.args_value_text.is_empty())
-        {
-            let Some((summary, argument_index)) = call_summary.and_then(|summary| {
-                call_argument_index_for_param(summary, callee_decl?, edge.param_idx as usize)
-                    .map(|index| (summary, index))
-            }) else {
-                // This is a projected explicit-argument relation. If the
-                // compact compiler facts cannot recover its actual slot, fail
-                // closed for display attribution instead of mislabelling a
-                // namespace/value receiver as the tainted argument.
-                return Vec::new();
-            };
-            let param_name = callee_decl
-                .and_then(|decl| decl.params.get(edge.param_idx as usize).cloned())
-                .unwrap_or_default();
-            return vec![crate::idg_api::TaintedArg {
-                index: argument_index,
-                value_text: summary
-                    .args_value_text
-                    .get(argument_index)
-                    .cloned()
-                    .unwrap_or_default(),
-                param_name,
-                place: summary.args_place.get(argument_index).cloned().flatten(),
-                source_names: summary
-                    .args_source_names
-                    .get(argument_index)
-                    .cloned()
-                    .unwrap_or_default(),
-            }];
-        }
-        if matches!(
-            edge.relation,
-            bonsai_idg::CrossCallRelation::Argument | bonsai_idg::CrossCallRelation::Capture
-        ) {
-            if let Some((summary, receiver)) = call_summary
-                .and_then(|summary| summary.receiver.as_deref().map(|receiver| (summary, receiver)))
-                .map(|(summary, receiver)| (summary, receiver.trim()))
-                .filter(|(_, receiver)| !receiver.is_empty())
-            {
-                let (index, param_name) = if summary.args_value_text.is_empty() {
-                    (usize::MAX, SYNTHETIC_RECEIVER_PARAM_NAME.to_string())
-                } else if edge.param_idx != u32::MAX {
-                    (
-                        edge.param_idx as usize,
-                        callee_decl
-                            .and_then(|decl| decl.params.get(edge.param_idx as usize).cloned())
-                            .unwrap_or_default(),
-                    )
-                } else {
-                    // A sentinel with explicit arguments but no formal slot
-                    // is provenance-only. Do not relabel the receiver as the
-                    // tainted actual when the compiler could not prove that.
-                    return Vec::new();
-                };
-                return vec![crate::idg_api::TaintedArg {
-                    index,
-                    value_text: receiver.to_string(),
-                    param_name,
-                    place: summary.receiver.clone(),
-                    source_names: summary.receiver_source_names.clone(),
-                }];
-            }
-        }
-        if matches!(
-            edge.relation,
-            bonsai_idg::CrossCallRelation::Callback | bonsai_idg::CrossCallRelation::Capture
-        ) && edge.param_idx != u32::MAX
-        {
-            let param_name = callee_decl
-                .and_then(|decl| decl.params.get(edge.param_idx as usize).cloned())
-                .unwrap_or_default();
-            let value_text = if param_name.is_empty() {
-                format!("param#{}", edge.param_idx)
-            } else {
-                param_name.clone()
-            };
-            return vec![crate::idg_api::TaintedArg {
+    let param_name = callee_decl
+        .and_then(|decl| decl.params.get(edge.param_idx as usize).cloned())
+        .unwrap_or_default();
+    if matches!(
+        edge.relation,
+        bonsai_idg::CrossCallRelation::Callback | bonsai_idg::CrossCallRelation::Capture
+    ) {
+        return if edge.param_idx == u32::MAX || param_name.is_empty() {
+            Vec::new()
+        } else {
+            vec![crate::idg_api::TaintedArg {
                 index: edge.param_idx as usize,
-                value_text,
+                value_text: param_name.clone(),
                 param_name,
                 place: None,
                 source_names: Vec::new(),
-            }];
-        }
+            }]
+        };
+    }
+    if edge.relation != bonsai_idg::CrossCallRelation::Argument {
         return Vec::new();
     }
-    let value_text = call_summary
-        .and_then(|summary| summary.args_value_text.get(edge.arg_idx as usize).cloned())
-        .unwrap_or_default();
-    let param_name = if edge.param_idx == u32::MAX {
-        String::new()
-    } else {
-        callee_decl
-            .and_then(|decl| decl.params.get(edge.param_idx as usize).cloned())
-            .unwrap_or_default()
+    let Some(summary) = call_summary else {
+        return Vec::new();
     };
-    // `TaintedArg.index` is the call-site argument slot. Keep the IDG edge's
-    // `arg_idx`; `param_idx` can differ for methods with implicit receivers.
-    vec![crate::idg_api::TaintedArg {
-        index: edge.arg_idx as usize,
-        value_text,
-        param_name,
-        place: call_summary
-            .and_then(|summary| summary.args_place.get(edge.arg_idx as usize))
-            .cloned()
-            .flatten(),
-        source_names: call_summary
-            .and_then(|summary| summary.args_source_names.get(edge.arg_idx as usize))
-            .cloned()
-            .unwrap_or_default(),
-    }]
-}
-
-/// Recover the explicit actual slot for one formal parameter using the same
-/// adapter-owned named/positional contract as IDG call stitching.
-fn call_argument_index_for_param(
-    summary: &CallEventSummary,
-    callee_decl: &bonsai_lang_api::Decl,
-    param_index: usize,
-) -> Option<usize> {
-    let receiver_index = callee_decl.receiver_param_index;
-    summary
-        .args_name
-        .iter()
-        .enumerate()
-        .find_map(|(argument_index, name)| {
-            let mapped_param = name.as_deref().map_or_else(
-                || match receiver_index {
-                    Some(receiver) if argument_index >= receiver => argument_index.saturating_add(1),
-                    _ => argument_index,
-                },
-                |name| {
-                    callee_decl
-                        .params
-                        .iter()
-                        .enumerate()
-                        .find(|(index, parameter)| {
-                            Some(*index) != receiver_index && parameter.trim() == name.trim()
-                        })
-                        .map_or(usize::MAX, |(index, _)| index)
-                },
-            );
-            (mapped_param == param_index).then_some(argument_index)
+    let index = if edge.arg_idx != u32::MAX {
+        Some(edge.arg_idx as usize)
+    } else if callee_decl.is_some_and(|decl| decl.receiver_param_index == Some(edge.param_idx as usize))
+        || summary.args_value_text.is_empty()
+    {
+        Some(usize::MAX)
+    } else if edge.param_idx != u32::MAX {
+        callee_decl.and_then(|decl| {
+            bonsai_lang_api::argument_index_for_parameter(
+                edge.param_idx as usize,
+                summary.args_name.iter().map(|name| name.as_deref()),
+                &decl.params,
+                decl.receiver_param_index,
+            )
         })
+    } else {
+        None
+    };
+    let Some(index) = index else {
+        return Vec::new();
+    };
+    if index == usize::MAX {
+        let Some(receiver) = summary.receiver.as_ref() else {
+            return Vec::new();
+        };
+        return vec![crate::idg_api::TaintedArg {
+            index,
+            value_text: receiver.clone(),
+            param_name: if param_name.is_empty() {
+                SYNTHETIC_RECEIVER_PARAM_NAME.to_owned()
+            } else {
+                param_name
+            },
+            place: Some(receiver.clone()),
+            source_names: summary.receiver_source_names.clone(),
+        }];
+    }
+    let Some(value_text) = summary.args_value_text.get(index) else {
+        return Vec::new();
+    };
+    vec![crate::idg_api::TaintedArg {
+        index,
+        value_text: value_text.clone(),
+        param_name,
+        place: summary.args_place.get(index).cloned().flatten(),
+        source_names: summary.args_source_names.get(index).cloned().unwrap_or_default(),
+    }]
 }
 
 /// Link an outer call edge to the exact nested return that produced its

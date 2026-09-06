@@ -1,6 +1,8 @@
 //! End-to-end `security` command coverage on every lang's micro fixture.
 
 use std::collections::BTreeSet;
+#[path = "support/analysis_coverage.rs"]
+mod analysis_coverage;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -2148,6 +2150,40 @@ fn sink_analysis_maps_python_endpoints_and_exact_upstream_paths() {
 }
 
 #[test]
+fn constant_sink_lineage_does_not_claim_argument_taint() {
+    let ws = temp_workspace("constant-sink-lineage");
+    std::fs::write(
+        ws.join("app.py"),
+        "import os\n\ndef clean():\n    return os.system(\"echo constant\")\n",
+    )
+    .expect("write constant sink fixture");
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "sink-analysis",
+        "--profile",
+        "all",
+        "--sink",
+        "^python\\.cmdi\\.os_system$",
+        "--all",
+    ])
+    .unwrap();
+    assert!(out.contains("echo constant"), "missing sink body:\n{out}");
+    assert!(
+        out.contains("no argument attribution"),
+        "missing attribution notice:\n{out}"
+    );
+    assert!(
+        !out.contains("tainted value"),
+        "constant-only lineage falsely claims taint:\n{out}"
+    );
+    assert!(
+        out.contains("0 security-source proof(s)"),
+        "constant gained a security source:\n{out}"
+    );
+}
+
+#[test]
 fn dependency_analysis_projects_complete_taint_flows() {
     let ws = micro_path("python");
     if !ws.exists() {
@@ -3506,7 +3542,7 @@ fn taint_analysis_run_across_every_micro_lang() {
 }
 
 #[test]
-fn concrete_rule_backed_taint_analysis_completes_across_every_language_gauntlet() {
+fn concrete_rule_backed_taint_analysis_reports_exact_coverage_across_every_language_gauntlet() {
     for lang in LANGUAGE_GAUNTLET_LANGS {
         let ws = language_gauntlet_path(lang);
         assert!(ws.exists(), "{lang}: language_gauntlet fixture is missing");
@@ -3525,10 +3561,10 @@ fn concrete_rule_backed_taint_analysis_completes_across_every_language_gauntlet(
         .unwrap();
         let parsed: serde_json::Value =
             serde_json::from_str(&out).unwrap_or_else(|e| panic!("{lang}: invalid JSON: {e}\n{out}"));
-        assert_eq!(
-            parsed.get("analysis_complete").and_then(|value| value.as_bool()),
-            Some(true),
-            "{lang}: concrete gauntlet analysis must be complete:\n{out}"
+        analysis_coverage::assert_exact_coverage(
+            &parsed,
+            &analysis_coverage::gauntlet_manifest_reasons(lang),
+            lang,
         );
         let rows = json_rows(&parsed);
         assert_eq!(

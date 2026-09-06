@@ -128,7 +128,12 @@ pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<Ent
                 let kind = format!("{:?}", decl.kind).to_lowercase();
                 let (path, line, column) = format_span(&decl.name_span, ws);
                 let callees = attribution.map_or_else(Vec::new, |function| {
-                    function.calls.into_iter().map(|call| call.name).collect()
+                    let mut seen = ahash::AHashSet::new();
+                    function
+                        .calls
+                        .into_iter()
+                        .filter_map(|call| seen.insert(call.name.clone()).then_some(call.name))
+                        .collect()
                 });
                 per_file.push(EntryPointOut {
                     name: decl.name.clone(),
@@ -219,9 +224,15 @@ mod tests {
                 .iter()
                 .find(|decl| decl.name == row.name)
                 .expect("root declaration");
-            let body_callees = crate::common::collect_callee_names(&root.flow_events);
+            let mut body_callees = crate::common::collect_callee_names(&root.flow_events);
+            let mut seen = ahash::AHashSet::new();
+            body_callees.retain(|name| seen.insert(name.clone()));
             assert_eq!(row.callees, body_callees);
-            assert!(row.callees.iter().all(|callee| callee == "leaf"));
+            assert_eq!(
+                row.callees,
+                ["leaf"],
+                "callee inventory is distinct, not a count of IR projections"
+            );
         }
         assert_eq!(
             ws.stats().cached_decl_indexes,

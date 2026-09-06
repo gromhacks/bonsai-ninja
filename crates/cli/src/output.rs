@@ -14,8 +14,8 @@
 
 use anyhow::{Context, Result};
 use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::io::{BufWriter, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::html::HtmlDocumentContext;
@@ -23,9 +23,11 @@ use crate::html::HtmlDocumentContext;
 #[derive(Default)]
 struct OutputState {
     writer: Option<BufWriter<File>>,
+    pending: Option<(tempfile::TempPath, PathBuf)>,
     html: bool,
     html_closed: bool,
     error: Option<String>,
+    terminal_progress: Option<crate::progress::OutputProgressGuard<'static>>,
 }
 
 static OUTPUT: OnceLock<Mutex<OutputState>> = OnceLock::new();
@@ -38,19 +40,73 @@ fn lock_state() -> MutexGuard<'static, OutputState> {
     state().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-pub(crate) fn init(path: Option<&Path>, html: Option<&HtmlDocumentContext>) -> Result<()> {
+/// Discard an unpublished report on errors or unwinding, including errors
+/// before command dispatch. Successful `finish` has already consumed it.
+pub(crate) struct OutputGuard;
+
+impl Drop for OutputGuard {
+    fn drop(&mut self) {
+        let discarded = std::mem::take(&mut *lock_state());
+        drop(discarded);
+    }
+}
+
+pub(crate) fn init(
+    path: Option<&Path>,
+    html: Option<&HtmlDocumentContext>,
+    atomic: bool,
+) -> Result<OutputGuard> {
     anyhow::ensure!(
         html.is_none() || path.is_some(),
         "HTML output requires a destination path"
     );
-    let mut state = lock_state();
-    state.error = None;
-    state.html = html.is_some();
-    state.html_closed = false;
-    state.writer = match path {
+    let mut pending = None;
+    let writer = match path {
         Some(path) => {
-            let file =
-                File::create(path).with_context(|| format!("creating output file {}", path.display()))?;
+            let metadata = match std::fs::symlink_metadata(path) {
+                Ok(metadata) => Some(metadata),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("checking output file {}", path.display()))
+                }
+            };
+            // Follow existing symlinks just as an ordinary file sink does;
+            // replacing a symlink itself would change a different target.
+            let destination = if metadata.as_ref().is_some_and(|metadata| metadata.is_symlink()) {
+                path.canonicalize()
+                    .with_context(|| format!("resolving output symlink {}", path.display()))?
+            } else {
+                path.to_path_buf()
+            };
+            let target_metadata = destination.metadata().ok();
+            let file = if atomic && target_metadata.as_ref().is_none_or(std::fs::Metadata::is_file) {
+                let parent = destination
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                let parent = parent
+                    .canonicalize()
+                    .with_context(|| format!("resolving output directory {}", parent.display()))?;
+                let temporary = tempfile::Builder::new()
+                    .prefix(".bonsai-output-")
+                    .tempfile_in(&parent)
+                    .with_context(|| format!("preparing output file {}", path.display()))?;
+                if let Some(metadata) = target_metadata {
+                    anyhow::ensure!(
+                        !metadata.permissions().readonly(),
+                        "output file {} is read-only",
+                        path.display()
+                    );
+                    temporary.as_file().set_permissions(metadata.permissions())?;
+                }
+                let (file, temporary_path) = temporary.into_parts();
+                pending = Some((temporary_path, destination));
+                file
+            } else {
+                // Explicit watch streams and device sinks remain streaming.
+                File::create(&destination)
+                    .with_context(|| format!("creating output file {}", path.display()))?
+            };
             let mut writer = BufWriter::with_capacity(1024 * 1024, file);
             if let Some(context) = html {
                 writer
@@ -61,13 +117,28 @@ pub(crate) fn init(path: Option<&Path>, html: Option<&HtmlDocumentContext>) -> R
         }
         None => None,
     };
-    Ok(())
+    *lock_state() = OutputState {
+        writer,
+        pending,
+        html: html.is_some(),
+        ..OutputState::default()
+    };
+    Ok(OutputGuard)
 }
 
 /// True when `--html-output` is active and structured documents must be
 /// rendered as HTML fragments instead of pretty JSON.
 pub(crate) fn html_enabled() -> bool {
     lock_state().html
+}
+
+/// Hide only this command's exact temporary report from filesystem navigation.
+/// A prefix filter would incorrectly hide user-owned files with similar names.
+pub(crate) fn is_pending_output_path(path: &Path) -> bool {
+    lock_state().pending.as_ref().is_some_and(|(temporary, _)| {
+        let temporary: &Path = temporary.as_ref();
+        temporary == path
+    })
 }
 
 /// Print one canonical command document. Pretty JSON normally; under
@@ -95,6 +166,21 @@ pub(crate) fn write_raw_counted(s: &str) -> bool {
     write_parts(s.as_bytes(), None, s, false)
 }
 
+/// Once a terminal report starts, later compiler phases must not redraw
+/// progress between its lines. Keep this guard until command teardown, not
+/// merely until one write finishes. Device-file terminal sinks count too.
+pub(crate) fn begin_report() {
+    let mut state = lock_state();
+    if state.terminal_progress.is_none()
+        && state.writer.as_ref().map_or_else(
+            || std::io::stdout().is_terminal(),
+            |writer| writer.get_ref().is_terminal(),
+        )
+    {
+        state.terminal_progress = Some(crate::progress::OutputProgressGuard::new());
+    }
+}
+
 fn write_parts(bytes: &[u8], suffix: Option<&[u8]>, visible: &str, trailing_newline: bool) -> bool {
     let mut state = lock_state();
     let Some(writer) = state.writer.as_mut() else {
@@ -114,6 +200,7 @@ pub(crate) fn with_writer<T, F>(f: F) -> Result<T>
 where
     F: FnOnce(&mut dyn Write) -> Result<T>,
 {
+    begin_report();
     let mut state = lock_state();
     if let Some(error) = state.error.take() {
         anyhow::bail!("writing output file failed: {error}");
@@ -148,6 +235,15 @@ pub(crate) fn finish() -> Result<()> {
     }
     if close_html {
         state.html_closed = true;
+    }
+    // Close the writer before rename, including on Windows. A failed command
+    // never reaches this publication point and leaves an existing report intact.
+    drop(state.writer.take());
+    if let Some((temporary, destination)) = state.pending.take() {
+        temporary
+            .persist(&destination)
+            .map_err(|error| error.error)
+            .with_context(|| format!("publishing output file {}", destination.display()))?;
     }
     Ok(())
 }

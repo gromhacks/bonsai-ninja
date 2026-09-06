@@ -101,6 +101,207 @@ fn manifest_recognition_reuses_the_language_mapping() {
     assert!(!is_dependency_manifest_basename("notes.yaml", &metadata));
 }
 
+#[test]
+fn every_bundled_manifest_pattern_participates_in_root_cache_freshness() {
+    for (language, metadata) in bundled_metadata().languages {
+        for pattern in metadata.dependency_manifest_patterns {
+            let filename = pattern.replace('*', "sample");
+            assert!(
+                bonsai_common::dependency_metadata::is_dependency_metadata_file(&filename),
+                "{language}: {pattern} cannot be omitted from root-only cache fingerprints"
+            );
+        }
+    }
+}
+
+#[test]
+fn dependency_package_evidence_ignores_manifest_prose_and_comments() {
+    let cases = [
+        ("package.json", "javascript", r#"{"name":"sample","description":"express","dependencies":{"fastify":"*"}}"#, "express", "fastify"),
+        ("Cargo.toml", "rust", "[package]\nname = 'sample'\nversion = '0.1.0'\ndescription = 'reqwest'\n# reqwest = '*'\n[dependencies]\nserde = '1'\n", "reqwest", "serde"),
+        ("pom.xml", "java", "<project><!-- <artifactId>log4j-core</artifactId> --><description>log4j-core</description><dependencies><dependency><artifactId>jackson-databind</artifactId></dependency></dependencies></project>", "log4j-core", "jackson-databind"),
+        ("pubspec.yaml", "dart", "name: sample\ndescription: dio\n# dio: any\ndependencies:\n  http: any\n", "dio", "http"),
+    ];
+    for (filename, language, text, absent, present) in cases {
+        let root = tempfile::tempdir().expect("manifest fixture");
+        std::fs::write(root.path().join(filename), text).expect("write manifest");
+        let context = build_workspace_dependency_package_context(root.path(), &bundled_metadata(), None);
+        let packages = workspace_dependency_packages_from_context(&context, language).packages;
+        assert!(
+            !packages.contains(absent),
+            "{filename} prose/comment is not package evidence: {packages:?}"
+        );
+        assert!(
+            packages.contains(present),
+            "{filename} lost a declared dependency: {packages:?}"
+        );
+    }
+}
+
+#[test]
+fn structured_manifests_preserve_declared_aliases_nested_locks_and_short_names() {
+    let metadata = bundled_metadata();
+    for (file, language, source, expected) in [
+        ("package.json", "javascript", r#"{"dependencies":{"q":"1","alias":"npm:@scope/real@^1"}}"#, vec!["q", "alias", "@scope/real"]),
+        ("package-lock.json", "javascript", r#"{"dependencies":{"outer":{"dependencies":{"inner":{}}}},"packages":{"node_modules/@scope/pkg":{},"node_modules/a/node_modules/b":{}}}"#, vec!["outer", "inner", "@scope/pkg", "b"]),
+        ("Cargo.toml", "rust", "[target.'cfg(unix)'.dev-dependencies]\nalias = { package = 'real-crate', version = '1' }\n[workspace.dependencies]\nshared = '1'\n", vec!["alias", "real-crate", "shared"]),
+        ("pyproject.toml", "python", "[project.optional-dependencies]\ntest = ['requests[socks]>=2']\n[dependency-groups]\nlint = ['ruff==0.1']\n", vec!["requests", "ruff"]),
+        ("app.csproj", "csharp", "<Project><!-- <PackageReference Include='fake'/> --><ItemGroup><PackageReference Include='Real.Package'/></ItemGroup></Project>", vec!["Real.Package"]),
+        ("requirements.txt", "python", "# express requests\nrequests[socks]>=2; python_version > '3' # comment\nq==1\n", vec!["requests", "q"]),
+    ] {
+        let packages = dependency_manifest_packages(Path::new(file), source, language, &metadata, None).expect(file);
+        for package in expected { assert!(packages.contains(package), "{file}: {package} missing: {packages:?}"); }
+        assert!(!packages.contains("fake") && !packages.contains("express"));
+    }
+}
+
+#[test]
+fn invalid_or_unmodeled_manifests_never_fall_back_to_raw_package_names() {
+    let metadata = bundled_metadata();
+    for (file, language, source) in [
+        ("package.json", "javascript", r#"{"dependencies":{"express":"1"}, broken"#),
+        ("plugin.gemspec", "ruby", "# actionpack\n"),
+        ("pom.xml", "java", "<!DOCTYPE a [<!ENTITY x SYSTEM 'file:///private'>]><project><artifactId>&x;</artifactId></project>"),
+    ] {
+        assert!(dependency_manifest_packages(Path::new(file), source, language, &metadata, None).is_err(), "{file}");
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("pyproject.toml"), "[project\n# django").unwrap();
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    let mut pack = pack_with_bundled_metadata();
+    pack.packs.insert(
+        "python".into(),
+        LanguagePack {
+            language: "python".into(),
+            sources: Vec::new(),
+            sinks: vec![python_package_rule("django")],
+            sanitizers: Vec::new(),
+            typing: Vec::new(),
+        },
+    );
+    let inventory = build_inventory(&pack, &ws, root.path());
+    assert!(inventory.rows.is_empty());
+    assert!(!inventory.analysis_complete);
+    assert!(inventory
+        .analysis_incomplete_reasons
+        .iter()
+        .any(|reason| reason.contains("pyproject.toml")));
+    let report =
+        crate::deps_analysis::dependency_analysis(&ws, &pack, root.path(), Default::default()).unwrap();
+    assert!(
+        !report.analysis_complete,
+        "empty dependency report must retain manifest errors"
+    );
+}
+
+#[test]
+fn code_manifests_require_compiler_proven_calls_and_static_values() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    let metadata = bundled_metadata();
+    for (file, language, source, present, absent) in [
+        ("Gemfile", "ruby", "# gem 'fake'\nnotes = \"gem 'fake'\"\ngem 'actionpack'\n", vec!["actionpack"], vec!["fake"]),
+        ("Gemfile", "ruby", "def gem(name)\n puts name\nend\ngem 'actionpack'\n", vec![], vec!["actionpack"]),
+        ("setup.py", "python", "from setuptools import setup\nsetup(name='app', description='fake', install_requires=['requests>=2'])\n", vec!["app", "requests"], vec!["fake"]),
+    ] {
+        let packages = dependency_manifest_packages(Path::new(file), source, language, &metadata, Some(&ws)).expect(file);
+        for package in present { assert!(packages.contains(package), "{file}: {package} missing: {packages:?}"); }
+        for package in absent { assert!(!packages.contains(package), "{file}: false package {package}: {packages:?}"); }
+    }
+    assert!(dependency_manifest_packages(
+        Path::new("Gemfile"),
+        "gem ENV['PACKAGE']\n",
+        "ruby",
+        &metadata,
+        Some(&ws)
+    )
+    .is_err());
+    assert!(dependency_manifest_packages(
+        Path::new("Gemfile"),
+        "def unused\n gem 'actionpack'\nend\n",
+        "ruby",
+        &metadata,
+        Some(&ws)
+    )
+    .is_err());
+}
+
+#[test]
+fn code_manifest_imports_do_not_erase_workspace_local_provider_shadowing() {
+    let metadata = bundled_metadata();
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    for (provider, source) in [
+        (
+            "setuptools.py",
+            "from setuptools import setup\nsetup(install_requires=['django'])\n",
+        ),
+        (
+            "setuptools.py",
+            "import setuptools as packaging\npackaging.setup(install_requires=['django'])\n",
+        ),
+        (
+            "setuptools/__init__.py",
+            "from setuptools import setup\nsetup(install_requires=['django'])\n",
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let provider = root.path().join(provider);
+        std::fs::create_dir_all(provider.parent().unwrap()).unwrap();
+        std::fs::write(&provider, "def setup(**options):\n    return None\n").unwrap();
+        let error = dependency_manifest_packages(
+            &root.path().join("setup.py"),
+            source,
+            "python",
+            &metadata,
+            Some(&ws),
+        )
+        .expect_err("local or unselected providers must not become external dependency evidence");
+        assert!(error.to_string().contains("workspace-local"), "{error}");
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("setup.py"),
+        "from setuptools import setup\nsetup(install_requires=['django'])\n",
+    )
+    .unwrap();
+    let ws = Workspace::index(root.path(), bonsai_adapters::all_languages_registry()).unwrap();
+    let before = build_workspace_dependency_package_context(root.path(), &metadata, Some(&ws));
+    assert!(before.incomplete_reasons.is_empty());
+    // Deliberately leave the new provider outside the selected VFS: scope
+    // exclusions must not turn a local import into an external package.
+    std::fs::write(
+        root.path().join("setuptools.py"),
+        "def setup(**options):\n    return None\n",
+    )
+    .unwrap();
+    let after = build_workspace_dependency_package_context(root.path(), &metadata, Some(&ws));
+    assert_ne!(before.fingerprint, after.fingerprint);
+    assert!(after
+        .incomplete_reasons
+        .iter()
+        .any(|reason| reason.contains("workspace-local")));
+}
+
+#[test]
+fn dependency_layouts_are_validated_and_part_of_snapshot_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let mut metadata = bundled_metadata();
+    let before = build_workspace_dependency_package_context(root.path(), &metadata, None).fingerprint;
+    let javascript = metadata.languages.get_mut("javascript").unwrap();
+    javascript.dependency_manifest_layouts[0].packages[0].path = vec!["alternate".into()];
+    let after = build_workspace_dependency_package_context(root.path(), &metadata, None).fingerprint;
+    assert_ne!(before, after);
+    for source in [
+        r#"{"files":["x"],"format":"json","packages":[{"path":[],"capture":"no-group"}]}"#,
+        r#"{"files":["x"],"format":"xml","packages":[{"path":[],"keys":true}]}"#,
+        r#"{"files":["x"],"format":"lines","packages":[{"path":[],"capture":"(unanchored)"}]}"#,
+        r#"{"files":["x"],"format":"code","adapter":"ruby","calls":[{"callee":{"name":"gem"},"arguments":[{"index":0,"keyword":"name"}]}]}"#,
+    ] {
+        let layout: crate::loader::DependencyManifestLayout = serde_json::from_str(source).unwrap();
+        assert!(layout.validate().is_err(), "{source}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn manifest_scan_does_not_follow_directory_symlinks_outside_the_workspace() {
@@ -237,7 +438,7 @@ fn workspace_dependency_packages_alias_python_distribution_names_to_imports() {
     )
     .expect("requirements");
 
-    let context = build_workspace_dependency_package_context(&root, &bundled_metadata());
+    let context = build_workspace_dependency_package_context(&root, &bundled_metadata(), None);
     let packages = workspace_dependency_packages_from_context(&context, "python").packages;
     assert!(
         packages.contains("psycopg2"),
@@ -267,7 +468,7 @@ percent-encoding = "2"
     )
     .expect("cargo");
 
-    let context = build_workspace_dependency_package_context(&root, &bundled_metadata());
+    let context = build_workspace_dependency_package_context(&root, &bundled_metadata(), None);
     let packages = workspace_dependency_packages_from_context(&context, "rust").packages;
     assert!(
         packages.contains("percent_encoding"),
@@ -283,13 +484,13 @@ fn broad_manifest_refresh_replaces_stale_package_context() {
     std::fs::write(&manifest, "psycopg2-binary==2.9.9\n").expect("initial requirements");
 
     let metadata = bundled_metadata();
-    let initial_context = build_workspace_dependency_package_context(&root, &metadata);
+    let initial_context = build_workspace_dependency_package_context(&root, &metadata, None);
     let initial = workspace_dependency_packages_from_context(&initial_context, "python");
     assert!(initial.packages.contains("psycopg2"));
     assert!(!initial.packages.contains("requests"));
 
     std::fs::write(&manifest, "requests==2.32.3\n").expect("updated requirements");
-    let refreshed_context = build_workspace_dependency_package_context(&root, &metadata);
+    let refreshed_context = build_workspace_dependency_package_context(&root, &metadata, None);
     let refreshed = workspace_dependency_packages_from_context(&refreshed_context, "python");
     assert_ne!(initial.fingerprint, refreshed.fingerprint);
     assert!(!refreshed.packages.contains("psycopg2"));
@@ -303,7 +504,7 @@ fn analysis_manifest_snapshot_remains_immutable_until_the_run_finishes() {
     std::fs::write(&manifest, "psycopg2-binary==2.9.9\n").expect("initial requirements");
     let workspace_id = 9_001;
     let pack = pack_with_bundled_metadata();
-    let snapshot = super::begin_workspace_dependency_package_snapshot(&root, workspace_id, &pack);
+    let snapshot = super::begin_workspace_dependency_package_snapshot(&root, workspace_id, &pack, None);
 
     let initial =
         super::workspace_dependency_packages_for_language_in_workspace(&root, "python", workspace_id);
@@ -317,7 +518,8 @@ fn analysis_manifest_snapshot_remains_immutable_until_the_run_finishes() {
     assert!(!during_run.packages.contains("requests"));
 
     drop(snapshot);
-    let _refreshed_snapshot = super::begin_workspace_dependency_package_snapshot(&root, workspace_id, &pack);
+    let _refreshed_snapshot =
+        super::begin_workspace_dependency_package_snapshot(&root, workspace_id, &pack, None);
     let after_run =
         super::workspace_dependency_packages_for_language_in_workspace(&root, "python", workspace_id);
     assert_ne!(after_run.fingerprint, initial.fingerprint);

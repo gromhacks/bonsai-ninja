@@ -231,7 +231,7 @@ pub type DynAdapter = Arc<dyn LanguageAdapter>;
 pub use bonsai_vfs::{FileSnapshot, Vfs};
 pub use capabilities::{
 pub use kit::{
-pub use parameter_binding::{explicit_argument_parameter_index, named_argument_parameter_index};
+pub use parameter_binding::{
 pub use parse_recovery::{
 pub use registry::{AdapterArc, LanguageRegistry};
 pub use taxonomy::{flow_edge_spec, FlowEdgeKind, FlowEdgeSpec, FlowEdgeSupport, FLOW_EDGE_TAXONOMY};

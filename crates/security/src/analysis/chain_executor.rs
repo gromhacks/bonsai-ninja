@@ -737,6 +737,7 @@ impl SourceGroupExecutor<'_> {
                             call_graph: self.chain_call_graph.as_ref(),
                             static_provenance_call_graph: static_provenance_call_graph.as_ref(),
                             callback_invocations: &self.config.callback_invocations,
+                            throwing_call_sites: &self.config.throwing_call_sites,
                             tainted_call_spans: &tainted_call_spans,
                             sink_tainted_args: evidence.sink_tainted_args.clone(),
                             taint_path,

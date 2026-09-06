@@ -675,9 +675,13 @@ fn matcher_policy_fingerprint_matches_current_semantics() {
     // and semantic decorator configuration stopped becoming a text anchor.
     // Bumped 0x003a → 0x003e for exact CFG cleanup/receiver/callback identity
     // and removal of an unsound configured-regex transfer-site prefilter.
+    // Bumped through 0x0040 for compiler-owned package provenance and exact
+    // manifest declarations replacing whole-document token evidence.
+    // Bumped to 0x0041 for workspace-local code-manifest import ambiguity
+    // and dependency context fingerprints that retain projection coverage.
     assert_eq!(
         bonsai_security::MATCHER_POLICY_FINGERPRINT,
-        0x4d41_5443_4845_525f_504f_4c49_4359_003e_u128
+        0x4d41_5443_4845_525f_504f_4c49_4359_0041_u128
     );
 }
 

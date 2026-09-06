@@ -5,6 +5,8 @@
 //! resolution, and negative cases that guard against over-taint.
 
 use serde_json::Value;
+#[path = "support/analysis_coverage.rs"]
+mod analysis_coverage;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -109,20 +111,12 @@ fn run_taint_json_with_flags(ws: &Path, source: &str, sink: &str, flags: &[&str]
             String::from_utf8_lossy(&out.stdout)
         )
     });
-    assert_eq!(
-        value.get("analysis_complete").and_then(Value::as_bool),
-        Some(true),
-        "taint regression fixture produced an incomplete compiler snapshot:\n{}",
-        serde_json::to_string_pretty(&value).expect("render incomplete analysis")
-    );
-    assert!(
-        value
-            .get("analysis_incomplete_reasons")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty),
-        "complete taint regression fixture retained incomplete reasons:\n{}",
-        serde_json::to_string_pretty(&value).expect("render incomplete reasons")
-    );
+    let expected = if ws.join("go.mod").is_file() {
+        analysis_coverage::gauntlet_manifest_reasons("go")
+    } else {
+        Vec::new()
+    };
+    analysis_coverage::assert_exact_coverage(&value, &expected, "taint regression fixture");
     value
         .get("rows")
         .and_then(Value::as_array)

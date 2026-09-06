@@ -55,12 +55,12 @@ struct InventoryCache {
     matches: Vec<RuleMatch>,
 }
 
-const DEPS_INVENTORY_CACHE_KIND: &str = "security/deps-inventory/v1";
+const DEPS_INVENTORY_CACHE_KIND: &str = "security/deps-inventory/v2";
 
 /// Complete dependency inventory for one file scope.
 #[derive(Clone, Serialize, Deserialize)]
 struct DepsInventoryCache {
-    rows: Vec<bonsai_sdk::DependencyRow>,
+    inventory: bonsai_sdk::DependencyInventory,
 }
 
 /// Compute (or reuse) the complete inventory for `kind` — every enabled rule
@@ -1533,8 +1533,8 @@ fn cmd_deps(
     ]);
     let cached: Option<DepsInventoryCache> =
         page_cache::read_keyed_payload(workspace, inventory_hash, DEPS_INVENTORY_CACHE_KIND)?;
-    let mut inventory_rows = match cached {
-        Some(cached) => cached.rows,
+    let mut inv = match cached {
+        Some(cached) => cached.inventory,
         None => {
             let (project, _footer) = if !files.is_empty() || !exclude_files.is_empty() {
                 open_security_project_filtered_paths(workspace, pack, rules_dir, &files, &exclude_files)?
@@ -1554,22 +1554,22 @@ fn cmd_deps(
                 inventory_hash,
                 DEPS_INVENTORY_CACHE_KIND,
                 &DepsInventoryCache {
-                    rows: inv.rows.clone(),
+                    inventory: inv.clone(),
                 },
             )?;
-            inv.rows
+            inv
         }
     };
     // Same selectors the SDK inventory applies, as a view.
     if let Some(framework) = framework.as_deref() {
-        inventory_rows.retain(|row| {
+        inv.rows.retain(|row| {
             row.key == framework || row.signals.iter().any(|signal| signal.contains(framework))
         });
     }
     if let Some(floor) = severity_floor {
-        inventory_rows.retain(|row| row.severity.is_some_and(|row_severity| row_severity >= floor));
+        inv.rows
+            .retain(|row| row.severity.is_some_and(|row_severity| row_severity >= floor));
     }
-    let inv = bonsai_sdk::DependencyInventory { rows: inventory_rows };
 
     let filters_hash = filter_signature(&[
         ("kind", "deps"),
@@ -1591,8 +1591,8 @@ fn cmd_deps(
                 |paged, info, _cfg| {
                     let result_complete = info.page_number == 1 && info.is_last;
                     let payload = serde_json::json!({
-                        "analysis_complete": true,
-                        "analysis_incomplete_reasons": [],
+                        "analysis_complete": inv.analysis_complete,
+                        "analysis_incomplete_reasons": inv.analysis_incomplete_reasons,
                         "result_complete": result_complete,
                         "result_incomplete_reasons": if result_complete {
                             Vec::<String>::new()
@@ -1632,6 +1632,12 @@ fn cmd_deps(
                         "{}",
                         u.dim(&format!("security deps — {} package(s)", info.total_rows))
                     );
+                    if !inv.analysis_complete {
+                        cli_println!(
+                            "analysis: incomplete — {}",
+                            inv.analysis_incomplete_reasons.join("; ")
+                        );
+                    }
                     render_dependency_table(u, &rows);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja security <workspace> deps");
@@ -4588,7 +4594,9 @@ fn annotate_taint_flow(
         if is_sink {
             sink_annotated = true;
         }
-        let marker = if is_sink {
+        let marker = if let Some(storage) = &step.storage_transfer {
+            format!("STORAGE: {} -> {} read {storage}", step.caller, step.callee)
+        } else if is_sink {
             let sink_rule = sink.map(|sink| sink.rule_id.as_str()).unwrap_or("sink");
             format!("SINK: {sink_rule} {}", format_taint_args(&step.tainted_args))
         } else {
@@ -4643,7 +4651,9 @@ fn annotate_sink_lineage_flow(
     for step in taint_path {
         let is_sink = same_rendered_file(&step.file, &sink.file) && step.line == sink.line;
         sink_annotated |= is_sink;
-        let marker = if is_sink {
+        let marker = if let Some(storage) = &step.storage_transfer {
+            format!("STORAGE: {} -> {} read {storage}", step.caller, step.callee)
+        } else if is_sink {
             format!("SINK: {} {}", sink.rule_id, format_taint_args(&step.tainted_args))
         } else {
             format!(
@@ -4721,7 +4731,7 @@ fn same_rendered_file(rendered: &str, target: &str) -> bool {
 
 fn format_taint_args(args: &[TaintPropagationArg]) -> String {
     if args.is_empty() {
-        return "tainted value".to_string();
+        return "(no argument attribution)".to_string();
     }
     args.iter()
         .map(|arg| {
@@ -4743,7 +4753,7 @@ fn format_taint_args(args: &[TaintPropagationArg]) -> String {
 
 fn format_sink_args(sink: &FindingMatch) -> String {
     if sink.tainted_args.is_empty() {
-        return "tainted value".to_string();
+        return "(no argument attribution)".to_string();
     }
     sink.tainted_args
         .iter()

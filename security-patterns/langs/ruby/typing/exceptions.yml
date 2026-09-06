@@ -1,0 +1,21 @@
+- id: ruby.typing.kernel_raise
+  enabled: true
+  language: ruby
+  description: Unshadowed Kernel raise/fail calls raise an exception carrying their explicit arguments; local overrides retain ordinary call semantics.
+  taint_semantics:
+    throws: true
+  match:
+    kind: call
+    callee:
+      regex: '^(?:Kernel\.)?(?:raise|fail)$'
+      binding_origin: runtime-global
+  match_examples:
+  - name: runtime exception call
+    code: 'def reject(value); raise value; end'
+    expect_match_text: [raise]
+  - name: local returning override
+    code: 'def raise(value); value; end; def handle(value); raise value; end'
+    expect_no_match: true
+  - name: unrelated receiver method
+    code: 'def handle(receiver, value); receiver.raise(value); end'
+    expect_no_match: true

@@ -7403,11 +7403,24 @@ fn insert_local_import_package_markers(out: &mut AHashSet<String>, spec: &Import
 
 fn resolve_relative_import_file(ws: &Workspace, importer: FileId, module: &str) -> Option<FileId> {
     let importer_path = ws.vfs().path(importer).ok()?;
-    let base_dir = importer_path.parent()?;
     let adapter = ws.db().adapter_for(importer)?;
-    let capabilities = adapter.capabilities();
+    import_candidate_paths(&importer_path, module, &adapter.capabilities())
+        .into_iter()
+        .find_map(|candidate| ws.vfs().lookup(&candidate))
+}
+
+/// Adapter-owned module-path policy shared by source matching and code
+/// manifests. These are lookup candidates, not proof of a resolved callable.
+pub(crate) fn import_candidate_paths(
+    importer_path: &std::path::Path,
+    module: &str,
+    capabilities: &bonsai_lang_api::LanguageCapabilities,
+) -> Vec<std::path::PathBuf> {
+    let Some(base_dir) = importer_path.parent() else {
+        return Vec::new();
+    };
     if !module.starts_with('.') && !capabilities.unqualified_imports_search_current_directory {
-        return None;
+        return Vec::new();
     }
     let module_path = if module.starts_with('.') {
         module.to_string()
@@ -7417,8 +7430,6 @@ fn resolve_relative_import_file(ws: &Workspace, importer: FileId, module: &str) 
     let raw = normalize_path(&base_dir.join(module_path));
     let extensions = capabilities.module_resolution_extensions;
     relative_import_candidates(&raw, extensions)
-        .into_iter()
-        .find_map(|candidate| ws.vfs().lookup(&candidate))
 }
 
 fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {

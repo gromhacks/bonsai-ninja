@@ -56,7 +56,10 @@ pub(crate) fn mark_optional_evidence_unavailable() {
 // semantic report changes must also advance this cache generation.
 // Version 16 records unavailable scoped browse call evidence explicitly.
 // Version 17 coalesces assignment projections while retaining every RHS fact.
-const RENDER_CACHE_VERSION: u32 = 18;
+// Version 19 retains dependency metadata coverage in cached inventory pages.
+// Version 21 does not label unattributed sink arguments as tainted values.
+// Version 22 groups resolution declarations by file with compact counters.
+const RENDER_CACHE_VERSION: u32 = 22;
 
 /// Stable structural ids are hashes of rendered chains, so the id alone
 /// cannot be inverted into the target declaration that made the query
@@ -226,7 +229,7 @@ pub(crate) fn emit_cached_text(text: &str) -> anyhow::Result<()> {
     // A renderer may have prepared this page while a stage spinner was still
     // alive. Clear all progress chrome before the first visible report byte so
     // spinner redraws cannot land inside source snippets or tables.
-    progress::finish_all_for_output();
+    output::begin_report();
     if output::write_raw_counted(text) {
         return Ok(());
     }

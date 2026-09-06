@@ -17,8 +17,8 @@
 
 use super::{
     chain_names_for_path, flow_id_for_taint_path, sink_flow_origin, sink_rule_match_key,
-    source_analysis_worker_count, taint_path_for_lineage, tainted_call_matches_sink, AnalysisProgress,
-    InterTaintCaches, SinkAnalysisFlow, SinkEndpointKey,
+    source_analysis_worker_count, tainted_call_matches_sink, AnalysisProgress, InterTaintCaches,
+    SinkAnalysisFlow, SinkEndpointKey,
 };
 use crate::RuleMatch;
 use ahash::{AHashMap, AHashSet};
@@ -55,9 +55,10 @@ enum LineageEntry {
     Origin,
     /// One formal parameter, by position.
     Param(u32),
-    /// The reads of one place that the projected heap feeds from another
-    /// function's tainted write.
-    Read(String),
+    /// One exact read point fed by a projected-heap write. Different reads of
+    /// the same spelling can occur on opposite sides of an overwrite; they
+    /// are not interchangeable entering values.
+    Read { node: WsNodeId, name: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -77,7 +78,7 @@ impl LineageKey {
 #[derive(Clone, Debug)]
 enum EdgeEvidence {
     /// A tainted argument at a resolved call site.
-    Call { call: TaintedCall, arg_index: usize },
+    Call { record: TaintedCallEdge },
     /// A tainted write the projected heap joins to a read elsewhere.
     Heap { storage: String, read_span: Span },
 }
@@ -87,7 +88,7 @@ enum EdgeEvidence {
 struct LineageSummary {
     /// `(callee, argument index, call)` for every tainted argument at a call
     /// the call graph resolves to an admitted callee.
-    calls: Vec<(FuncId, usize, TaintedCall)>,
+    calls: Vec<(u32, TaintedCallEdge)>,
     /// Sink matches inside the function that the closure reached.
     sinks: Vec<(usize, TaintedCall)>,
     /// Read nodes in other admitted functions that the projected heap feeds
@@ -103,7 +104,6 @@ fn param_nodes(context: &SinkLineageContext<'_>, func: FuncId) -> Vec<(String, V
         .map(|decl| {
             decl.params
                 .iter()
-                .filter(|param| !param.is_empty())
                 .map(|param| (param.clone(), Vec::new()))
                 .collect()
         })
@@ -131,7 +131,8 @@ fn summarize_entry(
     func: FuncId,
     tokens: &TokenSet,
     seed_nodes: &[WsNodeId],
-    callees_by_span: &AHashMap<Span, Vec<FuncId>>,
+    calls: &AHashMap<Span, bonsai_lang_api::CompilerCallAttribution>,
+    boundaries: &bonsai_idg::IdgCrossCallLookup,
     admitted: &AHashSet<FuncId>,
 ) -> LineageSummary {
     let mut summary = LineageSummary::default();
@@ -168,17 +169,89 @@ fn summarize_entry(
                 }
             }
         }
-        let Some(callees) = callees_by_span.get(&call.call_span) else {
+    }
+    // The IDG stitch owns actual-to-formal binding, including receivers and
+    // named arguments. A callgraph edge plus an argument ordinal is not a
+    // parameter binding and must never be used to compose these summaries.
+    let mut seen = AHashSet::new();
+    for edge in boundaries.edges_for_reachable_nodes(&closure_nodes) {
+        if edge.caller != func
+            || !admitted.contains(&edge.callee)
+            || edge.relation != bonsai_idg::CrossCallRelation::Argument
+            || edge.param_idx == u32::MAX
+            || !seen.insert(*edge)
+        {
+            continue;
+        }
+        let Some(call) = calls.get(&edge.call_span) else {
             continue;
         };
-        for callee in callees {
-            if !admitted.contains(callee) {
+        let Some(callee) = context.global.decl_of(SymbolId::new(edge.callee.raw())) else {
+            continue;
+        };
+        let Some(param_name) = callee.params.get(edge.param_idx as usize) else {
+            continue;
+        };
+        let argument_index = if edge.arg_idx != u32::MAX {
+            Some(edge.arg_idx as usize)
+        } else if callee.receiver_param_index == Some(edge.param_idx as usize) {
+            Some(usize::MAX)
+        } else {
+            call.args.iter().enumerate().find_map(|(index, argument)| {
+                let mapped = argument
+                    .name
+                    .as_deref()
+                    .and_then(|name| {
+                        bonsai_lang_api::named_argument_parameter_index(
+                            name,
+                            callee.params.iter().map(String::as_str),
+                            callee.receiver_param_index,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        bonsai_lang_api::explicit_argument_parameter_index(index, callee.receiver_param_index)
+                    });
+                (mapped == edge.param_idx as usize).then_some(index)
+            })
+        };
+        let Some(index) = argument_index else {
+            continue;
+        };
+        let arg = if index == usize::MAX {
+            let Some(receiver) = call.receiver.as_ref() else {
                 continue;
+            };
+            TaintedArg {
+                index,
+                value_text: receiver.clone(),
+                param_name: param_name.clone(),
+                place: Some(receiver.clone()),
+                source_names: call.receiver_source_names.clone(),
             }
-            for arg in &call.tainted_args {
-                summary.calls.push((*callee, arg.index, call.clone()));
+        } else {
+            let Some(argument) = call.args.get(index) else {
+                continue;
+            };
+            TaintedArg {
+                index,
+                value_text: argument.value_text.clone(),
+                param_name: param_name.clone(),
+                place: argument.place.clone(),
+                source_names: argument.source_names.clone(),
             }
-        }
+        };
+        summary.calls.push((
+            edge.param_idx,
+            TaintedCallEdge {
+                trace_id: 0,
+                parent_trace_id: None,
+                caller: func,
+                callee: edge.callee,
+                call_span: edge.call_span,
+                tainted_args: vec![arg],
+                edge_kind: edge.call_kind,
+            },
+        ));
     }
     for node in closure_nodes {
         let Some(point) = context.idg.resolve_point(node) else {
@@ -201,21 +274,22 @@ fn summarize_entry(
     summary
 }
 
-fn callees_by_span(
-    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+fn calls_by_span(
+    context: &SinkLineageContext<'_>,
     func: FuncId,
-) -> AHashMap<Span, Vec<FuncId>> {
-    let mut by_span: AHashMap<Span, Vec<FuncId>> = AHashMap::new();
-    for edge in call_graph.callees_of(func) {
-        let callees = by_span.entry(edge.span).or_default();
-        if !callees.contains(&edge.to) {
-            callees.push(edge.to);
-        }
-    }
-    for callees in by_span.values_mut() {
-        callees.sort_unstable_by_key(|callee| callee.raw());
-    }
-    by_span
+) -> AHashMap<Span, bonsai_lang_api::CompilerCallAttribution> {
+    let Some(decl) = context.global.decl_of(SymbolId::new(func.raw())) else {
+        return AHashMap::new();
+    };
+    context
+        .ws
+        .db()
+        .compiler_function_attributions_uncached(decl.span.file, &[decl.span])
+        .into_iter()
+        .flatten()
+        .flat_map(|function| function.calls)
+        .map(|call| (call.span, call))
+        .collect()
 }
 
 /// The entry points of the admitted lineage call graph: admitted functions
@@ -285,8 +359,8 @@ fn with_pool<T: Send>(pool: Option<&rayon::ThreadPool>, work: impl FnOnce() -> T
     }
 }
 
-/// Group heap-fed read nodes by the reading function and place name: each
-/// group is one `Read` entry, seeded by exactly those nodes.
+/// Queue each exact heap-fed read point. A later summary can discover another
+/// read of the same place without that point being lost to a name-level done set.
 fn queue_heap_targets(
     context: &SinkLineageContext<'_>,
     targets: &[WsNodeId],
@@ -299,7 +373,10 @@ fn queue_heap_targets(
         };
         let key = LineageKey {
             func: point.func,
-            entry: LineageEntry::Read(point.name),
+            entry: LineageEntry::Read {
+                node: *target,
+                name: point.name,
+            },
         };
         let span = read_spans.entry(key.clone()).or_insert(point.span);
         if point.span.start < span.start {
@@ -322,6 +399,7 @@ where
     let started = Instant::now();
     context.idg.warm_contextual_query_runtime();
     let admitted: AHashSet<FuncId> = admitted_funcs.iter().copied().collect();
+    let boundaries = context.idg.cross_call_lookup_for_funcs(&admitted);
     let roots: AHashSet<FuncId> = sink_lineage_roots(admitted_funcs, context.call_graph)
         .into_iter()
         .collect();
@@ -354,11 +432,12 @@ where
                 .par_iter()
                 .map(|&func| {
                     let params = param_nodes(context, func);
-                    let callees = callees_by_span(context.call_graph, func);
+                    let calls = calls_by_span(context, func);
                     let mut entries: Vec<(LineageEntry, LineageSummary)> = Vec::new();
                     for (index, (name, nodes)) in params.iter().enumerate() {
                         let tokens: TokenSet = [name.clone()].into_iter().collect();
-                        let summary = summarize_entry(context, func, &tokens, nodes, &callees, &admitted);
+                        let summary =
+                            summarize_entry(context, func, &tokens, nodes, &calls, &boundaries, &admitted);
                         if !summary.calls.is_empty()
                             || !summary.sinks.is_empty()
                             || !summary.heap_targets.is_empty()
@@ -378,7 +457,8 @@ where
                             context.global,
                             context.idg,
                         );
-                        let summary = summarize_entry(context, func, &tokens, &seeds, &callees, &admitted);
+                        let summary =
+                            summarize_entry(context, func, &tokens, &seeds, &calls, &boundaries, &admitted);
                         entries.push((LineageEntry::Origin, summary));
                     }
                     (func, entries)
@@ -425,12 +505,20 @@ where
                 chunk
                     .par_iter()
                     .map(|(key, nodes)| {
-                        let callees = callees_by_span(context.call_graph, key.func);
-                        let LineageEntry::Read(name) = &key.entry else {
+                        let calls = calls_by_span(context, key.func);
+                        let LineageEntry::Read { name, .. } = &key.entry else {
                             unreachable!("heap-fed entries are reads");
                         };
                         let tokens: TokenSet = [name.clone()].into_iter().collect();
-                        let summary = summarize_entry(context, key.func, &tokens, nodes, &callees, &admitted);
+                        let summary = summarize_entry(
+                            context,
+                            key.func,
+                            &tokens,
+                            nodes,
+                            &calls,
+                            &boundaries,
+                            &admitted,
+                        );
                         (key.clone(), summary)
                     })
                     .collect::<Vec<_>>()
@@ -462,15 +550,15 @@ where
     }
     for (key, summary) in summaries {
         let source = graph.index[&key];
-        for (callee, arg_index, call) in summary.calls {
+        for (param_index, record) in summary.calls {
             let target_key = LineageKey {
-                func: callee,
-                entry: LineageEntry::Param(arg_index as u32),
+                func: record.callee,
+                entry: LineageEntry::Param(param_index),
             };
             let Some(&target) = graph.index.get(&target_key) else {
                 continue;
             };
-            graph.incoming[target as usize].push((source, EdgeEvidence::Call { call, arg_index }));
+            graph.incoming[target as usize].push((source, EdgeEvidence::Call { record }));
         }
         let mut heap_keys: Vec<LineageKey> = summary
             .heap_targets
@@ -479,7 +567,10 @@ where
                 let point = context.idg.resolve_point(*target)?;
                 Some(LineageKey {
                     func: point.func,
-                    entry: LineageEntry::Read(point.name),
+                    entry: LineageEntry::Read {
+                        node: *target,
+                        name: point.name,
+                    },
                 })
             })
             .collect();
@@ -489,7 +580,7 @@ where
             let Some(&target) = graph.index.get(&target_key) else {
                 continue;
             };
-            let LineageEntry::Read(storage) = &target_key.entry else {
+            let LineageEntry::Read { name: storage, .. } = &target_key.entry else {
                 continue;
             };
             let Some(read_span) = read_spans.get(&target_key).copied() else {
@@ -527,6 +618,7 @@ where
         total: graph.sinks.len() as u64,
     });
     let route_started = Instant::now();
+    let witnesses = origin_witnesses(&graph);
     let mut flows: Vec<(SinkEndpointKey, SinkAnalysisFlow)> = Vec::new();
     let mut origin_sites: AHashMap<FuncId, (String, String, u32)> = AHashMap::new();
     for (sink_index, hits) in &graph.sinks {
@@ -545,7 +637,7 @@ where
                 if routes_by_feeder.contains_key(&feeder_func) {
                     continue;
                 }
-                if let Some(mut path) = route_to_origin(&graph, *feeder) {
+                if let Some(mut path) = route_to_origin(&witnesses, *feeder) {
                     path.push(*hit);
                     routes_by_feeder.insert(feeder_func, path);
                 }
@@ -576,24 +668,47 @@ where
     flows
 }
 
-/// Walk backward from `start` to an entry-point origin, always taking the
-/// smallest admissible predecessor. Returns the path origin-first.
-fn route_to_origin(graph: &SummaryGraph, start: u32) -> Option<Vec<u32>> {
-    let mut path: Vec<u32> = vec![start];
-    let mut on_path: AHashSet<u32> = AHashSet::from([start]);
+/// Propagate origin witnesses through the already compiled summary graph.
+/// This is a finite compiler graph fixed point, not path enumeration or name
+/// search. Each admitted node receives one rooted, acyclic proof. A dead-end
+/// or cyclic predecessor must not mask a different origin-reaching edge.
+fn origin_witnesses(graph: &SummaryGraph) -> Vec<Option<u32>> {
+    let mut outgoing = vec![Vec::new(); graph.keys.len()];
+    for (target, incoming) in graph.incoming.iter().enumerate() {
+        for (source, _) in incoming {
+            outgoing[*source as usize].push(target as u32);
+        }
+    }
+    let mut witnesses = vec![None; graph.keys.len()];
+    let mut pending = Vec::new();
+    for (node, key) in graph.keys.iter().enumerate().rev() {
+        if key.entry == LineageEntry::Origin {
+            witnesses[node] = Some(node as u32);
+            pending.push(node as u32);
+        }
+    }
+    while let Some(source) = pending.pop() {
+        for &target in outgoing[source as usize].iter().rev() {
+            if witnesses[target as usize].is_none() {
+                witnesses[target as usize] = Some(source);
+                pending.push(target);
+            }
+        }
+    }
+    witnesses
+}
+
+fn route_to_origin(witnesses: &[Option<u32>], start: u32) -> Option<Vec<u32>> {
+    let mut path = vec![start];
     let mut current = start;
     loop {
-        if graph.keys[current as usize].entry == LineageEntry::Origin {
+        let previous = witnesses[current as usize]?;
+        if previous == current {
             path.reverse();
             return Some(path);
         }
-        let next = graph.incoming[current as usize]
-            .iter()
-            .map(|(source, _)| *source)
-            .find(|source| !on_path.contains(source))?;
-        on_path.insert(next);
-        path.push(next);
-        current = next;
+        path.push(previous);
+        current = previous;
     }
 }
 
@@ -620,60 +735,40 @@ fn render_route(
             chain_funcs.push(func);
         }
     }
-    let mut records: Vec<TaintedCallEdge> = Vec::new();
+    let chain_names = chain_names_for_path(ws, global, &chain_funcs)?;
+    let names = chain_funcs
+        .iter()
+        .copied()
+        .zip(chain_names.iter().cloned())
+        .collect();
+    let mut taint_path = Vec::new();
     for pair in path.windows(2) {
         let (source, target) = (pair[0], pair[1]);
-        let caller = graph.keys[source as usize].func;
-        let callee = graph.keys[target as usize].func;
-        let Some(evidence) = evidence_between(graph, source, target) else {
-            continue;
-        };
-        let trace_id = records.len() as u64 + 1;
-        let parent_trace_id = records.last().map(|record| record.trace_id);
-        let record = match evidence {
-            EdgeEvidence::Call { call, arg_index } => {
-                let param_name = global
-                    .decl_of(SymbolId::new(callee.raw()))
-                    .and_then(|decl| decl.params.get(*arg_index).cloned())
-                    .unwrap_or_default();
-                let arg = call.tainted_args.iter().find(|arg| arg.index == *arg_index);
-                TaintedCallEdge {
-                    trace_id,
-                    parent_trace_id,
-                    caller,
-                    callee,
-                    call_span: call.call_span,
-                    tainted_args: vec![TaintedArg {
-                        index: *arg_index,
-                        value_text: arg.map(|arg| arg.value_text.clone()).unwrap_or_default(),
-                        param_name,
-                        place: arg.and_then(|arg| arg.place.clone()),
-                        source_names: arg.map(|arg| arg.source_names.clone()).unwrap_or_default(),
-                    }],
-                    edge_kind: bonsai_callgraph::EdgeKind::Direct,
+        let evidence = evidence_between(graph, source, target)?;
+        match evidence {
+            EdgeEvidence::Call { record } => {
+                if let Some(step) = super::propagation_step_for_edge(ws, global, record, &names) {
+                    taint_path.push(step);
                 }
             }
-            EdgeEvidence::Heap { storage, read_span } => TaintedCallEdge {
-                trace_id,
-                parent_trace_id,
-                caller,
-                callee,
-                call_span: *read_span,
-                tainted_args: vec![TaintedArg {
-                    index: 0,
-                    value_text: storage.clone(),
-                    param_name: storage.clone(),
-                    place: Some(storage.clone()),
-                    source_names: vec![storage.clone()],
-                }],
-                edge_kind: bonsai_callgraph::EdgeKind::Direct,
-            },
-        };
-        records.push(record);
+            EdgeEvidence::Heap { storage, read_span } => {
+                let (file, line, column) = super::resolve_span_location(ws, *read_span);
+                taint_path.push(super::TaintPropagationStep {
+                    caller: super::path_display_name(global, &names, graph.keys[source as usize].func),
+                    callee: super::path_display_name(global, &names, graph.keys[target as usize].func),
+                    file,
+                    line,
+                    column,
+                    storage_transfer: Some(storage.clone()),
+                    tainted_args: Vec::new(),
+                });
+            }
+        }
     }
-    let chain_names = chain_names_for_path(ws, global, &chain_funcs)?;
-    let record_refs: Vec<&TaintedCallEdge> = records.iter().collect();
-    let taint_path = taint_path_for_lineage(ws, global, &record_refs, Some(terminal));
+    taint_path.push(super::propagation_step_for_terminal_call(
+        ws, global, terminal, &names,
+    ));
+    let taint_path = super::normalize_taint_path(taint_path);
     let origin = chain_funcs.first().copied()?;
     let (origin_function, origin_file, origin_line) = origin_sites
         .entry(origin)
@@ -689,4 +784,62 @@ fn render_route(
         taint_path,
         endpoint_only: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn origin_proof_survives_dead_end_and_cyclic_predecessors() {
+        let mut graph = SummaryGraph {
+            keys: Vec::new(),
+            index: AHashMap::new(),
+            incoming: Vec::new(),
+            sinks: BTreeMap::new(),
+        };
+        for (func, entry) in [
+            (0, LineageEntry::Param(0)),
+            (1, LineageEntry::Param(0)),
+            (2, LineageEntry::Origin),
+            (3, LineageEntry::Param(0)),
+            (4, LineageEntry::Param(0)),
+        ] {
+            graph.node(LineageKey {
+                func: FuncId::new(func),
+                entry,
+            });
+        }
+        let evidence = || EdgeEvidence::Heap {
+            storage: "value".into(),
+            read_span: Span::new(bonsai_common::FileId::new(0), 0, 1),
+        };
+        graph.incoming[0] = vec![(1, evidence()), (3, evidence())];
+        graph.incoming[3] = vec![(0, evidence()), (2, evidence())];
+        graph.incoming[4] = vec![(4, evidence())];
+        let witnesses = origin_witnesses(&graph);
+        assert_eq!(route_to_origin(&witnesses, 0), Some(vec![2, 3, 0]));
+        assert_eq!(route_to_origin(&witnesses, 1), None);
+        assert_eq!(route_to_origin(&witnesses, 4), None);
+    }
+
+    #[test]
+    fn separate_heap_reads_of_one_spelling_are_distinct_entering_values() {
+        let first = LineageKey {
+            func: FuncId::new(0),
+            entry: LineageEntry::Read {
+                node: WsNodeId(1),
+                name: "object.value".into(),
+            },
+        };
+        let later = LineageKey {
+            func: FuncId::new(0),
+            entry: LineageEntry::Read {
+                node: WsNodeId(2),
+                name: "object.value".into(),
+            },
+        };
+        assert_ne!(first, later);
+        assert!(!AHashSet::from([first]).contains(&later));
+    }
 }

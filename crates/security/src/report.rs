@@ -1144,6 +1144,7 @@ fn taint_step_to_sarif_location(
             "caller": step.caller,
             "callee": step.callee,
             "tainted_args": step.tainted_args,
+            "storage_transfer": step.storage_transfer,
         }
     })
 }
@@ -1245,6 +1246,12 @@ fn logical_locations_for(enclosing: Option<&str>, file: Option<&str>) -> serde_j
 pub fn render_deps_text(inv: &DependencyInventory) -> String {
     let mut output = String::new();
     output.push_str(&format!("deps — {} entries\n", inv.rows.len()));
+    if !inv.analysis_complete {
+        output.push_str(&format!(
+            "analysis: incomplete — {}\n",
+            inv.analysis_incomplete_reasons.join("; ")
+        ));
+    }
     for row in &inv.rows {
         output.push_str(&format!(
             "  [{}] {} — rules={} signals={} severity={} tags={}\n",

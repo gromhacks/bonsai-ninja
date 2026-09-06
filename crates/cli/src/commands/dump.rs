@@ -263,8 +263,10 @@ pub(crate) fn cmd_dump_resolution(
 /// The resolution text view renders one file summary row and a second
 /// declaration table row for every nested declaration. Pricing only a small
 /// fixed amount per declaration used to let a default page emit hundreds of
-/// thousands of bytes because the 13-column table wraps across many physical
-/// lines. Keep the estimate conservative and tied to every variable-width
+/// thousands of bytes because the old wide table wrapped across many physical
+/// lines. The compact per-file tables still need a conservative estimate of
+/// their headers, complete notes, and longest pinned declaration column.
+/// Keep the estimate tied to every variable-width
 /// field so text stays near the advertised context budget while JSON remains
 /// exact.
 fn resolution_coverage_row_cost(row: &bonsai_sdk::ResolutionCoverageFileRow) -> u64 {
@@ -277,15 +279,20 @@ fn resolution_coverage_row_cost(row: &bonsai_sdk::ResolutionCoverageFileRow) -> 
     let file_row = 2_400_u64
         .saturating_add(file_width.saturating_mul(4))
         .saturating_add(file_gap_width.saturating_mul(4));
+    let declaration_width = row
+        .decls
+        .iter()
+        .map(|decl| decl.name.len() + decl.kind.len())
+        .max()
+        .unwrap_or(0) as u64;
     let declaration_rows = row.decls.iter().map(|decl| {
         let gap_width = decl
             .analysis_incomplete_reasons
             .iter()
             .map(String::len)
             .sum::<usize>() as u64;
-        4_096_u64
-            .saturating_add(file_width.saturating_mul(4))
-            .saturating_add((decl.name.len() + decl.kind.len()) as u64 * 4)
+        1_024_u64
+            .saturating_add(declaration_width.saturating_mul(4))
             .saturating_add(gap_width.saturating_mul(4))
     });
     file_row
@@ -299,130 +306,140 @@ fn render_resolution_coverage_text(rows: &[bonsai_sdk::ResolutionCoverageFileRow
         cli_println!("{}", u.dim("(no resolution coverage rows matched)"));
         return;
     }
-    // File-level coverage: the same counters the JSON row carries, so a
-    // reader can see edge kinds and the dynamic/macro/receiver gap classes
-    // that explain an unresolved count instead of only the percentage.
+    cli_println!("{}", u.dim("calls: total/resolved/external/unresolved"));
+    cli_println!(
+        "{}",
+        u.dim("edges: direct/virtual/indirect · gaps: dynamic/macro/receiver")
+    );
     let mut table = u.table_pinned(
-        &[
-            "file",
-            "funcs",
-            "calls",
-            "resolved",
-            "external",
-            "unresolved",
-            "edges d/v/i",
-            "dynamic",
-            "macro",
-            "recv gaps",
-            "coverage",
-            "gaps",
-        ],
-        &["file"],
+        &["file", "funcs", "calls", "edges", "gaps", "coverage"],
+        &["file", "calls", "edges", "gaps", "coverage"],
     );
     for row in rows {
-        let gaps = if row.analysis_incomplete_reasons.is_empty() {
-            String::new()
-        } else {
-            row.analysis_incomplete_reasons.join("; ")
-        };
-        table.add_row(vec![
+        let mut cells = vec![
             comfy_table::Cell::new(u.path(&short_file(&row.file))),
             comfy_table::Cell::new(u.dim(&row.functions.to_string())),
-            comfy_table::Cell::new(u.dim(&row.call_sites.to_string())),
-            comfy_table::Cell::new(u.dim(&row.resolved_call_sites.to_string())),
-            comfy_table::Cell::new(u.dim(&row.external_call_sites.to_string())),
-            comfy_table::Cell::new(if row.unresolved_call_sites == 0 {
-                u.dim("0")
-            } else {
-                u.warn(&row.unresolved_call_sites.to_string())
-            }),
-            comfy_table::Cell::new(u.dim(&format!(
-                "{}/{}/{}",
-                row.direct_edges, row.virtual_edges, row.indirect_edges
-            ))),
-            comfy_table::Cell::new(u.dim(&row.dynamic_call_sites.to_string())),
-            comfy_table::Cell::new(u.dim(&row.macro_call_sites.to_string())),
-            comfy_table::Cell::new(if row.receiver_type_gaps == 0 {
-                u.dim("0")
-            } else {
-                u.warn(&row.receiver_type_gaps.to_string())
-            }),
-            comfy_table::Cell::new(u.annotation(&format!("{:.1}%", row.coverage_percent))),
-            comfy_table::Cell::new(if gaps.is_empty() {
-                u.dim("-")
-            } else {
-                u.warn(&gaps)
-            }),
-        ]);
+        ];
+        cells.extend(resolution_counter_cells(
+            u,
+            [
+                row.call_sites,
+                row.resolved_call_sites,
+                row.external_call_sites,
+                row.unresolved_call_sites,
+            ],
+            [row.direct_edges, row.virtual_edges, row.indirect_edges],
+            [
+                row.dynamic_call_sites,
+                row.macro_call_sites,
+                row.receiver_type_gaps,
+            ],
+            row.coverage_percent,
+        ));
+        table.add_row(cells);
     }
     cli_println!("{table}");
-    // Declaration-level coverage: every function/method/constructor the
-    // JSON `decls` array reports, with its own counters and reasons.
+    for row in rows {
+        render_resolution_notes(u, &row.file, &row.analysis_incomplete_reasons);
+    }
+    // Group by the same file owner as JSON. Repeating a long path beside
+    // every declaration squeezed even ordinary kinds and percentages into
+    // vertical fragments. Notes remain complete, outside the numeric table.
     if rows.iter().any(|row| !row.decls.is_empty()) {
         cli_println!();
         cli_println!("{}", u.heading("declarations"));
-        let mut decl_table = u.table_pinned(
+    }
+    for row in rows.iter().filter(|row| !row.decls.is_empty()) {
+        cli_println!();
+        cli_println!("{}", u.path(&row.file));
+        let mut table = u.table_pinned(
             &[
-                "file",
                 "declaration",
                 "kind",
                 "line",
                 "calls",
-                "resolved",
-                "external",
-                "unresolved",
-                "edges d/v/i",
-                "dynamic",
-                "macro",
-                "recv gaps",
-                "coverage",
+                "edges",
                 "gaps",
+                "coverage",
             ],
-            &["file", "declaration"],
+            &[
+                "declaration",
+                "kind",
+                "line",
+                "calls",
+                "edges",
+                "gaps",
+                "coverage",
+            ],
         );
-        for row in rows {
-            for decl in &row.decls {
-                let gaps = if decl.analysis_incomplete_reasons.is_empty() {
-                    String::new()
-                } else {
-                    decl.analysis_incomplete_reasons.join("; ")
-                };
-                decl_table.add_row(vec![
-                    comfy_table::Cell::new(u.path(&short_file(&row.file))),
-                    comfy_table::Cell::new(u.name(&decl.name)),
-                    comfy_table::Cell::new(u.kind(&decl.kind)),
-                    comfy_table::Cell::new(u.dim(&decl.line.to_string())),
-                    comfy_table::Cell::new(u.dim(&decl.call_sites.to_string())),
-                    comfy_table::Cell::new(u.dim(&decl.resolved_call_sites.to_string())),
-                    comfy_table::Cell::new(u.dim(&decl.external_call_sites.to_string())),
-                    comfy_table::Cell::new(if decl.unresolved_call_sites == 0 {
-                        u.dim("0")
-                    } else {
-                        u.warn(&decl.unresolved_call_sites.to_string())
-                    }),
-                    comfy_table::Cell::new(u.dim(&format!(
-                        "{}/{}/{}",
-                        decl.direct_edges, decl.virtual_edges, decl.indirect_edges
-                    ))),
-                    comfy_table::Cell::new(u.dim(&decl.dynamic_call_sites.to_string())),
-                    comfy_table::Cell::new(u.dim(&decl.macro_call_sites.to_string())),
-                    comfy_table::Cell::new(if decl.receiver_type_gaps == 0 {
-                        u.dim("0")
-                    } else {
-                        u.warn(&decl.receiver_type_gaps.to_string())
-                    }),
-                    comfy_table::Cell::new(u.annotation(&format!("{:.1}%", decl.coverage_percent))),
-                    comfy_table::Cell::new(if gaps.is_empty() {
-                        u.dim("-")
-                    } else {
-                        u.warn(&gaps)
-                    }),
-                ]);
-            }
+        for decl in &row.decls {
+            let mut cells = vec![
+                comfy_table::Cell::new(u.name(&decl.name)),
+                comfy_table::Cell::new(u.kind(&decl.kind)),
+                comfy_table::Cell::new(u.dim(&decl.line.to_string())),
+            ];
+            cells.extend(resolution_counter_cells(
+                u,
+                [
+                    decl.call_sites,
+                    decl.resolved_call_sites,
+                    decl.external_call_sites,
+                    decl.unresolved_call_sites,
+                ],
+                [decl.direct_edges, decl.virtual_edges, decl.indirect_edges],
+                [
+                    decl.dynamic_call_sites,
+                    decl.macro_call_sites,
+                    decl.receiver_type_gaps,
+                ],
+                decl.coverage_percent,
+            ));
+            table.add_row(cells);
         }
-        cli_println!("{decl_table}");
+        cli_println!("{table}");
+        for decl in &row.decls {
+            render_resolution_notes(
+                u,
+                &format!("{}:{}", decl.name, decl.line),
+                &decl.analysis_incomplete_reasons,
+            );
+        }
     }
     cli_println!("{}", u.dim(&format!("({total} files)")));
+}
+
+fn resolution_counter_cells(
+    u: &Ui,
+    calls: [usize; 4],
+    edges: [usize; 3],
+    gaps: [usize; 3],
+    coverage: f64,
+) -> Vec<comfy_table::Cell> {
+    let calls_text = calls.map(|value| value.to_string()).join("/");
+    let edges_text = edges.map(|value| value.to_string()).join("/");
+    let gaps_text = gaps.map(|value| value.to_string()).join("/");
+    vec![
+        comfy_table::Cell::new(if calls[3] == 0 {
+            u.dim(&calls_text)
+        } else {
+            u.warn(&calls_text)
+        }),
+        comfy_table::Cell::new(u.dim(&edges_text)),
+        comfy_table::Cell::new(if gaps == [0; 3] {
+            u.dim(&gaps_text)
+        } else {
+            u.warn(&gaps_text)
+        }),
+        comfy_table::Cell::new(u.annotation(&format!("{coverage:.1}%"))),
+    ]
+}
+
+fn render_resolution_notes(u: &Ui, label: &str, reasons: &[String]) {
+    if !reasons.is_empty() {
+        for line in u.wrapped_warn_labeled_lines("gaps", &format!("{label}: {}", reasons.join("; "))) {
+            cli_println!("{line}");
+        }
+    }
 }
 
 fn render_edge_records_text(records: &[bonsai_sdk::EdgeRecord], compact: bool, total: usize) {
@@ -811,6 +828,9 @@ pub(crate) fn cmd_dump_resolve(
     // convention `--flow <id>` / `--group <id>` / `--edge <id>`
     // already follow for unknown-id errors.)
     if trace.outcome == "unresolved" && candidate_id_filter.is_none() {
+        // This is a completed negative result, not a rendering failure.
+        // Publish/flush the diagnostic report before the intentional exit.
+        crate::output::finish()?;
         std::process::exit(2);
     }
     Ok(())
@@ -1328,7 +1348,7 @@ fn render_taint_report_text(
             let call_site = format!("{}:{}", short_file(&record.call_file), record.call_line);
             table.add_row(vec![
                 comfy_table::Cell::new(u.dim(&record.taint_id)),
-                comfy_table::Cell::new(u.annotation(&record.edge_kind)),
+                comfy_table::Cell::new(u.annotation(&format!("{} · {}", record.edge_kind, record.relation))),
                 comfy_table::Cell::new(u.name(&arrow)),
                 comfy_table::Cell::new(u.annotation(&args)),
                 comfy_table::Cell::new(u.path(&call_site)),
@@ -1342,9 +1362,10 @@ fn render_taint_report_text(
     for record in records {
         cli_println!();
         cli_println!(
-            "{} {}",
+            "{} {} · {}",
             u.annotation(&record.taint_id),
             u.annotation(&record.edge_kind),
+            u.annotation(&record.relation),
         );
         cli_println!(
             "  {} {} {}",
@@ -1381,6 +1402,8 @@ fn render_taint_report_text(
             for arg in &record.tainted_args {
                 let index = if arg.index == usize::MAX {
                     "receiver".to_string()
+                } else if matches!(record.relation.as_str(), "callback" | "capture") {
+                    format!("param[{}]", arg.index)
                 } else {
                     format!("[{}]", arg.index)
                 };

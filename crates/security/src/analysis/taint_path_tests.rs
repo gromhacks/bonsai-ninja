@@ -9,6 +9,7 @@ fn path_step(
     args: Vec<(usize, &str, &str)>,
 ) -> TaintPropagationStep {
     TaintPropagationStep {
+        storage_transfer: None,
         caller: caller.to_string(),
         callee: callee.to_string(),
         file: file.to_string(),

@@ -62,6 +62,46 @@ unrelated sibling file never authorizes a bare or same-named call. This keeps
 split framework and database modules usable without turning workspace package
 presence into API identity.
 
+Dependency manifests use `languages.<language>.dependency_manifest_layouts`.
+The layout declares `files` (basenames, at most one `*`), a `format`, and
+package-bearing projections. JSON, YAML, TOML, and XML are parsed as documents;
+descriptions, comments, and arbitrary matching words are never package facts.
+For object documents, `path` selects exact fields, `*` selects map children or
+array items, and `keys: true` selects dependency-map keys. `nested` follows the
+same dependency map beneath each entry in recursive lockfile records. XML
+paths select child elements; a final `@name` selects an attribute. XML external
+entities are not resolved. Optional `capture` extracts group 1 from a selected
+dependency specification. `format: lines` is reserved for data-record files,
+with an empty path and a capture anchored to the complete line—not source code.
+
+`format: code` declares an `adapter` and `calls`. Each call has a normal
+compiler-matched `callee` target and package `arguments`, selected by exactly
+one `index` or `keyword`. `sequence: true` projects exact static list values;
+`capture` can extract a distribution name from those values. This uses the
+existing language frontend and full binding-origin matcher, never executes a
+build file, and never infers declarations from strings resembling code.
+The bundled code layouts cover top-level Ruby `Gemfile` declarations and Python
+`setuptools.setup` arguments. Helper/callback declarations without execution
+evidence remain explicitly incomplete. A code manifest that imports local
+code also reports incomplete coverage: isolated lowering cannot prove that a
+local provider performs dependency installation. The check retains the real
+manifest directory and includes unselected files and namespace directories;
+filtering a provider out cannot turn it into an external package. Both the
+package projection and its coverage participate in the context fingerprint.
+Additional executable build formats require an
+explicit compiler-backed layout; merely listing a basename in
+`dependency_manifest_patterns` does not enable a raw-text fallback.
+
+Malformed documents, unavailable/unsupported frontends, and dynamic modeled
+arguments produce `dependency-manifest:` coverage reasons. Unsupported formats
+are grouped by language and basename with an exact affected-file count;
+ordinary security scans report only the languages in their selected source
+workspace. Dependency reports
+retain these reasons even when no package rows survive filtering, and security
+analysis retains them alongside parser/resolution coverage. Imports remain
+independent compiler evidence; a metadata coverage warning does not invent or
+erase an import. Layouts participate in dependency snapshot/cache identities.
+
 Tag defaults reduce repeated guard policy without moving security meaning into
 an adapter. A sink's explicit `analysis_semantics` wins; missing fields inherit
 from its language/tag entry in `metadata.yml`.
@@ -868,6 +908,25 @@ that index can contribute to the output, and `value_arg_indices` for
 fixed input positions. Do not add formatter/copy behavior to engine code:
 different libraries use different argument order and overwrite semantics,
 so those facts belong in editable rules.
+
+## Runtime Exception Calls
+
+Use `taint_semantics.throws: true` only on a typing rule whose complete
+`match.kind: call` identifies an operation that always raises an exception.
+Require the appropriate `binding_origin` and package/receiver constraints:
+an unrelated or locally overridden callable must not acquire an exception
+contract from its spelling.
+
+The matcher compiles these rules to exact call spans before IDG construction.
+Each explicit argument contributes to the exception value, the normal
+continuation stops at that call, and compiler-proven handlers receive the
+exception. Path-containment proofs can use the same matched spans as rejection
+evidence; a caught exception is not automatically proof that a later sink is
+unreachable. The spans participate in semantic cache identity.
+
+The Ruby pack models unshadowed `Kernel.raise` / `fail` through this contract,
+following the [runtime exception API](https://docs.ruby-lang.org/en/master/Kernel.html#method-i-raise).
+Adapters continue to emit ordinary call syntax, not API-name-based throws.
 
 ## Clean Output Overwrites
 

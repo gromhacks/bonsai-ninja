@@ -233,6 +233,10 @@ bonsai-ninja security ./src pack --audit --rules-dir ./security-patterns
 | `pack` | None | Audit (`--audit`), list, tree (`--tree`), or validate (`--validate`) the rulepack. |
 
 Dependency rows require package-specific import or manifest-content evidence.
+Manifest evidence comes from parsed dependency fields, complete data records,
+or compiler-proven static declaration arguments—not comments or descriptions.
+Unsupported, malformed, or dynamic manifests are reported through
+`analysis_incomplete_reasons`, including on empty dependency reports.
 A generic manifest or lockfile filename alone does not establish a package;
 a rule covering several frameworks cannot make its other providers appear
 installed. `dependency-analysis` retains the complete taint flows for the
@@ -632,7 +636,7 @@ omits adapter-classified minified JavaScript/TypeScript; add global
 `--minified-js` to include bundle internals. This selection changes source
 scope, never graph depth, fixed-point work, or path completeness within that
 scope.
-Native JSON schema v13 carries the code with its graph: `files[].source` is
+Native JSON schema v14 carries the code with its graph: `files[].source` is
 the full file text and every `span`, `line`, `start`, and `end` in the
 document indexes into it; `decls[]` carry their byte span; `callgraph[]` edges
 carry the exact `call_text`; `taint_graph.functions[]` carry `end_line`; and
@@ -644,7 +648,7 @@ workspace-relative; the top-level `workspace_root` is the sole absolute
 anchor, so artifacts stay portable between hosts and no machine-specific
 prefix leaks into graph identities or agent prompts. Its machine-readable
 Draft 2020-12 contract is
-[`schemas/bonsai-native-export-v13.schema.json`](../schemas/bonsai-native-export-v13.schema.json).
+[`schemas/bonsai-native-export-v14.schema.json`](../schemas/bonsai-native-export-v14.schema.json).
 A one-shot cache miss streams directly to the selected output; use
 `cache rebuild <workspace> --export` only when repeated exports justify a
 persisted copy.
@@ -859,6 +863,11 @@ bonsai-ninja search ./src --query "request.args"
 | `refs` | References to symbols, including read/call/type facts. | positional symbol, `--symbol`, `--file`, `--kind`, `--regex` |
 | `search` | Prefix-first fuzzy search over all browse facts, including source-file rows via `--kind file`. | positional query, `--query`, `--kind`, `--file`, `--regex` |
 
+`entrypoints` lists distinct callee names in source-evidence order; repeated
+calls or multiple IR projections do not inflate that preview. Use `calls`
+for individual call sites. Parameter names come from bindings, not their
+type annotations (including annotated variadic parameters).
+
 Common browse output flags:
 
 | Flag | Default | Description |
@@ -983,7 +992,7 @@ bonsai-ninja dump-taint ./src --source handle_request --seed cmd
 | `dump-cfg` | Basic-block CFG for one function, grouped by block in text or as one structured object with `--format json`. | `--symbol` (preferred), positional symbol, `--format`, `--output-path` |
 | `dump-callgraph` | Per-function caller and outgoing counts with exact source line/column locations in both JSON and text; JSON also retains the byte anchor. | `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `dump-edges` | Resolved call edges with stable `E:` ids, resolver stage, evidence, and confidence. | `--from`, `--to`, `--compact`, `--edge`, `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
-| `dump-resolution` | Per-file and per-decl call resolution coverage from shared `FlowEvent::Call` facts and canonical callgraph edges; nested declaration rows are paged as one lossless table. | `--file`, `--unresolved-only`, `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
+| `dump-resolution` | Per-file and per-decl call resolution coverage from shared `FlowEvent::Call` facts and canonical callgraph edges; declaration tables are grouped by file and paged without losing nested rows. | `--file`, `--unresolved-only`, `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `dump-resolve` | Resolver stages and candidates for a name. | `--name` (preferred), positional name, `--in-file`, `--compact`, `--candidate`, `--format`, `--output-path` |
 | `dump-taint` | Taint propagation records from one source function with stable `T:` ids. | `--source`, `--seed`, `--sink`, `--compact`, `--taint`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `diagnostics` | Adapter diagnostic report with parser diagnostics, workspace languages, and per-language capability/evidence tables for adapters present in the workspace; readable text by default, one structured object with `--format json`. | `<WORKSPACE>`, `--format`, `--output-path` |
@@ -998,6 +1007,11 @@ import-proven external calls are visible as `external_call_sites` but do not
 masquerade as missing workspace edges. Native export applies the same
 classification when it streams a persisted callgraph, so warming the cache
 cannot change `analysis_complete` or its reason counts.
+The text legend defines compact counters: calls are
+`total/resolved/external/unresolved`, edges are `direct/virtual/indirect`, and
+gaps are `dynamic/macro/receiver`. Each file has its own declaration table;
+complete coverage notes appear below the tables rather than squeezing numeric
+columns into wrapped fragments. JSON retains the separately named fields.
 
 `dump-taint --format json` includes top-level `analysis_complete` and
 `analysis_incomplete_reasons`. The IDG-backed path computes the requested

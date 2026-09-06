@@ -1,5 +1,306 @@
 use super::*;
 
+fn export_fixture(source: &str, filename: &str) -> serde_json::Value {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join(filename), source).expect("write fixture");
+    let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+    native_export_json(&ws, dir.path(), true).expect("native export")
+}
+
+#[test]
+fn export_summary_and_entry_rows_keep_exact_same_line_function_identities() {
+    let exported = export_fixture(
+        "class First { same(value) { return value; } } class Second { same(value) { return value; } }\n",
+        "app.js",
+    );
+    let summaries = exported["taint_graph"]["function_summaries"].as_array().unwrap();
+    assert_eq!(summaries.len(), 2);
+    let ids: std::collections::BTreeSet<_> = summaries
+        .iter()
+        .map(|row| {
+            row["func_id"]
+                .as_u64()
+                .expect("summary must retain exact function identity")
+        })
+        .collect();
+    assert_eq!(ids.len(), 2);
+    let entries = exported["taint_graph"]["propagations"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    for entry in entries {
+        assert!(ids.contains(&entry["entry_func_id"].as_u64().expect("entry function identity")));
+        assert_eq!(
+            entry["pairs_analyzed"], 0,
+            "an empty closure must not invent one analyzed pair"
+        );
+    }
+}
+
+#[test]
+fn export_call_count_does_not_count_assignment_projection_twice() {
+    let exported = export_fixture(
+        "def handle(value):\n    result = helper(value)\n    return result\n\ndef helper(value):\n    return value\n",
+        "app.py",
+    );
+    assert_eq!(exported["summary"]["call_site_count"], 1);
+}
+
+#[test]
+fn native_export_local_field_copy_loop_reaches_an_exact_fixed_point() {
+    let exported = export_fixture(
+        "def copy_in_loop(value, active):\n    holder.field = value\n    while active:\n        alias = holder\n    return alias\n",
+        "app.py",
+    );
+    let rows = exported["taint_graph"]["intra_taint"].as_array().unwrap();
+    let function = rows.iter().find(|row| row["function"] == "copy_in_loop").unwrap();
+    let parameters = function["per_param"].as_array().unwrap();
+    let value = parameters
+        .iter()
+        .find(|row| row["param_name"] == "value")
+        .unwrap();
+    let contains_alias_field = |parameter: &serde_json::Value| {
+        parameter["blocks"].as_array().unwrap().iter().any(|block| {
+            block["block_out"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|name| name == "alias.field")
+        })
+    };
+    assert!(contains_alias_field(value));
+    for parameter in parameters.iter().filter(|row| row["param_name"] != "value") {
+        assert!(!contains_alias_field(parameter));
+    }
+}
+
+#[test]
+fn native_export_local_copy_preserves_rhs_fields_and_replaces_destination_fields() {
+    let exported = export_fixture(
+        "def copy_bare_and_fields(value):\n    source = value\n    source.field = value\n    target = source\n    return target.field\n\ndef replace_bare(value, target):\n    target.old = value\n    target = value\n    return target.old\n",
+        "app.py",
+    );
+    let rows = exported["taint_graph"]["intra_taint"].as_array().unwrap();
+    for (name, expected_field) in [
+        ("copy_bare_and_fields", Some("target.field")),
+        ("replace_bare", None),
+    ] {
+        let function = rows.iter().find(|row| row["function"] == name).unwrap();
+        let value = function["per_param"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["param_name"] == "value")
+            .unwrap();
+        let outputs: std::collections::BTreeSet<_> = value["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|block| block["block_out"].as_array().unwrap())
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert!(outputs.contains("target"), "{name}: whole-value taint was lost");
+        assert!(
+            !outputs.contains("target.old"),
+            "{name}: previous object field survived"
+        );
+        if let Some(field) = expected_field {
+            assert!(outputs.contains(field), "{name}: exact RHS field was lost");
+        }
+    }
+}
+
+#[test]
+fn export_and_dump_distinguish_projected_arguments_from_receivers() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("app.py"), "class Worker:\n    def run(self, unused, value):\n        return value\ndef entry(value):\n    worker = Worker()\n    return worker.run(value=value, unused='clean')\n").unwrap();
+    let ws = Workspace::index(root.path(), bonsai_adapters::all_languages_registry()).unwrap();
+    let global = ws.compiler_linkage_index();
+    let find = |name: &str| {
+        global
+            .all_files()
+            .flat_map(|file| global.decls_in(file))
+            .find(|decl| decl.name == name)
+            .unwrap()
+    };
+    let caller = find("entry");
+    let callee = find("run");
+    let exact = ws.exact_decl(caller.symbol).unwrap();
+    let mut site = None;
+    bonsai_lang_api::kit::for_each_flow_event(&exact.flow_events, &mut |event| {
+        if let FlowEvent::Call { name, span, .. } = event {
+            if name == "worker.run" {
+                site = Some(*span);
+            }
+        }
+    });
+    let spans = ExportSpanCache::new(&ws);
+    let mut cache = ExportTaintRecordRenderCache::default();
+    for (param_idx, expected_index, text, parameter) in
+        [(2, 0, "value", "value"), (0, usize::MAX, "worker", "self")]
+    {
+        let edge = CrossCallEdge {
+            caller: FuncId::new(caller.symbol.raw()),
+            callee: FuncId::new(callee.symbol.raw()),
+            call_span: site.unwrap(),
+            arg_idx: u32::MAX,
+            param_idx,
+            call_kind: bonsai_callgraph::EdgeKind::Direct,
+            relation: bonsai_idg::CrossCallRelation::Argument,
+        };
+        let native = export_taint_record_from_cross_call(&mut cache, &edge, &global, &spans, &ws).unwrap();
+        let dump = crate::taint::build_taint_record_from_cross_call(&edge, &global, &ws).unwrap();
+        assert_eq!(native.tainted_args.len(), 1);
+        assert_eq!(dump.tainted_args.len(), 1);
+        assert_eq!(
+            (
+                native.tainted_args[0].index,
+                native.tainted_args[0].value_text.as_str(),
+                native.tainted_args[0].param_name.as_str()
+            ),
+            (expected_index, text, parameter)
+        );
+        assert_eq!(
+            (
+                dump.tainted_args[0].index,
+                dump.tainted_args[0].value_text.as_str(),
+                dump.tainted_args[0].param_name.as_str()
+            ),
+            (expected_index, text, parameter)
+        );
+    }
+}
+
+#[test]
+fn native_flow_graph_order_is_identical_before_and_after_sidecar_persistence() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.py"), "def z(value):\n    return value\n").unwrap();
+    std::fs::write(root.path().join("b.py"), "def a(value):\n    return value\n").unwrap();
+    let ws = Workspace::index(root.path(), bonsai_adapters::all_languages_registry()).unwrap();
+    let global = ws.compiler_linkage_index();
+    assert!(ws
+        .visit_persisted_callgraph_partitions(|_, _, _, _, _| {})
+        .is_none());
+    let cold = serde_json::to_value(ExportFlowGraphStreaming {
+        ws: &ws,
+        global: &global,
+    })
+    .unwrap();
+    ws.save_callgraph_sidecar(root.path()).unwrap();
+    assert!(ws
+        .visit_persisted_callgraph_partitions(|_, _, _, _, _| {})
+        .is_some());
+    let warm = serde_json::to_value(ExportFlowGraphStreaming {
+        ws: &ws,
+        global: &global,
+    })
+    .unwrap();
+    assert_eq!(cold, warm);
+}
+
+#[test]
+fn export_propagations_identify_return_direction_and_exact_endpoints() {
+    let exported = export_fixture(
+        "def handle(value):\n    result = helper(value)\n    return result\n\ndef helper(value):\n    return value\n",
+        "app.py",
+    );
+    let functions = exported["taint_graph"]["functions"].as_array().unwrap();
+    let function_id = |name: &str| {
+        functions.iter().find(|row| row["name"] == name).unwrap()["func_id"]
+            .as_u64()
+            .unwrap()
+    };
+    let records = exported["taint_graph"]["propagations"][0]["records"]
+        .as_array()
+        .unwrap();
+    assert!(!records.is_empty());
+    for record in records {
+        assert_eq!(record["call_file"], "app.py");
+        let relation = record["relation"].as_str().expect("propagation relation");
+        let (from, to) = if relation == "return" {
+            ("helper", "handle")
+        } else {
+            assert_eq!(relation, "argument");
+            ("handle", "helper")
+        };
+        assert_eq!(record["from_func_id"], function_id(from));
+        assert_eq!(record["to_func_id"], function_id(to));
+    }
+    assert!(records.iter().any(|record| record["relation"] == "return"));
+}
+
+#[test]
+fn export_argument_texts_include_deferred_and_resource_regions() {
+    let site = Span::new(FileId::new(0), 10, 14);
+    let call = FlowEvent::Call {
+        span: site,
+        name: "write".to_string(),
+        receiver: Some("output".to_string()),
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args: vec![CallArg {
+            span: site,
+            passing_mode: Default::default(),
+            name: None,
+            value_text: "input".to_string(),
+            place: Some("input".to_string()),
+            source_names: vec!["input".to_string()],
+        }],
+    };
+    for region in [
+        FlowEvent::Defer {
+            span: site,
+            body: vec![call.clone()],
+        },
+        FlowEvent::Using {
+            span: site,
+            body: vec![call.clone()],
+        },
+    ] {
+        let mut texts = ahash::AHashMap::default();
+        collect_export_call_arg_texts(&[region], &mut texts);
+        assert_eq!(texts[&site].args[0].1, "input");
+        assert_eq!(texts[&site].receiver.as_deref(), Some("output"));
+    }
+}
+
+#[test]
+fn export_field_entry_reads_use_typed_compound_and_aggregate_operands() {
+    let site = Span::new(FileId::new(0), 0, 20);
+    let value = bonsai_lang_api::ExpressionFlow::from_place("self.input");
+    for event in [
+        FlowEvent::Return {
+            span: site,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+            value_name: None,
+            value_text: Some("opaque rendering".to_string()),
+            value_flow: value.clone(),
+        },
+        FlowEvent::AggregateAssign {
+            span: site,
+            target: "result".to_string(),
+            type_name: None,
+            value_flow: value,
+        },
+    ] {
+        assert!(flow_read_places(&[event.clone()]).contains("self.input"));
+        assert!(flow_read_places(&[FlowEvent::Defer {
+            span: site,
+            body: vec![event],
+        }])
+        .contains("self.input"));
+    }
+    assert!(
+        !flow_read_places(&[FlowEvent::Return {
+            span: site,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Literal),
+            value_name: None,
+            value_text: Some("self.input".to_string()),
+            value_flow: Default::default(),
+        }],)
+        .contains("self.input"),
+        "rendered text cannot prove a value read"
+    );
+}
+
 #[test]
 fn native_export_uses_versioned_flat_flow_ir() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -23,7 +324,7 @@ def process(value):
     let exported = native_export_json(&ws, dir.path(), false).expect("native export");
 
     assert_eq!(exported["schema"], "bonsai-native-export");
-    assert_eq!(exported["schema_version"], 13);
+    assert_eq!(exported["schema_version"], 14);
     let file = exported["files"]
         .as_array()
         .and_then(|files| {
@@ -655,6 +956,17 @@ fn entry_points_preserve_func_identity_when_names_and_lines_collide() {
         .collect();
     assert_eq!(entries.len(), 2, "same name/line declarations must not merge");
     assert_ne!(entries[0]["func_id"], entries[1]["func_id"]);
+    let flow_entries: Vec<_> = exported["flow_graph"]
+        .as_array()
+        .expect("flow graph")
+        .iter()
+        .filter(|entry| entry["function"] == "entry")
+        .collect();
+    assert_eq!(flow_entries.len(), 2);
+    assert_ne!(flow_entries[0]["func_id"], flow_entries[1]["func_id"]);
+    for row in flow_entries {
+        assert!(entries.iter().any(|entry| entry["func_id"] == row["func_id"]));
+    }
 
     let parameter_sets: std::collections::BTreeSet<Vec<&str>> = entries
         .iter()

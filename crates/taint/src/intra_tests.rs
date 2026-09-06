@@ -148,6 +148,180 @@ fn entry_predecessor_edge_emits_diagnostic() {
     assert_eq!(diagnostic.code.as_deref(), Some("taint-entry-predecessor"));
     assert_eq!(diagnostic.severity, bonsai_diagnostics::Severity::Warning);
     assert!(diagnostic.message.contains("entry block"));
+    assert!(
+        result.is_tainted_at_entry(entry, "recv"),
+        "entry seed is preserved"
+    );
+    assert!(
+        result.is_tainted_at_entry(entry, "x"),
+        "loop-carried value must join the seed"
+    );
+    assert!(
+        result.is_tainted_at_exit(exit, "x"),
+        "the loop-carried value reaches the exit"
+    );
+}
+
+#[test]
+fn every_reachable_empty_state_block_is_processed() {
+    let cfg = build_cfg_from_flow(
+        "empty_states",
+        &[branch(vec![assign("left", None)], vec![assign("right", None)])],
+    );
+    let result = intraprocedural_taint(&cfg, &TaintConfig::default());
+    assert!(
+        result.iterations as usize >= cfg.blocks.len(),
+        "an unchanged empty state must still schedule previously unvisited successors"
+    );
+}
+
+#[test]
+fn clean_overwrite_removes_normalized_and_descendant_aliases() {
+    let mut state = config(&[
+        "$value",
+        "value",
+        "$value.part",
+        "value.part",
+        "value.*",
+        "value_sibling",
+    ])
+    .sources;
+    transfer_events(&[assign("$value", None)], &mut state, &TaintConfig::default());
+    assert_eq!(state, config(&["value_sibling"]).sources);
+}
+
+#[test]
+fn repeated_descendant_copy_is_idempotent_and_replaces_old_fields() {
+    let mut state = seed(&["source.field", "target.old", "unrelated"]);
+    let events = [assign("target", Some("source"))];
+    let expected = seed(&["source.field", "target.field", "unrelated"]);
+    transfer_events(&events, &mut state, &TaintConfig::default());
+    assert_eq!(state, expected);
+    transfer_events(&events, &mut state, &TaintConfig::default());
+    assert_eq!(state, expected, "an existing copied field is still tainted");
+}
+
+#[test]
+fn descendant_self_copy_reads_before_overwriting_the_target() {
+    let mut state = seed(&["value.field", "value.*", "unrelated"]);
+    let expected = state.clone();
+    transfer_events(
+        &[assign("value", Some("value"))],
+        &mut state,
+        &TaintConfig::default(),
+    );
+    assert_eq!(state, expected);
+}
+
+#[test]
+fn descendant_copy_in_loop_converges_and_clean_overwrite_remains_clean() {
+    let events = vec![
+        assign("holder.field", Some("value")),
+        loop_body(vec![assign("alias", Some("holder"))]),
+    ];
+    let (result, cfg) = run(events.clone(), &config(&["value"]));
+    assert!(result.is_tainted_at_exit(cfg.exit, "alias.field"));
+    assert!(!result.is_tainted_at_exit(cfg.exit, "alias.other"));
+    assert!(
+        result.iterations < 20,
+        "this finite copy loop should stabilize promptly"
+    );
+
+    let mut overwritten = events;
+    overwritten.push(assign("alias", None));
+    let (result, cfg) = run(overwritten, &config(&["value"]));
+    assert!(!result.is_tainted_at_exit(cfg.exit, "alias.field"));
+    assert!(result.is_tainted_at_exit(cfg.exit, "holder.field"));
+}
+
+#[test]
+fn direct_assignment_transfer_is_monotone_idempotent_and_kills_old_fields() {
+    let names = [
+        "source",
+        "source.field",
+        "source.*",
+        "target",
+        "target.field",
+        "target.*",
+        "target.old",
+        "unrelated",
+    ];
+    let inputs: Vec<TokenSet> = (0..1usize << names.len())
+        .map(|mask| {
+            names
+                .iter()
+                .enumerate()
+                .filter(|&(index, _)| mask & (1 << index) != 0)
+                .map(|(_, name)| (*name).to_string())
+                .collect()
+        })
+        .collect();
+    for operand_inventory in [false, true] {
+        let mut event = assign("target", Some("source"));
+        if operand_inventory {
+            let FlowEvent::Assign { source_names, .. } = &mut event else {
+                unreachable!()
+            };
+            source_names.push("source".into());
+        }
+        let events = [event];
+        let outputs: Vec<_> = inputs
+            .iter()
+            .map(|input| {
+                let mut state = input.clone();
+                transfer_events(&events, &mut state, &TaintConfig::default());
+                state
+            })
+            .collect();
+        for (index, input) in inputs.iter().enumerate() {
+            let output = &outputs[index];
+            assert!(
+                !output.contains("target.old"),
+                "replacement retained an old field: {input:?}"
+            );
+            let mut repeated = output.clone();
+            transfer_events(&events, &mut repeated, &TaintConfig::default());
+            assert_eq!(&repeated, output, "copy must be stable: {input:?}");
+            for (upper_index, upper) in inputs.iter().enumerate() {
+                if input.is_subset(upper) {
+                    assert!(
+                        output.is_subset(&outputs[upper_index]),
+                        "more RHS evidence erased a proof: {input:?} -> {output:?}; {upper:?} -> {:?}",
+                        outputs[upper_index]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn descendant_copy_normalizes_both_source_and_destination_sigils() {
+    let mut state = seed(&["$source.field", "$source.*", "$target.old"]);
+    transfer_events(
+        &[assign("$target", Some("$source"))],
+        &mut state,
+        &TaintConfig::default(),
+    );
+    assert!(state.contains("target.field"));
+    assert!(state.contains("target.*"));
+    assert!(!state.contains("$target.old"));
+}
+
+#[test]
+fn opaque_call_preservation_does_not_lose_fields_when_callee_taint_grows() {
+    for sources in [
+        seed(&["target", "target.field"]),
+        seed(&["target", "target.field", "opaque"]),
+    ] {
+        let mut state = sources.clone();
+        transfer_events(
+            &[assign_call("target", "opaque", &[])],
+            &mut state,
+            &TaintConfig::default(),
+        );
+        assert_eq!(state, sources);
+    }
 }
 
 #[test]
