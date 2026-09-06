@@ -33,8 +33,9 @@ cannot silently accumulate here.
   language and security knowledge.
 - `audit-layering.sh` — validates the workspace crate dependency DAG.
 - `audit-loop.sh` — runs the combined rulepack, fixture, sanitizer, taint-engine,
-  CLI, and release-binary health loop. Release-only tests preserve the remapped
-  distributable instead of replacing it with a local build.
+  CLI, and release-binary health loop. If the release binary is missing it
+  bootstraps through `build-release.sh`; release-only tests preserve the
+  remapped distributable instead of replacing it with a local build.
 - `audit-public-api.sh` — compares the public Rust API surface with its checked-in snapshot.
 - `audit-release-metadata.py` — validates public Cargo package and repository metadata.
 - `audit-release-binary.py` — rejects distributable binaries that retain the

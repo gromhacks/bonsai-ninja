@@ -16,9 +16,24 @@ PACK_AUDIT_WORKFLOW = (
     / "workflows"
     / "pack-audit.yml"
 )
+AUDIT_LOOP = Path(__file__).resolve().parents[2] / "scripts" / "audit-loop.sh"
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_audit_loop_bootstraps_a_remapped_release_binary(self) -> None:
+        script = AUDIT_LOOP.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'bash scripts/build-release.sh',
+            script,
+            "audit-loop must bootstrap the path-remapped distributable builder",
+        )
+        self.assertNotIn(
+            'cargo build --release -q',
+            script,
+            "audit-loop must not create an unreproducible fallback binary",
+        )
+
     def test_windows_checksum_is_portable_to_unix_verifiers(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
 

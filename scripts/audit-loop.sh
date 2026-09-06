@@ -54,8 +54,12 @@ run_section() {
 
 require_release_binary() {
     if [[ ! -x "$BIN" ]]; then
-        echo "release binary missing — running 'cargo build --release'"
-        (cd "$REPO" && cargo build --release -q) || return 1
+        echo "release binary missing — running 'scripts/build-release.sh'"
+        # The final section audits the binary as a distributable artifact.
+        # A plain Cargo release build records the checkout/home path in the
+        # dynamically loaded grammar registry, so bootstrap through the same
+        # remapped builder used by the release workflow.
+        (cd "$REPO" && bash scripts/build-release.sh) || return 1
     fi
 }
 
