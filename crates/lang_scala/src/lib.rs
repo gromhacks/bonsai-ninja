@@ -257,7 +257,11 @@ fn extract_scala_syntax_event(
     })
 }
 
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     expression_value_kind_extractor: None,
     literal_value_kinds: &[
         "null_literal",
@@ -268,7 +272,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "false",
     ],
     string_literal_kinds: &["string", "interpolated_string_expression", "character_literal"],
-    comment_kinds: &["comment"],
+    comment_kinds: &["comment", "block_comment"],
     doc_comment_prefixes: &["/**"],
     decorator_kinds: &["annotation"],
     parameter_container_kinds: &["parameters"],

@@ -3528,6 +3528,11 @@ pub struct DeclIndex {
 pub struct Comment {
     pub span: Span,
     pub text: String,
+    /// Unicode scalar count of the adapter-proven lexical body, excluding
+    /// comment delimiters (including documentation markers). Body whitespace
+    /// is preserved. `None` means the frontend could not prove the boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_len: Option<usize>,
     pub kind: CommentKind,
 }
 
@@ -3619,6 +3624,13 @@ impl CommentKind {
 pub struct StringLiteral {
     pub span: Span,
     pub text: String,
+    /// Unicode scalar count of the adapter-proven lexical body. Prefixes and
+    /// delimiters are excluded; escapes, interpolation source and whitespace
+    /// are counted verbatim. Adjacent literal bodies are summed without the
+    /// intervening syntax. This is independent of the decoded `static_value`.
+    /// `None` means the frontend could not prove the boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_len: Option<usize>,
     pub category: StringCategory,
     /// Exact decoded scalar value when the owning language adapter can prove
     /// one from its Tree-sitter grammar. Interpolated strings and literal

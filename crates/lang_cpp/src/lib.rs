@@ -176,7 +176,11 @@ fn cpp_call_target_without_template_arguments(target: Node<'_>, src: &[u8]) -> S
     out.trim().to_string()
 }
 
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     literal_value_kinds: &["null", "nullptr", "true", "false"],
     string_literal_kinds: &[
         "string_literal",

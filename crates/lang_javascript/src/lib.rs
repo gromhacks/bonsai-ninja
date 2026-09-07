@@ -218,7 +218,11 @@ pub fn ecmascript_source_file_representation(path: &std::path::Path) -> SourceFi
             SourceFileRepresentation::Minified
         })
 }
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     expression_value_kind_extractor: Some(ecmascript_expression_value_kind),
     literal_value_kinds: &["null", "number", "true", "false"],
     string_literal_kinds: &["string", "template_string"],

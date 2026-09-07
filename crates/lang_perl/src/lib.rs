@@ -507,7 +507,11 @@ fn perl_assignment_semantics(node: Node<'_>, _src: &[u8]) -> AssignmentNodeSeman
 // (newer perl5 OO syntax) is also surfaced for completeness.
 const PERL_CLASS_KINDS: &[&str] = &["package_statement", "class_statement"];
 
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     literal_value_kinds: &["number"],
     literal_value_spellings: &[],
     string_literal_kinds: &["interpolated_string_literal", "string_literal"],

@@ -444,7 +444,11 @@ fn kotlin_named_argument<'tree>(node: Node<'tree>, src: &[u8]) -> Option<(String
 // is observed end-to-end. Without this, the whole property collapses
 // into a single Field decl and accessor body events disappear
 // (audit task #131).
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     expression_value_kind_extractor: Some(kotlin_expression_value_kind),
     // Names are owned by the bundled Tree-sitter Kotlin grammar.  Keeping
     // this inventory adapter-local lets shared lowering classify values

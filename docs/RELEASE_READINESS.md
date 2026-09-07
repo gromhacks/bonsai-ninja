@@ -6,7 +6,7 @@ not duplicate dated performance history.
 
 ## Status
 
-The v0.2.16 candidate incorporates the expanded compiler, adapter, rulepack,
+The v0.3.0 candidate incorporates the expanded compiler, adapter, rulepack,
 CLI, cache, scheduling, and publication checks described below. Local status
 is determined from a fresh run of the listed commands; historical measurements
 are retained only where they document a reproducible scale baseline. A tag is
@@ -30,9 +30,79 @@ The product contains:
 - 11,919 enabled rule examples;
 - native CLI, Rust SDK, SARIF 2.1.0, JSON, HTML, and graph-export surfaces.
 
-## v0.2.16 local verification — 2026-09-06
+The 0.3 minor bump follows the SDK compatibility policy: literal inventory
+errors and ambiguity outcomes changed public Rust types. See the
+[0.2-to-0.3 migration guide](contributing/sdk.mdx#migrating-from-02-to-03).
+Native export remains schema 14. The earlier 0.2.16 preparation below was
+not tagged or published; its measurements describe that earlier tree, not
+the subsequent command/filter changes.
 
-All 47 workspace packages and the embedded rulepack marker use `0.2.16`.
+## 0.3 command and filter contracts
+
+The current candidate's completed local correctness checks (2026-09-07) are:
+
+| Gate | Result |
+|---|---|
+| Compact workspace correctness | 8,377 passed, 0 failed, 0 ignored across 376 test/doc-test targets; Elasticsearch runs separately |
+| Optimized Elasticsearch target | All 12 passed in 1,259.28 s, including a fresh semantic generation; existing SLOs and 3 GiB scheduling budget unchanged |
+| Command/selector and filter matrix | 5,119 checks across all 20 languages: 1,440 command cases, 3,659 filter checks, and 20 endpoint-corridor round trips |
+| Compiler lexical conformance | All 20 adapters retain exact Unicode body counts and empty literals; anonymous type keywords are excluded |
+| Live rulepack replay | All 11,919 enabled examples passed; 0 errors and 0 warnings |
+| Rust checks | Formatting, strict all-target Clippy, private-item rustdoc, and adapter FlowEvent checks passed |
+| Release/validator scripts | All 71 Python tests passed |
+| Runtime packaging | Binary-only relocation with an empty parser cache retained the expected critical Python flow; SARIF and HTML smoke passed |
+| Self-security | Complete production high-severity analysis returned no findings |
+| Static audits | Documentation/help, skill sync, public API, architecture, parser bundles, licenses, dependencies, workflow syntax, and secret checks passed |
+
+The command matrix covers every command family and maintained selectors, not
+every possible option combination or source program. Its Elixir, Erlang, and
+Lua class-inventory baselines are explicitly empty and are not counted as
+positive class coverage. These local gates do not establish hosted CI,
+cross-platform packaging, or publication; the tag workflow and post-release
+verification below establish those outcomes.
+
+On the pinned Elasticsearch checkout
+`e9741368da0cb5465f5cf76c668a09fd780583be`, selected completed measurements were
+52.86 s for fresh structural index, 2.72 s for warm structural index,
+349.10 s for cold semantic readiness, 2.55 s for warm semantic reuse,
+117.10 s for fresh-cache production taint, 48.47 s for inspect, 218.26 s for
+complete native export, 91.93 s for warm production taint, 44.29 s for
+dependency analysis, 78.28 s for sink lineage, and 3.94 s for source analysis.
+Warm inventory pages completed in 0.87–0.95 s. Known Gradle dependency-format
+warnings remain explicit rather than becoming complete negative results.
+
+The command review adds persistent coverage for the following contracts:
+
+- Repeated `--contains`/`--not-contains` values accumulate across command
+  levels. Matching uses canonical row string values, with consistent
+  inclusion/exclusion, regex, paging, and cached/uncached behavior. Export and
+  operational cache commands reject unsupported view filters explicitly.
+- Security inventories filter hydrated source evidence; findings, summaries,
+  SARIF, and dependency-attached flows retain the same selected facts.
+  Repeated file predicates have unambiguous cache identities, and selected
+  dependency counts remain distinct from complete analysis totals.
+- File-scoped entrypoints retain cross-module callers without leaking other
+  files' rows. Variable source filters include exact nested and compound RHS
+  call facts. All 20 adapters own lexical string/comment lengths.
+- AST depth limits retain explicit omission metadata, selectors report
+  ambiguity, and `show` validates ID-specific context. Endpoint-scoped flow
+  IDs are reopened against their originating compiler corridor, independently
+  of security-rule cache dependencies.
+- Tree filters retain the requested depth, and cached listings notice
+  non-source files and directories. One-shot export respects cache bypass.
+
+`scripts/validate-language-gauntlets.py` runs every command family over the 20
+language gauntlets and derives filter expectations from each command's full
+canonical JSON rows. It compares positive subsets, impossible predicates,
+text/JSON results, relative/absolute files, and the complete cursor-page union.
+Empty baselines are reported separately and never count as positive coverage.
+It also reopens endpoint-scoped flows and checks their exact nodes and edges.
+The focused Rust filter/navigation/security contracts run in the Windows
+portability job as well as the exhaustive Linux/macOS suites.
+
+## Earlier v0.2.16 preparation — 2026-09-06
+
+At this preparation step, all 47 workspace packages and the embedded rulepack marker used `0.2.16`.
 Every internal dependency remains exactly pinned to that version; the lockfile
 bump changes no third-party dependency. The 45 publishable crate names passed
 the registry ownership audit, and none had a published `0.2.16` version at
@@ -178,7 +248,10 @@ and added missing boundary models. The principal changes are:
   exceptions require exact compiler string-composition evidence.
 - Swift getter lowering, Python direct-argument compositions, and ignored-root
   SDK refresh preserve the same facts in fresh and persisted analysis. The
-  compiler-object frontend ABI is 203; older generations are rebuilt normally.
+  compiler-object frontend ABI for that rule-review baseline was 203;
+  the 0.3 candidate advances it to 206 for adapter-owned lexical lengths,
+  complete PHP nowdoc inventories with body-based string categories, and
+  named literal nodes distinct from anonymous type keywords.
 
 See [Security Specification](security-spec.mdx#sanitizer-credit) for the
 classification contract and [Rule Testing](rule-testing.mdx) for executable

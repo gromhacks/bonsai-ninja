@@ -80,6 +80,7 @@ pub struct ResolveTrace {
 pub enum ResolveOutcome {
     Trace(Box<ResolveTrace>),
     FileContextNotFound { needle: String },
+    FileContextAmbiguous { needle: String, candidates: Vec<String> },
     CandidateNotFound,
 }
 
@@ -328,27 +329,55 @@ where
 {
     let global = ws.compiler_header_index();
 
-    // `--in-file` matches a workspace-relative file path. The same shape
-    // any other browse filter uses.
-    let resolved_file_id: Option<bonsai_common::FileId> = f.in_file.and_then(|needle| {
-        global.all_files().find(|file_id| {
-            ws.vfs()
-                .path(*file_id)
-                .is_ok_and(|p| file_path_matches_filter(ws, &p.display().to_string(), needle))
-        })
-    });
+    // A resolver has one file's import/type context. A broad file predicate
+    // may discover candidates, but it must never choose an arbitrary alias
+    // map. Prefer an exact path, then require one remaining match.
+    let resolved_file_id = if let Some(needle) = f.in_file {
+        let requested = bonsai_common::normalize_path_for_filter(needle);
+        let mut candidates = global
+            .all_files()
+            .filter_map(|file_id| {
+                let path = ws.vfs().path(file_id).ok()?;
+                let absolute = path.to_string_lossy();
+                let relative = workspace_relative_path(ws, &absolute);
+                let exact =
+                    relative == requested || bonsai_common::normalize_path_for_filter(&absolute) == requested;
+                (exact || file_path_matches_filter(ws, &absolute, needle))
+                    .then_some((file_id, relative, exact))
+            })
+            .collect::<Vec<_>>();
+        if candidates.iter().any(|(_, _, exact)| *exact) {
+            candidates.retain(|(_, _, exact)| *exact);
+        }
+        match candidates.as_slice() {
+            [] => {
+                return ResolveOutcome::FileContextNotFound {
+                    needle: needle.to_string(),
+                };
+            }
+            [(file, _, _)] => Some(*file),
+            _ => {
+                let mut paths = candidates
+                    .into_iter()
+                    .map(|(_, path, _)| path)
+                    .collect::<Vec<_>>();
+                paths.sort();
+                paths.dedup();
+                return ResolveOutcome::FileContextAmbiguous {
+                    needle: needle.to_string(),
+                    candidates: paths,
+                };
+            }
+        }
+    } else {
+        None
+    };
     let applied_file_display: Option<String> = resolved_file_id.and_then(|file_id| {
         ws.vfs()
             .path(file_id)
             .ok()
             .map(|path| workspace_relative_path(ws, &path.display().to_string()))
     });
-    if let (Some(needle), None) = (f.in_file, resolved_file_id) {
-        return ResolveOutcome::FileContextNotFound {
-            needle: needle.to_string(),
-        };
-    }
-
     let short = short_callee(query).to_string();
 
     // Stage 1: alias rewrite. When the user supplied `--in-file`,

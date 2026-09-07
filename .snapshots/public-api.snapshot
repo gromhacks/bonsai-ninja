@@ -33,6 +33,7 @@ pub use edges::{compute_edge_id, dump_edges, EdgeRecord, EdgesFilters};
 pub use entrypoints::{entrypoints, EntryPointOut, EntryPointsFilters};
 pub use graph_export::{
 pub use imports::{imports, ImportOut, ImportsFilters};
+pub use literal_filter::LiteralFilterError;
 pub use module_map::{
 pub use native_export::{
 pub use operations::{operations, OperationOperandOut, OperationOut, OperationsFilters};

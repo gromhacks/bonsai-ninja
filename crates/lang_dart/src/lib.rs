@@ -1195,7 +1195,11 @@ fn extract_dart_syntax_events(
 // double-counting. Calls in Dart use the unique split-grammar pattern
 // `identifier selector(args)`; the walker has a Dart-specific branch
 // that synthesizes a Call event from the previous-sibling identifier.
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     pseudo_call_receiver_role: bonsai_lang_api::CallReceiverRole::Value,
     literal_value_kinds: &[
         "_literal",

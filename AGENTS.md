@@ -54,8 +54,10 @@ deletions, without changing the selected analysis scope.
 
 Treat the analyzer as a compiler pipeline. Each language adapter owns its
 Tree-sitter grammar, source-syntax recognition, declaration/import lowering,
-literal/value node inventories, and `FlowEvent`/capability facts. Shared
-analysis consumes that typed IR; do
+literal/value node inventories, and `FlowEvent`/capability facts. String and
+comment length filters consume adapter-proven lexical body lengths; shared
+browse code must not guess those boundaries by stripping source delimiters.
+Shared analysis consumes that typed IR; do
 not add language-id branches, cross-language token inventories, or API-name
 guesses to shared crates. Library/package/framework identities and every
 security-sensitive value belong in `security-patterns/langs/<lang>`, not in

@@ -32,6 +32,27 @@ Shared lowering uses those exact adapter inventories for assignment, return,
 call-argument, runtime-guard, place/value, and `strings` classification; it
 does not carry a union of other languages' keywords or grammar node names.
 
+String and comment inventories also carry `content_len: Option<usize>` from
+the owning handler's `string_content_len` and `comment_content_len` callbacks.
+These count Unicode scalar values in the lexical body, preserving whitespace,
+escapes, interpolation source, and grammar-defined composition while excluding
+literal prefixes and delimiters. They are not decoded runtime lengths.
+`Some(0)` proves an empty body; `None` preserves a fact whose boundaries are
+unknown. Shared inventory code must not guess a body by trimming punctuation
+or substitute the raw span length. A positive minimum-length filter fails
+explicitly when a surviving literal has unknown content length.
+
+`string_literal_kinds` identifies named grammar nodes, not anonymous tokens
+with the same spelling. For example, PHP/TypeScript's `string` type keyword is
+not a literal, whereas a quoted `"string"` value is. The shared matcher uses
+the parser's named-node identity rather than a text exclusion list.
+
+The all-language `lexical_content_length` conformance target checks every
+bundled handler's declared string/comment kinds, complete inventory spans,
+Unicode counts, empty bodies, and serialized fact round trips. PHP multiline
+strings retain their complete literal span, including empty nowdocs; browse
+categories use the exact parser-owned body, not the opening or closing tag.
+
 `kit::decl_index_with_handler(pack_name, file, ctx, handler)` is the full
 adapter pipeline (decls + refs + per-function flow events) in a single
 call. Most adapters delegate fully to this helper and add language-

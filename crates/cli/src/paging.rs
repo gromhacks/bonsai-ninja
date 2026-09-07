@@ -249,6 +249,11 @@ pub(crate) fn cursor_id(command: &str, filters_hash: u64, offset: u64) -> String
     hasher.absorb_separator();
     hasher.absorb(&filters_hash.to_le_bytes());
     hasher.absorb_separator();
+    let secondary = crate::filter::active();
+    if secondary.is_active() {
+        hasher.absorb(&secondary.signature().to_le_bytes());
+        hasher.absorb_separator();
+    }
     hasher.absorb(&offset.to_le_bytes());
     format!("P:{:08x}", bonsai_hash::fnv1a_low32(hasher.finish()))
 }

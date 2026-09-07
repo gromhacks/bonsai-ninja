@@ -649,6 +649,40 @@ migration note; after 1.0 they require a major-version bump.
 
 The CLI is a thin renderer over this SDK; both surfaces evolve together.
 
+### Migrating from 0.2 to 0.3
+
+Update all `bonsai-ninja-*` dependencies together to `0.3.0`.
+
+- `browse.strings()` and `browse.comments()` now return
+  `LiteralFilterError`: match `Regex` for invalid expressions and
+  `UnknownContentLength` when a positive minimum cannot be proven. General
+  error propagation with `?` into a boxed/aggregate error still works.
+- `StringLiteral`, `Comment`, `StringOut`, and `CommentOut` expose
+  `content_len: Option<usize>`. It counts Unicode scalar values in the lexical
+  source body, excluding delimiters/prefixes and preserving whitespace,
+  escapes, and interpolation. `Some(0)` means empty; `None` means unproven.
+  Custom grammar handlers can supply the new `string_content_len` and
+  `comment_content_len` hooks; shared analysis never guesses delimiters.
+- Exhaustive matches must handle `AstOutcome::FunctionAmbiguous` and
+  `ResolveOutcome::FileContextAmbiguous`. Show the supplied candidates and
+  request an exact selector; do not choose the first one silently.
+- `AstNode.children_omitted` records depth-limited presentation. A complete
+  parse can still have omitted display subtrees; consumers should preserve
+  that distinction.
+
+CLI scripts should also note that repeatable global `--contains` values
+accumulate across command levels. For `strings` and `comments`, these filter
+complete row string fields; their `--regex` switch is case-sensitive unless
+the expression uses `(?i)`. `export` and operational `cache` commands reject
+these view filters. Native export schema 14 and the exact analysis scope are
+unchanged. Compiler-object ABI 206 invalidates older derived sidecars normally;
+no manual cache deletion is required.
+
+PHP nowdoc inventory rows now retain the complete literal text and span,
+including opening/closing tags, and include empty nowdocs. Their `content_len`
+and browse category describe the parser-owned body; callers should not trim
+the rendered text to reconstruct a semantic value.
+
 `VarOut.source_names` contains the sorted, unique RHS identifiers and call names
 from all compiler projections of one exact assignment. `source_name` remains
 the comma-separated display form. A `--source` selector keeps the complete

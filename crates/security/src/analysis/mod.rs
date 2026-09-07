@@ -3246,6 +3246,13 @@ pub fn inventory_rule_ids(
                         .tag
                         .as_deref()
                         .is_none_or(|tag| rule.tag.as_deref() == Some(tag))
+                    && options
+                        .severity
+                        .is_none_or(|min| rule.severity.is_some_and(|severity| severity >= min))
+                    && options
+                        .category
+                        .as_deref()
+                        .is_none_or(|category| rule_matches_category(pack, rule, category))
             },
         )?,
         RuleKind::Typing => Vec::new(),

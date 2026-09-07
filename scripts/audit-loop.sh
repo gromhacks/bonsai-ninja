@@ -8,8 +8,8 @@
 # Layers (each runs independently; failures don't short-circuit):
 #
 #   1. pack-validate     — rule schema + match-example owners agree
-#   2. language-gauntlets — engine emits the expected per-language finding
-#                          counts on the language_gauntlet fixture
+#   2. language-gauntlets — command/selector and complete filter/pagination
+#                          contracts across all 20 language_gauntlet fixtures
 #   3. sanitizer-credit  — sanitizer tag vocabulary in YAML matches the
 #                          rulepack sanitizer-credit metadata
 #   4. logic-alignment   — cross-rule logic checks: identical
@@ -22,8 +22,9 @@
 #   8. cli-docs          — documented commands and flags match the release CLI
 #   9. release-binary    — distributable contains no build-machine paths
 #
-# Use `--quick` to skip the long-running matrix + cli-e2e tests when
-# you want a fast structural sweep.
+# Use `--quick` to skip the two Rust suites already covered by exhaustive
+# workspace correctness. It retains the complete release-binary language and
+# filter matrix; it is not a reduced correctness or timing gate.
 
 set -u
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

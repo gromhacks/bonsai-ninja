@@ -150,7 +150,7 @@ fn runtime_typeof_pair(
         .or_else(|| typeof_node.named_child(0))?;
     let subject = runtime_guard_identifier(unwrap_runtime_guard(subject, handler), src, handler)?;
     let type_node = unwrap_runtime_guard(type_node, handler);
-    if !handler.is_string_literal(type_node.kind()) {
+    if !handler.is_string_literal(type_node) {
         return None;
     }
     let type_name = node_text(&type_node, src)

@@ -86,6 +86,9 @@ jobs:
           cargo test --locked -p bonsai-ninja
           --test cli_contract
           --test command_coverage
+          --test filter_contract
+          --test navigation_filter_audit
+          --test security_filter_contract
           --test determinism
           --test pack_validate_integration
           --no-fail-fast

@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) const CALLSITE_RESOLUTION_SCOPE: &str = "syntactic-call-site";
 
 /// Filter bundle for [`calls`]. All fields optional; `None` skips
-/// that filter. `regex` controls how `callee` and `caller` are
-/// interpreted.
+/// that filter. `regex` controls how `callee` is interpreted;
+/// `caller` always uses substring matching.
 #[derive(Copy, Clone, Default, Debug)]
 pub struct CallsFilters<'a> {
     /// `--callee X` — substring (or regex) over the callee text
@@ -36,7 +36,7 @@ pub struct CallsFilters<'a> {
     /// `dynamic` …) — case-insensitive equality against the
     /// adapter-emitted [`bonsai_lang_api::CallKind`] tag.
     pub call_kind: Option<&'a str>,
-    /// Treat `callee` / `caller` as regexes instead of substrings.
+    /// Treat `callee` as a regex instead of a substring.
     pub regex: bool,
 }
 
@@ -71,7 +71,7 @@ pub struct CallOut {
 pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex::Error> {
     use rayon::prelude::*;
     let callee_match = make_callable_name_filter(f.callee, f.regex)?;
-    let caller_match = make_name_filter(f.caller, f.regex)?;
+    let caller_match = make_name_filter(f.caller, false)?;
     let files = source_files_small_first(ws);
     let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
     // `fold` accumulates per-thread (not per-file) so we don't pay
@@ -225,7 +225,7 @@ pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex
         }
     };
     let caller_rank = |call: &CallOut| {
-        if f.caller.is_some() && !f.regex {
+        if f.caller.is_some() {
             call.caller.as_deref().map_or((u8::MAX, usize::MAX), |caller| {
                 textual_relevance_key(caller, f.caller, false)
             })

@@ -3,6 +3,7 @@
 //! The renderers are pure functions over the in-memory data model — the
 //! CLI commands feed them the already-matched / already-grouped data.
 
+use crate::analysis::CombinedFindingWithChain;
 use crate::deps::DependencyInventory;
 use crate::finding::{Finding, TaintFlowRef};
 use crate::matcher::RuntimeDisabledRule;
@@ -87,6 +88,18 @@ impl SecurityReport {
     #[must_use]
     pub fn sarif_json_with_workspace_root(&self, workspace_root: &str) -> String {
         render_sarif_with_provenance(self, Some(workspace_root), None)
+    }
+
+    /// Render the same findings with their combined-result identities and
+    /// additional endpoint evidence. This is presentation metadata: it does
+    /// not replace representative routes or alter the analyzed findings.
+    #[must_use]
+    pub fn sarif_json_with_combined_findings(
+        &self,
+        workspace_root: &str,
+        combined: &[CombinedFindingWithChain],
+    ) -> String {
+        render_sarif_with_combined_metadata(self, Some(workspace_root), None, combined)
     }
 }
 
@@ -301,6 +314,15 @@ pub(crate) fn render_sarif_with_provenance(
     workspace_root: Option<&str>,
     version_control: Option<(&str, &str, &str)>,
 ) -> String {
+    render_sarif_with_combined_metadata(report, workspace_root, version_control, &[])
+}
+
+fn render_sarif_with_combined_metadata(
+    report: &SecurityReport,
+    workspace_root: Option<&str>,
+    version_control: Option<(&str, &str, &str)>,
+    combined: &[CombinedFindingWithChain],
+) -> String {
     // S2: emit one ruleDescriptor per distinct sink rule id (the
     // bonsai rule we attribute the finding to). Fast index lookup
     // via the BTreeMap so a stable name → index mapping exists.
@@ -445,10 +467,26 @@ pub(crate) fn render_sarif_with_provenance(
     };
 
     let workspace_root_uri = workspace_root.map(uri_for_path);
+    let combined_by_id: std::collections::BTreeMap<_, _> = combined
+        .iter()
+        .map(|finding| (finding.finding.finding_id.as_str(), finding))
+        .collect();
     let results_json: Vec<serde_json::Value> = report
         .findings
         .iter()
-        .map(|finding| finding_to_sarif_result(finding, &rule_index, &cwe_set, workspace_root))
+        .map(|finding| {
+            let mut result = finding_to_sarif_result(finding, &rule_index, &cwe_set, workspace_root);
+            if let Some(combined) = combined_by_id.get(finding.finding_id.as_str()) {
+                // `finding_id` remains the combined identity. Retain every
+                // member S: id accepted by CLI drilldown alongside it, and
+                // the co-tainted endpoints that need not have distinct F: ids.
+                let metadata = &mut result["properties"]["bonsai"];
+                metadata["member_finding_ids"] = serde_json::json!(combined.member_finding_ids);
+                metadata["additional_sources"] = serde_json::json!(combined.additional_sources);
+                metadata["additional_sinks"] = serde_json::json!(combined.additional_sinks);
+            }
+            result
+        })
         .collect();
 
     // S10: optional automation details + version control provenance.

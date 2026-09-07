@@ -303,7 +303,7 @@ pub fn dump_callable_file_qualifier(spec: &str) -> Option<&str> {
 /// multiple candidates are returned as ambiguity instead of silently
 /// choosing one.
 fn resolve_single_callable(ws: &Workspace, symbol: &str) -> Result<Option<Decl>, DumpLookupError> {
-    let spec = split_callable_spec(symbol);
+    let spec = split_callable_spec_in_workspace(ws, symbol);
     let global = ws.compiler_header_index();
     let vfs = ws.db().vfs();
     let wanted_segments = bonsai_common::qualified_name_segments(spec.name);
@@ -365,7 +365,42 @@ fn resolve_single_callable(ws: &Workspace, symbol: &str) -> Result<Option<Decl>,
     }
 }
 
+/// A basename and a namespace can have identical punctuation (`a.py:run`
+/// versus `My.Module:run`). Only actual compiler input paths establish the
+/// former; punctuation alone must not reinterpret a qualified identity.
+fn split_callable_spec_in_workspace<'a>(ws: &Workspace, symbol: &'a str) -> CallableSpec<'a> {
+    let spec = split_callable_spec(symbol);
+    if spec.file.is_some() {
+        return spec;
+    }
+    let Some((file, name)) = symbol.rsplit_once(':') else {
+        return spec;
+    };
+    if file.is_empty() || file.ends_with(':') || name.is_empty() || name.contains(['/', '\\']) {
+        return spec;
+    }
+    let root = ws.db().workspace_root();
+    let file_exists = ws.vfs().all_files().into_iter().any(|id| {
+        ws.vfs()
+            .path(id)
+            .is_ok_and(|path| file_matches_qualifier(&path.to_string_lossy(), file, root.as_deref()))
+    });
+    if file_exists {
+        CallableSpec {
+            file: Some(file),
+            line: None,
+            name,
+        }
+    } else {
+        spec
+    }
+}
+
 fn file_matches_qualifier(decl_file: &str, qualifier: &str, workspace_root: Option<&Path>) -> bool {
+    let normalized_decl = bonsai_common::normalize_path_for_filter(decl_file);
+    let normalized_qualifier = bonsai_common::normalize_path_for_filter(qualifier);
+    let decl_file = normalized_decl.as_str();
+    let qualifier = normalized_qualifier.as_str();
     if decl_file == qualifier {
         return true;
     }
@@ -377,16 +412,18 @@ fn file_matches_qualifier(decl_file: &str, qualifier: &str, workspace_root: Opti
         .canonicalize()
         .ok()
         .map(|path| path.to_string_lossy().into_owned());
-    let canonical_qualifier = Path::new(qualifier)
+    let qualifier_path = Path::new(qualifier);
+    let rooted_qualifier = workspace_root
+        .filter(|_| !qualifier_path.is_absolute())
+        .map_or_else(|| qualifier_path.to_path_buf(), |root| root.join(qualifier_path));
+    let canonical_qualifier = rooted_qualifier
         .canonicalize()
         .ok()
         .map(|path| path.to_string_lossy().into_owned());
-    if canonical_decl
-        .as_deref()
-        .zip(canonical_qualifier.as_deref())
-        .is_some_and(|(decl, qual)| decl == qual)
-    {
-        return true;
+    if let Some((decl, qualifier)) = canonical_decl.as_deref().zip(canonical_qualifier.as_deref()) {
+        // An existing exact path wins over unrelated files with the same
+        // basename. Suffix matching is only a fallback for a non-exact path.
+        return decl == qualifier;
     }
     if decl_file.ends_with(qualifier)
         && decl_file

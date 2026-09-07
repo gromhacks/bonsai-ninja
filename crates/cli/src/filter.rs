@@ -21,8 +21,14 @@ use std::sync::OnceLock;
 /// inactive filter that keeps every row.
 static SECONDARY_FILTER: OnceLock<SecondaryFilter> = OnceLock::new();
 
-pub(crate) fn init(contains: &[String], not_contains: &[String]) {
-    let _ = SECONDARY_FILTER.set(SecondaryFilter::new(contains, not_contains));
+pub(crate) fn init(contains: &[String], not_contains: &[String], regex: bool) -> Result<(), regex::Error> {
+    let filter = if regex {
+        SecondaryFilter::with_regex(contains, not_contains)?
+    } else {
+        SecondaryFilter::new(contains, not_contains)
+    };
+    let _ = SECONDARY_FILTER.set(filter);
+    Ok(())
 }
 
 pub(crate) fn active() -> &'static SecondaryFilter {
@@ -33,6 +39,8 @@ pub(crate) fn active() -> &'static SecondaryFilter {
 pub(crate) struct SecondaryFilter {
     /// Every needle here must appear (AND). Lower-cased once.
     contains: Vec<String>,
+    /// Opt-in regex alternatives to literal needles; still combined with AND.
+    contains_regex: Vec<regex::Regex>,
     /// If any needle here appears, the row is dropped. Lower-cased once.
     not_contains: Vec<String>,
 }
@@ -51,12 +59,23 @@ impl SecondaryFilter {
         };
         Self {
             contains: lower(contains),
+            contains_regex: Vec::new(),
             not_contains: lower(not_contains),
         }
     }
 
+    fn with_regex(contains: &[String], not_contains: &[String]) -> Result<Self, regex::Error> {
+        let mut filter = Self::new(&[], not_contains);
+        filter.contains_regex = contains
+            .iter()
+            .filter(|pattern| !pattern.is_empty())
+            .map(|pattern| regex::Regex::new(pattern))
+            .collect::<Result<_, _>>()?;
+        Ok(filter)
+    }
+
     pub(crate) fn is_active(&self) -> bool {
-        !self.contains.is_empty() || !self.not_contains.is_empty()
+        !self.contains.is_empty() || !self.contains_regex.is_empty() || !self.not_contains.is_empty()
     }
 
     /// Stable view fingerprint for pagination/cursor identities. Secondary
@@ -76,21 +95,53 @@ impl SecondaryFilter {
             hasher.absorb(value.as_bytes());
             hasher.absorb_separator();
         }
+        for pattern in &self.contains_regex {
+            hasher.absorb(b"contains-regex");
+            hasher.absorb_separator();
+            hasher.absorb(pattern.as_str().as_bytes());
+            hasher.absorb_separator();
+        }
         hasher.finish()
     }
 
-    /// True when `haystack` (already the row's combined searchable
-    /// text) satisfies every `--contains` and no `--not-contains`.
+    /// Match one string leaf independently of unrelated row fields.
+    #[cfg(test)]
     pub(crate) fn matches_text(&self, haystack: &str) -> bool {
+        self.matches_parts(std::iter::once(haystack), &mut Vec::new(), &mut String::new())
+    }
+
+    fn matches_parts<'a>(
+        &self,
+        parts: impl Iterator<Item = &'a str>,
+        matched: &mut Vec<bool>,
+        lower: &mut String,
+    ) -> bool {
         if !self.is_active() {
             return true;
         }
-        let lower = haystack.to_lowercase();
-        self.contains.iter().all(|needle| lower.contains(needle.as_str()))
-            && !self
+        matched.clear();
+        matched.resize(self.contains.len() + self.contains_regex.len(), false);
+        for part in parts {
+            lower.clear();
+            lower.extend(part.chars().flat_map(char::to_lowercase));
+            if self
                 .not_contains
                 .iter()
                 .any(|needle| lower.contains(needle.as_str()))
+            {
+                return false;
+            }
+            for (found, needle) in matched.iter_mut().zip(&self.contains) {
+                *found |= lower.contains(needle.as_str());
+            }
+            for (found, pattern) in matched[self.contains.len()..]
+                .iter_mut()
+                .zip(&self.contains_regex)
+            {
+                *found |= pattern.is_match(part);
+            }
+        }
+        matched.iter().all(|found| *found)
     }
 
     /// Match a row by the string leaves of its JSON form. Field names
@@ -121,16 +172,18 @@ impl SecondaryFilter {
         }
         scratch.json.clear();
         scratch.leaves.clear();
+        scratch.ranges.clear();
         if serde_json::to_writer(&mut scratch.json, row).is_err() {
             // Never silently drop a row on an encode error.
             return true;
         }
-        collect_json_string_values(&scratch.json, &mut scratch.leaves);
-        if let Some(extra) = extra {
-            scratch.leaves.push_str(extra);
-            scratch.leaves.push('\n');
-        }
-        self.matches_text(&scratch.leaves)
+        collect_json_string_values(&scratch.json, &mut scratch.leaves, &mut scratch.ranges);
+        let parts = scratch
+            .ranges
+            .iter()
+            .map(|range| &scratch.leaves[range.clone()])
+            .chain(extra);
+        self.matches_parts(parts, &mut scratch.matched, &mut scratch.lower)
     }
 
     /// Drop the rows whose serialized string-values fail the filter.
@@ -150,13 +203,17 @@ impl SecondaryFilter {
 pub(crate) struct FilterScratch {
     json: Vec<u8>,
     leaves: String,
+    ranges: Vec<std::ops::Range<usize>>,
+    lower: String,
+    matched: Vec<bool>,
 }
 
 /// Append every JSON string *value* in `json` to `out` (one per line),
+/// retaining exact leaf ranges so a multiline needle cannot bridge fields.
 /// decoding escapes; object keys are skipped so `--contains name` filters on
 /// values, not on the `"name"` key. Mirrors `collect_string_leaves` over a
 /// `Value` tree without materializing the tree.
-fn collect_json_string_values(json: &[u8], out: &mut String) {
+fn collect_json_string_values(json: &[u8], out: &mut String, ranges: &mut Vec<std::ops::Range<usize>>) {
     let mut index = 0usize;
     let len = json.len();
     while index < len {
@@ -243,7 +300,9 @@ fn collect_json_string_values(json: &[u8], out: &mut String) {
         }
         let is_key = json.get(peek) == Some(&b':');
         if !is_key {
+            let start = out.len();
             out.push_str(&decoded);
+            ranges.push(start..out.len());
             out.push('\n');
         }
         index = cursor;

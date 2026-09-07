@@ -73,7 +73,11 @@ fn objc_indirect_place_operand(node: Node<'_>) -> Option<Node<'_>> {
 // and `@autoreleasepool` are scope-bracketed regions modeled as
 // `using` (resource-managed scope) since `body` then runs under the
 // managed lock / pool.
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     literal_value_kinds: &["null", "true", "false"],
     string_literal_kinds: &["string_literal", "char_literal", "concatenated_string"],
     comment_kinds: &["comment"],

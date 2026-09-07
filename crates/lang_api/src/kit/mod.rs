@@ -31,6 +31,7 @@ mod direct_calls;
 mod expression_flow;
 mod flow_render;
 mod identifiers;
+pub mod lexical_content;
 mod param_extraction;
 mod pseudo_call;
 mod qualified;
@@ -1753,6 +1754,10 @@ pub type ArgumentPassingModeExtractor = for<'tree> fn(Node<'tree>, Node<'tree>) 
 /// return, and call-argument lowering all consume the same language-neutral
 /// shape and never infer literals from rendered text or capitalization.
 pub type ExpressionValueKindExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<crate::AssignValueKind>;
+
+/// Exact adapter-owned lexical body count. Missing proof stays unknown;
+/// shared consumers must not substitute raw text or decoded runtime values.
+pub type LexicalContentLengthExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<usize>;
 /// Adapter-owned decomposition for aggregate syntax whose key/value pairs
 /// are encoded as sibling CST nodes rather than one fielded pair wrapper.
 pub type AggregatePairExtractor = for<'tree> fn(Node<'tree>) -> Vec<(Node<'tree>, Node<'tree>)>;
@@ -2093,11 +2098,15 @@ pub struct GrammarHandler {
     /// Literal keyword spellings used only when the owning grammar exposes
     /// that keyword through an identifier-shaped node.
     pub literal_value_spellings: &'static [&'static str],
-    /// Complete string/character literal node kinds for this grammar. The
+    /// Complete named string/character literal node kinds for this grammar. The
     /// shared `strings` inventory walks only this adapter-owned set.
     pub string_literal_kinds: &'static [&'static str],
+    /// Adapter-owned lexical body length, independent of runtime decoding.
+    pub string_content_len: Option<LexicalContentLengthExtractor>,
     /// Exact comment node kinds emitted by this grammar.
     pub comment_kinds: &'static [&'static str],
+    /// Adapter-owned marker-free lexical comment body length.
+    pub comment_content_len: Option<LexicalContentLengthExtractor>,
     /// Comment kinds that are documentation comments by grammar contract.
     pub doc_comment_kinds: &'static [&'static str],
     /// Source prefixes that make an otherwise generic comment node a
@@ -2493,6 +2502,8 @@ pub const EMPTY_HANDLER: GrammarHandler = GrammarHandler {
     literal_value_kinds: &[],
     literal_value_spellings: &[],
     string_literal_kinds: &[],
+    string_content_len: None,
+    comment_content_len: None,
     comment_kinds: &[],
     doc_comment_kinds: &[],
     doc_comment_prefixes: &[],
@@ -2881,6 +2892,8 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "interpolated_string_expression",
         "interpolated_string_literal",
     ],
+    string_content_len: None,
+    comment_content_len: None,
     comment_kinds: &[
         "comment",
         "line_comment",
@@ -3618,8 +3631,10 @@ impl GrammarHandler {
     fn is_literal_value(&self, kind: &str, text: &str) -> bool {
         self.literal_value_kinds.contains(&kind) || self.literal_value_spellings.contains(&text.trim())
     }
-    fn is_string_literal(&self, kind: &str) -> bool {
-        self.string_literal_kinds.contains(&kind)
+    fn is_string_literal(&self, node: Node<'_>) -> bool {
+        // Anonymous keyword tokens can share a kind spelling with a named
+        // literal node. Only the grammar's named value node is a literal.
+        node.is_named() && self.string_literal_kinds.contains(&node.kind())
     }
     /// Classify a complete parsed value expression using only this grammar's
     /// inventories and optional exact callback.
@@ -3631,7 +3646,7 @@ impl GrammarHandler {
             {
                 return Some(kind);
             }
-            let is_literal = if self.is_string_literal(node.kind()) {
+            let is_literal = if self.is_string_literal(node) {
                 !string_expression_has_dynamic_input(node, src, self)
             } else {
                 self.is_literal_value(node.kind(), node_text(&node, src))
@@ -6086,6 +6101,8 @@ pub const fn with_fn_kinds_and_implicit_receivers(
         literal_value_kinds: GENERIC_HANDLER.literal_value_kinds,
         literal_value_spellings: GENERIC_HANDLER.literal_value_spellings,
         string_literal_kinds: GENERIC_HANDLER.string_literal_kinds,
+        string_content_len: GENERIC_HANDLER.string_content_len,
+        comment_content_len: GENERIC_HANDLER.comment_content_len,
         comment_kinds: GENERIC_HANDLER.comment_kinds,
         doc_comment_kinds: GENERIC_HANDLER.doc_comment_kinds,
         doc_comment_prefixes: GENERIC_HANDLER.doc_comment_prefixes,
@@ -7741,11 +7758,12 @@ pub fn extract_string_literals(
     let root = tree.root_node();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if handler.is_string_literal(node.kind()) {
+        if handler.is_string_literal(node) {
             let text = node_text(&node, src).to_string();
             if !text.is_empty() {
                 out.push(crate::StringLiteral {
                     span: span_of(file, &node),
+                    content_len: handler.string_content_len.and_then(|extract| extract(node, src)),
                     category: crate::StringCategory::classify(&text),
                     text,
                     static_value: None,

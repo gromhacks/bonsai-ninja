@@ -240,12 +240,10 @@ pub(crate) struct Cli {
     )]
     pub(crate) html_output: Option<PathBuf>,
 
-    /// Secondary output filter: keep only result rows whose text
-    /// contains this substring (case-insensitive). Repeatable — a row
-    /// must contain ALL given substrings. Works across the browse,
-    /// inspect, and security commands. Applied AFTER the query, so the
-    /// expensive analysis is reused — iterating on `--contains`
-    /// re-renders instead of re-running.
+    /// Keep rows matching ALL repeated values (case-insensitive substrings).
+    /// Filters rendered facts after analysis; export/cache reject view filters.
+    /// For strings/comments, `--regex` uses case-sensitive regexes; `(?i)`
+    /// enables case-insensitive matching.
     #[arg(
         long = "contains",
         global = true,
@@ -473,6 +471,10 @@ pub(crate) enum Cmd {
         /// File context for `R:` resolver candidate ids.
         #[arg(long = "in-file")]
         in_file: Option<String>,
+        /// Original call-site line for `R:` resolver candidate ids.
+        /// Requires `--in-file`; preserves line-scoped receiver evidence.
+        #[arg(long, requires = "in_file")]
+        line: Option<u32>,
         /// Source function for structured dump-taint `T:` propagation ids.
         #[arg(long = "taint-source")]
         taint_source: Option<String>,
@@ -1473,9 +1475,6 @@ pub(crate) enum Cmd {
         /// Category filter (`sql`, `url`, `shell`, `regex`, `path`, `generic`).
         #[arg(long)]
         category: Option<String>,
-        /// Substring match on the literal's text.
-        #[arg(long)]
-        contains: Option<String>,
         /// Workspace-relative file path filter. Explicit absolute paths are
         /// also accepted.
         #[arg(long)]
@@ -1483,10 +1482,12 @@ pub(crate) enum Cmd {
         /// Only strings inside a function whose name contains this substring.
         #[arg(long = "in-fn")]
         in_fn: Option<String>,
-        /// Minimum character length — filters out empty / trivial literals.
+        /// Minimum lexical body length in Unicode characters, excluding literal
+        /// prefixes/delimiters. Escapes, interpolation and whitespace stay verbatim.
         #[arg(long = "min-len")]
         min_len: Option<usize>,
-        /// Interpret `--contains` as a regex.
+        /// Interpret each `--contains` value as a case-sensitive regex over
+        /// the row's string fields. Use `(?i)` for case-insensitive regexes.
         #[arg(long, default_value_t = false)]
         regex: bool,
         /// Maximum rows per output page (`0` = token-budget only).
@@ -1549,9 +1550,6 @@ pub(crate) enum Cmd {
         /// `--kind do` matches both `todo` and `doc`.
         #[arg(long)]
         kind: Option<String>,
-        /// Substring match on the comment text.
-        #[arg(long)]
-        contains: Option<String>,
         /// Workspace-relative file path filter. Explicit absolute paths are
         /// also accepted.
         #[arg(long)]
@@ -1560,10 +1558,12 @@ pub(crate) enum Cmd {
         /// this substring.
         #[arg(long = "in-fn")]
         in_fn: Option<String>,
-        /// Minimum character length — filters out trivial markers.
+        /// Minimum lexical body length in Unicode characters, excluding comment
+        /// markers. Whitespace is preserved.
         #[arg(long = "min-len")]
         min_len: Option<usize>,
-        /// Interpret `--contains` as a regex.
+        /// Interpret each `--contains` value as a case-sensitive regex over
+        /// the row's string fields. Use `(?i)` for case-insensitive regexes.
         #[arg(long, default_value_t = false)]
         regex: bool,
         /// Maximum rows per output page (`0` = token-budget only).

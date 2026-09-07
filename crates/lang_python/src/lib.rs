@@ -305,7 +305,11 @@ fn python_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
         .flatten()
 }
 
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     pseudo_call_receiver_role: bonsai_lang_api::CallReceiverRole::Value,
     literal_value_kinds: &["none", "integer", "float", "true", "false"],
     literal_value_spellings: &[],
@@ -1213,6 +1217,7 @@ fn python_docstring_comments(tree: &Tree, file: FileId, src: &[u8]) -> Vec<Comme
         }
         out.push(Comment {
             span: span_of(file, &value),
+            content_len: lexical_content::string_content_len(value, src),
             kind: CommentKind::classify(&text, true),
             text,
         });

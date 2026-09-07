@@ -4,6 +4,7 @@ use crate::common::{
     admitted_file_decl_index, file_path_matches_filter, format_span, make_name_filter,
     source_files_small_first, textual_relevance_key,
 };
+use crate::literal_filter::{matches_min_len, LiteralFilterError};
 use bonsai_workspace::Workspace;
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +22,8 @@ pub struct StringsFilters<'a> {
     /// `--in-fn X` — only keep literals whose enclosing function's
     /// name contains `X`.
     pub in_fn: Option<&'a str>,
-    /// Drop literals with fewer than this many chars (post strip).
+    /// Minimum adapter-proven lexical body length in Unicode scalar values.
+    /// Delimiters/prefixes are excluded; escapes and whitespace stay verbatim.
     pub min_len: Option<usize>,
     /// Treat `contains` as a regex.
     pub regex: bool,
@@ -30,6 +32,9 @@ pub struct StringsFilters<'a> {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StringOut {
     pub text: String,
+    /// Adapter-proven lexical body length; unknown is distinct from empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_len: Option<usize>,
     pub category: String,
     pub file: String,
     pub line: u32,
@@ -37,14 +42,14 @@ pub struct StringOut {
 }
 
 /// Collect every string literal matching the filters.
-pub fn strings(ws: &Workspace, f: &StringsFilters<'_>) -> Result<Vec<StringOut>, regex::Error> {
+pub fn strings(ws: &Workspace, f: &StringsFilters<'_>) -> Result<Vec<StringOut>, LiteralFilterError> {
     use rayon::prelude::*;
     let contains_match = make_name_filter(f.contains, f.regex)?;
     let files = source_files_small_first(ws);
     let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
     let mut out: Vec<StringOut> = files
         .par_iter()
-        .flat_map_iter(|&file| {
+        .map(|&file| -> Result<Vec<StringOut>, LiteralFilterError> {
             let mut per_file: Vec<StringOut> = Vec::new();
             if let Some(needle) = f.file {
                 let path = ws
@@ -53,12 +58,12 @@ pub fn strings(ws: &Workspace, f: &StringsFilters<'_>) -> Result<Vec<StringOut>,
                     .map(|path| path.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 if !file_path_matches_filter(ws, &path, needle) {
-                    return per_file.into_iter();
+                    return Ok(per_file);
                 }
             }
             // String inventory consumes only file-local compiler facts.
             let Some(idx) = admitted_file_decl_index(ws, file, &memory_permits) else {
-                return per_file.into_iter();
+                return Ok(per_file);
             };
             let enclosing = f.in_fn.map(|_| {
                 bonsai_workspace::enclosing_index::EnclosingSpanIndex::from_callable_decls(&idx.defs)
@@ -71,13 +76,6 @@ pub fn strings(ws: &Workspace, f: &StringsFilters<'_>) -> Result<Vec<StringOut>,
                 if !contains_match(&s.text) {
                     continue;
                 }
-                if let Some(min_chars) = f.min_len {
-                    // `chars().count()` is O(n) but strings are short
-                    // and we only walk on cheap-checks-passed.
-                    if s.text.chars().count() < min_chars {
-                        continue;
-                    }
-                }
                 if let Some(needle) = f.in_fn {
                     if !enclosing
                         .as_ref()
@@ -87,18 +85,28 @@ pub fn strings(ws: &Workspace, f: &StringsFilters<'_>) -> Result<Vec<StringOut>,
                         continue;
                     }
                 }
+                if !matches_min_len(s.content_len, f.min_len, || format_span(&s.span, ws))? {
+                    continue;
+                }
                 let (path, line, col) = format_span(&s.span, ws);
                 per_file.push(StringOut {
                     text: s.text.clone(),
+                    content_len: s.content_len,
                     category: cat,
                     file: path,
                     line,
                     column: col,
                 });
             }
-            per_file.into_iter()
+            Ok(per_file)
         })
-        .collect();
+        .try_reduce(Vec::new, |mut left, mut right| {
+            if right.len() > left.len() {
+                std::mem::swap(&mut left, &mut right);
+            }
+            left.append(&mut right);
+            Ok(left)
+        })?;
     // Group by category (sql / url / shell / …) so each category's
     // strings cluster together, then alphabetical by text, then
     // file/line for stability.

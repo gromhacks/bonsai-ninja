@@ -1,8 +1,7 @@
-//! Browse commands: `defs`, `entrypoints`, `calls`, `imports`, `vars`,
-//! `strings`, `comments`, `args`, `operations`, `classes`, `refs`, `search`. Each reads
-//! from the shared `GlobalIndex` and emits a uniform `{header row, rows, footer}`
-//! shape. JSON output keeps a bare array when the full result fits the
-//! token budget; larger or explicitly paged renders use `{rows, page}`.
+//! Browse command renderers over canonical compiler-backed SDK fact rows.
+//! Syntax inventories stream selected file-local facts; they do not require
+//! a whole-workspace body index. JSON always retains the `{rows, page}`
+//! envelope and separate analysis/display completeness metadata.
 
 use anyhow::Result;
 use bonsai_sdk::Workspace;
@@ -865,13 +864,11 @@ pub(crate) fn cmd_entrypoints(
             )?;
             (scoped.0, scoped.1)
         }
-        None => {
-            if let Some(file) = f.file.filter(|file| !file.trim().is_empty()) {
-                open_project_index_filtered_paths(root, &[file.to_string()], &[])?
-            } else {
-                open_project(root)?
-            }
-        }
+        // `--file` selects candidate declarations, not the universe of
+        // callers. A filtered workspace would invent roots when their real
+        // callers live in a different module. The browse facade narrows the
+        // header worklist before checking exact callers in the full workspace.
+        None => open_project(root)?,
     };
     let (out, cached_analysis_reasons) = match cached_rows {
         Some(payload) => (payload.rows, Some(payload.analysis_incomplete_reasons)),
@@ -1622,14 +1619,7 @@ where
     let canonical = serde_json::to_value(value)?;
     let secondary = crate::filter::active();
     if apply_secondary_filter && secondary.is_active() && !secondary.matches_value(&canonical) {
-        crate::output::emit_json_document(&serde_json::json!({
-            "analysis_complete": true,
-            "analysis_incomplete_reasons": [],
-            "result_complete": true,
-            "result_incomplete_reasons": [],
-            "matched": false,
-            "value": null,
-        }))?;
+        crate::output::emit_json_document(&super::filtered_out_document(&canonical))?;
         return Ok(());
     }
 

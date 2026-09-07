@@ -89,13 +89,13 @@ pub use bonsai_browse::{
     AstFileDump, AstFilters, AstFunctionCandidate, AstNode, AstOutcome, CallOut, CallgraphRow, CallsFilters,
     ClassOut, ClassesFilters, CommentOut, CommentsFilters, DefOut, DefsFilters, EdgeRecord, EdgesFilters,
     EntryPointOut, EntryPointsFilters, GraphExportFormat, GraphProjection, HirDump, ImportOut,
-    ImportsFilters, Locator, NativeExportPhase, NativeExportProgress, OperationOperandOut, OperationOut,
-    OperationsFilters, PathFilters, PathFunctionRow, PathOutcome, PathTerminalCallRow, RefOut, RefsFilters,
-    ResolutionCoverageDeclRow, ResolutionCoverageFileRow, ResolutionCoverageFilters, ResolveFilters,
-    ResolveOutcome, ResolveTrace, SearchFilters, SearchHit, SliceFilters, SliceOutcome, SliceRow, SliceStep,
-    StringOut, StringsFilters, SummaryAnnotator, SymbolCallEdge, SymbolEvidenceKind, SymbolImport,
-    SymbolSummary, TaintFilters, TaintOutcome, TaintRecord, TaintReport, UnresolvedCallEvidence, VarOut,
-    VarsFilters,
+    ImportsFilters, LiteralFilterError, Locator, NativeExportPhase, NativeExportProgress,
+    OperationOperandOut, OperationOut, OperationsFilters, PathFilters, PathFunctionRow, PathOutcome,
+    PathTerminalCallRow, RefOut, RefsFilters, ResolutionCoverageDeclRow, ResolutionCoverageFileRow,
+    ResolutionCoverageFilters, ResolveFilters, ResolveOutcome, ResolveTrace, SearchFilters, SearchHit,
+    SliceFilters, SliceOutcome, SliceRow, SliceStep, StringOut, StringsFilters, SummaryAnnotator,
+    SymbolCallEdge, SymbolEvidenceKind, SymbolImport, SymbolSummary, TaintFilters, TaintOutcome, TaintRecord,
+    TaintReport, UnresolvedCallEvidence, VarOut, VarsFilters,
 };
 pub use bonsai_browse::{
     file_connections, FileConnections, ModuleDecl, ModuleEdge, ModuleEdgeGroup, ModuleImport,
@@ -5001,7 +5001,7 @@ impl Browse<'_> {
     pub fn strings(
         &self,
         filters: bonsai_browse::StringsFilters<'_>,
-    ) -> Result<Vec<bonsai_browse::StringOut>, regex::Error> {
+    ) -> Result<Vec<bonsai_browse::StringOut>, LiteralFilterError> {
         self.project.refresh_from_disk_best_effort();
         bonsai_browse::strings(&self.project.workspace, &filters)
     }
@@ -5009,7 +5009,7 @@ impl Browse<'_> {
     pub fn comments(
         &self,
         filters: CommentsFilters<'_>,
-    ) -> Result<Vec<bonsai_browse::CommentOut>, regex::Error> {
+    ) -> Result<Vec<bonsai_browse::CommentOut>, LiteralFilterError> {
         self.project.refresh_from_disk_best_effort();
         bonsai_browse::comments(&self.project.workspace, &filters)
     }
@@ -5317,6 +5317,10 @@ impl Show<'_> {
             ResolveOutcome::Trace(trace) => Ok(ShowOutcome::ResolverCandidate(trace)),
             ResolveOutcome::FileContextNotFound { needle } => Err(anyhow!(
                 "resolver file context `{needle}` was not found for candidate id `{candidate_id}`"
+            )),
+            ResolveOutcome::FileContextAmbiguous { needle, candidates } => Err(anyhow!(
+                "resolver file context `{needle}` is ambiguous for candidate id `{candidate_id}`; use one of: {}",
+                candidates.join(", ")
             )),
             ResolveOutcome::CandidateNotFound => {
                 Err(anyhow!("resolver candidate id `{candidate_id}` was not found"))

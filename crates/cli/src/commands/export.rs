@@ -21,7 +21,9 @@ pub(crate) fn cmd_export(
     full_propagations: bool,
     format: ExportFormat,
 ) -> Result<()> {
-    let cacheable_default_json = format == ExportFormat::Json && !full_propagations;
+    let cacheable_default_json = format == ExportFormat::Json
+        && !full_propagations
+        && !crate::NO_CACHE.get().copied().unwrap_or(false);
     if cacheable_default_json {
         let stage = progress::ScopedSpinner::new("checking export cache");
         let cache_hit = output::with_writer(|writer| {

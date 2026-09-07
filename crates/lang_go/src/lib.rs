@@ -205,7 +205,11 @@ fn apply_go_type_declaration_kinds(index: &mut DeclIndex, tree: &Tree, file: Fil
     }
 }
 
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     expression_value_kind_extractor: Some(go_expression_value_kind),
     literal_value_kinds: &[
         "nil",

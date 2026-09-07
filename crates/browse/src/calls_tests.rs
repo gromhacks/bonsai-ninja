@@ -34,3 +34,59 @@ fn assignment_source_call_rows_remain_when_no_explicit_call_exists() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].callee, "factory");
 }
+
+#[test]
+fn callee_regex_preserves_literal_caller_selector() {
+    let workspace = Workspace::new(bonsai_adapters::all_languages_registry());
+    workspace.vfs().write(
+        "app.js",
+        "function $scope(value) { invoke(value); invokeExtra(value); }\n\
+         function scope(value) { invoke(value); }\n",
+    );
+
+    let rows = calls(
+        &workspace,
+        &CallsFilters {
+            callee: Some("^invoke$"),
+            caller: Some("$scope"),
+            regex: true,
+            ..Default::default()
+        },
+    )
+    .expect("callee regex with literal caller");
+
+    assert_eq!(rows.len(), 1, "exact callee and literal caller: {rows:?}");
+    assert_eq!(rows[0].callee, "invoke");
+    assert_eq!(rows[0].caller.as_deref(), Some("$scope"));
+    assert_eq!(rows[0].line, 1);
+}
+
+#[test]
+fn regex_validation_applies_only_to_callee() {
+    let workspace = Workspace::new(bonsai_adapters::all_languages_registry());
+    workspace
+        .vfs()
+        .write("app.js", "function scope(value) { invoke(value); }\n");
+
+    let rows = calls(
+        &workspace,
+        &CallsFilters {
+            callee: Some("^invoke$"),
+            caller: Some("["),
+            regex: true,
+            ..Default::default()
+        },
+    )
+    .expect("caller is a literal substring, even when it is not a valid regex");
+    assert!(rows.is_empty(), "the literal caller does not match: {rows:?}");
+
+    assert!(calls(
+        &workspace,
+        &CallsFilters {
+            callee: Some("["),
+            regex: true,
+            ..Default::default()
+        },
+    )
+    .is_err());
+}

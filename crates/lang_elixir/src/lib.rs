@@ -643,7 +643,11 @@ fn elixir_catch_arm_facts(node: Node<'_>, file: FileId, src: &[u8]) -> Vec<bonsa
 // definitions also match), but that's the cost of Elixir's macro-based
 // syntax — precision upgrades would require a hand-rolled handler
 // filtering by target.
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     expression_value_kind_extractor: None,
     literal_value_kinds: &[
         "nil",

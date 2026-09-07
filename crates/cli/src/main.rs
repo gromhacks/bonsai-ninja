@@ -19,11 +19,13 @@
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::{Context, Result};
+#[cfg(test)]
 use clap::Parser;
 use theme::Theme;
 use ui::Ui;
 
 mod args;
+mod cli_parse;
 mod commands;
 mod filter;
 mod footer;
@@ -348,7 +350,7 @@ fn real_main() -> Result<()> {
     // Every parse error renders through the same themed help path as
     // `help` / `--help`: the error line, the menu the input addressed, and
     // the `help` hint.
-    let mut cli = match Cli::try_parse() {
+    let mut cli = match cli_parse::parse(std::env::args_os()) {
         Ok(cli) => cli,
         Err(err) => match err.kind() {
             clap::error::ErrorKind::DisplayHelp
@@ -409,7 +411,12 @@ fn real_main() -> Result<()> {
     // filter (a filtered run never replays an unfiltered run's pages);
     // the expensive taint *analysis* payload is keyed separately so it
     // is reused across filter changes.
-    filter::init(&cli.contains, &cli.not_contains);
+    let contains_regex = matches!(
+        &cli.command,
+        Cmd::Strings { regex: true, .. } | Cmd::Comments { regex: true, .. }
+    );
+    filter::init(&cli.contains, &cli.not_contains, contains_regex).context("invalid --contains regex")?;
+    page_cache::init_command(&cli.command);
     let command_output_path = command_output_path(&cli.command).map(std::path::Path::to_path_buf);
     if html_output.is_some() && command_output_path.is_some() {
         anyhow::bail!("--html-output and --output-path are mutually exclusive");
@@ -478,6 +485,7 @@ fn real_main() -> Result<()> {
             id,
             query,
             in_file,
+            line,
             taint_source,
             taint_seeds,
             taint_sink,
@@ -495,6 +503,7 @@ fn real_main() -> Result<()> {
                 id: &id,
                 query: query.as_deref(),
                 in_file: in_file.as_deref(),
+                line,
                 taint_source: taint_source.as_deref(),
                 taint_seeds: &taint_seeds,
                 taint_sink: taint_sink.as_deref(),
@@ -808,11 +817,10 @@ fn real_main() -> Result<()> {
         Cmd::Strings {
             workspace,
             category,
-            contains,
             file,
             in_fn,
             min_len,
-            regex,
+            regex: _,
             limit,
             flows,
             context,
@@ -824,11 +832,11 @@ fn real_main() -> Result<()> {
             &workspace,
             StringsFilters {
                 category: category.as_deref(),
-                contains: contains.as_deref(),
+                contains: None,
                 file: file.as_deref(),
                 in_fn: in_fn.as_deref(),
                 min_len,
-                regex,
+                regex: false,
             },
             limit,
             paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
@@ -838,11 +846,10 @@ fn real_main() -> Result<()> {
         Cmd::Comments {
             workspace,
             kind,
-            contains,
             file,
             in_fn,
             min_len,
-            regex,
+            regex: _,
             limit,
             context,
             page,
@@ -853,11 +860,11 @@ fn real_main() -> Result<()> {
             &workspace,
             CommentsFilters {
                 kind: kind.as_deref(),
-                contains: contains.as_deref(),
+                contains: None,
                 file: file.as_deref(),
                 in_fn: in_fn.as_deref(),
                 min_len,
-                regex,
+                regex: false,
             },
             limit,
             paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,

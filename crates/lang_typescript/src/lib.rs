@@ -260,7 +260,11 @@ fn grammar_pack_for_file(file: FileId, ctx: &AdapterContext<'_>) -> &'static str
         .filter(|extension| extension.eq_ignore_ascii_case("tsx"))
         .map_or(PACK_NAME, |_| TSX_PACK_NAME)
 }
+mod lexical_content;
+
 const COMMON_HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     expression_value_kind_extractor: Some(typescript_expression_value_kind),
     literal_value_kinds: &["null", "number", "true", "false"],
     string_literal_kinds: &["string", "template_string"],

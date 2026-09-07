@@ -16,7 +16,7 @@ use bonsai_common::{
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-use super::{emit_json_value_paged_cached, is_internal_workspace_entry_name};
+use super::{emit_json_value_paged_cached_prefiltered, is_internal_workspace_entry_name};
 use crate::args::BrowseFormat;
 use crate::cli_println;
 use crate::footer::render_paging_footer;
@@ -151,6 +151,10 @@ impl<'a> From<&'a StructuralTreeNode> for StructuralTreeNodeJson<'a> {
 }
 
 pub(crate) fn cmd_tree(args: TreeArgs<'_>) -> Result<()> {
+    // Validate presentation selectors even when the complete tree is later
+    // rejected by a secondary filter.
+    paging::config_from_raw(args.context, args.page, args.all, FormatClass::Programmatic)
+        .map_err(|error| anyhow::anyhow!(error))?;
     let filters_hash = tree_filters_hash(&args);
     let stage = progress::ScopedSpinner::new("scanning filesystem tree");
     let mut out = build_fast_filesystem_tree(&args)?;
@@ -163,17 +167,27 @@ pub(crate) fn cmd_tree(args: TreeArgs<'_>) -> Result<()> {
         attach_tree_connections(&args, &mut out)?
     };
 
+    // The hierarchy and its aggregate counts are one connected result.
+    // Select the same complete object in text and JSON; individual rendered
+    // lines cannot be removed without breaking its parent/child structure.
+    let view = StructuralTreeJson::from(&out);
+    let secondary = crate::filter::active();
+    if secondary.is_active() && !secondary.matches_value(&view) {
+        match args.format {
+            BrowseFormat::Json => {
+                let value = serde_json::to_value(&view)?;
+                crate::output::emit_json_document(&super::filtered_out_document(&value))?;
+            }
+            BrowseFormat::Text => cli_println!("no tree result matches the active output filter"),
+        }
+        return Ok(());
+    }
+
     match args.format {
         BrowseFormat::Json => {
             let cfg = paging::config_from_raw(args.context, args.page, args.all, FormatClass::Programmatic)
                 .map_err(|e| anyhow::anyhow!(e))?;
-            emit_json_value_paged_cached(
-                args.workspace,
-                &StructuralTreeJson::from(&out),
-                &cfg,
-                "tree",
-                filters_hash,
-            )?;
+            emit_json_value_paged_cached_prefiltered(args.workspace, &view, &cfg, "tree", filters_hash)?;
         }
         BrowseFormat::Text => {
             render_text_paged(&out, args.context, args.page, args.all, filters_hash)?;
@@ -202,11 +216,7 @@ fn build_fast_filesystem_tree(args: &TreeArgs<'_>) -> Result<StructuralTreeOut> 
         .unwrap_or_else(|_| args.workspace.to_path_buf());
     let mut build = FastTreeBuild {
         root: root.clone(),
-        max_depth: if args.file.is_some() {
-            usize::MAX
-        } else {
-            args.max_depth.unwrap_or(usize::MAX)
-        },
+        max_depth: args.max_depth.unwrap_or(usize::MAX),
         child_limit: if args.all || args.limit == 0 {
             usize::MAX
         } else {

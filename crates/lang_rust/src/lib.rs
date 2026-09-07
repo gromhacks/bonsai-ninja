@@ -192,7 +192,11 @@ fn rust_static_string(literal: &str) -> Option<String> {
     Some(out)
 }
 
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     expression_value_kind_extractor: None,
     literal_value_kinds: &[
         "boolean_literal",

@@ -100,8 +100,8 @@ fn complete_inventory(
     options: &SecurityInventoryOptions,
     progress: &mut SecurityAnalysisProgress,
 ) -> Result<Vec<RuleMatch>> {
-    let files_filter = options.files.join(",");
-    let exclude_files_filter = options.exclude_files.join(",");
+    let files_filter = filter_list_key(&options.files);
+    let exclude_files_filter = filter_list_key(&options.exclude_files);
     let analysis_hash = filter_signature(&[
         ("kind", kind_label),
         ("files", &files_filter),
@@ -1352,6 +1352,8 @@ fn cmd_sources(
         false,
         filter_signature(&[
             ("kind", "source"),
+            ("files", &filter_list_key(&files)),
+            ("exclude_files", &filter_list_key(&exclude_files)),
             ("rule", rule.as_deref().unwrap_or("")),
             ("rule_regex", rule_regex.as_deref().unwrap_or("")),
             ("trust", trust.as_deref().unwrap_or("")),
@@ -1427,6 +1429,8 @@ fn cmd_sinks(
         true,
         filter_signature(&[
             ("kind", "sink"),
+            ("files", &filter_list_key(&files)),
+            ("exclude_files", &filter_list_key(&exclude_files)),
             ("rule", rule.as_deref().unwrap_or("")),
             ("rule_regex", rule_regex.as_deref().unwrap_or("")),
             ("severity", severity.as_deref().unwrap_or("")),
@@ -1496,6 +1500,8 @@ fn cmd_sanitizers(
         false,
         filter_signature(&[
             ("kind", "sanitizer"),
+            ("files", &filter_list_key(&files)),
+            ("exclude_files", &filter_list_key(&exclude_files)),
             ("rule", rule.as_deref().unwrap_or("")),
             ("rule_regex", rule_regex.as_deref().unwrap_or("")),
             ("tag", tag.as_deref().unwrap_or("")),
@@ -1524,8 +1530,8 @@ fn cmd_deps(
     // The complete inventory for the file scope is a cached object;
     // framework and severity are views over it, rendered from the rows and
     // the loaded rulepack without opening the workspace.
-    let files_filter = files.join(",");
-    let exclude_files_filter = exclude_files.join(",");
+    let files_filter = filter_list_key(&files);
+    let exclude_files_filter = filter_list_key(&exclude_files);
     let inventory_hash = filter_signature(&[
         ("kind", "deps-inventory"),
         ("files", &files_filter),
@@ -1571,8 +1577,10 @@ fn cmd_deps(
             .retain(|row| row.severity.is_some_and(|row_severity| row_severity >= floor));
     }
 
-    let filters_hash = filter_signature(&[
+    let filters_hash = render_filter_signature(&[
         ("kind", "deps"),
+        ("files", &files_filter),
+        ("exclude_files", &exclude_files_filter),
         ("framework", framework.as_deref().unwrap_or("")),
         ("severity", severity.as_deref().unwrap_or("")),
     ]);
@@ -1718,8 +1726,8 @@ fn cmd_flows(
     // pattern-only, and text selectors are all views over that cached report
     // and deliberately do not enter this key, so a narrowed re-query never
     // reruns parsing, callgraph, IDG, or taint work.
-    let files_filter = files.join(",");
-    let exclude_files_filter = exclude_files.join(",");
+    let files_filter = filter_list_key(&files);
+    let exclude_files_filter = filter_list_key(&exclude_files);
     let analysis_hash = filter_signature(&[
         ("kind", "taint-analysis"),
         ("files", &files_filter),
@@ -1781,11 +1789,9 @@ fn cmd_flows(
                         attach_flow_evidence_to_render_finding(&mut body_cache, item);
                     }
                 }
-                let combined: Vec<CombinedFindingWithChain> =
-                    findings.into_iter().map(|item| item.finding).collect();
                 emit_taint_sarif(
                     workspace,
-                    combined,
+                    findings,
                     cached_report.runtime_disabled_rules.clone(),
                     cached_report.analysis_complete,
                     cached_report.analysis_incomplete_reasons.clone(),
@@ -1794,7 +1800,7 @@ fn cmd_flows(
                 render_progress.finish();
                 return Ok(());
             } else {
-                let cached_render_project = if !summary_only {
+                let cached_render_project = if !summary_only || crate::filter::active().is_active() {
                     Some(if !files.is_empty() || !exclude_files.is_empty() {
                         open_security_project_filtered_paths(
                             workspace,
@@ -1862,7 +1868,6 @@ fn cmd_flows(
         },
         |event| analysis_progress.handle(event),
     )?;
-    let runtime_disabled_rules = report.runtime_disabled_rules.clone();
     let bulk_flow_evidence_attached = matches!(format, SecurityFormat::Sarif);
     if bulk_flow_evidence_attached {
         attach_flow_evidence_to_report(project.workspace(), &mut report);
@@ -1889,7 +1894,7 @@ fn cmd_flows(
             // The complete report (with bulk flow evidence) is persisted
             // first so later text, JSON, and SARIF views reuse it instead of
             // re-running the analysis.
-            let render_report = build_taint_render_report(report.clone(), pack, true, true);
+            let render_report = build_taint_render_report(report, pack, true, true);
             save_taint_payload_if_requested(
                 workspace,
                 analysis_hash,
@@ -1898,18 +1903,12 @@ fn cmd_flows(
                 Some(&render_report),
             );
             let render_progress = ScopedProgress::new("rendering SARIF");
-            let TaintAnalysisReport {
-                findings,
-                analysis_complete,
-                analysis_incomplete_reasons,
-                ..
-            } = report;
             emit_taint_sarif(
                 workspace,
-                findings,
-                runtime_disabled_rules,
-                analysis_complete,
-                analysis_incomplete_reasons,
+                render_report.findings,
+                render_report.runtime_disabled_rules,
+                render_report.analysis_complete,
+                render_report.analysis_incomplete_reasons,
                 &view_filters,
             )?;
             render_progress.finish();
@@ -1931,7 +1930,7 @@ fn cmd_flows(
     });
     emit_taint_render_report(
         workspace,
-        if !summary_only {
+        if !summary_only || crate::filter::active().is_active() {
             Some(project.workspace())
         } else {
             None
@@ -2111,14 +2110,27 @@ fn emit_cached_page(pages: &[page_cache::CachedPage], current_page: u64) -> Resu
 /// expect the full selected result set in one document.
 fn emit_taint_sarif(
     workspace: &Path,
-    mut findings: Vec<CombinedFindingWithChain>,
+    findings: Vec<TaintAnalysisRenderFinding>,
     runtime_disabled_rules: Vec<RuntimeDisabledRule>,
     analysis_complete: bool,
     analysis_incomplete_reasons: Vec<String>,
     view_filters: &TaintViewFilters,
 ) -> Result<()> {
-    findings
-        .retain(|finding| view_filters.matches(finding) && crate::filter::active().matches_value(finding));
+    let mut selected = Vec::new();
+    // Both callers hydrate `finding.hops` before reaching this renderer:
+    // cold reports through attach_flow_evidence_to_report, compact cached
+    // rows through attach_flow_evidence_to_render_finding. Preserve the same
+    // canonical render item JSON uses, including its chain IDs and prose;
+    // taint_json_row derives the complete annotated flow from those hops.
+    for (index, item) in findings.into_iter().enumerate() {
+        if !view_filters.matches(&item.finding) {
+            continue;
+        }
+        if taint_secondary_matches(&item, index)? {
+            selected.push(item.finding);
+        }
+    }
+    let findings = selected;
     ensure_selected_taint_view_exists(findings.len(), view_filters)?;
     let plain: Vec<Finding> = findings.iter().map(|f| f.finding.clone()).collect();
     // Runtime-disabled rules collected by the matcher (invalid regex, etc.)
@@ -2130,7 +2142,10 @@ fn emit_taint_sarif(
         .ok()
         .and_then(|path| path.to_str().map(str::to_owned))
         .unwrap_or_else(|| workspace.to_string_lossy().into_owned());
-    cli_println!("{}", report.sarif_json_with_workspace_root(&workspace_root));
+    cli_println!(
+        "{}",
+        report.sarif_json_with_combined_findings(&workspace_root, &findings)
+    );
     Ok(())
 }
 
@@ -2292,6 +2307,13 @@ fn taint_json_row(item: &TaintAnalysisRenderFinding, index: usize) -> Result<ser
         fields.insert("flow".to_string(), serde_json::to_value(flow)?);
     }
     Ok(row)
+}
+
+fn taint_secondary_matches(item: &TaintAnalysisRenderFinding, index: usize) -> Result<bool> {
+    let secondary = crate::filter::active();
+    // Summary, text, JSON, and SARIF all select the same complete canonical
+    // finding, including rule prose and the hydrated, annotated flow body.
+    Ok(!secondary.is_active() || secondary.matches_value(&taint_json_row(item, index)?))
 }
 
 fn build_taint_text_pages(
@@ -3246,7 +3268,7 @@ fn filter_taint_render_report(
     };
     let mut findings = Vec::new();
     let mut hidden: BTreeMap<String, usize> = BTreeMap::new();
-    for original in &report.findings {
+    for (index, original) in report.findings.iter().enumerate() {
         if let Some(reason) = view.reject_reason(&original.finding) {
             *hidden.entry(reason.to_string()).or_insert(0) += 1;
             continue;
@@ -3255,8 +3277,10 @@ fn filter_taint_render_report(
         if let Some(cache) = body_cache.as_mut() {
             attach_flow_evidence_to_render_finding(cache, &mut finding);
         }
-        if secondary.matches_value(&finding.finding) {
-            findings.push(finding);
+        if taint_secondary_matches(&finding, index)? {
+            // Keep the compact cached unit. Summary filtering must not retain
+            // every hydrated source body; selected pages can hydrate on demand.
+            findings.push(original.clone());
         } else {
             *hidden.entry("text".to_string()).or_insert(0) += 1;
         }
@@ -3702,8 +3726,8 @@ fn cmd_sink_analysis(
     // chooses which sinks are compiled; severity, tag, and every source
     // selector are views over that cached report, which carries the
     // security-source proofs for every loaded source rule.
-    let files_filter = files.join(",");
-    let exclude_files_filter = exclude_files.join(",");
+    let files_filter = filter_list_key(&files);
+    let exclude_files_filter = filter_list_key(&exclude_files);
     let analysis_hash = filter_signature(&[
         ("kind", "sink-analysis"),
         ("sink", sink.as_deref().unwrap_or("")),
@@ -3817,6 +3841,7 @@ fn cmd_sink_analysis(
     let secondary_hash = format!("{:016x}", secondary.signature());
     let filters_hash = filter_signature(&[
         ("kind", "sink-analysis"),
+        ("analysis", &analysis_hash.to_string()),
         ("source", source.as_deref().unwrap_or("")),
         ("trust", trust.as_deref().unwrap_or("")),
         ("category", category.as_deref().unwrap_or("")),
@@ -4113,8 +4138,8 @@ fn cmd_source_analysis(
     let ws = project.workspace();
     // Analysis scope is the workspace shape only; every rule selector is a
     // view over the complete cached report.
-    let files_filter = files.join(",");
-    let exclude_files_filter = exclude_files.join(",");
+    let files_filter = filter_list_key(&files);
+    let exclude_files_filter = filter_list_key(&exclude_files);
     let analysis_hash = filter_signature(&[
         ("kind", "source-analysis"),
         ("files", &files_filter),
@@ -4222,6 +4247,7 @@ fn cmd_source_analysis(
     let secondary_hash = format!("{:016x}", secondary.signature());
     let filters_hash = filter_signature(&[
         ("kind", "source-analysis"),
+        ("analysis", &analysis_hash.to_string()),
         ("source", source.as_deref().unwrap_or("")),
         ("trust", trust.as_deref().unwrap_or("")),
         ("category", category.as_deref().unwrap_or("")),
@@ -5427,7 +5453,23 @@ fn parse_severity_flag(flag: Option<&str>) -> Result<Option<Severity>> {
 }
 
 fn filter_signature(pairs: &[(&str, &str)]) -> u64 {
-    paging::hash_filters(pairs)
+    // Encode boundaries, including those between keys and values. These
+    // identities are shared by semantic payloads and their rendered views.
+    let bytes = serde_json::to_vec(pairs).expect("string filter pairs serialize");
+    bonsai_hash::fnv1a_bytes64(&bytes)
+}
+
+fn filter_list_key(values: &[String]) -> String {
+    // A comma can be part of one path selector: ["a,b"] and ["a", "b"]
+    // select different workspaces and must never share a cached report.
+    serde_json::to_string(values).expect("string filter lists serialize")
+}
+
+fn render_filter_signature(pairs: &[(&str, &str)]) -> u64 {
+    filter_signature(&[
+        ("view", &filter_signature(pairs).to_string()),
+        ("secondary", &crate::filter::active().signature().to_string()),
+    ])
 }
 
 fn effective_limit(limit: usize, cfg: &paging::PagingConfig) -> usize {
@@ -5475,12 +5517,10 @@ fn render_match_table(
     show_severity: bool,
     filters_hash: u64,
 ) -> Result<()> {
-    // The code column is the matched source line, read only for the rows a
-    // page renders: reading it for every match would load every matched
-    // file before pagination. The cost model uses the matched text, which
-    // is that line's substance, so pagination stays a pure function of the
-    // semantic rows.
-    let rows = security_match_rows(pack, matches)
+    // Normally hydrate only the requested page. An active secondary filter
+    // must inspect each complete row, so stream its source line before
+    // pagination without retaining all hydrated rows in memory.
+    let mut rows = security_match_rows(pack, matches)
         .into_iter()
         .map(|matched| {
             let location = format!(
@@ -5515,6 +5555,15 @@ fn render_match_table(
             })
             .collect()
     };
+    let secondary = crate::filter::active();
+    if secondary.is_active() {
+        rows.retain(|row| {
+            with_code(std::slice::from_ref(row))
+                .first()
+                .is_some_and(|hydrated| secondary.matches_value(hydrated))
+        });
+    }
+    let filters_hash = render_filter_signature(&[("inventory", &filters_hash.to_string())]);
     let cost = |row: &SecurityMatchPresentationRow| {
         (row.matched.rule_id.len()
             + row.matched.language.len()
@@ -5532,7 +5581,7 @@ fn render_match_table(
 
     match format {
         BrowseFormat::Json => {
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 workspace,
                 &rows,
                 &paging_cfg,
@@ -5560,7 +5609,7 @@ fn render_match_table(
             )?;
         }
         BrowseFormat::Text => {
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 workspace,
                 &rows,
                 &paging_cfg,
@@ -5773,8 +5822,8 @@ fn complete_taint_render_report(
     exclude_files: &[String],
     exclude_tests: bool,
 ) -> Result<TaintAnalysisRenderReport> {
-    let files_filter = files.join(",");
-    let exclude_files_filter = exclude_files.join(",");
+    let files_filter = filter_list_key(files);
+    let exclude_files_filter = filter_list_key(exclude_files);
     // Identical key to `cmd_taint_analysis` for the same scope, so the
     // default taint run and dependency-analysis share one payload.
     let analysis_hash = filter_signature(&[
@@ -5927,9 +5976,9 @@ fn cmd_dependency_analysis(
     collect_progress.finish();
     let taint =
         complete_taint_render_report(workspace, pack, &project, &files, &exclude_files, exclude_tests)?;
-    // Findings are attached by identity here; their flow bodies hydrate only
-    // for the rows on the rendered page (below), never for every package.
-    let rows: Vec<DependencyAnalysisPresentation> = report
+    // Findings are attached by identity. Normally only a rendered page needs
+    // bodies; secondary filtering streams one hydrated package at a time.
+    let mut rows: Vec<DependencyAnalysisPresentation> = report
         .candidates
         .iter()
         .enumerate()
@@ -5968,12 +6017,34 @@ fn cmd_dependency_analysis(
                 })
                 .collect()
         };
+    // Preserve the pre-secondary-filter totals and report the selected set
+    // separately. Paging adds the number shown on this particular page.
+    let total_dependencies = rows.len();
     let total_sites: usize = rows.iter().map(|row| row.sites.len()).sum();
     let total_flows: usize = rows.iter().map(|row| row.finding_items.len()).sum();
+    let secondary = crate::filter::active();
+    if secondary.is_active() {
+        let mut selected = Vec::new();
+        for row in rows {
+            // `finding_items` is intentionally not serialized. Hydrate the
+            // same public unit the page emits, then keep its compact input.
+            let hydrated = hydrate_rows(std::slice::from_ref(&row))?;
+            if secondary.matches_value(&hydrated[0]) {
+                selected.push(row);
+            }
+        }
+        rows = selected;
+    }
+    let filtered_dependencies = rows.len();
+    let filtered_sites: usize = rows.iter().map(|row| row.sites.len()).sum();
+    let filtered_flows: usize = rows.iter().map(|row| row.finding_items.len()).sum();
     let taint_analysis_complete = taint.analysis_complete;
     let taint_incomplete_reasons = taint.analysis_incomplete_reasons.clone();
-    let filters_hash = filter_signature(&[
+    let filters_hash = render_filter_signature(&[
         ("kind", "dependency-analysis"),
+        ("files", &filter_list_key(&files)),
+        ("exclude_files", &filter_list_key(&exclude_files)),
+        ("exclude_tests", if exclude_tests { "1" } else { "0" }),
         ("framework", framework.as_deref().unwrap_or("")),
         ("severity", severity.as_deref().unwrap_or("")),
     ]);
@@ -5995,7 +6066,7 @@ fn cmd_dependency_analysis(
     let analysis_complete = report.analysis_complete && taint_analysis_complete;
     let mut analysis_incomplete_reasons = report.analysis_incomplete_reasons.clone();
     analysis_incomplete_reasons.extend(taint_incomplete_reasons);
-    page_cache::emit_paged_text(
+    page_cache::emit_paged_text_prefiltered(
         workspace,
         &rows,
         &paging_cfg,
@@ -6017,9 +6088,12 @@ fn cmd_dependency_analysis(
                     },
                     "rows": paged,
                     "summary": {
-                        "dependency_count": rows.len(),
+                        "dependency_count": total_dependencies,
                         "site_count": total_sites,
                         "taint_flow_count": total_flows,
+                        "filtered_dependency_count": filtered_dependencies,
+                        "filtered_site_count": filtered_sites,
+                        "filtered_taint_flow_count": filtered_flows,
                         "source_rule_count": taint.summary.source_rule_count,
                         "sink_rule_count": taint.summary.sink_rule_count,
                         "sanitizer_rule_count": taint.summary.sanitizer_rule_count,
@@ -6035,9 +6109,10 @@ fn cmd_dependency_analysis(
                 cli_println!(
                     "{}",
                     u.dim(&format!(
-                        "security dependency-analysis — {} package(s) · {total_sites} usage site(s) · {total_flows} taint flow(s) · \
+                        "security dependency-analysis — {filtered_dependencies} selected / {total_dependencies} total package(s) · \
+                         {filtered_sites} selected / {total_sites} total usage site(s) · \
+                         {filtered_flows} selected / {total_flows} total taint flow(s) · \
                          {} source rule(s) · {} sink rule(s) · {} sanitizer rule(s) loaded",
-                        rows.len(),
                         taint.summary.source_rule_count,
                         taint.summary.sink_rule_count,
                         taint.summary.sanitizer_rule_count,
@@ -6312,7 +6387,7 @@ fn cmd_pack(
         enabled: enabled_filter,
         taint_replay_examples: taint_replay,
     };
-    let base_filters_hash = filter_signature(&[
+    let base_filters_hash = render_filter_signature(&[
         ("kind", "pack"),
         ("lang", lang.as_deref().unwrap_or("")),
         ("category", category.as_deref().unwrap_or("")),

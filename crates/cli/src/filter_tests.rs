@@ -54,6 +54,43 @@ fn needles_do_not_bridge_separate_leaves() {
 }
 
 #[test]
+fn multiline_needles_do_not_bridge_fields_but_can_match_one_multiline_value() {
+    let include = SecondaryFilter::new(&["a\nb".to_string()], &[]);
+    assert!(!include.matches_value(&json!(["a", "b"])));
+    assert!(include.matches_value(&json!({"text": "a\nb"})));
+    let exclude = SecondaryFilter::new(&[], &["a\nb".to_string()]);
+    assert!(exclude.matches_value(&json!(["a", "b"])));
+    assert!(!exclude.matches_value(&json!({"text": "a\nb"})));
+}
+
+#[test]
+fn regex_filters_match_each_leaf_once_and_combine_with_literal_exclusions() {
+    let filter = SecondaryFilter::with_regex(
+        &["^Alpha.*Token$".to_string(), "(?i)^app\\.py$".to_string()],
+        &["BLOCKED".to_string()],
+    )
+    .unwrap();
+    assert!(filter.matches_value(&json!({"text": "Alpha Token", "file": "APP.py"})));
+    assert!(!filter.matches_value(&json!({"text": "alpha Token", "file": "app.py"})));
+    assert!(!filter.matches_value(&json!({"text": "Alpha Token blocked", "file": "app.py"})));
+    assert!(!filter.matches_value(&json!(["Alpha", "Token", "app.py"])));
+    assert!(SecondaryFilter::with_regex(&["[".to_string()], &[]).is_err());
+}
+
+#[test]
+fn regex_and_literal_filters_have_distinct_case_aware_view_identities() {
+    let literal = SecondaryFilter::new(&["Alpha".to_string()], &[]);
+    let regex = SecondaryFilter::with_regex(&["Alpha".to_string()], &[]).unwrap();
+    let lowercase_regex = SecondaryFilter::with_regex(&["alpha".to_string()], &[]).unwrap();
+    assert_ne!(literal.signature(), regex.signature());
+    assert_ne!(regex.signature(), lowercase_regex.signature());
+    assert_eq!(
+        literal.signature(),
+        SecondaryFilter::new(&["ALPHA".to_string()], &[]).signature()
+    );
+}
+
+#[test]
 fn streaming_string_values_match_the_value_tree_leaves() {
     #[derive(serde::Serialize)]
     struct Row<'a> {
@@ -77,7 +114,7 @@ fn streaming_string_values_match_the_value_tree_leaves() {
     super::collect_string_leaves(&value, &mut expected);
     let json = serde_json::to_vec(&row).expect("json");
     let mut streamed = String::new();
-    super::collect_json_string_values(&json, &mut streamed);
+    super::collect_json_string_values(&json, &mut streamed, &mut Vec::new());
     // Same leaves; a `Value` tree orders object keys, the stream keeps
     // serialization order. Leaves are matched independently, so order is
     // immaterial.

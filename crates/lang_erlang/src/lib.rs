@@ -736,7 +736,11 @@ const PACK_NAME: &str = "erlang";
 // Erlang's tree-sitter grammar (WhatsApp) uses its own construct nodes.
 // This adapter declares the complete production inventory so shared lowering
 // can emit case / if / try / receive flow without a cross-language fallback.
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     control_target_extractor: None,
     loop_label_extractor: None,
     expression_value_kind_extractor: None,

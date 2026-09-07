@@ -580,7 +580,7 @@ pub(crate) fn cmd_dump_ast(
         node_id: node_id_filter,
     };
     let stage = progress::ScopedSpinner::new("building AST dump");
-    let file_dumps = match project.dump().ast(filters) {
+    let mut file_dumps = match project.dump().ast(filters) {
         bonsai_sdk::AstOutcome::Dumps(d) => d,
         bonsai_sdk::AstOutcome::NodeIdNotFound => anyhow::bail!(
             "no AST node matching `{}` in this workspace + filter \
@@ -607,6 +607,13 @@ pub(crate) fn cmd_dump_ast(
         }
     };
     stage.finish();
+    // JSON rows are complete file/subtree objects. Apply that same filter
+    // unit before flattening text into paginated lines, preserving children
+    // and ancestor context when any part of the object matches.
+    let secondary = crate::filter::active();
+    if secondary.is_active() {
+        file_dumps.retain(|dump| secondary.matches_value(dump));
+    }
     let filters_hash = paging::hash_filters(&[
         ("file", file_filter.unwrap_or("")),
         ("function", function_filter.unwrap_or("")),
@@ -629,21 +636,34 @@ pub(crate) fn cmd_dump_ast(
     }
     let cost = |d: &bonsai_sdk::AstFileDump| (d.path.len() + node_count(&d.root) * 180) as u64;
     let analysis_reasons = super::touched_parser_incomplete_reasons(project.workspace());
+    let depth_reason = ast_depth_incomplete_reason(&file_dumps);
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(
+            page_cache::emit_paged_text_prefiltered(
                 root_dir,
                 &file_dumps,
                 &paging_cfg,
                 "dump-ast",
                 filters_hash,
                 cost,
-                &analysis_reasons,
+                |rows, info, _cfg| {
+                    let mut result_reasons = paged_json_incomplete_reasons("dump-ast", info);
+                    result_reasons.extend(depth_reason.iter().cloned());
+                    crate::output::emit_json_document(&serde_json::json!({
+                        "analysis_complete": analysis_reasons.is_empty(),
+                        "analysis_incomplete_reasons": analysis_reasons,
+                        "result_complete": result_reasons.is_empty(),
+                        "result_incomplete_reasons": result_reasons,
+                        "rows": rows,
+                        "page": page_info_to_json(info),
+                    }))?;
+                    Ok(())
+                },
             )?;
         }
         BrowseFormat::Text => {
             let units = ast_text_units(&file_dumps);
-            page_cache::emit_paged_text(
+            page_cache::emit_paged_text_prefiltered(
                 root_dir,
                 &units,
                 &paging_cfg,
@@ -656,6 +676,9 @@ pub(crate) fn cmd_dump_ast(
                         cli_println!("{}", render_ast_text_unit(u, unit, compact));
                     }
                     super::render_analysis_incomplete_notice(&analysis_reasons);
+                    if let Some(reason) = &depth_reason {
+                        cli_println!("{}", u.warn(reason));
+                    }
                     render_paging_footer(info, "bonsai-ninja dump-ast <workspace>");
                     Ok(())
                 },
@@ -663,6 +686,18 @@ pub(crate) fn cmd_dump_ast(
         }
     }
     Ok(())
+}
+
+fn ast_depth_incomplete_reason(file_dumps: &[bonsai_sdk::AstFileDump]) -> Option<String> {
+    let mut pending = file_dumps.iter().map(|file| &file.root).collect::<Vec<_>>();
+    let mut omitted = 0usize;
+    while let Some(node) = pending.pop() {
+        omitted = omitted.saturating_add(node.children_omitted);
+        pending.extend(&node.children);
+    }
+    (omitted > 0).then(|| format!(
+        "dump-ast result incomplete: --max-depth omitted {omitted} child subtree(s); increase or omit --max-depth to display them"
+    ))
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -753,9 +788,20 @@ fn render_ast_text_unit(u: &Ui, unit: &AstTextUnit<'_>, compact: bool) -> String
         "[{}:{}..{}:{}]",
         node.start_line, node.start_column, node.end_line, node.end_column
     );
+    let omitted_note = if node.children_omitted == 0 {
+        String::new()
+    } else {
+        format!(
+            "  {}",
+            u.warn(&format!(
+                "[{} child subtree(s) omitted by --max-depth]",
+                node.children_omitted
+            ))
+        )
+    };
     if compact {
         format!(
-            "{indent}{field_prefix}{} {} {}",
+            "{indent}{field_prefix}{} {} {}{omitted_note}",
             u.name(&node.kind),
             u.path(&range),
             u.dim(&node.node_id),
@@ -770,7 +816,7 @@ fn render_ast_text_unit(u: &Ui, unit: &AstTextUnit<'_>, compact: bool) -> String
             _ => String::new(),
         };
         format!(
-            "{indent}{field_prefix}{} {} {}{text_preview}",
+            "{indent}{field_prefix}{} {} {}{text_preview}{omitted_note}",
             u.name(&node.kind),
             u.path(&range),
             u.dim(&node.node_id),
@@ -806,6 +852,10 @@ pub(crate) fn cmd_dump_resolve(
              File context is required for semantic narrowing; rerun with a path \
              substring from `bonsai-ninja tree` or omit --in-file for a name inventory."
         ),
+        bonsai_sdk::ResolveOutcome::FileContextAmbiguous { needle, candidates } => anyhow::bail!(
+            "dump-resolve: --in-file `{needle}` is ambiguous; use a complete workspace-relative path:\n  {}",
+            candidates.join("\n  ")
+        ),
         bonsai_sdk::ResolveOutcome::CandidateNotFound => anyhow::bail!(
             "no candidate matching `{}` for query `{query}`. \
              Candidate ids are printed next to every row in `dump-resolve` \
@@ -816,9 +866,18 @@ pub(crate) fn cmd_dump_resolve(
     };
     stage.finish();
 
+    let value = serde_json::to_value(&trace)?;
+    let secondary = crate::filter::active();
+    let filtered_out = secondary.is_active() && !secondary.matches_value(&value);
     match format {
+        BrowseFormat::Json if filtered_out => {
+            crate::output::emit_json_document(&super::filtered_out_document(&value))?;
+        }
         BrowseFormat::Json => {
-            crate::output::emit_json_document(&super::with_completeness(&serde_json::to_value(&trace)?))?;
+            crate::output::emit_json_document(&super::with_completeness(&value))?;
+        }
+        BrowseFormat::Text if filtered_out => {
+            cli_println!("no resolver trace matches the active output filter");
         }
         BrowseFormat::Text => render_resolve_trace_text(&trace, compact),
     }
@@ -1076,13 +1135,15 @@ pub(crate) fn cmd_dump_taint(
     // source-reachable fixed point without making all bodies resident.
     // The complete propagation report for `{source, seeds}` is computed once
     // and cached under that scope; `--sink` and `--taint T:` are views.
-    let seeds_key = seeds.join(",");
+    // Preserve argument boundaries: a single accepted seed containing a
+    // comma must not reuse the report for two separate seeds.
+    let seeds_key = serde_json::to_string(seeds)?;
     let analysis_hash = paging::hash_filters(&[
         ("kind", "dump-taint"),
         ("source", source_name),
         ("seeds", &seeds_key),
     ]);
-    const DUMP_TAINT_CACHE_KIND: &str = "dump-taint/report/v1";
+    const DUMP_TAINT_CACHE_KIND: &str = "dump-taint/report/v2";
     let cached: Option<bonsai_sdk::TaintReport> =
         page_cache::read_keyed_payload(root, analysis_hash, DUMP_TAINT_CACHE_KIND)?;
     let outcome = if let Some(report) = cached {

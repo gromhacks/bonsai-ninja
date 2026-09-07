@@ -247,6 +247,89 @@ fn inspect_cli_filters_map_one_to_one_to_sdk_filters() {
 }
 
 #[test]
+fn inspect_cursor_identity_includes_every_result_selector() {
+    let render = InspectRenderOptions::default();
+    let baseline =
+        super::inspect_filters_hash(Some("target"), false, &[], &InspectFilters::default(), &render);
+    let filters = [
+        InspectFilters {
+            from: Some("entry"),
+            ..Default::default()
+        },
+        InspectFilters {
+            from_kind: Some(FactKindFilter::Decl),
+            ..Default::default()
+        },
+        InspectFilters {
+            to: Some("exit"),
+            ..Default::default()
+        },
+        InspectFilters {
+            to_kind: Some(FactKindFilter::Call),
+            ..Default::default()
+        },
+        InspectFilters {
+            file: Some("app.py"),
+            ..Default::default()
+        },
+        InspectFilters {
+            in_fn: Some("entry"),
+            ..Default::default()
+        },
+    ];
+    let mut identities = std::collections::BTreeSet::from([baseline]);
+    for filters in filters {
+        assert!(identities.insert(super::inspect_filters_hash(
+            Some("target"),
+            false,
+            &[],
+            &filters,
+            &render
+        )));
+    }
+    for render in [
+        InspectRenderOptions {
+            flow_id_filter: Some("F:123".into()),
+            ..Default::default()
+        },
+        InspectRenderOptions {
+            group_id_filter: Some("G:123".into()),
+            ..Default::default()
+        },
+        InspectRenderOptions {
+            structural_drilldown: true,
+            ..Default::default()
+        },
+        InspectRenderOptions {
+            endpoint_drilldown: true,
+            ..Default::default()
+        },
+    ] {
+        assert!(identities.insert(super::inspect_filters_hash(
+            Some("target"),
+            false,
+            &[],
+            &InspectFilters::default(),
+            &render
+        )));
+    }
+    for kinds in [
+        vec!["call".into()],
+        vec!["decl".into()],
+        vec!["call,decl".into()],
+        vec!["call".into(), "decl".into()],
+    ] {
+        assert!(identities.insert(super::inspect_filters_hash(
+            Some("target"),
+            false,
+            &kinds,
+            &InspectFilters::default(),
+            &render
+        )));
+    }
+}
+
+#[test]
 fn filter_marker_matches_structured_subjects_not_raw_source_text() {
     let filters = InspectFilters {
         to: Some("pickle"),
@@ -516,8 +599,7 @@ fn inspect_text_pages_taint_rows_and_flowless_hits_losslessly() {
                 &report,
                 &render,
                 &paging,
-                Some("page"),
-                false,
+                super::inspect_filters_hash(Some("page"), false, &[], &InspectFilters::default(), &render),
             )?);
             Ok(())
         })

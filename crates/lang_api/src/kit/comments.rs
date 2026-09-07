@@ -48,6 +48,7 @@ pub fn extract_comments(
                         .any(|prefix| text.starts_with(prefix));
                 out.push(crate::Comment {
                     span: span_of(file, &node),
+                    content_len: handler.comment_content_len.and_then(|extract| extract(node, src)),
                     kind: crate::CommentKind::classify(&text, is_doc),
                     text,
                 });

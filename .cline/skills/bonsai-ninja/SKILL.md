@@ -76,6 +76,11 @@ functions can share a line. Enclosing-function labels and cross-module
 `used in` evidence use the exact location, not the first name on that line.
 For `vars`, review the complete `source_names` list of a matching write;
 multiple RHS projections are not multiple writes or a proven taint path.
+`strings`/`comments --min-len` counts the adapter-proven lexical body, excluding
+delimiters but preserving whitespace and escapes; JSON exposes `content_len`.
+An unknown length is not an empty body. Ambiguous AST/resolver selectors need
+an exact candidate location. Reopen line-scoped `R:` IDs with the original
+`--query`, `--in-file`, and `--line`; `show` rejects irrelevant context flags.
 Check `used_in_complete` separately from syntax `analysis_complete`. A cold
 file-scoped view can lack cross-module caller evidence; `index <workspace>
 --semantic` makes the full validated relation available without expanding
@@ -110,6 +115,21 @@ command requires a duplicate whole-workspace lowering or edge scan.
    alone do not prove identity, reachability, or taint.
 6. Narrow by file, function, symbol, source, sink, rule, tag, or severity
    before requesting exhaustive output.
+
+Repeated `--contains` values combine with AND; repeated `--not-contains`
+values exclude on any match, regardless of their position around subcommands.
+These are case-insensitive string-field filters, not JSON-key searches.
+Use `--contains='-- comment'` for values beginning with a hyphen.
+For `strings`/`comments`, `--regex` changes inclusion values to regexes; use
+`(?i)` when case-insensitive regex matching is intended. Syntax browse filters
+search base facts, locations, and signatures, not page-only presentation
+extras. Security flows and their summaries filter complete hydrated evidence.
+Do not reuse a page cursor after changing filters.
+An existing `F:`/`G:` excluded by these view filters yields an empty selection;
+an unknown explicit ID still errors. Reopen endpoint-scoped flows with `show`
+to retain the originating compiler corridor, not an unrelated security query.
+`export` and operational `cache` commands reject these view filters; use
+syntax/security views to narrow a report, never a partial graph export.
 
 ## Choose the smallest command
 

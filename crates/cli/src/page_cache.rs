@@ -19,6 +19,39 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+#[derive(Default)]
+struct CommandCacheContext {
+    uses_rulepack: bool,
+    rules_dir: Option<PathBuf>,
+}
+
+static COMMAND_CONTEXT: OnceLock<CommandCacheContext> = OnceLock::new();
+
+/// Typed dispatch prevents selector values that happen to equal a command
+/// name from changing cache dependencies, and includes delegated reports.
+pub(crate) fn init_command(command: &crate::args::Cmd) {
+    use crate::args::{Cmd, SecurityAction};
+    let rules = match command {
+        Cmd::ReadFile { rules_dir, .. } | Cmd::Show { rules_dir, .. } => Some(rules_dir),
+        Cmd::Security { action, .. } => Some(match action {
+            SecurityAction::Sources { rules_dir, .. }
+            | SecurityAction::Sinks { rules_dir, .. }
+            | SecurityAction::Sanitizers { rules_dir, .. }
+            | SecurityAction::Deps { rules_dir, .. }
+            | SecurityAction::DependencyAnalysis { rules_dir, .. }
+            | SecurityAction::TaintAnalysis { rules_dir, .. }
+            | SecurityAction::SourceAnalysis { rules_dir, .. }
+            | SecurityAction::SinkAnalysis { rules_dir, .. }
+            | SecurityAction::Pack { rules_dir, .. } => rules_dir,
+        }),
+        _ => None,
+    };
+    let _ = COMMAND_CONTEXT.set(CommandCacheContext {
+        uses_rulepack: rules.is_some(),
+        rules_dir: rules.cloned().flatten(),
+    });
+}
+
 static REMEMBERED_WORKSPACE_FINGERPRINT: OnceLock<
     Mutex<Option<(PathBuf, bonsai_sdk::WorkspaceContentFingerprint)>>,
 > = OnceLock::new();
@@ -61,7 +94,11 @@ pub(crate) fn mark_optional_evidence_unavailable() {
 // Version 22 groups resolution declarations by file with compact counters.
 // Version 23 refreshes severity styling, inventory headings, and evidence-first
 // reports. JSON facts and semantic sidecar identities are unchanged.
-const RENDER_CACHE_VERSION: u32 = 23;
+// Version 24 unifies repeatable secondary filters and corrects regex/leaf
+// matching. Pages produced by the former local/global flag collision are stale.
+// Version 25 also invalidates broad cold-entrypoint rows and pages prepared
+// before repeatable argument inheritance was moved ahead of parser building.
+const RENDER_CACHE_VERSION: u32 = 26;
 
 /// Stable structural ids are hashes of rendered chains, so the id alone
 /// cannot be inverted into the target declaration that made the query
@@ -193,6 +230,7 @@ struct PageCacheFile {
     workspace_fingerprint: bonsai_sdk::WorkspaceContentFingerprint,
     dependency_metadata_fingerprint: u64,
     rulepack_fingerprint: Option<u64>,
+    filesystem_fingerprint: Option<u64>,
     normalized_argv_hash: u64,
     command: String,
     filters_hash: u64,
@@ -623,7 +661,7 @@ pub(crate) fn save_keyed_payload_with_bound<T: Serialize>(
             None => workspace_fingerprint(workspace)?,
         },
         dependency_metadata_fingerprint: dependency_metadata_fingerprint(workspace)?,
-        rulepack_fingerprint: rulepack_fingerprint_for_command(workspace)?,
+        rulepack_fingerprint: rulepack_fingerprint_for_payload(workspace, kind)?,
         semantic_key,
         kind: kind.to_string(),
         blob_len: blob.len() as u64,
@@ -704,7 +742,7 @@ pub(crate) fn read_keyed_payload<T: DeserializeOwned>(
     }
     let fresh = file.workspace_fingerprint == workspace_fingerprint(workspace)?
         && file.dependency_metadata_fingerprint == dependency_metadata_fingerprint(workspace)?
-        && file.rulepack_fingerprint == rulepack_fingerprint_for_command(workspace)?;
+        && file.rulepack_fingerprint == rulepack_fingerprint_for_payload(workspace, kind)?;
     if !fresh {
         return Ok(None);
     }
@@ -858,6 +896,9 @@ fn save_pages_value(
     };
     let dependency_metadata_fingerprint = dependency_metadata_fingerprint(workspace)?;
     let rulepack_fingerprint = rulepack_fingerprint_for_command(workspace)?;
+    let filesystem_fingerprint = (command == "tree")
+        .then(|| filesystem_namespace_fingerprint(workspace))
+        .transpose()?;
     let mut by_number = BTreeMap::new();
     if let Some(existing) = read_cache(workspace)? {
         let same_report = existing.command == command
@@ -865,6 +906,7 @@ fn save_pages_value(
             && existing.workspace_fingerprint == workspace_fingerprint
             && existing.dependency_metadata_fingerprint == dependency_metadata_fingerprint
             && existing.rulepack_fingerprint == rulepack_fingerprint;
+        let same_report = same_report && existing.filesystem_fingerprint == filesystem_fingerprint;
         if same_report {
             by_number.extend(existing.pages.into_iter().map(|page| (page.number, page)));
         }
@@ -879,6 +921,7 @@ fn save_pages_value(
         workspace_fingerprint,
         dependency_metadata_fingerprint,
         rulepack_fingerprint,
+        filesystem_fingerprint,
         normalized_argv_hash: normalized_argv_hash(),
         command: command.to_string(),
         filters_hash,
@@ -1173,7 +1216,44 @@ fn current_exe_is_newer_than_cache(cache_metadata: &std::fs::Metadata) -> bool {
 fn cache_is_fresh(workspace: &Path, cache: &PageCacheFile) -> anyhow::Result<bool> {
     Ok(cache.workspace_fingerprint == workspace_fingerprint(workspace)?
         && cache.dependency_metadata_fingerprint == dependency_metadata_fingerprint(workspace)?
-        && cache.rulepack_fingerprint == rulepack_fingerprint_for_command(workspace)?)
+        && cache.rulepack_fingerprint == rulepack_fingerprint_for_command(workspace)?
+        && cache.filesystem_fingerprint
+            == (cache.command == "tree")
+                .then(|| filesystem_namespace_fingerprint(workspace))
+                .transpose()?)
+}
+
+/// Tree includes non-source files, empty directories and symlink leaves.
+/// Their names and types are relevant even when compiler inputs are unchanged.
+/// Source contents are validated separately; no non-source body is read.
+fn filesystem_namespace_fingerprint(root: &Path) -> anyhow::Result<u64> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut entries = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            if crate::commands::is_internal_workspace_entry_name(&entry.file_name().to_string_lossy())
+                || bonsai_common::is_bonsai_case_probe_path(&path)
+                || output::is_pending_output_path(&path)
+            {
+                continue;
+            }
+            let kind = entry.file_type()?;
+            let tag = if kind.is_dir() {
+                "directory"
+            } else if kind.is_symlink() {
+                "symlink"
+            } else {
+                "file"
+            };
+            entries.push(format!("{}\0{tag}", path.strip_prefix(root)?.to_string_lossy()));
+            if kind.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(fingerprint_entries(entries))
 }
 
 fn cache_dir(workspace: &Path) -> PathBuf {
@@ -1271,37 +1351,33 @@ fn page_cache_content_hash(bytes: &[u8]) -> u64 {
     bonsai_hash::fnv1a_bytes64(bytes)
 }
 
-fn rulepack_fingerprint_for_command(workspace: &Path) -> anyhow::Result<Option<u64>> {
-    if !command_uses_rulepack() {
+fn rulepack_fingerprint_for_payload(workspace: &Path, kind: &str) -> anyhow::Result<Option<u64>> {
+    // Structural provenance is emitted by rulepack-free inspect and consumed
+    // by the show router, which can also delegate to security. Its dependency
+    // identity belongs to the artifact, not to whichever command opens it.
+    if kind == STRUCTURAL_ID_HINTS_KIND {
         return Ok(None);
     }
-    let root = explicit_rules_dir_arg().or_else(|| bonsai_sdk::Bonsai::discover_rulepack_root(workspace));
-    root.map(|path| content_tree_fingerprint(&path, rulepack_dir_skipped))
-        .transpose()
+    rulepack_fingerprint_for_command(workspace)
 }
 
-fn command_uses_rulepack() -> bool {
-    #[cfg(test)]
-    {
-        true
+fn rulepack_fingerprint_for_command(workspace: &Path) -> anyhow::Result<Option<u64>> {
+    let context = COMMAND_CONTEXT.get_or_init(CommandCacheContext::default);
+    if !context.uses_rulepack {
+        return Ok(None);
     }
-    #[cfg(not(test))]
-    {
-        std::env::args_os().any(|arg| arg == "security")
-    }
-}
-
-fn explicit_rules_dir_arg() -> Option<PathBuf> {
-    let mut args = std::env::args().skip(1).peekable();
-    while let Some(arg) = args.next() {
-        if arg == "--rules-dir" {
-            return args.next().map(PathBuf::from);
-        }
-        if let Some(value) = arg.strip_prefix("--rules-dir=") {
-            return Some(PathBuf::from(value));
-        }
-    }
-    None
+    let root = context
+        .rules_dir
+        .clone()
+        .or_else(|| bonsai_sdk::Bonsai::discover_rulepack_root(workspace));
+    let base = root
+        .map(|path| content_tree_fingerprint(&path, rulepack_dir_skipped))
+        .transpose()?;
+    let overlay = content_tree_fingerprint(&workspace.join(".bonsai/rules"), rulepack_dir_skipped)?;
+    Ok(Some(paging::hash_filters(&[
+        ("base", &base.map_or_else(String::new, |value| value.to_string())),
+        ("overlay", &overlay.to_string()),
+    ])))
 }
 
 fn dependency_metadata_fingerprint(root: &Path) -> anyhow::Result<u64> {

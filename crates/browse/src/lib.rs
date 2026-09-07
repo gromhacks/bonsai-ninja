@@ -29,6 +29,7 @@ pub(crate) mod edges;
 pub(crate) mod entrypoints;
 pub(crate) mod graph_export;
 pub(crate) mod imports;
+pub(crate) mod literal_filter;
 pub mod module_map;
 pub(crate) mod native_export;
 pub(crate) mod operations;
@@ -68,6 +69,7 @@ pub use graph_export::{
     GraphExportFormat, GraphNode, GraphProjection,
 };
 pub use imports::{imports, ImportOut, ImportsFilters};
+pub use literal_filter::LiteralFilterError;
 pub use module_map::{
     file_connections, FileConnections, ModuleDecl, ModuleEdge, ModuleEdgeGroup, ModuleImport,
 };

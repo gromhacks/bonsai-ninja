@@ -79,7 +79,11 @@ fn lua_static_key(node: Node<'_>, src: &[u8]) -> Option<String> {
 //   - Lua has no native exception construct; pcall/xpcall are the
 //     idiomatic try-equivalent (function calls; we rely on the
 //     do_block-descent + call-arg walking to surface their bodies).
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     expression_value_kind_extractor: None,
     literal_value_kinds: &["nil", "number", "true", "false"],
     string_literal_kinds: &["string"],

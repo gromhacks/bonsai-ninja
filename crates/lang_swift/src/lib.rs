@@ -543,7 +543,11 @@ fn swift_static_key(node: Node<'_>, src: &[u8]) -> Option<String> {
         .or_else(|| raw.strip_prefix('"').and_then(|value| value.strip_suffix('"')))?;
     (!quoted.contains('\\') && !quoted.contains('#') && !quoted.is_empty()).then(|| quoted.to_string())
 }
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     expression_value_kind_extractor: Some(swift_expression_value_kind),
     literal_value_kinds: &[
         "nil_literal",

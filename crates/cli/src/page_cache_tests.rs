@@ -238,6 +238,7 @@ fn cache_file_for(workspace: &std::path::Path) -> PageCacheFile {
             .expect("rulepack fingerprint"),
         normalized_argv_hash: 0,
         command: "test".to_string(),
+        filesystem_fingerprint: None,
         filters_hash: 0,
         pages: Vec::new(),
     }

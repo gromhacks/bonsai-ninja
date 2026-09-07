@@ -2034,6 +2034,9 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
                 bonsai_sdk::ResolveOutcome::FileContextNotFound { needle } => {
                     panic!("{lang} sdk dump-resolve file context not found: {needle}")
                 }
+                bonsai_sdk::ResolveOutcome::FileContextAmbiguous { needle, candidates } => {
+                    panic!("{lang} sdk dump-resolve file context ambiguous: {needle}: {candidates:?}")
+                }
                 bonsai_sdk::ResolveOutcome::CandidateNotFound => {
                     panic!("{lang} sdk dump-resolve candidate not found")
                 }

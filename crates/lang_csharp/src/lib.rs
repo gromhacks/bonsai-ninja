@@ -278,7 +278,11 @@ const PACK_NAME: &str = "csharp";
 // this the property collapses into a Field decl and accessor body
 // events disappear (audit task #131). `constructor_declaration` and
 // `destructor_declaration` join the set so RAII / dtor flows surface.
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     expression_value_kind_extractor: None,
     literal_value_kinds: &[
         "null_literal",

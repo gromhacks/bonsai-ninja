@@ -132,7 +132,11 @@ fn ruby_exception_region(node: Node<'_>) -> bool {
     }
     false
 }
+mod lexical_content;
+
 const BASE_HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     expression_value_kind_extractor: None,
     literal_value_kinds: &["nil", "integer", "float", "true", "false"],
     string_literal_kinds: &["string", "chained_string", "heredoc_body"],

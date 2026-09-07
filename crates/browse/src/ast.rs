@@ -16,7 +16,9 @@ pub struct AstFilters<'a> {
     /// Scope to one function's subtree. Matches by exact decl-name
     /// equality (not substring).
     pub function: Option<&'a str>,
-    /// Cap tree depth. `None` = unlimited.
+    /// Cap displayed depth relative to the selected root (depth zero).
+    /// `None` = unlimited. Elided child subtrees are recorded on each
+    /// boundary node; this does not change parser/analysis completeness.
     pub max_depth: Option<usize>,
     /// Drill into one node by its `N:`-prefixed id (returned in
     /// `node_id` on every node). When the id doesn't match any
@@ -38,6 +40,10 @@ pub struct AstNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     pub children: Vec<AstNode>,
+    /// Immediate named child subtrees omitted by `max_depth`. Zero means
+    /// this node's children are fully displayed; descendants can still
+    /// report their own omissions. This is presentation, not parser coverage.
+    pub children_omitted: usize,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -187,7 +193,22 @@ pub fn dump_ast(ws: &Workspace, f: &AstFilters<'_>) -> AstOutcome {
                 tree_root
             };
 
-            let root_ast = build_ast_node(scoped_node, source, &display_path, None, 0, depth_cap);
+            // Resolve the selected syntax identity before limiting output
+            // depth. A presentation cap must not hide an existing target,
+            // and its depth is relative to that target's subtree.
+            let (selected_node, selected_field) = if let Some(target_id) = f.node_id {
+                find_syntax_node_by_id(scoped_node, &display_path, target_id)?
+            } else {
+                (scoped_node, None)
+            };
+            let root_ast = build_ast_node(
+                selected_node,
+                source,
+                &display_path,
+                selected_field.as_deref(),
+                0,
+                depth_cap,
+            );
             Some(FileResult::Dump(AstFileDump {
                 path: output_path,
                 root: root_ast,
@@ -220,19 +241,8 @@ pub fn dump_ast(ws: &Workspace, f: &AstFilters<'_>) -> AstOutcome {
     // completion order.
     file_dumps.sort_by(|a, b| a.path.cmp(&b.path));
 
-    // `--node N:xx` drill: return only the matching subtree, or
-    // signal NotFound so the CLI can give a precise error.
-    if let Some(target_id) = f.node_id {
-        let drilled = file_dumps.iter().find_map(|file_dump| {
-            find_node_in_ast(&file_dump.root, target_id).map(|found| AstFileDump {
-                path: file_dump.path.clone(),
-                root: found.clone(),
-            })
-        });
-        match drilled {
-            Some(found) => return AstOutcome::Dumps(vec![found]),
-            None => return AstOutcome::NodeIdNotFound,
-        }
+    if f.node_id.is_some() && file_dumps.is_empty() {
+        return AstOutcome::NodeIdNotFound;
     }
 
     AstOutcome::Dumps(file_dumps)
@@ -290,6 +300,7 @@ fn build_ast_node(
         end_line: (end_point.row as u32) + 1,
         end_column: (end_point.column as u32) + 1,
         text: Some(node_text),
+        children_omitted: ts_node.named_child_count().saturating_sub(children.len()),
         children,
     }
 }
@@ -325,18 +336,27 @@ fn find_node_covering_span(
     Some(current)
 }
 
-/// Recursive search for an [`AstNode`] by its `N:`-prefixed id.
-/// Linear in tree size; the AST output the CLI returns is small
-/// enough (one file, capped depth) that a smarter index isn't worth
-/// the extra state.
-fn find_node_in_ast<'a>(root: &'a AstNode, target_id: &str) -> Option<&'a AstNode> {
-    if root.node_id == target_id {
-        return Some(root);
-    }
-    for child in &root.children {
-        if let Some(hit) = find_node_in_ast(child, target_id) {
-            return Some(hit);
+/// Search exact named syntax nodes without first allocating an uncapped
+/// output tree. Keep the parent field of a selected node for JSON parity
+/// with the same node inside a complete dump.
+fn find_syntax_node_by_id<'tree>(
+    root: ::tree_sitter::Node<'tree>,
+    file_path: &str,
+    target_id: &str,
+) -> Option<(::tree_sitter::Node<'tree>, Option<String>)> {
+    let mut pending = vec![(root, None)];
+    while let Some((node, field)) = pending.pop() {
+        if compute_node_id(file_path, node.start_byte(), node.end_byte(), node.kind()) == target_id {
+            return Some((node, field));
         }
+        let child_start = pending.len();
+        let mut cursor = node.walk();
+        for (index, child) in node.children(&mut cursor).enumerate() {
+            if child.is_named() {
+                pending.push((child, node.field_name_for_child(index as u32).map(str::to_string)));
+            }
+        }
+        pending[child_start..].reverse();
     }
     None
 }

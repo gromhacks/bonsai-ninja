@@ -27,6 +27,7 @@ pub(crate) struct ShowArgs<'a> {
     pub(crate) id: &'a str,
     pub(crate) query: Option<&'a str>,
     pub(crate) in_file: Option<&'a str>,
+    pub(crate) line: Option<u32>,
     pub(crate) taint_source: Option<&'a str>,
     pub(crate) taint_seeds: &'a [String],
     pub(crate) taint_sink: Option<&'a str>,
@@ -42,6 +43,7 @@ pub(crate) fn cmd_show(args: ShowArgs<'_>) -> Result<()> {
     let id = args.id.trim();
     let paging_cfg = paging_from_cli(args.context, args.page, args.all, args.format)?;
     let prefix = id_prefix(id)?;
+    args.validate_context(prefix)?;
     if prefix != "T" && args.has_dump_taint_context() {
         anyhow::bail!(
             "dump-taint show options (`--taint-source`, `--taint-seed`, `--taint-sink`) only apply to T: ids"
@@ -94,7 +96,7 @@ pub(crate) fn cmd_show(args: ShowArgs<'_>) -> Result<()> {
                 args.workspace,
                 query,
                 args.in_file,
-                None,
+                args.line,
                 args.compact,
                 Some(id),
                 args.format,
@@ -106,6 +108,35 @@ pub(crate) fn cmd_show(args: ShowArgs<'_>) -> Result<()> {
 }
 
 impl ShowArgs<'_> {
+    fn validate_context(&self, prefix: &str) -> Result<()> {
+        if self.query.is_some() && !matches!(prefix, "F" | "G" | "R") {
+            anyhow::bail!("--query only applies to structural F:/G: or resolver R: ids, not {prefix}: ids");
+        }
+        if self.in_file.is_some() && prefix != "R" {
+            anyhow::bail!("--in-file only applies to resolver R: ids, not {prefix}: ids");
+        }
+        if self.line.is_some() && prefix != "R" {
+            anyhow::bail!("--line only applies to resolver R: ids, not {prefix}: ids");
+        }
+        if let Some(line) = self.line {
+            if line == 0 {
+                anyhow::bail!("--line is one-based and must be greater than zero");
+            }
+            if self.in_file.is_none() {
+                anyhow::bail!("--line requires --in-file for resolver R: ids");
+            }
+        }
+        if self.rules_dir.is_some() {
+            if !matches!(prefix, "S" | "F" | "G") {
+                anyhow::bail!("--rules-dir only applies to security S:/F:/G: ids, not {prefix}: ids");
+            }
+            if self.query.is_some() {
+                anyhow::bail!("--rules-dir cannot be combined with --query: structural F:/G: queries do not use a rulepack");
+            }
+        }
+        Ok(())
+    }
+
     fn has_dump_taint_context(&self) -> bool {
         self.taint_source.is_some() || !self.taint_seeds.is_empty() || self.taint_sink.is_some()
     }
@@ -201,6 +232,9 @@ fn show_security_or_structural_flow(
     // id belonged to security (eight minutes on Elasticsearch).
     match show_security_flow(args, id) {
         Ok(()) => Ok(()),
+        // Explicit rulepack context selects the security interpretation.
+        // A structural fallback would silently discard that context.
+        Err(security_err) if args.rules_dir.is_some() => Err(security_err),
         // With no query provenance, the SDK's stable structural identity is
         // the only exact target. Re-running unfiltered inspect would render
         // the same chain once for every declaration/occurrence along it and
@@ -277,6 +311,7 @@ fn show_security_or_structural_group(
     }
     match show_security_group(args, id) {
         Ok(()) => Ok(()),
+        Err(security_err) if args.rules_dir.is_some() => Err(security_err),
         Err(security_err) => show_sdk_structural_group(args.workspace, id, args.format).map_err(|sdk_err| {
             anyhow::anyhow!(
                 "group id `{id}` was not found by security taint group or SDK structural chains: {security_err}; {sdk_err}"
@@ -331,9 +366,18 @@ fn show_sdk_structural_group(workspace: &Path, id: &str, format: BrowseFormat) -
 }
 
 fn emit_sdk_inspect_flow(flow: &bonsai_sdk::InspectFlowShow, format: BrowseFormat) -> Result<()> {
+    let value = serde_json::to_value(flow)?;
+    let secondary = crate::filter::active();
+    let filtered_out = secondary.is_active() && !secondary.matches_value(&value);
     match format {
+        BrowseFormat::Json if filtered_out => {
+            crate::output::emit_json_document(&super::filtered_out_document(&value))?;
+        }
         BrowseFormat::Json => {
-            crate::output::emit_json_document(&super::with_completeness(&serde_json::to_value(flow)?))?;
+            crate::output::emit_json_document(&super::with_completeness(&value))?;
+        }
+        BrowseFormat::Text if filtered_out => {
+            cli_println!("no structural flow matches the active output filter");
         }
         BrowseFormat::Text => {
             cli_println!("FLOW 1 {}", flow.flow_id);
@@ -351,9 +395,18 @@ fn emit_sdk_inspect_flow(flow: &bonsai_sdk::InspectFlowShow, format: BrowseForma
 }
 
 fn emit_sdk_inspect_group(group: &bonsai_sdk::InspectFlowGroupShow, format: BrowseFormat) -> Result<()> {
+    let value = serde_json::to_value(group)?;
+    let secondary = crate::filter::active();
+    let filtered_out = secondary.is_active() && !secondary.matches_value(&value);
     match format {
+        BrowseFormat::Json if filtered_out => {
+            crate::output::emit_json_document(&super::filtered_out_document(&value))?;
+        }
         BrowseFormat::Json => {
-            crate::output::emit_json_document(&super::with_completeness(&serde_json::to_value(group)?))?;
+            crate::output::emit_json_document(&super::with_completeness(&value))?;
+        }
+        BrowseFormat::Text if filtered_out => {
+            cli_println!("no structural flow group matches the active output filter");
         }
         BrowseFormat::Text => {
             cli_println!("GROUP {}  {} match(es)", group.group_id, group.matches.len());

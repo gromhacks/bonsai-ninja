@@ -6081,11 +6081,17 @@ fn security_matcher_uses_compiler_expression_facts() {
             && language_types.contains("pub direct_call_name: Option<String>")
             && language_kit.contains("pub use runtime_types::extract_runtime_type_narrowing_facts")
             && runtime_type_lowering.contains("fn extract_runtime_type_narrowing_facts")
-            && runtime_type_lowering.contains("handler.is_string_literal(type_node.kind())")
+            && runtime_type_lowering.contains("handler.is_string_literal(type_node)")
             && runtime_type_lowering.contains("handler.runtime_type_wrapper_kinds")
             && !runtime_type_lowering
                 .contains("\"string\" | \"string_literal\" | \"interpreted_string_literal\""),
         "language IR must retain direct-call and runtime-guard relationships"
+    );
+    let literal_matcher = function_body(&language_kit, "is_string_literal");
+    assert!(
+        literal_matcher.contains("node.is_named()")
+            && literal_matcher.contains("self.string_literal_kinds.contains(&node.kind())"),
+        "runtime guards and literal inventories must distinguish named values from anonymous keywords"
     );
 }
 

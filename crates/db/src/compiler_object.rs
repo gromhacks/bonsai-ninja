@@ -519,7 +519,10 @@ use std::sync::{
 // v201: typed splat parameter bindings exclude their annotation subtree.
 // v202: Swift computed getters retain their complete executable call/body IR.
 // v203: Python direct call arguments retain exact string-composition facts.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 203;
+// v204: adapters retain exact lexical string/comment body lengths for filters.
+// v205: complete PHP nowdoc inventories preserve body-based string categories.
+// v206: named string literals cannot be confused with anonymous type keywords.
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 206;
 #[cfg(test)]
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 

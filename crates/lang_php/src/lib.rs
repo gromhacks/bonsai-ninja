@@ -1031,10 +1031,14 @@ fn php_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
     let binding = header.next()?;
     Some((binding, iterable))
 }
+mod lexical_content;
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    string_content_len: Some(lexical_content::string_content_len),
+    comment_content_len: Some(lexical_content::comment_content_len),
     expression_value_kind_extractor: None,
     literal_value_kinds: &["null", "boolean", "integer", "float"],
-    string_literal_kinds: &["string", "encapsed_string", "heredoc", "nowdoc_string"],
+    string_literal_kinds: &["string", "encapsed_string", "heredoc", "nowdoc"],
     comment_kinds: &["comment"],
     doc_comment_prefixes: &["/**"],
     decorator_kinds: &["attribute"],
@@ -1339,6 +1343,7 @@ impl LanguageAdapter for PhpAdapter {
         let source = snapshot.text.to_string();
         let src = source.as_bytes();
         let mut idx = decl_index_from_tree_with_handler(file, src, &tree, &HANDLER);
+        lexical_content::classify_multiline_strings(&mut idx.strings, &tree, src);
         idx.string_compositions = php_string_compositions(&tree, file, src);
         idx.compiler_guards
             .extend(php_compound_static_allowlist_guards(&tree, file, src));

@@ -25,12 +25,42 @@ and suppresses new bars for the lifetime of that output stream.
 
 `--contains <TEXT>` (repeatable; every value must match) and
 `--not-contains <TEXT>` (repeatable; no value may match) are views over the
-command's complete result: they keep the rows whose string fields — the same
-fields the JSON `rows[]` entry carries, plus the rendered `file:line[:column]`
-location — contain the text, case-insensitively. They never re-run analysis
-and never read source lines, enclosing functions, callee summaries, or other
-presentation extras derived for the rendered page, so narrowing a large
-result costs one serialization per row.
+command's result rows: they keep rows whose string fields contain the text,
+case-insensitively, without re-running analysis. For syntax browse commands,
+the searchable facts are the base JSON row plus its rendered
+`file:line[:column]` location and declaration signature. Page-only source lines,
+enclosing-function labels, and callee summaries are not additional search
+inputs. This keeps large syntax inventories cheap to narrow. Inspect and
+security flows instead select complete evidence units, including hydrated
+source bodies; a summary uses the same selected findings as the full report.
+
+Repeated filters accumulate before or after the command and subcommand; a
+later occurrence never replaces an earlier one. Matches stay within individual
+string fields, so a multiline needle cannot bridge unrelated fields. Page
+cursors belong to the selected filter view and cannot be reused with different
+filters.
+
+Use `--contains='-- comment'` when the value begins with a hyphen, so it is
+parsed as literal text rather than another option (for example, a Lua comment).
+
+Explicit flow/group IDs are resolved before these view filters. Excluding a
+valid ID produces an empty selection, not an unknown-ID error; a nonexistent
+explicit ID still fails. `show` restores an endpoint-scoped flow's original
+compiler corridor without making its query provenance depend on security rules.
+
+`strings` and `comments` use these same repeatable, case-insensitive row
+filters. Their `--regex` switch interprets each `--contains` value as a regular
+expression instead, with every expression required to match a string field.
+Regex matching is case-sensitive unless the expression uses `(?i)`;
+`--not-contains` remains a case-insensitive literal exclusion. Regex mode
+requires a `--contains` value and invalid expressions fail explicitly.
+
+Atomic views such as `index`, `tree`, and `read-file` keep or reject their
+complete document, preserving completeness warnings when hidden. `dump-ast`
+selects complete file/subtree units, never disconnected printed node lines.
+`export` and operational `cache` subcommands reject these view filters:
+exports always retain the complete graph, and filters never narrow cache
+mutations.
 
 `--no-cache` and `BONSAI_NO_CACHE=1` select one exact cold invocation. The
 command does not load or publish reusable compiler-object, callgraph,
@@ -615,7 +645,7 @@ bonsai-ninja show ./src --id T:aabbccdd --taint-source update_user --taint-seed 
 | `T:` | raw inspect taint path (`inspect-graph`), or structured `dump-taint` propagation | `--taint-source` plus original dump-taint filters for structured propagation ids |
 | `E:` | `dump-edges --edge` call-edge provenance | None |
 | `N:` | `dump-ast --node` AST-node drilldown | Optional AST scope inherited by the delegated command |
-| `R:` | `dump-resolve --candidate` resolver candidate | `--query <QUERY>`, and `--in-file` when the original resolve was file-scoped |
+| `R:` | `dump-resolve --candidate` resolver candidate | `--query <QUERY>`, plus the original `--in-file` and `--line` context when scoped |
 | `S:` | `security taint-analysis --finding` finding drilldown | Rulepack via `--rules-dir` or discovery |
 
 | Flag | Default | Description |
@@ -623,8 +653,9 @@ bonsai-ninja show ./src --id T:aabbccdd --taint-source update_user --taint-seed 
 | `<WORKSPACE>` | Required | Workspace root. |
 | `[ID]` | None | Positional stable `F:`, `G:`, `T:`, `E:`, `N:`, `S:`, or `R:` ID. |
 | `--id <ID>` | None | Explicit equivalent of the positional ID. Exactly one form is required. |
-| `--query <QUERY>` | None | Resolver query required for `R:` candidate IDs. |
+| `--query <QUERY>` | None | Original resolver query for `R:` IDs, or structural query context for `F:`/`G:` IDs. |
 | `--in-file <FILE>` | None | File context for `R:` resolver candidate IDs. |
+| `--line <N>` | None | Original one-based call-site line for `R:` IDs; requires `--in-file` to preserve line-scoped receiver evidence. |
 | `--taint-source <FUNCTION>` | None | Source function required when reopening structured dump-taint `T:` propagation IDs. |
 | `--taint-seed <NAME>` | None | Seed identifier for structured dump-taint `T:` propagation IDs. Repeatable; use the same seeds as the original `dump-taint` query. |
 | `--taint-sink <TEXT>` | None | Sink-name filter for structured dump-taint `T:` propagation IDs. |
@@ -632,9 +663,12 @@ bonsai-ninja show ./src --id T:aabbccdd --taint-source update_user --taint-seed 
 | `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Disable delegated command output paging. Semantic work is unchanged. |
-| `--rules-dir <DIR>` | Bundled | Override the rulepack directory for `S:` finding IDs and security-owned `F:` flow IDs. |
+| `--rules-dir <DIR>` | Bundled | Override the rulepack directory for security-owned `S:`/`F:`/`G:` IDs. Cannot combine with structural `--query`. |
 | `--format <FORMAT>` | text | `text` or native `json`. |
 | `--output-path <PATH>` | stdout | Write the delegated output to a file. |
+
+`show` rejects context flags that do not apply to the selected ID family;
+an accepted selector is never silently discarded.
 
 ## export
 
@@ -892,6 +926,14 @@ bonsai-ninja search ./src --query "request.args"
 | `refs` | References to symbols, including read/call/type facts. | positional symbol, `--symbol`, `--file`, `--kind`, `--regex` |
 | `search` | Prefix-first fuzzy search over all browse facts, including source-file rows via `--kind file`. | positional query, `--query`, `--kind`, `--file`, `--regex` |
 
+`strings --min-len` and `comments --min-len` use the adapter-proven
+`content_len` fact: Unicode scalar values in the lexical body, excluding
+prefixes and delimiters. Whitespace, escapes, and interpolation source remain
+verbatim; this is not a decoded runtime value. Empty bodies have length zero.
+If a custom adapter cannot prove a selected body's length, a positive minimum
+fails explicitly; omitting the filter retains the fact. The SDK exposes
+`LiteralFilterError` for invalid regexes or unavailable length evidence.
+
 `entrypoints` lists distinct callee names in source-evidence order; repeated
 calls or multiple IR projections do not inflate that preview. Use `calls`
 for individual call sites. Parameter names come from bindings, not their
@@ -1022,9 +1064,18 @@ bonsai-ninja dump-taint ./src --source handle_request --seed cmd
 | `dump-callgraph` | Per-function caller and outgoing counts with exact source line/column locations in both JSON and text; JSON also retains the byte anchor. | `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `dump-edges` | Resolved call edges with stable `E:` ids, resolver stage, evidence, and confidence. | `--from`, `--to`, `--compact`, `--edge`, `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `dump-resolution` | Per-file and per-decl call resolution coverage from shared `FlowEvent::Call` facts and canonical callgraph edges; declaration tables are grouped by file and paged without losing nested rows. | `--file`, `--unresolved-only`, `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
-| `dump-resolve` | Resolver stages and candidates for a name. | `--name` (preferred), positional name, `--in-file`, `--compact`, `--candidate`, `--format`, `--output-path` |
+| `dump-resolve` | Resolver stages and candidates for a name. | `--name` (preferred), positional name, `--in-file`, `--line`, `--compact`, `--candidate`, `--format`, `--output-path` |
 | `dump-taint` | Taint propagation records from one source function with stable `T:` ids. | `--source`, `--seed`, `--sink`, `--compact`, `--taint`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `diagnostics` | Adapter diagnostic report with parser diagnostics, workspace languages, and per-language capability/evidence tables for adapters present in the workspace; readable text by default, one structured object with `--format json`. | `<WORKSPACE>`, `--format`, `--output-path` |
+
+`dump-ast --node` resolves the canonical node before applying `--max-depth`,
+so depth zero displays that selected root. Nodes report `children_omitted`
+when the depth limit hides child subtrees; parser coverage and displayed-result
+completeness remain separate. Ambiguous function names report candidate
+locations and IDs instead of selecting an arbitrary declaration.
+`dump-hir` and `dump-cfg` accept `file:name` and `file:line:name` selectors,
+including unique basenames. `dump-resolve --in-file` prefers an exact path
+and rejects ambiguous basename matches.
 
 `dump-resolution` is a language-agnostic resolver honesty view. It compares
 adapter-emitted call sites against the resolved semantic callgraph and reports

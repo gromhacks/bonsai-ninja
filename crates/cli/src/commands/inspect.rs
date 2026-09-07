@@ -1942,6 +1942,33 @@ fn finish_inspect_from_report(
         hints_started.elapsed().as_secs_f64()
     );
     let filters_started = std::time::Instant::now();
+    // Resolve explicit identities before view filtering. A valid id excluded
+    // by --contains is an empty selection, not a nonexistent compiler fact.
+    if let Some(target_id) = render.flow_id_filter.as_deref() {
+        apply_flow_id_filter(&mut report, target_id);
+        if report.decl_hits.is_empty()
+            && report.hits.is_empty()
+            && report.taint_flows.is_empty()
+            && report.corridor.is_none()
+        {
+            anyhow::bail!(
+                "no flow matching `{target_id}` in this workspace + query \
+                 combination. Flow ids are printed next to every `FLOW N` \
+                 header in text output and in `flow_id` in JSON output; \
+                 raw taint paths match their taint_id."
+            );
+        }
+    }
+    if let Some(target_id) = render.group_id_filter.as_deref() {
+        apply_group_id_filter(&mut report, target_id);
+        if report.decl_hits.is_empty() && report.hits.is_empty() && report.taint_flows.is_empty() {
+            anyhow::bail!(
+                "no flow group matching `{target_id}` in this workspace + \
+                 query combination. Group ids are printed next to every \
+                 `GROUP N` header and in `group_id` in JSON output."
+            );
+        }
+    }
     let secondary = crate::filter::active();
     if secondary.is_active() {
         // Secondary text filters match the complete canonical row, so every
@@ -1975,42 +2002,6 @@ fn finish_inspect_from_report(
         rebuild_report_summary(&mut report);
     }
 
-    // `--flow <id>`: keep only flows whose stable id matches, then
-    // drop hit / decl records that no longer have any flows. Runs
-    // AFTER chain enumeration so the filter is purely a render-time
-    // narrow — it can't lose a flow that was already caught by
-    // max-flows truncation, but that's an intentional trade (the
-    // truncation banner will still surface in that case).
-    if let Some(target_id) = render.flow_id_filter.as_deref() {
-        apply_flow_id_filter(&mut report, target_id);
-        if report.decl_hits.is_empty()
-            && report.hits.is_empty()
-            && report.taint_flows.is_empty()
-            && report.corridor.is_none()
-        {
-            anyhow::bail!(
-                "no flow matching `{target_id}` in this workspace + query \
-                 combination. Flow ids are printed next to every `FLOW N` \
-                 header in text output and in `flow_id` in JSON output; \
-                 raw taint paths match their taint_id."
-            );
-        }
-    }
-    // `--group <id>`: mirror of `--flow <id>` at the group level. Must
-    // run after flow-id filtering (so combining `--flow` and `--group`
-    // narrows to the intersection) and before render so the text /
-    // JSON paths see the reduced set.
-    if let Some(target_id) = render.group_id_filter.as_deref() {
-        apply_group_id_filter(&mut report, target_id);
-        if report.decl_hits.is_empty() && report.hits.is_empty() && report.taint_flows.is_empty() {
-            anyhow::bail!(
-                "no flow group matching `{target_id}` in this workspace + \
-                 query combination. Group ids are printed next to every \
-                 `GROUP N` header in grouped view (`--view grouped` / \
-                 `--view auto`) and in `group_id` in JSON output."
-            );
-        }
-    }
     if render.structural_drilldown || render.endpoint_drilldown {
         retain_structural_drilldown_targets(&mut report);
     }
@@ -2092,7 +2083,7 @@ fn finish_inspect_from_report(
     match format {
         BrowseFormat::Json => {
             // Keep one document shape for the complete and paged views.
-            let filters_hash = inspect_filters_hash(pattern, is_regex);
+            let filters_hash = inspect_filters_hash(pattern, is_regex, kind_filter, &filters, &render);
             let units = inspect_json_page_units(&report);
             // Secondary filters already selected complete hits above; the
             // page units are presentation slices of those hits and must not
@@ -2193,7 +2184,7 @@ fn finish_inspect_from_report(
             )?;
         }
         BrowseFormat::Text => {
-            let filters_hash = inspect_filters_hash(pattern, is_regex);
+            let filters_hash = inspect_filters_hash(pattern, is_regex, kind_filter, &filters, &render);
             let mut current_info = None;
             let current_text = page_cache::capture(|| {
                 current_info = Some(render_inspect_report_text(
@@ -2201,8 +2192,7 @@ fn finish_inspect_from_report(
                     &report,
                     &render,
                     &paging_cfg,
-                    pattern,
-                    is_regex,
+                    filters_hash,
                 )?);
                 Ok(())
             })?;
@@ -2226,7 +2216,11 @@ fn finish_inspect_from_report(
                 let mut page_info = None;
                 let text = page_cache::capture(|| {
                     page_info = Some(render_inspect_report_text(
-                        ws, &report, &render, &page_cfg, pattern, is_regex,
+                        ws,
+                        &report,
+                        &render,
+                        &page_cfg,
+                        filters_hash,
                     )?);
                     Ok(())
                 })?;
@@ -4323,10 +4317,36 @@ fn inspect_json_unit_cost(unit: &InspectJsonPageUnit<'_>) -> u64 {
 
 /// Filter-signature hash for `inspect`. Shared between the JSON
 /// and text paths so a cursor minted in one resolves in the other.
-fn inspect_filters_hash(pattern: Option<&str>, is_regex: bool) -> u64 {
+fn inspect_filters_hash(
+    pattern: Option<&str>,
+    is_regex: bool,
+    kinds: &[String],
+    filters: &InspectFilters<'_>,
+    render: &InspectRenderOptions,
+) -> u64 {
     paging::hash_filters(&[
         ("query", pattern.unwrap_or("")),
         ("regex", if is_regex { "1" } else { "0" }),
+        (
+            "kind",
+            &serde_json::to_string(kinds).expect("string list serializes"),
+        ),
+        ("from", filters.from.unwrap_or("")),
+        ("from_kind", filters.from_kind.map_or("", FactKindFilter::as_str)),
+        ("to", filters.to.unwrap_or("")),
+        ("to_kind", filters.to_kind.map_or("", FactKindFilter::as_str)),
+        ("file", filters.file.unwrap_or("")),
+        ("in_fn", filters.in_fn.unwrap_or("")),
+        ("flow", render.flow_id_filter.as_deref().unwrap_or("")),
+        ("group", render.group_id_filter.as_deref().unwrap_or("")),
+        (
+            "structural_drilldown",
+            if render.structural_drilldown { "1" } else { "0" },
+        ),
+        (
+            "endpoint_drilldown",
+            if render.endpoint_drilldown { "1" } else { "0" },
+        ),
     ])
 }
 
@@ -5143,8 +5163,7 @@ fn render_inspect_report_text(
     report: &InspectReport,
     render: &InspectRenderOptions,
     paging_cfg: &paging::PagingConfig,
-    pattern: Option<&str>,
-    is_regex: bool,
+    filters_hash: u64,
 ) -> Result<paging::PageInfo> {
     let u = ui();
     let view = resolve_view(render, report);
@@ -5153,7 +5172,6 @@ fn render_inspect_report_text(
     // without a structural flow, declaration blocks, then unique folded
     // occurrence flows. Every independently visible result is therefore
     // reachable by walking `--page`; table previews are never hidden caps.
-    let filters_hash = inspect_filters_hash(pattern, is_regex);
     let flowless_hits = report
         .hits
         .iter()

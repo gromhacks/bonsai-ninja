@@ -2753,9 +2753,8 @@ fn every_help_menu_renders_and_documents_core_surface() {
             return;
         };
         assert!(out.contains("USAGE:"), "{args:?}: help missing USAGE:\n{out}");
-        // The curated root menu currently needs 141 lines to represent every
-        // public command exactly once. Keep a one-line growth margin while
-        // preserving a tight regression budget for accidental duplication.
+        // Cover every public command once while preserving a tight layout
+        // budget for accidental duplication or overlong option descriptions.
         assert!(
             out.lines().count() <= 142,
             "{args:?}: help is too long ({} lines):\n{out}",

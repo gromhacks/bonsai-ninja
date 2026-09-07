@@ -4,6 +4,7 @@ use crate::common::{
     admitted_file_decl_index, file_path_matches_filter, format_span, make_name_filter,
     source_files_small_first, textual_relevance_key,
 };
+use crate::literal_filter::{matches_min_len, LiteralFilterError};
 use bonsai_workspace::Workspace;
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +21,8 @@ pub struct CommentsFilters<'a> {
     /// Restrict to comments whose enclosing function matches this
     /// substring.
     pub in_fn: Option<&'a str>,
-    /// Minimum character length of the comment's stripped body.
+    /// Minimum adapter-proven lexical body length in Unicode scalar values.
+    /// Comment markers are excluded; whitespace is preserved.
     pub min_len: Option<usize>,
     /// Treat `contains` as a regex.
     pub regex: bool,
@@ -29,6 +31,9 @@ pub struct CommentsFilters<'a> {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CommentOut {
     pub text: String,
+    /// Adapter-proven lexical body length; unknown is distinct from empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_len: Option<usize>,
     pub kind: String,
     pub file: String,
     pub line: u32,
@@ -36,14 +41,14 @@ pub struct CommentOut {
 }
 
 /// Collect every comment matching the filters.
-pub fn comments(ws: &Workspace, f: &CommentsFilters<'_>) -> Result<Vec<CommentOut>, regex::Error> {
+pub fn comments(ws: &Workspace, f: &CommentsFilters<'_>) -> Result<Vec<CommentOut>, LiteralFilterError> {
     use rayon::prelude::*;
     let contains_match = make_name_filter(f.contains, f.regex)?;
     let files = source_files_small_first(ws);
     let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
     let mut out: Vec<CommentOut> = files
         .par_iter()
-        .flat_map_iter(|&file| {
+        .map(|&file| -> Result<Vec<CommentOut>, LiteralFilterError> {
             let mut per_file: Vec<CommentOut> = Vec::new();
             if let Some(needle) = f.file {
                 let path = ws
@@ -52,27 +57,28 @@ pub fn comments(ws: &Workspace, f: &CommentsFilters<'_>) -> Result<Vec<CommentOu
                     .map(|path| path.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 if !file_path_matches_filter(ws, &path, needle) {
-                    return per_file.into_iter();
+                    return Ok(per_file);
                 }
             }
             let Some(idx) = admitted_file_decl_index(ws, file, &memory_permits) else {
-                return per_file.into_iter();
+                return Ok(per_file);
             };
             let enclosing = f.in_fn.map(|_| {
                 bonsai_workspace::enclosing_index::EnclosingSpanIndex::from_callable_decls(&idx.defs)
             });
             for comment in &idx.comments {
-                let kind = format!("{:?}", comment.kind).to_lowercase();
+                // Use the compiler enum's canonical serde spelling for both
+                // filtering and output (for example, `disabled_code`).
+                let serde_json::Value::String(kind) =
+                    serde_json::to_value(comment.kind).expect("comment kind serializes")
+                else {
+                    unreachable!("comment kind serializes as a string");
+                };
                 if f.kind.is_some_and(|k| !kind.contains(&k.to_lowercase())) {
                     continue;
                 }
                 if !contains_match(&comment.text) {
                     continue;
-                }
-                if let Some(min_chars) = f.min_len {
-                    if comment.text.chars().count() < min_chars {
-                        continue;
-                    }
                 }
                 if let Some(needle) = f.in_fn {
                     if !enclosing
@@ -83,18 +89,28 @@ pub fn comments(ws: &Workspace, f: &CommentsFilters<'_>) -> Result<Vec<CommentOu
                         continue;
                     }
                 }
+                if !matches_min_len(comment.content_len, f.min_len, || format_span(&comment.span, ws))? {
+                    continue;
+                }
                 let (path, line, column) = format_span(&comment.span, ws);
                 per_file.push(CommentOut {
                     text: comment.text.clone(),
+                    content_len: comment.content_len,
                     kind,
                     file: path,
                     line,
                     column,
                 });
             }
-            per_file.into_iter()
+            Ok(per_file)
         })
-        .collect();
+        .try_reduce(Vec::new, |mut left, mut right| {
+            if right.len() > left.len() {
+                std::mem::swap(&mut left, &mut right);
+            }
+            left.append(&mut right);
+            Ok(left)
+        })?;
     // Group attention-grabbing kinds together, then alphabetical by
     // text, then file/line for stability. `security` first, then
     // `fixme`, then `todo`, then doc, disabled-code, generic.
@@ -133,4 +149,39 @@ fn comment_relevance_key(row: &CommentOut, f: &CommentsFilters<'_>) -> ((u8, usi
             textual_relevance_key(&row.text, Some(contains), false)
         });
     (kind, text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_code_uses_canonical_kind_for_filtering_and_output() {
+        let workspace = Workspace::new(bonsai_adapters::all_languages_registry());
+        workspace
+            .vfs()
+            .write("app.py", "# ordinary\n# x = value;\n# TODO review\n");
+
+        let all = comments(&workspace, &CommentsFilters::default()).expect("comment inventory");
+        assert_eq!(
+            all.iter().map(|row| row.kind.as_str()).collect::<Vec<_>>(),
+            ["todo", "disabled_code", "generic"],
+            "canonical kinds also preserve attention-priority ordering: {all:?}"
+        );
+
+        for kind in ["disabled_code", "DISABLED_CODE", "disabled_"] {
+            let rows = comments(
+                &workspace,
+                &CommentsFilters {
+                    kind: Some(kind),
+                    ..Default::default()
+                },
+            )
+            .expect("comment kind filter");
+            assert_eq!(rows.len(), 1, "{kind}: {rows:?}");
+            assert_eq!(rows[0].kind, "disabled_code");
+            assert_eq!(rows[0].line, 2);
+            assert_eq!(rows[0].text, "# x = value;");
+        }
+    }
 }

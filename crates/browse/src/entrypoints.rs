@@ -63,6 +63,18 @@ pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<Ent
     let name_match = make_name_filter(f.name, f.regex)?;
     let mut candidates = Vec::new();
     for file in global.all_files() {
+        // A cold header service may reuse its full linkage directory even
+        // for a selected worklist. Apply the path predicate to canonical VFS
+        // identities here too, never to the workspace-relative display path.
+        if let Some(needle) = f.file {
+            if !ws
+                .vfs()
+                .path(file)
+                .is_ok_and(|path| file_path_matches_filter(ws, &path.to_string_lossy(), needle))
+            {
+                continue;
+            }
+        }
         for decl in global.decls_in(file) {
             // Adapters use a synthetic function to own executable module-scope
             // statements. It is a compiler container, not a callable users can
@@ -74,12 +86,6 @@ pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<Ent
             let kind = format!("{:?}", decl.kind).to_lowercase();
             if f.kind
                 .is_some_and(|needle| !kind.contains(&needle.to_lowercase()))
-            {
-                continue;
-            }
-            let path = format_span(&decl.name_span, ws).0;
-            if f.file
-                .is_some_and(|needle| !file_path_matches_filter(ws, &path, needle))
             {
                 continue;
             }
