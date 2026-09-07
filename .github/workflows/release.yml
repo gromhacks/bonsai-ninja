@@ -261,6 +261,12 @@ jobs:
           BONSAI_ES_COLD_TAINT_MAX_SECS: "500"
           BONSAI_ES_INSPECT_MAX_SECS: "150"
           BONSAI_ES_NAVIGATION_MAX_SECS: "55"
+          # The v0.3.0 ubuntu-22.04 run completed the exact endpoint corridor
+          # in 36.34s, versus 30.65s on the local reference host. Keep the
+          # 35s product/reference default; 45s gives this compiler-command
+          # class roughly 24% headroom over completed shared-runner work.
+          # This is a post-completion assertion, not a work or time cap.
+          BONSAI_ES_COMMAND_MAX_SECS: "45"
           # The same hosted runner completed warm taint in 238.52s, sink
           # lineage in 252.08s, and the cold inventory view in 125.24s.
           BONSAI_ES_TAINT_MAX_SECS: "300"

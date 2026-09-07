@@ -164,6 +164,29 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "large-repository SLOs must not compete with sibling scale cases",
         )
 
+    def test_compiler_command_slo_calibrates_only_the_hosted_scale_step(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        scale_step = workflow.split(
+            "- name: Run exact large-repository correctness and performance gates", 1
+        )[1].split("\n  build:", 1)[0]
+        setting = 'BONSAI_ES_COMMAND_MAX_SECS: "45"'
+
+        self.assertEqual(workflow.count(setting), 1)
+        self.assertIn(setting, scale_step)
+        self.assertIn("36.34s", scale_step)
+        self.assertIn("35s product/reference default", scale_step)
+        self.assertIn('BONSAI_MEMORY_BUDGET_MB: "3072"', scale_step)
+        self.assertIn("--test-threads=1", scale_step)
+
+        source = (
+            WORKFLOW.parents[2]
+            / "crates/cli/tests/elasticsearch_large_repo.rs"
+        ).read_text(encoding="utf-8")
+        defaults = re.findall(
+            r'"BONSAI_ES_COMMAND_MAX_SECS",\s*(\d+),', source
+        )
+        self.assertEqual(defaults, ["35", "35", "35"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,7 @@ not duplicate dated performance history.
 
 ## Status
 
-The v0.3.0 candidate incorporates the expanded compiler, adapter, rulepack,
+The v0.3.1 candidate incorporates the expanded compiler, adapter, rulepack,
 CLI, cache, scheduling, and publication checks described below. Local status
 is determined from a fresh run of the listed commands; historical measurements
 are retained only where they document a reproducible scale baseline. A tag is
@@ -37,9 +37,32 @@ Native export remains schema 14. The earlier 0.2.16 preparation below was
 not tagged or published; its measurements describe that earlier tree, not
 the subsequent command/filter changes.
 
+## 0.3.1 hosted-runner calibration
+
+The v0.3.0 tag passed preflight and all six native builds. Independent archive
+readback verified checksums, signed tag provenance, all 827 packaged files per
+platform, and relocated-binary analysis. Its Elasticsearch gate passed 11 of
+12 tests; the endpoint-corridor command exited successfully in 36.34 s but
+exceeded the unadjusted 35 s local-host assertion. The workflow consequently
+skipped both crates.io and GitHub publication. The failed tag is retained
+unchanged; it is not a published release.
+
+Version 0.3.1 adds the missing hosted-only `BONSAI_ES_COMMAND_MAX_SECS=45`
+calibration, approximately 24% above that completed measurement. The 35 s
+product/reference limit, 3 GiB scheduling budget, serial scale tests, hang
+watchdog, and exact analysis scope remain unchanged. A regression test pins
+that separation. No compiler, adapter, command, or analysis behavior changes
+in this patch; the Cargo version and internal pins advance together.
+
+All 72 release/validator script tests, strict all-target Clippy, version and
+ownership audits, documentation checks, workflow syntax checks, and skill-sync
+checks passed locally for this patch. The lockfile changes only the 47
+workspace versions; third-party dependency records are identical.
+
 ## 0.3 command and filter contracts
 
-The current candidate's completed local correctness checks (2026-09-07) are:
+The compiler/filter tree's completed local checks before tagging v0.3.0
+(2026-09-07) were:
 
 | Gate | Result |
 |---|---|
