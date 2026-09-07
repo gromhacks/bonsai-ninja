@@ -220,6 +220,11 @@ A security finding includes:
 - sanitizer or taint-transform evidence;
 - completeness metadata.
 
+Read the path's `status` together with its evidence. A `TAINT TRANSFORM`
+preserves attacker control; URL encoding or shell quoting alone is not a
+sanitizer guarantee. Use `--show-sanitized` to inspect credited protections
+and follow [Triage Workflow](triage-workflow.mdx) for context checks.
+
 Reopen evidence with:
 
 ```bash

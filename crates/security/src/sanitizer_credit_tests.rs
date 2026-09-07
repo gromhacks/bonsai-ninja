@@ -24,8 +24,8 @@ fn same_tag_credits() {
 }
 
 #[test]
-fn open_redirect_via_url_encode() {
-    assert!(sanitizer_credits_sink_tag(
+fn encoding_is_not_redirect_validation() {
+    assert!(!sanitizer_credits_sink_tag(
         metadata(),
         Some("url-encode"),
         Some("open-redirect")
@@ -34,6 +34,33 @@ fn open_redirect_via_url_encode() {
         metadata(),
         Some("open-redirect-sanitize"),
         Some("open-redirect")
+    ));
+}
+
+#[test]
+fn representation_transforms_do_not_prove_sink_context() {
+    for (transform, sink) in [
+        ("url-build", "ssrf"),
+        ("url-build", "open-redirect"),
+        ("shell-escape", "command-injection"),
+        ("ldap-dn-escape", "ldap-injection"),
+    ] {
+        assert!(!sanitizer_credits_sink_tag(
+            metadata(),
+            Some(transform),
+            Some(sink)
+        ));
+        assert!(sanitizer_tag_is_recognized_non_crediting(metadata(), transform));
+    }
+    assert!(sanitizer_credits_sink_tag(
+        metadata(),
+        Some("ldap-escape"),
+        Some("ldap-injection")
+    ));
+    assert!(sanitizer_credits_sink_tag(
+        metadata(),
+        Some("sql-parameter"),
+        Some("sql-injection")
     ));
 }
 

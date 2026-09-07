@@ -35,18 +35,28 @@
     callee:
       name: curl_easy_setopt
   constraints:
+  - arg_equals: {index: 1, value: CURLOPT_URL}
   - arg_tainted:
       index: 2
   match_examples:
-  - name: generated direct match
+  - name: libcurl URL option
     code: |
-      void example(const char *input) {
-        curl_easy_setopt("safe", "safe", input);
+      #include <curl/curl.h>
+      void example(CURL *client, const char *input) {
+        curl_easy_setopt(client, CURLOPT_URL, input);
       }
   - name: literal arg 2 negative
     code: |
-      void example() {
-        curl_easy_setopt("safe", "safe", "safe");
+      #include <curl/curl.h>
+      void example(CURL *client) {
+        curl_easy_setopt(client, CURLOPT_URL, "https://example.invalid/");
+      }
+    expect_no_match: true
+  - name: request body option is not the destination
+    code: |
+      #include <curl/curl.h>
+      void example(CURL *client, const char *input) {
+        curl_easy_setopt(client, CURLOPT_POSTFIELDS, input);
       }
     expect_no_match: true
   description: "curl_easy_setopt(CURLOPT_URL, tainted) - outbound request to an attacker-controlled host."

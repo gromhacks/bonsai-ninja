@@ -253,6 +253,11 @@ pub struct RuleTarget {
     /// this rule field, never in language adapters or shared analysis.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_call: Option<String>,
+    /// Require the parameter to have no adapter-emitted default-value call.
+    /// Frameworks can infer ordinary input parameters while reserving call
+    /// defaults for explicit binders/dependencies modeled by separate rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param_default_calls_absent: Option<bool>,
     /// Restrict a rule match to declarations whose enclosing class
     /// equals or extends one of the given names. Lets rules like
     /// `WebSocketHandler.on_message(self, message)` and
@@ -370,6 +375,7 @@ impl RuleTarget {
             && self.regex.is_none()
             && self.annotation.is_none()
             && self.default_call.is_none()
+            && self.param_default_calls_absent.is_none()
             && self.base_name_in.is_empty()
             && self.base_name_not_in.is_empty()
             && self.in_class.is_empty()
@@ -1448,6 +1454,11 @@ pub enum SanitizerAttachmentPolicy {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnalysisSemantics {
+    /// Classify a non-crediting sanitizer match as a taint-preserving
+    /// transform in canonical evidence. This reporting role does not add
+    /// transfer edges or confer sanitizer credit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taint_preserving_transform: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flow_classes: Vec<FlowClass>,
     /// Suppress inferred entry parameters for this sink class because those
@@ -1615,6 +1626,7 @@ impl AnalysisSemantics {
             };
         }
         inherit_option!(
+            taint_preserving_transform,
             source_specificity_rank,
             source_reporting_rank,
             suppress_inferred_sources,
@@ -2253,6 +2265,18 @@ pub struct ArgValueKindSpec {
 pub struct ArgStringCompositionPrefixSpec {
     pub index: u32,
     pub value: String,
+    /// Compare the declared prefix using ASCII case folding, for protocols
+    /// with case-insensitive field names. Source syntax is already lowered.
+    #[serde(default)]
+    pub ascii_case_insensitive: bool,
+    /// Permit the first literal component to contain further literal bytes
+    /// after the required prefix. Default retains exact-component matching.
+    #[serde(default)]
+    pub allow_prefix: bool,
+    /// Optional rule-owned restriction on the complete first literal component,
+    /// never on rendered source or the unknown remainder of the argument.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub literal_regex: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

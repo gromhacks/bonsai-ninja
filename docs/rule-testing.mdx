@@ -10,6 +10,12 @@ integration fixtures prove behavior against adapter compiler facts, and scale
 checks prove the same uncapped IDG semantics remain practical on production
 workspaces.
 
+Passing matching examples proves consistency with the authored model, not that
+the library API exists or that its security description is correct. Check
+signatures, defaults, argument roles, and supported versions against the
+provider's documentation. Use real API-shaped examples rather than invented
+namespace functions or placeholder imports.
+
 <Steps>
 
 1. Add or update `match_examples` on every enabled rule.
@@ -109,6 +115,28 @@ undeclared provider receives no sanitizer or source/sink credit.
 For same-origin helpers, test the approved imported parser and a same-named
 lookalike module. The adapter should emit both syntax facts with different
 provider identities; only the rule-declared provider may clear taint.
+
+The CLI's `security_rule_context_regressions` suite covers the twenty-language
+boundary matrix in `crates/cli/tests/fixtures/rule_context/`. It asserts exact
+source-to-sink locations, unsafe sanitizer verdicts, stable evidence IDs,
+complete pagination, safe neighboring cases, and native option classification.
+These fixtures are statically analyzed and never executed.
+
+```bash
+cargo test -p bonsai-ninja --test security_rule_context_regressions
+```
+
+Include adversarial cases beyond literal-input negatives: a quoted executable
+name, an encoder used in the wrong grammar, a changed option constant, a
+variadic body in a later slot, qualified built-ins, and an unrelated receiver
+with the same method name. A fixed executable with data arguments should not
+be mistaken for attacker-controlled executable selection.
+
+Cache regressions must compare canonical facts before and after additions,
+edits, renames, and deletions, including an explicitly selected workspace
+ignored by its parent Git repository. Git status cannot observe that root;
+both manifest validation and live SDK refresh use filesystem reconciliation.
+An `analysis_complete` flag alone is not proof of cached/fresh equality.
 
 ## Deployment Readiness Checks
 

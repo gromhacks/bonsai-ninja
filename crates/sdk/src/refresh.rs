@@ -131,6 +131,7 @@ impl GitChangeOracle {
     }
 
     fn refresh_ignore_control_stamps(&mut self) -> std::io::Result<()> {
+        ensure_observable_index(&self.workspace_root)?;
         let paths = super::git_ignore_control_paths_for_snapshot(&self.workspace_root, &self.repository_root);
         let mut stamps = Vec::with_capacity(paths.len());
         for path in paths {
@@ -197,6 +198,20 @@ impl GitChangeOracle {
 }
 
 pub(super) fn ensure_observable_index(workspace_root: &Path) -> std::io::Result<()> {
+    // An explicitly selected workspace is walked even when its parent Git
+    // repository ignores that directory. Git status cannot observe edits or
+    // additions there, so it cannot stand in for the compiler's input walk.
+    // Exit 1 alone proves the root is not ignored; command failures fail closed.
+    let ignored = Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(["check-ignore", "--quiet", "--", "."])
+        .output()?;
+    if ignored.status.code() != Some(1) {
+        return Err(std::io::Error::other(
+            "Git cannot observe an ignored workspace root",
+        ));
+    }
     let output = Command::new("git")
         .arg("-C")
         .arg(workspace_root)

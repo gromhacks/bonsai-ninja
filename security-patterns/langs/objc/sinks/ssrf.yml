@@ -236,3 +236,30 @@
       void fetch(id input) { [NSData dataWithContentsOfURL:input]; }
     expect_no_match: true
   description: "Foundation NSData dataWithContentsOfURL: performs a blocking outbound fetch to the supplied URL."
+
+- id: objc.ssrf.nsxmlparser_initwithcontentsofurl
+  enabled: true
+  language: objc
+  tag: ssrf
+  severity: high
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee: {attribute: [NSXMLParser, initWithContentsOfURL]}
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: XML parser initialization reads the selected URL
+    code: |
+      #import <Foundation/Foundation.h>
+      id configure(NSXMLParser *parser, NSURL *input) {
+        return [parser initWithContentsOfURL:input];
+      }
+  - name: fixed URL is not attacker selected
+    code: |
+      #import <Foundation/Foundation.h>
+      id configure(NSXMLParser *parser) {
+        return [parser initWithContentsOfURL:nil];
+      }
+    expect_no_match: true
+  description: "NSXMLParser initialization from an attacker-selected URL is a fetch boundary. External entity resolution is disabled by default and is modeled separately when explicitly enabled."

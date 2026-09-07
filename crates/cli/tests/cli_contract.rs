@@ -301,6 +301,51 @@ fn no_cache_taint_analysis_computes_exact_flow_without_persistent_artifacts() {
 }
 
 #[test]
+fn semantic_index_cannot_silently_ignore_watch() {
+    for flags in [["--semantic", "--watch"], ["--watch", "--semantic"]] {
+        let output = run(&["index", "missing-workspace", flags[0], flags[1]]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("cannot be used with"), "{error}");
+        assert!(
+            error.contains("--semantic") && error.contains("--watch"),
+            "{error}"
+        );
+        assert!(error.contains("USAGE: bonsai-ninja index"), "{error}");
+    }
+}
+
+#[test]
+fn security_help_documents_inferred_source_opt_in_and_typing_inventory() {
+    let help = stdout(&["security", "source-analysis", "--help"]);
+    let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized.contains("only with `--inferred-sources`"), "{help}");
+    assert!(
+        normalized.contains("--inferred-sources --profile all --category inferred"),
+        "{help}"
+    );
+    let help = stdout(&["security", "pack", "--help"]);
+    assert!(help.contains("`typing`"), "{help}");
+}
+
+#[test]
+fn sanitizer_help_distinguishes_inventory_matches_from_path_safety() {
+    let help = stdout(&["security", "sanitizers", "--help"]);
+    let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    for required in [
+        "credit-bearing sanitizer matches",
+        "Non-crediting transforms and validation markers are excluded",
+        "not proof that a particular source-to-sink path is safe",
+        "--rule python.sanitizer.html_escape",
+    ] {
+        assert!(normalized.contains(required), "missing {required}: {help}");
+    }
+    assert!(!help.contains("already cleansed"), "{help}");
+    assert!(!help.contains("python.sanitizer.shlex_quote"), "{help}");
+}
+
+#[test]
 fn leaf_help_names_the_full_command_and_documents_global_options() {
     let top_level = [
         "index",

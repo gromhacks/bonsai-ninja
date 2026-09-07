@@ -685,3 +685,40 @@
       func handle(part: String) { consume(part) }
     expect_no_match: true
   description: "A typed SwiftNIO HTTPServerRequestPart parameter carries either the client-supplied request head (including URI/headers) or body bytes; enum projection remains ordinary compiler flow."
+
+- id: swift.swiftui.on_open_url
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [url]
+  packages: [SwiftUI]
+  imports: [SwiftUI]
+  match:
+    kind: call
+    callee: {name: onOpenURL}
+  constraints:
+  - receiver_type_in: [View, Text, SwiftUI.View, SwiftUI.Text]
+  - arg_count: 1
+  - arg_is_inline_callback: 0
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
+  match_examples:
+  - name: SwiftUI callback receives an incoming URL
+    code: |
+      import SwiftUI
+      func example(view: Text) { view.onOpenURL { url in consume(url) } }
+    expect_match_text: [view.onOpenURL]
+  - name: unrelated callback does not become a deep link source
+    code: |
+      import SwiftUI
+      struct LocalView {
+          func onOpenURL(_ callback: (String) -> Void) {}
+      }
+      func example(view: LocalView) { view.onOpenURL { value in consume(value) } }
+    expect_no_match: true
+  description: "SwiftUI View.onOpenURL delivers incoming universal/custom URLs to callback parameter zero. Receiver identity and callback binding are compiler facts; the registration result is not a source."

@@ -58,7 +58,11 @@ facade calls do not broaden the declared scope.
 Git-backed refreshes observe clean committed changes as well as dirty files.
 Changes to HEAD, the index, or ignore controls trigger full reconciliation;
 submodules and index flags that hide edits (`assume-unchanged` or
-`skip-worktree`) disable dirty-list acceleration. Read-only Git checks do not
+`skip-worktree`) disable dirty-list acceleration. A selected workspace ignored
+by an enclosing Git repository also requires filesystem reconciliation:
+an empty Git status cannot prove that its files are unchanged. This applies to
+manifest validation and live refresh, including new, renamed, or deleted files.
+Read-only Git checks do not
 rewrite index metadata. Manifest validation applies the same hidden-index
 guard. The fallback changes scheduling only, not source scope.
 

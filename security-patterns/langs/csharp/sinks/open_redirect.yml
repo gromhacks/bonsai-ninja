@@ -9,21 +9,22 @@
   match:
     kind: call
     callee:
-      attribute: [Microsoft, AspNetCore, Mvc, Redirect]
+      name: Redirect
   constraints:
+  - receiver_type_in: [Controller, ControllerBase, Microsoft.AspNetCore.Mvc.Controller, Microsoft.AspNetCore.Mvc.ControllerBase]
   - arg_tainted:
       index: 0
   match_examples:
   - name: declared shape
     code: |
       using Microsoft.AspNetCore.Mvc;
-      class App { void Test(string input) { Microsoft.AspNetCore.Mvc.Redirect(input); } }
+      class App : Controller { IActionResult Test(string input) { return Redirect(input); } }
   - name: literal local redirect negative
     code: |
       using Microsoft.AspNetCore.Mvc;
-      class App { void Test() { Microsoft.AspNetCore.Mvc.Redirect("/home"); } }
+      class App : Controller { IActionResult Test() { return Redirect("/home"); } }
     expect_no_match: true
-  description: "Controller.Redirect(tainted url) - scoped to MVC namespace to avoid colliding with other Redirect helpers."
+  description: "Controller.Redirect(tainted url) requires compiler-proven MVC controller receiver or ancestry; unrelated Redirect helpers remain outside the model."
 
 - id: csharp.open_redirect.controller_redirectpermanent
   enabled: true

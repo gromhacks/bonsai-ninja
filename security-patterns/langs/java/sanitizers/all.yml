@@ -778,7 +778,7 @@
 - id: java.sanitizer.esapi_encode_for_dn
   enabled: true
   language: java
-  tag: ldap-escape
+  tag: ldap-dn-escape
   packages: ["org.owasp.esapi"]
   match:
     kind: call
@@ -2146,7 +2146,7 @@
 - id: java.sanitizer.rdn_escape_value
   enabled: true
   language: java
-  tag: ldap-escape
+  tag: ldap-dn-escape
   packages: ["javax.naming.ldap"]
   match:
     kind: call

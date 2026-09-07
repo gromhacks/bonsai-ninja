@@ -8,13 +8,36 @@
 use clap::builder::styling::{AnsiColor, Color, RgbColor, Style as ClapStyle, Styles as ClapStyles};
 use owo_colors::{Rgb, Style};
 
+/// Severity is a semantic signal, not a decorative theme accent. Keep this
+/// scale recognizable across every theme; labels remain present without ANSI.
+pub(crate) fn severity_color(severity: &str) -> Option<Rgb> {
+    let severity = if severity.eq_ignore_ascii_case("error") {
+        "critical"
+    } else if severity.eq_ignore_ascii_case("warning") {
+        "high"
+    } else if severity.eq_ignore_ascii_case("hint") {
+        "info"
+    } else {
+        severity
+    };
+    [
+        ("critical", Rgb(255, 95, 86)),
+        ("high", Rgb(255, 166, 77)),
+        ("medium", Rgb(235, 203, 89)),
+        ("low", Rgb(106, 192, 232)),
+        ("info", Rgb(158, 171, 186)),
+    ]
+    .into_iter()
+    .find_map(|(label, color)| severity.eq_ignore_ascii_case(label).then_some(color))
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Theme {
     // Muted brown-olive-amber. Borders dim, accents warm.
     EarthyDark,
     // Popular purple/teal Dracula palette.
     Dracula,
-    // Amber-on-near-black phosphor look. Four colors only.
+    // Amber-on-near-black chrome; severity keeps its shared semantic scale.
     RetroAmber,
     // Dark-forest bonsai house palette and the CLI default.
     Moss,
@@ -143,8 +166,8 @@ impl ChromePalette {
         let header = Style::new().color(Rgb(189, 147, 249)).bold(); // purple
         let name = Style::new().color(Rgb(139, 233, 253)).bold(); // cyan
         let kind = Style::new().color(Rgb(80, 250, 123)); // green
-        let path = Style::new().color(Rgb(98, 114, 164)); // comment blue-gray
-        let dim = Style::new().color(Rgb(98, 114, 164));
+        let path = Style::new().color(Rgb(147, 159, 196));
+        let dim = Style::new().color(Rgb(127, 141, 183));
         let accent = Style::new().color(Rgb(255, 121, 198)).bold(); // pink
         let warn = Style::new().color(Rgb(255, 184, 108)).bold(); // orange
         Self {
@@ -178,17 +201,15 @@ impl ChromePalette {
     }
 
     fn moss() -> Self {
-        // Dark-forest palette restricted to the cool half of the spectrum:
-        // evergreens, teals, sky blues, slate. No tan, no amber, no lime —
-        // every slot sits between deep blue and forest green so the
+        // Dark-forest chrome uses the cool half of the spectrum:
+        // evergreens, teals, sky blues, slate. Decorative slots sit
+        // between deep blue and forest green so the
         // terminal feels like a misted clearing under moonlight, not a
         // cabin interior.
         //
         // The visual pop (`accent`) is a clean cyan that reads like still
-        // water under pines. `warn` is a cool sky blue — distinct from
-        // accent, draws the eye, but stays inside the cool band. `error`
-        // (defined elsewhere) keeps the weathered crimson so errors still
-        // register unambiguously.
+        // water under pines. Warnings and severities deliberately leave
+        // that decorative band so incomplete evidence remains conspicuous.
         //
         //   pine-ink / border     — deep spruce shadow, nearly black
         //   misted-pine / header  — cool fresh-needle teal
@@ -197,15 +218,15 @@ impl ChromePalette {
         //   slate-moss / path     — old stone under lichen
         //   deep-shade / dim      — undergrowth at dusk
         //   spruce-cyan / accent  — cold still water, the pop
-        //   sky-pine / warn       — cool sky blue, draws the eye, no tan
-        let border = Style::new().color(Rgb(42, 58, 60));
+        //   amber / warn          — distinguish cautions from ordinary chrome
+        let border = Style::new().color(Rgb(64, 86, 90));
         let header = Style::new().color(Rgb(120, 188, 180)).bold();
         let name = Style::new().color(Rgb(168, 222, 218)).bold();
         let kind = Style::new().color(Rgb(96, 168, 160));
-        let path = Style::new().color(Rgb(92, 118, 122));
-        let dim = Style::new().color(Rgb(72, 96, 100));
+        let path = Style::new().color(Rgb(139, 168, 172));
+        let dim = Style::new().color(Rgb(112, 140, 145));
         let accent = Style::new().color(Rgb(110, 196, 210)).bold();
-        let warn = Style::new().color(Rgb(120, 168, 210)).bold();
+        let warn = Style::new().color(Rgb(235, 183, 96)).bold();
         Self {
             border,
             header,

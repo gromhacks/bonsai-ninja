@@ -338,6 +338,15 @@ fn render_string(out: &mut String, key: Option<&str>, text: &str) {
         out.push_str("<span class=\"empty\">(empty)</span>");
         return;
     }
+    if key == Some("severity") && crate::theme::severity_color(text).is_some() {
+        let _ = write!(
+            out,
+            "<span class=\"badge severity sev-{}\">{}</span>",
+            text.to_ascii_lowercase(),
+            escape(text),
+        );
+        return;
+    }
     if text.contains('\n') || key.is_some_and(is_code_key) {
         let _ = write!(out, "<pre><code>{}</code></pre>", escape(text));
     } else if key.is_some_and(is_identifier_key) {
@@ -667,6 +676,9 @@ main{padding:16px 0 40px}
 .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid var(--line)}
 .badge.ok{color:var(--ok);border-color:var(--ok)}
 .badge.warn{color:var(--warn);border-color:var(--warn)}
+.severity{border-color:currentColor}
+.sev-critical,.sev-error{color:#b52320}.sev-high,.sev-warning{color:#a34800}.sev-medium{color:#806100}.sev-low{color:#12658e}.sev-info,.sev-hint{color:#586474}
+@media (prefers-color-scheme:dark){.sev-critical,.sev-error{color:#ff5f56}.sev-high,.sev-warning{color:#ffa64d}.sev-medium{color:#ebcb59}.sev-low{color:#6ac0e8}.sev-info,.sev-hint{color:#9eabba}}
 .reasons{margin:0 0 12px;padding-left:20px;color:var(--warn)}
 dl.facts,dl.obj{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0 0 12px}
 dl.facts>div,dl.obj>div{display:contents}

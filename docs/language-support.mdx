@@ -79,5 +79,5 @@ requested semantic result; it is never replaced with a guessed edge.
 | Ruby | Yes | Yes | Limited | Modules, classes, blocks, closures, method dispatch | `method_missing` and runtime metaprogramming can be unresolved |
 | Rust | Yes | Yes | Yes | Modules, impls, traits, closures, tuples, async calls | Unexpanded procedural macros and trait objects can be unresolved |
 | Scala | Yes | Yes | Limited | Packages, objects, classes, inheritance, lambdas | Runtime reflection and compiler-expanded implicits can be unresolved |
-| Swift | Yes | Yes | Limited | Modules, classes, protocols, closures, async calls | Dynamic Objective-C bridging can be unresolved |
+| Swift | Yes | Yes | Limited | Modules, classes, protocols, computed getters, nested callbacks, async calls | Dynamic Objective-C bridging can be unresolved |
 | TypeScript | Yes | Yes | Limited | ES modules, types, classes, closures, async calls, statically assigned object/prototype methods | Type erasure and computed runtime properties can be unresolved |

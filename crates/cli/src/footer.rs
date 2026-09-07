@@ -157,6 +157,10 @@ pub(crate) fn render_paging_footer(info: &paging::PageInfo, cmd_line_hint: &str)
     // (fired later via `WorkspaceFooter`'s `Drop`) stays silent.
     PAGING_FOOTER_FIRED.store(true, Ordering::Relaxed);
     let u = ui();
+    // Use the renderer's command identity before inserting user arguments:
+    // a workspace path or query can itself contain another command's name.
+    let shown_label = paging_total_label(cmd_line_hint, info.shown_rows);
+    let total_label = paging_total_label(cmd_line_hint, info.total_rows);
     let cmd_line_hint = page_cache::current_command_without_page_hint(cmd_line_hint);
     let remaining_after_page = info
         .next_cursor
@@ -169,7 +173,7 @@ pub(crate) fn render_paging_footer(info: &paging::PageInfo, cmd_line_hint: &str)
     let page_line = if info.total_pages > 1 {
         if info.is_last {
             format!(
-                "page {} of {} ({} rows)",
+                "page {} of {} ({} {shown_label})",
                 info.page_number, info.total_pages, info.shown_rows
             )
         } else if remaining_after_page > 0 {
@@ -178,7 +182,7 @@ pub(crate) fn render_paging_footer(info: &paging::PageInfo, cmd_line_hint: &str)
             // workspaces with dozens of pages do not imply page 2
             // contains every remaining result.
             format!(
-                "page {} of {} ({} rows)  —  {} results remaining",
+                "page {} of {} ({} {shown_label})  —  {} results remaining",
                 info.page_number,
                 info.total_pages,
                 info.shown_rows,
@@ -191,12 +195,12 @@ pub(crate) fn render_paging_footer(info: &paging::PageInfo, cmd_line_hint: &str)
             // live in the `shown_rows` / `total_rows` accounting).
             // Drop the misleading numeric suffix.
             format!(
-                "page {} of {} ({} rows)  —  more results after this page",
+                "page {} of {} ({} {shown_label})  —  more results after this page",
                 info.page_number, info.total_pages, info.shown_rows,
             )
         }
     } else {
-        format!("page 1 of 1 ({} rows)", info.shown_rows)
+        format!("page 1 of 1 ({} {shown_label})", info.shown_rows)
     };
     cli_println!("{}", u.dim(&page_line));
     cli_println!(
@@ -204,7 +208,7 @@ pub(crate) fn render_paging_footer(info: &paging::PageInfo, cmd_line_hint: &str)
         u.dim(&format!(
             "total   {} {}",
             format_count(info.total_rows as usize),
-            paging_total_label(&cmd_line_hint, info.total_rows),
+            total_label,
         ))
     );
     // Footer reports ACTUAL rendered tokens, not the paginator's
@@ -304,14 +308,17 @@ pub(crate) fn render_paging_footer(info: &paging::PageInfo, cmd_line_hint: &str)
 }
 
 fn uncapped_hint_tokens(info: &paging::PageInfo, actual_tokens: u64) -> Option<u64> {
-    (info.total_tokens_uncapped > actual_tokens).then_some(info.total_tokens_uncapped)
+    // A conservative paginator estimate is not omitted output. Only advertise
+    // a larger artifact when other pages actually exist.
+    ((info.total_pages > 1 || info.next_cursor.is_some()) && info.total_tokens_uncapped > actual_tokens)
+        .then_some(info.total_tokens_uncapped)
 }
 
 fn paging_total_label(cmd_line_hint: &str, total: u64) -> &'static str {
     let singular = total == 1;
     let pluralize = |one: &'static str, many: &'static str| if singular { one } else { many };
     if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" taint-analysis") {
-        pluralize("taint flow", "taint flows")
+        pluralize("finding", "findings")
     } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" source-analysis") {
         pluralize("source flow", "source flows")
     } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" sink-analysis") {
@@ -322,18 +329,24 @@ fn paging_total_label(cmd_line_hint: &str, total: u64) -> &'static str {
         pluralize("sink", "sinks")
     } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" sanitizers") {
         pluralize("sanitizer", "sanitizers")
-    } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" deps") {
-        pluralize("dependency finding", "dependency findings")
+    } else if cmd_line_hint.contains(" security ")
+        && (cmd_line_hint.contains(" deps") || cmd_line_hint.contains(" dependency-analysis"))
+    {
+        pluralize("dependency", "dependencies")
     } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" pack") {
         pluralize("rule", "rules")
     } else if cmd_line_hint.contains(" defs ") {
         pluralize("definition", "definitions")
+    } else if cmd_line_hint.contains(" entrypoints ") {
+        pluralize("entry point", "entry points")
+    } else if cmd_line_hint.contains(" operations ") {
+        pluralize("operation", "operations")
     } else if cmd_line_hint.contains(" calls ") {
         pluralize("call site", "call sites")
     } else if cmd_line_hint.contains(" imports ") {
-        pluralize("unique import", "unique imports")
+        pluralize("import", "imports")
     } else if cmd_line_hint.contains(" vars ") {
-        pluralize("variable", "variables")
+        pluralize("write", "writes")
     } else if cmd_line_hint.contains(" strings ") {
         pluralize("string literal", "string literals")
     } else if cmd_line_hint.contains(" comments ") {
@@ -341,7 +354,7 @@ fn paging_total_label(cmd_line_hint: &str, total: u64) -> &'static str {
     } else if cmd_line_hint.contains(" args ") {
         pluralize("argument", "arguments")
     } else if cmd_line_hint.contains(" classes ") {
-        pluralize("class", "classes")
+        pluralize("type", "types")
     } else if cmd_line_hint.contains(" refs ") {
         pluralize("reference", "references")
     } else if cmd_line_hint.contains(" search ") {
@@ -368,27 +381,5 @@ fn paging_total_label(cmd_line_hint: &str, total: u64) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::uncapped_hint_tokens;
-    use crate::paging::PageInfo;
-
-    #[test]
-    fn uncapped_estimate_is_stable_across_pages_with_different_render_costs() {
-        let info = PageInfo {
-            page_number: 1,
-            total_pages: 2,
-            page_size: 5,
-            shown_rows: 5,
-            total_rows: 10,
-            budget: Some(1_024),
-            tokens_used: 900,
-            cursor: "P:00000000".to_string(),
-            next_cursor: Some("P:00000001".to_string()),
-            is_last: false,
-            start_offset: 0,
-            total_tokens_uncapped: 8_192,
-        };
-        assert_eq!(uncapped_hint_tokens(&info, 300), Some(8_192));
-        assert_eq!(uncapped_hint_tokens(&info, 700), Some(8_192));
-    }
-}
+#[path = "footer_tests.rs"]
+mod tests;

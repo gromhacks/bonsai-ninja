@@ -377,7 +377,7 @@
 - id: perl.sanitizer.net_ldap_dn_escape
   enabled: true
   language: perl
-  tag: ldap-escape
+  tag: ldap-dn-escape
   packages: ["Net::LDAP::Util"]
   match:
     kind: call

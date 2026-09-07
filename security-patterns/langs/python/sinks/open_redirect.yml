@@ -14,6 +14,11 @@
   constraints:
   - arg_tainted:
       index: 0
+  - arg_string_composition_not_starts_with:
+      index: 0
+      value: "/"
+      allow_prefix: true
+      literal_regex: '^/[^/\\\x00-\x20\x7f]'
   match_examples:
   - name: open redirect flask redirect
     code: |
@@ -27,6 +32,30 @@
       def example(user_input):
           return flask.redirect('safe')
     expect_no_match: true
+  - name: flask redirect fixed local query prefix negative
+    code: |
+      from flask import redirect
+      def example(user_input):
+          return redirect("/next?to=" + user_input)
+    expect_no_match: true
+  - name: flask redirect single slash cannot prove a local target
+    code: |
+      from flask import redirect
+      def example(user_input):
+          return redirect("/" + user_input)
+    expect_match_text: [redirect]
+  - name: flask redirect network path remains unsafe
+    code: |
+      from flask import redirect
+      def example(user_input):
+          return redirect("//" + user_input)
+    expect_match_text: [redirect]
+  - name: flask redirect backslash authority remains unsafe
+    code: |
+      from flask import redirect
+      def example(user_input):
+          return redirect("/\\" + user_input)
+    expect_match_text: [redirect]
   description: "flask.redirect(tainted) - fully-qualified form; returns a 302 with a tainted Location."
 
 - id: python.open_redirect.werkzeug_redirect

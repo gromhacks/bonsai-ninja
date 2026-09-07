@@ -118,38 +118,3 @@
       }
     expect_no_match: true
   description: "bincode::deserialize on attacker-controlled bytes can allocate from serialized length prefixes without a configured size limit; the exact fully-qualified call and tainted payload constraint keep typed decoding of trusted bytes quiet."
-
-- id: rust.deser.serde_pickle_from_slice
-  enabled: true
-  language: rust
-  tag: insecure-deserialization
-  severity: critical
-  packages: [serde_pickle]
-  cwe: [CWE-502]
-  match:
-    kind: call
-    callee:
-      attribute: [serde_pickle, from_slice]
-  constraints:
-  - arg_tainted:
-      index: 0
-  match_examples:
-  - name: tainted pickle slice
-    code: |
-      use serde_pickle;
-      use serde_pickle::dummy;
-      fn example(target: &[u8]) {
-          serde_pickle::from_slice(target);
-      }
-  - name: literal pickle slice negative
-    code: |
-      use serde_pickle;
-      use serde_pickle::dummy;
-      fn example() {
-          serde_pickle::from_slice(b"safe");
-      }
-    expect_no_match: true
-  description: "serde_pickle::from_slice - parses Python pickle format; supports arbitrary class construction via REDUCE opcode = RCE."
-
-  imports:
-  - serde_pickle

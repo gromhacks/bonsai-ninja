@@ -99,7 +99,7 @@
         Shellwords.escape(input)
       end
     expect_match_text: ["Shellwords.escape"]
-  description: "Shellwords.escape - neutralises argv injection."
+  description: "Shellwords.escape quotes one POSIX-shell word; it does not authorize an executable or prove the consumer's interpreter and argument context."
 
 - id: ruby.sanitizer.shellwords_shellescape
   enabled: true

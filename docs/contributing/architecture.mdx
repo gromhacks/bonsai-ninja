@@ -221,7 +221,8 @@ consumer that needs one function's exact body — a rendered flow, a read-file
 mark, a callee summary — decodes that declaration alone and remaps it to the
 header symbol table from the directory, without decoding its siblings. The
 whole-file object remains the canonical fallback. The generation file is
-`compiler-objects.v178.factstore` (`COMPILER_OBJECT_CACHE_VERSION`); every
+`compiler-objects.v<frontend-ABI>.factstore`, with its version defined by
+`COMPILER_OBJECT_CACHE_VERSION` in that module; every
 file has an object payload plus independently keyed header, attribution,
 browse, declaration-frame, and line-table payloads (`load_line_starts`), and
 a generation that predates line tables derives them from the text instead.
@@ -369,6 +370,18 @@ designated initializers, and implicit class initializers only when the exact
 CST/declaration facts permit them. Direct instance stored-property
 initializers prefix every designated initializer; static properties, computed
 properties, and sibling callable bodies never become constructor events.
+
+Swift computed getters are separate executable declarations. They retain the
+ordinary lowered body events and exact call-argument/callback projections, not
+only a synthesized return expression. Nested callback bodies keep separate
+owners. Changes to synthesized lowering invalidate the compiler-object frontend
+ABI and all derived semantic sidecars just like ordinary callable changes.
+
+Python string-composition facts include direct call arguments as well as
+assignments and returns. Argument projections join the existing typed argument
+directory through exact Tree-sitter range lookup; they do not parse rendered
+text or rescan the whole tree per argument. Unsupported value shapes remain
+unknown rather than receiving a partial safety proof.
 
 Parser diagnostics carry per-source-snapshot coverage. A successful file with
 zero diagnostics is recorded just as deliberately as a file with an
@@ -1175,8 +1188,12 @@ fingerprints, missing reasons, and a versioned source ledger. Each
 and, when the bytes are the text verbatim, its SHA-256 `text_digest`. A warm
 validation reuses the digest only when the stamp is unchanged; changed
 metadata always rehashes content. This turns an unchanged 30,000-file reopen
-into metadata validation without weakening exact source identity. Legacy
-in-tree analysis files are not reused. `cache stats` reports recognized
+into metadata validation without weakening exact source identity. Git change
+proofs are usable only when Git can observe the selected compiler inputs.
+An explicitly selected workspace ignored by its parent repository uses the
+filesystem fallback for manifest validation and live SDK refresh; an empty
+Git status there cannot prove that files were unchanged, added, or removed.
+Legacy in-tree analysis files are not reused. `cache stats` reports recognized
 inactive `<workspace>/.bonsai` artifacts; `cache clear --legacy`
 (`WorkspaceCache::clear_legacy_in_tree`) removes only those files, preserving
 rule overlays, links, configuration, and unknown data. Ordinary recursive

@@ -2,13 +2,16 @@
 //! a recognized sanitizer call is still reported with `status:
 //! sanitized`, not silently dropped from the graph.
 //!
-//! Each fixture under `examples/<lang>/sanitizer_credit/` has:
+//! Each fixture under `test-fixtures/languages/<lang>/sanitizer_credit/` has:
 //!
 //!   `unsanitized()` — source -> sink directly. Engine MUST report
 //!                     with unsanitized status.
 //!   `sanitized()`   — source -> sanitizer() -> sink. Engine MAY
 //!                     report, but if it does the status MUST be
 //!                     sanitized when the sanitizer credits the sink.
+//! The historical `sanitized` name is not proof: context-free shell
+//! quoting is a non-crediting transform, which must remain visible and
+//! unsanitized. Wrong-context credit-bearing encoders are tested separately.
 //!
 //! Per `docs/contributing/taint-engine-spec.mdx`, sanitizers are reporting
 //! evidence, not propagation blockers. This audit exercises the
@@ -53,8 +56,7 @@ fn rules_root() -> PathBuf {
 enum Expected {
     Pass,
     WrongContext,
-    #[allow(dead_code)]
-    Pending,
+    NonCreditingTransform,
 }
 
 const LANG_TABLE: &[(&str, Expected)] = &[
@@ -66,18 +68,18 @@ const LANG_TABLE: &[(&str, Expected)] = &[
     ("erlang", Expected::Pass),
     ("go", Expected::Pass),
     ("java", Expected::WrongContext),
-    ("javascript", Expected::Pass),
+    ("javascript", Expected::NonCreditingTransform),
     ("kotlin", Expected::Pass),
     ("lua", Expected::Pass),
     ("objc", Expected::Pass),
-    ("perl", Expected::Pass),
-    ("php", Expected::Pass),
-    ("python", Expected::Pass),
-    ("ruby", Expected::Pass),
-    ("rust", Expected::Pass),
+    ("perl", Expected::NonCreditingTransform),
+    ("php", Expected::NonCreditingTransform),
+    ("python", Expected::NonCreditingTransform),
+    ("ruby", Expected::NonCreditingTransform),
+    ("rust", Expected::NonCreditingTransform),
     ("scala", Expected::Pass),
     ("swift", Expected::Pass),
-    ("typescript", Expected::Pass),
+    ("typescript", Expected::NonCreditingTransform),
 ];
 
 fn run_taint_for(lang: &str) -> Result<bonsai_security::TaintAnalysisReport, String> {
@@ -104,6 +106,7 @@ struct Result_ {
     findings: usize,
     unsanitized_fired: bool,
     sanitized_statuses: Vec<bonsai_security::FindingStatus>,
+    transformed_legs: usize,
 }
 
 fn audit_one(lang: &'static str) -> Result_ {
@@ -116,6 +119,7 @@ fn audit_one(lang: &'static str) -> Result_ {
                 findings: 0,
                 unsanitized_fired: false,
                 sanitized_statuses: Vec::new(),
+                transformed_legs: 0,
             }
         }
     };
@@ -127,7 +131,7 @@ fn audit_one(lang: &'static str) -> Result_ {
     });
     // Detect the sanitized leg by chain entry name containing
     // "sanitized" but not "unsanitized".
-    let sanitized_statuses = report
+    let treated_legs: Vec<_> = report
         .findings
         .iter()
         .filter_map(|f| {
@@ -135,7 +139,7 @@ fn audit_one(lang: &'static str) -> Result_ {
                 let lower = hop.to_ascii_lowercase();
                 lower.contains("sanitized") && !lower.contains("unsanitized")
             });
-            is_sanitized_leg.then_some(f.finding.status)
+            is_sanitized_leg.then_some(&f.finding)
         })
         .collect();
     Result_ {
@@ -143,7 +147,11 @@ fn audit_one(lang: &'static str) -> Result_ {
         skipped: None,
         findings: report.findings.len(),
         unsanitized_fired,
-        sanitized_statuses,
+        sanitized_statuses: treated_legs.iter().map(|finding| finding.status).collect(),
+        transformed_legs: treated_legs
+            .iter()
+            .filter(|finding| !finding.taint_transforms_seen.is_empty() && finding.sanitizers_seen.is_empty())
+            .count(),
     }
 }
 
@@ -164,11 +172,9 @@ fn sanitizer_credit_audit_per_language() {
         let exp = match expected {
             Expected::Pass => "Pass",
             Expected::WrongContext => "WrongContext",
-            Expected::Pending => "Pending",
+            Expected::NonCreditingTransform => "NonCreditingTransform",
         };
-        let status = if matches!(expected, Expected::Pending) {
-            "skipped (pending)"
-        } else if r.skipped.is_some() {
+        let status = if r.skipped.is_some() {
             "fixture missing"
         } else {
             let sanitized_has_bad_status = r
@@ -194,7 +200,13 @@ fn sanitizer_credit_audit_per_language() {
                         "REGRESSION: wrong-context leg credited"
                     }
                 }
-                (Expected::Pending, _, _) => unreachable!(),
+                (Expected::NonCreditingTransform, _, _) => {
+                    if transform_regression(r).is_none() {
+                        "ok"
+                    } else {
+                        "REGRESSION: transform missing or credited"
+                    }
+                }
             }
         };
         eprintln!(
@@ -214,7 +226,7 @@ fn sanitizer_credit_audit_per_language() {
     let regressions: Vec<String> = results
         .iter()
         .filter_map(|(r, expected)| match expected {
-            Expected::Pending => None,
+            Expected::NonCreditingTransform => transform_regression(r),
             Expected::Pass => {
                 if r.skipped.is_some() {
                     Some(format!("{}: fixture missing", r.lang))
@@ -264,6 +276,30 @@ fn sanitizer_credit_audit_per_language() {
             msg.push('\n');
         }
         panic!("{msg}");
+    }
+}
+
+fn transform_regression(result: &Result_) -> Option<String> {
+    if result.skipped.is_some() || !result.unsanitized_fired {
+        Some(format!("{}: fixture or unsanitized leg missing", result.lang))
+    } else if result.sanitized_statuses.is_empty()
+        || result.transformed_legs != result.sanitized_statuses.len()
+    {
+        Some(format!(
+            "{}: non-crediting transform evidence missing or mislabeled",
+            result.lang
+        ))
+    } else if result
+        .sanitized_statuses
+        .iter()
+        .any(|status| *status != bonsai_security::FindingStatus::Unsanitized)
+    {
+        Some(format!(
+            "{}: a context-free transform received sanitizer credit",
+            result.lang
+        ))
+    } else {
+        None
     }
 }
 

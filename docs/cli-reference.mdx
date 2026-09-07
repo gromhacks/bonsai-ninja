@@ -14,6 +14,14 @@ fixed-point iterations, or results. `--debug <CATEGORIES>` emits selected
 diagnostic categories to stderr and is equivalent to `BONSAI_DEBUG`.
 `--theme` and `BONSAI_THEME` accept exactly `moss`, `earthy-dark`,
 `dracula`, or `retro-amber`; unknown values are errors.
+Severity colors are consistent in every theme: critical red, high orange,
+medium yellow, low blue, and info gray-blue. Text labels are always retained.
+Tables adapt to terminal width (`COLUMNS` overrides detection), using labeled
+records when dense columns would be unreadable. See [Output Formats](output-formats)
+for terminal, JSON, and HTML presentation contracts.
+Progress phases share one terminal-line owner: each transition clears and
+detaches the old bar before drawing the next. Report output clears progress
+and suppresses new bars for the lifetime of that output stream.
 
 `--contains <TEXT>` (repeatable; every value must match) and
 `--not-contains <TEXT>` (repeatable; no value may match) are views over the
@@ -161,7 +169,7 @@ bonsai-ninja index ./src --semantic --minified-js
 | `--semantic` | false | Explicitly build and persist the immutable compiler-object generation, resolved callgraph, compiler linkage, retrieval factstore, streamed workspace IDG, and external-cache `manifest.json`. This does not run all-entry dataflow prewarm. |
 | `--structural-only` | false | Explicit spelling for default syntax/construct indexing; do not warm reusable semantic sidecars. |
 | `--prewarm-dataflow` | false | Compute and persist the compatibility dataflow projection used by older SDK/query surfaces. This does not select another taint engine and can be expensive on large workspaces. |
-| `--watch` | false | Keep running, poll the source tree, hot-reload saved changes into the live workspace, and print fresh stats. |
+| `--watch` | false | Keep running, poll the source tree, hot-reload saved changes into the live workspace, and print fresh stats. Cannot be combined with the one-shot `--semantic` mode. |
 | `--interval-ms <N>` | 750 | Poll interval for `--watch`. Values below 100 ms are clamped to 100 ms. |
 | `--format <FORMAT>` | text | `text` for the themed summary or `json` for the complete canonical object. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
@@ -232,6 +240,12 @@ bonsai-ninja security ./src pack --audit --rules-dir ./security-patterns
 | `sink-analysis` | None | Map source-independent compiler value lineage into every selected taint-relevant sink. |
 | `pack` | None | Audit (`--audit`), list, tree (`--tree`), or validate (`--validate`) the rulepack. |
 
+Inventories identify review locations, not confirmed vulnerabilities. A sink
+can appear even when its arguments are constant or no source reaches it.
+Dependency severity is the highest associated rule severity, not a CVE verdict
+about an installed package version. Use `taint-analysis` for findings and
+`dependency-analysis` to place those findings in package-usage context.
+
 Dependency rows require package-specific import or manifest-content evidence.
 Manifest evidence comes from parsed dependency fields, complete data records,
 or compiler-proven static declaration arguments—not comments or descriptions.
@@ -241,6 +255,14 @@ A generic manifest or lockfile filename alone does not establish a package;
 a rule covering several frameworks cannot make its other providers appear
 installed. `dependency-analysis` retains the complete taint flows for the
 packages whose evidence survives that check.
+
+`sanitizers` lists only exact matches eligible for credit under the loaded
+rulepack policy. Non-crediting transforms and validation markers remain
+available to flow analysis but are excluded from this inventory. An inventory
+match does not prove a path safe: inspect `taint-analysis` for the actual
+source-to-sink path, sink context, and sanitizer status. For example, the bundled
+pack can list `python.sanitizer.html_escape`, but does not list `shlex.quote`
+or URL encoding as credit-bearing sanitizers.
 
 `pack --validate` checks rule schema, metadata, and `match_examples`. Add
 `--taint-replay` to also replay each taint-dependent rule's positive
@@ -336,7 +358,7 @@ bonsai-ninja security ./src pack --validate --taint-replay --format json
 | `--rules-dir <DIR>` | Bundled | Override the base rulepack directory. |
 | `--lang <LANG>` | None | Restrict the listing or audit to one language key. |
 | `--category <CATEGORY>` | None | Restrict to one tag or rule-ID family. |
-| `--kind <KIND>` | None | Restrict to `source`, `sink`, or `sanitizer`. |
+| `--kind <KIND>` | None | Restrict to `source`, `sink`, `sanitizer`, or non-finding `typing` models. |
 | `--severity <LEVEL>` | None | Keep rules at or above one strict severity value. |
 | `--tag <TAG>` | None | Restrict to one rule tag such as `command-injection` or `http-input`. |
 | `--rule <REGEX>` | None | Rule ID regex; matches the canonical id or any declared alias. |
@@ -507,7 +529,11 @@ no path enumeration. Text opens with a `CORRIDOR` section: the corridor's
 callables in call order, its resolved edges (`E:` id, caller → callee, call
 site, call text, dispatch and resolver stage), and, when `--to` names an
 external API rather than a workspace callable (`--to os.system`), the
-terminal call sites the corridor ends at inside their enclosing callables.
+target call matches inside their enclosing callables. These matches are discovery
+evidence, not a reachability claim: only the corridor edges and flow establish
+which callables connect to the selected source. Unconnected target matches may
+still appear. Backend/cache details remain in JSON and `--debug idg-query`, not
+the normal text header.
 A `CORRIDOR FLOW 1 F:<id>` block then renders every corridor callable's source
 body in call order, with `[FLOW 1 -> callee]` markers on each resolved hop and
 a `TO:` marker on the terminal call. Raw taint flows are seeded from the
@@ -671,6 +697,9 @@ rule id on each flow header. The command runs taint forward from each matched
 source seed, so it maps where that source value travels without requiring a
 sink rule. Internally it uses resolved callgraph lineage scopes and scoped IDG
 graphs; it does not walk the entire workspace separately for every source.
+Inferred entry-point parameters are opt-in. To inspect only that synthetic
+source set without production trust defaults hiding it, use
+`--inferred-sources --profile all --category inferred`.
 
 Like `taint-analysis`, source-analysis reports scan scope and taint-graph
 cache hit/miss notes on stderr while progress is enabled. JSON stdout and

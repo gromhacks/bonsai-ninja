@@ -378,26 +378,23 @@
 - id: go.sanitizer.strconv_quote
   enabled: true
   language: go
-  tag: shell-escape
+  tag: passthrough-transform
   packages: [strconv]
   match:
     kind: call
     callee:
       attribute: [strconv, Quote]
   match_examples:
-  - name: generated direct match
+  - name: Go string literal encoding
     code: |
-      import "strconv"
       package main
+      import "strconv"
 
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        strconv.Quote(target)
+      func example(input string) string {
+        return strconv.Quote(input)
       }
     expect_match_text: [strconv.Quote]
-  description: "strconv.Quote - Go-syntax quoting; NOT a shell escape, limited use as a shell sanitiser."
+  description: "strconv.Quote produces a Go string literal, not shell quoting; preserves taint."
 - id: go.sanitizer.shlex_split
   enabled: true
   language: go

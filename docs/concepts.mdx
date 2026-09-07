@@ -56,6 +56,13 @@ A sanitizer is evidence that a value was validated or encoded in a relevant cont
 A sanitizer that is correct for one sink family may be wrong for another. For example, HTML escaping does not sanitize a shell command.
 </Note>
 
+`TAINT TRANSFORM` is a separate evidence role: an operation changes the value's
+representation without proving safety for its use. URL encoding, URL building,
+and context-free shell quoting do not establish a trusted destination or
+executable. Such matches stay out of the sanitizer inventory and cannot alone
+change a finding to `sanitized`. See
+[Sanitizer credit](security-spec.mdx#sanitizer-credit) for the exact contract.
+
 ## Taint
 
 Taint is tracked through assignments, arguments, returns, receiver methods, fields, containers, positional tuple/list elements, callbacks, and cross-file calls, including import/export and package-internal handler-to-service hops. Source rules stay contextual: for example, GraphQL resolver arguments are modeled as `args.<field>` / `variables.<field>` receiver reads, not as every object property in a GraphQL file. The engine records which argument at a call site is tainted so the rendered flow explains why each hop is relevant.

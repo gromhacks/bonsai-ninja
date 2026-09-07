@@ -933,7 +933,7 @@ impl LanguageAdapter for PythonAdapter {
             idx.refs.extend(decorator_refs);
             idx.comments.extend(python_docstring_comments(&tree, file, src));
             populate_python_condition_expressions(&mut idx, &tree, file, src);
-            idx.string_compositions = python_string_compositions(&tree, file, src);
+            idx.string_compositions = python_string_compositions(&tree, file, src, &idx.call_argument_values);
             idx.finite_literal_selections = python_finite_literal_selections(&idx, &tree, file, src);
             idx.character_substitutions = python_character_substitutions(&idx, &tree, file, src);
             idx.character_constraints = python_character_constraints(&idx, &tree, file, src, &imports);
@@ -3370,7 +3370,12 @@ fn python_return_is_exact_place(return_node: Node<'_>, expected: &str, src: &[u8
 /// Lower Python string concatenation and `value or literal` fallback syntax
 /// into a complete, typed composition. Unsupported operands fail closed, so
 /// consumers never infer safety from a partial expression.
-fn python_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<StringCompositionFact> {
+fn python_string_compositions(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+    call_arguments: &[bonsai_lang_api::CallArgumentValueFact],
+) -> Vec<StringCompositionFact> {
     let mut facts = Vec::new();
     for assignment in collect_kinds(tree, &["assignment"]) {
         let (Some(target), Some(value)) = (
@@ -3408,6 +3413,32 @@ fn python_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<Stri
             facts.push(StringCompositionFact {
                 container_span: span_of(file, &return_node),
                 value_span: span_of(file, &value),
+                target: None,
+                dynamic_anchor_span: (dynamic_spans.len() == 1).then(|| dynamic_spans[0]),
+                parts,
+            });
+        }
+    }
+    // Direct call arguments are executable value expressions too. Join the
+    // ordinary compiler argument directory through Tree-sitter's exact range
+    // lookup; never rescan the complete tree once per argument.
+    for argument in call_arguments {
+        let Some(value) = bonsai_lang_api::kit::node_at_span(
+            tree.root_node(),
+            argument.argument_span,
+            &["binary_operator", "string", "parenthesized_expression"],
+        )
+        .filter(|node| span_of(file, node) == argument.argument_span) else {
+            continue;
+        };
+        let mut parts = Vec::new();
+        let mut dynamic_spans = Vec::new();
+        if lower_python_string_composition(value, file, src, &mut parts, &mut dynamic_spans)
+            && parts.len() > 1
+        {
+            facts.push(StringCompositionFact {
+                container_span: argument.argument_span,
+                value_span: argument.argument_span,
                 target: None,
                 dynamic_anchor_span: (dynamic_spans.len() == 1).then(|| dynamic_spans[0]),
                 parts,

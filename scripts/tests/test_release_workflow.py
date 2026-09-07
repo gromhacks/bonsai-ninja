@@ -20,6 +20,16 @@ AUDIT_LOOP = Path(__file__).resolve().parents[2] / "scripts" / "audit-loop.sh"
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_readme_demo_is_packaged_on_every_platform(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        root = WORKFLOW.parents[2]
+        asset = "assets/bonsai-ninja-python-demo.gif"
+
+        self.assertIn(asset, (root / "README.md").read_text(encoding="utf-8"))
+        self.assertTrue((root / asset).is_file())
+        self.assertIn('cp -R assets "dist/$artifact/assets"', workflow)
+        self.assertIn('Copy-Item assets "dist/$artifact/assets" -Recurse', workflow)
+
     def test_audit_correctness_tests_preserve_the_release_artifact(self) -> None:
         script = AUDIT_LOOP.read_text(encoding="utf-8")
 

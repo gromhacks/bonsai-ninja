@@ -50,6 +50,13 @@ Sanitized paths are hidden from the default finding report; add
 `--show-sanitized` when auditing sanitizer coverage. Passthrough rules preserve
 taint and appear as `TAINT TRANSFORM`, never as sanitizer evidence.
 
+URL encoding is not destination validation, and shell quoting alone does not
+prove a trusted executable or the correct interpreter context. LDAP
+distinguished-name escaping likewise cannot protect a search filter. These
+operations must not hide a flow merely because their names suggest escaping.
+Check the finding's `status`, exact consumed value, and
+[context-specific credit](security-spec.mdx#sanitizer-credit).
+
 </Accordion>
 
 <Accordion title="Why are there inferred entry-point findings?">
@@ -92,6 +99,12 @@ missing fact.
 </Accordion>
 
 <Accordion title="How do I clear stale cache data?">
+
+Ordinary saved changes invalidate analysis automatically, including workspaces
+ignored by an enclosing Git repository. To investigate a mismatch, compare
+the same command with and without `--no-cache` and inspect `cache stats ./src`.
+Capture the discrepancy before clearing anything; cache deletion should not
+be required after each edit.
 
 Run `bonsai-ninja cache clear ./src --dataflow-only` to clear the dataflow sidecar, or `bonsai-ninja cache clear ./src` to remove the workspace's external analysis cache. `cache stats ./src` prints its exact path. If `cache stats` reports a `legacy in-tree cache` (a `<workspace>/.bonsai` directory left by releases that cached inside the repository), remove it with `bonsai-ninja cache clear ./src --legacy`; it cannot be combined with `--orphans` or `--dataflow-only`.
 

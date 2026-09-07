@@ -59,7 +59,9 @@ pub(crate) fn mark_optional_evidence_unavailable() {
 // Version 19 retains dependency metadata coverage in cached inventory pages.
 // Version 21 does not label unattributed sink arguments as tainted values.
 // Version 22 groups resolution declarations by file with compact counters.
-const RENDER_CACHE_VERSION: u32 = 22;
+// Version 23 refreshes severity styling, inventory headings, and evidence-first
+// reports. JSON facts and semantic sidecar identities are unchanged.
+const RENDER_CACHE_VERSION: u32 = 23;
 
 /// Stable structural ids are hashes of rendered chains, so the id alone
 /// cannot be inverted into the target declaration that made the query
@@ -1184,6 +1186,8 @@ fn cache_path(workspace: &Path) -> PathBuf {
 
 fn normalized_argv_hash() -> u64 {
     let mut h = bonsai_hash::Hasher::new();
+    h.absorb(crate::ui().render_identity().as_bytes());
+    h.absorb_separator();
     for arg in normalized_argv_without_page() {
         h.absorb(arg.as_bytes());
         h.absorb_separator();

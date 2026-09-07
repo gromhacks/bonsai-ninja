@@ -90,3 +90,39 @@ def arithmetic(parsed):
         index.string_compositions
     );
 }
+
+#[test]
+fn direct_call_arguments_retain_complete_string_composition_spans() {
+    let source = r#"
+def example(value):
+    consume("prefix:" + value)
+    consume("prefix:" + fetch())
+    consume(value + 1)
+"#;
+    let index = python_index(source);
+    assert_eq!(index.string_compositions.len(), 2, "{index:#?}");
+    for composition in &index.string_compositions {
+        assert!(
+            index
+                .call_argument_values
+                .iter()
+                .any(|argument| { argument.argument_span == composition.value_span }),
+            "composition must join the canonical argument directory"
+        );
+        assert!(
+            matches!(composition.parts.first(), Some(StringCompositionPart::Literal { value }) if value == "prefix:")
+        );
+        assert!(
+            source[composition.value_span.start as usize..composition.value_span.end as usize]
+                .starts_with("\"prefix:\" + ")
+        );
+    }
+    assert!(index
+        .string_compositions
+        .iter()
+        .any(|fact| matches!(fact.parts.last(), Some(StringCompositionPart::Place { .. }))));
+    assert!(index
+        .string_compositions
+        .iter()
+        .any(|fact| matches!(fact.parts.last(), Some(StringCompositionPart::Call { .. }))));
+}

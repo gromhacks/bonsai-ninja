@@ -16,6 +16,11 @@
   constraints:
   - arg_tainted:
       index: 0
+  - arg_string_composition_not_starts_with:
+      index: 0
+      value: "/"
+      allow_prefix: true
+      literal_regex: '^/[^/\\\x00-\x20\x7f]'
   match_examples:
   - name: express res redirect
     code: |
@@ -30,6 +35,30 @@
         return res.redirect("/dashboard");
       }
     expect_no_match: true
+  - name: express fixed local query prefix negative
+    code: |
+      const express = require("express");
+      const app = express();
+      app.get("/", (req, res) => res.redirect("/next?to=" + req.query.next));
+    expect_no_match: true
+  - name: express single slash cannot prove a local target
+    code: |
+      const express = require("express");
+      const app = express();
+      app.get("/", (req, res) => res.redirect("/" + req.query.next));
+    expect_match_text: [res.redirect]
+  - name: express network path remains unsafe
+    code: |
+      const express = require("express");
+      const app = express();
+      app.get("/", (req, res) => res.redirect("//" + req.query.next));
+    expect_match_text: [res.redirect]
+  - name: express backslash authority remains unsafe
+    code: |
+      const express = require("express");
+      const app = express();
+      app.get("/", (req, res) => res.redirect("/\\" + req.query.next));
+    expect_match_text: [res.redirect]
   description: Express res.redirect(tainted).
 - id: javascript.open_redirect.express_res_location
   enabled: true

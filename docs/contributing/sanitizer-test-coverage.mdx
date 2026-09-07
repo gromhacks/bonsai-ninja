@@ -1,93 +1,74 @@
 ---
 title: "Sanitizer Test Coverage"
-description: "How per-language sanitizer fixtures prove raw and sanitized source-to-sink paths."
+description: "How fixtures distinguish credited protection, wrong-context encoders, and taint-preserving transforms."
 ---
 
-# sanitizer_test — per-language fixtures exercising enabled sanitizers
+# Sanitizer and transform coverage
 
-Each `test-fixtures/languages/<lang>/sanitizer_test/` directory contains one or more
-handler files with parallel `<name>_raw` / `<name>_safe` pairs. The
-raw form reaches the sink directly; the safe form keeps the tainted
-value flowing to the sink with the sanitizer wrapping it so the
-engine attaches sanitizer evidence to the finding.
+Fixtures under `test-fixtures/languages/<lang>/sanitizer_test/` and
+`sanitizer_credit/` contain parallel raw and treated handlers. Historical
+`_safe` / `sanitized` function names are test selectors, not safety claims.
+The exact source-to-sink context determines the result.
 
-The fixtures drive `bonsai-ninja security <ws> taint-analysis
---show-sanitized` and are the
-regression surface for sanitizer behaviour — the engine must:
+Sanitizers never remove IDG propagation. Default taint output hides findings
+with credited `sanitized` status; `--show-sanitized` exposes those paths without
+changing analysis. A context-free transform remains visible and unsanitized.
 
-  1. Produce a finding for every `_raw` chain (no sanitizer in the
-     path, taint reaches the sink directly).
-  2. Attach the sanitizer as evidence on the `_safe` chain when sanitized
-     paths are requested — the
-     finding's `sanitizers_seen` array lists the sanitizer rule id
-     with its source location.
+## What the tests require
 
-Default taint output hides sanitizer-cleared paths. `--show-sanitized` is an
-audit view; it does not change propagation or sanitizer classification.
+- `crates/cli/tests/sanitizer_fixtures.rs` checks that all 20 language fixtures
+  retain a raw finding. C, C++, and Elixir fixtures additionally assert
+  on-path sanitizer evidence and its rule/location fields. Erlang, Rust, and
+  Swift URL-encoded shell fixtures assert non-crediting transform evidence.
+- `crates/security/tests/sanitizer_credit_audit.rs` checks all 20 languages
+  against their explicit expected context. Missing fixtures fail the audit.
+- `crates/cli/tests/security_rule_context_regressions.rs` adds independently
+  API-shaped unsafe and safe controls, checks exhaustive canonical JSON, and
+  verifies that terminal output labels transforms consistently with JSON.
 
-Every language now has BOTH raw and sanitizer-evidence coverage
-(verified by `crates/cli/tests/sanitizer_fixtures.rs`).
+The credit audit's treated legs have these expectations:
 
-## Per-language sanitizer coverage
+| Languages | Expected treated-leg result |
+|---|---|
+| C, C++, Dart, Elixir, Erlang, Go, Kotlin, Lua, Objective-C, Scala, Swift | Any emitted treated finding must be `sanitized`; the raw control must remain visible. |
+| C#, Java | HTML/Java escaping used in shell context must be `wrong-context`. Separate HTML-output controls must receive XSS credit. |
+| JavaScript, Perl, PHP, Python, Ruby, Rust, TypeScript | Shell-quoting examples must remain `unsanitized`, with `taint_transforms_seen` and no sanitizer credit. |
 
-| Lang | Sinks exercised | Sanitizers attached |
-|---|---|---|
-| c | `strcat` (buffer), `sqlite3_prepare_v2` (SQLi via snprintf) | `strlcpy`, `sqlite3_bind_text`, `snprintf_bounded` |
-| cpp | `strcpy` (buffer), `set_content` (XSS, cpp-httplib) | `strncpy`, `toHtmlEscaped`, `bindValue` |
-| csharp | `cmd.ExecuteReader` (SQLi) | `SqlCommand.Parameters.AddWithValue`, `HtmlEncoder.Encode` |
-| dart | `Process.run(runInShell: true)` (cmdi) | `Uri.encodeComponent`, `HtmlEscape().convert` |
-| elixir | `:os.cmd` (cmdi), `Plug.Conn.send_resp` (XSS) | `URI.encode_www_form`, `Phoenix.HTML.html_escape`, `Plug.Crypto.secure_compare` |
-| erlang | `os:cmd`, raw `==` compare | `uri_string:quote`, `crypto:hash_equals` |
-| go | `exec.Command("sh", "-c", …)` (cmdi) | argv-`exec.Command`, `sql.Prepare`, `template.HTMLEscapeString`, `url.QueryEscape`, `subtle.ConstantTimeCompare` |
-| java | `stmt.executeQuery` (SQLi) | `PreparedStatement.setString`, `HtmlUtils.htmlEscape` |
-| javascript | `execSync` (cmdi), `res.redirect` (open-redirect) | `shell-quote.quote`, `encodeURIComponent` |
-| kotlin | `conn.createStatement().executeQuery` (SQLi) | `PreparedStatement.setString`, `HtmlUtils.htmlEscape` |
-| lua | `os.execute` (cmdi) | `ngx.quote_sql_str`, `lapis.html.escape`, `ngx.escape_uri` |
-| objc | `sqlite3_prepare_v2` (SQLi), `NSURLComponents` (redirect) | `sqlite3_bind_text`, `stringByAddingPercentEncodingWithAllowedCharacters` |
-| perl | `system` (cmdi), `DBI do` (SQLi) | `shell_quote`, `DBI ?-bindings`, `HTML::Entities::encode_entities`, `URI::Escape::uri_escape` |
-| php | `exec` (cmdi), `mysqli_query` (SQLi) | `escapeshellarg`, `PDO prepare + execute`, `htmlspecialchars` |
-| python | `os.system` (cmdi), `render_template_string` (XSS), `redirect` (open-redirect) | `shlex.quote`, `html.escape`, `urllib.parse.quote` |
-| ruby | `@db.execute` (SQLi), `system` (cmdi), `render inline` (XSS) | `Shellwords.escape`, `?-bindings`, `CGI.escapeHTML` |
-| rust | `Command::new("sh").arg("-c", …)` (cmdi) | `percent_encoding`, `ammonia::clean`, `constant_time_eq` |
-| scala | `stmt.executeQuery` (SQLi) | `PreparedStatement.setString`, `HtmlUtils.htmlEscape` |
-| swift | `sqlite3_prepare_v2` (SQLi), `Process.launch` (cmdi via /bin/sh) | `sqlite3_bind_text`, `addingPercentEncoding` |
-| typescript | `execSync` (cmdi), `res.redirect` (open-redirect) | `shell-quote.quote`, `encodeURIComponent` |
+These are fixture contracts, not claims that every library API or every
+interpreter/version has been executed. Matching examples alone cannot prove
+an API's security semantics; see [Rule Testing](../rule-testing.mdx).
 
-## The taint-through-wrapper pattern
-
-The fixtures deliberately route taint THROUGH the sanitizer and
-INTO the sink so the engine attaches sanitizer evidence — e.g.
+## A wrapper is not automatically a sanitizer
 
 ```python
-def cmd_safe(cmd):
-    return os.system(shlex.quote(cmd))  # shlex.quote wraps, os.system is the sink
+def quoted_command(cmd):
+    return os.system(shlex.quote(cmd))
 ```
 
-This mirrors real-world code: the sanitizer doesn't block the sink
-call, it cleanses the tainted value before it reaches the sink. The
-finding reports the sanitizer as evidence (a reviewer sees the
-cleanse and downgrades the finding). "Safe" handlers whose tainted
-data never reaches any sink (e.g. argv-form `Process.run` with no
-shell, a pure return-string function with no response sink) wouldn't
-generate a finding at all — so those handlers get rewritten to keep
-the tainted value flowing to the sink.
+This still executes an attacker-selected command. Shell quoting does not
+establish a trusted executable or prove placement for the selected interpreter.
+The quote belongs in `taint_transforms_seen`, not `sanitizers_seen`.
+
+Similarly, URL encoding does not validate a host or scheme. A redirect such as
+`redirect("/next?to=" + value)` can instead be excluded through its exact fixed
+local path prefix. Bare `"/" + value` does not establish that property.
+An unrelated SQL bind elsewhere in a function does not protect interpolated
+SQL text merely by co-occurring with it.
 
 ## Running
 
 ```shell
+cargo test -p bonsai-ninja --test sanitizer_fixtures --test security_rule_context_regressions
+cargo test -p bonsai-ninja-security --test sanitizer_credit_audit
+
 bonsai-ninja security test-fixtures/languages/python/sanitizer_test taint-analysis \
-    --show-sanitized --format json --all | \
-    jq '.rows[] | {id: .finding_id, sanitizers: (.sanitizers_seen | length)}'
+  --profile all --inferred-sources --show-sanitized --format json --all \
+  --no-color --no-progress | \
+  jq '.rows[] | {id: .finding_id, status, sanitizers: (.sanitizers_seen // []), transforms: (.taint_transforms_seen // [])}'
 ```
 
-Findings with `sanitizers > 0` are the `_safe` paths — the engine
-threaded taint through the sanitizer and attached it as evidence.
-Findings with `sanitizers == 0` are the `_raw` paths.
-
-The paginated `security sanitizers` surface lists every enabled
-sanitizer rule's hits independently of flows:
-
-```shell
-bonsai-ninja security test-fixtures/languages/python/sanitizer_test sanitizers
-bonsai-ninja security test-fixtures/languages/python/sanitizer_test sanitizers --tag shell-escape
-```
+Read `status` and the attributed rule/location evidence; neither handler names
+nor a nonempty sanitizer array prove credit for the sink's context. The
+`security sanitizers` inventory lists matched **credit-bearing** sanitizer
+rules, not URL/shell transforms. Use taint analysis to inspect transforms along
+actual flows, and `security pack` to inspect the complete rule catalog.

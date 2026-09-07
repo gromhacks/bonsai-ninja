@@ -6,15 +6,11 @@
 #![recursion_limit = "256"]
 //! `bonsai-ninja` — the bonsai-ninja CLI.
 //!
-//! Two command groups:
-//!
-//! - **Flow commands** (the headline): `trace`, `diagnostics`,
-//!   `dump-hir`, `dump-cfg`, `dump-callgraph`, `index`.
-//! - **Browse / inspect commands**: `defs`, `entrypoints`, `calls`,
-//!   `imports`, `vars`, `strings`, `args`, `operations`, `classes`, `refs`, `search`,
-//!   `inspect`, `export`.
-//!   All read from the same `GlobalIndex` + per-file `DeclIndex`, so
-//!   behavior is uniform across every supported language.
+//! Workspace/cache maintenance, navigation, syntax inventories,
+//! `inspect-graph` / stable-ID reopening, security analysis, and compiler
+//! diagnostics share the canonical SDK facades. Each command requests only
+//! its required compiler facts; presentation does not select another engine
+//! or force a whole-workspace semantic index for a syntax-only query.
 
 // Large compiler phases repeatedly transfer ownership of AST/graph batches.
 // Mimalloc promptly makes pages freed at those boundaries eligible for purge

@@ -628,7 +628,7 @@ fn operations_does_not_report_literal_returns_as_reads() {
 #[test]
 fn classes_table_has_headers_even_when_empty() {
     // The python micro example has no classes, so the table should be
-    // empty but still carry the header row and `(0 types)` summary.
+    // empty but still carry the header row and `0 types` summary.
     let ws = ws_path();
     let Some(out) = run(&["classes", ws.to_str().unwrap()]) else {
         return;
@@ -1776,7 +1776,7 @@ fn imports_wildcard_and_module_filter() {
     let Some(out) = run(&["imports", ws.to_str().unwrap(), "--wildcard"]) else {
         return;
     };
-    assert!(out.contains("(0 imports)"));
+    assert!(out.starts_with("imports — 0 imports\n"));
 
     let Some(out) = run(&["imports", ws.to_str().unwrap(), "--module", "flask"]) else {
         return;
@@ -5367,7 +5367,7 @@ fn secondary_filter_updates_browse_totals() {
     };
     assert!(out.contains("get_user"), "filtered definition missing:\n{out}");
     assert!(
-        out.contains("(1 definitions)"),
+        out.starts_with("defs — 1 definition\n"),
         "browse totals must describe the post-filter rows, not the hidden pre-filter set:\n{out}"
     );
 }

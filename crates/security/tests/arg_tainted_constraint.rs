@@ -679,9 +679,11 @@ fn matcher_policy_fingerprint_matches_current_semantics() {
     // manifest declarations replacing whole-document token evidence.
     // Bumped to 0x0041 for workspace-local code-manifest import ambiguity
     // and dependency context fingerprints that retain projection coverage.
+    // Bumped to 0x0042 for lexical callable shadowing, exact aggregate argument
+    // shapes, and rule-owned string-composition prefix evidence.
     assert_eq!(
         bonsai_security::MATCHER_POLICY_FINGERPRINT,
-        0x4d41_5443_4845_525f_504f_4c49_4359_0041_u128
+        0x4d41_5443_4845_525f_504f_4c49_4359_0042_u128
     );
 }
 

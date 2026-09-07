@@ -4667,9 +4667,9 @@ fn render_inspect_header(u: &Ui, report: &InspectReport, view: ResolvedView) {
             .semantic_flow_target_cut_size
             .map(|size| format!(" · target cut {size}"))
             .unwrap_or_default();
-        cli_println!(
-            "  {} {} entries · cache {} hit / {} miss · backends {}{}",
-            u.dim("semantic flow:"),
+        bonsai_diagnostics::debug_log!(
+            "idg-query",
+            "semantic flow: {} entries · cache {} hit / {} miss · backends {}{}",
             report.summary.semantic_flow_entry_queries,
             report.summary.semantic_flow_cache_hits,
             report.summary.semantic_flow_cache_misses,
@@ -5695,10 +5695,10 @@ fn render_corridor_tables(u: &Ui, corridor: &InspectCorridor) {
         format!("{} edge(s)", corridor.edge_count),
     ];
     if !corridor.terminal_calls.is_empty() {
-        meta.push(format!("{} terminal call(s)", corridor.terminal_calls.len()));
+        meta.push(format!("{} target call match(es)", corridor.terminal_calls.len()));
     }
     if !corridor.backends.is_empty() {
-        meta.push(format!("backends {}", corridor.backends.join(", ")));
+        bonsai_diagnostics::debug_log!("idg-query", "corridor backends: {}", corridor.backends.join(", "));
     }
     cli_println!("  {}", u.dim(&meta.join(" · ")));
     if !corridor.nodes.is_empty() {
@@ -5733,7 +5733,11 @@ fn render_corridor_tables(u: &Ui, corridor: &InspectCorridor) {
         }
     }
     if !corridor.terminal_calls.is_empty() {
-        cli_println!("  {}", u.dim("terminal calls:"));
+        cli_println!("  {}", u.label("target call matches (not a reachability claim):"));
+        cli_println!(
+            "    {}",
+            u.dim("The corridor edges and flow identify which enclosing callables are connected.")
+        );
         for call in &corridor.terminal_calls {
             cli_println!(
                 "    {}  {}:{}:{}  {} {}",

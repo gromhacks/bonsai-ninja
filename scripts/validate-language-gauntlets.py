@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Exhaustive release-binary CLI/switch validation.
+"""Release-binary command and representative switch validation.
 
-The matrix intentionally runs every command family and every public switch at
-least once per language. Destructive cache commands run only against temporary
+The maintained matrix runs every command family across every language; focused
+CLI integration tests cover additional flags and invalid combinations. It is
+not an exhaustive Cartesian product of options. Destructive cache commands run only against temporary
 copies of the fixture workspaces. By default the script also runs the Redis
 realworld header/footer stress sweep; pass --skip-realworld for a faster
 language-fixture-only pass.
@@ -80,9 +81,19 @@ EXPECTED_FINDINGS = {
 
 MatrixEntry = tuple[str, list[Any], tuple[int, ...], bool, bool]
 
+# Match the compiler CLI gate in tests/support/analysis_coverage.rs. These
+# manifests intentionally report missing dependency coverage; the concrete
+# source-to-sink proof remains complete. Pin exact gaps, never waive arbitrary
+# incompleteness or accept a falsely complete envelope.
+EXPECTED_ANALYSIS_INCOMPLETE_REASONS = {
+    "go": ["dependency-manifest:unsupported:go:go.mod:files=1"],
+    "objc": ["dependency-manifest:unsupported:objc:Podfile:files=1"],
+    "swift": ["dependency-manifest:unsupported:swift:Package.swift:files=1"],
+}
+
 CONTEXT_FOOTER_RE = re.compile(r"context\s+~?([0-9,]+) / ([0-9,]+) tokens \((\d+)%\)")
 PAGE_FOOTER_RE = re.compile(
-    r"^page\s+\d+\s+of\s+[0-9,]+\s+\([0-9,]+\s+rows\)", re.MULTILINE
+    r"^page\s+\d+\s+of\s+[0-9,]+\s+\([0-9,]+\s+[^)\n]+\)", re.MULTILINE
 )
 TOTAL_FOOTER_RE = re.compile(r"^total\s+[0-9,]+\s+\S+", re.MULTILINE)
 
@@ -228,12 +239,6 @@ def first_collection_field(value: Any, collection: str, field: str) -> Any:
     if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
         return None
     return rows[0].get(field)
-
-
-def first_list_field(value: Any, field: str) -> Any:
-    if not isinstance(value, list) or not value or not isinstance(value[0], dict):
-        return None
-    return value[0].get(field)
 
 
 def child_mapping(value: dict[str, Any], field: str) -> dict[str, Any]:
@@ -479,13 +484,18 @@ class Validator:
             json_out=True,
         )
         raw_rows = taint.get("rows", []) if isinstance(taint, dict) else taint
-        if not isinstance(taint, dict) or taint.get("analysis_complete") is not True:
+        expected_reasons = EXPECTED_ANALYSIS_INCOMPLETE_REASONS.get(lang, [])
+        if (
+            not isinstance(taint, dict)
+            or taint.get("analysis_complete") is not (not expected_reasons)
+            or taint.get("analysis_incomplete_reasons") != expected_reasons
+        ):
             self.failures.append(
                 Failure(
                     lang,
                     "derive taint",
                     ["security", str(ws), "taint-analysis", "--no-cache"],
-                    "expected analysis_complete=true for the concrete gauntlet flow",
+                    f"expected exact analysis coverage: {expected_reasons or 'complete'}",
                 )
             )
             return None
@@ -556,7 +566,7 @@ class Validator:
             ["dump-edges", ws, "--format", "json", "--all"],
             json_out=True,
         )
-        edge_id = first_list_field(edges, "edge_id")
+        edge_id = first_collection_field(edges, "rows", "edge_id")
 
         ast = self.check(
             lang,
@@ -689,6 +699,26 @@ class Validator:
             json_out: bool = False,
         ) -> None:
             matrix.append((label, args, ok, nonempty, json_out))
+
+        # Reopen each applicable ID family through the public router, not only
+        # through its owning command's selector. Resolver and propagation IDs
+        # retain the exact query/source context that produced them.
+        for label, identifier, extra in [
+            ("F", flow_id, []),
+            ("G", group_id, []),
+            ("E", edge_id, []),
+            ("N", node_id, []),
+            ("R", candidate_id, ["--query", target]),
+            ("T", taint_id, ["--taint-source", entry]),
+            ("S", select_primary_finding(rows).get("finding_id"), []),
+        ]:
+            append_optional_entry(
+                matrix,
+                identifier,
+                f"show {label} id",
+                ["show", ws, "--id", identifier, *extra, "--format", "json", "--all"],
+                json_out=True,
+            )
 
         add(
             "global --no-color",
@@ -1647,9 +1677,15 @@ class Validator:
             add("cache rebuild", ["cache", "rebuild", temp_ws])
             add("cache clear", ["cache", "clear", temp_ws])
             for label, args, ok, nonempty, json_out in matrix:
-                self.check(
+                result = self.check(
                     lang, label, args, ok=ok, nonempty=nonempty, json_out=json_out
                 )
+                if label.startswith("show "):
+                    identifier = str(args[args.index("--id") + 1])
+                    if identifier not in json.dumps(result):
+                        self.failures.append(
+                            Failure(lang, label, list(map(str, args)), f"reopened result lost {identifier}")
+                        )
 
         self.counts.append((lang, len(matrix)))
 

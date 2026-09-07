@@ -685,3 +685,38 @@
     expect_no_match: true
   description: "cross-spawn spawn(cmd, taintedArgs, {shell: true}) - tainted\
     \ argv is shell-interpreted."
+
+- id: typescript.cmdi.spawn_executable
+  enabled: true
+  language: typescript
+  tag: command-injection
+  category: process-exec
+  severity: critical
+  imports: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee: {regex: '^child_process[.](?:spawn|spawnSync)$', binding_origin: imported}
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: executable remains attacker controlled without a shell
+    code: |
+      import * as child_process from 'child_process';
+      function run(input: string) { child_process.spawn(input, [], {shell: false}); }
+  - name: fixed executable and data argument is not executable selection
+    code: |
+      import * as child_process from 'child_process';
+      function run(input: string) { child_process.spawn('/bin/echo', [input], {shell: false}); }
+    expect_no_match: true
+  - name: local object is not a child process provider
+    code: |
+      const worker = {spawn: (value: string) => value};
+      function run(input: string) { worker.spawn(input); }
+    expect_no_match: true
+  - name: parameter shadows the imported provider
+    code: |
+      import * as child_process from 'child_process';
+      function run(input, child_process) { child_process.spawn(input, [], {shell: false}); }
+    expect_no_match: true
+  description: "child_process spawn/spawnSync execute the attacker-selected program even without a shell. Data arguments to a fixed executable are a different boundary."

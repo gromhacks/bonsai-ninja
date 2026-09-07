@@ -208,6 +208,14 @@ annotation facts at sibling positions. Each annotation requirement has an
 `index` and non-empty `annotation_in` list. Missing type/annotation facts fail
 closed, and provider-specific values remain in rule YAML.
 
+`param_default_calls_absent: true` excludes a selected parameter with an
+adapter-emitted default-value call. Combine it with exact signature and
+decorator-owner constraints when modeling implicit framework inputs: a
+primitive-typed FastAPI route parameter is not the same boundary as a value
+supplied by `Depends(...)`. Explicit binders such as `Body(...)` belong to
+their own default-call rules. This field reads compiler facts, not parameter
+names or a source-text search for a provider spelling.
+
 For a call or exact write whose spelling is meaningful only because its root
 is imported or provided by the runtime, declare the binding origin explicitly:
 
@@ -631,8 +639,21 @@ classification (`literal`, `call_result`, `property_read`, `yield_result`,
 `whole_value_selection`, or `unknown`). The string-composition constraints
 consume ordered `StringCompositionFact` parts from the compiler IR; they never
 parse rendered argument text. The positive form requires at least two parts,
-an exact first literal equal to `value`, and a later non-literal part. The
-inverse rejects only that fully proven shape.
+a matching first literal, and a later non-literal part. By default the first
+literal must equal `value`; both forms accept these optional refinements:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `ascii_case_insensitive` | `false` | Apply ASCII case folding to the `value` comparison, for example a protocol header name. |
+| `allow_prefix` | `false` | Permit additional literal bytes after `value` in that first component. |
+| `literal_regex` | Absent | Also require a rule-owned regex match against the complete first literal, never the unknown suffix. |
+
+The inverse rejects only a composition that satisfies the complete declared
+proof. Missing or ambiguous composition facts cannot establish a safe prefix.
+The bundled redirect rules use `allow_prefix` plus `literal_regex` to require
+a fixed local path before untrusted bytes. A bare `"/" + value` is not enough;
+see [Sanitizer credit](security-spec.mdx#sanitizer-credit) for the boundary and
+unsafe near-misses. A prefix exception is not a general URL sanitizer.
 
 ```yaml
 - receiver_factory_arguments_equal:
@@ -989,6 +1010,15 @@ describe validation-shaped or transfer facts, but cannot claim to sanitize a
 sink. Do not replace this with a generic engine heuristic, because unrelated
 application methods with similar names may validate, ignore, or transform
 different operands.
+
+When existing compiler transfer already preserves the value, use
+`analysis_semantics.taint_preserving_transform: true` on a non-crediting rule
+or its `sanitizer_tag_semantics` default to classify the evidence without
+adding transfer edges. This flag cannot turn a credit-bearing tag into a
+transform. URL encoders/builders and context-free shell quoting are not
+automatic sanitizer proofs; LDAP DN escaping must not receive LDAP filter
+credit. Keep the emitted transform evidence separate from credited protections
+in JSON, text, and SARIF.
 The matcher normalizes common qualified-name separators (`.`, `::`, `->`,
 and Erlang `:`), so structured callee attributes can represent language
 surface syntax without hardcoding that API in Rust code.
@@ -1249,6 +1279,13 @@ The `code` is parsed and matched at validation time - if the rule wouldn't
 fire on its own example, validation rejects it. Add multiple examples for
 notable variant shapes; see [Pattern Variants](pattern-variants.mdx) for common
 variants worth covering.
+
+A passing example establishes a matcher contract, not that the API exists or
+has the claimed vulnerability. Add independent API-shaped source-to-sink and
+safe-control fixtures using real imports, signatures, defaults, and argument
+roles. Test lexical shadowing, wrong-context transforms, and changed-cache
+parity where relevant. The [Rule Testing](rule-testing.mdx) guide separates
+these integration proofs from pack-local examples and coverage inventories.
 
 ## Severity
 

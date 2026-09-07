@@ -146,3 +146,36 @@
       }
     expect_no_match: true
   description: WordPress wp_redirect - flag if not wp_safe_redirect.
+
+- id: php.open_redirect.header_location
+  enabled: true
+  language: php
+  tag: open-redirect
+  severity: high
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee: {name: header, binding_origin: runtime-global}
+  constraints:
+  - arg_tainted: {index: 0}
+  - arg_string_composition_starts_with: {index: 0, value: "Location:", ascii_case_insensitive: true, allow_prefix: true}
+  match_examples:
+  - name: dynamic Location destination
+    code: |
+      <?php
+      function run($next) { header('Location: ' . $next); }
+  - name: fixed local redirect
+    code: |
+      <?php
+      function run() { header('Location: /home'); }
+    expect_no_match: true
+  - name: header name is case insensitive
+    code: |
+      <?php
+      function run($next) { header('lOcAtIoN:' . $next); }
+  - name: unrelated header is not a redirect
+    code: |
+      <?php
+      function run($value) { header('X-Request-Id: ' . $value); }
+    expect_no_match: true
+  description: "A compiler-proven, case-insensitive Location header composition redirects to an attacker-controlled destination; other header fields do not match."

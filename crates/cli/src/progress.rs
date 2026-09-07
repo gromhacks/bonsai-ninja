@@ -32,8 +32,12 @@ struct ProgressRegistry {
 
 impl ProgressRegistry {
     fn track(&mut self, bar: &ProgressBar) {
-        self.bars.retain(|active| !active.is_finished());
+        // One terminal line has one owner. Retire the previous phase before
+        // the next bar gets a visible draw target; constructing both against
+        // stderr lets their first draws concatenate and strand an old line.
+        self.finish_all();
         if self.output_depth == 0 {
+            bar.set_draw_target(ProgressDrawTarget::stderr());
             self.bars.push(bar.clone());
         } else {
             bar.finish_and_clear();
@@ -43,6 +47,9 @@ impl ProgressRegistry {
     fn finish_all(&mut self) {
         for bar in self.bars.drain(..) {
             bar.finish_and_clear();
+            // Callers can still hold the old handle and finish/update it.
+            // It must no longer be able to erase the new phase's line.
+            bar.set_draw_target(ProgressDrawTarget::hidden());
         }
     }
 }
@@ -156,7 +163,7 @@ pub(crate) fn progress_bar(label: &str, total: u64) -> ProgressBar {
     if is_disabled() {
         return ProgressBar::hidden();
     }
-    let bar = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::stderr());
+    let bar = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::hidden());
     let template = if is_color_disabled() {
         PLAIN_BAR_TEMPLATE
     } else {
@@ -178,7 +185,7 @@ pub(crate) fn spinner(label: &str) -> ProgressBar {
     if is_disabled() {
         return ProgressBar::hidden();
     }
-    let spin = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
+    let spin = ProgressBar::with_draw_target(None, ProgressDrawTarget::hidden());
     let template = if is_color_disabled() {
         PLAIN_SPINNER_TEMPLATE
     } else {
@@ -188,8 +195,8 @@ pub(crate) fn spinner(label: &str) -> ProgressBar {
         spin.set_style(style.tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "));
     }
     spin.set_message(label.to_string());
-    spin.enable_steady_tick(std::time::Duration::from_millis(120));
     track(&spin);
+    spin.enable_steady_tick(std::time::Duration::from_millis(120));
     spin
 }
 
@@ -359,6 +366,25 @@ mod tests {
         assert!(!bar.is_finished());
         let _guard = OutputProgressGuard::for_registry(&registry);
         assert!(bar.is_finished());
+    }
+
+    #[test]
+    fn a_new_phase_retires_and_detaches_the_previous_terminal_owner() {
+        let mut registry = ProgressRegistry::default();
+        let old = ProgressBar::hidden();
+        registry.track(&old);
+        let next = ProgressBar::hidden();
+        registry.track(&next);
+        assert!(old.is_finished());
+        assert!(old.is_hidden());
+        assert!(!next.is_finished());
+        assert_eq!(registry.bars.len(), 1);
+        old.set_message("late update");
+        old.finish_and_clear();
+        assert!(!next.is_finished());
+        registry.finish_all();
+        assert!(next.is_finished());
+        assert!(next.is_hidden());
     }
 
     #[test]

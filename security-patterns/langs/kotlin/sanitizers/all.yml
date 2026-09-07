@@ -470,8 +470,7 @@
         }
       }
     expect_match_text: [HttpUrl.parse]
-  description: "OkHttp HttpUrl.parse - strict URL parsing; subsequent .newBuilder().addQueryParameter() escapes path/query
-    segments."
+  description: "OkHttp HttpUrl.parse validates URL syntax, not destination policy; attacker-controlled hosts remain tainted."
 
 - id: kotlin.sanitizer.okhttp_httpurl_addqueryparameter
   enabled: true
@@ -1045,7 +1044,7 @@
 - id: kotlin.sanitizer.rdn_escape_value
   enabled: true
   language: kotlin
-  tag: ldap-escape
+  tag: ldap-dn-escape
   packages: ["javax.naming.ldap"]
   match:
     kind: call
@@ -1087,7 +1086,7 @@
 - id: kotlin.sanitizer.esapi_encode_for_dn
   enabled: true
   language: kotlin
-  tag: ldap-escape
+  tag: ldap-dn-escape
   packages: ["org.owasp.esapi"]
   match:
     kind: call

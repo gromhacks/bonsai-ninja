@@ -42,6 +42,12 @@ output-mode, public-switch, stable-id, and cache-command matrix against every
 language's `language_gauntlet`. It is not a claim that every possible flag combination
 is useful or tested.
 
+Finding-level completeness does not imply complete dependency coverage for the
+workspace. The Go (`go.mod`), Objective-C (`Podfile`), and Swift
+(`Package.swift`) fixtures currently retain explicit unsupported-manifest
+reasons on the top-level analysis envelope. Both validators pin those exact
+gaps; a new gap or an incorrectly complete envelope fails the gate.
+
 Run one language:
 
 ```
@@ -56,7 +62,7 @@ cargo build --release
 scripts/validate-language-gauntlets.py --bin ./target/release/bonsai-ninja
 ```
 
-## Current all-code `security taint-analysis` results
+## Current production `security taint-analysis` results
 
 Generated with the release CLI:
 

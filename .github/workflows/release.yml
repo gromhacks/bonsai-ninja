@@ -445,6 +445,7 @@ jobs:
           mkdir -p "dist/$artifact/.agents/skills"
           cp -R .agents/skills/bonsai-ninja "dist/$artifact/.agents/skills/bonsai-ninja"
           cp -R docs "dist/$artifact/docs"
+          cp -R assets "dist/$artifact/assets"
           cp -R schemas "dist/$artifact/schemas"
           cp -R security-patterns "dist/$artifact/security-patterns"
           smoke_dir="$(mktemp -d)"
@@ -500,6 +501,7 @@ jobs:
           New-Item -ItemType Directory -Force "dist/$artifact/.agents/skills" | Out-Null
           Copy-Item .agents/skills/bonsai-ninja "dist/$artifact/.agents/skills/bonsai-ninja" -Recurse
           Copy-Item docs "dist/$artifact/docs" -Recurse
+          Copy-Item assets "dist/$artifact/assets" -Recurse
           Copy-Item schemas "dist/$artifact/schemas" -Recurse
           Copy-Item security-patterns "dist/$artifact/security-patterns" -Recurse
           $repo = (Get-Location).Path

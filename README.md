@@ -7,21 +7,28 @@
 
 ## See it in a few seconds
 
-![bonsai-ninja compiler-backed Python trace](assets/bonsai-ninja-python-demo.gif)
+![Terminal walkthrough: index a Python project, map its modules, read the HTTP input, trace six compiler-resolved functions, and inspect a critical command-injection flow](assets/bonsai-ninja-python-demo.gif)
 
-The short terminal demo walks a deliberately vulnerable Python project from
-compiler indexing, through its cross-module tree and HTTP entrypoint, to an
-exact compiler corridor and a source-to-sink command-injection finding. After
-installing bonsai-ninja, the same flow is:
+This 24-second walkthrough uses real terminal output from the current release
+build: index a deliberately vulnerable Python project, map its modules, read
+the HTTP input, and follow a six-function compiler corridor to a critical
+source-to-sink command-injection finding. Commands stay visible in full;
+scrollback is excerpted and pauses are edited. Colors, locations, stable IDs,
+and flow annotations come directly from the CLI.
+
+After installing bonsai-ninja, reproduce it from this checkout:
 
 ```bash
 cd examples/python/language_gauntlet
 bonsai-ninja index . --no-progress
-bonsai-ninja tree . --max-depth 2 --context 8k --no-progress
-bonsai-ninja read-file . --file entrypoints/http.py --lines 14:55 --context 8k --no-progress
-bonsai-ninja inspect-graph . --from handle_request --to os.system --compact --context 8k --no-progress
-bonsai-ninja security . taint-analysis --tag command-injection --context 16k --no-progress
+bonsai-ninja tree . --max-depth 2 --no-progress
+bonsai-ninja read-file . --file entrypoints/http.py --lines 24:31 --no-progress
+bonsai-ninja inspect-graph . --from handle_request --to CommandRunner.execute --compact --no-progress
+bonsai-ninja security . taint-analysis --tag command-injection --no-progress
 ```
+
+For a local release build instead of an installed command, first run
+`alias bonsai-ninja="$PWD/target/release/bonsai-ninja"` from the repository root.
 
 > **Project maturity:** bonsai-ninja is an ambitious early-stage project.
 > Compiler-backed analysis and security modeling across 20 languages leave a
@@ -96,40 +103,38 @@ local-model hobbyist.
 
 ## Scale, measured
 
-**30,055 source files. Completed modeled analysis. Warm navigation in
-seconds.** The current Elasticsearch measurements use a 3 GiB semantic-worker
-scheduling budget and
-separate the first explicit semantic index from commands run after it exists:
+**30,055 source files. Completed modeled analysis.** The latest completed
+fresh-generation Elasticsearch reference-host run used a 3 GiB semantic-worker scheduling
+budget. Selected results from the
+[current verification record](docs/RELEASE_READINESS.md):
 
 | Cache state and operation | Measured time | Result |
 |---|---:|---|
-| Empty cache: default structural `index` | 47.5s | All 30,055 sources parsed and lowered; the instrumented optimization run used 1.24 GB maximum RSS and zero swaps |
-| After structural index: default `index` | 3.8s | Compiler generation validated root-only; the instrumented optimization run used 77 MB maximum RSS and reopened no source bodies |
-| Empty cache: `index --semantic` | 7m 19.0s | Complete validated reusable compiler, linkage, callgraph, retrieval, and IDG generation under the 3 GiB scheduling profile |
-| Empty analysis cache: complete production taint analysis | 28.8s | Requested analysis completed without requiring the whole semantic prewarm |
-| After index: semantic generation reopen | 2.4s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
-| After index: search | 4.6s | Compiler-proven requested matches |
-| After index: call lookup | 3.9s | Compiler-resolved call rows |
-| After index: default `inspect-graph` | 10.5s | Structural evidence for the requested target with an empty rendered-page cache |
-| After index: complete diagnostics | 8.3s | One streaming compiler-object pass; no duplicate parse-all phase |
-| After index: stable edge lookup with `show E:<id>` | 7.3s | Exact persisted edge-ID lookup; no whole-graph ID scan |
-| After index: complete production taint analysis | 15.7s | Requested fixed point completed without a semantic cap |
-| After index: default native export | 4m 02.2s | 4.54 GB compiler, callgraph, flow, and compiled-IDG facts |
-| After index: `--full-propagations` export | 7m 36s | 6.42 GB with the same exact propagation relation materialized as individual rows |
+| Empty cache: default structural `index` | 53.84s | Complete syntax/construct generation |
+| After structural index: default `index` | 2.79s | Compiler generation validated root-only |
+| Empty cache: `index --semantic` | 5m 58.32s | Complete reusable compiler, linkage, callgraph, retrieval, and IDG generation |
+| Empty analysis cache: production taint analysis | 1m 59.97s | Requested analysis without requiring whole-workspace semantic prewarm |
+| After index: semantic generation reopen | 2.57s | Validated sidecar reuse |
+| After index: default `inspect-graph` | 46.24s | Requested structural and taint evidence |
+| After index: production taint analysis | 1m 30.78s | Requested fixed point completed without a semantic cap |
+| After index: default native export | 3m 46.12s | Complete native document streamed and validated |
 
-The measured cold operation is specifically `index --semantic`, which users
-request when they want every reusable semantic sidecar prepared up front.
+The semantic-generation row is specifically `index --semantic`, which users
+request when they want reusable semantic sidecars prepared up front.
 Ordinary `index` is the lighter syntax/declaration warm-up and does not force a
 whole-workspace callgraph or IDG build; ordinary commands can also compute
 their requested facts on demand. The structural rows use a separate empty
 cache on the same 30,055-source checkout; warm validation checks the exact
 source fingerprint ledger without reopening every source body.
 
-The cold row is an intentional one-time whole-workspace prewarm, not normal
+That semantic prewarm is intentional whole-workspace work, not normal
 command startup. The 3 GiB setting schedules semantic workers rather than
 limiting operating-system RSS, and compressed export changes representation,
-not graph meaning. Full methodology, component sizes, memory measurements, and
-the optimization history live in
+not graph meaning. These are measurements on one reference host, not latency
+promises for every repository or CI runner. Unsupported Gradle dependency
+formats remain explicit coverage warnings; completing the modeled analysis
+does not mean every dependency manifest was understood. Full methodology,
+current SLOs, and separately labeled historical memory/export measurements live in
 [Release Readiness](docs/RELEASE_READINESS.md).
 
 ## Supported languages
@@ -224,6 +229,11 @@ gh attestation verify bonsai-ninja-<target>.tar.gz \
 
 ## Quickstart
 
+Terminal severity labels use red for critical, orange for high, yellow for
+medium, blue for low, and gray-blue for info in every theme. Dense tables adapt
+to narrow terminals without dropping fields; findings lead with the compiler
+chain and source/sink locations. See [Output Formats](docs/output-formats.mdx).
+
 Use the release binary. Add `--no-color --no-progress` for scripts and agent
 workflows.
 
@@ -248,7 +258,7 @@ workflows.
 ./target/release/bonsai-ninja security ./my-app sink-analysis \
   --context 16k --no-color --no-progress
 
-# Triage one flagged dependency: import sites, bound names, calls, rule matches.
+# Triage one flagged dependency: usage sites and complete source-to-sink flows.
 ./target/release/bonsai-ninja security ./my-app dependency-analysis \
   --framework node-serialize --no-color --no-progress
 
@@ -292,7 +302,7 @@ For any unfamiliar option, use the binary's `--help` and the
 | Security model or findings | `security` |
 | Downstream paths from sources | `security source-analysis` |
 | Upstream paths into sinks | `security sink-analysis` |
-| Where a flagged dependency is imported, bound, and called | `security dependency-analysis` |
+| A flagged dependency's usage sites and source-to-sink taint flows | `security dependency-analysis` |
 | Downstream graph artifact | `export` |
 
 `tree` is a direct filesystem walk. It does not initialize the compiler,

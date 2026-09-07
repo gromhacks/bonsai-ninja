@@ -30,12 +30,22 @@ FINDING 1 · command-injection · critical  S:979a7231afe45297
 
 ## True Or False Positive
 
-| Question | True-positive signal | False-positive signal |
+| Question | Evidence of unsafe use | Evidence against unsafe use |
 |---|---|---|
-| Is the source attacker controlled? | Remote request, queue, CLI, env, database row | Constant, fixture, generated sample |
+| Is the source attacker controlled? | Input crosses the deployment's relevant trust boundary | Proven constant or a value the relevant attacker cannot control |
 | Is the sink dangerous in this context? | Shell, query, template, file, external call | Literal safe arg or non-dangerous overload |
 | Does the flow preserve the value? | Tainted arg labels line up hop by hop | Wrong field, wrong receiver, impossible branch |
-| Is sanitizer context correct? | Sanitizer tag matches sink family | Sanitizer is for a different context |
+| Is protection proven for this use? | No credited protection, a wrong-context sanitizer, or only a taint transform | Exact lineage has a compatible sanitizer or complete compiler-proven guard |
+
+A matching tag alone does not prove protection: verify the checked value,
+guard polarity, execution order, and eventual sink argument. URL encoders,
+shell quoting, and other `TAINT TRANSFORM` steps retain attacker control.
+Use `--show-sanitized` to review credited paths, and read `status` rather than
+inferring safety from the presence of an escaping call. A row's static evidence
+still needs deployment-context review; a clean result is not a runtime safety
+guarantee. A test or example path is a review-scope decision, not evidence that
+the code itself is safe; deliberately vulnerable fixtures can contain real
+source-to-sink paths.
 
 ## Suppression Syntax
 

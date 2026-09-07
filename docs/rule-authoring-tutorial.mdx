@@ -96,9 +96,13 @@ def run(cmd):
     return os.system(cmd)
 ```
 
-## 3. Write Sanitizer
+## 3. Distinguish Sanitizers from Transforms
 
-### Sanitizer rule YAML
+Rules in `sanitizers/` can also describe non-crediting transforms. The bundled
+metadata treats `shell-escape` as one: matching a quote operation does not
+prove a trusted executable or its interpreter context.
+
+### Transform rule YAML
 
 ```yaml
 - id: python.sanitizer.shlex_quote
@@ -116,10 +120,10 @@ def run(cmd):
         def clean(value):
           return shlex.quote(value)
       expect_match_text: [shlex.quote]
-  description: "shlex.quote escapes a single shell token; review context before crediting it."
+  description: "shlex.quote quotes one POSIX-shell token; context-free matching preserves taint and gives no execution-safety credit."
 ```
 
-### Sanitizer example
+### Transform example
 
 ```python
 import shlex
@@ -127,6 +131,10 @@ import shlex
 def clean(value):
     return shlex.quote(value)
 ```
+
+An unsafe source-to-sink path through this operation remains `unsanitized` and
+records `taint_transforms_seen`. Credited protection requires a separately
+modeled proof appropriate to the sink, not merely the presence of a wrapper.
 
 ## 4. Add Constraint
 
@@ -166,6 +174,10 @@ def clean(value):
 
 ### Constrained example
 
+The negative example above excludes only this shell-interpretation rule.
+An attacker-controlled executable can still match a separate process-selection
+rule with `shell=False`; it is not a blanket safe-execution example.
+
 ```python
 import subprocess
 
@@ -187,6 +199,7 @@ def run(cmd):
 
 ```bash
 ./target/release/bonsai-ninja security ./examples/python/language_gauntlet taint-analysis \
+  --profile all \
   --rules-dir ./security-patterns \
   --source python.flask.request_args_get \
   --sink python.cmdi.os_system

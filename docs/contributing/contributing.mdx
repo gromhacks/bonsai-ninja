@@ -8,7 +8,7 @@ description: "Development setup, test workflow, and links for adding rules or la
 ## Dev Setup
 
 ```bash
-cargo build --workspace
+bash scripts/build-release.sh
 cargo test -q -p bonsai-ninja --test security_commands
 cargo test --workspace
 ```
@@ -42,7 +42,14 @@ Integration and matrix tests stay under each crate's `tests/` directory.
 2. Put the rule in `security-patterns/langs/<lang>/<kind>/<family>.yml`.
 3. Add positive and negative `match_examples`.
 4. Run `python3 scripts/validate-pattern-pack.py --binary ./target/release/bonsai-ninja`.
-5. Add a fixture test if propagation behavior changes.
+5. Add independent API-shaped unsafe and safe-control fixtures for a changed
+   security boundary, not just examples derived from the rule's own matcher.
+6. Verify complete source-to-sink evidence, sanitizer/transform roles, and
+   cached/fresh results when the change affects propagation or cache identity.
+
+Follow [Rule Testing](../rule-testing.mdx) for the full validation and live
+taint-replay commands. Matching an example is not independent proof of the
+library's runtime semantics.
 
 Pack-wide ecosystem values belong in `security-patterns/metadata.yml`:
 dependency manifest patterns, package aliases, sink-family aliases,

@@ -1,8 +1,7 @@
 //! `bonsai-ninja index` / `diagnostics` / `dump-hir` / `dump-cfg` —
-//! low-ceremony inspection commands that open the workspace, run one
-//! analysis pass, and print the result as JSON. They don't have
-//! per-row rendering or text-mode decoration, so they all fit in a
-//! single small module together.
+//! compiler inspection commands with readable text projections and canonical
+//! JSON documents. Diagnostic locations retain exact compiler byte spans;
+//! presentation must not invent source coordinates or enable extra analysis.
 
 use anyhow::Result;
 use serde_json::json;
@@ -761,6 +760,46 @@ fn render_diagnostics_text(value: &serde_json::Value) {
         u.label("files with diagnostics"),
         u.name(&files.to_string())
     );
+    // Actionable diagnostics precede the adapter's capability reference.
+    if let Some(rows) = value["diagnostics"].as_array().filter(|rows| !rows.is_empty()) {
+        let paths: std::collections::BTreeMap<_, _> = value["diagnostic_files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|file| Some((file["file"].as_u64()?, file["path"].as_str()?)))
+            .collect();
+        let mut table = u.table(&["severity", "location (bytes)", "code", "message", "notes"]);
+        for row in rows {
+            let path = row["span"]["file"]
+                .as_u64()
+                .and_then(|file| paths.get(&file).copied());
+            let location = path.map_or_else(
+                || span_text(&row["span"]),
+                |path| format!("{path} bytes {}..{}", row["span"]["start"], row["span"]["end"]),
+            );
+            table.add_row(vec![
+                Cell::new(u.severity(row["severity"].as_str().unwrap_or("-"))),
+                Cell::new(u.path(&location)),
+                Cell::new(row["code"].as_str().unwrap_or("-")),
+                Cell::new(row["message"].as_str().unwrap_or("-")),
+                Cell::new(
+                    row["notes"]
+                        .as_array()
+                        .map(|notes| {
+                            notes
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .unwrap_or_default(),
+                ),
+            ]);
+        }
+        cli_println!("{table}");
+    } else {
+        cli_println!("  {}", u.dim("no compiler diagnostics in the selected workspace"));
+    }
     if let Some(capabilities) = value["adapter_capabilities"].as_array() {
         for capability in capabilities {
             let language = capability["display_name"]
@@ -801,16 +840,6 @@ fn render_diagnostics_text(value: &serde_json::Value) {
             }
             cli_println!("{table}");
         }
-    }
-    if let Some(rows) = value["diagnostics"].as_array().filter(|rows| !rows.is_empty()) {
-        let mut table = u.table(&["#", "diagnostic"]);
-        for (index, row) in rows.iter().enumerate() {
-            table.add_row(vec![
-                Cell::new((index + 1).to_string()),
-                Cell::new(compact_json(row)),
-            ]);
-        }
-        cli_println!("{table}");
     }
 }
 

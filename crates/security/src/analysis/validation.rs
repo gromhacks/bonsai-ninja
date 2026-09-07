@@ -1171,6 +1171,15 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
     let Some(semantics) = rule.analysis_semantics.as_ref() else {
         return;
     };
+    if semantics.taint_preserving_transform.is_some() && rule.kind != RuleKind::Sanitizer {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "taint-preserving transform reporting is only valid on sanitizer/transform rules",
+        );
+    }
     for class in &semantics.flow_classes {
         let valid_kind = match class {
             FlowClass::ProcessInput | FlowClass::HttpInput | FlowClass::EnvironmentInput => {
@@ -2993,6 +3002,15 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
                 "constraints.any_arg_matches_regex",
                 any_arg_matches_regex.as_str(),
             )),
+            crate::rule::ConstraintKind::ArgStringCompositionStartsWith {
+                arg_string_composition_starts_with: spec,
+            }
+            | crate::rule::ConstraintKind::ArgStringCompositionNotStartsWith {
+                arg_string_composition_not_starts_with: spec,
+            } => spec
+                .literal_regex
+                .as_deref()
+                .map(|pattern| ("constraints.string_composition.literal_regex", pattern)),
             crate::rule::ConstraintKind::ReceiverTypeIn { .. }
             | crate::rule::ConstraintKind::ReceiverTypeNotIn { .. }
             | crate::rule::ConstraintKind::RequiresPriorReceiverWrite { .. }
@@ -3013,8 +3031,6 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
             | crate::rule::ConstraintKind::MaxArgs { .. }
             | crate::rule::ConstraintKind::ArgValueNotAggregate { .. }
             | crate::rule::ConstraintKind::ArgValueKind { .. }
-            | crate::rule::ConstraintKind::ArgStringCompositionStartsWith { .. }
-            | crate::rule::ConstraintKind::ArgStringCompositionNotStartsWith { .. }
             | crate::rule::ConstraintKind::ArgIsInlineCallback { .. }
             | crate::rule::ConstraintKind::ArgInlineCallbackReturnsStatic { .. }
             | crate::rule::ConstraintKind::ArgSequenceItemsEqual { .. }

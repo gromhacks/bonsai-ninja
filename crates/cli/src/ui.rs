@@ -24,7 +24,78 @@ pub(crate) struct Ui {
     theme: Theme,
 }
 
+/// Dense inventories become labeled records when the terminal cannot afford
+/// readable columns. This changes layout only: every original cell survives.
+pub(crate) struct UiTable {
+    table: Table,
+    pinned: Vec<usize>,
+}
+
+impl std::ops::Deref for UiTable {
+    type Target = Table;
+
+    fn deref(&self) -> &Self::Target {
+        &self.table
+    }
+}
+
+impl std::ops::DerefMut for UiTable {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.table
+    }
+}
+
+impl std::fmt::Display for UiTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Some(header) = self.table.header() else {
+            return std::fmt::Display::fmt(&self.table, f);
+        };
+        let columns = header.cell_iter().count();
+        let width = self.table.width().unwrap_or(140);
+        if columns < 4
+            || usize::from(width) / columns >= 22
+            || self.table.row_count() == 0
+            || self
+                .table
+                .row_iter()
+                .any(|row| row.cell_iter().count() != columns)
+        {
+            return write!(f, "{}", self.table.trim_fmt());
+        }
+        for (row_index, row) in self.table.row_iter().enumerate() {
+            if row_index > 0 {
+                writeln!(f)?;
+            }
+            for (index, (label, value)) in header.cell_iter().zip(row.cell_iter()).enumerate() {
+                let mut field = Table::new();
+                field.load_style(NOTHING);
+                field.set_content_arrangement(ContentArrangement::Dynamic);
+                field.set_width(width);
+                field.add_row(vec![label.clone(), value.clone()]);
+                field.set_constraints(vec![
+                    ColumnConstraint::Absolute(Width::Fixed(18)),
+                    if self.pinned.contains(&index) {
+                        // Copyable rule/stable IDs must never be split just to
+                        // fit a terminal. Only their line may exceed its width.
+                        ColumnConstraint::ContentWidth
+                    } else {
+                        ColumnConstraint::LowerBoundary(Width::Fixed(1))
+                    },
+                ]);
+                writeln!(f, "{}", field.trim_fmt())?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Ui {
+    /// Rendered pages are reusable only for the same effective display, even
+    /// when argv is unchanged (TTY, NO_COLOR, BONSAI_THEME, resize/COLUMNS).
+    pub(crate) fn render_identity(&self) -> String {
+        format!("{:?}:{}:{:?}", self.theme, self.colors, terminal_width())
+    }
+
     /// Build a UI honoring `--no-color`, `NO_COLOR`, and stdout-is-TTY.
     /// The theme selection comes from `--theme` / `BONSAI_THEME` (default:
     /// `moss` — the bonsai-ninja house palette).
@@ -93,6 +164,23 @@ impl Ui {
 
     pub(crate) fn warn(&self, text: &str) -> String {
         self.apply(text, &self.palette.warn)
+    }
+
+    pub(crate) fn severity(&self, text: &str) -> String {
+        match crate::theme::severity_color(text) {
+            Some(color) => self.apply(text, &owo_colors::Style::new().color(color).bold()),
+            None => self.dim(text),
+        }
+    }
+
+    /// A consistent, source-independent title for syntax inventory pages.
+    pub(crate) fn result_heading(&self, command: &str, count: u64, singular: &str, plural: &str) -> String {
+        format!(
+            "{} — {} {}",
+            self.label(command),
+            self.name(&crate::footer::format_count(count as usize)),
+            if count == 1 { singular } else { plural },
+        )
     }
 
     pub(crate) fn wrapped_warn_labeled_lines(&self, label: &str, text: &str) -> Vec<String> {
@@ -170,6 +258,7 @@ impl Ui {
     }
 
     pub(crate) fn ruler(&self, ch: char, width: usize) -> String {
+        let width = terminal_width().map_or(width, |available| width.min(usize::from(available)));
         let line: String = std::iter::repeat_n(ch, width).collect();
         self.apply(&line, &self.palette.border)
     }
@@ -180,7 +269,7 @@ impl Ui {
     /// only, no per-row separators). Cleaner than the full grid for
     /// browse listings while still giving a visible header break.
     #[must_use]
-    pub(crate) fn table(&self, headers: &[&str]) -> Table {
+    pub(crate) fn table(&self, headers: &[&str]) -> UiTable {
         let mut t = Table::new();
         // Minimal chrome: header underline + bottom rule, no per-row
         // divider lines. We also force the header/bottom *intersections*
@@ -203,7 +292,10 @@ impl Ui {
             constraints[flow_col] = ColumnConstraint::Absolute(Width::Fixed(8));
             t.set_constraints(constraints);
         }
-        t
+        UiTable {
+            table: t,
+            pinned: Vec::new(),
+        }
     }
 
     /// A [`Self::table`] whose `pinned` columns always render at their
@@ -211,7 +303,7 @@ impl Ui {
     /// be wrapped or truncated to fit a narrow terminal: a cut id cannot be
     /// copied back into `--rule` / `show`, so prose columns absorb the
     /// width pressure instead.
-    pub(crate) fn table_pinned(&self, headers: &[&str], pinned: &[&str]) -> Table {
+    pub(crate) fn table_pinned(&self, headers: &[&str], pinned: &[&str]) -> UiTable {
         let mut t = self.table(headers);
         let constraints: Vec<ColumnConstraint> = headers
             .iter()
@@ -226,6 +318,11 @@ impl Ui {
             })
             .collect();
         t.set_constraints(constraints);
+        t.pinned = headers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, header)| pinned.contains(header).then_some(index))
+            .collect();
         t
     }
 
@@ -412,6 +509,7 @@ fn terminal_width() -> Option<u16> {
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .filter(|w| *w >= 40)
+        .or_else(|| Table::new().width().filter(|w| *w >= 40))
 }
 
 /// Best-effort extension extraction from a workspace path.

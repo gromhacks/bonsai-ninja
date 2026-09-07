@@ -1,7 +1,7 @@
 Adapter              vis aliases bases rfw panns pdefaults exports
 lang_c               3   7       0     0   1     0         0
 lang_cpp             7   25      1     3   0     0         0
-lang_csharp          10  12      1     7   1     0         0
+lang_csharp          10  12      1     6   1     0         0
 lang_dart            2   22      1     5   0     0         0
 lang_elixir          3   4       0     0   1     0         0
 lang_erlang          2   4       0     0   1     0         0

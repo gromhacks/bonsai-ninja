@@ -5,8 +5,10 @@ description: "Common source, sink, sanitizer, lifecycle, and constraint rule sha
 
 # Pattern variants
 
-Common rule shapes by category. Use these as templates when authoring new
-rules.
+Common rule shapes by category. These are focused authoring examples, not
+blanket API safety claims or complete production rules. Retain each provider's
+real imports, receiver/overload constraints, and independent safe and unsafe
+controls before adding a rule to a pack.
 
 ---
 
@@ -90,6 +92,12 @@ class overrides:
 ```
 
 ### Parameter default-call binder (FastAPI)
+
+Explicit binders and implicit inputs are different source models. The bundled
+implicit scalar-route rule combines the imported route-owner decorator,
+primitive parameter types, and `param_default_calls_absent: true` so a
+`Depends(...)` default cannot borrow ordinary request-input semantics. An
+explicit binder such as `Body(...)` instead uses its exact default-call target:
 
 ```yaml
 - id: python.fastapi.body_param
@@ -264,38 +272,43 @@ class overrides:
 
 ### Parameterised query
 
-```yaml
-- id: python.sanitizer.parametrised_execute
-  enabled: true
-  language: python
-  tag: parameterized-query
-  match:
-    kind: call
-    callee:
-      attribute: [cursor, execute]
-  constraints:
-    - min_args: 2
-    - max_args: 2
-    - arg_matches_regex:
-        index: 0
-        regex: "\\?|\\$\\d+"
+The protection belongs to the query/value relationship, not to any two-argument
+method named `execute`. A SQLite control binds user data into a fixed query:
+
+```python
+import sqlite3
+
+def lookup(user):
+    with sqlite3.connect(":memory:") as connection:
+        return connection.execute("SELECT ?", (user,)).fetchone()
 ```
+
+Keep a companion case that interpolates `user` into the query string; merely
+finding a placeholder somewhere in dynamic SQL does not prove parameterization.
+The [SQLite parameter-binding documentation](https://docs.python.org/3/library/sqlite3.html#how-to-use-placeholders-to-bind-values-in-sql-queries)
+defines this API boundary. Model the exact provider and consumed value using
+the [compiler guard contract](security-spec.mdx#compiler-proven-guard-semantics),
+not a generic call-name sanitizer.
 
 ### Token verification
 
-```yaml
-- id: python.sanitizer.jwt_decode_verify
-  enabled: true
-  language: python
-  tag: signed-token-verify
-  packages: [jose, pyjwt]
-  match:
-    kind: call
-    callee:
-      attribute: [jwt, decode]
-  constraints:
-    - keyword_arg_equals: { name: verify, value: "True" }
+Do not use a legacy `verify=True` keyword as a complete authentication proof.
+For example, a PyJWT signature-verification control uses the `jwt` import,
+a trusted configured key, and a fixed algorithm allowlist:
+
+```python
+import jwt
+
+def decode_claims(token, trusted_public_key):
+    return jwt.decode(token, trusted_public_key, algorithms=["RS256"])
 ```
+
+The key and algorithm choice must not come from attacker-controlled token
+data. Audience, issuer, and required claims are separate application-policy
+checks; signature verification alone does not prove them. See the
+[PyJWT API contract](https://pyjwt.readthedocs.io/en/stable/api.html#jwt.decode).
+Rule tests must include disabled-signature and attacker-selected-configuration
+near-misses and must not give unrelated sinks sanitizer credit.
 
 ---
 

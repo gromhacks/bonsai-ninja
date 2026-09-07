@@ -33,7 +33,7 @@
 - id: php.sanitizer.strip_tags
   enabled: true
   language: php
-  tag: html-sanitize
+  tag: passthrough-transform
   match:
     kind: call
     callee:
@@ -43,7 +43,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  strip_tags($input);\n}\n"
     expect_match_text:
     - strip_tags
-  description: strip_tags - removes HTML tags (not foolproof for attribute context).
+  description: "strip_tags removes tags but retains attributes on allowed tags and does not establish an XSS-safe output context. Taint-preserving transform."
 - id: php.sanitizer.urlencode
   enabled: true
   language: php
@@ -99,7 +99,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  escapeshellcmd($input);\n}\n"
     expect_match_text:
     - escapeshellcmd
-  description: escapeshellcmd - escapes command metacharacters (weaker than escapeshellarg).
+  description: "escapeshellcmd escapes shell metacharacters but leaves executable and argument selection attacker-controlled; not an unconditional command-injection sanitizer."
 - id: php.sanitizer.mysqli_real_escape_string
   enabled: true
   language: php

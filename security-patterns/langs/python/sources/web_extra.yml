@@ -1373,3 +1373,69 @@
           return value
     expect_match_text: [info.context.args]
   description: "GraphQL resolver info.context.args - framework-provided client argument map exposed through the resolver context."
+
+- id: python.fastapi.implicit_scalar_route_param
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, path]
+  packages: [fastapi]
+  imports: [fastapi]
+  analysis_semantics:
+    source_specificity_rank: 10
+  match:
+    kind: param
+    target:
+      param_type_in: [str, int, float, bool]
+      param_default_calls_absent: true
+  constraints:
+  - enclosing_decorator_in:
+    - fastapi.FastAPI.get
+    - fastapi.FastAPI.post
+    - fastapi.FastAPI.put
+    - fastapi.FastAPI.patch
+    - fastapi.FastAPI.delete
+    - fastapi.FastAPI.head
+    - fastapi.FastAPI.options
+    - fastapi.FastAPI.api_route
+    - fastapi.APIRouter.get
+    - fastapi.APIRouter.post
+    - fastapi.APIRouter.put
+    - fastapi.APIRouter.patch
+    - fastapi.APIRouter.delete
+    - fastapi.APIRouter.head
+    - fastapi.APIRouter.options
+    - fastapi.APIRouter.api_route
+  match_examples:
+  - name: implicit typed query parameter on an imported route owner
+    code: |
+      from fastapi import FastAPI
+      app = FastAPI()
+      @app.get('/run')
+      def run(cmd: str): return cmd
+    expect_match_text: [cmd]
+  - name: helper parameter is not externally bound
+    code: |
+      from fastapi import FastAPI
+      def helper(cmd: str): return cmd
+    expect_no_match: true
+  - name: unrelated decorator receiver does not borrow framework imports
+    code: |
+      from fastapi import FastAPI
+      class Registry:
+          def get(self, path): return lambda fn: fn
+      app = Registry()
+      @app.get('/run')
+      def run(cmd: str): return cmd
+    expect_no_match: true
+  - name: dependency value is not an implicit request parameter
+    code: |
+      from fastapi import FastAPI, Depends
+      app = FastAPI()
+      def command(): return '/usr/bin/true'
+      @app.get('/run')
+      def run(cmd: str = Depends(command)): return cmd
+    expect_no_match: true
+  description: "FastAPI infers scalar query/path parameters on registered routes without Query/Path markers. The adapter-proven imported decorator owner is required; default-call dependencies and undecorated helpers remain outside this model."

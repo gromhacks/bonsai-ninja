@@ -2279,7 +2279,9 @@ Future<Response> feed(Request req) async {
     ])
     .unwrap();
     assert!(
-        sinks.contains("dart.xxe.xml_document_parse") && sinks.contains("severity medium"),
+        sinks.contains("dart.xxe.xml_document_parse")
+            && sinks.contains("severity")
+            && sinks.split_whitespace().any(|word| word == "medium"),
         "the unprofiled inventory must retain the medium audit endpoint:\n{sinks}"
     );
 
@@ -3076,8 +3078,8 @@ fn taint_analysis_keeps_a_fitting_flow_in_one_continuous_block() {
         "the continuous block must retain the complete compiler-resolved chain:\n{out}"
     );
     assert!(
-        out.contains("total   1 taint flow"),
-        "the footer must count semantic flows rather than internal fragments:\n{out}"
+        out.contains("total   1 finding"),
+        "the footer must count canonical findings rather than internal fragments:\n{out}"
     );
 }
 
@@ -3535,7 +3537,7 @@ fn taint_analysis_run_across_every_micro_lang() {
         ])
         .unwrap();
         assert!(
-            out.contains("finding(s)"),
+            out.starts_with("security taint-analysis — ") && out.lines().next().unwrap().contains("finding"),
             "{lang}: expected report header in output:\n{out}"
         );
     }

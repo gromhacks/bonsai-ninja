@@ -583,10 +583,7 @@ fn render_text(out: &ReadFileOut, compact: bool) {
             u.label(&format!("findings ({}):", out.findings_in_view.len()))
         );
         for d in &out.findings_in_view {
-            let sev_styled = match d.severity {
-                Severity::Critical | Severity::High => u.warn(severity_label(d.severity)),
-                _ => u.kind(severity_label(d.severity)),
-            };
+            let sev_styled = u.severity(severity_label(d.severity));
             cli_println!(
                 "  {} {} ({}/{}) {}",
                 u.annotation(&d.finding_id),
@@ -893,10 +890,7 @@ fn format_mark(m: &LineMark) -> String {
     }
     if let Some(sev) = m.severity {
         let label = severity_label(sev);
-        parts.push(match sev {
-            Severity::Critical | Severity::High => u.warn(label),
-            _ => u.kind(label),
-        });
+        parts.push(u.severity(label));
     }
     if let Some(t) = &m.taint_source_name {
         parts.push(u.dim(&format!("taint←{t}")));

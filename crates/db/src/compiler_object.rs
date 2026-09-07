@@ -517,7 +517,9 @@ use std::sync::{
 // v199: JavaScript/TypeScript module identity strips one source extension only.
 // v200: exact static values for same-span unparenthesized call arguments.
 // v201: typed splat parameter bindings exclude their annotation subtree.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 201;
+// v202: Swift computed getters retain their complete executable call/body IR.
+// v203: Python direct call arguments retain exact string-composition facts.
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 203;
 #[cfg(test)]
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 

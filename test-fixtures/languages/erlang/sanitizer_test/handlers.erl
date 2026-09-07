@@ -7,7 +7,7 @@ cmd_raw(Input) ->
     os:cmd("ping " ++ Input).
 
 cmd_safe(Input) ->
-    %% Wrong-context sanitizer evidence: URL encoding is visible on-path but
+    %% Non-crediting transform evidence: URL encoding is visible on-path but
     %% must not clear a command-injection finding for os:cmd/1.
     os:cmd(["ping ", uri_string:quote(Input)]).
 

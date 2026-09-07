@@ -1180,3 +1180,87 @@
     expect_no_match: true
   description: "ansible_runner.run - executes ad-hoc Ansible modules; tainted\
     \ module / args = remote code exec across inventory."
+
+- id: python.cmdi.subprocess_executable_string
+  enabled: true
+  language: python
+  tag: command-injection
+  category: process-exec
+  severity: critical
+  imports: [subprocess]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee: {regex: '^subprocess[.](?:run|call|check_call|check_output|Popen)$', binding_origin: imported}
+  constraints:
+  - arg_tainted: {index: 0}
+  - arg_value_not_aggregate: 0
+  match_examples:
+  - name: scalar executable without shell
+    code: |
+      import subprocess
+      def run(input): return subprocess.run(input, shell=False)
+  - name: fixed executable with data arguments
+    code: |
+      import subprocess
+      def run(input): return subprocess.run(['/bin/echo', input], shell=False)
+    expect_no_match: true
+  - name: literal executable
+    code: |
+      import subprocess
+      def run(): return subprocess.run('/usr/bin/true')
+    expect_no_match: true
+  - name: assigned fixed executable argv with data arguments
+    code: |
+      import subprocess
+      def run(input):
+          args = ['/bin/echo', input]
+          copied = args
+          return subprocess.run(copied, shell=False)
+    expect_no_match: true
+  - name: overwritten argv does not hide scalar executable selection
+    code: |
+      import subprocess
+      def run(input):
+          args = ['/bin/echo', input]
+          args = input
+          return subprocess.run(args, shell=False)
+  - name: conditional scalar overwrite cannot borrow an aggregate initializer
+    code: |
+      import subprocess
+      def run(input, condition):
+          args = ['/bin/echo', input]
+          if condition:
+              args = input
+          return subprocess.run(args, shell=False)
+  - name: parameter shadows the imported provider
+    code: |
+      import subprocess
+      def run(input, subprocess): return subprocess.run(input, shell=False)
+    expect_no_match: true
+  description: "A non-aggregate subprocess program argument can select an attacker-controlled executable without a shell. This scalar model excludes compiler-proven aggregate argv; executable overrides and shell-program interpretation are modeled separately."
+
+- id: python.cmdi.subprocess_executable_override
+  enabled: true
+  language: python
+  tag: command-injection
+  category: process-exec
+  severity: critical
+  imports: [subprocess]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee: {regex: '^subprocess[.](?:run|call|check_call|check_output|Popen)$', binding_origin: imported}
+  constraints:
+  - arg_tainted: {kw: executable}
+  match_examples:
+  - name: explicit executable override
+    code: |
+      import subprocess
+      def run(input): return subprocess.run(['fixed'], executable=input)
+  - name: data argument does not taint fixed override
+    code: |
+      import subprocess
+      def run(input): return subprocess.run(['fixed', input], executable='/bin/echo')
+    expect_no_match: true
+  description: "The executable keyword overrides the program independently of argv and shell selection."

@@ -292,3 +292,64 @@ fn manifest_rehashes_sources_hidden_by_git_index_flags() {
         let _ = std::fs::remove_dir_all(root);
     }
 }
+
+#[test]
+fn ignored_workspace_root_never_reuses_an_unobservable_git_snapshot() {
+    let Some(repository) = init_git_workspace("ignored-workspace", "def outer(): return 0\n") else {
+        return;
+    };
+    std::fs::write(repository.join(".gitignore"), "/scratch/\n").expect("ignore nested workspace");
+    let root = repository.join("scratch");
+    std::fs::create_dir(&root).expect("nested workspace");
+    std::fs::write(root.join("app.py"), "def first(): return 1\n").expect("source");
+    let manifest = WorkspaceCache::new(&root).manifest().expect("manifest");
+    assert!(manifest.git_source_state.is_none());
+    assert!(refresh::GitChangeOracle::discover(&root).is_none());
+
+    // Also reject an old manifest whose Git proof predates this guard.
+    let mut legacy = manifest.clone();
+    legacy.git_source_state = WorkspaceCache::new(&repository)
+        .manifest()
+        .expect("outer manifest")
+        .git_source_state;
+    for (name, source) in [
+        ("extra.py", "def second(): return 2\n"),
+        ("app.py", "def changed(): return 3\n"),
+    ] {
+        std::fs::write(root.join(name), source).expect("change ignored source");
+        let actual = source_file_fingerprints_for_cache_validation(&root, Some(&legacy), false)
+            .expect("validate ignored workspace");
+        let expected = source_file_fingerprints_from_disk(&root, false).expect("fresh source walk");
+        assert_eq!(actual, expected);
+    }
+    std::fs::rename(root.join("extra.py"), root.join("renamed.py")).expect("rename source");
+    std::fs::remove_file(root.join("app.py")).expect("delete source");
+    let actual = source_file_fingerprints_for_cache_validation(&root, Some(&legacy), false)
+        .expect("validate renamed/deleted sources");
+    assert_eq!(actual, source_file_fingerprints_from_disk(&root, false).unwrap());
+    assert_eq!(actual.len(), 1);
+    assert!(actual[0].path.ends_with("renamed.py"));
+    std::fs::remove_dir_all(repository).expect("fixture cleanup");
+}
+
+#[test]
+fn live_project_reconciles_an_ignored_workspace_root() {
+    let Some(repository) = init_git_workspace("live-ignored-workspace", "def outer(): return 0\n") else {
+        return;
+    };
+    std::fs::write(repository.join(".gitignore"), "/scratch/\n").expect("ignore nested workspace");
+    let root = repository.join("scratch");
+    std::fs::create_dir(&root).expect("nested workspace");
+    std::fs::write(root.join("app.py"), "def original(): return 1\n").expect("source");
+    let project = Bonsai::new()
+        .with_persistent_semantic_cache(false)
+        .open_with_options(&root, WorkspaceOpenOptions::lazy_query())
+        .expect("open ignored workspace");
+    assert!(project.change_oracle.lock().is_none());
+    std::fs::write(root.join("app.py"), "def changed(): return 2\n").expect("edit");
+    std::fs::write(root.join("added.py"), "def added(): return 3\n").expect("add");
+    let changed = project.refresh_from_disk().expect("refresh");
+    assert_eq!(changed.modified, 1);
+    assert_eq!(changed.added, 1);
+    std::fs::remove_dir_all(repository).expect("fixture cleanup");
+}

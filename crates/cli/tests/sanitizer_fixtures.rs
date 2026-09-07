@@ -1,6 +1,6 @@
 //! Per-language `sanitizer_test` fixture integration tests.
 //!
-//! Every `examples/<lang>/sanitizer_test/` directory pairs
+//! Every `test-fixtures/languages/<lang>/sanitizer_test/` directory pairs
 //! `<name>_raw` / `<name>_safe` handlers. All-source taint-analysis must
 //! keep the raw source-to-sink findings visible. Safe branches may be
 //! fully removed when the value no longer reaches the sink; when a
@@ -38,6 +38,9 @@ fn run(args: &[&str]) -> Option<(String, String, i32)> {
     let mut full: Vec<&str> = args.to_vec();
     full.push("--no-color");
     full.push("--no-progress");
+    full.push("--all");
+    full.push("--rules-dir");
+    full.push("security-patterns");
     let out = Command::new(&bin)
         .args(&full)
         .env("COLUMNS", "240")
@@ -102,26 +105,11 @@ const LANGS_WITH_DEFAULT_RAW_FINDING: &[&str] = &[
 /// sanitizer coverage through `crates/security/tests/sanitizer_credit_audit.rs`;
 /// this legacy fixture only asserts evidence shape where evidence is
 /// actually emitted in explicit all-source taint-analysis.
-///
-/// `go` is intentionally absent: its sanitizer model is hard-removal
-/// (a sanitizer on the path drops the taint, so a sanitized flow is
-/// SAFE and emits no finding — `RedirectSafe`'s `url.QueryEscape`'d URL,
-/// `XssSafe`'s disabled-`Fprintf` sink, etc.). Sanitizer evidence is now
-/// attached only when the sanitizer sits ON the source→sink path; the go
-/// fixture has no such flow. It previously "passed" only via an artifact
-/// — `open_redirect`'s `arg_tainted index: 1` matched `http.Redirect`'s
-/// `r *http.Request` (arg 1 is the request object, not the URL, which is
-/// arg 2 for net/http), and an off-path `url.QueryEscape` was spuriously
-/// attached as evidence. Tightening attribution to on-path sanitizers
-/// (the accurate behavior) correctly removed both. Go's `db_query`
-/// prepared-statement FP and the net/http `http.Redirect` arg-index are
-/// tracked as follow-up rulepack fixes in docs/goal.md §H.
-///
-/// Dart, Lua, PHP, and Ruby are also absent here because their current
-/// fixture safe branches are hard-removed rather than emitted as
-/// findings with `sanitizers_seen`; raw unsafe paths and sanitizer
-/// inventory remain covered by the sibling tests.
-const LANGS_WITH_SANITIZER_EVIDENCE: &[&str] = &["c", "cpp", "elixir", "erlang", "rust", "swift"];
+/// URL/shell encoders are transforms, not credited sanitizer evidence.
+/// Sanitizers never remove IDG propagation; visibility and status are
+/// separate reporting decisions. Erlang's URL-encoded shell argument is
+/// explicitly covered by the transform regression below.
+const LANGS_WITH_SANITIZER_EVIDENCE: &[&str] = &["c", "cpp", "elixir"];
 
 #[test]
 fn every_sanitizer_fixture_produces_a_raw_finding() {
@@ -301,10 +289,8 @@ fn sanitizer_evidence_has_complete_shape() {
     }
 }
 
-/// For the Python fixture we can be precise under the current
-/// semantic contract: only the raw branches remain visible in default
-/// taint-analysis. The sanitizer-cleared branches do not reach a
-/// tainted sink in this legacy fixture.
+/// Context-free shell quoting is not a command-execution proof. The
+/// redirect's fixed local prefix, rather than its URL encoder, is safe.
 #[test]
 fn python_sanitizer_fixture_expected_counts() {
     let Some(_) = bin_path() else { return };
@@ -335,14 +321,71 @@ fn python_sanitizer_fixture_expected_counts() {
         .collect();
     assert_eq!(
         raw.len(),
-        2,
-        "python sanitizer fixture: raw findings = {}, want exactly 2",
+        3,
+        "python sanitizer fixture: raw findings = {}, want exactly 3",
         raw.len()
     );
     assert_eq!(
         rows.len(),
-        2,
-        "python sanitizer fixture: total findings = {}, want exactly 2 raw-only findings",
+        3,
+        "python sanitizer fixture: total findings = {}, want exactly 3 raw-only findings",
         rows.len()
     );
+    for handler in ["cmd_raw", "cmd_safe", "redirect_raw"] {
+        assert!(
+            rows.iter().any(|row| {
+                row["status"] == "unsanitized"
+                    && row["chain_display"].as_array().is_some_and(|chain| {
+                        chain
+                            .iter()
+                            .any(|hop| hop.as_str().is_some_and(|name| name.contains(handler)))
+                    })
+            }),
+            "missing {handler}: {rows:?}"
+        );
+    }
+    assert!(
+        rows.iter().any(|row| {
+            row["taint_transforms_seen"].as_array().is_some_and(|transforms| {
+                transforms
+                    .iter()
+                    .any(|transform| transform["rule_id"] == "python.sanitizer.shlex_quote")
+            })
+        }),
+        "shell quote must remain visible as a transform: {rows:?}"
+    );
+}
+
+#[test]
+fn url_quoting_remains_a_visible_non_crediting_shell_transform() {
+    for language in ["erlang", "rust", "swift"] {
+        let w = fixture_ws(language);
+        let Some((out, error, code)) = run(&[
+            "security",
+            &w,
+            "taint-analysis",
+            "--profile",
+            "all",
+            "--inferred-sources",
+            "--show-sanitized",
+            "--format",
+            "json",
+        ]) else {
+            return;
+        };
+        assert_eq!(code, 0, "{error}");
+        let rows = rows_of(&serde_json::from_str(&out).unwrap());
+        assert!(
+            rows.iter().any(|row| {
+                row["status"] == "unsanitized"
+                    && row["taint_transforms_seen"]
+                        .as_array()
+                        .is_some_and(|transforms| !transforms.is_empty())
+                    && row
+                        .get("sanitizers_seen")
+                        .is_none_or(|value| value.as_array().unwrap().is_empty())
+            }),
+            "{language}: URL quoting must not sanitize a shell command: {rows:?}"
+        );
+    }
 }

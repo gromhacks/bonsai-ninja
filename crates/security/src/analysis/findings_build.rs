@@ -862,7 +862,10 @@ fn rule_is_taint_preserving_transform(rule: &Rule, metadata: &RulepackMetadata) 
             || semantics.call_result_passthrough_args_from.is_some()
             || semantics.call_result_passthrough_receiver
     });
-    has_passthrough_semantics
+    rule.analysis_semantics
+        .as_ref()
+        .and_then(|semantics| semantics.taint_preserving_transform)
+        .unwrap_or(has_passthrough_semantics)
         && rule
             .tag
             .as_deref()

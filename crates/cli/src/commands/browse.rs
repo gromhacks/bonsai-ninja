@@ -205,7 +205,7 @@ fn render_browse_used_in_section<T: BrowseRowLocation>(u: &Ui, ws: &Workspace, r
     let uses = browse_used_in_connections(ws, rows);
     cli_println!("{}", u.heading("used in (cross-module)"));
     for reason in &uses.incomplete_reasons {
-        cli_println!("  {}", u.dim(reason));
+        cli_println!("  {}", u.warn(reason));
     }
     let connections = uses.connections;
     if connections.is_empty() {
@@ -217,15 +217,17 @@ fn render_browse_used_in_section<T: BrowseRowLocation>(u: &Ui, ws: &Workspace, r
         }
         return;
     }
-    let mut table = u.table(&["target", "caller", "callee", "call site", "edge"]);
+    let mut table = u.table_pinned(
+        &["target file", "caller", "callee", "call site", "edge"],
+        &["edge"],
+    );
     for facts in connections {
         for group in facts.callers_in {
             for edge in group.edges {
-                let caller = format!("{} ({})", edge.caller, group.file);
                 let call_site = format!("{}:{}:{}", group.file, edge.line, edge.column);
                 table.add_row(vec![
                     Cell::new(u.path(&facts.file)),
-                    Cell::new(u.name(&caller)),
+                    Cell::new(u.name(&edge.caller)),
                     Cell::new(u.name(&edge.callee)),
                     Cell::new(u.path(&call_site)),
                     Cell::new(u.annotation(&edge.edge_id)),
@@ -757,6 +759,10 @@ pub(crate) fn cmd_defs(
                     let mut flow_status = SummaryColumnStatus::default();
                     let headers =
                         with_summaries_header(&["name", "kind", "location", "signature", "callees"], flows);
+                    cli_println!(
+                        "{}",
+                        u.result_heading("defs", info.total_rows, "definition", "definitions")
+                    );
                     let mut t = u.table(&headers);
                     let callees_by_row = def_callee_summaries(ws, &rows, 3);
                     for (d, callees_cell) in rows.iter().zip(callees_by_row) {
@@ -795,7 +801,6 @@ pub(crate) fn cmd_defs(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} definitions)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
@@ -919,6 +924,10 @@ pub(crate) fn cmd_entrypoints(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let mut t = u.table(&["name", "kind", "location", "signature", "callees", "reason"]);
+                    cli_println!(
+                        "{}",
+                        u.result_heading("entrypoints", info.total_rows, "entry point", "entry points")
+                    );
                     for e in &rows {
                         let display_params = dedup_sigil_params(&e.params);
                         let signature = if display_params.is_empty() {
@@ -945,7 +954,6 @@ pub(crate) fn cmd_entrypoints(
                         ]);
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} entry points)", info.total_rows)));
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_browse_used_in_section(u, project.workspace(), &rows);
@@ -1489,6 +1497,10 @@ pub(crate) fn cmd_calls(
                     let mut flow_status = SummaryColumnStatus::default();
                     let headers =
                         with_summaries_header(&["callee text", "caller function", "location", "code"], flows);
+                    cli_println!(
+                        "{}",
+                        u.result_heading("calls", info.total_rows, "call site", "call sites")
+                    );
                     let mut t = u.table(&headers);
                     for c in &rows {
                         let caller = c.caller.as_deref().unwrap_or("-");
@@ -1515,7 +1527,6 @@ pub(crate) fn cmd_calls(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} call sites)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
@@ -1932,6 +1943,10 @@ pub(crate) fn cmd_imports(
                         &["module", "symbol", "alias", "kind", "location", "code"],
                         flows,
                     );
+                    cli_println!(
+                        "{}",
+                        u.result_heading("imports", info.total_rows, "import", "imports")
+                    );
                     let mut t = u.table(&headers);
                     for import in &rows {
                         let alias = import.alias.clone().unwrap_or_else(|| "-".to_string());
@@ -1967,7 +1982,6 @@ pub(crate) fn cmd_imports(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} imports)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
@@ -2129,6 +2143,7 @@ pub(crate) fn cmd_vars(
                     let mut flow_status = SummaryColumnStatus::default();
                     let headers =
                         with_summaries_header(&["var", "in function", "source", "location", "code"], flows);
+                    cli_println!("{}", u.result_heading("vars", info.total_rows, "write", "writes"));
                     let mut t = u.table(&headers);
                     for v in &rows {
                         let loc = format!("{}:{}:{}", short_file(&v.file), v.line, v.column);
@@ -2156,7 +2171,6 @@ pub(crate) fn cmd_vars(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} writes)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
@@ -2312,6 +2326,10 @@ pub(crate) fn cmd_strings(
                     let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
                     let enclosing_ann = bonsai_sdk::SummaryAnnotator::new(ws);
                     let mut flow_status = SummaryColumnStatus::default();
+                    cli_println!(
+                        "{}",
+                        u.result_heading("strings", info.total_rows, "string literal", "string literals")
+                    );
                     let headers = with_summaries_header(
                         &["category", "text", "in function", "location", "code"],
                         flows,
@@ -2346,7 +2364,6 @@ pub(crate) fn cmd_strings(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} strings)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
@@ -2454,6 +2471,10 @@ pub(crate) fn cmd_comments(
                     let u = ui();
                     let enclosing_ann = bonsai_sdk::SummaryAnnotator::new(ws);
                     let headers = &["kind", "text", "in function", "location"];
+                    cli_println!(
+                        "{}",
+                        u.result_heading("comments", info.total_rows, "comment", "comments")
+                    );
                     let mut t = u.table(headers);
                     for c in &rows {
                         let preview = truncate(&c.text.replace('\n', " "), 100);
@@ -2470,7 +2491,6 @@ pub(crate) fn cmd_comments(
                         t.add_row(cells);
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} comments)", info.total_rows)));
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
                     render_browse_used_in_section(u, ws, &rows);
@@ -2655,6 +2675,10 @@ pub(crate) fn cmd_args(
                         ],
                         flows,
                     );
+                    cli_println!(
+                        "{}",
+                        u.result_heading("args", info.total_rows, "argument", "arguments")
+                    );
                     let mut t = u.table(&headers);
                     for a in &rows {
                         let pos_label = a
@@ -2691,7 +2715,6 @@ pub(crate) fn cmd_args(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} arguments)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
@@ -2877,6 +2900,10 @@ pub(crate) fn cmd_operations(
                         ],
                         flows,
                     );
+                    cli_println!(
+                        "{}",
+                        u.result_heading("operations", info.total_rows, "operation", "operations")
+                    );
                     let mut t = u.table(&headers);
                     for op in &rows {
                         let operands = if op.operands.is_empty() {
@@ -2916,7 +2943,6 @@ pub(crate) fn cmd_operations(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} operations)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
@@ -3060,6 +3086,10 @@ pub(crate) fn cmd_classes(
                         &["name", "kind", "location", "method count", "methods"],
                         flows,
                     );
+                    cli_println!(
+                        "{}",
+                        u.result_heading("classes", info.total_rows, "type", "types")
+                    );
                     let mut t = u.table(&headers);
                     for c in &rows {
                         let loc = format!("{}:{}:{}", short_file(&c.file), c.line, c.column);
@@ -3094,7 +3124,6 @@ pub(crate) fn cmd_classes(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} types)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
@@ -3196,6 +3225,10 @@ pub(crate) fn cmd_refs(
                     let mut flow_status = SummaryColumnStatus::default();
                     let headers =
                         with_summaries_header(&["symbol", "kind", "in function", "location", "code"], flows);
+                    cli_println!(
+                        "{}",
+                        u.result_heading("refs", info.total_rows, "reference", "references")
+                    );
                     let mut t = u.table(&headers);
                     for r in &rows {
                         let loc = format!("{}:{}:{}", short_file(&r.file), r.line, r.column);
@@ -3225,7 +3258,6 @@ pub(crate) fn cmd_refs(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} references)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);
@@ -3356,6 +3388,10 @@ pub(crate) fn cmd_search(
                         &["name", "kind", "qualified", "context", "code", "location"],
                         flows,
                     );
+                    cli_println!(
+                        "{}",
+                        u.result_heading("search", info.total_rows, "match", "matches")
+                    );
                     let mut t = u.table(&headers);
                     for h in &rows {
                         let loc = format!("{}:{}:{}", short_file(&h.file), h.line, h.column);
@@ -3385,7 +3421,6 @@ pub(crate) fn cmd_search(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} matches)", info.total_rows)));
                     render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     super::render_analysis_incomplete_notice(&analysis_reasons);

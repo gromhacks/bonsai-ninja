@@ -238,7 +238,7 @@
 - id: lua.sanitizer.method_match_shell_safe_alphabet
   enabled: true
   language: lua
-  tag: shell-escape
+  tag: shell-argument-allowlist
   category: validation
   match:
     kind: call

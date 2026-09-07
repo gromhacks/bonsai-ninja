@@ -1037,7 +1037,7 @@ fn paged_footer_reports_command_specific_totals() {
     for (cmd, extra, label) in [
         ("defs", &[][..], "definition"),
         ("calls", &[][..], "call site"),
-        ("imports", &[][..], "unique import"),
+        ("imports", &[][..], "import"),
         ("dump-callgraph", &[][..], "function"),
         ("dump-edges", &[][..], "semantic call edge"),
     ] {
@@ -1058,8 +1058,8 @@ fn paged_footer_reports_command_specific_totals() {
     };
     assert!(
         out.lines()
-            .any(|line| line.contains("total") && line.contains("taint flow")),
-        "security taint-analysis footer must report total semantic flow count, got:\n{out}"
+            .any(|line| line.contains("total") && line.contains("finding")),
+        "security taint-analysis footer must count finding rows, not alternate flow paths, got:\n{out}"
     );
 }
 

@@ -357,8 +357,9 @@ pub(crate) enum Cmd {
                       Pass `--watch` to keep the process alive as a workflow \
                       tool: bonsai polls the source tree, hot-reloads saved \
                       changes into the live workspace, and prints fresh stats. \
-                      Use `--structural-only --watch` only when you want saved \
-                      edits refreshed without semantic sidecar prewarm."),
+                      Watch mode refreshes syntax by default; `--structural-only` \
+                      makes that choice explicit. `--semantic` is a one-shot \
+                      prewarm and cannot be combined with `--watch`."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Sanity-check a workspace\n  \
                       $ bonsai-ninja index ./src\n  \
@@ -387,7 +388,7 @@ pub(crate) enum Cmd {
         prewarm_dataflow: bool,
         /// Build and persist structural semantic sidecars used by later
         /// query commands. Does not run the compatibility all-entry dataflow prewarm.
-        #[arg(long, conflicts_with_all = ["prewarm_dataflow", "structural_only"])]
+        #[arg(long, conflicts_with_all = ["prewarm_dataflow", "structural_only", "watch"])]
         semantic: bool,
         /// Internal worker phase for exact semantic prewarm.
         #[arg(long, hide = true, requires = "semantic")]
@@ -2653,29 +2654,26 @@ pub(crate) enum SecurityAction {
         output: OutputPathArg,
     },
 
-    /// Enumerate sanitizer matches across the workspace. Same surface
-    /// as `sources` / `sinks` — each row is a call site the rulepack
-    /// claims is a cleansing operation (html-escape, shell-escape,
-    /// url-encode, constant-time compare, etc).
+    /// Enumerate credit-bearing sanitizer matches across the workspace.
+    /// Inventory matches are not proof that a particular flow is safe.
     #[command(
-        long_about = themed_subcommand_long_about("Enumerate sanitizer matches across the workspace — one row \
-                      per fact a loaded `sanitizers/` rule claimed. Same \
-                      surface as `security sources` / `sinks` plus a \
-                      sanitizer-tag narrower. Sanitizers tag cleansing \
-                      operations (html-escape, shell-escape, url-encode, \
-                      constant-time compare) whose presence on a taint \
-                      chain attaches sanitizer evidence to the finding. \
-                      Use this to audit where the pack considers taint \
-                      already cleansed without running full flows."),
+        long_about = themed_subcommand_long_about("Enumerate credit-bearing sanitizer matches across the workspace. \
+                      Each row is an exact rule match eligible for sanitizer \
+                      credit under the loaded pack's policy. Non-crediting \
+                      transforms and validation markers are excluded from this \
+                      inventory but remain available to flow analysis. A match \
+                      alone is not proof that a particular source-to-sink path \
+                      is safe: use `taint-analysis` to inspect the path, sink \
+                      context, and sanitizer status."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Every sanitizer hit in the workspace\n  \
+                      # Every credit-bearing sanitizer match in the workspace\n  \
                       $ bonsai-ninja security ./src sanitizers\n  \
                       \n  \
                       # HTML-escape sanitizers only\n  \
                       $ bonsai-ninja security ./src sanitizers --tag html-encode\n  \
                       \n  \
-                      # One rule id — e.g. every `shlex.quote` call site\n  \
-                      $ bonsai-ninja security ./src sanitizers --rule python.sanitizer.shlex_quote")
+                      # One rule id — e.g. every `html.escape` call site\n  \
+                      $ bonsai-ninja security ./src sanitizers --rule python.sanitizer.html_escape")
     )]
     Sanitizers {
         /// Override the bundled `langs/<lang>/…` rulepack tree.
@@ -2688,13 +2686,12 @@ pub(crate) enum SecurityAction {
         /// Filter to rules whose id matches this regex.
         #[arg(long)]
         rule_regex: Option<String>,
-        /// Tag narrower — sanitizer tag (e.g. `html-encode`,
-        /// `shell-escape`, `url-encode`, `constant-time`,
-        /// `sql-parameter`, `path-sanitize`).
+        /// Tag narrower — credit-bearing sanitizer tag (e.g.
+        /// `html-encode`, `sql-parameter`, `path-sanitize`).
         #[arg(long)]
         tag: Option<String>,
         /// Severity-floor filter for sanitizer rules that carry
-        /// severity (e.g. `weak-hash` flagged as medium). Same
+        /// severity. Same
         /// strict parsing as `sinks --severity`.
         #[arg(long)]
         severity: Option<String>,
@@ -3044,8 +3041,8 @@ pub(crate) enum SecurityAction {
         long_about = themed_subcommand_long_about("Render downstream taint/call paths starting at every matched \
                       source. This is source-centric exploration, not \
                       source→sink vulnerability reporting: no `sinks/` rule \
-                      is required. The command seeds every loaded `sources/` \
-                      rule plus inferred entry-point parameters, then follows \
+                      is required. The command seeds matched `sources/` rules \
+                      (plus entry-point parameters only with `--inferred-sources`), then follows \
                       resolved user-defined call paths so reviewers can map \
                       application, service, API, queue, cloud, CLI, IPC, \
                       database, and hardware entrypoint logic.\n\
@@ -3060,8 +3057,8 @@ pub(crate) enum SecurityAction {
                       # Remote entrypoints only\n  \
                       $ bonsai-ninja security ./src source-analysis --trust remote\n  \
                       \n  \
-                      # One source category only\n  \
-                      $ bonsai-ninja security ./src source-analysis --category inferred\n  \
+                      # Opt in to inferred entry-point sources\n  \
+                      $ bonsai-ninja security ./src source-analysis --inferred-sources --profile all --category inferred\n  \
                       \n  \
                       # JSON for tooling\n  \
                       $ bonsai-ninja security ./src source-analysis --format json --all")
@@ -3275,7 +3272,7 @@ pub(crate) enum SecurityAction {
         /// trailing segment of its id.
         #[arg(long)]
         category: Option<String>,
-        /// Filter by rule kind (`source`, `sink`, `sanitizer`).
+        /// Filter by rule kind (`source`, `sink`, `sanitizer`, `typing`).
         #[arg(long)]
         kind: Option<String>,
         /// Severity-floor filter — drops rules below this level.

@@ -277,3 +277,31 @@
       fun statement(connection: LocalConnection) = connection.createStatement()
     expect_no_match: true
   description: "A compiler-typed java.sql.Connection.createStatement call returns Statement; typing-only metadata supports later JDBC sink matching."
+
+- id: kotlin.typing.spring_resttemplate_constructor
+  enabled: true
+  language: kotlin
+  imports: [org.springframework.web.client]
+  returns_type: RestTemplate
+  match:
+    kind: new
+    callee:
+      attribute: [org, springframework, web, client, RestTemplate]
+      binding_origin: imported
+  match_examples:
+  - name: imported constructor types a local receiver
+    code: |
+      import org.springframework.web.client.RestTemplate
+      fun example(url: String) {
+        val client = RestTemplate()
+        client.getForObject(url, String::class.java)
+      }
+    expect_match_text: [RestTemplate]
+  - name: ordinary local factory does not borrow the imported type
+    code: |
+      import org.springframework.web.client.RestTemplate as SpringClient
+      class LocalClient
+      fun RestTemplate() = LocalClient()
+      fun example() { val client = RestTemplate() }
+    expect_no_match: true
+  description: "Imported Spring RestTemplate construction returns its exact receiver type; local factories do not inherit that identity."

@@ -917,3 +917,32 @@
   - zendframework/zenddb
   - zendframework
   - zendframework\zenddb
+
+- id: php.sqli.pdo_exec
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee: {attribute: [PDO, exec]}
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: PDO executes untrusted SQL
+    code: |
+      <?php
+      function run(PDO $db, $sql) { $db->exec($sql); }
+  - name: literal SQL is not tainted
+    code: |
+      <?php
+      function run(PDO $db) { $db->exec("DELETE FROM expired_sessions"); }
+    expect_no_match: true
+  - name: unrelated receiver is not PDO
+    code: |
+      <?php
+      class Worker { function exec($value) {} }
+      function run(Worker $worker, $sql) { $worker->exec($sql); }
+    expect_no_match: true
+  description: "PDO::exec executes SQL directly, including statements that do not return a result set. Requires the exact PDO receiver identity."

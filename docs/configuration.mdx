@@ -27,7 +27,7 @@ bonsai-ninja does not require a project config file for normal scans. Workspace-
 |---|---|---|---|
 | `.bonsai/rules/` | directory | Absent | Optional workspace-local rule overlay. |
 | `$CACHE_DIR/manifest.json` | generated file | `index` (after a compiler-object rebuild, or whenever the stored manifest has an older schema, a different workspace root, or a different minified-source profile), `index --semantic`, SDK semantic/full-prewarm facades, or `cache rebuild` | JSON inventory (schema 8) of cache coverage, producer fingerprints, sidecar paths, missing reasons, and the versioned exact source ledger. Each source entry records its filesystem stamp (length, mtime, ctime, device, inode), FNV-1a hash, and — when the on-disk bytes are the text verbatim — its SHA-256 `text_digest`. Unchanged stamps reuse the recorded digest and, on Unix, let a warm open intern the file by identity and read it only on first semantic use; a stamp change forces content rehashing. Do not use as the analysis payload path; commands validate and read the binary sidecars. |
-| `$CACHE_DIR/compiler-objects.v*.factstore` | generated file | `index`, first phase of `index --semantic`, SDK semantic prewarm, or `cache rebuild` | Atomic generation (currently `v178`) of per-file adapter-lowered compiler objects and diagnostics, validated by relative path, adapter, frontend ABI, SHA-256 source digest, and payload digest. Import indexes, declaration linkage facts (including direct-call receiver-field initializers), compact syntax targets (calls, exact return targets, assignment aliases, factory assignments, inline callbacks, typed callables, and receiver/type evidence), per-declaration frames, and the source's line-start table remain independently decodable without retaining declaration/flow bodies; the line table lets a lazily interned source render line/column locations unread. Publication holds a cross-process lock and removes only unlocked older recognized compiler-object schemas plus abandoned matching staging files; unknown/manual files are preserved. |
+| `$CACHE_DIR/compiler-objects.v*.factstore` | generated file | `index`, first phase of `index --semantic`, SDK semantic prewarm, or `cache rebuild` | Atomic, frontend-ABI-versioned generation of per-file adapter-lowered compiler objects and diagnostics, validated by relative path, adapter, frontend ABI, SHA-256 source digest, and payload digest. Import indexes, declaration linkage facts (including direct-call receiver-field initializers), compact syntax targets (calls, exact return targets, assignment aliases, factory assignments, inline callbacks, typed callables, and receiver/type evidence), per-declaration frames, and the source's line-start table remain independently decodable without retaining declaration/flow bodies; the line table lets a lazily interned source render line/column locations unread. Publication holds a cross-process lock and removes only unlocked older recognized compiler-object schemas plus abandoned matching staging files; unknown/manual files are preserved. |
 | `$CACHE_DIR/dataflow.v3.factstore` | generated file | SDK full prewarm, explicit dataflow prewarm, or exact query commands | Persisted dataflow sidecar. Do not edit manually. |
 | `$CACHE_DIR/value_flow.v*.factstore` | generated file | explicit compatibility prewarm/save APIs | Persisted `ValueFlowGraph` compatibility projection. Canonical security/export semantics live in the IDG; do not edit manually. |
 | `$CACHE_DIR/flow_ids.v*.factstore` | generated file | SDK full prewarm or exact render/query commands | Persisted flow-id sidecar. Do not edit manually. |
@@ -64,6 +64,12 @@ every byte. Any path, size, timestamp, adapter, frontend ABI, or payload
 identity change falls back to exact hashing/decoding before reuse. Missing,
 old-schema, or corrupt manifests are rebuilt; independently valid binary
 sidecars remain eligible through their own exact headers.
+
+Git status is only a freshness accelerator. When the explicitly selected
+workspace root is ignored by an enclosing Git repository, an empty dirty-file
+list cannot establish an unchanged snapshot. Manifest checks and long-lived
+SDK refreshes fall back to filesystem reconciliation, including additions,
+edits, renames, and deletions; this fallback does not broaden the selected scope.
 
 Semantic workers publish compiler objects first. Unchanged compressed objects
 are copied into the next generation; only source/path/adapter/ABI misses are
@@ -170,6 +176,7 @@ never the analyzed files, facts, closure, or findings.
 | `BONSAI_CONTEXT` | integer tokens, `<N>k`, `<N>m`, or `0`/`all`/`uncapped`/`none` | `32k` | Default paging/context budget for text and JSON output; same as `--context`. |
 | `BONSAI_THEME` | `moss`, `earthy-dark`, `dracula`, or `retro-amber` | `moss` | Terminal theme; same as `--theme`. |
 | `NO_COLOR` | set to any value | unset | Disable ANSI styling; same as `--no-color`. Does not hide progress. |
+| `COLUMNS` | integer at least 40 | detected terminal width | Override text layout width. Dense tables become labeled records on narrow terminals while preserving every field and copyable ID. |
 | `NO_PROGRESS` | set to any value | unset | Disable progress bars; same as `--no-progress`. Bars are also hidden when stderr is not a TTY. |
 
 ### Performance and parallelism

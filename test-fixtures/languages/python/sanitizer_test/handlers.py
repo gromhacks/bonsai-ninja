@@ -2,11 +2,11 @@
 
 Each family has:
   - `<name>_raw(req)`     source → sink directly (SHOULD FLAG).
-  - `<name>_safe(req)`    source → sanitizer → sink (should clear / attach).
+  - `<name>_safe(req)`    historical name for the transformed/control leg.
 
-The canonical sanitizers exercised: shlex.quote (shell), html.escape
-(XSS), sqlalchemy bindparam (SQL — via parameterised API), hmac.
-compare_digest (timing), urllib.parse.quote (URL / open-redirect).
+html.escape credits HTML output. Shell/URL quoting alone does not prove
+the execution or destination context. A fixed local redirect prefix is
+safe independently of URL encoding; IDG propagation is never removed.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def cmd_raw():
 
 @app.route("/cmd/safe")
 def cmd_safe():
-    # SOURCE → shlex.quote → SINK — sanitizer should attach / suppress.
+    # Quoting remains a transform without a proven interpreter/argument context.
     cmd = request.args.get("cmd", "")
     safe = shlex.quote(cmd)
     return os.system("ping " + safe)

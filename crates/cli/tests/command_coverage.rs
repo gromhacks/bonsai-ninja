@@ -555,7 +555,7 @@ fn classes_is_empty_on_function_only_fixture() {
     let Some(out) = run(&["classes", ws().to_str().unwrap()]) else {
         return;
     };
-    assert_contains(&out, "(0 types)", "classes");
+    assert_contains(&out, "classes — 0 types", "classes");
 }
 
 // -------- refs --------

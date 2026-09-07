@@ -228,7 +228,7 @@
       def example(user_input):
           return shlex.quote(user_input)
     expect_match_text: [shlex.quote]
-  description: shlex.quote - POSIX-shell-quotes a single argument so it cannot break out.
+  description: "shlex.quote quotes one POSIX-shell word; it does not authorize executable selection and is not portable escaping for every command interpreter."
 
 - id: python.sanitizer.shlex_split
   enabled: true

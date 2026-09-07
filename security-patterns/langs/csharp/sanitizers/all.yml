@@ -659,7 +659,7 @@
 - id: csharp.sanitizer.ldap_distinguishedname_encode
   enabled: true
   language: csharp
-  tag: ldap-escape
+  tag: ldap-dn-escape
   packages: [AntiXSS]
   match:
     kind: call

@@ -96,6 +96,10 @@ class and verify each box.
       forms (e.g. `from Crypto.Cipher import DES`, not `import
       pycryptodome`).
 - [ ] **Discriminating constraints have positive AND negative examples.**
+- [ ] **Independent API coverage exists.** Real imports, signatures, defaults,
+      and consumed argument roles are checked outside pack-derived examples.
+      Retain a genuine unsafe flow, safe control, and one-condition-broken
+      protection; a family inventory cell is not proof of API completeness.
 - [ ] **Bundled rules are executable.** No `enabled: false` placeholders;
       duplicates use canonical aliases and genuine family exclusions use
       `metadata.yml`.
@@ -107,6 +111,9 @@ class and verify each box.
 - [ ] **Sanitizer-credit audit passes.** `python3
       scripts/sanitizer_credit_audit.py` reads the same metadata as runtime and
       reports no unknown or untagged sanitizer rules.
+- [ ] **Transforms cannot claim protection.** Non-crediting encoders and
+      wrappers remain visible as taint transforms in JSON, text, and SARIF,
+      stay out of sanitizer inventory, and do not hide reachable findings.
 
 ## Browse / Inspect / Trace change (`crates/browse`, `crates/inspect`, `crates/trace`)
 
@@ -183,6 +190,18 @@ class and verify each box.
       pinned in the matrix.
 - [ ] **All-flag test passes.** Every command accepts the relevant
       `--all` / `--page` / `--context` flags consistently.
+- [ ] **Help describes actual behavior.** Check defaults, examples, and invalid
+      combinations against dispatch, not just the parser's flag list. An
+      accepted option must not be silently ignored; `cli_contract` pins the
+      one-shot semantic-index/watch conflict and security inventory semantics.
+- [ ] **Empty and paged results retain facts.** Check zero matches as well as
+      populated examples. Follow every page/cursor and compare the concatenated
+      rows with `--all` on a small fixture, including cross-module evidence and
+      completeness metadata. Run `cli_presentation` and `text_json_parity`.
+- [ ] **Saved reports use canonical facts.** Check HTML and JSON with identical
+      filters/page selection; verify source locations, stable IDs, completeness,
+      and stdout/file routing. For export changes, validate native JSON against
+      its schema and confirm graph-projection edges reference emitted nodes.
 - [ ] **Theme / paging integration intact.** Output respects
       `BONSAI_THEME`, `--theme`, `--page`, `--context`.
 
@@ -199,7 +218,7 @@ class and verify each box.
 - [ ] **Compatibility is explicit.** Compatible additions update the current
       contract; incompatible changes increment `schema_version` and add a new,
       immutable schema under `schemas/`.
-- [ ] **Schema drift gate passes.** `cargo test --release --locked -p
+- [ ] **Schema drift gate passes.** `cargo test --locked -p
       bonsai-ninja --test export_schema_drift` validates every supported-language
       fixture and `--full-propagations` output against the committed schema.
 - [ ] **Schema is packaged and documented.** Release archives retain
@@ -292,7 +311,7 @@ class and verify each box.
       use one sparse backward demand proof plus exact forward closures; they
       do not run an unrestricted whole-IDG closure once per lexical hit.
 - [ ] **Architecture invariant passes.** Run
-      `cargo test --release -p bonsai-ninja-conformance --test
+      `cargo test -p bonsai-ninja-conformance --test
       architecture_invariants`.
 - [ ] **Hardcoded-knowledge boundary passes.** Run
       `scripts/audit-hardcoded.sh --check`. Review production code, excluding
@@ -416,6 +435,10 @@ class and verify each box.
 - [ ] **Tests cover invalidation.** A unit test rewrites a fixture
       file and asserts the cache produces fresh results (not stale
       ones).
+- [ ] **Git cannot hide the selected workspace.** An ignored workspace root
+      falls back to filesystem reconciliation for manifests and live SDK
+      refresh. Compare cached and `--no-cache` results after additions, edits,
+      renames, and deletions; empty Git status is not a source-snapshot proof.
 
 ## All changes
 

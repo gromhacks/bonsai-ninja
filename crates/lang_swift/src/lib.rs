@@ -2597,6 +2597,12 @@ fn strip_swift_import_attribute_prefixes(text: &str) -> &str {
 /// Swift executes an accessor behind that syntax.
 fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
     let mut next = idx.defs.iter().map(|d| d.symbol.raw()).max().map_or(1, |m| m + 1);
+    let class_names = idx
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| decl.name.clone())
+        .collect::<Vec<_>>();
     let mut synthesized: Vec<Decl> = Vec::new();
     for prop in collect_kinds(tree, &["property_declaration"]) {
         // Only handle computed properties — a `computed_value:
@@ -2648,15 +2654,23 @@ fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, t
             }
         }
         let value_name = value_flow.place.clone();
-        let flow_events = vec![FlowEvent::Return {
-            span: body_span,
-            value_kind: HANDLER
-                .expression_value_kind(body_expression, src)
-                .or(Some(bonsai_lang_api::AssignValueKind::Compound)),
-            value_text: Some(body_text),
-            value_name,
-            value_flow,
-        }];
+        // A computed getter is executable code, not merely a return-value
+        // projection. Reuse the ordinary adapter lowering for its complete
+        // body so calls, assignments, branches and callback registrations
+        // retain the same typed events as ordinary methods. Nested callback
+        // bodies stay in their own declarations.
+        let mut flow_events = walk_flow_events(computed, file, src, &HANDLER, &class_names);
+        if !HANDLER.return_kinds.contains(&body_expression.kind()) {
+            flow_events.push(FlowEvent::Return {
+                span: body_span,
+                value_kind: HANDLER
+                    .expression_value_kind(body_expression, src)
+                    .or(Some(bonsai_lang_api::AssignValueKind::Compound)),
+                value_text: Some(body_text),
+                value_name,
+                value_flow,
+            });
+        }
         // Name span: the simple_identifier under `name: pattern`.
         let name_span = swift_property_name_span(prop, file).unwrap_or(body_span);
         // This declaration is synthesized after the kit's ordinary callable
@@ -2677,7 +2691,7 @@ fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, t
             name_span,
             visibility,
             parent,
-            body_span: Some(body_span),
+            body_span: Some(span_of(file, &computed)),
             flow_events,
             has_implicit_returns: false,
             params: Vec::new(),
@@ -2694,6 +2708,28 @@ fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, t
             is_variadic: false,
         });
         next += 1;
+    }
+    if !synthesized.is_empty() {
+        // These executable owners did not exist during the kit's initial
+        // argument projection. Lower their exact argument/callback shapes
+        // through that same compiler API before static-value enrichment.
+        idx.call_argument_values
+            .extend(bonsai_lang_api::kit::extract_call_argument_value_facts(
+                tree,
+                file,
+                &synthesized,
+                src,
+                &HANDLER,
+            ));
+        idx.call_argument_values.sort_by_key(|fact| {
+            (
+                fact.call_span.file.raw(),
+                fact.call_span.start,
+                fact.call_span.end,
+                fact.argument_index,
+            )
+        });
+        idx.call_argument_values.dedup();
     }
     idx.defs.extend(synthesized);
     // After synthesis, rewrite bare-name reads of these getters

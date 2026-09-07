@@ -147,6 +147,14 @@ to `.snapshots/ADAPTER_CAPABILITIES.snapshot`. The CI gate
 (`hardening-checks.yml::capabilities`) runs `--check` which fails on
 drift between the script's live output and the snapshot.
 
+These are source-mention counts, not counts of supported behaviors. For example,
+C# lowers `this(...)` and `base(...)` as calls on the current receiver; the
+resolved IDG composes their field effects. Removing the former adapter-local
+constructor-propagation helper reduced its snapshot count without removing
+receiver-field support. Behavioral regressions separately check constructor
+chaining and ensure that constructing another object does not write the current
+receiver.
+
 The behavioral conformance gate
 `cargo test -p bonsai-ninja-conformance capability_matrix_report` probes every
 registered adapter and writes generated docs/data to

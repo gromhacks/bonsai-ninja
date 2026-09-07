@@ -58,7 +58,7 @@ For agent-readable text, normally add:
 --context 16k --no-color --no-progress
 ```
 
-For scripts, normally add:
+For scripts, use canonical JSON, not width-dependent colored tables/records:
 
 ```text
 --format json --no-color --no-progress
@@ -69,7 +69,7 @@ default and one structured object with `--format json`; pass `--format json`
 explicitly before piping to `jq`. Use `--output-path <file>` for large
 artifacts when the command supports it. Use `--html-output <file>` for a human
 report rendered from the command's canonical JSON result; it never enables
-more analysis.
+more analysis. Severity colors retain text labels and do not change JSON facts.
 Browse locations use one-based byte columns as well as lines. Keep the full
 locator when reopening a row: separate writes, references, or neighboring
 functions can share a line. Enclosing-function labels and cross-module
@@ -87,6 +87,9 @@ source syntax coverage alone does not prove that every cross-file relation
 was available. Reopen after semantic prewarm when that relation is needed.
 When investigating cache discrepancies, compare a normal invocation with
 `--no-cache`: the selected source, declarations, and locations must agree.
+Include additions, edits, renames, and deletions in cache regressions. A root
+ignored by an enclosing Git repository needs filesystem reconciliation;
+empty Git status is not freshness evidence.
 Full `diagnostics` performs one exact streaming compiler-object pass. Stable
 `show E:<id>` drilldown uses the persisted exact edge directory; neither
 command requires a duplicate whole-workspace lowering or edge scan.
@@ -288,6 +291,8 @@ For every reported issue, retain the finding, flow, and group IDs; exact
 source and sink locations; sanitizer status; completion status; and reviewed
 page/cursor coverage. A `TAINT TRANSFORM` preserves taint; only a `SANITIZER`
 step can support a sanitized classification.
+URL encoding/building and context-free shell quoting do not prove safe use;
+LDAP DN escaping is not filter escaping. Read `status`, not the API name.
 Use `taint-analysis --show-sanitized` when reviewing that classification.
 Check the exact guard's comparison polarity, binding ownership, and execution
 order; a similar-looking check or configuration after consumption is not a
@@ -463,6 +468,9 @@ Ordinary security commands use the immutable rulepack embedded in the binary,
 so they work from any current directory. Pass `--rules-dir` only when selecting
 an editable/custom base pack; an invalid explicit path fails instead of falling
 back. Workspace-local `.bonsai/rules/` overlays remain additive.
+Use independent real-API unsafe/safe controls as well as rule match examples;
+passing matcher examples alone proves neither API validity nor coverage.
+
 Validate changes with:
 
 ```shell

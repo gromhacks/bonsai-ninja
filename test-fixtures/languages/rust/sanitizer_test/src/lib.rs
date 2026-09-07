@@ -1,7 +1,6 @@
-// Rust sanitizer-fixture — parallel handlers per sink family. Safe
-// variants keep the tainted value flowing all the way to the sink
-// (with the sanitizer wrapping it in between) so the engine attaches
-// sanitizer evidence to the finding.
+// Rust sanitizer-fixture — parallel handlers per sink family. Historical
+// "safe" names do not establish safety: URL encoding remains a transform
+// on shell-command paths. Context-specific protections are tested separately.
 use std::process::Command;
 
 // --- Command injection ---------------------------------------------------

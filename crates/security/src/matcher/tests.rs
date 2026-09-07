@@ -6253,6 +6253,41 @@ fn binding_origin_uses_import_runtime_and_lexical_compiler_facts() {
         )
     };
 
+    assert!(!evaluate(
+        "function entry(value) { function Function(value) { return value; } return Function(value); }\n",
+        &[],
+        "Function",
+        RuleBindingOrigin::RuntimeGlobal,
+        &[],
+    ));
+    assert!(!evaluate(
+        "function Function(value) { return Function(value); }\n",
+        &[],
+        "Function",
+        RuleBindingOrigin::RuntimeGlobal,
+        &[],
+    ));
+    assert!(!evaluate(
+        "function outer() { function Function(value) { return value; } function entry(value) { return Function(value); } }\n",
+        &[],
+        "Function",
+        RuleBindingOrigin::RuntimeGlobal,
+        &[],
+    ));
+    assert!(evaluate(
+        "function unrelated() { function Function(value) { return value; } } function entry(value) { return Function(value); }\n",
+        &[],
+        "Function",
+        RuleBindingOrigin::RuntimeGlobal,
+        &[],
+    ));
+    assert!(!evaluate(
+        "import { decode } from 'provider'; function entry(value) { function decode(value) { return value; } return decode(value); }\n",
+        &[],
+        "decode",
+        RuleBindingOrigin::Imported,
+        &["provider"],
+    ));
     assert!(evaluate(
         "import { getQuery } from 'h3';\nfunction entry(event) { return getQuery(event); }\n",
         &[],
@@ -6779,4 +6814,25 @@ description: neutral reaching-definition constraint
             ConstraintKind::RequiresPriorReceiverWrite { .. }
         ]
     ));
+}
+#[test]
+fn string_composition_prefix_regex_is_compiled_and_invalid_rules_fail_closed() {
+    for constraint in [
+        "arg_string_composition_starts_with",
+        "arg_string_composition_not_starts_with",
+    ] {
+        let valid: crate::rule::ConstraintKind = serde_yaml::from_str(&format!(
+            "{constraint}:\n  index: 0\n  value: /\n  allow_prefix: true\n  literal_regex: '^/[a-z]'\n"
+        ))
+        .unwrap();
+        let compiled = super::compile_constraint_regexes("test.prefix", &[valid]).unwrap();
+        let regex = compiled[0].as_ref().expect("literal regex must not be ignored");
+        assert!(regex.is_match("/next?to="));
+        assert!(!regex.is_match("//"));
+        let invalid: crate::rule::ConstraintKind = serde_yaml::from_str(&format!(
+            "{constraint}:\n  index: 0\n  value: /\n  literal_regex: '['\n"
+        ))
+        .unwrap();
+        assert!(super::compile_constraint_regexes("test.invalid-prefix", &[invalid]).is_none());
+    }
 }

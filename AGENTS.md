@@ -47,6 +47,11 @@ workspace binding so dependency-manifest freshness cannot be lost when a
 sidecar path is outside the source tree. Workspace-local rule overlays remain
 under `<workspace>/.bonsai/rules/` and are not analysis caches.
 
+A workspace ignored by an enclosing Git repository cannot use an empty Git
+status as freshness proof. Manifest validation and live refresh must fall back
+to filesystem reconciliation, including file additions, edits, renames, and
+deletions, without changing the selected analysis scope.
+
 Treat the analyzer as a compiler pipeline. Each language adapter owns its
 Tree-sitter grammar, source-syntax recognition, declaration/import lowering,
 literal/value node inventories, and `FlowEvent`/capability facts. Shared
@@ -402,6 +407,12 @@ credit-bearing sanitizer claim. Passthrough transforms and generic
 non-crediting validation markers remain available to flow analysis but do not
 appear as sanitizer inventory.
 
+`TAINT TRANSFORM` evidence does not support a sanitized classification. URL
+encoding/building, context-free shell quoting, and LDAP DN escaping must not
+borrow destination, executable, or LDAP-filter safety guarantees. Inspect the
+exact consumed value and compatible compiler/rule proof; read the finding's
+`status` rather than inferring protection from an API name.
+
 Filter findings by rule class:
 
 ```shell
@@ -436,10 +447,14 @@ log, join, or parse patterns without a security-specific constraint.
 `typing` rules are non-finding compiler models for rulepack-declared factory
 return types; they must never be used to smuggle API names into the engine.
 
+Matching a rule's own example does not prove the API is real or dangerous.
+Retain independent API-shaped unsafe and safe controls with real imports,
+signatures, defaults, shadowing negatives, and exact source/sink evidence.
+
 Validate before reporting:
 
 ```shell
-./target/release/bonsai-ninja security . pack --validate --format json --no-color --no-progress
-./target/release/bonsai-ninja security . pack --audit --context 16k --no-color --no-progress
+./target/release/bonsai-ninja security . pack --validate --taint-replay --rules-dir security-patterns --format json --no-color --no-progress
+./target/release/bonsai-ninja security . pack --audit --rules-dir security-patterns --context 16k --no-color --no-progress
 cargo test -q -p bonsai-ninja-security --test rulepack_conformance
 ```

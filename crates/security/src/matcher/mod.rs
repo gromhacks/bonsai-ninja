@@ -5388,6 +5388,7 @@ fn decl_target_context_allows(
         && (param_index.is_none() || target.param_index_not_in.is_empty())
         && (param_index.is_none() || target.param_type_in.is_empty())
         && (param_index.is_none() || target.param_type_exact_in.is_empty())
+        && target.param_default_calls_absent != Some(true)
         && target.signature_param_types.is_empty()
         && target.signature_param_annotations.is_empty()
         && target.param_count_in.is_empty()
@@ -5413,6 +5414,14 @@ fn decl_target_context_allows(
         return false;
     }
     if let Some(idx) = param_index {
+        if target.param_default_calls_absent == Some(true)
+            && decl
+                .param_default_calls
+                .get(idx)
+                .is_some_and(|calls| !calls.is_empty())
+        {
+            return false;
+        }
         if !target.param_index_in.is_empty() && !target.param_index_in.contains(&(idx as u32)) {
             return false;
         }
@@ -8543,14 +8552,24 @@ fn call_binding_origin_is_valid(
     if bare_call
         && file_decls.is_some_and(|decls| {
             decls.iter().any(|decl| {
-                decl.symbol != caller.symbol
-                    && decl.name == root
+                decl.name == root
                     && (matches!(
                         decl.kind,
                         DeclKind::Function | DeclKind::Method | DeclKind::Constructor
                     ) || (bare_type_is_callable
                         && matches!(decl.kind, DeclKind::Class | DeclKind::Struct | DeclKind::Enum)))
-                    && (decl.parent.is_none() || decl.parent == caller.parent)
+                    && (decl.parent.is_none()
+                        || decl.parent == caller.parent
+                        || decl.parent == Some(caller.symbol)
+                        || decl
+                            .parent
+                            .and_then(|parent| decls.iter().find(|owner| owner.symbol == parent))
+                            .is_some_and(|owner| {
+                                matches!(
+                                    owner.kind,
+                                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                                ) && matcher_span_contains(owner.body_span.unwrap_or(owner.span), call.span)
+                            }))
             })
         })
     {
@@ -8714,7 +8733,28 @@ fn resolve_workspace_call_candidates(
             .with_file_path_lookup(&path_lookup)
             .with_same_directory_unqualified_calls(capabilities.same_directory_unqualified_calls)
             .with_module_path_syntax(capabilities.module_path_syntax);
-    bonsai_resolve::resolve_callable_with_context(context.global, call_name, &resolve_context)
+    let mut candidates =
+        bonsai_resolve::resolve_callable_with_context(context.global, call_name, &resolve_context);
+    if bonsai_common::qualified_name_owner(call_name).is_none() && !aliases.contains_key(call_name) {
+        // Module resolution supplies candidates; a nested callable's lexical
+        // owner must also contain an unqualified, unimported call site. A
+        // same-name helper in an unrelated function cannot shadow a runtime
+        // binding or provide an external factory's return type.
+        candidates.retain(|candidate| {
+            let owner = context
+                .global
+                .decl_of(SymbolId::new(candidate.raw()))
+                .and_then(|decl| decl.parent)
+                .and_then(|parent| context.global.decl_of(parent));
+            owner.is_none_or(|owner| {
+                !matches!(
+                    owner.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) || matcher_span_contains(owner.body_span.unwrap_or(owner.span), call_span)
+            })
+        });
+    }
+    candidates
 }
 
 fn workspace_call_resolves_as_constructor(
@@ -13380,6 +13420,7 @@ fn callee_matches_with_receiver_types(
 pub(crate) fn rule_target_matches_call(callee: &str, receiver_types: &[String], target: &RuleTarget) -> bool {
     if target.annotation.is_some()
         || target.default_call.is_some()
+        || target.param_default_calls_absent.is_some()
         || !target.in_class.is_empty()
         || !target.in_class_suffix.is_empty()
         || !target.in_owner_base.is_empty()
@@ -13868,6 +13909,19 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
                 "constraints.any_arg_matches_regex",
                 any_arg_matches_regex,
             )?),
+            ConstraintKind::ArgStringCompositionStartsWith {
+                arg_string_composition_starts_with: spec,
+            }
+            | ConstraintKind::ArgStringCompositionNotStartsWith {
+                arg_string_composition_not_starts_with: spec,
+            } => match spec.literal_regex.as_deref() {
+                Some(pattern) => Some(compile_constraint_regex(
+                    rule_id,
+                    "constraints.string_composition.literal_regex",
+                    pattern,
+                )?),
+                None => None,
+            },
             ConstraintKind::ReceiverTypeIn { .. }
             | ConstraintKind::ReceiverTypeNotIn { .. }
             | ConstraintKind::RequiresPriorReceiverWrite { .. }
@@ -13888,8 +13942,6 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
             | ConstraintKind::MaxArgs { .. }
             | ConstraintKind::ArgValueNotAggregate { .. }
             | ConstraintKind::ArgValueKind { .. }
-            | ConstraintKind::ArgStringCompositionStartsWith { .. }
-            | ConstraintKind::ArgStringCompositionNotStartsWith { .. }
             | ConstraintKind::ArgIsInlineCallback { .. }
             | ConstraintKind::ArgInlineCallbackReturnsStatic { .. }
             | ConstraintKind::ArgSequenceItemsEqual { .. }
@@ -13954,8 +14006,12 @@ fn argument_string_composition_starts_with(
     structural: StructuralConstraintContext<'_>,
     call_span: Span,
     argument_index: usize,
-    required: &str,
+    required: &crate::rule::ArgStringCompositionPrefixSpec,
+    literal_regex: Option<&Regex>,
 ) -> bool {
+    if required.literal_regex.is_some() && literal_regex.is_none() {
+        return false;
+    }
     let Some(argument) =
         bonsai_lang_api::call_argument_value_fact(structural.call_argument_values, call_span, argument_index)
     else {
@@ -13966,7 +14022,9 @@ fn argument_string_composition_starts_with(
             && composition.parts.len() > 1
             && matches!(
                 composition.parts.first(),
-                Some(bonsai_lang_api::StringCompositionPart::Literal { value }) if value == required
+                Some(bonsai_lang_api::StringCompositionPart::Literal { value })
+                    if string_composition_literal_matches(value, required)
+                        && literal_regex.is_none_or(|regex| regex.is_match(value))
             )
             && composition
                 .parts
@@ -13974,6 +14032,84 @@ fn argument_string_composition_starts_with(
                 .skip(1)
                 .any(|part| !matches!(part, bonsai_lang_api::StringCompositionPart::Literal { .. }))
     })
+}
+
+fn string_composition_literal_matches(
+    value: &str,
+    required: &crate::rule::ArgStringCompositionPrefixSpec,
+) -> bool {
+    let candidate = if required.allow_prefix {
+        let Some(prefix) = value.get(..required.value.len()) else {
+            return false;
+        };
+        prefix
+    } else {
+        value
+    };
+    if required.ascii_case_insensitive {
+        candidate.eq_ignore_ascii_case(&required.value)
+    } else {
+        candidate == required.value
+    }
+}
+
+/// Prove an aggregate through exact local copies in the consumer's basic
+/// block. Calls/control transfers stop the proof: an unknown clobber or a
+/// branch cannot lend a stale initializer to this argument. This is a shape
+/// predicate only; it does not remove any IDG value or taint edge.
+fn argument_has_straight_line_aggregate_value(
+    structural: StructuralConstraintContext<'_>,
+    call_span: Span,
+    argument: &bonsai_lang_api::CallArgumentValueFact,
+) -> bool {
+    let aggregate = |flow: &bonsai_lang_api::ExpressionFlow| {
+        !flow.aggregate_fields.is_empty() || !flow.tuple_items.is_empty() || !flow.spreads.is_empty()
+    };
+    if aggregate(&argument.value_flow) || argument.exact_static_sequence_values.is_some() {
+        return true;
+    }
+    let exact_place = |flow: &bonsai_lang_api::ExpressionFlow| {
+        flow.projection.is_none() && flow.call_sites.is_empty() && flow.source_names.len() <= 1
+    };
+    if !exact_place(&argument.value_flow) {
+        return false;
+    }
+    let Some(mut place) = argument.value_flow.place.as_deref() else {
+        return false;
+    };
+    let events = &structural.current_decl.flow_events;
+    let Some(consumer) = events
+        .iter()
+        .position(|event| matches!(event, FlowEvent::Call { span, .. } if *span == call_span))
+    else {
+        return false;
+    };
+    for event in events[..consumer].iter().rev() {
+        let (span, target) = match event {
+            FlowEvent::Assign { span, target, .. } | FlowEvent::AggregateAssign { span, target, .. } => {
+                (*span, target)
+            }
+            _ => return false,
+        };
+        if target != place {
+            continue;
+        }
+        let Some(value) = bonsai_lang_api::assignment_value_fact_for_span(structural.assignment_values, span)
+        else {
+            return false;
+        };
+        if aggregate(&value.value_flow) {
+            return true;
+        }
+        if !exact_place(&value.value_flow) {
+            return false;
+        }
+        let Some(source) = value.value_flow.place.as_deref() else {
+            return false;
+        };
+        place = source;
+    }
+    false
 }
 
 #[derive(Copy, Clone)]
@@ -14769,12 +14905,8 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                     ctx.span,
                     *arg_value_not_aggregate as usize,
                 )
-                .is_some_and(|fact| {
-                    !fact.value_flow.aggregate_fields.is_empty()
-                        || !fact.value_flow.tuple_items.is_empty()
-                        || !fact.value_flow.spreads.is_empty()
-                        || fact.exact_static_sequence_values.is_some()
-                }) {
+                .is_some_and(|fact| argument_has_straight_line_aggregate_value(structural, ctx.span, fact))
+                {
                     return false;
                 }
             }
@@ -14802,7 +14934,10 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                     structural,
                     ctx.span,
                     arg_string_composition_starts_with.index as usize,
-                    &arg_string_composition_starts_with.value,
+                    arg_string_composition_starts_with,
+                    ctx.constraint_regexes
+                        .get(constraint_index)
+                        .and_then(Option::as_ref),
                 ) {
                     return false;
                 }
@@ -14817,7 +14952,10 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                     structural,
                     ctx.span,
                     arg_string_composition_not_starts_with.index as usize,
-                    &arg_string_composition_not_starts_with.value,
+                    arg_string_composition_not_starts_with,
+                    ctx.constraint_regexes
+                        .get(constraint_index)
+                        .and_then(Option::as_ref),
                 ) {
                     return false;
                 }

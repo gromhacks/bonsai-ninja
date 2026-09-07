@@ -42,9 +42,9 @@
     kind: call
     callee:
       name: Function
+      binding_origin: runtime-global
   constraints:
-  - arg_tainted:
-      index: 0
+  - any_arg_tainted: true
   match_examples:
   - name: function constructor
     code: |
@@ -64,6 +64,17 @@
         return Function(body);
       }
     expect_match_text: [Function]
+  - name: body after parameter definitions
+    code: |
+      function example(body) { return new Function("x", "y", body); }
+    expect_match_text: [Function]
+  - name: local Function is not the runtime constructor
+    code: |
+      function example(body) {
+        function Function(value) { return value; }
+        return Function(body);
+      }
+    expect_no_match: true
   - name: arg tainted literal negative
     code: "function demo(input, req, obj) {\n  return new Function(\"safe\");\n}\n"
     expect_no_match: true

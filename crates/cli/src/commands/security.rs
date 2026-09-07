@@ -2521,14 +2521,27 @@ fn render_taint_analysis_report_heading(summary: &TaintAnalysisSummary) {
         .unwrap_or_default();
     cli_println!(
         "{}",
+        u.result_heading(
+            "security taint-analysis",
+            summary.total_findings as u64,
+            "finding",
+            "findings"
+        )
+    );
+    let severities = ["critical", "high", "medium", "low", "info"]
+        .into_iter()
+        .filter_map(|severity| {
+            let count = summary.severity_counts.get(severity).copied().unwrap_or(0);
+            (count > 0).then_some(format!("{} {count}", u.severity(severity)))
+        })
+        .collect::<Vec<_>>();
+    if !severities.is_empty() {
+        cli_println!("  {}", severities.join(" · "));
+    }
+    cli_println!(
+        "{}",
         u.dim(&format!(
-            "security taint-analysis — {} finding(s)  \
-             (critical {}, high {}, medium {})  · \
-             {} source rule(s) · {} sink rule(s) · {} sanitizer rule(s) loaded{}{}",
-            summary.total_findings,
-            summary.severity_counts.get("critical").copied().unwrap_or(0),
-            summary.severity_counts.get("high").copied().unwrap_or(0),
-            summary.severity_counts.get("medium").copied().unwrap_or(0),
+            "rules: {} sources · {} sinks · {} sanitizers{}{}",
             summary.source_rule_count,
             summary.sink_rule_count,
             summary.sanitizer_rule_count,
@@ -3473,7 +3486,12 @@ fn render_count_table(u: &Ui, title: &str, key_header: &str, counts: &BTreeMap<S
     cli_println!("{}", u.dim(title));
     let mut table = u.table(&[key_header, "count"]);
     for (key, count) in sorted_counts(counts).into_iter().take(limit) {
-        table.add_row(vec![Cell::new(u.name(key)), Cell::new(*count)]);
+        let label = if key_header == "severity" {
+            u.severity(key)
+        } else {
+            u.name(key)
+        };
+        table.add_row(vec![Cell::new(label), Cell::new(*count)]);
     }
     cli_println!("{table}");
 }
@@ -4844,8 +4862,8 @@ fn render_source_analysis_source(u: &Ui, workspace: &Path, source: &FindingMatch
 
 /// Print the security-finding narrative for one finding. Framed as a
 /// vulnerability report, not a raw rule dump: headline severity +
-/// vulnerability class, a synthesised one-sentence summary of what's
-/// happening, then labelled `SOURCE:` / `SANITIZER:` / `SINK:` blocks
+/// vulnerability class, the compiler-provided route and endpoint locations,
+/// then labelled `SOURCE:` / `SANITIZER:` / `SINK:` blocks
 /// that each read as short prose (what the input is, what the dangerous
 /// operation is, why it's dangerous) plus the rule id, location, and
 /// supporting taxonomy metadata (CWE, OWASP, category, packages,
@@ -4890,6 +4908,31 @@ fn render_finding_security_header(
         }
     };
     cli_println!("  {}", status_label);
+    // Put the actual route and endpoints ahead of taxonomy and rule prose.
+    // This is the canonical finding's route, not a new path computation.
+    if !f.chain_display.is_empty() {
+        for line in u.wrapped_annotation_prefixed_lines(
+            "  chain: ",
+            &format!("  {} ", u.label("chain:")),
+            "         ",
+            &f.chain_display.join(" → "),
+        ) {
+            cli_println!("{line}");
+        }
+    }
+    for (label, endpoint) in [("source", &f.source), ("sink", &f.sink)] {
+        cli_println!(
+            "  {} {}  {}",
+            u.label(&format!("{label}:")),
+            u.name(&endpoint.text),
+            u.path(&format!(
+                "{}:{}:{}",
+                security_display_file(workspace, &endpoint.file),
+                endpoint.line,
+                endpoint.column
+            )),
+        );
+    }
     if let Some(flow_id) = f.representative_flow_id.as_deref() {
         let group_id = f.group_id.as_deref().unwrap_or("-");
         cli_println!(
@@ -4939,25 +4982,8 @@ fn render_finding_security_header(
             cli_println!("{line}");
         }
     }
-    cli_println!();
-
-    // One-sentence synthesised summary. Pulls the source-rule
-    // description (the "what the input is" half) and the sink-rule
-    // description (the "why it's dangerous" half) from the YAML and
-    // stitches them with "→". A plain-English overview before the
-    // per-side evidence blocks below.
-    if let Some(summary) = synth_summary(combined, pack) {
-        for line in u.wrapped_dim_prefixed_lines(
-            "  summary: ",
-            &format!("  {} ", u.dim("summary:")),
-            "           ",
-            &summary,
-        ) {
-            cli_println!("{line}");
-        }
-        cli_println!();
-    }
-
+    // Rule descriptions follow once per endpoint, instead of repeating the
+    // same prose in both a synthesized paragraph and the evidence blocks.
     render_finding_side(u, workspace, FindingSide::Source, &f.source, pack);
     for source in &combined.additional_sources {
         render_finding_side(u, workspace, FindingSide::Source, source, pack);
@@ -5413,10 +5439,7 @@ fn security_display_file(workspace: &Path, file: &str) -> String {
 }
 
 fn severity_cell(u: &Ui, sev: &str) -> String {
-    match sev {
-        "critical" | "high" | "medium" => u.warn(sev),
-        _ => u.dim(sev),
-    }
+    u.severity(sev)
 }
 
 fn meta_chip(u: &Ui, label: &str, value: String) -> String {
@@ -5561,18 +5584,15 @@ fn render_match_table(
                         "{}",
                         u.dim(&format!("security {label} — {} match(es)", info.total_rows))
                     );
-                    let mut table = u.table_pinned(
-                        &["rule", "location", "in", "code", "metadata", "description"],
-                        &["rule"],
-                    );
+                    let mut headers = vec!["rule"];
+                    if show_severity {
+                        headers.push("severity");
+                    }
+                    headers.extend(["location", "in", "code", "metadata", "description"]);
+                    let mut table = u.table_pinned(&headers, &["rule"]);
                     for row in &rows {
                         let matched = &row.matched;
                         let mut metadata = Vec::new();
-                        if show_severity {
-                            if let Some(severity) = matched.severity.as_deref() {
-                                metadata.push(format!("severity {severity}"));
-                            }
-                        }
                         if let Some(trust) = matched.trust.as_deref() {
                             metadata.push(format!("trust {trust}"));
                         }
@@ -5591,14 +5611,18 @@ fn render_match_table(
                         if !matched.frameworks.is_empty() {
                             metadata.push(format!("frameworks {}", matched.frameworks.join(", ")));
                         }
-                        table.add_row(vec![
-                            Cell::new(u.name(&matched.rule_id)),
+                        let mut cells = vec![Cell::new(u.name(&matched.rule_id))];
+                        if show_severity {
+                            cells.push(Cell::new(u.severity(matched.severity.as_deref().unwrap_or("-"))));
+                        }
+                        cells.extend([
                             Cell::new(u.path(&row.location)),
                             Cell::new(u.kind(matched.enclosing_fn.as_deref().unwrap_or("<module>"))),
                             Cell::new(u.snippet(row.code.trim(), extension_for(&matched.file))),
                             Cell::new(u.dim(&metadata.join(" · "))),
                             Cell::new(u.dim(matched.description.as_deref().unwrap_or("-"))),
                         ]);
+                        table.add_row(cells);
                     }
                     cli_println!("{table}");
                     render_truncation_notice(rows.len(), truncated);

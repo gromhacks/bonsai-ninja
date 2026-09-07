@@ -217,3 +217,54 @@
     expect_no_match: true
   description: "Proc::Background->new(STRING) - single-string form forks a shell;\
     \ tainted cmd = RCE."
+
+- id: perl.cmdi.open_two_argument
+  enabled: true
+  language: perl
+  tag: command-injection
+  category: process-exec
+  severity: critical
+  cwe: [CWE-78]
+  match: {kind: call, callee: {name: open}}
+  constraints:
+  - arg_count: 2
+  - arg_tainted: {index: 1}
+  match_examples:
+  - name: two argument open interprets attacker mode and pipe syntax
+    code: |
+      sub run { my ($input) = @_; open(my $fh, $input); }
+  - name: literal file is not attacker controlled
+    code: |
+      sub run { open(my $fh, "README"); }
+    expect_no_match: true
+  - name: explicit file mode is not command execution
+    code: |
+      sub run { my ($input) = @_; open(my $fh, '<', $input); }
+    expect_no_match: true
+  description: "Perl two-argument open interprets a mode/filename string, including command-pipe syntax. Explicit fixed file modes belong to path rules."
+
+- id: perl.cmdi.open_pipe
+  enabled: true
+  language: perl
+  tag: command-injection
+  category: process-exec
+  severity: critical
+  cwe: [CWE-78]
+  match: {kind: call, callee: {name: open}}
+  constraints:
+  - min_args: 3
+  - arg_matches_regex: {index: 1, regex: "^(?:'\\|-'|\"\\|-\"|'-\\|'|\"-\\|\"|\\|-|-\\|)$"}
+  - arg_tainted: {index: 2}
+  match_examples:
+  - name: pipe mode selects an attacker program
+    code: |
+      sub run { my ($input) = @_; open(my $fh, '|-', $input); }
+  - name: fixed file read is not a pipe
+    code: |
+      sub run { my ($input) = @_; open(my $fh, '<', $input); }
+    expect_no_match: true
+  - name: fixed executable with data argument is not executable selection
+    code: |
+      sub run { my ($input) = @_; open(my $fh, '|-', '/bin/echo', $input); }
+    expect_no_match: true
+  description: "Explicit pipe-open modes execute the selected program; the program slot, not arbitrary data arguments, carries executable-selection taint."

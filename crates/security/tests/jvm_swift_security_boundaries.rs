@@ -363,8 +363,8 @@ class UrlService(private val client: WSClient) {
     );
     assert_eq!(
         finding("kotlin.ssrf.play_wsclient_url", "missingHostUrl").map(|finding| finding.finding.status),
-        Some(FindingStatus::WrongContext),
-        "scheme validation without a finite host proof must be denied guard credit: {:#?}",
+        Some(FindingStatus::Unsanitized),
+        "URL parsing is a transform; scheme validation without a finite host proof must be denied guard credit: {:#?}",
         report.findings,
     );
 }

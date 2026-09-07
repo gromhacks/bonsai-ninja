@@ -1,7 +1,6 @@
-// Swift sanitizer-fixture — parallel handlers per sink family. Safe
-// variants keep the tainted value flowing all the way to the sink
-// (with the sanitizer wrapping it in between) so the engine attaches
-// sanitizer evidence to the finding.
+// Swift sanitizer-fixture — parallel handlers per sink family. Historical
+// "safe" names do not establish safety: URL encoding remains a transform
+// on shell-command paths, and an unrelated bind does not protect SQL text.
 import Foundation
 import SQLite3
 
@@ -18,9 +17,8 @@ class Handlers {
 
     func sqlSafe(_ userId: String) {
         var stmt: OpaquePointer?
-        // bindValue is the true sanitizer; we keep userId visible on
-        // the prepare sink so the engine attaches bind_text as
-        // evidence on the co-occurring finding.
+        // This bind is not used by the interpolated query below. Mere
+        // co-occurrence must not give that query sanitizer credit.
         sqlite3_bind_text(stmt, 1, userId, -1, nil)
         let q = "SELECT * FROM users WHERE id = '\(userId)'"
         sqlite3_prepare_v2(db, q, -1, &stmt, nil)

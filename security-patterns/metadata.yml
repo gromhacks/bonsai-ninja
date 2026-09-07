@@ -110,8 +110,9 @@ sink_family_aliases:
 # inventory markers: they are recognized but never clear taint.
 sanitizer_credits:
   open-redirect-sanitize: [open-redirect]
-  url-encode: [open-redirect]
-  url-build: [ssrf, open-redirect]
+  # Encoding/building preserves attacker authority; destination policy is separate.
+  url-encode: []
+  url-build: []
   same-origin-path: [open-redirect, header-injection]
   nosql-sanitize: [nosql-injection]
   nosql-parameter: [nosql-injection]
@@ -128,7 +129,11 @@ sanitizer_credits:
   csrf-protect: [csrf]
   ssrf-sanitize: [ssrf]
   ldap-escape: [ldap-injection]
-  shell-escape: [command-injection]
+  # Quoting alone proves neither executable selection nor interpreter placement.
+  # Keep these operations visible as transforms until a contextual guard is proven.
+  shell-escape: []
+  shell-argument-allowlist: [command-injection]
+  ldap-dn-escape: []
   sql-parameter: [sql-injection]
   sql-parameterize: [sql-injection]
   db-bind-parameter: [sql-injection]
@@ -180,6 +185,18 @@ sink_category_semantics:
 # Generic guard-call value roles by sanitizer tag. Shared analysis reads these
 # roles and exact compiler call facts; it never switches on the tag spelling.
 sanitizer_tag_semantics:
+  url-encode:
+    taint_preserving_transform: true
+  url-build:
+    taint_preserving_transform: true
+  shell-escape:
+    taint_preserving_transform: true
+  ldap-dn-escape:
+    taint_preserving_transform: true
+  passthrough-transform:
+    taint_preserving_transform: true
+  passthrough-decode:
+    taint_preserving_transform: true
   same-origin-path:
     sanitizer_guard:
       use_receiver: true

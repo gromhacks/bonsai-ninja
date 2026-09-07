@@ -47,5 +47,7 @@
 // compiler declaration arguments; arbitrary manifest text is not proof.
 // v65: code manifests retain workspace-local import ambiguity, and package
 // context fingerprints include the exact projection and coverage state.
-pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_0041_u128;
+// v66: runtime/import identity retains exact nested callable scope, including
+// recursion and unrelated owners; parameter/default and prefix constraints.
+pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_0042_u128;
 const _: () = assert!(MATCHER_POLICY_FINGERPRINT != 0);

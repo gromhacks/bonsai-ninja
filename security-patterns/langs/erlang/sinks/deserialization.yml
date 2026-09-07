@@ -8,7 +8,7 @@
   match:
     kind: call
     callee:
-      regex: "^binary_to_term$"
+      regex: "^(?:erlang[.:])?binary_to_term$"
   constraints:
   - arg_count: 1
   - arg_tainted:
@@ -37,7 +37,7 @@
   match:
     kind: call
     callee:
-      regex: "^binary_to_term$"
+      regex: "^(?:erlang[.:])?binary_to_term$"
   constraints:
   - arg_count: 2
   - arg_tainted:

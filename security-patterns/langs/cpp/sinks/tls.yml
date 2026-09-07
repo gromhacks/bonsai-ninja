@@ -305,3 +305,79 @@
       }
     expect_no_match: true
   description: "cpp-httplib Client::enable_server_certificate_verification(false) disables server certificate verification."
+
+- id: cpp.tls.curl_verify_peer_disabled
+  enabled: true
+  language: cpp
+  tag: weak-tls
+  category: source-independent
+  severity: high
+  packages: [libcurl]
+  imports: [curl/curl.h, curl]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee: {name: curl_easy_setopt}
+  constraints:
+  - arg_equals: {index: 1, value: CURLOPT_SSL_VERIFYPEER}
+  - arg_matches_regex: {index: 2, regex: '^0[uUlL]*$'}
+  match_examples:
+  - name: disabled libcurl verification
+    code: |
+      #include <curl/curl.h>
+      void configure(CURL *client) {
+        curl_easy_setopt(client, CURLOPT_SSL_VERIFYPEER, 0L);
+      }
+  - name: enabled verification is not a disable
+    code: |
+      #include <curl/curl.h>
+      void configure(CURL *client) {
+        curl_easy_setopt(client, CURLOPT_SSL_VERIFYPEER, 2L);
+      }
+    expect_no_match: true
+  - name: different option is not a TLS setting
+    code: |
+      #include <curl/curl.h>
+      void configure(CURL *client) {
+        curl_easy_setopt(client, CURLOPT_FOLLOWLOCATION, 0L);
+      }
+    expect_no_match: true
+  description: "Disabling CURLOPT_SSL_VERIFYPEER removes libcurl's peer verification. Requires the exact option and a zero-valued C integer literal."
+
+- id: cpp.tls.curl_verify_host_disabled
+  enabled: true
+  language: cpp
+  tag: weak-tls
+  category: source-independent
+  severity: high
+  packages: [libcurl]
+  imports: [curl/curl.h, curl]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee: {name: curl_easy_setopt}
+  constraints:
+  - arg_equals: {index: 1, value: CURLOPT_SSL_VERIFYHOST}
+  - arg_matches_regex: {index: 2, regex: '^0[uUlL]*$'}
+  match_examples:
+  - name: disabled libcurl verification
+    code: |
+      #include <curl/curl.h>
+      void configure(CURL *client) {
+        curl_easy_setopt(client, CURLOPT_SSL_VERIFYHOST, 0L);
+      }
+  - name: enabled verification is not a disable
+    code: |
+      #include <curl/curl.h>
+      void configure(CURL *client) {
+        curl_easy_setopt(client, CURLOPT_SSL_VERIFYHOST, 2L);
+      }
+    expect_no_match: true
+  - name: different option is not a TLS setting
+    code: |
+      #include <curl/curl.h>
+      void configure(CURL *client) {
+        curl_easy_setopt(client, CURLOPT_FOLLOWLOCATION, 0L);
+      }
+    expect_no_match: true
+  description: "Disabling CURLOPT_SSL_VERIFYHOST removes libcurl's host verification. Requires the exact option and a zero-valued C integer literal."

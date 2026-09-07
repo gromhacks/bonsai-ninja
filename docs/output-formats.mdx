@@ -32,9 +32,28 @@ bonsai-ninja security ./src taint-analysis \
   --html-output bonsai-security.html
 ```
 
+## Terminal presentation
+
+Text presents the canonical result with command/count headings, source locations,
+copyable IDs, and explicit completeness and paging information. Dense tables
+switch to labeled records on narrow terminals; no fields are removed. Width is
+detected from the terminal, with `COLUMNS` available as an override.
+
+Severity labels retain their meaning across themes: **critical** is red,
+**high** orange, **medium** yellow, **low** blue, and **info** gray-blue.
+Security inventories, findings, source overlays, and HTML reports use this
+scale. Labels remain readable with `--no-color`, `NO_COLOR`, or piped output;
+color is never the only indicator. Compiler diagnostics use red for errors and
+orange for warnings and appear before adapter capability details.
+
+Finding headers lead with the compiler-provided chain and source/sink locations;
+rule explanations and full flow evidence follow. Page footers name the actual
+unit (for example, `1 finding` or `3 definitions`), not a generic row count.
+JSON keys, values, stable IDs, and analysis scope do not depend on styling.
+
 ## JSON envelope
 
-Every command prints one canonical document shape regardless of how many
+Each one-shot report prints one canonical document shape regardless of how many
 results it holds. Row commands (browse inventories, dumps, security
 inventories, analyses) wrap their rows:
 
@@ -82,12 +101,17 @@ inspect hit or corridor, sink-analysis candidate, or read-file view
 keeps the whole object, and the filter is applied exactly once, never to the
 child rows of an already selected parent.
 
-Text and row/object JSON commands are token-budgeted by default. Small
-JSON results keep their native shape; larger results return page metadata
-and the current rows or JSON lines. Use `--page next` or the printed
+Text and row/object JSON commands are token-budgeted by default. JSON keeps
+each command's canonical document shape on every page; pagination selects
+complete rows or structured sections, never lines of serialized JSON. Use `--page next` or the printed
 `P:...` cursor to continue. Use `--all`, `--context all`, or
 `--context uncapped` only when you intentionally want an exhaustive
 artifact.
+
+`index --watch --format json` is a long-lived event stream, not a one-shot
+report: it emits an initial stats object, a `watching` object, and a
+`reindexed` object after each observed change. Consume complete JSON values
+incrementally; the stream is not a single JSON array or one object per line.
 
 Paging is deterministic and fail-closed. A numeric page beyond the reported
 last page is an error rather than an alias for the last page. Query reports
@@ -98,8 +122,11 @@ pages on demand through `--page next`, a number, or the printed cursor.
 Security reports format and cache only the requested page: their complete
 result is already a cached object and each page hydrates flow bodies.
 Repeating the same page reuses it after binary, source, dependency, and
-rulepack freshness validation. The footer's uncapped token estimate describes the complete
-result consistently on every page, not only the rows currently rendered.
+rulepack freshness validation. Rendered-page identities also include the effective
+theme, color mode, and terminal width, so resizing or changing `NO_COLOR` cannot
+replay stale styling. Multi-page footers show the complete result's uncapped
+token estimate consistently on every page, not only the rows currently rendered;
+single-page reports omit that redundant estimate.
 An oversized security finding keeps its original `FINDING N` identity on
 every part and uses `FLOW X/Y` for the page-sized units; there is no separate
 “continued” item or renumbering.
@@ -331,6 +358,14 @@ workspace-relative; `S:`, `F:`, and `G:` ids do not change when the same
 checkout is analyzed from a different absolute path. `presentation` holds the
 text view's rule metadata and one-line summary and is not analysis evidence.
 
+Finding rows keep matched protections in `sanitizers_seen` and non-crediting
+transform evidence in `taint_transforms_seen`; alternate routes retain their
+own evidence lists. The abbreviated example above omits those empty lists.
+Text renders the latter as `TAINT TRANSFORM`, not `SANITIZER`, and SARIF keeps
+`taint_transform_rule_ids` separate from `sanitizer_rule_ids`. Read `status`
+for the path classification: neither an escaping function's name nor a
+non-empty evidence list alone proves that the sink's context was protected.
+
 ## SARIF
 
 SARIF 2.1.0 is available from `security taint-analysis` only. Results include standard locations, code flows, rules, CWE taxonomies, `fingerprints` / `partialFingerprints`, and bonsai-specific metadata under `properties.bonsai` (`finding_id`, `flow_id`, `flow_ids`, `group_id`, `source_rule_id`, `sink_rule_id`, `status`, `tag`, `cwe`, `owasp`, `chain_display`, `taint_path`, `alternate_flows`, `sanitizer_rule_ids`, `taint_transform_rule_ids`, `analysis_complete`, `analysis_incomplete_reasons`). Artifact URIs are workspace-relative and resolve through `originalUriBaseIds`. One concrete vulnerability sink is one SARIF result; when several complete source-to-sink routes reach it, each route is preserved as a separate `codeFlows` entry on that result. Security code flows are built from the same source-specific propagation used by text `TAINT FLOW` output.
@@ -381,10 +416,14 @@ package/framework key. Each row groups the rule ids, the rule records
 the key with every workspace-relative file that supplied import evidence.
 `security dependency-analysis` wraps the same `dependency` object per row and
 adds `bound_names`, `sites[]`, and `findings[]` for where the package is used.
+An inventory row's severity summarizes its associated rules; it is not a
+package-version vulnerability or CVE finding.
 Each `findings[]` value is the complete taint-analysis finding shape: it keeps
 the compiler `source`, `sink`, `taint_path`, stable finding/flow/group ids, and
 the hydrated `flow.functions[].lines[]` bodies used by text rendering. The
-summary's `taint_flow_count` is the exact count of those projected flows.
+summary's `taint_flow_count` counts those package-associated flows. The same
+finding can appear under several packages; use `finding_id` to deduplicate
+across package blocks when counting distinct findings.
 
 ```bash
 bonsai-ninja security ./src deps --severity critical --format json --output-path deps.json

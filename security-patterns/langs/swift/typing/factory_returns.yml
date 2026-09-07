@@ -202,3 +202,26 @@
       }
     expect_no_match: true
   description: "`SQLite.Statement(...)` returns `Statement`; imported member aliases are resolved through compiler import facts so bind rules do not depend on local variable names. Typing-only — never a finding."
+
+- id: swift.typing.swiftui_text
+  enabled: true
+  language: swift
+  packages: [SwiftUI]
+  imports: [SwiftUI]
+  returns_type: Text
+  match:
+    kind: call
+    callee: {name: Text, binding_origin: imported}
+  match_examples:
+  - name: imported SwiftUI Text creates a view
+    code: |
+      import SwiftUI
+      func example() { let view = Text("Hello") }
+    expect_match_text: [Text]
+  - name: local Text is not a SwiftUI view
+    code: |
+      import SwiftUI
+      struct Text { init(_ value: String) {} }
+      func example() { let view = Text("Hello") }
+    expect_no_match: true
+  description: "SwiftUI.Text construction supplies its exact external receiver type; a local Text declaration does not acquire SwiftUI callback semantics."
