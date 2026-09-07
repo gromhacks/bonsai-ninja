@@ -47,7 +47,7 @@ The release preparation passed:
 | Command/switch matrix | 1,440 cases across all 20 languages; all passed |
 | Live rulepack replay | All 11,919 enabled examples passed; 0 errors and 0 warnings |
 | Rust checks | Formatting, strict all-target Clippy, private-item rustdoc, and adapter FlowEvent checks passed |
-| Release scripts | All 39 Python tests passed, including tar/zip README-asset coverage |
+| Release scripts | All 40 Python tests passed, including tar/zip README assets and registry link resolution |
 | Publication inputs | All 45 Cargo source inventories passed; local archive includes docs, skills, schemas, rule sources, and the README GIF |
 | Runtime packaging | Binary-only relocation with an empty parser cache retained the expected critical Python flow; SARIF and HTML smoke passed |
 | Self-security | Complete production high-severity analysis returned no findings |
@@ -792,6 +792,13 @@ the tag workflow and post-release checks below finish successfully.
 Both tar and zip archives include `assets/` beside the README, preserving its
 terminal demo in the downloadable package as well as on GitHub. The GIF's
 documented commands target the example in a source checkout.
+
+Cargo packages share `crates/README.md`, whose image and documentation links
+are absolute. crates.io resolves relative links under each crate's repository
+subdirectory, so inheriting the root README would send readers to nonexistent
+paths such as `crates/cli/assets/`. The root README keeps relative links for
+the repository and downloadable archives. Keep both surfaces accurate when
+changing the demo or documentation entry points.
 
 ## Post-release verification
 

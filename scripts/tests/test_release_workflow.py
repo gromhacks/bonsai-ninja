@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import re
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -20,6 +22,21 @@ AUDIT_LOOP = Path(__file__).resolve().parents[2] / "scripts" / "audit-loop.sh"
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_registry_readme_links_do_not_resolve_under_a_crate_subdirectory(self) -> None:
+        root = WORKFLOW.parents[2]
+        manifest = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+        readme = root / manifest["workspace"]["package"]["readme"]
+        self.assertEqual(readme, root / "crates" / "README.md")
+        text = readme.read_text(encoding="utf-8")
+        links = re.findall(r"\]\(([^)]+)\)", text)
+        self.assertTrue(links)
+        for link in links:
+            self.assertTrue(link.startswith("https://"), link)
+        self.assertIn(
+            "https://raw.githubusercontent.com/gromhacks/bonsai-ninja/main/assets/bonsai-ninja-python-demo.gif",
+            links,
+        )
+
     def test_readme_demo_is_packaged_on_every_platform(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         root = WORKFLOW.parents[2]
