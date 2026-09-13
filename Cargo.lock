@@ -177,7 +177,7 @@ dependencies = [
  "bonsai-ninja-sdk",
  "clap",
  "comfy-table",
- "dirs",
+ "dirs 6.0.0",
  "ignore",
  "indicatif",
  "jsonschema",
@@ -291,7 +291,7 @@ name = "bonsai-ninja-common"
 version = "0.3.1"
 dependencies = [
  "bonsai-ninja-hash",
- "dirs",
+ "dirs 6.0.0",
  "rmp-serde",
  "serde",
  "tempfile",
@@ -344,7 +344,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tree-sitter",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -731,7 +731,7 @@ dependencies = [
  "regex",
  "serde",
  "tempfile",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -739,7 +739,7 @@ name = "bonsai-ninja-rulepack"
 version = "0.3.1"
 dependencies = [
  "sha2",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -809,7 +809,7 @@ dependencies = [
  "bonsai-ninja-taint",
  "bonsai-ninja-testkit",
  "bonsai-ninja-workspace",
- "dirs",
+ "dirs 6.0.0",
  "fs2",
  "lru",
  "parking_lot",
@@ -824,7 +824,7 @@ dependencies = [
  "thiserror",
  "toml",
  "tracing",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -1248,6 +1248,15 @@ name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
 dependencies = [
  "dirs-sys",
 ]
@@ -2882,13 +2891,13 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 
 [[package]]
 name = "tree-sitter-language-pack"
-version = "1.15.0"
+version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83bbaee31d8295927db82b08bca21f365edf56fc9753f1d1d0674d46a49bbe08"
+checksum = "8074a6f562c62733c6e1c837affd0b14f8e749b079b416344e3e4d8176b6d5d0"
 dependencies = [
  "ahash",
  "cc",
- "dirs",
+ "dirs 7.0.0",
  "fd-lock",
  "getrandom 0.4.3",
  "libloading",
@@ -2900,8 +2909,9 @@ dependencies = [
  "thiserror",
  "tracing",
  "tree-sitter",
+ "tree-sitter-language",
  "ureq",
- "zstd",
+ "zstd 0.14.0",
 ]
 
 [[package]]
@@ -3414,7 +3424,16 @@ version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
 dependencies = [
- "zstd-safe",
+ "zstd-safe 7.2.4",
+]
+
+[[package]]
+name = "zstd"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf06bd8162af0734b344780deb55b42a2429ae430870d13fcc12f238e880fe6e"
+dependencies = [
+ "zstd-safe 8.0.0",
 ]
 
 [[package]]
@@ -3427,10 +3446,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
+name = "zstd-safe"
+version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+checksum = "ae42c0555055784c70058d19ba8e275528e8a99a706684868ace5da4e716a4ab"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.0+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
 dependencies = [
  "cc",
  "pkg-config",
