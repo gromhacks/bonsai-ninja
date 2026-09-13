@@ -100,7 +100,7 @@ fs2 = "0.4"
 ignore = "0.4"
 lru = "0.18.2"
 tempfile = "3"
-dirs = "6"
+dirs = "7"
 mimalloc = { version = "0.1.52", features = ["v2"] }
 owo-colors = "4"
 comfy-table = { version = "8", features = ["custom_styling"] }

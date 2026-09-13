@@ -177,7 +177,7 @@ dependencies = [
  "bonsai-ninja-sdk",
  "clap",
  "comfy-table",
- "dirs",
+ "dirs 7.0.0",
  "ignore",
  "indicatif",
  "jsonschema",
@@ -291,7 +291,7 @@ name = "bonsai-ninja-common"
 version = "0.3.1"
 dependencies = [
  "bonsai-ninja-hash",
- "dirs",
+ "dirs 7.0.0",
  "rmp-serde",
  "serde",
  "tempfile",
@@ -809,7 +809,7 @@ dependencies = [
  "bonsai-ninja-taint",
  "bonsai-ninja-testkit",
  "bonsai-ninja-workspace",
- "dirs",
+ "dirs 7.0.0",
  "fs2",
  "lru",
  "parking_lot",
@@ -1248,6 +1248,15 @@ name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
 dependencies = [
  "dirs-sys",
 ]
@@ -2888,7 +2897,7 @@ checksum = "83bbaee31d8295927db82b08bca21f365edf56fc9753f1d1d0674d46a49bbe08"
 dependencies = [
  "ahash",
  "cc",
- "dirs",
+ "dirs 6.0.0",
  "fd-lock",
  "getrandom 0.4.3",
  "libloading",
