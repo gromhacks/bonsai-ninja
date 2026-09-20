@@ -53,7 +53,7 @@ jobs:
         with:
           key: release-preflight
 
-      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
+      - uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2
         with:
           tool: cargo-audit,cargo-machete
           fallback: none
